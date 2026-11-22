@@ -85,7 +85,7 @@ pub fn read_identity(directory: &Path) -> Result<CursorIdentity, CursorIdentityE
     let account_key = config["authInfo"]["authId"]
         .as_str()
         .and_then(crate::identity::digest)
-        .map(|key| format!("cursor-{key}"))
+        .map(|key| provenant_records::Harness::Cursor.spec().account_key(&key))
         .ok_or(CursorIdentityError::Malformed)?;
     Ok(CursorIdentity {
         account_key,
@@ -142,6 +142,8 @@ pub const REGISTRATION: crate::Registration = crate::Registration {
         low_power: true,
         solo: false,
     },
+    reconcile_account: None,
+    model_offers_sink: None,
 };
 
 /// Project the CLI's current `status` output immediately to a non-secret

@@ -509,18 +509,27 @@ fn install_error_result(command: &str, error: &InstallError) -> CommandResult<In
     let projection = (code == provenant_config::shared_settings::NEVER_SYNCED_CODE)
         .then(provenant_config::shared_settings::never_synced_diagnostic);
     let mut result = CommandResult::new(command, status, InstallData::failure(error));
-    result.error = Some(CommandError {
-        diagnostic: projection.as_ref().map(Into::into),
-        code: code.into(),
-        message: error.to_string(),
-        cause: None,
-        repair: projection
-            .and_then(|projection| projection.next)
-            .or_else(|| {
-                matches!(error, InstallError::Partial { .. })
-                    .then(|| "Resolve the failure and re-apply the same install command".into())
-            }),
-    });
+    let diagnostic = projection.as_ref().map(Into::into);
+    let repair = projection
+        .as_ref()
+        .and_then(|projection| projection.next.as_deref())
+        .map(str::to_owned)
+        .or_else(|| {
+            matches!(error, InstallError::Partial { .. })
+                .then(|| "Resolve the failure and re-apply the same install command".to_owned())
+        })
+        .unwrap_or_else(|| {
+            if code == provenant_config::shared_settings::NEVER_SYNCED_CODE {
+                "run `provenant accounts sync`".to_owned()
+            } else if code == "INSTALL_INVALID" {
+                crate::REPAIR_CONFIG.to_owned()
+            } else {
+                "resolve the reported install failure and rerun the install command".to_owned()
+            }
+        });
+    let mut failure = CommandError::new(code, error.to_string(), None, repair);
+    failure.diagnostic = diagnostic;
+    result.error = Some(failure);
     result
 }
 const HOME_REPAIR: &str =
@@ -528,13 +537,7 @@ const HOME_REPAIR: &str =
 
 fn home_error_result(command: &str, message: &str) -> CommandResult<()> {
     let mut result = CommandResult::new(command, Outcome::Invalid, ());
-    result.error = Some(CommandError {
-        diagnostic: None,
-        code: "HOME".into(),
-        message: message.into(),
-        cause: None,
-        repair: Some(HOME_REPAIR.into()),
-    });
+    result.error = Some(CommandError::new("HOME", message, None, HOME_REPAIR));
     result
 }
 
@@ -550,6 +553,7 @@ fn edge_error(command: &str, error: EdgeError, globals: &cli::Globals) -> u8 {
             Outcome::Invalid,
             "INSTALL_ROOT",
             &error.to_string(),
+            crate::REPAIR_ROOT,
             globals,
         ),
         EdgeError::Peer(error) => super::fail(
@@ -557,6 +561,7 @@ fn edge_error(command: &str, error: EdgeError, globals: &cli::Globals) -> u8 {
             Outcome::Error,
             "PEER_AGENT",
             &error.to_string(),
+            "resolve the reported peer agent error, then rerun the command",
             globals,
         ),
         EdgeError::Home => home_error(command, "HOME must be an absolute directory", globals),
@@ -1164,9 +1169,14 @@ impl Refused {
         match self {
             Self::Edge(error) => edge_error(command, error, globals),
             Self::Install(error) => install_error(command, &error, globals),
-            Self::Fail(status, code, message) => {
-                super::fail(command, status, code, &message, globals)
-            }
+            Self::Fail(status, code, message) => super::fail(
+                command,
+                status,
+                code,
+                &message,
+                "correct the reported condition and rerun the command",
+                globals,
+            ),
         }
     }
     fn message(&self) -> String {
@@ -1292,7 +1302,11 @@ fn preflight_install(
         prepare_agents_at(batch, destination)?;
     }
     if matches!(args.hooks, Some(cli::Switch::On)) && !batches.iter().any(supports_hooks) {
-        return Err(InstallError::HooksUnavailable.into());
+        batches[0].policy.warn_or(
+            "INSTALL_HOOKS_UNAVAILABLE",
+            provenant_records::policy::Facts::violation(provenant_config::HOOKS_UNAVAILABLE_DETAIL),
+            |_| InstallError::HooksUnavailable,
+        )?;
     }
     let mut preview = InstallOutcome {
         actions: Vec::new(),
@@ -1900,6 +1914,7 @@ pub(super) fn run_sync(
                         Outcome::Invalid,
                         "SYNC_ADOPT",
                         &message,
+                        "resolve the reported adopt error and rerun `provenant accounts sync --adopt <account>`",
                         globals,
                     );
                 }
@@ -1919,6 +1934,7 @@ pub(super) fn run_sync(
                     Outcome::Error,
                     "SYNC_PRUNE",
                     &message,
+                    "resolve the reported prune error and rerun `provenant accounts sync`",
                     globals,
                 );
             }
@@ -1939,6 +1955,7 @@ pub(super) fn run_sync(
             Outcome::Invalid,
             "SYNC_RECEIPT",
             "No install receipt; run install first",
+            "run `provenant install` first, then rerun `provenant accounts sync`",
             globals,
         ),
         Err(refused) => refused.emit("accounts sync", globals),
@@ -2273,7 +2290,14 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
         let runner = match runner_for_verify(&targets) {
             Ok(runner) => runner,
             Err(error) => {
-                return super::fail("upgrade", Outcome::Error, "UPGRADE_VERIFY", &error, globals);
+                return super::fail(
+                    "upgrade",
+                    Outcome::Error,
+                    "UPGRADE_VERIFY",
+                    &error,
+                    "configure a valid verify runner, then rerun `provenant upgrade --dry-run`",
+                    globals,
+                );
             }
         };
         let program = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("provenant"));
@@ -2295,7 +2319,14 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
                     false,
                 )
             }
-            Err(error) => super::fail("upgrade", Outcome::Error, "UPGRADE_VERIFY", &error, globals),
+            Err(error) => super::fail(
+                "upgrade",
+                Outcome::Error,
+                "UPGRADE_VERIFY",
+                &error,
+                "fix the reported smoke preview failure, then rerun `provenant upgrade --dry-run`",
+                globals,
+            ),
         };
     }
     match read_install_receipt(&targets) {
@@ -2306,6 +2337,7 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
                 Outcome::Invalid,
                 "UPGRADE_RECEIPT",
                 "No install receipt; run install first",
+                "run `provenant install` first, then rerun `provenant upgrade`",
                 globals,
             );
         }
@@ -2534,6 +2566,7 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
             Outcome::Error,
             "UPGRADE_FAILED",
             &message,
+            "inspect the reported failure, resolve it, then rerun `provenant upgrade`",
             globals,
         ),
         Ok(mut hosts) => {
@@ -2598,14 +2631,12 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
                 hosts,
             );
             if !success {
-                result.error = Some(CommandError {
-                    diagnostic: None,
-                    code: "UPGRADE_FAILED".into(),
-                    message: "Some hosts failed to upgrade; inspect host results and rerun upgrade"
-                        .into(),
-                    cause: None,
-                    repair: None,
-                });
+                result.error = Some(CommandError::new(
+                    "UPGRADE_FAILED",
+                    "Some hosts failed to upgrade; inspect host results and rerun upgrade",
+                    None,
+                    "inspect the failing host's output above, resolve it, then rerun `provenant upgrade`",
+                ));
             }
             super::emit(&result, globals, &human, false)
         }
@@ -2625,7 +2656,14 @@ pub(super) fn run_uninstall(args: cli::Uninstall, globals: &cli::Globals) -> u8 
     let context = match context(&clock, &cancel) {
         Ok(context) => context,
         Err(error) => {
-            return super::fail("uninstall", Outcome::Error, "WAIT_BUDGET", &error, globals);
+            return super::fail(
+                "uninstall",
+                Outcome::Error,
+                "WAIT_BUDGET",
+                &error,
+                "wait for the running operation to release its lease, then rerun `provenant uninstall`",
+                globals,
+            );
         }
     };
     let mut reporter = PreviewReporter {

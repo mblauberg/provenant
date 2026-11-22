@@ -574,22 +574,36 @@ pub fn run(
                 _ => (Outcome::Error, "io"),
             };
             let projection = edge_diagnostic(&error);
+            let diagnostic = projection.as_ref().map(Into::into);
+            let repair = projection
+                .as_ref()
+                .and_then(|projection| projection.next.clone())
+                .unwrap_or_else(|| {
+                    let next = match code {
+                        "io" => {
+                            "Inspect the reported I/O error, resolve it, then retry the command."
+                        }
+                        "invalid_input" => "Correct the invalid argument and retry the command.",
+                        "config" => "Correct the configuration named in the error, then retry.",
+                        _ => {
+                            "Inspect the reported error, resolve its cause, then retry the command."
+                        }
+                    };
+                    next.to_owned()
+                });
+            let message = projection.as_ref().map_or_else(
+                || error.to_string(),
+                |projection| {
+                    projection
+                        .detail
+                        .clone()
+                        .unwrap_or_else(|| projection.code.clone())
+                },
+            );
             let mut result = CommandResult::new(&command, status, Value::Null);
-            result.error = Some(CommandError {
-                diagnostic: projection.as_ref().map(Into::into),
-                code: code.into(),
-                message: projection.as_ref().map_or_else(
-                    || error.to_string(),
-                    |projection| {
-                        projection
-                            .detail
-                            .clone()
-                            .unwrap_or_else(|| projection.code.clone())
-                    },
-                ),
-                cause: None,
-                repair: projection.and_then(|projection| projection.next),
-            });
+            let mut command_error = CommandError::new(code, message, None, repair);
+            command_error.diagnostic = diagnostic;
+            result.error = Some(command_error);
             result
         }
     };

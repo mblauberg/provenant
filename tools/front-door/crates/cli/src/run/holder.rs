@@ -1177,6 +1177,7 @@ mod tests {
         let records = crate::quota::read_cache_at(&state)?;
         assert_eq!(records[0].refusals[0].resets_unix_seconds, Some(resets));
         let admission = provenant_quota::Admission {
+            freshness: &provenant_quota::DEFAULT_FRESHNESS,
             policy: &provenant_records::policy::Policy::default(),
             policies: &[],
             now_unix_seconds: observed + 1,
@@ -1193,6 +1194,7 @@ mod tests {
             None
         );
         let after = provenant_quota::Admission {
+            freshness: &provenant_quota::DEFAULT_FRESHNESS,
             policy: &provenant_records::policy::Policy::default(),
             now_unix_seconds: resets,
             ..admission

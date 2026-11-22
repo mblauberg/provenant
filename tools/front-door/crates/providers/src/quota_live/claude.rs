@@ -28,7 +28,7 @@ fn expected_fingerprint(expected: &str, live: &str) -> Result<(), ProbeFailure> 
 fn claude_executable() -> Option<std::path::PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
-        .map(|dir| dir.join("claude"))
+        .map(|dir| dir.join(provenant_records::Harness::Claude.spec().binary))
         .filter(|path| provenant_os::sys::is_executable(path))
         .find_map(|path| path.canonicalize().ok())
 }
@@ -60,7 +60,10 @@ struct AuthStatus {
 fn session_account_identity(status: &AuthStatus) -> provenant_records::AccountIdentity {
     // Claude exposes a verified account fingerprint but no native login epoch.
     // Keep the frozen epoch field Unknown instead of treating expiry as an epoch.
-    provenant_records::AccountIdentity::provider_observation("claude", &status.fingerprint)
+    provenant_records::AccountIdentity::provider_observation(
+        provenant_records::Harness::Claude.spec().name,
+        &status.fingerprint,
+    )
 }
 fn login_expiry(value: &Value) -> Option<i64> {
     if let Some(seconds) = value.as_i64() {

@@ -63,7 +63,8 @@ const LAYERS: &[(&str, &[&str])] = &[
         ],
     ),
     ("quota", &["core", "records", "config"]),
-    ("telemetry", &["core", "records", "routing", "os"]),
+    // Price overlays read host and project layers through config.
+    ("telemetry", &["core", "records", "config", "routing", "os"]),
     (
         "routing",
         &["core", "records", "config", "quota", "providers"],
@@ -1339,6 +1340,30 @@ fn adapter_policy_detects_registry_names_and_harness_comparisons() -> Result<(),
     Ok(())
 }
 
+/// Provider and config sources are scanned for policy comparisons even though
+/// their own binding literals are declarative. A new adapter-identity branch in
+/// either crate must still come from the registry.
+#[test]
+fn adapter_policy_detects_provider_and_config_identity_branches() -> Result<(), Box<dyn Error>> {
+    let comparison = adapter_identity_comparison()?;
+    for source in [
+        "if adapter == \"agy\" { detect(); }",
+        "if target.harness == Harness::Claude { sync(); }",
+        "match adapter { \"codex\" => update(), _ => {} }",
+        "matches!(adapter, Harness::Opencode)",
+    ] {
+        assert!(comparison.is_match(source), "missed: {source}");
+    }
+    for source in [
+        "crate::adapter!(Agy, \"agy\", prepare);",
+        "adapter: \"agy\",",
+        "provenant_records::Harness::Agy.spec().name",
+    ] {
+        assert!(!comparison.is_match(source), "false positive: {source}");
+    }
+    Ok(())
+}
+
 /// Adapter policy belongs to the records registry; hooks are declarative
 /// provider command data. Test fixtures may still name their provider.
 #[test]
@@ -1352,7 +1377,11 @@ fn adapter_policy_uses_registry_data() -> Result<(), Box<dyn Error>> {
     let literal = regex::Regex::new(&format!(r#""(?:{names})""#))?;
     let comparison = adapter_identity_comparison()?;
     let mut sources = Vec::new();
-    for name in ["cli", "routing", "quota"] {
+    // Every production crate that can dispatch on adapter identity is in scope.
+    // Providers and config declare their own adapter bindings and name adapters
+    // in declarative data and diagnostics, so only identity comparisons are
+    // policy there; the routing/cli/quota side has no such declarations.
+    for name in ["cli", "routing", "quota", "providers", "config"] {
         rust_sources(&root.join("crates").join(name).join("src"), &mut sources)?;
     }
     rust_sources(&root.join("src"), &mut sources)?;
@@ -1364,12 +1393,15 @@ fn adapter_policy_uses_registry_data() -> Result<(), Box<dyn Error>> {
         let tests = selected_test_scopes(&source, is_test_source(&path.to_string_lossy()), true);
         // Hook command literals are declarative data; comparisons still
         // represent policy and must be checked.
-        let checks: Vec<_> =
-            if path.starts_with(root.join("src")) || path == root.join("crates/cli/src/hooks.rs") {
-                vec![&comparison]
-            } else {
-                vec![&literal, &comparison]
-            };
+        let declarative = path.starts_with(root.join("src"))
+            || path == root.join("crates/cli/src/hooks.rs")
+            || path.starts_with(root.join("crates/providers/src"))
+            || path.starts_with(root.join("crates/config/src"));
+        let checks: Vec<_> = if declarative {
+            vec![&comparison]
+        } else {
+            vec![&literal, &comparison]
+        };
         for found in checks
             .into_iter()
             .flat_map(|check| check.find_iter(&source))
@@ -1378,6 +1410,10 @@ fn adapter_policy_uses_registry_data() -> Result<(), Box<dyn Error>> {
             let non_adapter_literal = (path.ends_with("grammar.rs")
                 && line_text.contains("conflicts_with_all"))
                 || (path.ends_with("fabric.rs") && line_text.contains("InvalidField("))
+                // Declared under #[cfg(test)] in lib.rs; the source scanner cannot see that.
+                || path.ends_with("seatbelt_snapshots.rs")
+                // A build strategy name, not an adapter identity.
+                || (path.ends_with("lane.rs") && line_text.contains("build_port.strategy"))
                 || (path.ends_with("run/provider/command.rs") && line_text.contains(".join("))
                 || (path.ends_with("run/status.rs")
                     && source[found.end()..].starts_with(": cursor"))
@@ -1404,6 +1440,142 @@ fn adapter_policy_uses_registry_data() -> Result<(), Box<dyn Error>> {
     assert!(
         violations.is_empty(),
         "adapter policy must use AdapterSpec data:\n{}",
+        violations.join("\n")
+    );
+    Ok(())
+}
+
+// One implementation per shared primitive. The owner path is relative to
+// tools/front-door; a free function with the same name anywhere else would
+// restore the duplication these helpers were collapsed from.
+const OWNED_HELPERS: &[(&str, &str)] = &[
+    ("quote", "crates/os/src/shell.rs"),
+    ("quote_if_needed", "crates/os/src/shell.rs"),
+    ("quote_portable", "crates/os/src/shell.rs"),
+    ("quote_os", "crates/os/src/shell.rs"),
+    ("shell_quote", "crates/os/src/shell.rs"),
+    ("shell_quote_text", "crates/os/src/shell.rs"),
+    ("shell_quote_os", "crates/os/src/shell.rs"),
+    ("now_unix_seconds", "crates/os/src/clock.rs"),
+    ("now_unix_millis", "crates/os/src/clock.rs"),
+    ("now_unix_ms", "crates/os/src/clock.rs"),
+    ("hex", "crates/core/src/bytes.rs"),
+    ("atomic_write", "crates/os/src/fs.rs"),
+];
+
+// Different behaviours with their own owners: SQL identifier quoting and a
+// byte predicate used by diagnostic redaction. Neither is shell quoting.
+const HELPER_EXEMPTIONS: &[&str] = &[
+    "crates/sqlite/src/schema.rs",
+    "crates/confinement/src/publication.rs",
+];
+
+fn free_fn_declaration() -> Result<regex::Regex, regex::Error> {
+    regex::Regex::new(
+        r"^(?:pub(?:\([^)]*\))?\s+|async\s+|const\s+|unsafe\s+)*fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(",
+    )
+}
+
+fn local_helper_violations(source: &str, relative: &str, pattern: &regex::Regex) -> Vec<String> {
+    if HELPER_EXEMPTIONS.contains(&relative) {
+        return Vec::new();
+    }
+    let mut findings = Vec::new();
+    for (index, line) in source.lines().enumerate() {
+        // Methods sit inside an impl and are indented; only free definitions
+        // create a second owner for a primitive.
+        if line.chars().next().is_some_and(char::is_whitespace) {
+            continue;
+        }
+        let Some(name) = pattern.captures(line).and_then(|found| found.get(1)) else {
+            continue;
+        };
+        let owner = OWNED_HELPERS
+            .iter()
+            .find(|(owned, _)| *owned == name.as_str())
+            .map(|(_, owner)| *owner);
+        if let Some(owner) = owner
+            && owner != relative
+        {
+            findings.push(format!(
+                "{}:{}: {} must be defined in {owner}",
+                relative,
+                index + 1,
+                name.as_str()
+            ));
+        }
+    }
+    findings
+}
+
+#[test]
+fn local_helper_rule_distinguishes_owners_from_duplicates() -> Result<(), Box<dyn Error>> {
+    let pattern = free_fn_declaration()?;
+    assert_eq!(
+        local_helper_violations(
+            "fn shell_quote(x: &str) -> String { x.into() }",
+            "src/pr/sync.rs",
+            &pattern
+        )
+        .len(),
+        1
+    );
+    assert!(
+        local_helper_violations(
+            "pub fn quote(text: &str) -> String {\n    format!(\"'{text}'\")\n}",
+            "crates/os/src/shell.rs",
+            &pattern
+        )
+        .is_empty()
+    );
+    assert!(
+        local_helper_violations(
+            "fn quote(identifier: &str) -> String { identifier.into() }",
+            "crates/sqlite/src/schema.rs",
+            &pattern
+        )
+        .is_empty()
+    );
+    // A method is not a second owner, and a line inside a literal is not code.
+    assert!(local_helper_violations(
+        "impl Store {\n    fn atomic_write(&self) {}\n}\nlet text = \"fn hex(bytes: &[u8]) -> String\";",
+        "crates/workflow/src/store.rs",
+        &pattern
+    )
+    .is_empty());
+    assert_eq!(
+        local_helper_violations(
+            "pub(crate) fn now_unix_ms() -> u64 { 0 }",
+            "crates/run/src/build/ledger.rs",
+            &pattern
+        )
+        .len(),
+        1
+    );
+    Ok(())
+}
+
+#[test]
+fn owned_helpers_have_one_definition() -> Result<(), Box<dyn Error>> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let pattern = free_fn_declaration()?;
+    let mut sources = Vec::new();
+    for path in source_roots() {
+        rust_sources(&path, &mut sources)?;
+    }
+    let mut violations = Vec::new();
+    for path in sources {
+        let relative = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let source = fs::read_to_string(&path)?;
+        violations.extend(local_helper_violations(&source, &relative, &pattern));
+    }
+    assert!(
+        violations.is_empty(),
+        "shared helpers must have one owner:\n{}",
         violations.join("\n")
     );
     Ok(())

@@ -88,6 +88,19 @@ pub trait QuotaSource: Sync {
     ) -> Result<provenant_quota::QuotaSnapshot, provenant_quota::QuotaError>;
 }
 
+/// Rebind a changed registered identity after a live probe detects a switch.
+/// Implemented by the adapter whose identity format changed; registered so the
+/// generic quota edge never has to name an adapter.
+pub type AccountReconciler = fn(
+    &provenant_core::Roots,
+    &std::path::Path,
+    &str,
+    &str,
+) -> Result<bool, provenant_config::ConfigError>;
+
+/// Persist a freshly discovered offer list where this adapter reads it.
+pub type ModelOffersSink = fn(&std::path::Path, &std::path::Path, i64, &[String]) -> bool;
+
 #[derive(Clone, Copy)]
 pub struct Registration {
     pub adapter: &'static dyn Adapter,
@@ -96,6 +109,17 @@ pub struct Registration {
     pub stderr_decoder: Option<&'static dyn provenant_os::capture::FrameDecoder>,
     pub display_name: &'static str,
     pub quota: provenant_quota::QuotaPolicy,
+    /// Identity rebinding hook; absent where the provider does not switch keys.
+    pub reconcile_account: Option<AccountReconciler>,
+    /// Offer-list sink; absent where the provider does not report offered models.
+    pub model_offers_sink: Option<ModelOffersSink>,
+}
+
+/// The implementation `Registration` contributed by the named adapter's module.
+pub fn registration(adapter: &str) -> Option<&'static Registration> {
+    REGISTRY
+        .iter()
+        .find(|registration| registration.adapter.id() == adapter)
 }
 
 // Preserve dispatch order independently of the order used to install harnesses.

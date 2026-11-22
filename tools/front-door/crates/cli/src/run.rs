@@ -245,7 +245,7 @@ impl From<run::RunError> for Fail {
             |detail| {
                 if matches!(
                     error,
-                    run::RunError::Delivery(_) | run::RunError::DeliveryLimit { .. }
+                    run::RunError::Delivery { .. } | run::RunError::DeliveryLimit { .. }
                 ) {
                     detail.clone()
                 } else {
@@ -265,19 +265,29 @@ impl From<run::RunError> for Fail {
     }
 }
 fn command_error(fail: &Fail) -> CommandError {
-    CommandError {
-        diagnostic: fail.projection.as_deref().map(Into::into),
-        code: fail.kind.code().into(),
-        message: fail.message.clone(),
-        cause: fail
-            .projection
-            .as_ref()
-            .and_then(|projection| projection.detail.clone()),
-        repair: fail
-            .projection
-            .as_ref()
-            .and_then(|projection| projection.next.clone()),
-    }
+    let cause = fail
+        .projection
+        .as_ref()
+        .and_then(|projection| projection.detail.clone());
+    let repair = fail
+        .projection
+        .as_ref()
+        .and_then(|projection| projection.next.clone())
+        .or_else(|| fail.kind.diagnostic().next)
+        .unwrap_or_else(|| {
+            format!(
+                "Resolve the {} condition named in the error, then retry the command.",
+                fail.kind.code()
+            )
+        });
+    let mut error = CommandError::new(
+        fail.kind.code(),
+        fail.message.clone(),
+        cause.as_deref(),
+        repair,
+    );
+    error.diagnostic = fail.projection.as_deref().map(Into::into);
+    error
 }
 
 /// The upstream head a stale read-only checkout should review. `head` is kept
@@ -1705,6 +1715,19 @@ fn attach_freshness(
         ));
     }
     data["price_freshness"] = json!(freshness);
+    let sources = prices.sources();
+    if !sources.is_empty() {
+        data["price_sources"] = json!(sources);
+        for source in &sources {
+            human.push_str(&format!(
+                "price {}/{} source={}\n",
+                source.provider, source.model, source.source
+            ));
+        }
+    }
+    for warning in prices.warnings() {
+        human.push_str(&format!("warning: {warning}\n"));
+    }
     Ok(())
 }
 
@@ -1875,7 +1898,7 @@ fn safe_cause(error: &run::RunError) -> Option<String> {
     use run::RunError as E;
     let fixed = matches!(
         error,
-        E::Delivery(_)
+        E::Delivery { .. }
             | E::IntegrationHeadMoved
             | E::IntegrationParentBusy { .. }
             | E::IntegrationConflict { .. }
@@ -2041,9 +2064,16 @@ fn load_price_sheet(
     })?;
     let config = toml_edit::de::from_str::<provenant_telemetry::ConfiguredPrices>(&text)
         .map_err(|error| Fail::new(Status::Error, ErrorKind::Prices, error.to_string()))?;
-    let table = provenant_telemetry::validate_prices(&config)
-        .map_err(|error| Fail::new(Status::Error, ErrorKind::Prices, error.to_string()))?;
-    Ok((config, table))
+    let project = edge.roots.checkout();
+    let key = provenant_config::project_key_for(project);
+    let layered = provenant_telemetry::prices_overlay::load(
+        edge.assets,
+        edge.roots.state.as_path(),
+        Some(project),
+        key.as_deref(),
+    )
+    .map_err(|error| Fail::new(Status::Error, ErrorKind::Prices, error.to_string()))?;
+    Ok((config, layered.table))
 }
 
 /// Read one price document from a file or fetch it over HTTPS.

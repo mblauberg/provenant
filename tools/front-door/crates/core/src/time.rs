@@ -301,6 +301,19 @@ pub trait Clock: Sync {
     fn unix_seconds(&self) -> i64 {
         self.wall_now().map_or(0, WallTime::unix_seconds)
     }
+    /// Whole Unix milliseconds now, for millisecond-granular records; zero
+    /// when the wall clock is outside the supported range.
+    fn unix_millis(&self) -> i64 {
+        self.wall_now().map_or(0, WallTime::unix_millis)
+    }
+    /// Whole Unix seconds now, refusing an unreadable or out-of-range clock.
+    fn try_unix_seconds(&self) -> Result<u64, TimeError> {
+        u64::try_from(self.wall_now()?.unix_seconds()).map_err(|_| TimeError::WallRange)
+    }
+    /// Whole Unix milliseconds now, refusing an unreadable or out-of-range clock.
+    fn try_unix_millis(&self) -> Result<u64, TimeError> {
+        u64::try_from(self.wall_now()?.unix_millis()).map_err(|_| TimeError::WallRange)
+    }
     fn mono_now(&self) -> MonoTime;
     /// Wait until a monotonic deadline according to this clock's time source.
     fn wait_until(&self, deadline: MonoTime) -> Result<(), TimeError>;

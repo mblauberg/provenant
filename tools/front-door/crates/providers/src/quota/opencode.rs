@@ -5,7 +5,7 @@ pub(crate) fn decode_source(
     capture: &provenant_quota::ProbeCapture,
 ) -> Result<QuotaSnapshot, QuotaError> {
     super::decode_source(
-        "opencode",
+        provenant_records::Harness::Opencode.spec().name,
         plan,
         capture,
         |payload, windows, details| {

@@ -26,14 +26,24 @@ fn reply(command: &str, output: Output) -> Reply {
             read_only: true,
         },
         Err((kind, message)) => {
+            let repair: String = match kind {
+                ErrorKind::Io => {
+                    "Verify the state path named in the error is readable, then rerun the command."
+                        .into()
+                }
+                ErrorKind::NotFound => {
+                    "Launch the target with `provenant run` first, then rerun the command.".into()
+                }
+                ErrorKind::Invalid => "Wait for the lane's usage row to be written when it settles, then rerun the command.".into(),
+                _ => kind.diagnostic().next.unwrap_or_else(|| {
+                    format!(
+                        "Resolve the {} condition named in the error, then retry the command.",
+                        kind.code()
+                    )
+                }),
+            };
             let mut result = CommandResult::new(command, Status::Error, Value::Null);
-            result.error = Some(CommandError {
-                diagnostic: None,
-                code: kind.code().into(),
-                message,
-                cause: None,
-                repair: None,
-            });
+            result.error = Some(CommandError::new(kind.code(), message, None, repair));
             Reply {
                 result,
                 human: String::new(),

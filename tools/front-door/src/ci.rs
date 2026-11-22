@@ -42,6 +42,7 @@ pub(crate) fn run(command: provenant_cli::Ci, globals: &Globals) -> u8 {
                         Outcome::Error,
                         "CI_FAILURES",
                         "cannot specify both --pr and a run subcommand",
+                        "drop either --pr or the run subcommand and retry",
                         globals,
                     );
                 }
@@ -51,6 +52,7 @@ pub(crate) fn run(command: provenant_cli::Ci, globals: &Globals) -> u8 {
                         Outcome::Error,
                         "CI_FAILURES",
                         "provide pull request numbers (`pr <N>...` or `--pr <N>`) or an Actions run id (`run <ID>`)",
+                        "rerun with `pr <N>...` or `run <ID>`",
                         globals,
                     );
                 }
@@ -1389,6 +1391,7 @@ fn emit(leaf: &str, result: Result<Report, Box<dyn std::error::Error>>, globals:
             Outcome::Error,
             "CI_FAILURES",
             &error.to_string(),
+            "check the reported forge read error and credentials, then rerun `provenant ci failures`",
             globals,
         ),
     }
@@ -1447,6 +1450,7 @@ fn emit_reports(
             Outcome::Error,
             "CI_FAILURES",
             &error.to_string(),
+            "check the reported forge read error and credentials, then rerun `provenant ci failures`",
             globals,
         ),
     }

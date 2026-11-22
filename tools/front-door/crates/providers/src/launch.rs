@@ -1399,8 +1399,11 @@ fn lane_instructions(input: &PrepareInput<'_>, spec: &mut LaunchSpec) -> Result<
 /// configuration untouched.
 fn lane_hooks(input: &PrepareInput<'_>, spec: &mut LaunchSpec) -> Result<bool, ProviderError> {
     if !input.access().is_isolated()
-        && provenant_records::AdapterSpec::get(&input.route.adapter)
-            .is_some_and(|spec| spec.id == provenant_records::Harness::Opencode)
+        && provenant_records::AdapterSpec::get(&input.route.adapter).is_some_and(|spec| {
+            spec.install.is_some_and(|install| {
+                install.hook_protocol == Some(provenant_records::HookProtocol::OpenCodePlugin)
+            })
+        })
     {
         return Ok(true);
     }

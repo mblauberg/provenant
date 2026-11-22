@@ -729,16 +729,22 @@ pub(crate) fn graph_ask_with<T>(
     edge(&service)
 }
 
-pub(crate) fn load_graph_prices(
+/// Read the bundled sheet with the same host and project config layers the
+/// other cross-cutting domains use. Missing overlays leave the sheet unchanged.
+pub(crate) fn load_graph_prices_layered(
     assets: &std::path::Path,
+    roots: &provenant_core::Roots,
 ) -> Result<provenant_telemetry::PriceTable, String> {
-    let path = assets.join("config/telemetry-prices.toml");
-    let text =
-        std::fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))?;
-    let config = toml_edit::de::from_str::<provenant_telemetry::ConfiguredPrices>(&text)
-        .map_err(|error| format!("{}: invalid price table: {error}", path.display()))?;
-    provenant_telemetry::validate_prices(&config)
-        .map_err(|error| format!("{}: invalid price table: {error}", path.display()))
+    let project = roots.checkout();
+    let key = provenant_config::project_key_for(project);
+    provenant_telemetry::prices_overlay::load(
+        assets,
+        roots.state.as_path(),
+        Some(project),
+        key.as_deref(),
+    )
+    .map(|layered| layered.table)
+    .map_err(|error| error.to_string())
 }
 
 pub(crate) fn graph_attempt_usage(
@@ -2205,7 +2211,9 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             return None;
         }
         self.prices
-            .get_or_insert_with(|| load_graph_prices(&self.factory.assets))
+            .get_or_insert_with(|| {
+                load_graph_prices_layered(&self.factory.assets, &self.factory.context.roots)
+            })
             .as_ref()
             .err()
             .cloned()
@@ -2317,9 +2325,9 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         };
         let record = owner.snapshot(target, self.budget, self.cancel)?;
         let cost_unknown_reason = self.cost_unknown_reason();
-        let prices = self
-            .prices
-            .get_or_insert_with(|| load_graph_prices(&self.factory.assets));
+        let prices = self.prices.get_or_insert_with(|| {
+            load_graph_prices_layered(&self.factory.assets, &self.factory.context.roots)
+        });
         Ok(graph_attempt_usage(
             record,
             prices.as_ref().ok(),

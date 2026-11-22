@@ -527,6 +527,7 @@ pub(crate) fn gc_worker(globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
             Outcome::Error,
             "tick_gc",
             &error.to_string(),
+            "resolve the reported GC error and rerun `provenant tick`",
             globals,
         ),
     }
@@ -745,7 +746,7 @@ fn schedule_build_hygiene(resolved: &crate::roots::Resolved) -> Vec<String> {
         settings.insert(key.clone(), resolved_settings);
         projects.push((path, key));
     }
-    let now_ms = provenant_run::build::ledger::now_unix_ms();
+    let now_ms = provenant_os::clock::now_unix_millis();
     let now = UNIX_EPOCH + Duration::from_millis(now_ms);
     let report = hygiene::gc_projects(&resolved.home, state, limit, now, |key| {
         settings.get(key).copied().unwrap_or(default)
@@ -1504,6 +1505,7 @@ pub(crate) fn seed_worker(globals: &Globals) -> u8 {
             Outcome::Error,
             "tick_seed",
             &error.to_string(),
+            "wait for the seed worker to release its lock, then rerun `provenant tick`",
             globals,
         ),
     }
@@ -1973,7 +1975,14 @@ pub(crate) fn run(globals: &Globals, workers: &'static dyn WorkerObserver) -> u8
                 Some(&summary),
             )
         }
-        Err(error) => crate::fail("tick", Outcome::Error, "tick", &error.to_string(), globals),
+        Err(error) => crate::fail(
+            "tick",
+            Outcome::Error,
+            "tick",
+            &error.to_string(),
+            "correct the reported tick error and rerun `provenant tick`",
+            globals,
+        ),
     }
 }
 

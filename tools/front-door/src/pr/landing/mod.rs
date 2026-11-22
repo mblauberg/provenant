@@ -145,6 +145,29 @@ pub struct Options {
     pub accept_delta: Option<String>,
 }
 
+/// The concrete next step for a landing refusal that did not carry its own.
+fn landing_repair(code: &str) -> &'static str {
+    match code {
+        "LAND_BUSY" => {
+            "wait for the other landing run to release the publication lock, then rerun `provenant land`"
+        }
+        "LAND_PENDING" | "LAND_PUBLICATION_UNKNOWN" => {
+            "wait for CI to settle, then rerun `provenant land` to reconcile"
+        }
+        "LAND_CONTENTION" => "wait for the target to stop moving, then rerun `provenant land`",
+        "LAND_GATE_UNMET" => "satisfy the required gate, then rerun `provenant land`",
+        "LAND_SPENDING_CAP" => "raise the land spending cap in config, then rerun `provenant land`",
+        "LAND_CONFLICT" => "resolve the candidate conflict, then rerun `provenant land`",
+        "LAND_PORT_UNAVAILABLE" | "LAND_UNSUPPORTED" => {
+            "enable the required landing port or backend in config, then rerun `provenant land`"
+        }
+        "CI_UNAVAILABLE" | "RATE_LIMITED" => {
+            "wait for the forge to respond, then rerun `provenant land`"
+        }
+        _ => "resolve the reported landing refusal, then rerun `provenant land`",
+    }
+}
+
 pub(crate) fn run(
     options: Options,
     globals: &provenant_cli::Globals,
@@ -173,6 +196,11 @@ pub(crate) fn run(
                     code
                 },
                 &error.to_string(),
+                landing_repair(if unavailable {
+                    "LAND_PORT_UNAVAILABLE"
+                } else {
+                    code
+                }),
                 globals,
             )
         }
@@ -266,10 +294,8 @@ fn batch_response(
         None => (Outcome::Failed, ""),
     };
     let (cause, repair) = match failure.as_ref() {
-        Some(LandingError::RefusedWith { cause, repair, .. }) => {
-            (Some(*cause), Some(repair.clone()))
-        }
-        _ => (None, None),
+        Some(LandingError::RefusedWith { cause, repair, .. }) => (Some(*cause), repair.clone()),
+        _ => (None, landing_repair(code).to_owned()),
     };
     let mut value = serde_json::json!({"receipts": report.receipts, "outcomes": report.outcomes, "warnings": report.warnings, "local_follow_up": report.local_steps, "steps": []});
     if let Some(LandingError::Unavailable { id, reason }) = &failure {
@@ -305,13 +331,7 @@ fn batch_response(
     }
     let mut response = CommandResult::new("land", status, value);
     if let Some(error) = failure {
-        response.error = Some(CommandError {
-            code: code.into(),
-            message: error.to_string(),
-            cause: cause.map(str::to_owned),
-            repair,
-            diagnostic: None,
-        });
+        response.error = Some(CommandError::new(code, error.to_string(), cause, &repair));
     }
     response
 }
@@ -475,7 +495,7 @@ fn prepare_resolved(
             });
         if !errors.is_empty() {
             return Err(format!(
-                "invalid effective landing policy: {}",
+                "invalid effective landing policy: {}; correct the land settings named above (see provenant land --explain for each source)",
                 errors
                     .iter()
                     .map(ToString::to_string)

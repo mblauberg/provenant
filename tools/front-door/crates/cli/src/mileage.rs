@@ -9,7 +9,6 @@ use provenant_telemetry::ingest;
 use provenant_telemetry::mileage::{self, Observation, Reading, Series};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
-use std::path::Path;
 
 const SCHEMA_VERSION: u64 = 1;
 
@@ -22,14 +21,24 @@ pub fn run(command: Mileage, edge: &Edge<'_>) -> Reply {
             read_only: true,
         },
         Err((kind, message)) => {
+            let repair: String = match kind {
+                ErrorKind::Io => {
+                    "Verify the quota history and state paths named in the error are readable, then rerun the command."
+                        .into()
+                }
+                ErrorKind::Invalid => {
+                    "Request a smaller window with --since and --until, then rerun the command."
+                        .into()
+                }
+                _ => kind.diagnostic().next.unwrap_or_else(|| {
+                    format!(
+                        "Resolve the {} condition named in the error, then retry the command.",
+                        kind.code()
+                    )
+                }),
+            };
             let mut result = CommandResult::new("telemetry mileage", Status::Error, Value::Null);
-            result.error = Some(CommandError {
-                diagnostic: None,
-                code: kind.code().into(),
-                message,
-                cause: None,
-                repair: None,
-            });
+            result.error = Some(CommandError::new(kind.code(), message, None, repair));
             Reply {
                 result,
                 human: String::new(),
@@ -42,11 +51,17 @@ pub fn run(command: Mileage, edge: &Edge<'_>) -> Reply {
 
 type Failure = (ErrorKind, String);
 
-fn prices(assets: &Path) -> Option<provenant_telemetry::PriceTable> {
-    let text = std::fs::read_to_string(assets.join("config/telemetry-prices.toml")).ok()?;
-    let configured =
-        toml_edit::de::from_str::<provenant_telemetry::ConfiguredPrices>(&text).ok()?;
-    provenant_telemetry::validate_prices(&configured).ok()
+fn prices(edge: &Edge<'_>) -> Option<provenant_telemetry::PriceTable> {
+    let project = edge.roots.checkout();
+    let key = provenant_config::project_key_for(project);
+    provenant_telemetry::prices_overlay::load(
+        edge.assets,
+        edge.roots.state.as_path(),
+        Some(project),
+        key.as_deref(),
+    )
+    .ok()
+    .map(|layered| layered.table)
 }
 
 fn microdollars(numerator: u128) -> Option<u64> {
@@ -178,7 +193,7 @@ fn inner(command: &Mileage, edge: &Edge<'_>) -> Result<(Value, String), Failure>
         },
     )
     .map_err(|error| (ErrorKind::Io, error.to_string()))?;
-    let table = prices(edge.assets);
+    let table = prices(edge);
     let options = mileage::Options {
         min_runs: command.min_runs,
         fall_percent: command.fall_percent,

@@ -159,11 +159,24 @@ eligible members; host failures are not quality observations, a validated
 successful completed-before-budget result is one, and missing evidence stays
 neutral. Producer and resolver share one prior-role derivation: an explicit role
 wins, otherwise review workload is `review`, work with writes is `writer` and
-other work is `task`. Selection rules, exclusion sources, exploration and
-weights are typed receipt fields; unknown forward fields alone use
-`ExtraFields`, and malformed known fields fail decoding. Account ranking scales
-reset-adjusted usable headroom by sourced penalties and divides by one plus live
-lanes.
+other work is `task`. Candidate ranking and route diagnostics have typed owners.
+Selection rules, exclusion sources, exploration and weights are typed receipt
+fields; unknown forward fields alone use `ExtraFields`, and malformed known
+fields fail decoding. Account ranking scales reset-adjusted usable headroom by
+sourced penalties and divides by one plus live lanes.
+
+Exhaustion is classified before weights, so a draw never offers a member
+routing already judged spent and dispatch records no refuted pick for it. A
+preview has no live probe: it uses its weighted draw, judges each member's
+cached accounts, and the route it shows carries a redraw receipt naming
+whichever member the draw offered first and that refusal's typed cause. Preview,
+review-family and dispatch read one route-scoped exhaustion verdict: a snapshot
+governs only the models its plan serves and only the windows bound to the
+route's pools or allowance windows; the whole-snapshot reading applies only to a
+route with no pool mapping. A spent paid window therefore cannot hide a
+free-pool member the same account serves. Complete coverage still establishes
+exhaustion when a window governing the route is spent; partial coverage remains
+advisory and never refuses on its own.
 
 - Why: capability is a preference, while attributed comparable outcomes supply
   the evidence that adjusts declared route weights.
@@ -210,6 +223,9 @@ model and account unless provider evidence proves a wider pool. A plan usage
 limit holds the whole account until its reset, except that the exact model the
 owner pinned warns with the record's source and expiry and is attempted anyway;
 an automatic fallback or unpinned route still prefers an available route.
+OpenCode retry-after values are rounded up to whole seconds, and `quota show`
+names the provider retry-after as the source of a displayed OpenCode refusal
+reset.
 
 A refusal expires at its provider reset, or one hour after observation when none
 is usable; Agy's expire within five minutes even when the provider reports a
@@ -220,21 +236,30 @@ reading below 95% headroom that postdates a refusal clears it; for a
 model-scoped refusal without a pool every reported window must show headroom.
 A successful run clears that model's refusal, and success on a free-model route
 clears the registered free pool's refusal (`observed_success`). `quota tick`
-rechecks old free-pool refusals with the adapter's probe, and `quota clear`
-removes refusals on owner request and reports what it removed. Each clearing
+rechecks old free-pool refusals with the adapter's registered probe, where one
+exists; a refusal the probe does not supersede keeps its provider reset and gets
+another bounded window. `quota clear` removes refusals on owner request and
+reports exactly what it removed, saying so when nothing matched. Each clearing
 records its source (`reading`, `run`, `observed_success` or `manual`), and
-settlement replay respects the retained, bounded clearing records.
+settlement replay respects the retained, bounded clearing records, so an evicted
+clearing cannot prevent a later replay.
 
 `Admission::account_block` decides account blocks for both resolution and the
-pre-launch recheck. Readiness is stored apart from quota records; a failed
-publication leaves readiness unknown and never erases held refusals. A pool
+pre-launch recheck. `Admission::route_exhausted` is the one route-scoped
+allowance verdict preview, review-family and dispatch share. A typed
+`AccountBlock` travels through admission, so an exclusion keeps its provider,
+free-tier or mismatch cause while its text stays operator detail. Readiness is
+stored apart from quota records; a failed publication leaves readiness unknown
+and never erases held refusals. A pool
 cannot draw a current login-required account even when every other member is
 unavailable, and a missing availability observation reaches preparation for its
-typed cause rather than launching an account. Sign-out and login-expiry
+typed cause rather than launching an account. An observed account with unknown
+identity follows the identity policy below. Sign-out and login-expiry
 failures stay unavailable until a strictly newer successful login observation
 or an explicit sign-in; for adapters with no login observation (OpenCode
 included) they expire after the observation interval, and an executable-only
-probe never establishes recovery. Preparation publishes its first typed login
+probe never establishes recovery. Identity mismatches still require identity
+evidence. Preparation publishes its first typed login
 failure, and a successful reprobe publishes recovery, through the quota and
 readiness owner's account-scoped store. A pool exhausted by pre-launch
 exclusions carries one typed aggregate preparation disposition even when the

@@ -61,6 +61,23 @@ pub enum ModelListingFormat {
     CursorText,
 }
 
+/// How an adapter's own executable is updated. The mechanics of resolving a
+/// package-manager install stay in the update worker; this is only the declared
+/// per-adapter choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateCommand {
+    /// No self-update is known for this adapter.
+    None,
+    /// A subcommand of the adapter's own executable.
+    Subcommand(&'static str),
+    /// The executable is installed by Homebrew or by a global npm install.
+    HomebrewOrNpm {
+        formula: &'static str,
+        module: &'static str,
+        package: &'static str,
+    },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuotaProbeKind {
     None,
@@ -84,6 +101,24 @@ pub enum LoginReprobe {
     Cursor,
     AccountIdentity,
     ExecutableOnly,
+}
+
+/// How an adapter reports the identity of a registered account.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountIdentityProbe {
+    None,
+    KeychainLog,
+    AuthJson,
+    Vscdb,
+    CliAuthStatus,
+}
+
+/// When a launch under host access warns about native provider authentication.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeAuthWarning {
+    None,
+    WhenMismatch,
+    Always,
 }
 
 /// How availability records supply fresh login evidence.
@@ -121,6 +156,15 @@ pub enum ModelObservation {
 
 /// Location of a provider's user skill tree relative to the host home or an
 /// absolute environment override. The fallback is relative to the home.
+/// Host variables that identify a running native client session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClientEnvMarkers {
+    /// Variable whose value must be exactly `1`.
+    pub equals_one: Option<&'static str>,
+    /// Variables whose non-empty presence is sufficient.
+    pub presence: &'static [&'static str],
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SkillLocation {
     pub environment: Option<&'static str>,
@@ -236,6 +280,8 @@ pub struct HarnessInstall {
     /// Whether a pre-compaction response reaches the model's context.
     pub precompact_context: CapabilitySupport,
     pub instructions: CapabilitySupport,
+    /// The adapter declares its instruction documents as an array in its config.
+    pub instruction_array: bool,
     pub source: &'static str,
 }
 
@@ -541,6 +587,14 @@ pub struct AdapterSpec {
     pub name: &'static str,
     /// Format of a supported CLI model listing.
     pub model_listing: Option<ModelListingFormat>,
+    /// Default provider setting for the models this adapter can select.
+    pub default_models: Option<&'static [&'static str]>,
+    /// Namespace an adapter adds to model ids. Stripped before comparing a
+    /// requested id with an account's offer list.
+    pub model_id_prefix: Option<&'static str>,
+    /// CLI argv for a model-listing probe. Absence excludes the adapter from
+    /// model discovery entirely.
+    pub model_discovery: Option<&'static [&'static str]>,
     /// Provider family used by declared route constraints.
     pub family: &'static str,
     pub binary: &'static str,
@@ -561,6 +615,12 @@ pub struct AdapterSpec {
     pub account_config_dir: bool,
     /// Fixed home-relative prefix for registered account directories, if required.
     pub account_directory_prefix: Option<&'static str>,
+    /// Prefix of a registered key derived from the signed-in identity, for
+    /// adapters that namespace their account keys.
+    pub account_key_prefix: Option<&'static str>,
+    /// Namespace carried inside a provider identity string and folded into the
+    /// registered key by `account_key`.
+    pub account_identity_namespace: Option<&'static str>,
     /// Registered account configuration supports shared settings overlays.
     pub shared_account_settings: bool,
     /// Registered accounts use an isolated login keychain rooted in their home.
@@ -573,10 +633,14 @@ pub struct AdapterSpec {
     pub login_observation: LoginObservation,
     /// The login recheck identifies the signed-in account.
     pub login_check_names_account: bool,
+    /// How a registered account's identity is read from its directory.
+    pub account_identity_probe: AccountIdentityProbe,
     /// Synthetic account label and key for an adapter using its local login.
     pub local_account: (&'static str, &'static str),
     pub argv_prompt: bool,
     pub authentication: Option<&'static str>,
+    /// When a host-access launch warns about the adapter's native login.
+    pub native_auth_warning: NativeAuthWarning,
     /// Files observed by metadata only, relative to the account directory.
     pub credential_files: &'static [&'static str],
     /// Additional Provenant-owned files protected within registered stores.
@@ -586,6 +650,8 @@ pub struct AdapterSpec {
     /// Also watch the host login keychain on macOS.
     pub credential_host_keychain: bool,
     pub login_hint: &'static str,
+    /// How the adapter's own executable updates itself.
+    pub update: UpdateCommand,
     /// Account-scoped interactive login command, with {directory} shell quoted.
     pub login_template: Option<&'static str>,
     /// Account-scoped interactive command for refreshing an expired login.
@@ -609,6 +675,8 @@ pub struct AdapterSpec {
     /// warning names them as the place to keep worktrees out of indexing.
     pub indexing_ignore_files: &'static [&'static str],
     pub compaction_env: Option<&'static str>,
+    /// Host variables identifying this adapter's native client session.
+    pub client_env_markers: Option<ClientEnvMarkers>,
     pub allowance_prefix: Option<&'static str>,
     /// Local allowance windows governing models under allowance_prefix.
     pub allowance_windows: &'static [&'static str],
@@ -625,6 +693,10 @@ pub struct AdapterSpec {
     pub launch_token_refresh: bool,
     /// Remove a duplicated complete answer from the provider stream.
     pub deduplicate_result: bool,
+    /// Oversized command-execution frames are ignorable evidence for this adapter.
+    pub oversize_command_frames: bool,
+    /// Plain text events carry the final answer for this adapter.
+    pub answer_from_text: bool,
     /// Diagnose absent usage from structured result events.
     pub result_event_usage: bool,
     /// Provider-specific explanation when writer token budgets cannot stop it.
@@ -641,6 +713,8 @@ pub struct AdapterSpec {
     pub stderr_quota: bool,
     /// Parse stdout error diagnostics for provider failure explanations.
     pub stdout_error_diagnostic: bool,
+    /// The adapter's plan uses the Codex clean/inherited config policy.
+    pub codex_policy: bool,
     /// Source of model identity after a run.
     pub model_observation: ModelObservation,
     /// Preparation mechanism for a model-less named entry.
@@ -827,6 +901,37 @@ impl AdapterSpec {
     pub fn get(name: &str) -> Option<&'static Self> {
         ADAPTER_SPECS.iter().find(|spec| spec.name == name)
     }
+    /// Strip this adapter's declared model-id namespace, when it has one.
+    pub fn normalise_model_id<'a>(&self, id: &'a str) -> &'a str {
+        self.model_id_prefix
+            .and_then(|prefix| id.strip_prefix(prefix))
+            .unwrap_or(id)
+    }
+    /// Prefix a registered key built from a provider identity carries.
+    pub fn registered_key_prefix(&self) -> Option<&'static str> {
+        self.account_key_prefix
+    }
+    /// Build a registered key from a provider identity string.
+    pub fn account_key(&self, identity: &str) -> String {
+        let Some(prefix) = self.account_key_prefix else {
+            return identity.to_owned();
+        };
+        let identity = self
+            .account_identity_namespace
+            .and_then(|namespace| identity.strip_prefix(namespace))
+            .unwrap_or(identity);
+        format!("{prefix}{identity}")
+    }
+}
+
+/// Strip whichever declared namespace a model id carries. Namespaces are
+/// distinct, so the registry alone decides how ids are normalised.
+pub fn normalise_model_id(id: &str) -> &str {
+    ADAPTER_SPECS
+        .iter()
+        .filter_map(|spec| spec.model_id_prefix)
+        .find_map(|prefix| id.strip_prefix(prefix))
+        .unwrap_or(id)
 }
 
 // The installed Provenant release carries the common portfolio used by each
@@ -842,6 +947,9 @@ adapter_specs! { $;
         name: "claude",
         stdout: StreamContract::ProviderJsonl,
         model_listing: None,
+        default_models: None,
+        model_id_prefix: None,
+        model_discovery: None,
         family: "anthropic",
         binary: "claude",
         install: Some(HarnessInstall {
@@ -858,6 +966,7 @@ adapter_specs! { $;
             answer_delivery: CapabilitySupport::Supported,
             precompact_context: CapabilitySupport::Supported,
             instructions: CapabilitySupport::Supported,
+            instruction_array: false,
             source: "https://docs.anthropic.com/en/docs/claude-code/settings; https://docs.anthropic.com/en/docs/claude-code/hooks",
         }),
         skills: Some(SkillLocation {
@@ -871,6 +980,8 @@ adapter_specs! { $;
         registered_account: true,
         account_config_dir: true,
         account_directory_prefix: Some(".claude-"),
+        account_key_prefix: None,
+        account_identity_namespace: None,
         shared_account_settings: true,
         isolated_login_keychain: false,
         transcript_account_root: true,
@@ -879,14 +990,17 @@ adapter_specs! { $;
         login_reprobe: LoginReprobe::AccountIdentity,
         login_observation: LoginObservation::Reprobe,
         login_check_names_account: true,
+        account_identity_probe: AccountIdentityProbe::CliAuthStatus,
         local_account: ("default", "local"),
         argv_prompt: false,
         authentication: None,
+        native_auth_warning: NativeAuthWarning::Always,
         credential_files: &[".credentials.json", "settings.json"],
         credential_auxiliary_files: &["provenant-lane-token", "provenant-oauth-refresh.lock"],
         credential_profile_sibling: true,
         credential_host_keychain: true,
         login_hint: "claude auth login",
+        update: UpdateCommand::Subcommand("update"),
         login_template: Some("CLAUDE_CONFIG_DIR={directory} claude auth login"),
         login_refresh_template: Some("CLAUDE_CONFIG_DIR={directory} claude"),
         auth_markers: &["not logged in", "authentication_failed"],
@@ -895,6 +1009,10 @@ adapter_specs! { $;
         ignore_files: &[],
         indexing_ignore_files: &[],
         compaction_env: Some("CLAUDE_CODE_AUTO_COMPACT_WINDOW"),
+        client_env_markers: Some(ClientEnvMarkers {
+            equals_one: Some("CLAUDECODE"),
+            presence: &["CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID"],
+        }),
         allowance_prefix: None,
         allowance_windows: &[],
         namespaced_models: false,
@@ -905,6 +1023,8 @@ adapter_specs! { $;
         session_handoff: true,
         launch_token_refresh: true,
         deduplicate_result: false,
+        oversize_command_frames: false,
+        answer_from_text: true,
         result_event_usage: true,
         token_budget_notice: None,
         session_wide_usage: false,
@@ -912,6 +1032,7 @@ adapter_specs! { $;
         exit_route: false,
         stderr_quota: false,
         stdout_error_diagnostic: false,
+        codex_policy: false,
         model_observation: ModelObservation::Stream,
         named_entry: NamedEntry::None,
         user_sessions: false,
@@ -948,6 +1069,9 @@ adapter_specs! { $;
         name: "codex",
         stdout: StreamContract::ProviderJsonl,
         model_listing: Some(ModelListingFormat::CodexJson),
+        default_models: None,
+        model_id_prefix: None,
+        model_discovery: Some(&["debug", "models"]),
         family: "openai",
         binary: "codex",
         install: Some(HarnessInstall {
@@ -967,6 +1091,7 @@ adapter_specs! { $;
                 source: "https://developers.openai.com/codex/hooks",
             },
             instructions: CapabilitySupport::Supported,
+            instruction_array: false,
             source: "https://learn.chatgpt.com/docs/hooks; https://developers.openai.com/codex/guides/agents-md",
         }),
         skills: Some(SkillLocation {
@@ -980,6 +1105,8 @@ adapter_specs! { $;
         registered_account: true,
         account_config_dir: true,
         account_directory_prefix: None,
+        account_key_prefix: Some("codex-"),
+        account_identity_namespace: None,
         shared_account_settings: false,
         isolated_login_keychain: false,
         transcript_account_root: false,
@@ -988,14 +1115,21 @@ adapter_specs! { $;
         login_reprobe: LoginReprobe::Codex,
         login_observation: LoginObservation::Reprobe,
         login_check_names_account: false,
+        account_identity_probe: AccountIdentityProbe::AuthJson,
         local_account: ("default", "local"),
         argv_prompt: false,
         authentication: Some("login"),
+        native_auth_warning: NativeAuthWarning::WhenMismatch,
         credential_files: &["auth.json", "config.toml"],
         credential_auxiliary_files: &[],
         credential_profile_sibling: false,
         credential_host_keychain: false,
         login_hint: "codex login",
+        update: UpdateCommand::HomebrewOrNpm {
+            formula: "codex",
+            module: "@openai/codex",
+            package: "@openai/codex@latest",
+        },
         login_template: Some("CODEX_HOME={directory} codex login"),
         login_refresh_template: None,
         auth_markers: &[
@@ -1008,6 +1142,10 @@ adapter_specs! { $;
         ignore_files: &[],
         indexing_ignore_files: &[],
         compaction_env: None,
+        client_env_markers: Some(ClientEnvMarkers {
+            equals_one: None,
+            presence: &["CODEX_THREAD_ID"],
+        }),
         allowance_prefix: None,
         allowance_windows: &[],
         namespaced_models: false,
@@ -1018,6 +1156,8 @@ adapter_specs! { $;
         session_handoff: false,
         launch_token_refresh: false,
         deduplicate_result: false,
+        oversize_command_frames: true,
+        answer_from_text: false,
         result_event_usage: false,
         token_budget_notice: Some("Codex writer token budgets are checked at completed-turn boundaries; a turn cannot be interrupted mid-flight"),
         session_wide_usage: true,
@@ -1025,6 +1165,7 @@ adapter_specs! { $;
         exit_route: false,
         stderr_quota: false,
         stdout_error_diagnostic: false,
+        codex_policy: true,
         model_observation: ModelObservation::Rollout,
         named_entry: NamedEntry::None,
         user_sessions: false,
@@ -1061,6 +1202,9 @@ adapter_specs! { $;
         name: "cursor",
         stdout: StreamContract::ProviderJsonl,
         model_listing: Some(ModelListingFormat::CursorText),
+        default_models: Some(&["auto", "composer-*", "grok-*"]),
+        model_id_prefix: None,
+        model_discovery: Some(&["models"]),
         family: "cursor",
         binary: "cursor-agent",
         install: Some(HarnessInstall {
@@ -1086,6 +1230,7 @@ adapter_specs! { $;
                 reason: "Cursor global instructions are settings-managed; AGENTS.md is project-root scoped",
                 source: "https://docs.cursor.com/context/rules-for-ai",
             },
+            instruction_array: false,
             source: "https://docs.cursor.com/hooks; https://docs.cursor.com/context/rules-for-ai",
         }),
         skills: Some(SkillLocation {
@@ -1099,6 +1244,8 @@ adapter_specs! { $;
         registered_account: false,
         account_config_dir: false,
         account_directory_prefix: None,
+        account_key_prefix: Some("cursor-"),
+        account_identity_namespace: None,
         shared_account_settings: false,
         isolated_login_keychain: false,
         transcript_account_root: false,
@@ -1107,14 +1254,17 @@ adapter_specs! { $;
         login_reprobe: LoginReprobe::Cursor,
         login_observation: LoginObservation::Reprobe,
         login_check_names_account: false,
+        account_identity_probe: AccountIdentityProbe::Vscdb,
         local_account: ("default", "local"),
         argv_prompt: true,
         authentication: Some("login"),
+        native_auth_warning: NativeAuthWarning::WhenMismatch,
         credential_files: &["state.vscdb", "state.vscdb-wal", "state.vscdb-shm", "cli-config.json"],
         credential_auxiliary_files: &[],
         credential_profile_sibling: false,
         credential_host_keychain: false,
         login_hint: "agent login",
+        update: UpdateCommand::None,
         login_template: None,
         login_refresh_template: None,
         auth_markers: &[
@@ -1126,6 +1276,7 @@ adapter_specs! { $;
         ignore_files: &[".cursorignore"],
         indexing_ignore_files: &[".cursorindexingignore"],
         compaction_env: None,
+        client_env_markers: None,
         allowance_prefix: None,
         allowance_windows: &[],
         namespaced_models: false,
@@ -1136,6 +1287,8 @@ adapter_specs! { $;
         session_handoff: false,
         launch_token_refresh: false,
         deduplicate_result: false,
+        oversize_command_frames: false,
+        answer_from_text: true,
         result_event_usage: false,
         token_budget_notice: None,
         session_wide_usage: false,
@@ -1143,6 +1296,7 @@ adapter_specs! { $;
         exit_route: false,
         stderr_quota: false,
         stdout_error_diagnostic: false,
+        codex_policy: false,
         model_observation: ModelObservation::Stream,
         named_entry: NamedEntry::None,
         user_sessions: false,
@@ -1179,6 +1333,9 @@ adapter_specs! { $;
         name: "agy",
         stdout: StreamContract::ProviderJsonl,
         model_listing: Some(ModelListingFormat::AgyText),
+        default_models: None,
+        model_id_prefix: Some("agy/"),
+        model_discovery: Some(&["models"]),
         family: "google",
         binary: "agy",
         install: Some(HarnessInstall {
@@ -1201,6 +1358,7 @@ adapter_specs! { $;
                 source: "https://antigravity.google/docs/hooks#supported-events",
             },
             instructions: CapabilitySupport::Supported,
+            instruction_array: false,
             source: "https://antigravity.google/docs/hooks; https://antigravity.google/docs/customization-discovery",
         }),
         skills: Some(SkillLocation {
@@ -1214,6 +1372,8 @@ adapter_specs! { $;
         registered_account: true,
         account_config_dir: false,
         account_directory_prefix: None,
+        account_key_prefix: Some("agy-google-"),
+        account_identity_namespace: Some("google-"),
         shared_account_settings: false,
         isolated_login_keychain: true,
         transcript_account_root: false,
@@ -1222,9 +1382,11 @@ adapter_specs! { $;
         login_reprobe: LoginReprobe::AccountIdentity,
         login_observation: LoginObservation::Reprobe,
         login_check_names_account: true,
+        account_identity_probe: AccountIdentityProbe::KeychainLog,
         local_account: ("default", "local"),
         argv_prompt: true,
         authentication: Some("keychain"),
+        native_auth_warning: NativeAuthWarning::WhenMismatch,
         credential_files: &[
             "state.vscdb",
             "state.vscdb-wal",
@@ -1234,6 +1396,7 @@ adapter_specs! { $;
         credential_profile_sibling: false,
         credential_host_keychain: false,
         login_hint: "agy auth login",
+        update: UpdateCommand::None,
         login_template: Some("HOME={directory} agy` and use `/login"),
         login_refresh_template: None,
         auth_markers: &[
@@ -1245,6 +1408,7 @@ adapter_specs! { $;
         ignore_files: &[],
         indexing_ignore_files: &[],
         compaction_env: None,
+        client_env_markers: None,
         allowance_prefix: None,
         allowance_windows: &[],
         namespaced_models: false,
@@ -1255,6 +1419,8 @@ adapter_specs! { $;
         session_handoff: false,
         launch_token_refresh: false,
         deduplicate_result: true,
+        oversize_command_frames: false,
+        answer_from_text: false,
         result_event_usage: false,
         token_budget_notice: None,
         session_wide_usage: false,
@@ -1262,6 +1428,7 @@ adapter_specs! { $;
         exit_route: false,
         stderr_quota: false,
         stdout_error_diagnostic: false,
+        codex_policy: false,
         model_observation: ModelObservation::Stream,
         named_entry: NamedEntry::None,
         user_sessions: false,
@@ -1298,6 +1465,9 @@ adapter_specs! { $;
         name: "opencode",
         stdout: StreamContract::ProviderJsonl,
         model_listing: Some(ModelListingFormat::OpencodeText),
+        default_models: None,
+        model_id_prefix: Some("opencode/"),
+        model_discovery: Some(&["models"]),
         family: "opencode",
         binary: "opencode",
         install: Some(HarnessInstall {
@@ -1317,6 +1487,7 @@ adapter_specs! { $;
             },
             precompact_context: CapabilitySupport::Supported,
             instructions: CapabilitySupport::Supported,
+            instruction_array: true,
             source: "https://opencode.ai/docs/build/plugins/; https://opencode.ai/docs/instructions",
         }),
         skills: Some(SkillLocation {
@@ -1330,6 +1501,8 @@ adapter_specs! { $;
         registered_account: false,
         account_config_dir: false,
         account_directory_prefix: None,
+        account_key_prefix: None,
+        account_identity_namespace: None,
         shared_account_settings: false,
         isolated_login_keychain: false,
         transcript_account_root: false,
@@ -1338,9 +1511,11 @@ adapter_specs! { $;
         login_reprobe: LoginReprobe::ExecutableOnly,
         login_observation: LoginObservation::ExecutableOnly,
         login_check_names_account: false,
+        account_identity_probe: AccountIdentityProbe::None,
         local_account: ("go", "go"),
         argv_prompt: false,
         authentication: Some("login"),
+        native_auth_warning: NativeAuthWarning::None,
         credential_files: &[
             "auth.json",
             "opencode.db",
@@ -1351,6 +1526,7 @@ adapter_specs! { $;
         credential_profile_sibling: false,
         credential_host_keychain: false,
         login_hint: "opencode auth login",
+        update: UpdateCommand::Subcommand("upgrade"),
         login_template: None,
         login_refresh_template: None,
         auth_markers: &["no api key found", "run opencode auth login"],
@@ -1359,6 +1535,7 @@ adapter_specs! { $;
         ignore_files: &[],
         indexing_ignore_files: &[],
         compaction_env: None,
+        client_env_markers: None,
         allowance_prefix: Some("opencode-go/"),
         allowance_windows: &["five_hour", "seven_day", "thirty_day"],
         namespaced_models: true,
@@ -1369,6 +1546,8 @@ adapter_specs! { $;
         session_handoff: false,
         launch_token_refresh: false,
         deduplicate_result: false,
+        oversize_command_frames: false,
+        answer_from_text: false,
         result_event_usage: false,
         token_budget_notice: None,
         session_wide_usage: false,
@@ -1376,6 +1555,7 @@ adapter_specs! { $;
         exit_route: false,
         stderr_quota: true,
         stdout_error_diagnostic: true,
+        codex_policy: false,
         model_observation: ModelObservation::SessionDatabase,
         named_entry: NamedEntry::None,
         user_sessions: false,
@@ -1415,6 +1595,9 @@ adapter_specs! { $;
         name: "command",
         stdout: StreamContract::Raw,
         model_listing: None,
+        default_models: None,
+        model_id_prefix: None,
+        model_discovery: None,
         family: "command",
         binary: "",
         install: None,
@@ -1425,6 +1608,8 @@ adapter_specs! { $;
         registered_account: false,
         account_config_dir: false,
         account_directory_prefix: None,
+        account_key_prefix: None,
+        account_identity_namespace: None,
         shared_account_settings: false,
         isolated_login_keychain: false,
         transcript_account_root: false,
@@ -1433,14 +1618,17 @@ adapter_specs! { $;
         login_reprobe: LoginReprobe::None,
         login_observation: LoginObservation::None,
         login_check_names_account: false,
+        account_identity_probe: AccountIdentityProbe::None,
         local_account: ("default", "local"),
         argv_prompt: false,
         authentication: None,
+        native_auth_warning: NativeAuthWarning::None,
         credential_files: &[],
         credential_auxiliary_files: &[],
         credential_profile_sibling: false,
         credential_host_keychain: false,
         login_hint: "",
+        update: UpdateCommand::None,
         login_template: None,
         login_refresh_template: None,
         auth_markers: &[],
@@ -1449,6 +1637,7 @@ adapter_specs! { $;
         ignore_files: &[],
         indexing_ignore_files: &[],
         compaction_env: None,
+        client_env_markers: None,
         allowance_prefix: None,
         allowance_windows: &[],
         namespaced_models: false,
@@ -1459,6 +1648,8 @@ adapter_specs! { $;
         session_handoff: false,
         launch_token_refresh: false,
         deduplicate_result: false,
+        oversize_command_frames: false,
+        answer_from_text: false,
         result_event_usage: false,
         token_budget_notice: None,
         session_wide_usage: false,
@@ -1466,6 +1657,7 @@ adapter_specs! { $;
         exit_route: true,
         stderr_quota: false,
         stdout_error_diagnostic: false,
+        codex_policy: false,
         model_observation: ModelObservation::Stream,
         named_entry: NamedEntry::Command,
         user_sessions: false,
@@ -1504,6 +1696,9 @@ adapter_specs! { $;
         name: "host-native",
         stdout: StreamContract::ProviderJsonl,
         model_listing: None,
+        default_models: None,
+        model_id_prefix: None,
+        model_discovery: None,
         family: "host-native",
         binary: "",
         install: None,
@@ -1514,6 +1709,8 @@ adapter_specs! { $;
         registered_account: false,
         account_config_dir: false,
         account_directory_prefix: None,
+        account_key_prefix: None,
+        account_identity_namespace: None,
         shared_account_settings: false,
         isolated_login_keychain: false,
         transcript_account_root: false,
@@ -1522,14 +1719,17 @@ adapter_specs! { $;
         login_reprobe: LoginReprobe::None,
         login_observation: LoginObservation::None,
         login_check_names_account: false,
+        account_identity_probe: AccountIdentityProbe::None,
         local_account: ("default", "local"),
         argv_prompt: false,
         authentication: None,
+        native_auth_warning: NativeAuthWarning::None,
         credential_files: &[],
         credential_auxiliary_files: &[],
         credential_profile_sibling: false,
         credential_host_keychain: false,
         login_hint: "",
+        update: UpdateCommand::None,
         login_template: None,
         login_refresh_template: None,
         auth_markers: &[],
@@ -1538,6 +1738,7 @@ adapter_specs! { $;
         ignore_files: &[],
         indexing_ignore_files: &[],
         compaction_env: None,
+        client_env_markers: None,
         allowance_prefix: None,
         allowance_windows: &[],
         namespaced_models: false,
@@ -1548,6 +1749,8 @@ adapter_specs! { $;
         session_handoff: false,
         launch_token_refresh: false,
         deduplicate_result: false,
+        oversize_command_frames: false,
+        answer_from_text: false,
         result_event_usage: false,
         token_budget_notice: None,
         session_wide_usage: false,
@@ -1555,6 +1758,7 @@ adapter_specs! { $;
         exit_route: false,
         stderr_quota: false,
         stdout_error_diagnostic: false,
+        codex_policy: false,
         model_observation: ModelObservation::Stream,
         named_entry: NamedEntry::DelegatedAgent,
         user_sessions: false,
@@ -1592,6 +1796,9 @@ adapter_specs! { $;
         name: "fixture-provider",
         stdout: StreamContract::ProviderJsonl,
         model_listing: None,
+        default_models: None,
+        model_id_prefix: None,
+        model_discovery: None,
         family: "fixture",
         binary: "fixture-provider",
         install: None,
@@ -1602,6 +1809,8 @@ adapter_specs! { $;
         registered_account: false,
         account_config_dir: false,
         account_directory_prefix: None,
+        account_key_prefix: None,
+        account_identity_namespace: None,
         shared_account_settings: false,
         isolated_login_keychain: false,
         transcript_account_root: false,
@@ -1610,14 +1819,17 @@ adapter_specs! { $;
         login_reprobe: LoginReprobe::None,
         login_observation: LoginObservation::None,
         login_check_names_account: false,
+        account_identity_probe: AccountIdentityProbe::None,
         local_account: ("fixture", "work"),
         argv_prompt: false,
         authentication: None,
+        native_auth_warning: NativeAuthWarning::None,
         credential_files: &[],
         credential_auxiliary_files: &[],
         credential_profile_sibling: false,
         credential_host_keychain: false,
         login_hint: "",
+        update: UpdateCommand::None,
         login_template: None,
         login_refresh_template: None,
         auth_markers: &[],
@@ -1626,6 +1838,7 @@ adapter_specs! { $;
         ignore_files: &[],
         indexing_ignore_files: &[],
         compaction_env: None,
+        client_env_markers: None,
         allowance_prefix: None,
         allowance_windows: &[],
         namespaced_models: false,
@@ -1636,6 +1849,8 @@ adapter_specs! { $;
         session_handoff: false,
         launch_token_refresh: false,
         deduplicate_result: false,
+        oversize_command_frames: false,
+        answer_from_text: false,
         result_event_usage: false,
         token_budget_notice: None,
         session_wide_usage: false,
@@ -1643,6 +1858,7 @@ adapter_specs! { $;
         exit_route: true,
         stderr_quota: false,
         stdout_error_diagnostic: false,
+        codex_policy: false,
         model_observation: ModelObservation::Stream,
         named_entry: NamedEntry::None,
         user_sessions: false,

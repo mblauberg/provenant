@@ -30,6 +30,13 @@ pub struct QuotaTick {
     pub power: Power,
 }
 
+/// When a refresh is judged due: what asked for it and the host's power state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Due {
+    pub trigger: Trigger,
+    pub power: Power,
+}
+
 pub const TICK_BUDGET_SECONDS: i64 = crate::DEFAULT_WALL_BUDGET_SECONDS as i64;
 /// A probe must finish before its durable claim expires, even when the tick's
 /// configured wall budget is longer than the claim window.
@@ -69,6 +76,7 @@ pub fn next_due(
     record: &AccountRecord,
     trigger: Trigger,
     power: Power,
+    freshness: &FreshnessPolicy,
 ) -> Result<Option<i64>, QuotaError> {
     let Some(ttl) = interval(policies, &record.account.adapter, trigger, power) else {
         return Ok(None);
@@ -95,7 +103,7 @@ pub fn next_due(
     // when the adapter registers a quota probe. It is still subject to the
     // backoff and claim bounds below, so a confirmed refusal is not re-probed
     // on every tick.
-    if let Some(recheck) = crate::free_pool_recheck_due(record)? {
+    if let Some(recheck) = crate::free_pool_recheck_due(record, freshness)? {
         due = due.min(recheck);
     }
     if let Some(backoff) = record.backoff_until_unix_seconds
@@ -117,12 +125,13 @@ pub fn trigger_for_readiness(
     trigger: Trigger,
     power: Power,
     missing: bool,
+    freshness: &FreshnessPolicy,
 ) -> Result<Trigger, QuotaError> {
     let Some(record) = record.filter(|_| missing) else {
         return Ok(trigger);
     };
-    let normal = next_due(policies, record, trigger, power)?;
-    let readiness = next_due(policies, record, Trigger::Panel, power)?;
+    let normal = next_due(policies, record, trigger, power, freshness)?;
+    let readiness = next_due(policies, record, Trigger::Panel, power, freshness)?;
     Ok(match (normal, readiness) {
         (Some(normal), Some(readiness)) if readiness < normal => Trigger::Panel,
         _ => trigger,
@@ -227,9 +236,10 @@ pub fn reserve(
     account: &AccountScope,
     now: i64,
     token: &str,
-    trigger: Trigger,
-    power: Power,
+    due: Due,
+    freshness: &FreshnessPolicy,
 ) -> Result<UpdateIntent, QuotaError> {
+    let Due { trigger, power } = due;
     account.validate()?;
     if !component(token) {
         return Err(QuotaError::Invalid("claim token"));
@@ -241,7 +251,7 @@ pub fn reserve(
     // Identity is adapter and key; a changed display label is adopted below.
     if record.account.adapter != account.adapter
         || record.account.account_key != account.account_key
-        || next_due(policies, &record, trigger, power)?.is_none_or(|due| due > now)
+        || next_due(policies, &record, trigger, power, freshness)?.is_none_or(|due| due > now)
     {
         return Err(QuotaError::Conflict);
     }
@@ -390,6 +400,7 @@ pub fn plan_tick_with_settings(
     missing_readiness: &[(String, String)],
 ) -> Result<TickPlan, QuotaError> {
     use provenant_config::DomainConfig;
+    let freshness = FreshnessPolicy::from_settings(settings.freshness);
     if !settings.validate().is_empty() {
         return Err(QuotaError::Invalid("scheduling settings"));
     }
@@ -471,9 +482,16 @@ pub fn plan_tick_with_settings(
         let missing = missing_readiness
             .iter()
             .any(|(adapter, key)| adapter == &account.adapter && key == &account.account_key);
-        let trigger = trigger_for_readiness(policies, current, tick.trigger, tick.power, missing)?;
+        let trigger = trigger_for_readiness(
+            policies,
+            current,
+            tick.trigger,
+            tick.power,
+            missing,
+            &freshness,
+        )?;
         let due = match current {
-            Some(record) => next_due(policies, record, trigger, tick.power)?,
+            Some(record) => next_due(policies, record, trigger, tick.power, &freshness)?,
             None => interval(policies, &account.adapter, trigger, tick.power).map(|_| i64::MIN),
         };
         if due.is_some_and(|due| due <= now) {
@@ -539,15 +557,35 @@ fn validate_inputs(records: &[AccountRecord], detections: &[Detection]) -> Resul
     }
     Ok(())
 }
+/// The facts and policy one quota report judges accounts against.
+#[derive(Clone, Copy)]
+pub struct ReportInputs<'a> {
+    pub policies: &'a [QuotaPolicy],
+    pub records: &'a [AccountRecord],
+    pub detections: &'a [Detection],
+    pub policy: &'a provenant_records::policy::Policy,
+    pub freshness: &'a FreshnessPolicy,
+    pub readiness: &'a [ReadinessInput<'a>],
+    /// The pools each model draws on, from the catalogue dispatch admits with,
+    /// so a model's servable flag agrees with the verdict dispatch reaches.
+    pub pools: ModelPools<'a>,
+}
+
 pub fn report(
-    policies: &[QuotaPolicy],
-    records: &[AccountRecord],
-    detections: &[Detection],
+    inputs: ReportInputs<'_>,
     query: &QuotaQuery,
     now: i64,
     path: String,
-    policy: &provenant_records::policy::Policy,
 ) -> Result<QuotaReport, QuotaError> {
+    let ReportInputs {
+        policies,
+        records,
+        detections,
+        policy,
+        freshness,
+        readiness,
+        pools,
+    } = inputs;
     validate_inputs(records, detections)?;
     let selected = |id: &str| query.adapter.as_ref().is_none_or(|s| s == id);
     let mut accounts = Vec::new();
@@ -568,148 +606,43 @@ pub fn report(
         let age = record.snapshot.as_ref().map(|s| {
             u64::try_from(now.saturating_sub(s.observed_unix_seconds).max(0)).unwrap_or(u64::MAX)
         });
-        let auth_required = record.last_error.is_some_and(ProbeFailure::needs_login)
-            || (!record
-                .auth_verified_unix_seconds
-                .is_some_and(|at| at <= now && now.saturating_sub(at) < 900)
-                && detections.iter().any(|d| {
-                    d.adapter == record.account.adapter
-                        && d.status == QuotaStatus::AuthRequired
-                        && d.accounts.as_ref().is_some_and(|a| a.len() == 1)
-                }));
-        let fresh = record.snapshot.as_ref().is_some_and(|s| {
-            s.observed_unix_seconds <= now
-                && record.last_error.is_none()
-                && !auth_required
-                && age.is_some_and(|a| {
-                    a < interval(policies, &record.account.adapter, Trigger::Timer, Power::Ac)
-                        .unwrap_or(0)
-                })
-        });
-        let auth_refresh_pending = record.auth_state.as_ref().is_some_and(|auth| {
-            auth.signed_in == Some(true)
-                && auth.refresh_pending
-                && auth.observed_unix_seconds.is_some_and(|at| {
-                    at <= now
-                        && (now.saturating_sub(at) as u64)
-                            < interval(policies, &record.account.adapter, Trigger::Timer, Power::Ac)
-                                .unwrap_or(0)
-                })
-        });
-        let live: Vec<_> = record
-            .refusals
+        let readiness_file = readiness
             .iter()
-            .filter(|refusal| {
-                refusal.observed_unix_seconds <= now
-                    && refusal
-                        .expires_unix_seconds()
-                        .is_ok_and(|expires| expires > now)
+            .find(|input| {
+                input.adapter == record.account.adapter
+                    && input.account_key == record.account.account_key
             })
-            .collect();
-        let refusals: Vec<_> = live
-            .iter()
-            .map(|refusal| crate::RefusalRow {
-                model: refusal.model.clone(),
-                pool: refusal.pool.clone(),
-                resets_at: refusal
-                    .resets_unix_seconds
-                    .filter(|reset| *reset > now)
-                    .and_then(|reset| jiff::Timestamp::from_second(reset).ok())
-                    .map(|timestamp| timestamp.to_string()),
-            })
-            .collect();
-        let free_pool = provenant_records::AdapterSpec::get(&record.account.adapter)
-            .filter(|spec| {
-                spec.is_free_plan(
-                    record
-                        .snapshot
-                        .as_ref()
-                        .and_then(|snapshot| snapshot.details.as_ref())
-                        .and_then(|details| details.plan.as_deref()),
-                )
-            })
-            .and_then(|spec| spec.free_pool);
-        let in_free = |refusal: &&crate::RefusalRow| {
-            free_pool.is_some_and(|pool| refusal.pool.as_deref() == Some(pool))
-        };
-        let free_refused = refusals.iter().any(|refusal| in_free(&refusal));
-        // A free-pool refusal or a spent plan usage limit makes the whole
-        // account read exhausted until the latest named reset.
-        // A newer reading that clears the hold clears it here too: the one
-        // rule is `Admission::refusal_holds`.
-        let admission = crate::Admission {
-            policy,
+            .map(|input| input.file);
+        let effective = crate::effective_status(&crate::StatusInput {
+            record,
+            detections,
+            readiness: readiness_file,
+            pools,
+            now,
+            freshness,
             policies,
-            now_unix_seconds: now,
-            records,
-            pools: &[],
-        };
-        let mut account_refusals = Vec::new();
-        for (refusal, row) in live.iter().zip(&refusals) {
-            if (in_free(&row) || row.pool.as_deref() == Some(ACCOUNT_ROUTE))
-                && admission.refusal_holds(&record.account.adapter, Some(record), refusal)?
-            {
-                account_refusals.push(row);
-            }
-        }
-        let account_refused = !account_refusals.is_empty();
-        let status = match &record.snapshot {
-            _ if record.last_error == Some(ProbeFailure::IsolatedKeychainUnavailable) => {
-                QuotaStatus::KeychainUnavailable
-            }
-            _ if account_refused => QuotaStatus::Exhausted,
-            _ if auth_required => QuotaStatus::AuthRequired,
-            // Preserve operational failures separately from the observed need
-            // for renewal. Old auth facts expire and never override sign-out.
-            _ if auth_refresh_pending
-                || (record.last_error == Some(ProbeFailure::RefreshDeferred)
-                    && record.last_attempt_unix_seconds.is_some_and(|at| {
-                        at <= now
-                            && (now.saturating_sub(at) as u64)
-                                < interval(
-                                    policies,
-                                    &record.account.adapter,
-                                    Trigger::Timer,
-                                    Power::Ac,
-                                )
-                                .unwrap_or(0)
-                    })) =>
-            {
-                QuotaStatus::RefreshPending
-            }
-            Some(snapshot) if fresh => snapshot.status,
-            Some(_) => QuotaStatus::Stale,
-            None if record.last_error == Some(ProbeFailure::Disabled) => QuotaStatus::Unsupported,
-            None => QuotaStatus::Unknown,
-        };
-        let reset_seconds = if account_refused {
-            account_refusals
-                .iter()
-                .map(|refusal| refusal.resets_at.as_deref())
-                .collect::<Option<Vec<_>>>()
-                .and_then(|resets| {
-                    resets
-                        .into_iter()
-                        .filter_map(|reset| reset.parse::<jiff::Timestamp>().ok())
-                        .max()
-                })
-                .map(|reset| reset.to_string())
-        } else {
-            None
-        };
+            policy,
+        })?;
         accounts.push(AccountRow {
             account: record.account.clone(),
             readiness: None,
             login_expiry: None,
             auth_state: record.auth_state.clone(),
             snapshot: record.snapshot.clone(),
-            status,
-            resets_at: reset_seconds,
-            refusals,
-            free_pool_refusal: free_refused,
+            status: effective.status,
+            resets_at: effective.resets_at,
+            refusals: effective.refusals,
+            free_pool_refusal: effective.free_pool_refusal,
+            models: effective.models,
             age_seconds: age,
-            next_due_unix_seconds: next_due(policies, record, Trigger::Timer, Power::Ac)?
-                .map(|d| d.max(now)),
+            next_due_unix_seconds: next_due(
+                policies,
+                record,
+                Trigger::Timer,
+                Power::Ac,
+                freshness,
+            )?
+            .map(|d| d.max(now)),
             refreshing: record
                 .claim
                 .as_ref()
@@ -790,10 +723,18 @@ mod tests {
             Trigger::Timer,
             Power::Ac,
             true,
+            &crate::DEFAULT_FRESHNESS,
         )
         .unwrap();
         assert_eq!(
-            next_due(crate::source::TEST_POLICIES, &record, trigger, Power::Ac).unwrap(),
+            next_due(
+                crate::source::TEST_POLICIES,
+                &record,
+                trigger,
+                Power::Ac,
+                &crate::DEFAULT_FRESHNESS
+            )
+            .unwrap(),
             Some(220)
         );
         record.backoff_until_unix_seconds = Some(250);
@@ -808,10 +749,18 @@ mod tests {
             Trigger::Timer,
             Power::Ac,
             true,
+            &crate::DEFAULT_FRESHNESS,
         )
         .unwrap();
         assert_eq!(
-            next_due(crate::source::TEST_POLICIES, &record, trigger, Power::Ac).unwrap(),
+            next_due(
+                crate::source::TEST_POLICIES,
+                &record,
+                trigger,
+                Power::Ac,
+                &crate::DEFAULT_FRESHNESS
+            )
+            .unwrap(),
             Some(280)
         );
         assert_eq!(
@@ -821,6 +770,7 @@ mod tests {
                 Trigger::Timer,
                 Power::Ac,
                 false,
+                &crate::DEFAULT_FRESHNESS,
             )
             .unwrap(),
             Trigger::Timer
@@ -852,7 +802,8 @@ mod tests {
                     crate::source::TEST_POLICIES,
                     &record,
                     Trigger::Timer,
-                    Power::Ac
+                    Power::Ac,
+                    &crate::DEFAULT_FRESHNESS,
                 )
                 .unwrap(),
                 Some(115)
@@ -866,13 +817,18 @@ mod tests {
         let mut record = AccountRecord::empty(account);
         record.last_error = Some(ProbeFailure::IsolatedKeychainUnavailable);
         let report = report(
-            crate::source::TEST_POLICIES,
-            &[record],
-            &[],
+            ReportInputs {
+                pools: &|_, _| Vec::new(),
+                policies: crate::source::TEST_POLICIES,
+                records: &[record],
+                detections: &[],
+                policy: crate::source::test_policy(),
+                freshness: &crate::DEFAULT_FRESHNESS,
+                readiness: &[],
+            },
             &QuotaQuery { adapter: None },
             100,
             "fixture".into(),
-            crate::source::test_policy(),
         )
         .unwrap();
         assert_eq!(report.accounts[0].status, QuotaStatus::KeychainUnavailable);
@@ -888,7 +844,14 @@ mod tests {
             deadline_unix_seconds: 155,
         });
         assert_eq!(
-            next_due(crate::source::TEST_POLICIES, &r, Trigger::Manual, Power::Ac).unwrap(),
+            next_due(
+                crate::source::TEST_POLICIES,
+                &r,
+                Trigger::Manual,
+                Power::Ac,
+                &crate::DEFAULT_FRESHNESS
+            )
+            .unwrap(),
             Some(400)
         );
         let claim = reserve(
@@ -897,8 +860,11 @@ mod tests {
             &r.account,
             400,
             "new",
-            Trigger::Manual,
-            Power::Ac,
+            Due {
+                trigger: Trigger::Manual,
+                power: Power::Ac,
+            },
+            &crate::DEFAULT_FRESHNESS,
         )
         .unwrap();
         assert!(claim.check(Some(&r)).is_ok());
@@ -920,8 +886,11 @@ mod tests {
                 &r.account,
                 399,
                 "new",
-                Trigger::Manual,
-                Power::Ac
+                Due {
+                    trigger: Trigger::Manual,
+                    power: Power::Ac
+                },
+                &crate::DEFAULT_FRESHNESS,
             ),
             Err(QuotaError::Conflict)
         ));
@@ -959,8 +928,11 @@ mod tests {
                 &record.account,
                 110,
                 "claim",
-                tick.trigger,
-                tick.power
+                Due {
+                    trigger: tick.trigger,
+                    power: tick.power
+                },
+                &crate::DEFAULT_FRESHNESS,
             )
             .is_ok()
         );
@@ -976,8 +948,11 @@ mod tests {
                 &record.account,
                 110,
                 "claim",
-                tick.trigger,
-                tick.power
+                Due {
+                    trigger: tick.trigger,
+                    power: tick.power
+                },
+                &crate::DEFAULT_FRESHNESS,
             )
             .is_err()
         );
@@ -1017,8 +992,15 @@ mod tests {
             solo: false,
         }];
         assert_eq!(
-            next_due(&policies, &record, Trigger::Timer, Power::Ac).unwrap(),
-            Some(100 + FREE_POOL_RECHECK_SECONDS)
+            next_due(
+                &policies,
+                &record,
+                Trigger::Timer,
+                Power::Ac,
+                &crate::DEFAULT_FRESHNESS
+            )
+            .unwrap(),
+            Some(100 + crate::DEFAULT_FRESHNESS.free_pool_recheck_seconds as i64)
         );
         let detection = Detection {
             adapter: account.adapter.clone(),
@@ -1045,13 +1027,98 @@ mod tests {
             std::slice::from_ref(&record),
             std::slice::from_ref(&detection),
             &tick,
-            100 + FREE_POOL_RECHECK_SECONDS,
+            100 + crate::DEFAULT_FRESHNESS.free_pool_recheck_seconds as i64,
         )
         .unwrap()
         .batches;
         assert_eq!(after, vec![vec![account]]);
         // A probe that found no headroom leaves the recorded reset in place.
         assert_eq!(record.refusals[0].resets_unix_seconds, Some(100 + 50_000));
+    }
+
+    // One resolved policy decides every consumer: a configured recheck
+    // interval moves the due time, and the tick plan reads the same setting.
+    #[test]
+    fn configured_free_pool_recheck_moves_next_due_and_the_tick_plan() {
+        let spec = provenant_records::ADAPTER_SPECS
+            .iter()
+            .find(|spec| {
+                spec.free_pool.is_some()
+                    && spec.quota_probe != provenant_records::QuotaProbeKind::None
+            })
+            .expect("free pool adapter with a quota probe");
+        let account = AccountScope {
+            extra: Default::default(),
+            adapter: spec.name.into(),
+            account_key: "key".into(),
+            label: "zen".into(),
+        };
+        let mut record = AccountRecord::empty(account.clone());
+        record.last_attempt_unix_seconds = Some(100);
+        record.refusals.push(crate::Refusal {
+            extra: Default::default(),
+            account: account.clone(),
+            model: "free-model".into(),
+            pool: spec.free_pool.map(str::to_owned),
+            observed_unix_seconds: 100,
+            resets_unix_seconds: Some(100 + 50_000),
+        });
+        let policies = [QuotaPolicy {
+            adapter: spec.name,
+            timer_seconds: 7200,
+            panel_seconds: 3600,
+            probe_seconds: 14,
+            low_power: true,
+            solo: false,
+        }];
+        let settings = Settings {
+            freshness: crate::FreshnessSettings {
+                free_pool_recheck_seconds: 30,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let configured = FreshnessPolicy::from_settings(settings.freshness);
+        assert_eq!(
+            next_due(&policies, &record, Trigger::Timer, Power::Ac, &configured).unwrap(),
+            Some(130)
+        );
+        assert_ne!(
+            next_due(
+                &policies,
+                &record,
+                Trigger::Timer,
+                Power::Ac,
+                &crate::DEFAULT_FRESHNESS
+            )
+            .unwrap(),
+            Some(130)
+        );
+        let detection = Detection {
+            adapter: account.adapter.clone(),
+            accounts: Some(vec![account.clone()]),
+            status: QuotaStatus::Available,
+        };
+        let tick = QuotaTick {
+            adapter: None,
+            trigger: Trigger::Timer,
+            power: Power::Ac,
+        };
+        let plan = |now| {
+            plan_tick_with_settings(
+                &policies,
+                std::slice::from_ref(&record),
+                std::slice::from_ref(&detection),
+                &tick,
+                now,
+                &settings,
+                &[],
+            )
+            .unwrap()
+            .batches
+        };
+        assert!(plan(129).is_empty());
+        assert_eq!(plan(130), vec![vec![account]]);
     }
 
     #[test]
@@ -1065,8 +1132,11 @@ mod tests {
             &agy,
             100,
             "first",
-            Trigger::Manual,
-            Power::Ac,
+            Due {
+                trigger: Trigger::Manual,
+                power: Power::Ac,
+            },
+            &crate::DEFAULT_FRESHNESS,
         )
         .unwrap()
         .replacement
@@ -1116,8 +1186,11 @@ mod tests {
             &agy,
             170,
             "second",
-            Trigger::Manual,
-            Power::Ac,
+            Due {
+                trigger: Trigger::Manual,
+                power: Power::Ac,
+            },
+            &crate::DEFAULT_FRESHNESS,
         )
         .unwrap()
         .replacement
@@ -1144,13 +1217,18 @@ mod tests {
         .replacement
         .unwrap();
         let row = report(
-            crate::source::TEST_POLICIES,
-            &[repaired],
-            std::slice::from_ref(&detection),
+            ReportInputs {
+                pools: &|_, _| Vec::new(),
+                policies: crate::source::TEST_POLICIES,
+                records: &[repaired],
+                detections: std::slice::from_ref(&detection),
+                policy: crate::source::test_policy(),
+                freshness: &crate::DEFAULT_FRESHNESS,
+                readiness: &[],
+            },
             &QuotaQuery { adapter: None },
             180,
             "report.json".into(),
-            crate::source::test_policy(),
         )
         .unwrap()
         .accounts
@@ -1170,7 +1248,8 @@ mod tests {
                 crate::source::TEST_POLICIES,
                 &record,
                 Trigger::Manual,
-                Power::Ac
+                Power::Ac,
+                &crate::DEFAULT_FRESHNESS,
             )
             .unwrap(),
             Some(220)
@@ -1210,8 +1289,11 @@ mod tests {
                 &record.account,
                 110,
                 "claim",
-                trigger,
-                Power::Ac,
+                Due {
+                    trigger,
+                    power: Power::Ac,
+                },
+                &crate::DEFAULT_FRESHNESS,
             )
             .unwrap()
             .replacement
@@ -1226,8 +1308,11 @@ mod tests {
                     &record.account,
                     111,
                     "second",
-                    trigger,
-                    Power::Ac
+                    Due {
+                        trigger,
+                        power: Power::Ac
+                    },
+                    &crate::DEFAULT_FRESHNESS,
                 )
                 .is_err()
             );
@@ -1236,7 +1321,14 @@ mod tests {
                 .replacement
                 .unwrap();
             assert_eq!(
-                next_due(crate::source::TEST_POLICIES, &failed, trigger, Power::Ac).unwrap(),
+                next_due(
+                    crate::source::TEST_POLICIES,
+                    &failed,
+                    trigger,
+                    Power::Ac,
+                    &crate::DEFAULT_FRESHNESS
+                )
+                .unwrap(),
                 Some(1012)
             );
         }
@@ -1281,13 +1373,18 @@ mod tests {
             .unwrap();
             assert_eq!(after.batches, vec![vec![record.account.clone()]]);
             let current = report(
-                crate::source::TEST_POLICIES,
-                &[record.clone()],
-                std::slice::from_ref(&detection),
+                ReportInputs {
+                    pools: &|_, _| Vec::new(),
+                    policies: crate::source::TEST_POLICIES,
+                    records: &[record.clone()],
+                    detections: std::slice::from_ref(&detection),
+                    policy: crate::source::test_policy(),
+                    freshness: &crate::DEFAULT_FRESHNESS,
+                    readiness: &[],
+                },
                 &QuotaQuery { adapter: None },
                 due,
                 "report.json".into(),
-                crate::source::test_policy(),
             )
             .unwrap();
             assert_eq!(current.accounts[0].status, QuotaStatus::AuthRequired);
@@ -1304,24 +1401,34 @@ mod tests {
         };
         let query = QuotaQuery { adapter: None };
         let recent = report(
-            crate::source::TEST_POLICIES,
-            &[record.clone()],
-            std::slice::from_ref(&detection),
+            ReportInputs {
+                pools: &|_, _| Vec::new(),
+                policies: crate::source::TEST_POLICIES,
+                records: &[record.clone()],
+                detections: std::slice::from_ref(&detection),
+                policy: crate::source::test_policy(),
+                freshness: &crate::DEFAULT_FRESHNESS,
+                readiness: &[],
+            },
             &query,
             101,
             "/report".into(),
-            crate::source::test_policy(),
         )
         .unwrap();
         assert_eq!(recent.accounts[0].status, QuotaStatus::Unknown);
         let expired = report(
-            crate::source::TEST_POLICIES,
-            &[record],
-            &[detection],
+            ReportInputs {
+                pools: &|_, _| Vec::new(),
+                policies: crate::source::TEST_POLICIES,
+                records: &[record],
+                detections: &[detection],
+                policy: crate::source::test_policy(),
+                freshness: &crate::DEFAULT_FRESHNESS,
+                readiness: &[],
+            },
             &query,
             1000,
             "/report".into(),
-            crate::source::test_policy(),
         )
         .unwrap();
         assert_eq!(expired.accounts[0].status, QuotaStatus::AuthRequired);
@@ -1377,13 +1484,18 @@ mod tests {
         });
         let row = |now| {
             report(
-                crate::source::TEST_POLICIES,
-                &[record.clone()],
-                &[],
+                ReportInputs {
+                    pools: &|_, _| Vec::new(),
+                    policies: crate::source::TEST_POLICIES,
+                    records: &[record.clone()],
+                    detections: &[],
+                    policy: crate::source::test_policy(),
+                    freshness: &crate::DEFAULT_FRESHNESS,
+                    readiness: &[],
+                },
                 &QuotaQuery { adapter: None },
                 now,
                 "report.json".into(),
-                crate::source::test_policy(),
             )
             .unwrap()
             .accounts
@@ -1451,8 +1563,11 @@ mod tests {
             &renamed,
             400,
             "claim",
-            Trigger::Manual,
-            Power::Ac,
+            Due {
+                trigger: Trigger::Manual,
+                power: Power::Ac,
+            },
+            &crate::DEFAULT_FRESHNESS,
         )
         .unwrap();
         intent.check(Some(&r)).unwrap();
@@ -1525,8 +1640,11 @@ mod tests {
             &a,
             400,
             "claim",
-            Trigger::Manual,
-            Power::Ac,
+            Due {
+                trigger: Trigger::Manual,
+                power: Power::Ac,
+            },
+            &crate::DEFAULT_FRESHNESS,
         )
         .unwrap();
         let current = intent.replacement.unwrap();
@@ -1537,13 +1655,18 @@ mod tests {
         let failed = complete(&current, "claim", 420, Err(ProbeFailure::Auth), None).unwrap();
         assert_eq!(failed.replacement.as_ref().unwrap().snapshot, r.snapshot);
         let row = report(
-            crate::source::TEST_POLICIES,
-            &[failed.replacement.clone().unwrap()],
-            &[],
+            ReportInputs {
+                pools: &|_, _| Vec::new(),
+                policies: crate::source::TEST_POLICIES,
+                records: &[failed.replacement.clone().unwrap()],
+                detections: &[],
+                policy: crate::source::test_policy(),
+                freshness: &crate::DEFAULT_FRESHNESS,
+                readiness: &[],
+            },
             &QuotaQuery { adapter: None },
             420,
             "report.json".into(),
-            crate::source::test_policy(),
         )
         .unwrap()
         .accounts
@@ -1610,13 +1733,18 @@ mod tests {
                 observed_unix_seconds: Some(observed),
             });
             let report = report(
-                crate::source::TEST_POLICIES,
-                &[record],
-                &[],
+                ReportInputs {
+                    pools: &|_, _| Vec::new(),
+                    policies: crate::source::TEST_POLICIES,
+                    records: &[record],
+                    detections: &[],
+                    policy: crate::source::test_policy(),
+                    freshness: &crate::DEFAULT_FRESHNESS,
+                    readiness: &[],
+                },
                 &QuotaQuery { adapter: None },
                 420,
                 "report.json".into(),
-                crate::source::test_policy(),
             )
             .unwrap();
             assert_eq!(
@@ -1653,8 +1781,11 @@ mod tests {
                 &a,
                 400,
                 "claim",
-                Trigger::Manual,
-                Power::Ac,
+                Due {
+                    trigger: Trigger::Manual,
+                    power: Power::Ac,
+                },
+                &crate::DEFAULT_FRESHNESS,
             )
             .unwrap()
             .replacement
@@ -1666,13 +1797,18 @@ mod tests {
             assert_eq!(failed.snapshot, record.snapshot);
             assert!(failed.refusals.is_empty());
             let row = report(
-                crate::source::TEST_POLICIES,
-                &[failed],
-                &[],
+                ReportInputs {
+                    pools: &|_, _| Vec::new(),
+                    policies: crate::source::TEST_POLICIES,
+                    records: &[failed],
+                    detections: &[],
+                    policy: crate::source::test_policy(),
+                    freshness: &crate::DEFAULT_FRESHNESS,
+                    readiness: &[],
+                },
                 &QuotaQuery { adapter: None },
                 420,
                 "report.json".into(),
-                crate::source::test_policy(),
             )
             .unwrap()
             .accounts
@@ -1720,13 +1856,18 @@ mod tests {
         });
         for (now, expected_refusals) in [(150, 1), (200, 0)] {
             let row = report(
-                crate::source::TEST_POLICIES,
-                &[record.clone()],
-                &[],
+                ReportInputs {
+                    pools: &|_, _| Vec::new(),
+                    policies: crate::source::TEST_POLICIES,
+                    records: &[record.clone()],
+                    detections: &[],
+                    policy: crate::source::test_policy(),
+                    freshness: &crate::DEFAULT_FRESHNESS,
+                    readiness: &[],
+                },
                 &QuotaQuery { adapter: None },
                 now,
                 "fixture".into(),
-                crate::source::test_policy(),
             )
             .unwrap()
             .accounts
@@ -1761,8 +1902,11 @@ mod tests {
             &a,
             400,
             "claim",
-            Trigger::Manual,
-            Power::Ac,
+            Due {
+                trigger: Trigger::Manual,
+                power: Power::Ac,
+            },
+            &crate::DEFAULT_FRESHNESS,
         )
         .unwrap();
         let current = intent.replacement.unwrap();
@@ -1777,13 +1921,18 @@ mod tests {
         .replacement
         .unwrap();
         let row = report(
-            crate::source::TEST_POLICIES,
-            std::slice::from_ref(&failed),
-            &[],
+            ReportInputs {
+                pools: &|_, _| Vec::new(),
+                policies: crate::source::TEST_POLICIES,
+                records: std::slice::from_ref(&failed),
+                detections: &[],
+                policy: crate::source::test_policy(),
+                freshness: &crate::DEFAULT_FRESHNESS,
+                readiness: &[],
+            },
             &QuotaQuery { adapter: None },
             420,
             "report.json".into(),
-            crate::source::test_policy(),
         )
         .unwrap()
         .accounts
@@ -1797,8 +1946,11 @@ mod tests {
             &a,
             2000,
             "next",
-            Trigger::Manual,
-            Power::Ac,
+            Due {
+                trigger: Trigger::Manual,
+                power: Power::Ac,
+            },
+            &crate::DEFAULT_FRESHNESS,
         )
         .unwrap()
         .replacement
@@ -1814,8 +1966,11 @@ mod tests {
             &a,
             4000,
             "verified",
-            Trigger::Manual,
-            Power::Ac,
+            Due {
+                trigger: Trigger::Manual,
+                power: Power::Ac,
+            },
+            &crate::DEFAULT_FRESHNESS,
         )
         .unwrap()
         .replacement
@@ -1972,8 +2127,11 @@ mod transition_tests {
             &r.account,
             100,
             "first",
-            Trigger::Manual,
-            Power::Ac,
+            Due {
+                trigger: Trigger::Manual,
+                power: Power::Ac,
+            },
+            &crate::DEFAULT_FRESHNESS,
         )
         .unwrap();
         let second = reserve(
@@ -1982,8 +2140,11 @@ mod transition_tests {
             &r.account,
             100,
             "second",
-            Trigger::Manual,
-            Power::Ac,
+            Due {
+                trigger: Trigger::Manual,
+                power: Power::Ac,
+            },
+            &crate::DEFAULT_FRESHNESS,
         )
         .unwrap();
         let claimed = first.replacement.as_ref().unwrap();
@@ -1995,8 +2156,11 @@ mod transition_tests {
                 &r.account,
                 110,
                 "third",
-                Trigger::Manual,
-                Power::Ac
+                Due {
+                    trigger: Trigger::Manual,
+                    power: Power::Ac
+                },
+                &crate::DEFAULT_FRESHNESS,
             )
             .is_err()
         );
@@ -2006,8 +2170,11 @@ mod transition_tests {
             &r.account,
             160,
             "third",
-            Trigger::Manual,
-            Power::Ac,
+            Due {
+                trigger: Trigger::Manual,
+                power: Power::Ac,
+            },
+            &crate::DEFAULT_FRESHNESS,
         )
         .unwrap()
         .replacement
@@ -2022,8 +2189,11 @@ mod transition_tests {
             &r.account,
             125,
             "recreated",
-            Trigger::Manual,
-            Power::Ac,
+            Due {
+                trigger: Trigger::Manual,
+                power: Power::Ac,
+            },
+            &crate::DEFAULT_FRESHNESS,
         )
         .unwrap()
         .replacement
@@ -2042,8 +2212,11 @@ mod transition_tests {
                 &r.account,
                 100,
                 "overflow",
-                Trigger::Manual,
-                Power::Ac
+                Due {
+                    trigger: Trigger::Manual,
+                    power: Power::Ac
+                },
+                &crate::DEFAULT_FRESHNESS,
             ),
             Err(QuotaError::NumberOutOfRange)
         ));
@@ -2058,13 +2231,18 @@ mod transition_tests {
         });
         record.last_attempt_unix_seconds = Some(45);
         let report = report(
-            crate::source::TEST_POLICIES,
-            &[record.clone()],
-            &[],
+            ReportInputs {
+                pools: &|_, _| Vec::new(),
+                policies: crate::source::TEST_POLICIES,
+                records: &[record.clone()],
+                detections: &[],
+                policy: crate::source::test_policy(),
+                freshness: &crate::DEFAULT_FRESHNESS,
+                readiness: &[],
+            },
             &QuotaQuery { adapter: None },
             100,
             "fixture".into(),
-            crate::source::test_policy(),
         )
         .unwrap();
         assert!(report.refreshing_ids.is_empty());
@@ -2077,13 +2255,18 @@ mod transition_tests {
     }
     fn report_for_bad(record: AccountRecord) -> Result<QuotaReport, QuotaError> {
         report(
-            crate::source::TEST_POLICIES,
-            &[record],
-            &[],
+            ReportInputs {
+                pools: &|_, _| Vec::new(),
+                policies: crate::source::TEST_POLICIES,
+                records: &[record],
+                detections: &[],
+                policy: crate::source::test_policy(),
+                freshness: &crate::DEFAULT_FRESHNESS,
+                readiness: &[],
+            },
             &QuotaQuery { adapter: None },
             100,
             "fixture".into(),
-            crate::source::test_policy(),
         )
     }
     #[test]
@@ -2100,13 +2283,18 @@ mod transition_tests {
             status: QuotaStatus::Available,
         }];
         let rep = report(
-            crate::source::TEST_POLICIES,
-            &records,
-            &detections,
+            ReportInputs {
+                pools: &|_, _| Vec::new(),
+                policies: crate::source::TEST_POLICIES,
+                records: &records,
+                detections: &detections,
+                policy: crate::source::test_policy(),
+                freshness: &crate::DEFAULT_FRESHNESS,
+                readiness: &[],
+            },
             &QuotaQuery { adapter: None },
             100,
             "report.json".into(),
-            crate::source::test_policy(),
         )
         .unwrap();
         assert_eq!(rep.accounts.len(), 1);
@@ -2263,13 +2451,18 @@ mod transition_tests {
                 status: QuotaStatus::AuthRequired,
             }];
             let report = report(
-                crate::source::TEST_POLICIES,
-                &records,
-                &detections,
+                ReportInputs {
+                    pools: &|_, _| Vec::new(),
+                    policies: crate::source::TEST_POLICIES,
+                    records: &records,
+                    detections: &detections,
+                    policy: crate::source::test_policy(),
+                    freshness: &crate::DEFAULT_FRESHNESS,
+                    readiness: &[],
+                },
                 &QuotaQuery { adapter: None },
                 now,
                 "report.json".into(),
-                crate::source::test_policy(),
             )
             .unwrap();
             let observed = report
@@ -2365,7 +2558,9 @@ mod zen_tests {
             observed_unix_seconds: 100,
             resets_unix_seconds: None,
         };
-        let expiry = prototype.expires_unix_seconds().unwrap();
+        let expiry = prototype
+            .expires_unix_seconds(&crate::DEFAULT_FRESHNESS)
+            .unwrap();
         for now in [expiry - 1, expiry] {
             for error in [None, Some(ProbeFailure::Auth)] {
                 let records: Vec<_> = spec
@@ -2394,13 +2589,18 @@ mod zen_tests {
                     status: QuotaStatus::Available,
                 }];
                 let report = report(
-                    crate::source::TEST_POLICIES,
-                    &records,
-                    &detections,
+                    ReportInputs {
+                        pools: &|_, _| Vec::new(),
+                        policies: crate::source::TEST_POLICIES,
+                        records: &records,
+                        detections: &detections,
+                        policy: crate::source::test_policy(),
+                        freshness: &crate::DEFAULT_FRESHNESS,
+                        readiness: &[],
+                    },
                     &QuotaQuery { adapter: None },
                     now,
                     "report.json".into(),
-                    crate::source::test_policy(),
                 )
                 .unwrap();
                 for record in &records {
@@ -2463,13 +2663,18 @@ mod zen_tests {
             (5_000, QuotaStatus::Unknown, None),
         ] {
             let report = report(
-                crate::source::TEST_POLICIES,
-                std::slice::from_ref(&record),
-                &detections,
+                ReportInputs {
+                    pools: &|_, _| Vec::new(),
+                    policies: crate::source::TEST_POLICIES,
+                    records: std::slice::from_ref(&record),
+                    detections: &detections,
+                    policy: crate::source::test_policy(),
+                    freshness: &crate::DEFAULT_FRESHNESS,
+                    readiness: &[],
+                },
                 &QuotaQuery { adapter: None },
                 now,
                 "report.json".into(),
-                crate::source::test_policy(),
             )
             .unwrap();
             let row = &report.accounts[0];
@@ -2497,17 +2702,22 @@ mod zen_tests {
             resets_unix_seconds: Some(200),
         });
         let report_with_reset = report(
-            crate::source::TEST_POLICIES,
-            &[record.clone()],
-            &[Detection {
-                adapter: "opencode".into(),
-                accounts: Some(vec![account.clone()]),
-                status: QuotaStatus::Available,
-            }],
+            ReportInputs {
+                pools: &|_, _| Vec::new(),
+                policies: crate::source::TEST_POLICIES,
+                records: &[record.clone()],
+                detections: &[Detection {
+                    adapter: "opencode".into(),
+                    accounts: Some(vec![account.clone()]),
+                    status: QuotaStatus::Available,
+                }],
+                policy: crate::source::test_policy(),
+                freshness: &crate::DEFAULT_FRESHNESS,
+                readiness: &[],
+            },
             &QuotaQuery { adapter: None },
             101,
             "report.json".into(),
-            crate::source::test_policy(),
         )
         .unwrap();
         assert_eq!(report_with_reset.accounts[0].status, QuotaStatus::Exhausted);
@@ -2530,17 +2740,22 @@ mod zen_tests {
             resets_unix_seconds: None,
         });
         let mixed_report = report(
-            crate::source::TEST_POLICIES,
-            &[mixed],
-            &[Detection {
-                adapter: "opencode".into(),
-                accounts: Some(vec![account]),
-                status: QuotaStatus::Available,
-            }],
+            ReportInputs {
+                pools: &|_, _| Vec::new(),
+                policies: crate::source::TEST_POLICIES,
+                records: &[mixed],
+                detections: &[Detection {
+                    adapter: "opencode".into(),
+                    accounts: Some(vec![account]),
+                    status: QuotaStatus::Available,
+                }],
+                policy: crate::source::test_policy(),
+                freshness: &crate::DEFAULT_FRESHNESS,
+                readiness: &[],
+            },
             &QuotaQuery { adapter: None },
             101,
             "report.json".into(),
-            crate::source::test_policy(),
         )
         .unwrap();
         assert_eq!(mixed_report.accounts[0].status, QuotaStatus::Exhausted);
@@ -2565,17 +2780,22 @@ mod zen_tests {
             resets_unix_seconds: Some(200),
         });
         let report = report(
-            crate::source::TEST_POLICIES,
-            &[record],
-            &[Detection {
-                adapter: "opencode".into(),
-                accounts: Some(vec![account]),
-                status: QuotaStatus::Available,
-            }],
+            ReportInputs {
+                pools: &|_, _| Vec::new(),
+                policies: crate::source::TEST_POLICIES,
+                records: &[record],
+                detections: &[Detection {
+                    adapter: "opencode".into(),
+                    accounts: Some(vec![account]),
+                    status: QuotaStatus::Available,
+                }],
+                policy: crate::source::test_policy(),
+                freshness: &crate::DEFAULT_FRESHNESS,
+                readiness: &[],
+            },
             &QuotaQuery { adapter: None },
             101,
             "report.json".into(),
-            crate::source::test_policy(),
         )
         .unwrap();
         let row = &report.accounts[0];

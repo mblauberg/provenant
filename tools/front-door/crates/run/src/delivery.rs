@@ -1,8 +1,8 @@
 //! Host-only delivery. Credential environment travels on the private handoff
 //! pipe, never in provider environment, launch records or the delivery receipt.
 use crate::{
-    DeliveryPrepareRefusal, DeliveryPrepareStep, HelperSafety, PathCheck, Result, RunError,
-    WriterDeliveryReceipt, WriterDeliveryRequest, WriterDeliveryStage as Stage,
+    DeliveryCause, DeliveryPrepareRefusal, DeliveryPrepareStep, HelperSafety, PathCheck, Result,
+    RunError, WriterDeliveryReceipt, WriterDeliveryRequest, WriterDeliveryStage as Stage,
     WriterDeliveryState, WriterIntegration, WriterRequest,
 };
 use provenant_confinement::repo::GitRefName;
@@ -97,6 +97,9 @@ pub(crate) const HEAD_MISMATCH: &str = "worktree head differs from sealed delive
 const BINDING_MISMATCH: &str = "delivery destination differs from the launch binding";
 const BINDING_MISSING: &str = "delivery launch binding was not sealed";
 const ORIGIN_REFRESH_LIMIT: u64 = 4096;
+/// Bounded stderr tail kept in a delivery command cause. Redaction is off by
+/// default by owner decision, so the text is passed through, not masked.
+const DELIVERY_STDERR_LIMIT: usize = 1024;
 pub(super) const ORIGIN_REFRESH_PRECOMPOSE_SETTING: &str = "core.precomposeunicode=true";
 pub(super) const PREPARE_REASON_LIMIT: usize = 1024;
 pub(super) const PREPARE_REASON_TRUNCATION_MARKER: &str = "...";
@@ -695,6 +698,9 @@ impl HostDeliveryContext {
         };
         let timeout = Duration::from_secs(30);
         let truncated = std::cell::Cell::new(false);
+        // The port discards its execution on a non-success disposition, so keep
+        // the command's own exit and bounded stderr at this seam.
+        let command_failure = std::cell::Cell::new(None::<(Termination, bool, String)>);
         let forge_limit = || RunError::DeliveryLimit {
             stage,
             tool: "gh",
@@ -742,10 +748,10 @@ impl HostDeliveryContext {
                     options.stdout = StreamPolicy::Capture {
                         limit: stdout_limit(false, args),
                     };
-                    options.stderr = if stage == Stage::Prepare {
-                        StreamPolicy::Capture { limit: 4096 }
-                    } else {
-                        StreamPolicy::Discard
+                    // The fatal line is last, so every stage keeps a bounded
+                    // stderr tail as its cause, preparation included.
+                    options.stderr = StreamPolicy::Tail {
+                        limit: DELIVERY_STDERR_LIMIT * 4,
                     };
                     let executor = SystemExecutor::new(1).map_err(std::io::Error::other)?;
                     let fallback = provenant_core::CancelToken::new();
@@ -758,6 +764,11 @@ impl HostDeliveryContext {
                         )
                         .map_err(std::io::Error::other)?;
                     truncated.set(outcome.stdout.truncated);
+                    let stderr = provenant_core::bounded_tail(
+                        &String::from_utf8_lossy(&outcome.stderr.bytes),
+                        DELIVERY_STDERR_LIMIT,
+                    );
+                    command_failure.set(Some((outcome.termination, outcome.timed_out, stderr)));
                     Ok(outcome)
                 },
             )
@@ -767,10 +778,11 @@ impl HostDeliveryContext {
                 if truncated.get() {
                     return forge_limit();
                 }
+                let cause = failure_cause(command_failure.take(), error);
                 if stage == Stage::Prepare {
-                    prepare_error(DeliveryPrepareStep::ForgePort, error.to_string())
+                    prepare_error(DeliveryPrepareStep::ForgePort, cause)
                 } else {
-                    RunError::Delivery(stage)
+                    RunError::delivery(stage, cause)
                 }
             })?;
         if response.execution.disposition != provenant_config::PortCommandDisposition::Succeeded {
@@ -783,12 +795,25 @@ impl HostDeliveryContext {
                     ),
                 )
             } else {
-                RunError::Delivery(stage)
+                RunError::delivery(
+                    stage,
+                    response
+                        .execution
+                        .outcome
+                        .as_ref()
+                        .map(command_cause)
+                        .unwrap_or_else(|| {
+                            DeliveryCause::parse(format!(
+                                "forge command returned {:?}",
+                                response.execution.disposition
+                            ))
+                        }),
+                )
             });
         }
         String::from_utf8(response.body)
             .map(|value| value.trim().to_owned())
-            .map_err(|_| RunError::Delivery(stage))
+            .map_err(|error| RunError::delivery(stage, DeliveryCause::parse(error)))
     }
 
     /// Share the command-scoped repository fact limits with host delivery.
@@ -900,7 +925,7 @@ impl HostDeliveryContext {
             stage,
         )?;
         if refs.lines().any(|line| line.starts_with("ref: ")) {
-            return Err(RunError::Delivery(stage));
+            return Err(delivery_refusal(stage, "remote target is a symbolic ref"));
         }
         Ok(())
     }
@@ -931,10 +956,9 @@ impl HostDeliveryContext {
             worktree: project.into(),
         };
         let host = self.prepare_with_fetch(&writer, &request, false)?;
-        let bound = host
-            .bound
-            .as_ref()
-            .ok_or(RunError::Delivery(Stage::Prepare))?;
+        let bound = host.bound.as_ref().ok_or_else(|| {
+            delivery_refusal(Stage::Prepare, "delivery launch binding was not sealed")
+        })?;
         let head = if local {
             host.command(
                 project,
@@ -945,7 +969,8 @@ impl HostDeliveryContext {
         } else {
             host.refresh_target_and_resolve(&writer, branch, Stage::Head)?
         };
-        let head = GitOid::parse(&head).map_err(|_| RunError::Delivery(Stage::Head))?;
+        let head = GitOid::parse(&head)
+            .map_err(|error| RunError::delivery(Stage::Head, DeliveryCause::parse(error)))?;
         host.verify_objects(&writer, head, Stage::Head)?;
         host.verify_objects(&writer, base, Stage::Head)?;
         // A local integration ref may belong to a human. Publish a separate
@@ -987,12 +1012,14 @@ impl HostDeliveryContext {
             Stage::Verify,
         )?;
         if remote.split_whitespace().next() != Some(head.to_string().as_str()) {
-            return Err(RunError::Delivery(Stage::Verify));
+            return Err(delivery_refusal(
+                Stage::Verify,
+                "verified remote ref differs from the published head",
+            ));
         }
-        let repo = bound
-            .pull_request_repo
-            .as_deref()
-            .ok_or(RunError::Delivery(Stage::PullRequest))?;
+        let repo = bound.pull_request_repo.as_deref().ok_or_else(|| {
+            delivery_refusal(Stage::PullRequest, "pull request repository was not bound")
+        })?;
         let base_branch = host.pr_base(project, repo)?;
         if let Some(url) = host.existing_pr(project, repo, branch, head, &base_branch)? {
             return Ok(url);
@@ -1019,7 +1046,10 @@ impl HostDeliveryContext {
             commits.as_bytes(),
         )?;
         if !url.starts_with("https://") || url.lines().count() != 1 {
-            return Err(RunError::Delivery(Stage::PullRequest));
+            return Err(delivery_refusal(
+                Stage::PullRequest,
+                "gh did not return a single https pull request URL",
+            ));
         }
         Ok(url)
     }
@@ -1035,7 +1065,8 @@ impl HostDeliveryContext {
         let _lock = directory.lock(
             OsStr::new("provenant-graph-publication.lock"),
             LockMode::Exclusive,
-            WaitBudget::cli(clock.mono_now(), 60).map_err(|_| RunError::Delivery(stage))?,
+            WaitBudget::cli(clock.mono_now(), 60)
+                .map_err(|error| RunError::delivery(stage, DeliveryCause::parse(error)))?,
             &cancel,
             &clock,
         )?;
@@ -1051,12 +1082,15 @@ impl HostDeliveryContext {
             )?
             .is_empty()
         {
-            return Err(RunError::Delivery(stage));
+            return Err(delivery_refusal(stage, "publication ref is a symbolic ref"));
         }
         if let Some(raw) = crate::artifacts::read_sealed(&directory, &marker, crate::RECORD_LIMIT)?
             && raw != branch.as_bytes()
         {
-            return Err(RunError::Delivery(stage));
+            return Err(delivery_refusal(
+                stage,
+                "publication marker was written for a different head",
+            ));
         }
         // Recover an unmarked publication or a marked ref deleted after a PR.
         // Both updates compare the old value, so a different head refuses.
@@ -1587,7 +1621,8 @@ impl HostDeliveryContext {
         branch: &str,
         stage: Stage,
     ) -> Result<String> {
-        let branch_ref = GitRefName::branch(branch).map_err(|_| RunError::Delivery(stage))?;
+        let branch_ref = GitRefName::branch(branch)
+            .map_err(|error| RunError::delivery(stage, DeliveryCause::parse(error)))?;
         let common = self.common_git_dir(&writer.project, stage)?;
         crate::writer::verify_writer_git_paths(&common, &branch_ref)?;
         self.validate_transport_helpers(writer)?;
@@ -1597,7 +1632,7 @@ impl HostDeliveryContext {
         let remote = &self
             .bound
             .as_ref()
-            .ok_or(RunError::Delivery(stage))?
+            .ok_or_else(|| delivery_refusal(stage, "delivery launch binding was not sealed"))?
             .push_url;
         let query = || {
             self.command(
@@ -1618,9 +1653,12 @@ impl HostDeliveryContext {
         let advertised = query()?;
         let (oid, reference) = advertised
             .split_once('\t')
-            .ok_or(RunError::Delivery(stage))?;
+            .ok_or_else(|| delivery_refusal(stage, "advertised ref is malformed"))?;
         if reference != source || GitOid::parse(oid).is_err() {
-            return Err(RunError::Delivery(stage));
+            return Err(delivery_refusal(
+                stage,
+                "advertised ref does not match the requested ref",
+            ));
         }
         let tracking = format!("refs/remotes/origin/{branch}");
         self.refuse_symref_destination(&writer.worktree, &tracking, stage)?;
@@ -1645,11 +1683,15 @@ impl HostDeliveryContext {
             stage,
         )?;
         if query()? != advertised {
-            return Err(RunError::Delivery(stage));
+            return Err(delivery_refusal(
+                stage,
+                "remote ref changed during delivery",
+            ));
         }
         self.verify_objects(
             writer,
-            GitOid::parse(oid).map_err(|_| RunError::Delivery(stage))?,
+            GitOid::parse(oid)
+                .map_err(|error| RunError::delivery(stage, DeliveryCause::parse(error)))?,
             stage,
         )?;
         Ok(oid.to_owned())
@@ -1780,7 +1822,7 @@ impl HostDeliveryContext {
             .unwrap_or_default();
         let lane_path =
             FilteredLanePath::from_path(&captured_path, &writer.project, &writer.worktree)
-                .map_err(|_| prepare_error(DeliveryPrepareStep::Environment, "PATH is invalid"))?;
+                .map_err(|error| prepare_error(DeliveryPrepareStep::Environment, error))?;
         let path_bytes = lane_path.path().as_bytes().to_vec();
         if let Some((_, value)) = self.environment.iter_mut().find(|(key, _)| key == b"PATH") {
             *value = path_bytes;
@@ -1865,10 +1907,10 @@ impl HostDeliveryContext {
             .as_ref()
             .ok_or_else(|| prepare_error(DeliveryPrepareStep::GhExecutable, "PATH is unavailable"))?
             .resolve(tool)
-            .map_err(|_| {
+            .map_err(|error| {
                 prepare_error(
                     DeliveryPrepareStep::GhExecutable,
-                    format!("{tool} is unavailable on filtered PATH"),
+                    format!("{tool} is unavailable on filtered PATH: {error}"),
                 )
             })?;
         host_path(&candidate, writer)
@@ -1951,11 +1993,13 @@ impl HostDeliveryContext {
         if tool == "gh" {
             return self.forge_command_with_input(cwd, args, stage, input);
         }
-        let failure = |reason: String| {
+        let failure = |cause: DeliveryCause| {
             if mode.preserve_reason {
                 // A named config read needs the leaf cause for its refusal,
                 // not just the stage that an ordinary command reports.
-                RunError::ConfigCommandFailed { reason }
+                RunError::ConfigCommandFailed {
+                    reason: cause.to_string(),
+                }
             } else if stage == Stage::Prepare {
                 let step = match args.first().copied() {
                     Some("remote") => DeliveryPrepareStep::RemoteUrl,
@@ -1969,9 +2013,9 @@ impl HostDeliveryContext {
                     _ if args.contains(&"fetch") => DeliveryPrepareStep::Fetch,
                     _ => DeliveryPrepareStep::GitExecutable,
                 };
-                prepare_error(step, reason)
+                prepare_error(step, cause)
             } else {
-                RunError::Delivery(stage)
+                RunError::delivery(stage, cause)
             }
         };
         let mut environment: Vec<_> = self
@@ -1992,10 +2036,14 @@ impl HostDeliveryContext {
         let tools = self
             .tools
             .as_ref()
-            .ok_or_else(|| failure("host tools are unavailable".into()))?;
+            .ok_or_else(|| failure(DeliveryCause::parse("host tools are unavailable")))?;
         let executable = match tool {
             "git" => &tools.git,
-            _ => return Err(failure(format!("{tool} is unavailable"))),
+            _ => {
+                return Err(failure(DeliveryCause::parse(format!(
+                    "{tool} is unavailable"
+                ))));
+            }
         };
         let git_options: &[&str] = if tool == "git" {
             &HOST_GIT_HARDENING_CONFIG_ARGS
@@ -2024,15 +2072,15 @@ impl HostDeliveryContext {
             })
         });
         let alias = if let Some(url) = secret_url {
-            let unique =
-                provenant_os::fs::temporary_name().map_err(|error| failure(error.to_string()))?;
+            let unique = provenant_os::fs::temporary_name()
+                .map_err(|error| failure(DeliveryCause::parse(error)))?;
             let alias = format!("provenant-bound-{}", unique.to_string_lossy());
             let count = environment
                 .iter()
                 .find(|(name, _)| name == "GIT_CONFIG_COUNT")
                 .map(|(_, value)| value.to_string_lossy().parse::<usize>())
                 .transpose()
-                .map_err(|error| failure(error.to_string()))?
+                .map_err(|error| failure(DeliveryCause::parse(error)))?
                 .unwrap_or(0);
             environment.retain(|(name, _)| name != "GIT_CONFIG_COUNT");
             environment.push(("GIT_CONFIG_COUNT".into(), (count + 1).to_string().into()));
@@ -2056,7 +2104,8 @@ impl HostDeliveryContext {
                 }
             }))
             .collect();
-        let executor = SystemExecutor::new(1).map_err(|error| failure(error.to_string()))?;
+        let executor =
+            SystemExecutor::new(1).map_err(|error| failure(DeliveryCause::parse(error)))?;
         let commit_log = tool == "git" && args.first() == Some(&"log");
         let limit = if tool == "git" && provenant_os::git::fact_capture_limit(args, 0) != 0 {
             host_output_limit(HostOutputClass::FactCapture)
@@ -2074,12 +2123,11 @@ impl HostDeliveryContext {
             options.stdin = Some(input);
             options.stdout = StreamPolicy::Capture { limit };
             options.stop_on_output_limit = commit_log;
-            options.stderr = if stage == Stage::Prepare {
-                StreamPolicy::Capture { limit: 4096 }
-            } else if mode.retry_config_lock {
-                StreamPolicy::Tail { limit: 4096 }
-            } else {
-                StreamPolicy::Discard
+            // The fatal line is last, so every stage keeps a bounded stderr
+            // tail as its cause, preparation included. Redaction is off by
+            // default by owner decision.
+            options.stderr = StreamPolicy::Tail {
+                limit: DELIVERY_STDERR_LIMIT * 4,
             };
             options
         };
@@ -2112,9 +2160,12 @@ impl HostDeliveryContext {
             let options = make_options(Duration::from_secs(30));
             self.facts
                 .with_executor(&executor, attempt_cancel, |executor| {
-                    executor
-                        .execute(options)
-                        .map_err(|error| failure(format!("{}: {error}", executable.display())))
+                    executor.execute(options).map_err(|error| {
+                        failure(DeliveryCause::parse(format!(
+                            "{}: {error}",
+                            executable.display()
+                        )))
+                    })
                 })
                 .map_err(|error: RunError| match error {
                     RunError::Writer(provenant_confinement::worktrees::WorktreeError::Utility(
@@ -2169,11 +2220,7 @@ impl HostDeliveryContext {
                     .collect();
                 return Err(RunError::MergeConflict { conflicting_files });
             }
-            let stderr = String::from_utf8_lossy(&output.stderr.bytes).into_owned();
-            return Err(failure(format!(
-                "{tool} {:?} (timed out: {}): {stderr}",
-                output.termination, output.timed_out
-            )));
+            return Err(failure(command_cause(&output)));
         }
         if commit_log && output.stdout.truncated {
             // A truncated log may end in the middle of a credential, including
@@ -2182,7 +2229,7 @@ impl HostDeliveryContext {
         }
         String::from_utf8(output.stdout.bytes)
             .map(|v| v.trim().into())
-            .map_err(|error| failure(error.to_string()))
+            .map_err(|error| failure(DeliveryCause::parse(error)))
     }
     /// A fetch writes through a symref to the ref it points at, which would
     /// move that ref instead. Never fetch into one.
@@ -2202,7 +2249,7 @@ impl HostDeliveryContext {
                 "destination is a symbolic ref",
             ));
         }
-        Err(RunError::Delivery(stage))
+        Err(delivery_refusal(stage, "destination is a symbolic ref"))
     }
 
     /// Refuse an advertisement or fetch whose effective configuration is read
@@ -2225,8 +2272,12 @@ impl HostDeliveryContext {
             .map_or(cwd, |bound| bound.host_cwd.as_path());
         let mut protected = self.lane_roots.clone();
         if let Some(worktree) = &self.trusted_worktree {
-            let tools = self.tools.as_ref().ok_or(RunError::Delivery(stage))?;
-            let executor = SystemExecutor::new(1).map_err(|_| RunError::Delivery(stage))?;
+            let tools = self
+                .tools
+                .as_ref()
+                .ok_or_else(|| delivery_refusal(stage, "host tools are unavailable"))?;
+            let executor = SystemExecutor::new(1)
+                .map_err(|error| RunError::delivery(stage, DeliveryCause::parse(error)))?;
             let cancel = provenant_core::CancelToken::new();
             let own = std::fs::canonicalize(worktree).ok();
             let others = self
@@ -2330,12 +2381,17 @@ impl HostDeliveryContext {
             &["rev-parse", "--verify", "HEAD"],
             Stage::Head,
         )?;
-        let head = GitOid::parse(&head).map_err(|_| RunError::Delivery(Stage::Head))?;
+        let head = GitOid::parse(&head)
+            .map_err(|error| RunError::delivery(Stage::Head, DeliveryCause::parse(error)))?;
         self.verify_objects(writer, head, Stage::Head)?;
         Ok(head)
     }
     fn verify_objects(&self, writer: &WriterRequest, head: GitOid, stage: Stage) -> Result<()> {
-        let git = &self.tools.as_ref().ok_or(RunError::Delivery(stage))?.git;
+        let git = &self
+            .tools
+            .as_ref()
+            .ok_or_else(|| delivery_refusal(stage, "host tools are unavailable"))?
+            .git;
         let common = self.common_git_dir(&writer.project, stage)?;
         crate::objects::require_commit(
             git,
@@ -2345,7 +2401,7 @@ impl HostDeliveryContext {
             self.bound.as_ref().map(|bound| bound.base_head),
             self.cancellation.as_ref(),
         )
-        .map_err(|_| RunError::Delivery(stage))
+        .map_err(|error| RunError::delivery(stage, DeliveryCause::parse(error)))
     }
     fn trusted_common_git_dir(&self, writer: &WriterRequest, stage: Stage) -> Result<PathBuf> {
         self.discover_common_git_dir(&writer.project, stage)
@@ -2380,19 +2436,20 @@ impl HostDeliveryContext {
     fn discover_common_git_dir(&self, project: &Path, stage: Stage) -> Result<PathBuf> {
         // Use the validated host executable and checkout; never resolve through
         // lane-writable Git metadata after delivery has been bound.
-        let failure = |reason: String| {
+        let failure = |cause: DeliveryCause| {
             if stage == Stage::Prepare {
-                prepare_error(DeliveryPrepareStep::Head, reason)
+                prepare_error(DeliveryPrepareStep::Head, cause)
             } else {
-                RunError::Delivery(stage)
+                RunError::delivery(stage, cause)
             }
         };
         let git = &self
             .tools
             .as_ref()
-            .ok_or_else(|| failure("host tools are unavailable".into()))?
+            .ok_or_else(|| failure(DeliveryCause::parse("host tools are unavailable")))?
             .git;
-        let executor = SystemExecutor::new(1).map_err(|error| failure(error.to_string()))?;
+        let executor =
+            SystemExecutor::new(1).map_err(|error| failure(DeliveryCause::parse(error)))?;
         let cancel = provenant_core::CancelToken::new();
         self.facts
             .with_executor(
@@ -2406,7 +2463,7 @@ impl HostDeliveryContext {
                         provenant_os::git::RepositoryPath::CommonDir,
                         self.cancellation.as_ref(),
                     )
-                    .map_err(|error| failure(error.to_string()))
+                    .map_err(|error| failure(DeliveryCause::parse(error)))
                 },
             )
             .map_err(|error: RunError| match error {
@@ -2431,7 +2488,10 @@ impl HostDeliveryContext {
             Stage::Head,
         )?;
         if !status.is_empty() {
-            return Err(RunError::Delivery(Stage::Head));
+            return Err(delivery_refusal(
+                Stage::Head,
+                "writer worktree is not clean",
+            ));
         }
         Ok(())
     }
@@ -2442,7 +2502,9 @@ impl HostDeliveryContext {
         head: GitOid,
         identity: &str,
     ) -> Result<String> {
-        let bound = self.bound.as_ref().ok_or(RunError::Delivery(Stage::Head))?;
+        let bound = self.bound.as_ref().ok_or_else(|| {
+            delivery_refusal(Stage::Head, "delivery launch binding was not sealed")
+        })?;
         self.verify_objects(writer, head, Stage::Head)?;
         self.verify_objects(writer, bound.base_head, Stage::Head)?;
         let range = if bound.base_head == head {
@@ -2481,9 +2543,9 @@ impl HostDeliveryContext {
                     body.as_bytes(),
                 )
             })
-            .map_err(|_| RunError::Delivery(Stage::PullRequest))?;
+            .map_err(|error| RunError::delivery(Stage::PullRequest, DeliveryCause::parse(error)))?;
         let body = String::from_utf8(projection.into_bytes())
-            .map_err(|_| RunError::Delivery(Stage::PullRequest))?;
+            .map_err(|error| RunError::delivery(Stage::PullRequest, DeliveryCause::parse(error)))?;
         // Projection precedes truncation so an exact credential cannot be cut
         // into an unrecognisable prefix and then escape the final boundary.
         Ok(cap_pr_body(body))
@@ -2501,13 +2563,19 @@ impl HostDeliveryContext {
         let stage = Stage::Integrate;
         self.refuse_protected_target(writer, &request.branch, stage)
             .map_err(|error| delivery_stage_error(error, stage))?;
-        let bound = self.bound.as_ref().ok_or(RunError::Delivery(stage))?;
+        let bound = self
+            .bound
+            .as_ref()
+            .ok_or_else(|| delivery_refusal(stage, "delivery launch binding was not sealed"))?;
         self.refuse_protected_target(writer, &request.branch, stage)
             .map_err(|error| delivery_stage_error(error, stage))?;
         self.verify_objects(writer, head, stage)?;
         self.clean(writer)?;
         if self.head(writer)? != head {
-            return Err(RunError::Delivery(Stage::Head));
+            return Err(delivery_refusal(
+                Stage::Head,
+                "writer head moved during delivery",
+            ));
         }
         let destination = format!("refs/heads/{}", request.branch);
         let remote = !request.remote.is_empty();
@@ -2543,7 +2611,8 @@ impl HostDeliveryContext {
                 stage,
             )?
         };
-        let expected_oid = GitOid::parse(&expected).map_err(|_| RunError::Delivery(stage))?;
+        let expected_oid = GitOid::parse(&expected)
+            .map_err(|error| RunError::delivery(stage, DeliveryCause::parse(error)))?;
         self.verify_objects(writer, expected_oid, stage)?;
         let integration = |integrated| WriterIntegration {
             extra: Default::default(),
@@ -2554,7 +2623,8 @@ impl HostDeliveryContext {
             previous: Some(expected_oid),
             integrated,
         };
-        let target_ref = GitRefName::new(&destination).map_err(|_| RunError::Delivery(stage))?;
+        let target_ref = GitRefName::new(&destination)
+            .map_err(|error| RunError::delivery(stage, DeliveryCause::parse(error)))?;
         if self.landed(writer, head, target_ref, expected_oid, stage)? {
             return Ok(integration(expected_oid));
         }
@@ -2621,7 +2691,10 @@ impl HostDeliveryContext {
             )
             .map_err(|error| delivery_config_read_error(stage, error))?;
             if !config.is_empty() {
-                return Err(RunError::Delivery(stage));
+                return Err(delivery_refusal(
+                    stage,
+                    "configured merge drivers are not allowed",
+                ));
             }
             let tree = self
                 .command(
@@ -2644,14 +2717,17 @@ impl HostDeliveryContext {
                             conflicting_files,
                         }
                     }
-                    RunError::Delivery(Stage::Integrate) => RunError::IntegrationConflict {
+                    RunError::Delivery {
+                        stage: Stage::Integrate,
+                        ..
+                    } => RunError::IntegrationConflict {
                         child_head: head,
                         conflicting_files: Vec::new(),
                     },
                     error => error,
                 })?;
             let tree = GitOid::parse(tree.lines().next().unwrap_or_default())
-                .map_err(|_| RunError::Delivery(stage))?;
+                .map_err(|error| RunError::delivery(stage, DeliveryCause::parse(error)))?;
             let commit = self.command(
                 &writer.worktree,
                 "git",
@@ -2671,7 +2747,8 @@ impl HostDeliveryContext {
                 ],
                 stage,
             )?;
-            GitOid::parse(&commit).map_err(|_| RunError::Delivery(stage))?
+            GitOid::parse(&commit)
+                .map_err(|error| RunError::delivery(stage, DeliveryCause::parse(error)))?
         };
         self.refuse_protected_target(writer, &request.branch, stage)
             .map_err(|error| delivery_stage_error(error, stage))?;
@@ -2723,7 +2800,10 @@ impl HostDeliveryContext {
                 )?
             };
             if verified != candidate.to_string() {
-                return Err(RunError::Delivery(Stage::Verify));
+                return Err(delivery_refusal(
+                    Stage::Verify,
+                    "verified ref differs from the integrated commit",
+                ));
             }
         } else {
             self.command(
@@ -2740,7 +2820,10 @@ impl HostDeliveryContext {
             )?;
         }
         if self.head(writer)? != head {
-            return Err(RunError::Delivery(Stage::Head));
+            return Err(delivery_refusal(
+                Stage::Head,
+                "writer head moved during delivery",
+            ));
         }
         Ok(integration(candidate))
     }
@@ -2765,7 +2848,7 @@ impl HostDeliveryContext {
         };
         provenant_confinement::worktrees::landed(&graph, head, &target, &[])
             .map(|landing| landing.is_landed())
-            .map_err(|_| RunError::Delivery(stage))
+            .map_err(|error| RunError::delivery(stage, DeliveryCause::parse(error)))
     }
     // Bind the same default branch for lookup and creation. A failed lookup
     // is ambiguous and must never be treated as permission to create a PR.
@@ -2778,13 +2861,15 @@ impl HostDeliveryContext {
                 Stage::PullRequest,
             )
             .map_err(pr_lookup_error)?;
-        let value: serde_json::Value =
-            serde_json::from_str(&raw).map_err(|_| RunError::Delivery(Stage::PullRequest))?;
+        let value: serde_json::Value = serde_json::from_str(&raw)
+            .map_err(|error| RunError::delivery(Stage::PullRequest, DeliveryCause::parse(error)))?;
         value["defaultBranchRef"]["name"]
             .as_str()
             .filter(|name| !name.is_empty())
             .map(str::to_owned)
-            .ok_or(RunError::Delivery(Stage::PullRequest))
+            .ok_or_else(|| {
+                delivery_refusal(Stage::PullRequest, "gh did not return a default branch")
+            })
     }
     fn existing_pr(
         &self,
@@ -2815,8 +2900,8 @@ impl HostDeliveryContext {
                 Stage::PullRequest,
             )
             .map_err(pr_lookup_error)?;
-        let values: Vec<serde_json::Value> =
-            serde_json::from_str(&raw).map_err(|_| RunError::Delivery(Stage::PullRequest))?;
+        let values: Vec<serde_json::Value> = serde_json::from_str(&raw)
+            .map_err(|error| RunError::delivery(Stage::PullRequest, DeliveryCause::parse(error)))?;
         if values.is_empty() {
             return Ok(None);
         }
@@ -2829,7 +2914,10 @@ impl HostDeliveryContext {
         }
         let value = &values[0];
         if value["headRefOid"].as_str() != Some(head.to_string().as_str()) {
-            return Err(RunError::Delivery(Stage::Verify));
+            return Err(delivery_refusal(
+                Stage::Verify,
+                "pull request head differs from the delivered commit",
+            ));
         }
         let url = value["url"]
             .as_str()
@@ -2838,7 +2926,9 @@ impl HostDeliveryContext {
                     && !url.chars().any(char::is_whitespace)
                     && !url.chars().any(char::is_control)
             })
-            .ok_or(RunError::Delivery(Stage::PullRequest))?;
+            .ok_or_else(|| {
+                delivery_refusal(Stage::PullRequest, "pull request has no usable URL")
+            })?;
         if value["baseRefName"].as_str() != Some(base) {
             return Err(pr_reconciliation(
                 "pull request base differs from the expected base",
@@ -2871,12 +2961,15 @@ impl HostDeliveryContext {
         require_clean: bool,
     ) -> Result<Published> {
         if self.head(writer)? != head {
-            return Err(RunError::Delivery(Stage::Head));
+            return Err(delivery_refusal(
+                Stage::Head,
+                "writer head moved during delivery",
+            ));
         }
         self.refuse_protected_target(writer, &request.branch, Stage::Push)
             .map_err(|error| match error {
                 RunError::DeliveryLimit { .. } | RunError::DeliveryFact { .. } => error,
-                _ => RunError::Delivery(Stage::Prepare),
+                other => RunError::delivery(Stage::Prepare, DeliveryCause::parse(other)),
             })?;
         if require_clean {
             self.clean(writer)?;
@@ -2887,10 +2980,9 @@ impl HostDeliveryContext {
                 integration: Some(self.integrate(writer, request, head)?),
             });
         }
-        let bound = self
-            .bound
-            .as_ref()
-            .ok_or(RunError::Delivery(Stage::Prepare))?;
+        let bound = self.bound.as_ref().ok_or_else(|| {
+            delivery_refusal(Stage::Prepare, "delivery launch binding was not sealed")
+        })?;
         let cwd = &writer.worktree;
         let branch = self.command(
             cwd,
@@ -2899,7 +2991,10 @@ impl HostDeliveryContext {
             Stage::Head,
         )?;
         if branch != bound.lane_branch {
-            return Err(RunError::Delivery(Stage::Head));
+            return Err(delivery_refusal(
+                Stage::Head,
+                "writer branch changed after preparation",
+            ));
         }
         let destination = format!("refs/heads/{}", request.branch);
         self.refuse_remote_symbolic_target(cwd, &bound.push_url, &request.branch, Stage::Push)?;
@@ -2910,19 +3005,25 @@ impl HostDeliveryContext {
             &["ls-remote", "--", &bound.push_url, &destination],
             Stage::Push,
         )?;
-        let previous = if advertised.is_empty() {
-            None
-        } else {
-            let mut lines = advertised.lines();
-            let (oid, reference) = lines
-                .next()
-                .and_then(|line| line.split_once('\t'))
-                .ok_or(RunError::Delivery(Stage::Push))?;
-            if reference != destination || lines.next().is_some() {
-                return Err(RunError::Delivery(Stage::Push));
-            }
-            Some(GitOid::parse(oid).map_err(|_| RunError::Delivery(Stage::Push))?)
-        };
+        let previous =
+            if advertised.is_empty() {
+                None
+            } else {
+                let mut lines = advertised.lines();
+                let (oid, reference) = lines
+                    .next()
+                    .and_then(|line| line.split_once('\t'))
+                    .ok_or_else(|| delivery_refusal(Stage::Push, "advertised ref is malformed"))?;
+                if reference != destination || lines.next().is_some() {
+                    return Err(delivery_refusal(
+                        Stage::Push,
+                        "unexpected advertisement for the destination ref",
+                    ));
+                }
+                Some(GitOid::parse(oid).map_err(|error| {
+                    RunError::delivery(Stage::Push, DeliveryCause::parse(error))
+                })?)
+            };
         let already_pushed = previous == Some(head);
         if !already_pushed {
             let refspec = format!("{head}:{destination}");
@@ -2963,7 +3064,10 @@ impl HostDeliveryContext {
             Stage::Verify,
         )?;
         if pushed != head.to_string() || self.head(writer)? != head {
-            return Err(RunError::Delivery(Stage::Verify));
+            return Err(delivery_refusal(
+                Stage::Verify,
+                "verified ref differs from the pushed head",
+            ));
         }
         // A retried push that finds its own head already there cannot tell
         // whether it created the ref, so it records the head it found.
@@ -3034,14 +3138,16 @@ impl HostDeliveryContext {
             )
             .map_err(|error| delivery_config_read_error(Stage::Verify, error))?;
             if stored != value {
-                return Err(RunError::Delivery(Stage::Verify));
+                return Err(delivery_refusal(
+                    Stage::Verify,
+                    "verified upstream configuration differs from the request",
+                ));
             }
         }
         if request.open_pr {
-            let repo = bound
-                .pull_request_repo
-                .as_deref()
-                .ok_or(RunError::Delivery(Stage::PullRequest))?;
+            let repo = bound.pull_request_repo.as_deref().ok_or_else(|| {
+                delivery_refusal(Stage::PullRequest, "pull request repository was not bound")
+            })?;
             let base_branch = self.pr_base(cwd, repo)?;
             if let Some(url) = self.existing_pr(cwd, repo, &request.branch, head, &base_branch)? {
                 return Ok(Published {
@@ -3056,10 +3162,12 @@ impl HostDeliveryContext {
                     "pr",
                     "create",
                     "--repo",
-                    bound
-                        .pull_request_repo
-                        .as_deref()
-                        .ok_or(RunError::Delivery(Stage::PullRequest))?,
+                    bound.pull_request_repo.as_deref().ok_or_else(|| {
+                        delivery_refusal(
+                            Stage::PullRequest,
+                            "pull request repository was not bound",
+                        )
+                    })?,
                     "--head",
                     &request.branch,
                     "--base",
@@ -3073,7 +3181,10 @@ impl HostDeliveryContext {
                 body.as_bytes(),
             )?;
             if !url.starts_with("https://") || url.lines().count() != 1 {
-                return Err(RunError::Delivery(Stage::PullRequest));
+                return Err(delivery_refusal(
+                    Stage::PullRequest,
+                    "gh did not return a single https pull request URL",
+                ));
             }
             Ok(Published {
                 pull_request: Some(url),
@@ -3304,6 +3415,47 @@ fn origin_refresh_completion(common: &Directory) -> Result<Option<OriginRefreshR
     }
 }
 
+/// The typed leaf cause of a failed host command: its exit or signal and a
+/// bounded, single-line tail of stderr. `bounded_line` does not redact, which
+/// matches the owner's default-off redaction decision.
+fn command_cause(outcome: &provenant_os::exec::ExecOutcome) -> DeliveryCause {
+    DeliveryCause::Command {
+        termination: outcome.termination,
+        timed_out: outcome.timed_out,
+        stderr: provenant_core::bounded_tail(
+            &String::from_utf8_lossy(&outcome.stderr.bytes),
+            DELIVERY_STDERR_LIMIT,
+        ),
+    }
+}
+
+/// The cause of a failed forge command port call. The command's own exit or
+/// signal is the cause only when the command failed; a command that exited 0
+/// and then returned something the port could not use keeps the port's error.
+fn failure_cause(
+    command: Option<(Termination, bool, String)>,
+    error: impl std::fmt::Display,
+) -> DeliveryCause {
+    match command {
+        Some((termination, timed_out, stderr))
+            if timed_out || termination != Termination::Exit(0) =>
+        {
+            DeliveryCause::Command {
+                termination,
+                timed_out,
+                stderr,
+            }
+        }
+        _ => DeliveryCause::parse(error),
+    }
+}
+
+/// A delivery failure at `stage` with a descriptive cause, for refusals that
+/// have no underlying command, I/O or parse error to carry.
+fn delivery_refusal(stage: Stage, detail: impl std::fmt::Display) -> RunError {
+    RunError::delivery(stage, DeliveryCause::parse(detail))
+}
+
 pub(super) fn prepare_error(step: DeliveryPrepareStep, detail: impl std::fmt::Display) -> RunError {
     RunError::DeliveryPrepare {
         step,
@@ -3328,13 +3480,15 @@ fn pr_reconciliation(reason: &str, next: &str) -> RunError {
 }
 
 fn pr_lookup_error(error: RunError) -> RunError {
-    if matches!(error, RunError::Delivery(Stage::PullRequest)) {
-        pr_reconciliation(
-            "pull request lookup failed",
+    match error {
+        RunError::Delivery {
+            stage: Stage::PullRequest,
+            cause,
+        } => pr_reconciliation(
+            &format!("pull request lookup failed: {cause}"),
             "inspect the repository and branch, then retry delivery",
-        )
-    } else {
-        error
+        ),
+        other => other,
     }
 }
 
@@ -3396,7 +3550,7 @@ pub(super) fn stdout_limit(commit_log: bool, args: &[&str]) -> usize {
 /// a failed push.
 pub(crate) fn failed_state(error: &RunError) -> WriterDeliveryState {
     let (stage, reason) = match error {
-        RunError::Delivery(stage) => (*stage, None),
+        RunError::Delivery { stage, cause } => (*stage, Some(prepare_reason(cause))),
         RunError::DeliveryReconciliation { .. } => {
             (Stage::PullRequest, Some(prepare_reason(error)))
         }
@@ -3467,7 +3621,8 @@ fn delivery_stage_error(error: RunError, stage: Stage) -> RunError {
         },
         RunError::DeliveryFact { source, .. } => RunError::DeliveryFact { stage, source },
         RunError::DeliveryConfigRead { cause, .. } => RunError::DeliveryConfigRead { stage, cause },
-        _ => RunError::Delivery(stage),
+        RunError::Delivery { cause, .. } => RunError::delivery(stage, cause),
+        other => RunError::delivery(stage, DeliveryCause::parse(other)),
     }
 }
 
@@ -3489,12 +3644,20 @@ fn transport_config_cause(error: provenant_os::git_config::ConfigError<RunError>
 
 pub(crate) fn prepare_reason(detail: impl std::fmt::Display) -> String {
     let detail = detail.to_string();
-    let mut reason = detail.split_whitespace().collect::<Vec<_>>().join(" ");
-    if reason.len() > PREPARE_REASON_LIMIT {
-        reason.truncate(reason.floor_char_boundary(PREPARE_REASON_LIMIT));
-        reason.push_str(PREPARE_REASON_TRUNCATION_MARKER);
+    let reason = detail.split_whitespace().collect::<Vec<_>>().join(" ");
+    if reason.len() <= PREPARE_REASON_LIMIT {
+        return reason;
     }
-    reason
+    // Keep the start, which names the step, and the end, where a command's
+    // failure is: a reason cut at the start alone loses the fatal line.
+    let head = reason.floor_char_boundary(PREPARE_REASON_LIMIT / 4);
+    let tail =
+        reason.ceil_char_boundary(reason.len() - (PREPARE_REASON_LIMIT - PREPARE_REASON_LIMIT / 4));
+    format!(
+        "{}{PREPARE_REASON_TRUNCATION_MARKER}{}",
+        &reason[..head],
+        &reason[tail..]
+    )
 }
 
 fn credential_helper(path: &Path, writer: &WriterRequest) -> Result<()> {
@@ -3571,16 +3734,19 @@ fn reaches_remote(args: &[&str]) -> bool {
 fn pull_request_repo(url: &str) -> Result<String> {
     let (host, path) = if let Some((scheme, rest)) = url.split_once("://") {
         if !matches!(scheme, "https" | "ssh") {
-            return Err(RunError::Delivery(Stage::Prepare));
+            return Err(delivery_refusal(
+                Stage::Prepare,
+                "unsupported push URL scheme",
+            ));
         }
         let (authority, path) = rest
             .split_once('/')
-            .ok_or(RunError::Delivery(Stage::Prepare))?;
+            .ok_or_else(|| delivery_refusal(Stage::Prepare, "push URL has no path"))?;
         (authority.rsplit('@').next().unwrap_or_default(), path)
     } else {
         let (authority, path) = url
             .split_once(':')
-            .ok_or(RunError::Delivery(Stage::Prepare))?;
+            .ok_or_else(|| delivery_refusal(Stage::Prepare, "push URL has no authority"))?;
         (authority.rsplit('@').next().unwrap_or_default(), path)
     };
     let path = path
@@ -3603,7 +3769,10 @@ fn pull_request_repo(url: &str) -> Result<String> {
                     .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
         })
     {
-        return Err(RunError::Delivery(Stage::Prepare));
+        return Err(delivery_refusal(
+            Stage::Prepare,
+            "push URL is not a valid repository URL",
+        ));
     }
     Ok(format!("{host}/{path}"))
 }
@@ -4054,7 +4223,7 @@ pub(crate) fn deliver_once(
         } else {
             match receipt
                 .head
-                .ok_or(RunError::Delivery(Stage::Head))
+                .ok_or_else(|| delivery_refusal(Stage::Head, "delivery head was not captured"))
                 .and_then(|head| {
                     let body = host.commit_body(writer, head, identity)?;
                     crate::artifacts::seal(
@@ -4073,8 +4242,13 @@ pub(crate) fn deliver_once(
                     }
                 }
                 Err(error)
-                    if matches!(error, RunError::Delivery(Stage::Push))
-                        && !matches!(request.mode, crate::DeliveryMode::Integrate(_))
+                    if matches!(
+                        error,
+                        RunError::Delivery {
+                            stage: Stage::Push,
+                            ..
+                        }
+                    ) && !matches!(request.mode, crate::DeliveryMode::Integrate(_))
                         && !host
                             .cancellation
                             .as_ref()
@@ -4175,6 +4349,36 @@ mod stored_format_tests {
             1,
             "{rendered}"
         );
+    }
+
+    #[test]
+    fn a_command_that_exited_zero_keeps_the_ports_parse_error() {
+        let ok = Some((Termination::Exit(0), false, "warning".to_owned()));
+        let cause = failure_cause(ok, "malformed response");
+        assert!(
+            matches!(&cause, DeliveryCause::Parse { detail } if detail == "malformed response")
+        );
+        for failed in [(Termination::Exit(1), false), (Termination::Exit(0), true)] {
+            let cause = failure_cause(Some((failed.0, failed.1, "boom".into())), "ignored");
+            assert!(matches!(cause, DeliveryCause::Command { .. }), "{failed:?}");
+        }
+        assert!(matches!(
+            failure_cause(None, "no command ran"),
+            DeliveryCause::Parse { .. }
+        ));
+    }
+
+    #[test]
+    fn a_long_reason_keeps_its_start_and_its_end() {
+        let long = format!(
+            "forge step {} fatal: the real failure",
+            "noise ".repeat(400)
+        );
+        let reason = prepare_reason(&long);
+        assert!(reason.starts_with("forge step"), "{reason}");
+        assert!(reason.ends_with("fatal: the real failure"), "{reason}");
+        assert!(reason.len() <= PREPARE_REASON_LIMIT + PREPARE_REASON_TRUNCATION_MARKER.len());
+        assert!(reason.contains(PREPARE_REASON_TRUNCATION_MARKER));
     }
 
     #[test]

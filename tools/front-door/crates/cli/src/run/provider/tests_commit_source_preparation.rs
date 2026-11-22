@@ -389,12 +389,13 @@ fn consecutive_preparations_skip_the_account_after_its_first_login_failure()
             host: provenant_quota::LOCAL_HOST.into(),
             adapter: "codex".into(),
             account_key: "signed-out".into(),
-            route: "codex/gpt-6-luna".into(),
+            route: provenant_quota::ReadinessRoute::from_text("codex/gpt-6-luna"),
         };
         let observed = crate::quota::read_readiness(
             &fixture.state,
             &scope,
             provenant_os::clock::SystemClock::new().unix_seconds(),
+            &provenant_quota::DEFAULT_FRESHNESS,
         );
         assert_eq!(observed.state, provenant_quota::ReadinessState::Unavailable);
         assert_eq!(
@@ -429,10 +430,10 @@ fn successful_login_probe_recovers_an_expired_preparation_failure()
         host: provenant_quota::LOCAL_HOST.into(),
         adapter: account.adapter.clone(),
         account_key: account.account_key.clone(),
-        route: "cursor/composer-2.5".into(),
+        route: provenant_quota::ReadinessRoute::from_text("cursor/composer-2.5"),
     };
     assert_eq!(
-        crate::quota::read_readiness(&fixture.state, &scope, now).state,
+        crate::quota::read_readiness(&fixture.state, &scope, now, &provenant_quota::DEFAULT_FRESHNESS).state,
         provenant_quota::ReadinessState::Unavailable
     );
     let launch = fixture.prepare()?;
@@ -441,7 +442,8 @@ fn successful_login_probe_recovers_an_expired_preparation_failure()
         crate::quota::read_readiness(
             &fixture.state,
             &scope,
-            provenant_os::clock::SystemClock::new().unix_seconds()
+            provenant_os::clock::SystemClock::new().unix_seconds(),
+            &provenant_quota::DEFAULT_FRESHNESS,
         )
         .reason,
         Some(provenant_quota::ReadinessReason::ProbedNoFigures)

@@ -30,6 +30,9 @@ pub struct Settings {
     /// How long a pull request wait holds a settling reading pending while
     /// Actions has reported no run for its head. Zero settles at once.
     pub actions_grace_seconds: u64,
+    /// How long a wait's store preflight tolerates a momentarily busy store
+    /// before it refuses. The final snapshot stays deliberately nonblocking.
+    pub preflight_busy_timeout_ms: u64,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -46,6 +49,7 @@ impl Default for Settings {
             max_targets: 64,
             pr_read_timeout_seconds: 60,
             actions_grace_seconds: 60,
+            preflight_busy_timeout_ms: 2000,
         }
     }
 }
@@ -272,6 +276,12 @@ impl DomainConfig for Settings {
                 600,
             ),
             ("actions_grace_seconds", self.actions_grace_seconds, 0, 600),
+            (
+                "preflight_busy_timeout_ms",
+                self.preflight_busy_timeout_ms,
+                0,
+                60000,
+            ),
         ]
         .into_iter()
         .filter(|(_, value, min, max)| !(min..=max).contains(&value))
@@ -294,7 +304,7 @@ impl DomainConfig for Settings {
 pub const SECTION: DomainSection = DomainSection::new::<Settings>(
     "wait",
     |_| {
-        "pr_complete_timeout_seconds = 3600\ntimeout_seconds = 300\nmax_timeout_seconds = 14400\nlocal_interval_ms = 500\npr_interval_ms = 5000\npr_slow_interval_ms = 15000\npr_near_end_window_ms = 30000\npr_conditional_requests = true\nforge_source = \"auto\"\nmax_targets = 64\npr_read_timeout_seconds = 60\nactions_grace_seconds = 60\n"
+        "pr_complete_timeout_seconds = 3600\ntimeout_seconds = 300\nmax_timeout_seconds = 14400\nlocal_interval_ms = 500\npr_interval_ms = 5000\npr_slow_interval_ms = 15000\npr_near_end_window_ms = 30000\npr_conditional_requests = true\nforge_source = \"auto\"\nmax_targets = 64\npr_read_timeout_seconds = 60\nactions_grace_seconds = 60\npreflight_busy_timeout_ms = 2000\n"
     },
 )
 .with_fields(&[
@@ -310,6 +320,7 @@ pub const SECTION: DomainSection = DomainSection::new::<Settings>(
     FieldMetadata::int("max_targets", 1, 1024),
     FieldMetadata::int("pr_read_timeout_seconds", 1, 600),
     FieldMetadata::int("actions_grace_seconds", 0, 600),
+    FieldMetadata::int("preflight_busy_timeout_ms", 0, 60000),
 ]);
 
 #[cfg(test)]

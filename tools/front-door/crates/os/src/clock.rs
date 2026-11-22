@@ -35,6 +35,19 @@ impl Default for SystemClock {
         Self::new()
     }
 }
+
+/// Current wall time in whole Unix seconds, zero when the clock is outside the
+/// supported range. The one ambient seconds read; state machines take a clock
+/// instead so their time is injected.
+pub fn now_unix_seconds() -> u64 {
+    SystemClock::new().unix_seconds().max(0) as u64
+}
+
+/// Current wall time in whole Unix milliseconds, zero when the clock is
+/// outside the supported range. The one ambient milliseconds read.
+pub fn now_unix_millis() -> u64 {
+    u64::try_from(SystemClock::new().unix_millis().max(0)).unwrap_or_default()
+}
 impl Clock for SystemClock {
     // Wall-clock sampling is the production clock boundary.
     #[allow(clippy::disallowed_methods)]

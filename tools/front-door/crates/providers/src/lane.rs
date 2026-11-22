@@ -3,6 +3,7 @@ use crate::launch::{exact, subtree};
 use crate::{ProviderError, SetupStep};
 use provenant_confinement::permissions::ProviderProfileSpec;
 use provenant_core::{AttemptId, RUN_STATE_DIRECTORY_ENV, STATE_DIRECTORY_ENV, consumer_env};
+use provenant_os::shell::{quote, quote_os};
 use provenant_records::policy::{Facts, Policy};
 use std::{
     ffi::OsString,
@@ -121,7 +122,7 @@ impl crate::LaunchSpec {
             if !path.is_absolute() || value.chars().any(char::is_control) {
                 return Err(ProviderError::InvalidPath);
             }
-            Ok(shell_quote(value))
+            Ok(quote(value))
         };
         if gate.slots > 64 || !["all", "check", "none"].contains(&gate.local_cargo) {
             return Err(ProviderError::Malformed);
@@ -150,7 +151,7 @@ impl crate::LaunchSpec {
                 let json = serde_json::to_string(&gate).map_err(|_| ProviderError::Malformed)?;
                 Ok::<_, ProviderError>(format!(
                     "{name}={}\nexport {name}\n",
-                    shell_quote(&json),
+                    quote(&json),
                     name = consumer_env::ADMISSION_DISK_LIMITS,
                 ))
             })
@@ -165,12 +166,12 @@ impl crate::LaunchSpec {
             .unwrap_or_default();
         let env_prefix = format!(
             "#!/bin/sh\n{disk}{context_env}={} {state}={} {slots}={} {local}={} {wait_env}={} PROVENANT_ADMISSION_CONFIG={}\nexport {context_env} {state} {slots} {local} {wait_env} PROVENANT_ADMISSION_CONFIG\n",
-            shell_quote(gate.build_context),
+            quote(gate.build_context),
             text(gate.state)?,
             gate.slots,
             gate.local_cargo,
             text(scratch)?,
-            shell_quote(&class_config),
+            quote(&class_config),
             context_env = consumer_env::BUILD_CONTEXT,
             state = consumer_env::ADMISSION_SLOT_STATE,
             slots = consumer_env::ADMISSION_SLOTS,
@@ -336,7 +337,7 @@ impl crate::LaunchSpec {
                 .map(|(_, value)| PathBuf::from(value))
                 .unwrap_or_else(|| home.join(".config/gh"))
         };
-        let gh_config = shell_quote(&text(&gh_config_root).map_err(|error| {
+        let gh_config = quote(&text(&gh_config_root).map_err(|error| {
             self.policy.boundary_error(
                 "LANE_LAUNCHSPEC_CONFIGURE_PUBLISHING_AUTHORITY",
                 Facts::violation(
@@ -345,7 +346,7 @@ impl crate::LaunchSpec {
                 error,
             )
         })?);
-        let gh = format!("GH_CONFIG_DIR={gh_config} {}", shell_quote(&gh_path));
+        let gh = format!("GH_CONFIG_DIR={gh_config} {}", quote(&gh_path));
         let config = scratch.join("publishing.gitconfig");
         let config_text = format!(
             "[credential]\n\thelper =\n\thelper = {}\n\tinteractive = false\n",
@@ -377,7 +378,7 @@ impl crate::LaunchSpec {
                 bytes: gh_wrapper(
                     &gh_path,
                     Some(&gh_config),
-                    &shell_quote(&text(&scratch.join(provenant_config::GH_INVOCATIONS_FILE))?),
+                    &quote(&text(&scratch.join(provenant_config::GH_INVOCATIONS_FILE))?),
                     shim,
                 )
                 .into_bytes(),
@@ -433,7 +434,7 @@ impl crate::LaunchSpec {
         };
         let gh_path = text(gh)?;
         let gh_config_text = text(gh_config)?;
-        let counter = shell_quote(&text(&scratch.join(provenant_config::GH_INVOCATIONS_FILE))?);
+        let counter = quote(&text(&scratch.join(provenant_config::GH_INVOCATIONS_FILE))?);
         let bin = scratch.join("bin");
         let path_index = self
             .env
@@ -457,13 +458,7 @@ impl crate::LaunchSpec {
         );
         self.setup.push(SetupStep::WriteExecutable {
             path: wrapper,
-            bytes: gh_wrapper(
-                &gh_path,
-                Some(&shell_quote(&gh_config_text)),
-                &counter,
-                shim,
-            )
-            .into_bytes(),
+            bytes: gh_wrapper(&gh_path, Some(&quote(&gh_config_text)), &counter, shim).into_bytes(),
         });
         self.env[path_index].1 = next_path;
         self.env.retain(|(key, _)| key != "GH_CONFIG_DIR");
@@ -662,7 +657,7 @@ pub(crate) fn git_wrapper(git: &Path, options: &GitWrapper) -> Result<Vec<u8>, P
             bytes.extend_from_slice(exports.as_bytes());
         }
         let global = if let Some(config) = &options.identity_config {
-            shell_quote_os(config.as_os_str()).map_err(|_| {
+            quote_os(config.as_os_str()).map_err(|_| {
                 wrapper_error(
                     "the private Git configuration path cannot be represented in the wrapper",
                 )
@@ -679,11 +674,7 @@ pub(crate) fn git_wrapper(git: &Path, options: &GitWrapper) -> Result<Vec<u8>, P
             wrapper_error("the selected Git exec path cannot be represented in the wrapper")
         })?;
         bytes.extend_from_slice(
-            format!(
-                "GIT_EXEC_PATH={}\nexport GIT_EXEC_PATH\n",
-                shell_quote(exec_path)
-            )
-            .as_bytes(),
+            format!("GIT_EXEC_PATH={}\nexport GIT_EXEC_PATH\n", quote(exec_path)).as_bytes(),
         );
     }
     bytes.extend_from_slice(b"_provenant_git_program='");
@@ -696,16 +687,20 @@ pub(crate) fn git_wrapper(git: &Path, options: &GitWrapper) -> Result<Vec<u8>, P
     }
     bytes.push(b'\'');
     bytes.extend_from_slice(b"\n_provenant_git_include=");
-    bytes.extend_from_slice(shell_quote(options.include.as_deref().unwrap_or_default()).as_bytes());
+    bytes.extend_from_slice(quote(options.include.as_deref().unwrap_or_default()).as_bytes());
     bytes.extend_from_slice(b"\n");
     bytes.extend_from_slice(b"_provenant_git_hooks_path_reader=");
     if let Some(reader) = &options.hooks_path_reader {
-        bytes.extend_from_slice(shell_quote_os(reader.as_os_str())?.as_bytes());
+        bytes.extend_from_slice(
+            quote_os(reader.as_os_str())
+                .map_err(|_| ProviderError::InvalidPath)?
+                .as_bytes(),
+        );
     } else {
         bytes.extend_from_slice(b"''");
     }
     bytes.push(b'\n');
-    let helper = shell_quote(&format!(
+    let helper = quote(&format!(
         "credential.https://github.com.helper={TOKEN_HELPER}"
     ));
     bytes.extend_from_slice(b"_provenant_git_helper=");
@@ -1032,7 +1027,7 @@ fn gh_wrapper(gh: &str, gh_config: Option<&str>, counter: &str, shim: &GhShim<'_
         "gh_count_file={counter}\nif printf . >> \"$gh_count_file\" 2>/dev/null; then\n  gh_count_dots=\n  IFS= read -r gh_count_dots < \"$gh_count_file\" || :\n  gh_count=${{#gh_count_dots}}\n"
     );
     if shim.budget > 0 {
-        let warning = shell_quote(&format!(
+        let warning = quote(&format!(
             "(lanes.gh_budget = {}, source: {}). The call proceeds; batch reads, avoid polling and prefer one gh api graphql query over many calls.",
             shim.budget, shim.budget_source
         ));
@@ -1053,7 +1048,7 @@ fn gh_wrapper(gh: &str, gh_config: Option<&str>, counter: &str, shim: &GhShim<'_
         let conditions = words
             .iter()
             .enumerate()
-            .map(|(i, word)| format!("[ \"${{{}}}\" = {} ]", i + 1, shell_quote(word)))
+            .map(|(i, word)| format!("[ \"${{{}}}\" = {} ]", i + 1, quote(word)))
             .collect::<Vec<_>>()
             .join(" && ");
         guard.push_str(&format!("if [ \"$#\" -ge {} ] && {conditions}; then\n  printf '%s\\n' 'warning: github.deny_verbs (advisory)' >&2\nfi\n", words.len()));
@@ -1064,7 +1059,7 @@ fn gh_wrapper(gh: &str, gh_config: Option<&str>, counter: &str, shim: &GhShim<'_
             // Quoting the literal keeps shell metacharacters in labels inert.
             let label = label.trim();
             if !label.is_empty() {
-                guard.push_str(&format!("      if [ \"$item\" = {} ]; then printf '%s\\n' 'warning: github.deny_labels (advisory)' >&2; fi\n", shell_quote(label)));
+                guard.push_str(&format!("      if [ \"$item\" = {} ]; then printf '%s\\n' 'warning: github.deny_labels (advisory)' >&2; fi\n", quote(label)));
             }
         }
         guard.push_str("      case \"$value\" in *,*) value=${value#*,} ;; *) break ;; esac\n    done\n    shift\n  done\n}\ncheck_labels \"$@\"\n");
@@ -1072,14 +1067,7 @@ fn gh_wrapper(gh: &str, gh_config: Option<&str>, counter: &str, shim: &GhShim<'_
     let config = gh_config
         .map(|config| format!("GH_CONFIG_DIR={config}\nexport GH_CONFIG_DIR\n"))
         .unwrap_or_default();
-    format!(
-        "#!/bin/sh\n{guard}{config}exec {} \"$@\"\n",
-        shell_quote(gh)
-    )
-}
-
-pub(crate) fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
+    format!("#!/bin/sh\n{guard}{config}exec {} \"$@\"\n", quote(gh))
 }
 
 /// What the `cargo` shim needs to take a host build slot.
@@ -1203,7 +1191,7 @@ impl LaneRuntime<'_> {
                     ProviderError::InvalidPath,
                 ));
             }
-            script.push_str(&format!("export {key}={}\n", shell_quote(&value)));
+            script.push_str(&format!("export {key}={}\n", quote(&value)));
         }
         let executable = self.executable.to_str().ok_or_else(|| {
             policy.boundary_error(
@@ -1223,7 +1211,7 @@ impl LaneRuntime<'_> {
                 ProviderError::InvalidPath,
             ));
         }
-        script.push_str(&format!("exec {} \"$@\"\n", shell_quote(executable)));
+        script.push_str(&format!("exec {} \"$@\"\n", quote(executable)));
         // A private name also pins ordinary shell `git`, independently of
         // PATH's system shim and of the override executable's basename.
         install_git(
@@ -1340,27 +1328,6 @@ fn claude_shell(env: &[(OsString, OsString)]) -> Vec<u8> {
     script
 }
 
-fn shell_quote_os(value: &std::ffi::OsStr) -> Result<String, ProviderError> {
-    use std::os::unix::ffi::OsStrExt;
-    if value
-        .to_str()
-        .is_some_and(|text| text.chars().any(char::is_control))
-    {
-        return Err(ProviderError::InvalidPath);
-    }
-    let mut quoted = String::from("'");
-    for &byte in value.as_bytes() {
-        match byte {
-            0..=31 | 127 => return Err(ProviderError::InvalidPath),
-            b'\'' => quoted.push_str("'\\''"),
-            32..=126 => quoted.push(char::from(byte)),
-            _ => quoted.push_str(&format!("'$(printf '\\{byte:03o}')'")),
-        }
-    }
-    quoted.push('\'');
-    Ok(quoted)
-}
-
 /// Shell that applies the private binding only when Git acts on the lane
 /// checkout itself, and otherwise leaves the Git selectors and arguments as
 /// the caller gave them. Either way the wrapper's own scrub that follows
@@ -1374,13 +1341,16 @@ fn shell_quote_os(value: &std::ffi::OsStr) -> Result<String, ProviderError> {
 /// an option the parser does not know, or a missing value, means it cannot
 /// tell where the subcommand starts, so it does not bind.
 fn bound_exports(bound: &BoundGit) -> Result<String, ProviderError> {
-    let worktree = shell_quote_os(bound.worktree.as_os_str())?;
+    let worktree = quote_os(bound.worktree.as_os_str()).map_err(|_| ProviderError::InvalidPath)?;
     let mut exports = String::new();
     let mut names = Vec::new();
     for (key, value) in &bound.env {
         let key = key.to_str().ok_or(ProviderError::InvalidPath)?;
         names.push(key);
-        exports.push_str(&format!("  export {key}={}\n", shell_quote_os(value)?));
+        exports.push_str(&format!(
+            "  export {key}={}\n",
+            quote_os(value).map_err(|_| ProviderError::InvalidPath)?
+        ));
     }
     // Clear selectors not supplied by the lane before binding the checkout.
     let others: Vec<&str> = UNBOUND
@@ -1482,7 +1452,7 @@ mod tests {
         let argv = [
             OsString::from("/bin/sh"),
             OsString::from("-c"),
-            OsString::from(format!("printf %s {}", shell_quote_os(value)?)),
+            OsString::from(format!("printf %s {}", quote_os(value)?)),
         ];
         let output = SystemExecutor::new(1)?.execute(ExecOptions::new(
             &argv,
@@ -2013,9 +1983,9 @@ mod tests {
             &git,
             format!(
                 "#!/bin/sh\nGIT_CONFIG_GLOBAL={}; export GIT_CONFIG_GLOBAL\nGIT_CONFIG_NOSYSTEM=1; export GIT_CONFIG_NOSYSTEM\nprintf called > {}\nexec {} \"$@\"\n",
-                shell_quote(home.join(".gitconfig").to_str().ok_or("global config")?),
-                shell_quote(marker.to_str().ok_or("marker")?),
-                shell_quote(real_git.to_str().ok_or("git")?)
+                quote(home.join(".gitconfig").to_str().ok_or("global config")?),
+                quote(marker.to_str().ok_or("marker")?),
+                quote(real_git.to_str().ok_or("git")?)
             ),
         )?;
         fs::set_permissions(&git, fs::Permissions::from_mode(0o700))?;
@@ -2594,7 +2564,7 @@ mod tests {
             gh_wrapper(
                 real_gh.to_str().unwrap(),
                 Some("'/tmp'"),
-                &shell_quote(counter.to_str().unwrap()),
+                &quote(counter.to_str().unwrap()),
                 &GhShim {
                     policy: &policy,
                     budget: 0,
@@ -2669,7 +2639,7 @@ mod tests {
             gh_wrapper(
                 real_gh.to_str().unwrap_or_default(),
                 None,
-                &shell_quote(counter.to_str().unwrap_or_default()),
+                &quote(counter.to_str().unwrap_or_default()),
                 &GhShim {
                     policy: &policy,
                     budget: 2,
@@ -2716,7 +2686,7 @@ mod tests {
                 gh_wrapper(
                     real_gh.to_str().unwrap_or_default(),
                     None,
-                    &shell_quote(counter.to_str().unwrap_or_default()),
+                    &quote(counter.to_str().unwrap_or_default()),
                     &GhShim {
                         policy: &policy,
                         budget: 0,
@@ -3443,7 +3413,7 @@ mod tests {
             ])
             .arg(format!(
                 "--receive-pack={} receive-pack",
-                shell_quote_os(wrapper.as_os_str())?
+                quote_os(wrapper.as_os_str()).map_err(|_| ProviderError::InvalidPath)?
             ))
             .arg(&destination)
             .arg("HEAD:refs/heads/imported")
@@ -3980,7 +3950,7 @@ mod tests {
             &hook,
             format!(
                 "#!/bin/sh\nprintf x >> {}\nprintf \"fatal: Unable to create '%s/.git/index.lock': File exists.\\n\" \"$PWD\" >&2\nexit 128\n",
-                shell_quote(hook_count.to_str().ok_or("hook marker path")?)
+                quote(hook_count.to_str().ok_or("hook marker path")?)
             ),
         )?;
         std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o700))?;
@@ -4119,7 +4089,7 @@ mod tests {
         let rule = &policy.rule("LANE_LANERUNTIME_ENVIRONMENT_AUTHORITY").rule;
         assert_eq!(
             rule.boundary,
-            provenant_records::policy::Boundary::Authority
+            provenant_records::policy::Boundary::Operation
         );
         assert_eq!(rule.strength, provenant_records::policy::Strength::Refuse);
         assert!(rule.knob.is_none());

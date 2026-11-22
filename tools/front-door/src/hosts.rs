@@ -488,6 +488,18 @@ impl DoctorError {
             message: "peer doctor report is not a valid report".into(),
         }
     }
+    fn repair(&self) -> &'static str {
+        match self.code {
+            "SIGNIN_PROBE" => {
+                "sign in to the reported host identity, then rerun `provenant hosts doctor`"
+            }
+            "UNKNOWN_HOST" => {
+                "run `provenant hosts` to list configured peers and use a peer name from that list"
+            }
+            "PEER" => "resolve the reported peer error, then rerun `provenant hosts doctor`",
+            _ => "correct the reported host condition, then rerun `provenant hosts doctor`",
+        }
+    }
 }
 /// Keep a locally produced report within the 128-row peer validation cap.
 /// Omitted rows are acknowledged with one warning line so an empty-looking
@@ -548,10 +560,10 @@ fn valid_remote(report: &Report) -> bool {
                             .as_ref()
                             .is_some_and(|key| key == &scope.account_key)
                         && [
-                            &scope.host,
-                            &scope.adapter,
-                            &scope.account_key,
-                            &scope.route,
+                            scope.host.as_str(),
+                            scope.adapter.as_str(),
+                            scope.account_key.as_str(),
+                            scope.route.as_text(),
                         ]
                         .iter()
                         .all(|value| {
@@ -846,6 +858,7 @@ pub fn run(
             error.outcome,
             error.code,
             &error.message,
+            error.repair(),
             globals,
         ),
     }
@@ -1013,6 +1026,7 @@ mod tests {
             status: provenant_quota::QuotaStatus::AuthRequired,
             resets_at: None,
             refusals: vec![],
+            models: Vec::new(),
             free_pool_refusal: false,
             age_seconds: Some(20),
             next_due_unix_seconds: None,
@@ -1092,7 +1106,7 @@ mod tests {
         assert!(!super::valid_remote(&installed));
 
         let mut scoped: super::Report = serde_json::from_str(
-            r#"{"claude":[],"peer_agent":"stopped","login_accounts":[{"adapter":"fixture","label":"work","account_key":"key","reason":null,"last_success_unix_seconds":null,"login_expiry":null,"repair":null,"readiness":{"state":"unavailable","reason":"signed_out","observed_unix_seconds":1,"expires_unix_seconds":2,"reset_unix_seconds":null,"evidence_ref":"fixture","observed_scope":{"host":"local","adapter":"fixture","account_key":"key","route":"*"}}}]}"#,
+            r#"{"claude":[],"peer_agent":"stopped","login_accounts":[{"adapter":"fixture","label":"work","account_key":"key","reason":null,"last_success_unix_seconds":null,"login_expiry":null,"repair":null,"readiness":{"state":"unavailable","reason":"signed_out","observed_unix_seconds":1,"expires_unix_seconds":2,"reset_unix_seconds":null,"evidence_ref":"fixture","observed_scope":{"host":"local","adapter":"fixture","account_key":"key","route":{"kind":"account"}}}}]}"#,
         ).unwrap();
         assert!(super::valid_remote(&scoped));
         scoped.login_accounts[0]

@@ -164,13 +164,13 @@ fn resolve_reports_effort_controls_and_nearby_models() -> Result {
     let file = provenant_quota::ReadinessFile {
         records: vec![provenant_quota::RouteReadiness {
             extra: Default::default(),
-            schema_version: 1,
+            schema_version: provenant_quota::READINESS_SCHEMA_VERSION,
             scope: provenant_quota::ReadinessScope {
                 extra: Default::default(),
                 host: provenant_quota::LOCAL_HOST.into(),
                 adapter: "codex".into(),
                 account_key: "key-one".into(),
-                route: "codex/gpt-6-luna".into(),
+                route: provenant_quota::ReadinessRoute::from_text("codex/gpt-6-luna"),
             },
             state: provenant_quota::ReadinessState::Unavailable,
             reason: Some(provenant_quota::ReadinessReason::ProviderRefusal),
@@ -211,7 +211,7 @@ fn resolve_reports_effort_controls_and_nearby_models() -> Result {
     );
     assert_eq!(
         known["data"]["recorded_readiness"][0]["observation"]["observed_scope"]["route"],
-        "codex/gpt-6-luna"
+        serde_json::json!({"kind": "model", "value": "codex/gpt-6-luna"})
     );
     assert_eq!(
         known["data"]["recorded_readiness"][0]["observation"]["observed_unix_seconds"],

@@ -76,7 +76,7 @@ fn report_checkout(store: &Path, commit: &str) -> Option<ReportCheckout> {
     let temp = std::env::temp_dir().join(format!(
         "provenant-report-{}-{}-{}",
         std::process::id(),
-        provenant_run::build::ledger::now_unix_ms(),
+        provenant_os::clock::now_unix_millis(),
         unique
     ));
     std::fs::create_dir(&temp).ok()?;
@@ -209,6 +209,7 @@ pub fn run(command: Build, globals: &Globals) -> u8 {
                     Outcome::Invalid,
                     "ROOT",
                     &error.to_string(),
+                    crate::REPAIR_ROOT,
                     globals,
                 );
             }
@@ -249,6 +250,7 @@ pub fn run(command: Build, globals: &Globals) -> u8 {
                 Outcome::Invalid,
                 "ROOT",
                 &error.to_string(),
+                crate::REPAIR_ROOT,
                 globals,
             );
         }
@@ -269,6 +271,7 @@ pub fn run(command: Build, globals: &Globals) -> u8 {
                         Outcome::Error,
                         "CONFIG",
                         &error.to_string(),
+                        crate::REPAIR_CONFIG,
                         globals,
                     );
                 }
@@ -280,7 +283,7 @@ pub fn run(command: Build, globals: &Globals) -> u8 {
                 Some(&key),
             )
             .slots;
-            let cutoff = provenant_run::build::ledger::now_unix_ms()
+            let cutoff = provenant_os::clock::now_unix_millis()
                 .saturating_sub(since.unwrap_or(u64::MAX).saturating_mul(1000));
             let root = provenant_run::build::paths::build_root(state);
             let mut rows = Vec::new();
@@ -309,7 +312,7 @@ pub fn run(command: Build, globals: &Globals) -> u8 {
             let ram = provenant_os::sys::resources::memory()
                 .ok()
                 .map(|memory| memory.total_bytes);
-            let now_ms = provenant_run::build::ledger::now_unix_ms();
+            let now_ms = provenant_os::clock::now_unix_millis();
             let store = provenant_run::build::paths::store_path(state, &key);
             let cache_root = state.join("build/report-cache");
             let _ = std::fs::create_dir_all(&cache_root);
@@ -433,8 +436,7 @@ pub fn run(command: Build, globals: &Globals) -> u8 {
             )
         }
         Build::Maintain => {
-            let now =
-                UNIX_EPOCH + Duration::from_millis(provenant_run::build::ledger::now_unix_ms());
+            let now = UNIX_EPOCH + Duration::from_millis(provenant_os::clock::now_unix_millis());
             let outcome = provenant_run::build::hygiene::maintain(
                 state,
                 &resolved.home,

@@ -46,6 +46,8 @@ mod loader;
 mod managed;
 pub use harness::{InstallSettings, TargetSettings, apply_install_config_with_domains};
 pub const NATIVE_CAPABILITY_UNAVAILABLE: &str = "native_capability_unavailable";
+pub mod overlays;
+pub use overlays::{OverlayLayer, OverlaySource, OverlayWarning};
 pub mod policy;
 mod presets;
 mod providers;
@@ -317,12 +319,13 @@ pub struct ConfigInspection {
 }
 
 pub use managed::{
-    AccountHome, AccountState, AccountStatus, Action, Disposition, EntryIdentity, HarnessTarget,
-    InstallContext, InstallError, InstallFinding, InstallInspection, InstallOutcome, InstallPlan,
-    InstallReporter, ManualInclude, ReleaseSmoke, STABLE_BINARY_NAME, SelectorChange, Snapshots,
-    Targets, inspect_accounts, inspect_install, install, installed_binary, peer_agent_plist,
-    plan_and_install, plan_install, private_directory, release_instruction_asset, release_root,
-    systemd_user_dir, tick_agent_plist, tick_service_path, tick_timer_path, uninstall, user_dir_in,
+    AccountHome, AccountState, AccountStatus, Action, Disposition, EntryIdentity,
+    HOOKS_UNAVAILABLE_DETAIL, HarnessTarget, InstallContext, InstallError, InstallFinding,
+    InstallInspection, InstallOutcome, InstallPlan, InstallReporter, ManualInclude, ReleaseSmoke,
+    STABLE_BINARY_NAME, SelectorChange, Snapshots, Targets, inspect_accounts, inspect_install,
+    install, installed_binary, peer_agent_plist, plan_and_install, plan_install, private_directory,
+    release_instruction_asset, release_root, systemd_user_dir, tick_agent_plist, tick_service_path,
+    tick_timer_path, uninstall, user_dir_in,
 };
 pub use provenant_records::Harness;
 pub use release::{Release, package_release};

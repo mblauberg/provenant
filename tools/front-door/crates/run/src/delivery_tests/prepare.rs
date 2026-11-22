@@ -779,7 +779,10 @@ fn delivery_cancellation_stops_its_running_git_child()
             cancel.cancel();
             assert!(matches!(
                 worker.join().map_err(|_| "delivery panicked")?,
-                Err(RunError::Delivery(WriterDeliveryStage::Head))
+                Err(RunError::Delivery {
+                    stage: WriterDeliveryStage::Head,
+                    ..
+                })
             ));
             assert!(seen, "delivery never reached Git");
             Ok(())
@@ -993,7 +996,10 @@ fn host_push_delivery_refuses_a_non_fast_forward_and_leaves_the_branch()
     let attempt = store.attempt_dir(input.attempt_id, false)?;
     assert!(matches!(
         deliver_once(&host, &writer, &request, &attempt, "fixture receipt"),
-        Err(RunError::Delivery(WriterDeliveryStage::Push))
+        Err(RunError::Delivery {
+            stage: WriterDeliveryStage::Push,
+            ..
+        })
     ));
     assert!(artifacts::read_sealed(&attempt, "delivery.json", RECORD_LIMIT)?.is_none());
     assert!(

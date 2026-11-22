@@ -977,6 +977,7 @@ pub fn events(
                     .unwrap_or(provenant_records::Outcome::Error),
                 typed.as_ref().map_or("events_read", FacadeError::code),
                 &error.to_string(),
+                "resolve the reported coordination error and retry the events read",
                 globals,
             )
         }
@@ -991,15 +992,7 @@ pub fn events(
 mod test_presentation {
     use super::*;
     fn shell_path(path: &std::path::Path) -> String {
-        let value = path.to_string_lossy();
-        if value
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || "_./-".contains(character))
-        {
-            value.into_owned()
-        } else {
-            format!("'{}'", value.replace('\'', "'\\''"))
-        }
+        provenant_os::shell::quote_if_needed(&path.to_string_lossy())
     }
     pub(super) fn graph_display(
         run: &provenant_fabric_runtime::graph::GraphRun,

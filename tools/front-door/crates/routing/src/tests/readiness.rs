@@ -559,9 +559,7 @@ fn review_floor_policy_can_be_overridden_and_extended() -> Result<(), Box<dyn st
 #[test]
 fn expired_login_observation_warns_and_remains_selectable() -> Result<(), Box<dyn std::error::Error>>
 {
-    use provenant_quota::{
-        ACCOUNT_ROUTE, LOCAL_HOST, LoginObservation, ReadinessFile, ReadinessScope,
-    };
+    use provenant_quota::{LOCAL_HOST, LoginObservation, ReadinessFile, ReadinessScope};
     let file = ReadinessFile {
         extra: Default::default(),
         login: Some(LoginObservation {
@@ -571,7 +569,7 @@ fn expired_login_observation_warns_and_remains_selectable() -> Result<(), Box<dy
                 host: LOCAL_HOST.into(),
                 adapter: "codex".into(),
                 account_key: "opaque-account".into(),
-                route: ACCOUNT_ROUTE.into(),
+                route: provenant_quota::ReadinessRoute::Account,
             },
             observed_unix_seconds: 80,
             valid_until_unix_seconds: 100,
@@ -584,7 +582,13 @@ fn expired_login_observation_warns_and_remains_selectable() -> Result<(), Box<dy
     let records = [availability()];
     let access = readiness_access();
     for cached in [false, true] {
-        let lookup = |scope: &ReadinessScope, time| file.get(scope, if cached { 90 } else { time });
+        let lookup = |scope: &ReadinessScope, time| {
+            file.get(
+                scope,
+                if cached { 90 } else { time },
+                &provenant_quota::DEFAULT_FRESHNESS,
+            )
+        };
         let context = RoutingContext {
             availability: &records,
             access: &access,

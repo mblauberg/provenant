@@ -1,19 +1,36 @@
 use super::*;
 
 #[test]
-fn shared_submit_context_refuses_depth_above_the_limit() {
-    let parent = AttemptId::from_bytes([7; 16]).to_string();
+fn shared_submit_context_warns_above_the_depth_limit_unless_configured_to_stop() {
+    use provenant_records::policy::{Policy, Source, Strength};
+    let parent = AttemptId::from_bytes([7; 16]);
+    let parent_text = parent.to_string();
     let state = Path::new("/state");
+    // Depth above the configured maximum warns and proceeds by default.
     let result = lane_dispatch_values(
         Some("2"),
-        Some(&parent),
+        Some(&parent_text),
         2,
         &Default::default(),
         state,
         Some(state),
     );
-    let Err(failure) = result else {
-        panic!("depth above the configured maximum must be refused");
+    assert!(matches!(result, Ok((3, Some(found))) if found == parent));
+    // The owner can make it a stop with policy.LANE_DEPTH=refuse.
+    let mut strict = Policy::default();
+    strict.overlay(
+        &std::collections::BTreeMap::from([("LANE_DEPTH".to_owned(), Strength::Refuse)]),
+        Source::Host,
+    );
+    let Err(failure) = lane_dispatch_values(
+        Some("2"),
+        Some(&parent_text),
+        2,
+        &strict,
+        state,
+        Some(state),
+    ) else {
+        panic!("depth above the maximum must be refused when policy says refuse");
     };
     assert_eq!(failure.status, Status::Refused);
     assert_eq!(failure.kind.code(), "LANE_DEPTH");

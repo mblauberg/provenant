@@ -131,7 +131,14 @@ fn human_inbox(
             &resolved.home,
             &resolved.project,
         ),
-        Err(error) => fail(path, Outcome::Error, "ROOT", &error.to_string(), globals),
+        Err(error) => fail(
+            path,
+            Outcome::Error,
+            "ROOT",
+            &error.to_string(),
+            REPAIR_ROOT,
+            globals,
+        ),
     }
 }
 fn emit<T: Serialize>(
@@ -406,6 +413,12 @@ fn accounts_summary(settings: &provenant_providers::accounts::Settings) -> prove
         .collect();
     provenant_cli::Summary::new(headline, rows, None)
 }
+/// Reusable next steps for the common refusals. Every `fail` call supplies a
+/// repair explicitly, so the renderer never has to synthesise one.
+const REPAIR_ROOT: &str = "run from a project checkout or pass `--project PATH`";
+const REPAIR_CONFIG: &str = "run `provenant check config --json` and correct the reported setting";
+const REPAIR_IO: &str = "check the reported path and file permissions, then retry";
+
 /// The one construction of a refusal's transport facts. `cause` is extra
 /// evidence beside the short message and is rendered indented in human output
 /// and as `error.cause` in JSON; owners whose cause repeats the message let the
@@ -414,31 +427,26 @@ pub(crate) fn command_error(
     code: &str,
     message: &str,
     cause: Option<&str>,
-    repair: Option<&str>,
+    repair: &str,
 ) -> CommandError {
-    CommandError {
-        diagnostic: None,
-        code: code.into(),
-        message: message.into(),
-        cause: cause.map(Into::into),
-        repair: repair.map(Into::into),
-    }
+    CommandError::new(code, message, cause, repair)
 }
 fn fail(
     command: &str,
     status: Outcome,
     code: &str,
     message: &str,
+    repair: &str,
     globals: &provenant_cli::Globals,
 ) -> u8 {
-    fail_with_repair(command, status, code, message, None, globals)
+    fail_with_repair(command, status, code, message, repair, globals)
 }
 fn fail_with_repair(
     command: &str,
     status: Outcome,
     code: &str,
     message: &str,
-    repair: Option<&str>,
+    repair: &str,
     globals: &provenant_cli::Globals,
 ) -> u8 {
     fail_with_cause(command, status, code, message, None, repair, globals)
@@ -451,7 +459,7 @@ fn fail_with_cause(
     code: &str,
     message: &str,
     cause: Option<&str>,
-    repair: Option<&str>,
+    repair: &str,
     globals: &provenant_cli::Globals,
 ) -> u8 {
     fail_with_cause_with_writers(
@@ -477,7 +485,7 @@ pub(crate) fn fail_with_cause_with_writers<Wout: Write, Werr: Write>(
     code: &str,
     message: &str,
     cause: Option<&str>,
-    repair: Option<&str>,
+    repair: &str,
     globals: &provenant_cli::Globals,
     stdout: &mut Wout,
     stderr: &mut Werr,
@@ -538,7 +546,10 @@ fn fail_with_diagnostic(
         code,
         &message,
         diagnostic.detail.as_deref(),
-        diagnostic.next.as_deref(),
+        diagnostic
+            .next
+            .as_deref()
+            .unwrap_or("correct the reported condition and rerun the command"),
     );
     error.diagnostic = Some(diagnostic.into());
     result.error = Some(error);
@@ -600,7 +611,14 @@ fn run_edge_emitting(
                 roots::RootError::Checkout | roots::RootError::State(_) => Outcome::Invalid,
                 _ => Outcome::Error,
             };
-            fail(leaf, status, "ROOT", &error.to_string(), globals)
+            fail(
+                leaf,
+                status,
+                "ROOT",
+                &error.to_string(),
+                REPAIR_ROOT,
+                globals,
+            )
         }
     }
 }
@@ -764,15 +782,12 @@ fn sync_registered_account(
         }
         Err(message) => {
             reply.result.status = Outcome::Error;
-            reply.result.error = Some(CommandError {
-                diagnostic: None,
-                code: "ACCOUNT_SYNC".into(),
-                message: format!(
-                    "account registered, but syncing managed content failed: {message}"
-                ),
-                cause: None,
-                repair: Some("Resolve the failure, then run `provenant accounts sync`".into()),
-            });
+            reply.result.error = Some(CommandError::new(
+                "ACCOUNT_SYNC",
+                format!("account registered, but syncing managed content failed: {message}"),
+                None,
+                "resolve the failure, then run `provenant accounts sync`",
+            ));
         }
     }
 }
@@ -1174,16 +1189,27 @@ fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::
             if code == provenant_config::shared_settings::NEVER_SYNCED_CODE {
                 let projection = provenant_config::shared_settings::never_synced_diagnostic();
                 let mut result = CommandResult::new(command, status, ());
-                result.error = Some(CommandError {
-                    diagnostic: Some((&projection).into()),
-                    code: projection.code.clone(),
-                    message: error.to_string(),
-                    cause: projection.detail.clone(),
-                    repair: projection.next.clone(),
-                });
+                let mut error = CommandError::new(
+                    projection.code.clone(),
+                    error.to_string(),
+                    projection.detail.as_deref(),
+                    projection
+                        .next
+                        .as_deref()
+                        .unwrap_or("run `provenant accounts sync`"),
+                );
+                error.diagnostic = Some((&projection).into());
+                result.error = Some(error);
                 return emit(&result, globals, "", false);
             }
-            fail(command, status, code, &error.to_string(), globals)
+            fail(
+                command,
+                status,
+                code,
+                &error.to_string(),
+                REPAIR_CONFIG,
+                globals,
+            )
         }
     }
 }
@@ -1307,6 +1333,7 @@ fn supervise(descriptors: &[u64], globals: &provenant_cli::Globals, process: &dy
                     Outcome::Error,
                     "GRAPH_ADVANCE",
                     &error.to_string(),
+                    "run `provenant tick` after the reported cause is resolved",
                     globals,
                 ),
             },
@@ -1317,6 +1344,7 @@ fn supervise(descriptors: &[u64], globals: &provenant_cli::Globals, process: &dy
                     status,
                     code,
                     &error.to_string(),
+                    "rerun the command; if it persists, report its `--json` refusal",
                     globals,
                 )
             }
@@ -1330,16 +1358,32 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::ProcessTree { root } => return process_tree::run(root, globals),
         command => command,
     };
-    // Inside a lane, account state is out of reach whatever root was selected.
-    if matches!(command, Command::Quota { .. })
-        && std::env::var_os(provenant_core::consumer_env::LANE_DEPTH)
-            .is_some_and(|depth| depth != "0")
-    {
+    // Lanes may read quota and routing state (`quota show`, `quota history`
+    // and `route resolve`), but must not mutate account state: the mutating
+    // commands run provider probes with the chair's credentials and write the
+    // chair's quota record. Each refusal names the command to run outside the
+    // lane instead of sending the agent in a circle.
+    let mutating_quota_repair = match &command {
+        Command::Quota {
+            command: Some(provenant_cli::Quota::Tick { .. }),
+        } => Some("run `provenant quota tick` from the chair's session"),
+        Command::Quota {
+            command: Some(provenant_cli::Quota::Clear { .. }),
+        } => Some("run `provenant quota clear` from the chair's session"),
+        Command::Quota {
+            command: Some(provenant_cli::Quota::Display { .. }),
+        } => Some("run `provenant quota display` from the chair's session"),
+        _ => None,
+    };
+    let in_lane = std::env::var_os(provenant_core::consumer_env::LANE_DEPTH)
+        .is_some_and(|depth| depth != "0");
+    if in_lane && let Some(repair) = mutating_quota_repair {
         return fail(
             &inv.leaf,
-            Outcome::Error,
+            Outcome::Refused,
             "QUOTA_UNAVAILABLE_IN_LANE",
-            "account quota is unavailable inside a lane; read it from the chair's session",
+            "mutating quota commands are unavailable inside a lane; run them from the chair's session",
+            repair,
             globals,
         );
     }
@@ -1368,7 +1412,14 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                 }
                 state_handoff::PlanError::Io(_) => (Outcome::Error, "STATE_COPY"),
             };
-            return fail(&inv.leaf, status, code, &error.to_string(), globals);
+            return fail(
+                &inv.leaf,
+                status,
+                code,
+                &error.to_string(),
+                REPAIR_ROOT,
+                globals,
+            );
         }
     }
     if let Err(error) = roots::validate_globals(globals, session_save) {
@@ -1386,7 +1437,14 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         if matches!(error, roots::RootError::Home) && inv.leaf == "install" {
             return install::home_error(&inv.leaf, &error.to_string(), globals);
         }
-        return fail(&inv.leaf, status, code, &error.to_string(), globals);
+        return fail(
+            &inv.leaf,
+            status,
+            code,
+            &error.to_string(),
+            REPAIR_ROOT,
+            globals,
+        );
     }
     match command {
         Command::ProcessTree { .. } => unreachable!("process-tree returned before root validation"),
@@ -1450,13 +1508,17 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                             serde_json::Value::Null,
                         );
                         let projection = kind.map(|kind| kind.diagnostic());
-                        result.error = Some(CommandError {
-                            diagnostic: projection.as_ref().map(Into::into),
-                            code: kind.map_or("ACCOUNT", |kind| kind.code()).into(),
+                        let mut error = CommandError::new(
+                            kind.map_or("ACCOUNT", |kind| kind.code()),
                             message,
-                            cause: None,
-                            repair: projection.and_then(|diagnostic| diagnostic.next),
-                        });
+                            None,
+                            projection
+                                .as_ref()
+                                .and_then(|diagnostic| diagnostic.next.as_deref())
+                                .unwrap_or("run `provenant accounts sync` and retry"),
+                        );
+                        error.diagnostic = projection.as_ref().map(Into::into);
+                        result.error = Some(error);
                         provenant_cli::run::Reply {
                             result,
                             human: String::new(),
@@ -1507,7 +1569,14 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                     &human,
                     true,
                 ),
-                Err(error) => fail("root", Outcome::Error, "ROOT", &error.to_string(), globals),
+                Err(error) => fail(
+                    "root",
+                    Outcome::Error,
+                    "ROOT",
+                    &error.to_string(),
+                    REPAIR_ROOT,
+                    globals,
+                ),
             }
         }
         Command::Internal(provenant_cli::Internal::Supervise { descriptors }) => {
@@ -1519,6 +1588,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             Outcome::Error,
             "INTERNAL",
             "admit is dispatched before the command table",
+            "report this internal dispatch error; rerun the command",
             globals,
         ),
         Command::Internal(provenant_cli::Internal::Settle { request }) => {
@@ -1554,7 +1624,14 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             })();
             match result {
                 Ok(()) => 0,
-                Err(error) => fail(&inv.leaf, Outcome::Error, "SETTLEMENT", &error, globals),
+                Err(error) => fail(
+                    &inv.leaf,
+                    Outcome::Error,
+                    "SETTLEMENT",
+                    &error,
+                    "rerun `provenant reconcile` to finish settlement",
+                    globals,
+                ),
             }
         }
         Command::Internal(provenant_cli::Internal::LaneCleanup { request }) => {
@@ -1565,6 +1642,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                     Outcome::Error,
                     "LANE_CLEANUP",
                     &error.to_string(),
+                    "rerun lane cleanup after the writer releases custody",
                     globals,
                 ),
             }
@@ -1603,6 +1681,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                         Outcome::Error,
                         "PROVIDER_UPDATE",
                         &error,
+                        "rerun `provenant tick` after the reported cause is resolved",
                         globals,
                     ),
                 },
@@ -1611,6 +1690,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                     Outcome::Error,
                     "ROOT",
                     &error.to_string(),
+                    REPAIR_ROOT,
                     globals,
                 ),
             }
@@ -1620,6 +1700,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             Outcome::Invalid,
             "INVALID",
             "help must be resolved by the parser",
+            "report this internal parser error; rerun `provenant help`",
             globals,
         ),
         Command::Config(provenant_cli::Config::Ports) => {
@@ -1713,7 +1794,14 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                         roots::RootError::Checkout | roots::RootError::State(_) => Outcome::Invalid,
                         _ => Outcome::Error,
                     };
-                    fail(&inv.leaf, status, "ROOT", &error.to_string(), globals)
+                    fail(
+                        &inv.leaf,
+                        status,
+                        "ROOT",
+                        &error.to_string(),
+                        REPAIR_ROOT,
+                        globals,
+                    )
                 }
             }
         }
@@ -1732,6 +1820,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                     Outcome::Error,
                     "ROOT",
                     &error.to_string(),
+                    REPAIR_ROOT,
                     globals,
                 ),
             }
@@ -1851,13 +1940,12 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                     reply.result.data["refusal_notice_recovery_pending"] = serde_json::json!(true);
                     if reply.result.error.is_none() {
                         reply.result.status = provenant_records::Outcome::Failed;
-                        reply.result.error = Some(provenant_records::CommandError {
-                            code: "RECONCILE_INCOMPLETE".into(),
-                            message: message.into(),
-                            cause: None,
-                            repair: Some("rerun `provenant reconcile`".into()),
-                            diagnostic: None,
-                        });
+                        reply.result.error = Some(provenant_records::CommandError::new(
+                            "RECONCILE_INCOMPLETE",
+                            message,
+                            None,
+                            "rerun `provenant reconcile`",
+                        ));
                     }
                 }
             }
@@ -1933,13 +2021,12 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                     }
                     Err(message) => {
                         reply.result.status = Outcome::Invalid;
-                        reply.result.error = Some(CommandError {
-                            diagnostic: None,
-                            code: "EXPERIMENT_REPORT".into(),
+                        reply.result.error = Some(CommandError::new(
+                            "EXPERIMENT_REPORT",
                             message,
-                            cause: None,
-                            repair: None,
-                        });
+                            None,
+                            "use a non-empty experiment id without ':' and rerun `provenant telemetry experiments show`",
+                        ));
                     }
                 }
             }
@@ -1977,6 +2064,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                         Outcome::Invalid,
                         "QUOTA_CONFIG",
                         "invalid quota accounts configuration",
+                        "run `provenant check config --json` and correct the accounts configuration",
                         globals,
                     ),
                 },
@@ -1985,6 +2073,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                     Outcome::Error,
                     "ROOT",
                     &error.to_string(),
+                    REPAIR_ROOT,
                     globals,
                 ),
             }
@@ -2030,6 +2119,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                         outcome,
                         error.code(),
                         &error.to_string(),
+                        REPAIR_ROOT,
                         globals,
                     )
                 }
@@ -2214,7 +2304,9 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
             Outcome::Invalid,
             "INVALID",
             &error.to_string(),
-            error.repair(),
+            error
+                .repair()
+                .unwrap_or("correct the reported argument and rerun the command"),
             &globals,
         ),
         ParseOutcome::Help {
@@ -2260,6 +2352,7 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
                 Outcome::Error,
                 "IDENTITY",
                 &error.to_string(),
+                "report this identity error; rerun `provenant --version`",
                 &globals,
             ),
         },

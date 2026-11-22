@@ -21,13 +21,16 @@ pub fn run(globals: &Globals) -> u8 {
                 Outcome::Error
             };
             let mut result = CommandResult::new("disk report", outcome, None);
-            result.error = Some(CommandError {
-                diagnostic: None,
-                code: "DISK".into(),
-                message: error.to_string(),
-                cause: None,
-                repair: None,
-            });
+            result.error = Some(CommandError::new(
+                "DISK",
+                error.to_string(),
+                None,
+                if outcome == Outcome::Invalid {
+                    crate::REPAIR_ROOT
+                } else {
+                    crate::REPAIR_IO
+                },
+            ));
             result
         }
     };
@@ -40,13 +43,12 @@ pub fn run(globals: &Globals) -> u8 {
             Err(error) => {
                 result.status = Outcome::Error;
                 result.data = None;
-                result.error = Some(CommandError {
-                    diagnostic: None,
-                    code: "ENCODE".into(),
-                    message: error.to_string(),
-                    cause: None,
-                    repair: None,
-                });
+                result.error = Some(CommandError::new(
+                    "ENCODE",
+                    error.to_string(),
+                    None,
+                    "rerun `provenant disk report --json`, or report the encoding failure if it persists",
+                ));
                 String::new()
             }
         }
@@ -140,13 +142,12 @@ fn render(
         }
         Err(error) => {
             let mut failure = CommandResult::new("disk report", Outcome::Error, ());
-            failure.error = Some(CommandError {
-                diagnostic: None,
-                code: "IO".into(),
-                message: error.to_string(),
-                cause: None,
-                repair: None,
-            });
+            failure.error = Some(CommandError::new(
+                "IO",
+                error.to_string(),
+                None,
+                crate::REPAIR_IO,
+            ));
             if json {
                 let _ = provenant_cli::render(&failure, RenderMode::Json, stdout);
             } else {

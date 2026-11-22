@@ -41,10 +41,8 @@
     #[test]
     fn admission_redraw_keeps_a_stale_member_for_preparation() -> Result<(), Box<dyn Error>> {
         let first = resolved("codex", "paid", 17);
-        let mut stale = resolved("claude", "stale", 3);
-        stale.readiness = RouteReadiness::stale();
-        let mut replacement = super::admission_replacement(Ok(stale))?
-            .ok_or("stale member was treated as exhaustion")?;
+        let mut replacement = resolved("claude", "stale", 3);
+        replacement.readiness = RouteReadiness::stale();
         super::record_pool_redraw(&first, &mut replacement, "admission refused")?;
         assert!(matches!(replacement.readiness, RouteReadiness::Unavailable { reason: provenant_records::RouteExclusionReason::StaleAvailability, .. }));
         assert_eq!(replacement.pool_selection.unwrap().redraws[0].rejected_pick, "codex/paid");
@@ -85,10 +83,10 @@
         let readiness_path = readiness.join("cursor.json");
         let mut file = provenant_quota::ReadinessFile::default();
         file.records.push(provenant_quota::RouteReadiness {
-            extra: Default::default(), schema_version: 1,
+            extra: Default::default(), schema_version: provenant_quota::READINESS_SCHEMA_VERSION,
             scope: provenant_quota::ReadinessScope {
                 extra: Default::default(), host: provenant_quota::LOCAL_HOST.into(), adapter: "cursor".into(),
-                account_key: "local".into(), route: "cursor/composer-2.5".into(),
+                account_key: "local".into(), route: provenant_quota::ReadinessRoute::from_text("cursor/composer-2.5"),
             },
             state: provenant_quota::ReadinessState::Ready, reason: None,
             observed_unix_seconds: now, expires_unix_seconds: now + 300,
@@ -96,11 +94,13 @@
         });
         std::fs::write(&readiness_path, serde_json::to_vec(&file)?)?;
         std::fs::set_permissions(&readiness_path, std::fs::Permissions::from_mode(0o600))?;
-        let read = crate::quota::read_readiness(&state, &file.records[0].scope, now);
+        let read = crate::quota::read_readiness(&state, &file.records[0].scope, now, &provenant_quota::DEFAULT_FRESHNESS);
         assert_eq!(read.state, provenant_quota::ReadinessState::Ready, "{read:?}");
         assert_eq!(preview()?, "cursor", "real readiness remains a candidate");
         file.sync_probe_result(&record, provenant_quota::LOCAL_HOST, now, 300,
-            Some(provenant_quota::ReadinessReason::ProbeTimeout))?;
+            Some(provenant_quota::ReadinessReason::ProbeTimeout),
+            &provenant_quota::DEFAULT_FRESHNESS,
+)?;
         std::fs::write(&readiness_path, serde_json::to_vec(&file)?)?;
         assert!(preview().is_err(), "a published local probe failure still constrains preview");
         std::fs::remove_file(&readiness_path)?;
@@ -453,8 +453,17 @@
             adapter: &str,
             edit: impl FnOnce(&mut provenant_quota::AccountRecord),
         ) -> Result<(), Box<dyn Error>> {
+            self.seed_account(adapter, &format!("{adapter}-account"), edit)
+        }
+        /// Persist the record of one named account of a provider.
+        fn seed_account(
+            &self,
+            adapter: &str,
+            key: &str,
+            edit: impl FnOnce(&mut provenant_quota::AccountRecord),
+        ) -> Result<(), Box<dyn Error>> {
             use std::os::unix::fs::PermissionsExt;
-            let key = format!("{adapter}-account");
+            let key = key.to_owned();
             let scope = provenant_quota::AccountScope { extra: Default::default(),
                 adapter: adapter.into(),
                 account_key: key.clone(),
@@ -854,6 +863,297 @@
             1,
             "{reason}"
         );
+        Ok(())
+    }
+
+    /// The route resolve preview must pick the same candidate dispatch picks
+    /// for one quota state: a spent pool member redraws in both, and the next
+    /// admitted member is what both show.
+    #[test]
+    fn route_resolve_preview_and_dispatch_pick_the_same_candidate()
+    -> Result<(), Box<dyn Error>> {
+        use provenant_os::clock::SystemClock;
+        use super::{config::execute_in, Data, Route, RouteResolve};
+        let fixture = pair_fixture(exhaust, |_| {})?;
+        let request = super::RouteRequest {
+            read_heavy: false,
+            model: None,
+            route: Some("principal".into()),
+            effort: None,
+            confidential: false,
+            fallback: vec![],
+            exclude: vec![],
+        }
+        .to_domain()?;
+        let dispatch = super::resolve_dispatch(
+            &request,
+            &fixture.roots,
+            None,
+            ("fixture", 0),
+            &fixture.availability,
+            &fixture.access,
+            "fixture",
+            None,
+            &[],
+        )?;
+        let query = RouteResolve {
+            writes: false,
+            account: None,
+            name: None,
+            request: super::RouteRequest {
+                read_heavy: false,
+                model: None,
+                route: Some("principal".into()),
+                effort: None,
+                confidential: false,
+                fallback: vec![],
+                exclude: vec![],
+            },
+        };
+        let Data::Resolved(preview) = execute_in(
+            &Route::Resolve(query),
+            &fixture.roots,
+            provenant_core::Clock::wall_now(&SystemClock::new())?,
+            &fixture._temp.path().join("home"),
+            &fixture._temp.path().join("checkout"),
+        )? else {
+            return Err("expected a resolved route preview".into());
+        };
+        let dispatch_pick = format!("{}/{}", dispatch.adapter, dispatch.model);
+        let preview_pick = format!("{}/{}", preview.route.adapter, preview.route.model);
+        assert_eq!(dispatch_pick, preview_pick);
+        Ok(())
+    }
+
+    /// A paid plan's spent window cannot hide the free-pool member the same
+    /// account serves. The pool's only member is that account's free model, so
+    /// preview and dispatch must both select it whatever their draw seeds are,
+    /// and the preview must not report the route blocked.
+    #[test]
+    fn paid_exhaustion_keeps_the_free_member_preview_and_dispatch_agree()
+    -> Result<(), Box<dyn Error>> {
+        use provenant_os::clock::SystemClock;
+        use std::os::unix::fs::PermissionsExt;
+        use super::{config::execute_in, Data, Route, RouteResolve};
+
+        let fixture = ReviewFixture::new()?;
+        let path = fixture.roots.state.as_path().join("config.toml");
+        std::fs::write(
+            &path,
+            "schema_version=1\n[domains.routing.pools]\nprincipal=[{model='opencode/opencode/deepseek-v4.1-flash-free',weight=1}]\n",
+        )?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        let now = fixture.now;
+        // One OpenCode account on the paid `go` plan: its paid window is spent
+        // and OpenCode reports partial coverage, which stays advisory, while
+        // the keyless free pool member is still available.
+        fixture.seed("opencode", |record| {
+            let account = record.account.clone();
+            record.snapshot = Some(provenant_quota::QuotaSnapshot {
+                extra: Default::default(),
+                schema_version: 1,
+                account,
+                revision: 0,
+                status: provenant_quota::QuotaStatus::Exhausted,
+                observed_unix_seconds: now,
+                source_ref: "fixture".into(),
+                authority_ref: None,
+                windows: vec![provenant_quota::QuotaWindow {
+                    extra: Default::default(),
+                    pool: "five_hour".into(),
+                    window_seconds: Some(18_000),
+                    used_basis_points: 10_000,
+                    resets_unix_seconds: Some(now + 3_600),
+                }],
+                details: Some(provenant_quota::QuotaDetails {
+                    plan: Some("go".into()),
+                    coverage: Some("partial".into()),
+                    ..Default::default()
+                }),
+            });
+        })?;
+        let availability = [provenant_providers::AvailabilityRecord {
+            schema_version: 1,
+            adapter: "opencode".into(),
+            executable: "/fixture/opencode".into(),
+            version: "fixture".into(),
+            last_update: None,
+            fixture_ref: "fixture".into(),
+            catalogue_revision: super::Catalogue::bundled()?.revision().into(),
+            account_key: Some("opencode-account".into()),
+            plan: None,
+            observed_models: vec![
+                "opencode-go/deepseek-v4.1-flash".into(),
+                "opencode/deepseek-v4.1-flash-free".into(),
+            ],
+            observed_unix_seconds: now,
+            expires_unix_seconds: now + 300,
+        }];
+        let access = [provenant_routing::AccessContext {
+            adapter: "opencode",
+            disclosure_ref: "fixture",
+            confinement_ref: "fixture",
+        }];
+        let request = super::RouteRequest {
+            read_heavy: false,
+            model: None,
+            route: Some("principal".into()),
+            effort: None,
+            confidential: false,
+            fallback: vec![],
+            exclude: vec![],
+        };
+        let dispatch = super::resolve_dispatch(
+            &request.to_domain()?,
+            &fixture.roots,
+            None,
+            ("fixture", 0),
+            &availability,
+            &access,
+            "fixture",
+            None,
+            &[],
+        )?;
+        assert_eq!(
+            dispatch.model, "opencode/deepseek-v4.1-flash-free",
+            "the spent paid window cannot exclude the free member"
+        );
+        // The preview admission shares this verdict: an account-wide reading
+        // would report the whole route blocked even though dispatch serves it.
+        assert_eq!(
+            super::route_blocked("principal", &[], &fixture.roots),
+            None,
+            "the preview must not block a free member its own dispatch admits"
+        );
+        let query = RouteResolve {
+            writes: false,
+            account: None,
+            name: None,
+            request,
+        };
+        let Data::Resolved(preview) = execute_in(
+            &Route::Resolve(query),
+            &fixture.roots,
+            provenant_core::Clock::wall_now(&SystemClock::new())?,
+            &fixture._temp.path().join("home"),
+            &fixture._temp.path().join("checkout"),
+        )? else {
+            return Err("expected a resolved route preview".into());
+        };
+        assert_eq!(
+            preview.route.model, "opencode/deepseek-v4.1-flash-free",
+            "preview keeps the free member"
+        );
+        Ok(())
+    }
+
+    /// The redraw receipt rides on the candidate admission accepted, so the
+    /// route a preview shows names the pool member it passed over and why.
+    ///
+    /// Dispatch cannot carry this receipt for a spent member: routing classifies
+    /// exhaustion before weights, so the draw only offers members it judged
+    /// ready and the spent one is an exclusion, not a refuted pick. A preview
+    /// has no live probe, so it uses its weighted draw, judges each member's
+    /// cached accounts and redraws on the member it refuses. The spent member is
+    /// the only weighted candidate and the ready one has zero weight, so the
+    /// first draw offers the spent member whichever order declares them.
+    #[test]
+    fn preview_route_carries_the_redraw_receipt() -> Result<(), Box<dyn Error>> {
+        use provenant_os::clock::SystemClock;
+        use std::os::unix::fs::PermissionsExt;
+        use super::{config::execute_in, Data, Route, RouteResolve};
+        let fixture = pair_fixture(exhaust, |_| {})?;
+        let path = fixture.roots.state.as_path().join("config.toml");
+        std::fs::write(
+            &path,
+            "schema_version=1\n[domains.routing.pools]\nprincipal=[{model='claude/claude-haiku-5-5',weight=1,effort='high',efforts=['high']},{model='codex/gpt-6-luna',weight=0,effort='high',efforts=['high']}]\n",
+        )?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        let query = RouteResolve {
+            writes: false,
+            account: None,
+            name: None,
+            request: super::RouteRequest {
+                read_heavy: false,
+                model: None,
+                route: Some("principal".into()),
+                effort: None,
+                confidential: false,
+                fallback: vec![],
+                exclude: vec![],
+            },
+        };
+        let Data::Resolved(preview) = execute_in(
+            &Route::Resolve(query),
+            &fixture.roots,
+            provenant_core::Clock::wall_now(&SystemClock::new())?,
+            &fixture._temp.path().join("home"),
+            &fixture._temp.path().join("checkout"),
+        )? else {
+            return Err("expected a resolved route preview".into());
+        };
+        assert_eq!(
+            format!("{}/{}", preview.route.adapter, preview.route.model),
+            "codex/gpt-6-luna",
+            "the spent first member cannot be shown"
+        );
+        let selection = preview
+            .route
+            .pool_selection
+            .as_ref()
+            .ok_or("pool selection")?;
+        assert_eq!(selection.redraws.len(), 1, "{selection:?}");
+        let redraw = &selection.redraws[0];
+        assert_eq!(redraw.rejected_pick, "claude/claude-haiku-5-5");
+        assert_eq!(
+            redraw.cause,
+            Some(provenant_records::RouteExclusionReason::Exhausted)
+        );
+        assert!(
+            redraw.reason.contains("allowance exhausted"),
+            "{}",
+            redraw.reason
+        );
+        Ok(())
+    }
+
+    /// `route resolve --account` judges only the pinned account: a free second
+    /// account of the same provider cannot hide that the pinned one is spent.
+    #[test]
+    fn route_resolve_preview_judges_only_the_pinned_account() -> Result<(), Box<dyn Error>> {
+        use provenant_os::clock::SystemClock;
+        use super::{config::execute_in, Data, Route, RouteResolve};
+        let fixture = pair_fixture(exhaust, |_| {})?;
+        fixture.seed_account("claude", "claude-personal", |_| {})?;
+        let preview = |account: Option<&str>| -> Result<String, Box<dyn Error>> {
+            let query = RouteResolve {
+                writes: false,
+                account: account.map(Into::into),
+                name: None,
+                request: super::RouteRequest {
+                    read_heavy: false,
+                    model: None,
+                    route: Some("principal".into()),
+                    effort: None,
+                    confidential: false,
+                    fallback: vec![],
+                    exclude: vec![],
+                },
+            };
+            let Data::Resolved(preview) = execute_in(
+                &Route::Resolve(query),
+                &fixture.roots,
+                provenant_core::Clock::wall_now(&SystemClock::new())?,
+                &fixture._temp.path().join("home"),
+                &fixture._temp.path().join("checkout"),
+            )? else {
+                return Err("expected a resolved route preview".into());
+            };
+            Ok(preview.route.adapter.clone())
+        };
+        // The spent account is pinned: claude cannot serve, so codex is shown.
+        assert_eq!(preview(Some("claude-account"))?, "codex");
+        assert_eq!(preview(Some("claude/claude-account"))?, "codex");
         Ok(())
     }
 

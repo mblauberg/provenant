@@ -99,7 +99,14 @@ pub fn run(command: Cloud, globals: &Globals) -> u8 {
             if let Some(diagnostic) = project_binding_directory_diagnostic(error.as_ref()) {
                 fail_with_diagnostic(leaf, Outcome::Invalid, code, &diagnostic, globals)
             } else {
-                fail(leaf, Outcome::Error, code, &error.to_string(), globals)
+                fail(
+                    leaf,
+                    Outcome::Error,
+                    code,
+                    &error.to_string(),
+                    "check the reported cloud error and connection, then rerun the cloud command",
+                    globals,
+                )
             }
         }
     }

@@ -270,16 +270,20 @@ fn invoke(
         Ok(input) => input,
         Err(projection) => {
             let mut result = CommandResult::new(command, Outcome::Invalid, Value::Null);
-            result.error = Some(provenant_records::CommandError {
-                diagnostic: Some(projection.as_ref().into()),
-                code: projection.code.clone(),
-                message: projection
+            let repair = projection.next.clone().unwrap_or_else(|| {
+                "correct the reported graph input, then rerun the graph command".to_owned()
+            });
+            let mut error = provenant_records::CommandError::new(
+                projection.code.clone(),
+                projection
                     .detail
                     .clone()
                     .unwrap_or_else(|| "graph input could not be processed".into()),
-                cause: None,
-                repair: projection.next,
-            });
+                None,
+                &repair,
+            );
+            error.diagnostic = Some(projection.as_ref().into());
+            result.error = Some(error);
             return crate::emit(&result, globals, "", false);
         }
     };
@@ -403,38 +407,28 @@ fn invoke(
                     .as_array()
                     .and_then(|rows| rows.iter().find(|row| row["status"] == "refused"))
             {
-                result.error = Some(provenant_records::CommandError {
-                    code: refusal["code"]
+                result.error = Some(provenant_records::CommandError::new(
+                    refusal["code"].as_str().unwrap_or("preparation_refused"),
+                    refusal["reason"]
                         .as_str()
-                        .unwrap_or("preparation_refused")
-                        .into(),
-                    message: refusal["reason"]
-                        .as_str()
-                        .unwrap_or("source admission refused")
-                        .into(),
-                    diagnostic: None,
-                    cause: None,
-                    repair: None,
-                });
+                        .unwrap_or("source admission refused"),
+                    None,
+                    "correct the reported source admission refusal and rerun `provenant run`",
+                ));
             }
             if command == "run"
                 && !replayed
                 && let Some(node) = launch_error_node(&result.data, result.status)
             {
-                result.error = Some(provenant_records::CommandError {
-                    code: node["advance_owner_code"]
+                result.error = Some(provenant_records::CommandError::new(
+                    node["advance_owner_code"]
                         .as_str()
                         .or_else(|| node["advance_error_code"].as_str())
-                        .unwrap_or("launch_failed")
-                        .into(),
-                    message: node["advance_error"]
-                        .as_str()
-                        .unwrap_or("launch failed")
-                        .into(),
-                    diagnostic: None,
-                    cause: None,
-                    repair: None,
-                });
+                        .unwrap_or("launch_failed"),
+                    node["advance_error"].as_str().unwrap_or("launch failed"),
+                    None,
+                    "correct the reported launch failure and rerun `provenant run`",
+                ));
             }
             let summary = if command == "templates" {
                 templates_summary(&result.data, input.get("name").and_then(Value::as_str))
@@ -464,7 +458,9 @@ fn invoke(
                 .unwrap_or_else(|| {
                     provenant_records::diagnostic::Diagnostic::new("graph_error")
                         .detail(error.to_string())
-                        .next(format!("provenant help {command} --json"))
+                        .next(format!(
+                            "resolve the reported graph error, then rerun `provenant {command}`"
+                        ))
                 });
             let outcome = facade.map_or(
                 if config.is_some() {
@@ -475,20 +471,23 @@ fn invoke(
                 provenant_cli::fabric::coordination_outcome,
             );
             let mut result = CommandResult::new(command, outcome, Value::Null);
-            result.error = Some(provenant_records::CommandError {
-                diagnostic: Some((&projection).into()),
-                code: projection.code.as_str().into(),
-                message: projection
+            let repair = projection.next.clone().unwrap_or_else(|| {
+                "correct the reported graph error, then rerun the graph command".to_owned()
+            });
+            let cause = facade
+                .and_then(|error| error.cause())
+                .map_or_else(|| error.to_string(), str::to_owned);
+            let mut error = provenant_records::CommandError::new(
+                projection.code.as_str(),
+                projection
                     .detail
                     .clone()
                     .unwrap_or_else(|| "graph input could not be processed".into()),
-                cause: Some(
-                    facade
-                        .and_then(|error| error.cause())
-                        .map_or_else(|| error.to_string(), str::to_owned),
-                ),
-                repair: projection.next,
-            });
+                Some(cause.as_str()),
+                &repair,
+            );
+            error.diagnostic = Some((&projection).into());
+            result.error = Some(error);
             crate::emit(&result, globals, "", false)
         }
     }

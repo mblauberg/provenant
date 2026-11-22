@@ -53,7 +53,7 @@ impl LiveQuota {
         let log_arg = log.to_str().ok_or(ProbeFailure::Malformed)?;
         let payload = self.json_command(
             &probe_home,
-            "agy",
+            provenant_records::Harness::Agy.spec().binary,
             &[
                 "-p",
                 "/usage",
@@ -68,7 +68,7 @@ impl LiveQuota {
         )?;
         let signed_in = payload.get("status").and_then(Value::as_str) == Some("SUCCESS");
         let actual = agy_signed_in_account(signed_in, read(&log).ok())?;
-        let key = format!("agy-{actual}");
+        let key = provenant_records::Harness::Agy.spec().account_key(&actual);
         // A safe atomic save is not a missing keychain. Its identity stamp is
         // uncertain for this observation, so retry briefly rather than applying
         // the unavailable-keychain backoff or caching an old account identity.
@@ -87,13 +87,16 @@ impl LiveQuota {
         // The synthetic local key deliberately names the current HOME login;
         // registered keys must still match the probed Google identity exactly.
         let local = probe_home.path() == self.home
-            && provenant_records::AdapterSpec::get("agy")
-                .is_some_and(|spec| spec.is_unregistered_local(&account.scope.account_key));
+            && provenant_records::Harness::Agy
+                .spec()
+                .is_unregistered_local(&account.scope.account_key);
         if key != account.scope.account_key && !local {
-            if let Some(roots) = &self.roots {
+            if let Some(roots) = &self.roots
+                && let Some(reconcile) = crate::agy::REGISTRATION.reconcile_account
+            {
                 // Failure to save never makes the stale identity routable. A
                 // later quota probe retries under the normal mismatch backoff.
-                match crate::accounts::reconcile_agy(
+                match reconcile(
                     roots,
                     &account.identity_dir,
                     &account.scope.account_key,
@@ -109,7 +112,10 @@ impl LiveQuota {
                     Ok(false) => {}
                     Err(error) => {
                         *self.last_reconcile_error.borrow_mut() = Some(error.to_string());
-                        eprintln!("provenant: failed to reconcile agy account switch: {error}");
+                        eprintln!(
+                            "provenant: failed to reconcile {} account switch: {error}",
+                            provenant_records::Harness::Agy.spec().name
+                        );
                     }
                 }
             }

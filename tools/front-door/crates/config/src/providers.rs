@@ -60,9 +60,8 @@ pub fn defaults() -> BTreeMap<String, ProviderSettings> {
         .iter()
         .map(|provider| {
             let mut settings = ProviderSettings::default();
-            if provider.name == "cursor" {
-                settings.models =
-                    Some(["auto", "composer-*", "grok-*"].map(str::to_owned).to_vec());
+            if let Some(models) = provider.default_models {
+                settings.models = Some(models.iter().map(|model| (*model).to_owned()).collect());
             }
             (provider.name.to_owned(), settings)
         })

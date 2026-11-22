@@ -4350,6 +4350,7 @@ fn opencode_free_pool_cools_second_model() -> Result {
     let pools = vec!["opencode-free".to_owned()];
     assert!(matches!(
         provenant_quota::Admission {
+            freshness: &provenant_quota::DEFAULT_FRESHNESS,
             policy: &provenant_records::policy::Policy::default(),
             policies: &provenant_providers::quota_policies(provenant_providers::REGISTRY),
             now_unix_seconds: now,
@@ -4357,8 +4358,9 @@ fn opencode_free_pool_cools_second_model() -> Result {
             pools: &pools,
         }
         .check(&second),
-        Err(provenant_quota::QuotaError::Refused(reason))
-            if reason == provenant_quota::AccountBlock::FreeTierRefusal.repair()
+        Err(provenant_quota::QuotaError::Blocked(
+            provenant_quota::AccountBlock::FreeTierRefusal
+        ))
     ));
     Ok(())
 }
@@ -4379,7 +4381,7 @@ fn opencode_free_limit_records_provider_retry_after() -> Result {
         Some(refusal.observed_unix_seconds + 5625)
     );
     assert_eq!(
-        refusal.expires_unix_seconds()?,
+        refusal.expires_unix_seconds(&provenant_quota::DEFAULT_FRESHNESS)?,
         refusal.observed_unix_seconds + 5625
     );
     Ok(())
@@ -4436,6 +4438,7 @@ fn opencode_free_reset_cools_pool_until_reset_and_restores() -> Result {
     let pools = vec!["opencode-free".to_owned()];
     let admit = |route: &ResolvedRoute, at| {
         provenant_quota::Admission {
+            freshness: &provenant_quota::DEFAULT_FRESHNESS,
             policy: &provenant_records::policy::Policy::default(),
             policies: &provenant_providers::quota_policies(provenant_providers::REGISTRY),
             now_unix_seconds: at,
@@ -4450,8 +4453,9 @@ fn opencode_free_reset_cools_pool_until_reset_and_restores() -> Result {
         for route in [&first, &second] {
             assert!(matches!(
                 admit(route, at),
-                Err(provenant_quota::QuotaError::Refused(reason))
-                    if reason == provenant_quota::AccountBlock::FreeTierRefusal.repair()
+                Err(provenant_quota::QuotaError::Blocked(
+                    provenant_quota::AccountBlock::FreeTierRefusal
+                ))
             ));
         }
     }
@@ -4555,6 +4559,7 @@ fn agy_individual_quota_cools_model_until_revalidation() -> Result {
     };
     let admit = |route: &ResolvedRoute, now_unix_seconds| {
         provenant_quota::Admission {
+            freshness: &provenant_quota::DEFAULT_FRESHNESS,
             policy: &provenant_records::policy::Policy::default(),
             policies: &provenant_providers::quota_policies(provenant_providers::REGISTRY),
             now_unix_seconds,
@@ -4568,8 +4573,9 @@ fn agy_individual_quota_cools_model_until_revalidation() -> Result {
     for at in [now, now + 299] {
         assert!(matches!(
             admit(&route, at),
-            Err(provenant_quota::QuotaError::Refused(reason))
-                if reason == provenant_quota::AccountBlock::ScopedRefusal.repair()
+            Err(provenant_quota::QuotaError::Blocked(
+                provenant_quota::AccountBlock::ScopedRefusal
+            ))
         ));
     }
     assert!(now + 300 < resets);

@@ -172,36 +172,51 @@ fn compact_view_bounds_rows_and_full_view_shows_all_configured_accounts() -> Res
 }
 
 #[test]
-fn account_quota_is_unavailable_inside_a_lane() -> Result {
+// Invariant: a lane reads quota and routing state but cannot mutate it.
+fn a_lane_reads_quota_but_cannot_mutate_it() -> Result {
     let mut rig = quota_rig()?;
     rig.env
         .push((provenant_core::consumer_env::LANE_DEPTH.into(), "1".into()));
 
-    let missing = rig.state.join("missing-project");
-    let missing = missing.to_str().ok_or("non-UTF-8 fixture path")?;
+    // Read-only account and routing state is available inside a lane.
     for args in [
-        &["quota"][..],
-        &["quota", "--json"],
-        &["--project", missing, "quota"],
+        &["quota", "show", "--json"][..],
+        &["quota", "history", "--json"],
+        &["route", "resolve", "codex/gpt-6-luna", "--json"],
+    ] {
+        let output = rig.command(args)?;
+        assert_eq!(
+            code(&output),
+            0,
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stdout.bytes)
+        );
+    }
+    assert!(!rig.state.join("quota").exists());
+
+    // Mutating quota commands are refused with a concrete next step that
+    // points out of the lane, never a circular help command.
+    for (args, command) in [
+        (&["quota", "tick", "--json"][..], "quota tick"),
+        (&["quota", "clear", "codex", "--json"], "quota clear"),
+        (
+            &["quota", "display", "--icon", "codex", "--json"],
+            "quota display",
+        ),
     ] {
         let output = rig.command(args)?;
         assert_ne!(code(&output), 0, "{args:?}");
-        if !args.contains(&"--json") {
-            let text = format!(
-                "{}{}",
-                String::from_utf8_lossy(&output.stdout.bytes),
-                String::from_utf8_lossy(&output.stderr.bytes)
-            );
-            assert!(text.contains("QUOTA_UNAVAILABLE_IN_LANE"), "{text}");
-            assert!(text.contains("unavailable inside a lane"), "{text}");
-            assert!(text.contains("chair's session"), "{text}");
-        } else {
-            let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
-            assert_eq!(report["error"]["code"], "QUOTA_UNAVAILABLE_IN_LANE");
-            assert!(report["error"]["message"].as_str().is_some_and(|message| {
-                message.contains("unavailable inside a lane") && message.contains("chair's session")
-            }));
-        }
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+        assert_eq!(
+            report["error"]["code"], "QUOTA_UNAVAILABLE_IN_LANE",
+            "{report}"
+        );
+        let repair = report["error"]["repair"]
+            .as_str()
+            .ok_or("mutating quota refusal has a repair")?;
+        assert!(repair.contains("chair's session"), "{repair}");
+        assert!(repair.contains(command), "{repair}");
+        assert!(!repair.contains("provenant help"), "{repair}");
     }
     assert!(!rig.state.join("quota").exists());
     rig.assert_v1_root_untouched()
@@ -971,6 +986,7 @@ fn registered_accounts_have_distinct_quota_keys() -> Result {
         });
         let records = [record];
         let admission = Admission {
+            freshness: &provenant_quota::DEFAULT_FRESHNESS,
             policy: &provenant_records::policy::Policy::default(),
             policies: &provenant_providers::quota_policies(provenant_providers::REGISTRY),
             now_unix_seconds: at,

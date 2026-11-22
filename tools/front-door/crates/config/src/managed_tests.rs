@@ -3394,6 +3394,19 @@ fn declared_hooks_render_and_symlinked_configs_refuse_before_any_write() {
     assert!(Snapshots::capture(&release, &f.targets).is_ok());
     assert!(!f.targets.roots.state.as_path().exists());
     f.targets.hook_specs.clear();
+    assert!(
+        f.targets.validate().is_ok(),
+        "hooks with no hook specification warn and proceed by default"
+    );
+    let mut strict = provenant_records::policy::Policy::default();
+    strict.overlay(
+        &std::collections::BTreeMap::from([(
+            "INSTALL_HOOKS_UNAVAILABLE".to_owned(),
+            provenant_records::policy::Strength::Refuse,
+        )]),
+        provenant_records::policy::Source::Project,
+    );
+    f.targets.policy = std::sync::Arc::new(strict);
     assert!(matches!(
         f.targets.validate(),
         Err(InstallError::HooksUnavailable)

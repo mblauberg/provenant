@@ -79,6 +79,13 @@
       "refresh_budget_seconds": {"type": "int", "allowed": "1 to 600 seconds", "min": 1, "max": 600, "default": "120", "effect": "Wall-clock budget for one quota refresh cycle."},
       "refresh_min_budget_seconds": {"type": "int", "allowed": "1 to 600 seconds", "min": 1, "max": 600, "default": "60", "effect": "Minimum wall-clock budget kept for a quota refresh after other work; it must not exceed refresh_budget_seconds."},
       "login_expiry_warning_seconds": {"type": "int", "allowed": "0 or more seconds", "min": 0, "default": "864000", "effect": "Warn this many seconds before a provider login expires."},
+      "freshness.snapshot_seconds": {"type": "int", "allowed": "1 or more seconds", "min": 1, "default": "900", "effect": "Fallback lifetime of a quota snapshot when its adapter has no polling interval."},
+      "freshness.login_verification_seconds": {"type": "int", "allowed": "1 or more seconds", "min": 1, "default": "900", "effect": "How long a positive login observation suppresses an ambient sign-in detection."},
+      "freshness.chair_seconds": {"type": "int", "allowed": "1 or more seconds", "min": 1, "default": "900", "effect": "Maximum age of a snapshot used for an automatic chair switch."},
+      "freshness.availability_grace_seconds": {"type": "int", "allowed": "1 or more seconds", "min": 1, "default": "60", "effect": "Grace after an availability observation expires, for routing decisions already in flight."},
+      "freshness.refusal_seconds": {"type": "int", "allowed": "1 or more seconds", "min": 1, "default": "3600", "effect": "Refusal lifetime when the provider names no reset and the adapter has no override."},
+      "freshness.free_pool_recheck_seconds": {"type": "int", "allowed": "1 or more seconds", "min": 1, "default": "600", "effect": "How long a live free-pool refusal may go without a cheap recheck."},
+      "freshness.readiness_min_seconds": {"type": "int", "allowed": "1 or more seconds", "min": 1, "default": "1", "effect": "Shortest expiry synthesised for a readiness observation."},
       "display.headline": {"type": "enum", "effect": "Which quota window the headline shows: auto, 5h or weekly."},
       "display.icon": {"type": "string", "allowed": "icon selection", "default": "most_constrained", "effect": "Which account's usage drives the quota menu-bar icon."},
       "polling_intervals.{adapter}.timer_seconds": {"type": "int", "allowed": "1 to 2305843009213693951 seconds", "min": 1, "default": "unset", "effect": "Timer cadence for quota polling of this adapter.", "max": 2305843009213693951},
@@ -342,7 +349,8 @@
       "forge_source": {"type": "string", "allowed": "auto, webhook or poll", "default": "auto", "effect": "Host forge event source for waits: auto detects, webhook listens for events, poll samples the forge."},
       "max_targets": {"type": "int", "allowed": "1 to 1024", "min": 1, "max": 1024, "default": "64", "effect": "Maximum number of targets a single wait may track."},
       "pr_read_timeout_seconds": {"type": "int", "allowed": "1 to 600 seconds", "min": 1, "max": 600, "default": "60", "effect": "Timeout for one pull request read before the wait retries."},
-      "actions_grace_seconds": {"type": "int", "allowed": "0 to 600 seconds", "min": 0, "max": 600, "default": "60", "effect": "How long a pull request wait holds a settling reading while Actions reports no run for its head; zero settles at once."}
+      "actions_grace_seconds": {"type": "int", "allowed": "0 to 600 seconds", "min": 0, "max": 600, "default": "60", "effect": "How long a pull request wait holds a settling reading while Actions reports no run for its head; zero settles at once."},
+      "preflight_busy_timeout_ms": {"type": "int", "allowed": "0 to 60000 milliseconds", "min": 0, "max": 60000, "default": "2000", "effect": "How long a wait tolerates a momentarily busy store during preflight before it reports the store busy; the final snapshot stays nonblocking. Zero fails at once."}
     }
   },
   "host_graph_settings": {
@@ -510,6 +518,7 @@
       "policy.LAUNCH_SANDBOX_UNAVAILABLE_NONE": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "An unavailable sandbox backend warns and proceeds for host access, naming the access source and recording the reason in the receipt."},
       "policy.LAUNCH_PROCESS_TREE_INTERVAL_OR_WARN_NONE": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "Unreadable run settings warn and launch the lane without a process-tree sampler; admission then skips its memory limit with a warning. The setting source is named in each warning."},
       "policy.LAUNCH_RETAINED_CUSTODY_LIMIT_OR_WARN_DEFAULT": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "Unreadable run settings warn and launch the lane with the shipped retained-custody limit. The setting source is named in each warning."},
+      "policy.PR_ATTEMPT_STATE": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "Opening a pull request from an attempt that did not end succeeded or review_required warns and proceeds from its recorded branch and head. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
       "policy.PORT_BLOCKS": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "An exhausted port-block pool warns the writer and reports the effective count, its host or compiled origin, and the setting that can raise the pool or disable allocation. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
       "policy.GUARDIAN_LANE_PORT_ALLOCATION_NONE": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "A port-block allocation I/O failure warns and continues without a block; stale port-block environment variables are removed. The setting source is named in each warning."},
       "policy.PACING_ADAPTER": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "An adapter reserve defaults to shipped values and can be configured; the observation reports its effective percentage and source. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},

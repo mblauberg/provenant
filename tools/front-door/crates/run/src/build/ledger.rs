@@ -21,16 +21,6 @@ pub struct LedgerRotation {
     pub expired: u64,
 }
 
-/// Current wall time in Unix milliseconds, saturating on clock conversion.
-pub fn now_unix_ms() -> u64 {
-    u64::try_from(
-        provenant_os::clock::SystemClock::new()
-            .wall_now()
-            .map_or(0, |time| time.unix_millis().max(0)),
-    )
-    .unwrap_or_default()
-}
-
 /// Append one row under the host ledger lock. If host state cannot be written,
 /// append to the attempt scratch file and report the failure if that also fails.
 pub fn append(row: &JobOutcome, state: &Path, attempt_scratch: Option<&Path>) {

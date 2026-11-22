@@ -29,6 +29,8 @@ pub const REGISTRATION: crate::Registration = crate::Registration {
         low_power: true,
         solo: false,
     },
+    reconcile_account: None,
+    model_offers_sink: None,
 };
 
 crate::adapter!(Command, "command", prepare);

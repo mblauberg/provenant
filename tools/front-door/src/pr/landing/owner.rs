@@ -211,7 +211,7 @@ fn latest_record(
 fn write_record(state: &Path, record: &LandingRecord) -> Result<(), LandingError> {
     let bytes = serde_json::to_vec_pretty(record)
         .map_err(|error| LandingError::Failed(format!("encode landing record: {error}")))?;
-    receipt::atomic_write(&record_path(state, &record.id), &bytes)
+    receipt::write_publication(&record_path(state, &record.id), &bytes)
 }
 
 fn settlement_record(

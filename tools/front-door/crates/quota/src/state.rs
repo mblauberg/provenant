@@ -513,6 +513,10 @@ pub struct AccountRow {
     /// Active provider refusals scoped to a pool or model.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub refusals: Vec<RefusalRow>,
+    /// Models this account can serve now, with the reason for every exclusion.
+    /// The menu reads this list instead of deriving availability itself.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<crate::ModelAvailability>,
     /// Whether a recorded refusal currently holds this account's free pool.
     #[serde(default, skip_serializing_if = "is_false")]
     pub free_pool_refusal: bool,

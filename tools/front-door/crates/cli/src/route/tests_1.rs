@@ -54,12 +54,12 @@
             host: provenant_quota::LOCAL_HOST.into(),
             adapter: "codex".into(),
             account_key: "key-one".into(),
-            route: model.as_str().into(),
+            route: provenant_quota::ReadinessRoute::from_text(model.as_str()),
         };
         let file = ReadinessFile {
             records: vec![
                 RouteReadiness { extra: Default::default(),
-                    schema_version: 1,
+                    schema_version: provenant_quota::READINESS_SCHEMA_VERSION,
                     scope: scope.clone(),
                     state: ReadinessState::Unavailable,
                     reason: Some(ReadinessReason::ProviderRefusal),
@@ -69,7 +69,7 @@
                     evidence_ref: Some("fixture".into()),
                 },
                 RouteReadiness { extra: Default::default(),
-                    schema_version: 1,
+                    schema_version: provenant_quota::READINESS_SCHEMA_VERSION,
                     scope: ReadinessScope {
                         account_key: "key-two".into(),
                         ..scope.clone()
@@ -82,10 +82,10 @@
                     evidence_ref: Some("fixture".into()),
                 },
                 RouteReadiness { extra: Default::default(),
-                    schema_version: 1,
+                    schema_version: provenant_quota::READINESS_SCHEMA_VERSION,
                     scope: ReadinessScope {
                         account_key: "key-two".into(),
-                        route: "verified-pool".into(),
+                        route: provenant_quota::ReadinessRoute::pool("verified-pool"),
                         ..scope.clone()
                     },
                     state: ReadinessState::Unavailable,
@@ -104,7 +104,7 @@
             &[],
             None,
             Some("one"),
-            |requested| file.get(requested, 15),
+            |requested| file.get(requested, 15, &provenant_quota::DEFAULT_FRESHNESS),
         );
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].host, provenant_quota::LOCAL_HOST);
@@ -122,7 +122,7 @@
             &[],
             None,
             Some("two"),
-            |requested| file.get(requested, 15),
+            |requested| file.get(requested, 15, &provenant_quota::DEFAULT_FRESHNESS),
         );
         assert_eq!(other[0].observation.state, ReadinessState::Ready);
         assert_eq!(other[0].observation.observed_unix_seconds, Some(11));
@@ -132,7 +132,7 @@
             &["verified-pool".into()],
             None,
             Some("two"),
-            |requested| file.get(requested, 15),
+            |requested| file.get(requested, 15, &provenant_quota::DEFAULT_FRESHNESS),
         );
         assert_eq!(
             pooled[0].observation.reason,
@@ -140,7 +140,7 @@
         );
         assert_eq!(
             pooled[0].observation.observed_scope.as_ref().unwrap().route,
-            "verified-pool"
+            provenant_quota::ReadinessRoute::pool("verified-pool")
         );
         let other_model = super::ModelId::parse("codex/gpt-6.1-terra")?;
         let other = super::recorded_model_readiness(
@@ -149,7 +149,7 @@
             &[],
             None,
             Some("one"),
-            |requested| file.get(requested, 15),
+            |requested| file.get(requested, 15, &provenant_quota::DEFAULT_FRESHNESS),
         );
         assert_eq!(other[0].observation.state, ReadinessState::Unknown);
         Ok(())
@@ -388,6 +388,7 @@
                 now - 10,
                 300,
                 Some(ReadinessReason::SignedOut),
+                &provenant_quota::DEFAULT_FRESHNESS,
             )?;
             let path = dir.join(format!("{adapter}.json"));
             std::fs::write(&path, serde_json::to_vec(&file)?)?;
@@ -489,6 +490,7 @@
             now - 10,
             300,
             Some(ReadinessReason::SignedOut),
+            &provenant_quota::DEFAULT_FRESHNESS,
         )?;
         let path = dir.join("opencode.json");
         std::fs::write(&path, serde_json::to_vec(&file)?)?;
@@ -561,9 +563,10 @@
                     host: LOCAL_HOST.into(),
                     adapter: "opencode".into(),
                     account_key: "go".into(),
-                    route: "opencode/opencode-go/deepseek-v4.1-flash".into()
+                    route: provenant_quota::ReadinessRoute::from_text("opencode/opencode-go/deepseek-v4.1-flash")
                 },
-                now
+                now,
+                &provenant_quota::DEFAULT_FRESHNESS,
             )
             .reason,
             Some(ReadinessReason::SignedOut)
@@ -583,6 +586,7 @@
             now - 10,
             300,
             Some(ReadinessReason::SignedOut),
+            &provenant_quota::DEFAULT_FRESHNESS,
         )?;
         let zen_path = zen_dir.join("opencode.json");
         std::fs::write(&zen_path, serde_json::to_vec(&zen_readiness)?)?;

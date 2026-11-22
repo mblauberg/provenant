@@ -21,9 +21,59 @@ pub const REGISTRATION: crate::Registration = crate::Registration {
         low_power: false,
         solo: true,
     },
+    reconcile_account: Some(reconcile_account),
+    model_offers_sink: Some(remember_models),
 };
 
 crate::adapter!(Agy, "agy", prepare, failure_diagnostic);
+
+/// Rebind only the registration whose key and directory the quota probe used.
+/// The config editor serialises this with manual registration. Labels and all
+/// user policy stay in place; the old quota record remains a routing exclusion.
+pub(crate) fn reconcile_account(
+    roots: &provenant_core::Roots,
+    directory: &std::path::Path,
+    previous: &str,
+    actual: &str,
+) -> Result<bool, provenant_config::ConfigError> {
+    #[derive(serde::Deserialize, serde::Serialize)]
+    struct Domains {
+        accounts: crate::accounts::Settings,
+    }
+    const SECTIONS: provenant_config::DomainSections<Domains> =
+        provenant_config::DomainSections::new(&[crate::accounts::SECTION]);
+    let adapter = provenant_records::Harness::Agy.spec().name;
+    let channel = format!("{adapter}-account-switch");
+    let mut changed = false;
+    provenant_config::edit_config(
+        roots,
+        &SECTIONS,
+        &provenant_config::EditOptions::new(&channel),
+        |doc, current| {
+            if current
+                .domains
+                .accounts
+                .entries
+                .values()
+                .any(|entry| entry.adapter == adapter && entry.key == actual)
+            {
+                return Err(provenant_config::ConfigError::Refused(format!(
+                    "{adapter} identity is already registered; run `provenant accounts list`"
+                )));
+            }
+            for (id, entry) in &current.domains.accounts.entries {
+                if entry.adapter == adapter && entry.key == previous && entry.directory == directory
+                {
+                    doc["domains"]["accounts"]["entries"][id]["key"] = toml_edit::value(actual);
+                    changed = true;
+                }
+            }
+            Ok(())
+        },
+    )?;
+    Ok(changed)
+}
+
 const MODEL_ON_WIRE: bool = true;
 
 /// The CLI's own turn limit, off at zero; the supervisor's deadline is the real
@@ -132,10 +182,13 @@ pub(crate) fn cached_identity(
 ) -> Option<String> {
     let root = provenant_os::fs::Directory::open_anchor(state).ok()?;
     let probe = read_identity_probe(&root, directory)?;
+    let key_prefix = provenant_records::Harness::Agy
+        .spec()
+        .registered_key_prefix()?;
     (probe.observed <= now
         && now < probe.observed.saturating_add(IDENTITY_TTL)
         && probe.stamp == keychain_stamp(directory)
-        && probe.key.strip_prefix("agy-google-").is_some_and(|hash| {
+        && probe.key.strip_prefix(key_prefix).is_some_and(|hash| {
             hash.len() == 12 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
         }))
     .then_some(probe.key)

@@ -50,6 +50,7 @@ pub fn hosts(globals: &provenant_cli::Globals, workers: &'static dyn WorkerObser
             provenant_records::Outcome::Error,
             "io",
             &error.to_string(),
+            crate::REPAIR_IO,
             globals,
         ),
     }

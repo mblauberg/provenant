@@ -94,50 +94,6 @@ impl Settings {
         settings
     }
 }
-/// Rebind only the registration whose key and directory the quota probe used.
-/// The config editor serialises this with manual registration. Labels and all
-/// user policy stay in place; the old quota record remains a routing exclusion.
-pub(crate) fn reconcile_agy(
-    roots: &provenant_core::Roots,
-    directory: &Path,
-    previous: &str,
-    actual: &str,
-) -> Result<bool, provenant_config::ConfigError> {
-    #[derive(Deserialize, Serialize)]
-    struct Domains {
-        accounts: Settings,
-    }
-    const SECTIONS: provenant_config::DomainSections<Domains> =
-        provenant_config::DomainSections::new(&[SECTION]);
-    let mut changed = false;
-    provenant_config::edit_config(
-        roots,
-        &SECTIONS,
-        &provenant_config::EditOptions::new("agy-account-switch"),
-        |doc, current| {
-            if current
-                .domains
-                .accounts
-                .entries
-                .values()
-                .any(|entry| entry.adapter == "agy" && entry.key == actual)
-            {
-                return Err(provenant_config::ConfigError::Refused(
-                    "agy identity is already registered; run `provenant accounts list`".into(),
-                ));
-            }
-            for (id, entry) in &current.domains.accounts.entries {
-                if entry.adapter == "agy" && entry.key == previous && entry.directory == directory {
-                    doc["domains"]["accounts"]["entries"][id]["key"] = toml_edit::value(actual);
-                    changed = true;
-                }
-            }
-            Ok(())
-        },
-    )?;
-    Ok(changed)
-}
-
 const NOT_ALLOWED: &str =
     "a per-account `settings` key is not in `shared_settings.keys`; add it there first";
 impl Settings {
@@ -452,7 +408,12 @@ fn detect_with_org_inner(
     use_cache: bool,
 ) -> Result<(String, Option<String>), ProviderError> {
     let cwd = Path::new(crate::claude::PROBE_CWD);
-    if adapter == "agy" {
+    let spec = provenant_records::AdapterSpec::get(adapter);
+    use provenant_records::AccountIdentityProbe;
+    let probe = spec.map_or(AccountIdentityProbe::None, |spec| {
+        spec.account_identity_probe
+    });
+    if probe == AccountIdentityProbe::KeychainLog {
         // An isolated account is signed in under its own directory as `HOME`.
         // The mode comes from the directory, so a missing keychain is refused
         // here rather than probed under the shared login.
@@ -476,7 +437,7 @@ fn detect_with_org_inner(
         crate::agy::remember_identity(probe_root, directory, &key, now, stamp_before, &models);
         return Ok((key, None));
     }
-    if adapter == "codex" {
+    if probe == AccountIdentityProbe::AuthJson {
         let bytes = read_following(
             &directory.join("auth.json"),
             ReadOptions { limit: 1024 * 1024 },
@@ -486,7 +447,7 @@ fn detect_with_org_inner(
             .map(|key| (key, None))
             .ok_or(ProviderError::UnknownIdentity);
     }
-    if adapter == "cursor" {
+    if probe == AccountIdentityProbe::Vscdb {
         let identity = crate::cursor::read_identity(directory).map_err(|error| match error {
             crate::cursor::CursorIdentityError::CredentialNotFound => {
                 ProviderError::CredentialNotFound
@@ -496,7 +457,11 @@ fn detect_with_org_inner(
         })?;
         return Ok((identity.account_key, None));
     }
-    if adapter != "claude" || directory == home.join(".claude") {
+    if probe != AccountIdentityProbe::CliAuthStatus
+        || spec
+            .and_then(|spec| spec.install)
+            .is_some_and(|install| directory == home.join(install.home))
+    {
         return Err(ProviderError::UnknownIdentity);
     }
     let argv: Vec<OsString> = [
@@ -633,7 +598,11 @@ fn detect_agy(
     let bytes = read_following(&log, ReadOptions { limit: 1024 * 1024 })
         .map_err(|_| ProviderError::UnknownIdentity)?;
     let key = crate::identity::agy_fingerprint(&bytes)
-        .map(|fingerprint| format!("agy-{fingerprint}"))
+        .map(|fingerprint| {
+            provenant_records::Harness::Agy
+                .spec()
+                .account_key(&fingerprint)
+        })
         .ok_or(ProviderError::UnknownIdentity)?;
     let stderr_str = std::str::from_utf8(&out.stderr.bytes).ok();
     let models = crate::quota::agy::extract_agy_models(Some(&payload), stderr_str);

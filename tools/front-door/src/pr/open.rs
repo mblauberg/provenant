@@ -98,14 +98,23 @@ fn plan(
         .map_err(fail)?
         .remove(0);
     if !matches!(author.state.as_str(), "succeeded" | "review_required") {
-        return Err(Refused::new(
-            "PR_ATTEMPT_STATE",
-            format!(
-                "attempt {} ended {}; only a succeeded or review_required attempt can back a pull request",
-                author.attempt_id, author.state
-            ),
-        )
-        .into());
+        // Opening a pull request is not an authority act: landing still gates
+        // on CI and review. The policy table says what backs the body and
+        // carries on; a configured strict mode stops here instead.
+        provenant_config::policy::read(resolved.roots.state.as_path(), "", &Default::default())
+            .warn_or(
+                "PR_ATTEMPT_STATE",
+                provenant_records::policy::Facts::violation(format!(
+                    "attempt {} ended {}, not succeeded or review_required; opening the pull request from its recorded branch and head anyway (source: attempt record)",
+                    author.attempt_id, author.state
+                )),
+                |diagnostic| {
+                    Refused::new(
+                        "PR_ATTEMPT_STATE",
+                        diagnostic.detail.unwrap_or_default(),
+                    )
+                },
+            )?;
     }
     // Reviews named on the command resolve as targets; the receipt's own
     // reviews are already attempt ids.
@@ -120,10 +129,10 @@ fn plan(
         .branch
         .clone()
         .or_else(|| author.branch.clone())
-        .ok_or("the attempt delivered no branch; pass --branch")?;
+        .ok_or("the attempt delivered no branch; pass --branch BRANCH, or push the lane branch and retry")?;
     let head = author
         .head
-        .ok_or("the attempt recorded no head, so there is nothing to open")?;
+        .ok_or("the attempt recorded no head, so there is nothing to open; open the pull request from an attempt that committed")?;
     let base = match &command.base {
         Some(base) => base.clone(),
         None => default_branch(resolved.roots.state.as_path(), project)?,
@@ -153,7 +162,7 @@ fn plan(
     }
     let (title, summary) = pr_body::split_summary(&summary);
     if title.is_empty() {
-        return Err("the summary file has no title line".into());
+        return Err("the summary file has no title line; start it with a one-line title (a Markdown heading is fine)".into());
     }
     let body = pr_body::fill(
         &template,
@@ -188,14 +197,30 @@ pub(super) fn run(command: PrOpen, globals: &Globals) -> u8 {
         roots::Product::Required,
     ) {
         Ok(resolved) => resolved,
-        Err(error) => return fail(LEAF, Outcome::Invalid, "PR", &error.to_string(), globals),
+        Err(error) => {
+            return fail(
+                LEAF,
+                Outcome::Invalid,
+                "PR",
+                &error.to_string(),
+                crate::REPAIR_ROOT,
+                globals,
+            );
+        }
     };
     let project = resolved.project.clone();
     let plan = match plan(&command, globals, &project, &resolved) {
         Ok(plan) => plan,
         Err(error) => {
             let code = code_of(error.as_ref(), "PR");
-            return fail(LEAF, Outcome::Invalid, code, &error.to_string(), globals);
+            return fail(
+                LEAF,
+                Outcome::Invalid,
+                code,
+                &error.to_string(),
+                "correct the reported pull request plan error and rerun `provenant pr open`",
+                globals,
+            );
         }
     };
     let mut data = json!({
@@ -278,7 +303,14 @@ pub(super) fn run(command: PrOpen, globals: &Globals) -> u8 {
                 false,
             )
         }
-        Err(error) => fail(LEAF, Outcome::Error, "PR", &error.to_string(), globals),
+        Err(error) => fail(
+            LEAF,
+            Outcome::Error,
+            "PR",
+            &error.to_string(),
+            "resolve the reported pull request error and rerun `provenant pr open`",
+            globals,
+        ),
     }
 }
 

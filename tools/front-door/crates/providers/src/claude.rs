@@ -94,6 +94,8 @@ pub const REGISTRATION: crate::Registration = crate::Registration {
         low_power: true,
         solo: false,
     },
+    reconcile_account: None,
+    model_offers_sink: None,
 };
 
 crate::adapter!(
@@ -756,7 +758,8 @@ fn refresh_account_with_clock_and_lock_observer(
     clock: &dyn Clock,
     before_lock: &dyn Fn(&Directory),
 ) -> Result<OauthToken, ProviderError> {
-    if account.adapter() != "claude" || login.config_dir != account.directory() {
+    let own_adapter = provenant_records::Harness::Claude.spec().name;
+    if account.adapter() != own_adapter || login.config_dir != account.directory() {
         return Err(ProviderError::IdentityMismatch);
     }
     let check = || -> Result<(), ProviderError> {

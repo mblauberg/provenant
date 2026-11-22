@@ -153,9 +153,10 @@ pub(crate) fn warn_unknown_input_once(state: &Path, bytes: &[u8], warning: &Inpu
 }
 
 fn is_pre_tool_hook(args: impl IntoIterator<Item = std::ffi::OsString>) -> bool {
+    let claude = provenant_records::Harness::Claude.spec().name;
     let mut words = args.into_iter();
     words.any(|word| word == "hook")
-        && words.any(|word| word == "claude")
+        && words.any(|word| word == claude)
         && words.any(|word| word == "pre-tool-use")
 }
 

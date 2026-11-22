@@ -148,6 +148,12 @@ impl Roots {
         &self.credential_roots
     }
 
+    /// The checkout this root snapshot was captured for, for readers that need
+    /// project-scoped configuration without re-resolving the root inputs.
+    pub fn checkout(&self) -> &Path {
+        &self.inputs.checkout
+    }
+
     /// Rebind only the state candidate against the captured root context. No
     /// environment is re-read and no workspace or old-root boundary is lost.
     pub fn with_state_dir(

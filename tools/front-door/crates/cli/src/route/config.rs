@@ -50,6 +50,8 @@ pub(super) fn display_list_data(
 ) -> Result<Box<RouteListDisplay>, EdgeError> {
     let (routes, accounts) = list_data_and_accounts(roots, query)?;
     let catalogue = crate::model_discovery::effective(roots)?;
+    let resolved = crate::config_reads::read_for(roots, "route")?;
+    let freshness = crate::quota::quota_freshness(&resolved.origins, &resolved.domains.quota);
     let now = SystemClock::new().unix_seconds();
     let mut models = BTreeSet::new();
     models.extend(routes.models.iter().map(|entry| entry.model.clone()));
@@ -81,7 +83,7 @@ pub(super) fn display_list_data(
             .map_err(|_| ())
         });
         match file {
-            Ok(Some(file)) => file.get(scope, now),
+            Ok(Some(file)) => file.get(scope, now, &freshness),
             Ok(None) => provenant_quota::ReadinessRead::absent(),
             Err(()) => provenant_quota::ReadinessRead::unknown(
                 provenant_quota::ReadinessReason::InvalidEvidence,
@@ -852,15 +854,53 @@ pub(super) fn execute_in(
                 };
                 let request = resolve_request(query, context)?;
                 let rules = effective_exclusion_rules(&query.request.exclude, roots)?;
-                let mut route = provenant_routing::resolve_for_account_with_seed_excluding(
+                // Preview chooses with the same admission-aware resolver as
+                // dispatch. With no live probe it judges every cached account
+                // of each pool member, so a spent member cannot be shown as
+                // the route a dispatch would pick.
+                let facts = super::admission::AdmissionFacts {
+                    freshness: &context.config.freshness,
+                    policy: &context.config.launch_policy,
+                    policies,
+                    now_unix_seconds: context.now.as_timestamp().as_second(),
+                    records,
+                    catalogue: context.catalogue,
+                };
+                let admitted = super::admission::resolve_admitted(
                     &request,
-                    context,
-                    None,
-                    "route-preview",
-                    0,
-                    &[],
-                    &rules,
+                    &facts,
+                    super::admission::AdmissionOptions {
+                        account: query.account.as_deref(),
+                        mode: super::admission::AdmitMode::CachedAccounts,
+                        initial_excluded: &[],
+                        narrow_accounts: false,
+                    },
+                    |narrowing| {
+                        provenant_routing::resolve_for_account_with_seed_excluding(
+                            &request,
+                            context,
+                            None,
+                            "route-preview",
+                            0,
+                            narrowing.excluded,
+                            &rules,
+                        )
+                        .map_err(super::EdgeError::from)
+                    },
                 )?;
+                // With nothing to show, the search's own refusal is the answer: it
+                // names every exclusion, where a bare message would drop them.
+                let refusal = admitted.refusal;
+                let mut route = admitted
+                    .candidates
+                    .into_iter()
+                    .next()
+                    .or(admitted.last_refused)
+                    .ok_or_else(|| {
+                        refusal.unwrap_or_else(|| {
+                            super::EdgeError::Admission("no eligible pool member".into())
+                        })
+                    })?;
                 if matches!(request.choice, RouteChoice::Model(_))
                     && let Some(scope) = context.config.provider_scopes.get(&route.adapter)
                     && let Some(warning) = scope.pin_warning(&route.adapter, &route.model)
@@ -927,6 +967,7 @@ pub(super) fn execute_in(
                             roots.state.as_path(),
                             scope,
                             now.unix_seconds(),
+                            &context.config.freshness,
                         )
                     },
                 );
@@ -948,6 +989,7 @@ pub(super) fn execute_in(
                     std::slice::from_ref(&model),
                 )?;
                 let admission = provenant_quota::Admission {
+                    freshness: &context.config.freshness,
                     policy: &context.config.launch_policy,
                     policies,
                     now_unix_seconds: now.unix_seconds(),
@@ -966,7 +1008,10 @@ pub(super) fn execute_in(
                         availability_warning: None,
                         extra: Default::default(),
                         availability_ref: "preview".into(),
-                        expires_unix_seconds: now.unix_seconds().saturating_add(60),
+                        expires_unix_seconds: context
+                            .config
+                            .freshness
+                            .expired_availability_expires(now.unix_seconds()),
                     };
                     let result = admission.check(&candidate);
                     match &result {
@@ -991,7 +1036,35 @@ pub(super) fn execute_in(
                             &pools,
                             now.unix_seconds(),
                         );
-                        let verdict = match (observation.snapshot.status, headroom) {
+                        let effective = records
+                            .iter()
+                            .find(|record| {
+                                record.account.adapter == route.adapter
+                                    && record.account.account_key == row.account_key
+                            })
+                            .and_then(|record| {
+                                let file = crate::quota::recorded_readiness_file(
+                                    roots.state.as_path(),
+                                    &route.adapter,
+                                    &row.account_key,
+                                )
+                                .ok()
+                                .flatten();
+                                provenant_quota::effective_status(&provenant_quota::StatusInput {
+                                    record,
+                                    detections: &[],
+                                    readiness: file.as_ref(),
+                                    pools: &|_, _| pools.clone(),
+                                    now: now.unix_seconds(),
+                                    freshness: &context.config.freshness,
+                                    policies,
+                                    policy: &context.config.launch_policy,
+                                })
+                                .ok()
+                            });
+                        let status =
+                            effective.map_or(observation.snapshot.status, |value| value.status);
+                        let verdict = match (status, headroom) {
                             (QuotaStatus::AuthRequired, _) => Some((
                                 ReadinessState::Unavailable,
                                 Some(ReadinessReason::SignedOut),
@@ -1017,7 +1090,9 @@ pub(super) fn execute_in(
                                     host: provenant_quota::LOCAL_HOST.into(),
                                     adapter: route.adapter.clone(),
                                     account_key: row.account_key.clone(),
-                                    route: model.as_str().into(),
+                                    route: provenant_quota::ReadinessRoute::Model(
+                                        model.as_str().into(),
+                                    ),
                                 }),
                                 state,
                                 reason,
@@ -1081,6 +1156,8 @@ pub(super) fn execute_in(
                     quota,
                     admission_refusal,
                     provider_refusals,
+                    catalogue_sources: context.catalogue.overlay_sources().clone(),
+                    overlay_warnings: context.catalogue.overlay_warnings().to_vec(),
                 })))
             },
         ),

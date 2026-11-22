@@ -1524,7 +1524,7 @@ mod tests {
         let rule = policy.rule("REPO_VERIFY_WORKTREE_GIT_ISOLATION");
         assert_eq!(
             rule.rule.boundary,
-            provenant_records::policy::Boundary::GitIsolation
+            provenant_records::policy::Boundary::OtherWork
         );
         assert_eq!(
             rule.rule.strength,

@@ -372,7 +372,7 @@ pub fn admit(request: &AdmissionRequest<'_>) -> Result<Admitted, BuildError> {
         project_key: request.project_key.to_owned(),
         priority: request.priority,
         aging_ms: request.aging.as_millis().min(u128::from(u64::MAX)) as u64,
-        enqueued_unix_ms: super::ledger::now_unix_ms(),
+        enqueued_unix_ms: provenant_os::clock::now_unix_millis(),
         pid: std::process::id(),
         start_time: super::process_marker()
             .and_then(|s| s.split_once(':').and_then(|(_, start)| start.parse().ok()))
@@ -425,7 +425,7 @@ pub fn admit(request: &AdmissionRequest<'_>) -> Result<Admitted, BuildError> {
         {
             return Ok(Admitted::Overflow { waited: elapsed });
         }
-        let now = super::ledger::now_unix_ms();
+        let now = provenant_os::clock::now_unix_millis();
         let mut tickets = live_tickets(&dir, &queue_path)?;
         if tickets.iter().any(|other| {
             other.owner == ticket.owner

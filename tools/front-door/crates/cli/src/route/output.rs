@@ -1,19 +1,5 @@
 use super::*;
 
-/// Whether the account's reading says a window is spent and has not reset.
-/// Admission gates only models with a quota pool; native providers surface a
-/// spent allowance as an exhausted snapshot, which a preview reads directly.
-pub(super) fn spent(record: &provenant_quota::AccountRecord, now: i64) -> bool {
-    record.snapshot.as_ref().is_some_and(|snapshot| {
-        snapshot.status == provenant_quota::QuotaStatus::Exhausted
-            && snapshot.observed_unix_seconds <= now
-            && snapshot.windows.iter().any(|window| {
-                window.used_basis_points >= 10_000
-                    && window.resets_unix_seconds.is_none_or(|reset| reset > now)
-            })
-    })
-}
-
 pub fn route_blocked(alias: &str, exclude: &[String], roots: &Roots) -> Option<String> {
     let query = RouteResolve {
         writes: false,
@@ -41,80 +27,40 @@ pub fn route_blocked(alias: &str, exclude: &[String], roots: &Roots) -> Option<S
         |context, records, policies, _| {
             let request = resolve_request(&query, context)?;
             let rules = effective_exclusion_rules(exclude, roots)?;
-            let now = context.now.as_timestamp().as_second();
-            // Dispatch retries the next pool member when one is refused, so a
-            // route is blocked only when every member is. The resolver picks
-            // each candidate in turn; a refused member is excluded from the
-            // next pick, exactly as dispatch narrows its own retry.
-            let mut excluded: Vec<ModelId> = Vec::new();
-            let mut refusals: Vec<String> = Vec::new();
-            loop {
-                let route = match provenant_routing::resolve_for_account_with_seed_excluding(
-                    &request,
-                    context,
-                    None,
-                    "route-preview",
-                    0,
-                    &excluded,
-                    &rules,
-                ) {
-                    Ok(route) => route,
-                    Err(error) if refusals.is_empty() => return Err(error.into()),
-                    // Every member has been judged and refused.
-                    Err(_) => return Ok::<_, EdgeError>(Some(refusals.join("; "))),
-                };
-                let model = ModelId::parse(&format!("{}/{}", route.adapter, route.model))?;
-                // The resolver ignores exclusions for a route that names one
-                // model, and returns it again: every candidate has been seen.
-                if excluded.contains(&model) {
-                    return Ok(Some(refusals.join("; ")));
-                }
-                let pools = context.catalogue.admission_pools(&model);
-                let admission = provenant_quota::Admission {
-                    policy: &context.config.launch_policy,
-                    policies,
-                    now_unix_seconds: now,
-                    records,
-                    pools: &pools,
-                };
-                // Judge each cached account of the member's provider as if its
-                // provider were ready: a spent, refused or unauthenticated
-                // account cannot serve. With no cached account, nothing is
-                // known and the member may run once dispatch probes it.
-                let mut member = Vec::new();
-                for record in records
-                    .iter()
-                    .filter(|record| record.account.adapter == route.adapter)
-                {
-                    let mut probe = route.clone();
-                    probe.account_key = Some(record.account.account_key.clone());
-                    probe.readiness = RouteReadiness::Ready {
-                        availability_warning: None,
-                        extra: Default::default(),
-                        availability_ref: "preview".into(),
-                        expires_unix_seconds: now + 60,
-                    };
-                    match admission.check(&probe) {
-                        Ok(()) if !spent(record, now) => return Ok(None),
-                        Ok(()) => member.push("allowance exhausted".to_owned()),
-                        Err(error) => member.push(error.to_string()),
-                    }
-                }
-                if member.is_empty() {
-                    return Ok(None);
-                }
-                refusals.push(format!(
-                    "{}/{}: {}",
-                    route.adapter,
-                    route.model,
-                    member.join("; ")
-                ));
-                // Dispatch narrows only a pool; a single model has no next one.
-                if route.pool_selection.is_none() {
-                    return Ok(Some(refusals.join("; ")));
-                }
-                excluded.push(model);
-            }
+            let facts = super::admission::AdmissionFacts {
+                freshness: &context.config.freshness,
+                policy: &context.config.launch_policy,
+                policies,
+                now_unix_seconds: context.now.as_timestamp().as_second(),
+                records,
+                catalogue: context.catalogue,
+            };
+            // The shared resolver walks the pool in dispatch's order and
+            // judges every cached account of each member. A route blocks only
+            // when no member can serve, with each typed refusal in the reason.
+            let admitted = super::admission::resolve_admitted(
+                &request,
+                &facts,
+                super::admission::AdmissionOptions {
+                    account: None,
+                    mode: super::admission::AdmitMode::CachedAccounts,
+                    initial_excluded: &[],
+                    narrow_accounts: false,
+                },
+                |narrowing| {
+                    provenant_routing::resolve_for_account_with_seed_excluding(
+                        &request,
+                        context,
+                        None,
+                        "route-preview",
+                        0,
+                        narrowing.excluded,
+                        &rules,
+                    )
+                    .map_err(EdgeError::from)
+                },
+            )?;
+            Ok(admitted.blocked_reason())
         },
     );
     match blocked {
@@ -286,6 +232,35 @@ pub(crate) fn resolved_text(preview: &RoutePreview) -> String {
         preview.model_policy.sources.join(", "),
         preview.compaction_break_even_turns
     ));
+    if let Ok(model) =
+        provenant_routing::ModelId::parse(&format!("{}/{}", route.adapter, route.model))
+    {
+        if let Some(source) = preview.catalogue_sources.model_source(&model) {
+            text.push_str(&format!("catalogue model source={source}\n"));
+        }
+        if let Some(selection) = &route.pool_selection {
+            if let Some(source) = preview
+                .catalogue_sources
+                .membership_source(&selection.pool, &model)
+            {
+                text.push_str(&format!("catalogue pool membership source={source}\n"));
+            }
+            if let Some(source) = preview
+                .catalogue_sources
+                .weight_source(&selection.pool, &model)
+            {
+                text.push_str(&format!("catalogue weight source={source}\n"));
+            }
+        }
+    }
+    for (name, source) in &preview.catalogue_sources.capability_preferences {
+        text.push_str(&format!(
+            "catalogue capability preferences {name} source={source}\n"
+        ));
+    }
+    for warning in &preview.overlay_warnings {
+        text.push_str(&format!("warning: {warning}\n"));
+    }
     for note in &preview.exclusion_notes {
         text.push_str(&format!("note: {note}\n"));
     }
@@ -399,13 +374,25 @@ pub fn run(
                 }
                 _ => None,
             };
-            result.error = Some(CommandError {
-                diagnostic: projection.as_ref().map(Into::into),
-                code: code.into(),
-                message: error.to_string(),
-                cause: None,
-                repair: projection.and_then(|diagnostic| diagnostic.next),
-            });
+            let diagnostic = projection.as_ref().map(Into::into);
+            let repair = projection
+                .as_ref()
+                .and_then(|diagnostic| diagnostic.next.clone())
+                .unwrap_or_else(|| {
+                    let next = match code {
+                        "IO" => "Inspect the reported I/O error, resolve it, then retry the command.",
+                        "QUOTA" => {
+                            "Run `provenant quota show --json` to inspect the quota before retrying."
+                        }
+                        "INVALID" => "Correct the invalid argument and retry the command.",
+                        "CONFIG" => "Correct the configuration named in the error, then retry.",
+                        _ => "Inspect the reported error, resolve its cause, then retry the command.",
+                    };
+                    next.to_owned()
+                });
+            let mut command_error = CommandError::new(code, error.to_string(), None, repair);
+            command_error.diagnostic = diagnostic;
+            result.error = Some(command_error);
             result
         }
     };
@@ -497,7 +484,7 @@ pub fn run(
                         .iter()
                         .map(|member| {
                             format!(
-                                "{} source={} weight={} weight_layer={} pacing={:?}{}{}",
+                                "{} source={} weight={} weight_layer={} pacing={:?}{}{} membership_source={} weight_source={}",
                                 member.model.as_str(),
                                 member.source,
                                 member.weight,
@@ -508,12 +495,20 @@ pub fn run(
                                     .as_ref()
                                     .map_or(String::new(), |effort| format!(" effort={effort}")),
                                 unobserved_model(&member.model, list),
+                                member.membership_source,
+                                member.weight_source,
                             )
                         })
                         .collect::<Vec<_>>()
                         .join(", ");
                     format!("route pool {name} = {models}")
                 }));
+                for (route, source) in &list.catalogue_sources.capability_preferences {
+                    lines.push(format!("capability preferences {route} source={source}"));
+                }
+                for warning in &list.overlay_warnings {
+                    lines.push(format!("warning: {warning}"));
+                }
                 format!("{}\n", lines.join("\n"))
             }
             Some(Data::Resolved(preview)) => resolved_text(preview),

@@ -1,5 +1,5 @@
 //! Cached-quota chair placement. This policy never probes an account.
-use crate::{QuotaSnapshot, QuotaStatus};
+use crate::{FreshnessPolicy, QuotaSnapshot, QuotaStatus};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum SwitchDecision<'a> {
@@ -15,13 +15,14 @@ pub fn decide_switch<'a>(
     threshold_percent: u64,
     now: i64,
     automatic: bool,
+    freshness: &FreshnessPolicy,
 ) -> SwitchDecision<'a> {
     if !(1..=100).contains(&threshold_percent) {
         return SwitchDecision::Refuse("switch threshold must be between 1 and 100 percent");
     }
     let threshold = threshold_percent * 100;
     if automatic {
-        let Some(current) = current.filter(|s| fresh(s, now)) else {
+        let Some(current) = current.filter(|s| fresh(s, now, freshness)) else {
             return SwitchDecision::Stay;
         };
         if !current.windows.iter().any(|w| {
@@ -34,7 +35,7 @@ pub fn decide_switch<'a>(
     }
     for (label, snapshot) in targets {
         if snapshot.is_some_and(|s| {
-            fresh(s, now)
+            fresh(s, now, freshness)
                 && s.status == QuotaStatus::Available
                 && ["five_hour", "seven_day"].iter().all(|pool| {
                     s.windows.iter().any(|w| {
@@ -55,15 +56,14 @@ pub fn decide_switch<'a>(
 fn relevant(pool: &str) -> bool {
     matches!(pool, "five_hour" | "seven_day")
 }
-fn fresh(snapshot: &QuotaSnapshot, now: i64) -> bool {
-    snapshot.validate().is_ok()
-        && provenant_records::AdapterSpec::get(&snapshot.account.adapter)
-            .is_some_and(|spec| spec.chair_switch)
+fn fresh(snapshot: &QuotaSnapshot, now: i64, freshness: &FreshnessPolicy) -> bool {
+    provenant_records::AdapterSpec::get(&snapshot.account.adapter)
+        .is_some_and(|spec| spec.chair_switch)
         && matches!(
             snapshot.status,
             QuotaStatus::Available | QuotaStatus::Exhausted
         )
-        && (0..=900).contains(&now.saturating_sub(snapshot.observed_unix_seconds))
+        && freshness.chair_fresh(snapshot, now)
 }
 
 #[cfg(test)]
@@ -106,17 +106,38 @@ mod tests {
         let weekly = snapshot(200, 9200);
         let targets = [("first", Some(&low)), ("second", Some(&low))];
         assert_eq!(
-            decide_switch(Some(&low), &targets, 92, 1001, true),
+            decide_switch(
+                Some(&low),
+                &targets,
+                92,
+                1001,
+                true,
+                &crate::DEFAULT_FRESHNESS
+            ),
             SwitchDecision::Stay
         );
         for current in [&hot, &weekly] {
             assert_eq!(
-                decide_switch(Some(current), &targets, 92, 1001, true),
+                decide_switch(
+                    Some(current),
+                    &targets,
+                    92,
+                    1001,
+                    true,
+                    &crate::DEFAULT_FRESHNESS
+                ),
                 SwitchDecision::Switch("first")
             );
         }
         assert_eq!(
-            decide_switch(Some(&low), &targets, 92, 1001, false),
+            decide_switch(
+                Some(&low),
+                &targets,
+                92,
+                1001,
+                false,
+                &crate::DEFAULT_FRESHNESS
+            ),
             SwitchDecision::Switch("first")
         );
     }
@@ -131,7 +152,14 @@ mod tests {
             ("third", Some(&low)),
         ];
         assert_eq!(
-            decide_switch(Some(&current), &targets, 91, 1001, true),
+            decide_switch(
+                Some(&current),
+                &targets,
+                91,
+                1001,
+                true,
+                &crate::DEFAULT_FRESHNESS
+            ),
             SwitchDecision::Switch("second")
         );
         let mut future = low.clone();
@@ -144,7 +172,8 @@ mod tests {
                 &[("future", Some(&future)), ("expired", Some(&expired))],
                 92,
                 1001,
-                true
+                true,
+                &crate::DEFAULT_FRESHNESS
             ),
             SwitchDecision::Refuse(_)
         ));
@@ -160,16 +189,23 @@ mod tests {
             ("full", Some(&hot)),
         ];
         assert!(matches!(
-            decide_switch(Some(&hot), &targets, 92, 1001, true),
+            decide_switch(
+                Some(&hot),
+                &targets,
+                92,
+                1001,
+                true,
+                &crate::DEFAULT_FRESHNESS
+            ),
             SwitchDecision::Refuse(_)
         ));
         assert!(matches!(
-            decide_switch(Some(&hot), &[], 92, 1001, true),
+            decide_switch(Some(&hot), &[], 92, 1001, true, &crate::DEFAULT_FRESHNESS),
             SwitchDecision::Refuse(_)
         ));
         for current in [None, Some(&stale)] {
             assert_eq!(
-                decide_switch(current, &targets, 92, 1001, true),
+                decide_switch(current, &targets, 92, 1001, true, &crate::DEFAULT_FRESHNESS),
                 SwitchDecision::Stay
             );
         }

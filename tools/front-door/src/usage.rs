@@ -54,6 +54,7 @@ pub fn run(stats: &Stats, globals: &Globals) -> u8 {
             Outcome::Error,
             "ROOT",
             "cannot resolve usage state root",
+            crate::REPAIR_ROOT,
             globals,
         );
     };
@@ -82,6 +83,7 @@ pub fn run(stats: &Stats, globals: &Globals) -> u8 {
             Outcome::Error,
             "USAGE",
             &error.to_string(),
+            "check the reported usage store error, then rerun `provenant telemetry stats`",
             globals,
         ),
     }
@@ -214,6 +216,7 @@ pub fn ingest(cmd: &provenant_cli::Ingest, globals: &Globals) -> u8 {
             Outcome::Error,
             "ROOT",
             "cannot resolve the state root",
+            crate::REPAIR_ROOT,
             globals,
         );
     };
@@ -251,6 +254,7 @@ pub fn ingest(cmd: &provenant_cli::Ingest, globals: &Globals) -> u8 {
             Outcome::Error,
             "INGEST",
             &message,
+            "check the reported transcript or store error, then rerun `provenant telemetry ingest`",
             globals,
         ),
     }
@@ -340,7 +344,14 @@ pub fn native(cmd: provenant_cli::Native, globals: &Globals) -> u8 {
             "recorded\n",
             false,
         ),
-        Err(error) => crate::fail(action, Outcome::Error, "NATIVE_ATTEMPT", &error, globals),
+        Err(error) => crate::fail(
+            action,
+            Outcome::Error,
+            "NATIVE_ATTEMPT",
+            &error,
+            "correct the reported native attempt condition, then retry the hook",
+            globals,
+        ),
     }
 }
 

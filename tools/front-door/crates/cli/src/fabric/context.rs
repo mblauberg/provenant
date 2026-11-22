@@ -1088,16 +1088,21 @@ fn check_submit_health(peer: &str, result: PeerResult) -> Result<(), PeerFailure
 fn harness_client(
     explicit: Option<provenant_records::Harness>,
 ) -> Option<provenant_records::Harness> {
-    use provenant_records::Harness;
     explicit.or_else(|| {
-        let present = |name| std::env::var_os(name).is_some_and(|value| !value.is_empty());
-        let codex = present("CODEX_THREAD_ID");
-        let claude = std::env::var("CLAUDECODE").is_ok_and(|value| value == "1")
-            || present("CLAUDE_CODE_SESSION_ID")
-            || present("CLAUDE_SESSION_ID");
-        match (codex, claude) {
-            (true, false) => Some(Harness::Codex),
-            (false, true) => Some(Harness::Claude),
+        let present = |name: &str| std::env::var_os(name).is_some_and(|value| !value.is_empty());
+        let detected: Vec<_> = provenant_records::ADAPTER_SPECS
+            .iter()
+            .filter(|spec| {
+                spec.client_env_markers.is_some_and(|markers| {
+                    markers
+                        .equals_one
+                        .is_some_and(|name| std::env::var(name).is_ok_and(|value| value == "1"))
+                        || markers.presence.iter().any(|name| present(name))
+                })
+            })
+            .collect();
+        match detected.as_slice() {
+            [spec] => Some(spec.id),
             _ => None,
         }
     })

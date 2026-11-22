@@ -7,7 +7,10 @@ use super::{
 };
 use crate::hosts::plain_text;
 use provenant_core::{HostId, OperationId, ProjectId};
-use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
+use provenant_os::{
+    exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination},
+    shell::quote,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     ffi::OsString,
@@ -309,9 +312,6 @@ fn refused(code: &str, message: impl Into<String>) -> HandoffReceipt {
         message: message.into(),
         accounts: Vec::new(),
     }
-}
-fn quote(text: &str) -> String {
-    format!("'{}'", text.replace('\'', "'\\''"))
 }
 fn script_path(path: &Path) -> Result<&str, String> {
     path.to_str()

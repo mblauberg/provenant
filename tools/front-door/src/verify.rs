@@ -56,6 +56,7 @@ pub fn run(tier: Option<&str>, commit: Option<&str>, affected: bool, globals: &G
                 Outcome::Invalid,
                 "ROOT",
                 &error.to_string(),
+                crate::REPAIR_ROOT,
                 globals,
             );
         }
@@ -69,6 +70,7 @@ pub fn run(tier: Option<&str>, commit: Option<&str>, affected: bool, globals: &G
                 Outcome::Invalid,
                 "PORT_CONFIG",
                 &format!("cannot read verify port: {error}"),
+                crate::REPAIR_CONFIG,
                 globals,
             );
         }
@@ -85,6 +87,7 @@ pub fn run(tier: Option<&str>, commit: Option<&str>, affected: bool, globals: &G
             Outcome::Invalid,
             "VERIFY_TIER",
             &format!("verify tier {tier:?} is not declared by the effective verify port"),
+            "declare that tier in the verify port config, then rerun `provenant verify --tier <tier>`",
             globals,
         );
     }
@@ -96,6 +99,7 @@ pub fn run(tier: Option<&str>, commit: Option<&str>, affected: bool, globals: &G
                 Outcome::Error,
                 "PORT_CONFIG",
                 &format!("cannot encode effective verify config for the verify engine: {error}"),
+                crate::REPAIR_CONFIG,
                 globals,
             );
         }
@@ -114,7 +118,16 @@ pub fn run(tier: Option<&str>, commit: Option<&str>, affected: bool, globals: &G
     };
     let context = match context {
         Ok(context) => context,
-        Err(error) => return fail(COMMAND, Outcome::Invalid, "PORT_CONFIG", &error, globals),
+        Err(error) => {
+            return fail(
+                COMMAND,
+                Outcome::Invalid,
+                "PORT_CONFIG",
+                &error,
+                crate::REPAIR_CONFIG,
+                globals,
+            );
+        }
     };
     let git = match context.git.clone() {
         Some(git) => git,
@@ -124,6 +137,7 @@ pub fn run(tier: Option<&str>, commit: Option<&str>, affected: bool, globals: &G
                 Outcome::Unavailable,
                 "VERIFY_ENGINE_UNAVAILABLE",
                 "Git binding unavailable",
+                "bind a Git checkout for this project, then rerun `provenant verify`",
                 globals,
             );
         }
@@ -137,6 +151,7 @@ pub fn run(tier: Option<&str>, commit: Option<&str>, affected: bool, globals: &G
                     Outcome::Invalid,
                     "VERIFY_COMMIT",
                     "cannot resolve verify commit",
+                    "pass a valid commit with `--commit <rev>`, then rerun `provenant verify`",
                     globals,
                 );
             }
@@ -210,6 +225,7 @@ pub fn run(tier: Option<&str>, commit: Option<&str>, affected: bool, globals: &G
                     Outcome::Unavailable,
                     "VERIFY_ENGINE_UNAVAILABLE",
                     &error,
+                    "check the reported object transfer error and rerun `provenant verify`",
                     globals,
                 );
             }
@@ -237,6 +253,7 @@ pub fn run(tier: Option<&str>, commit: Option<&str>, affected: bool, globals: &G
                     Outcome::Unavailable,
                     "VERIFY_ENGINE_UNAVAILABLE",
                     &error,
+                    "check the reported checkout error and rerun `provenant verify`",
                     globals,
                 );
             }
@@ -262,6 +279,7 @@ pub fn run(tier: Option<&str>, commit: Option<&str>, affected: bool, globals: &G
                     Outcome::Unavailable,
                     "VERIFY_ENGINE_UNAVAILABLE",
                     "the builtin verify tier engine is not present in the selected product assets",
+                    "run `provenant install` to restore the product assets, then rerun `provenant verify`",
                     globals,
                 );
             }
@@ -407,7 +425,7 @@ pub fn run(tier: Option<&str>, commit: Option<&str>, affected: bool, globals: &G
         id: format!(
             "verify-{}-{}",
             std::process::id(),
-            build::ledger::now_unix_ms()
+            provenant_os::clock::now_unix_millis()
         ),
         project_key: context.project_key.clone(),
         project: context.project.clone(),
@@ -467,6 +485,7 @@ pub fn run(tier: Option<&str>, commit: Option<&str>, affected: bool, globals: &G
                 Outcome::Unavailable,
                 "VERIFY_ENGINE_UNAVAILABLE",
                 &error.to_string(),
+                "check the reported verify engine error and rerun `provenant verify`",
                 globals,
             );
         }
@@ -657,7 +676,7 @@ impl DetachedCheckout {
             "{purpose}-{}-{}-{}",
             &commit[..commit.len().min(12)],
             std::process::id(),
-            build::ledger::now_unix_ms()
+            provenant_os::clock::now_unix_millis()
         );
         let path = project.join(
             ports
@@ -817,13 +836,12 @@ fn render(
     };
     let mut result = CommandResult::new(COMMAND, status, report);
     if let Some((code, message)) = error {
-        result.error = Some(CommandError {
-            diagnostic: None,
-            code: code.into(),
+        result.error = Some(CommandError::new(
+            code,
             message,
-            cause: None,
-            repair: None,
-        });
+            None,
+            "check the reported verify output or engine error and rerun `provenant verify`",
+        ));
     }
     emit(&result, globals, &message, false)
 }

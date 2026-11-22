@@ -5,11 +5,26 @@ use std::{collections::BTreeMap, sync::OnceLock};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Boundary {
+    /// Credentials and secrets never reach a lane, provider or output not granted them.
     Credentials,
-    GitIsolation,
-    DataIntegrity,
+    /// No lane moves, rewrites or deletes another lane's refs, commits or uncommitted files.
+    OtherWork,
+    /// User gates, merge, release and ruleset changes need the held authority.
     Authority,
+    /// Not a boundary: a typed operation error (malformed input, missing capability,
+    /// invalid state, failed integrity check). It refuses that one operation and has
+    /// no override because proceeding cannot work.
+    Operation,
+    /// Not a boundary: a mechanism or default that warns and proceeds.
     None,
+}
+
+impl Boundary {
+    /// Whether a violated rule refuses without any override: the three
+    /// boundaries and operation errors.
+    pub const fn is_immutable(self) -> bool {
+        !matches!(self, Self::None)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,9 +77,9 @@ impl Rule {
             (Boundary::None, Strength::Warn | Strength::Off) => true,
             (
                 Boundary::Credentials
-                | Boundary::GitIsolation
-                | Boundary::DataIntegrity
-                | Boundary::Authority,
+                | Boundary::OtherWork
+                | Boundary::Authority
+                | Boundary::Operation,
                 Strength::Refuse,
             ) => true,
             _ => false,
@@ -80,10 +95,10 @@ impl Rule {
             .collect::<Vec<_>>()
             .join("; ");
         format!(
-            "Policy {} (default={}, source=compiled default; override={}): {}. For a non-boundary rule, refuse means a configured stop; boundary refusal is immutable.",
+            "Policy {} (default={}, source=compiled default; override={}): {}. For a rule with boundary none, refuse means a configured stop; boundary and operation refusals are immutable.",
             self.code,
             strength_name(self.strength),
-            self.knob.as_deref().unwrap_or("none; immutable boundary"),
+            self.knob.as_deref().unwrap_or("none; immutable"),
             strengths
         )
     }
@@ -199,7 +214,7 @@ impl Policy {
             if effective.rule.knob.is_none() {
                 let _ = writeln!(
                     std::io::stderr().lock(),
-                    "policy override {code} ignored: boundary rules have no override"
+                    "policy override {code} ignored: boundary and operation rules have no override"
                 );
                 continue;
             }
@@ -246,7 +261,7 @@ impl Policy {
             facts.detail,
             rule.strength,
             effective.source,
-            rule.knob.as_deref().unwrap_or("boundary; no override")
+            rule.knob.as_deref().unwrap_or("immutable; no override")
         );
         match rule.strength {
             Strength::Off => Effect::Proceed,
@@ -285,18 +300,18 @@ impl Policy {
             Effect::Refuse(_) => panic!("non-boundary policy cannot refuse"),
         }
     }
-    /// Keep an existing domain error while routing its immutable safety
-    /// decision through the compiled policy table. Boundary rules have no
+    /// Keep an existing domain error while routing its immutable decision
+    /// through the compiled policy table. Boundary and operation rules have no
     /// knobs and must always refuse a violated predicate; a table regression
-    /// here is a programming error, not a reason to weaken the boundary.
+    /// here is a programming error, not a reason to weaken them.
     #[allow(clippy::panic)]
     pub fn boundary_error<E>(&self, code: &str, facts: Facts, typed_error: E) -> E {
         let effective = self.rule(code);
         assert!(
-            effective.rule.boundary != Boundary::None
+            effective.rule.boundary.is_immutable()
                 && effective.rule.knob.is_none()
                 && effective.rule.strength == Strength::Refuse,
-            "boundary policy must be immutable and refusing"
+            "boundary and operation policy must be immutable and refusing"
         );
         match self.check(code, facts) {
             Effect::Refuse(_) => typed_error,
@@ -319,6 +334,7 @@ impl Policy {
                         (_, Strength::Off) => "proceed",
                         (_, Strength::Warn) => "warn",
                         (Boundary::None, Strength::Refuse) => "configured_stop",
+                        (Boundary::Operation, Strength::Refuse) => "operation_error",
                         (_, Strength::Refuse) => "boundary_refusal",
                     },
                     value.source,
@@ -440,6 +456,17 @@ mod tests {
                 .as_deref()
                 .is_some_and(|d| d.contains("Project"))
         );
+    }
+    #[test]
+    fn opening_a_pr_from_an_unsettled_attempt_warns_and_can_be_made_a_stop() {
+        let mut policy = Policy::default();
+        let fact = || Facts::violation("attempt a1 ended failed");
+        assert!(policy.warn_or("PR_ATTEMPT_STATE", fact(), |_| ()).is_ok());
+        policy.overlay(
+            &BTreeMap::from([("PR_ATTEMPT_STATE".into(), Strength::Refuse)]),
+            Source::Host,
+        );
+        assert!(policy.warn_or("PR_ATTEMPT_STATE", fact(), |_| ()).is_err());
     }
     #[test]
     #[allow(clippy::panic)]

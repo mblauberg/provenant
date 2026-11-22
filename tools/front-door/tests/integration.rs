@@ -3,6 +3,7 @@ mod support;
 mod terminal_run;
 
 mod accounts;
+mod actionable_errors;
 mod admission;
 mod build_inventory;
 mod catalogue_read_only;
