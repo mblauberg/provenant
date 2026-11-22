@@ -228,11 +228,19 @@ pub(crate) fn resolve_admitted(
     let mut excluded: Vec<ModelId> = options.initial_excluded.to_vec();
     let mut refused_accounts: Vec<(String, String)> = Vec::new();
     let mut result = AdmittedRoutes::default();
+    // The redraw already resolved for a refused pool member. It carries the
+    // redraw receipt, so the next iteration judges it instead of resolving a
+    // fresh copy that would lose the receipt.
+    let mut queued: Option<ResolvedRoute> = None;
     loop {
-        let route = match resolve(&Narrowing {
-            excluded: &excluded,
-            refused_accounts: &refused_accounts,
-        }) {
+        let next = match queued.take() {
+            Some(route) => Ok(route),
+            None => resolve(&Narrowing {
+                excluded: &excluded,
+                refused_accounts: &refused_accounts,
+            }),
+        };
+        let route = match next {
             Ok(route) => route,
             Err(error @ EdgeError::Routing(RoutingError::NoEligiblePoolMember { .. })) => {
                 if result.refusal.is_none() {
@@ -275,7 +283,7 @@ pub(crate) fn resolve_admitted(
                     reason: refusal.reason.clone(),
                     detail: refusal.detail.clone(),
                 });
-                result.refusal = Some(*refusal.error);
+                let earlier_refusal = result.refusal.replace(*refusal.error);
                 // A spent account leaves the model servable by another
                 // registered account. Unless the caller pinned one, try the
                 // same model there before giving it up.
@@ -298,6 +306,11 @@ pub(crate) fn resolve_admitted(
                             && matches!(replacement.readiness, RouteReadiness::Ready { .. })
                             && judge(&replacement, facts, options.mode).is_ok()
                         {
+                            // The model is servable on another account, so it
+                            // is not an exclusion: preparation would otherwise
+                            // reject the model the resolver just recovered.
+                            result.exclusions.pop();
+                            result.refusal = earlier_refusal;
                             result.candidates.push(replacement);
                             break;
                         }
@@ -337,8 +350,7 @@ pub(crate) fn resolve_admitted(
                 {
                     redraw.cause = Some(refusal.reason);
                 }
-                // The redraw is the next routing pick; the loop asks for it
-                // through `resolve` with the updated exclusions.
+                queued = Some(replacement);
             }
         }
     }

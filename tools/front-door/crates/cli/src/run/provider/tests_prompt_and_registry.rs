@@ -1438,6 +1438,7 @@ fn rerun_in_clean_environment(test: &str) -> Result<bool, Box<dyn std::error::Er
 /// accounts, `spent` carrying advisory local-ledger usage estimates.
 fn prepare_with_partial_account_estimates(
     spent: &[&str],
+    hard: bool,
     pin: Option<&str>,
 ) -> Result<Result<run::PreparedLaunch, PrepareError>, Box<dyn std::error::Error>> {
     use provenant_core::{AttemptId, CancelToken, Clock, Digest, OperationId};
@@ -1518,11 +1519,15 @@ fn prepare_with_partial_account_estimates(
             schema_version: 1,
             account,
             revision: 0,
-            status: provenant_quota::QuotaStatus::Available,
+            status: if hard {
+                provenant_quota::QuotaStatus::Exhausted
+            } else {
+                provenant_quota::QuotaStatus::Available
+            },
             observed_unix_seconds: now,
             source_ref: "fixture".into(),
             authority_ref: None,
-            details: Some(provenant_quota::QuotaDetails {
+            details: (!hard).then(|| provenant_quota::QuotaDetails {
                 coverage: Some("partial".into()),
                 ..Default::default()
             }),
@@ -1643,7 +1648,7 @@ fn partial_account_estimates_allow_launch_without_swapping_a_pinned_account()
         (&["ready", "spent-a", "spent-b"][..], None),
         (&["spent-a"][..], Some("spent-a")),
     ] {
-        let prepared = prepare_with_partial_account_estimates(at_limit, pin)?
+        let prepared = prepare_with_partial_account_estimates(at_limit, false, pin)?
             .map_err(|error| format!("{error}"))?;
         if let Some(pin) = pin {
             assert_eq!(prepared.route.account_key.as_deref(), Some(pin));
@@ -1652,5 +1657,25 @@ fn partial_account_estimates_allow_launch_without_swapping_a_pinned_account()
             route.cause != Some(provenant_records::RouteExclusionReason::Exhausted)
         }));
     }
+    Ok(())
+}
+
+/// A model whose first account is spent is still servable on another
+/// registered account: preparation must keep it and launch there, not drop the
+/// model the resolver recovered (and not report it as an exhausted skip).
+#[test]
+fn spent_account_falls_back_to_another_account_of_the_same_model()
+-> Result<(), Box<dyn std::error::Error>> {
+    if rerun_in_clean_environment(
+        "spent_account_falls_back_to_another_account_of_the_same_model",
+    )? {
+        return Ok(());
+    }
+    let prepared = prepare_with_partial_account_estimates(&["ready", "spent-a"], true, None)?
+        .map_err(|error| format!("{error}"))?;
+    assert_eq!(prepared.route.account_key.as_deref(), Some("spent-b"));
+    assert!(prepared.skipped_routes.iter().all(|route| {
+        route.cause != Some(provenant_records::RouteExclusionReason::Exhausted)
+    }));
     Ok(())
 }

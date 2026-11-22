@@ -916,6 +916,65 @@
         Ok(())
     }
 
+    /// The redraw receipt rides on the candidate admission accepted, so a
+    /// dispatched route shows which pick was refused and why.
+    #[test]
+    fn dispatched_pool_candidate_carries_the_redraw_receipt() -> Result<(), Box<dyn Error>> {
+        let mut redrawn = 0;
+        for spent_claude in [true, false] {
+            let fixture = pair_fixture(
+                |record| {
+                    if spent_claude {
+                        exhaust(record)
+                    }
+                },
+                |record| {
+                    if !spent_claude {
+                        exhaust(record)
+                    }
+                },
+            )?;
+            let request = super::RouteRequest {
+                read_heavy: false,
+                model: None,
+                route: Some("principal".into()),
+                effort: None,
+                confidential: false,
+                fallback: vec![],
+                exclude: vec![],
+            }
+            .to_domain()?;
+            let dispatch = super::resolve_dispatch(
+                &request,
+                &fixture.roots,
+                None,
+                ("fixture", 0),
+                &fixture.availability,
+                &fixture.access,
+                "fixture",
+                None,
+                &[],
+            )?;
+            let spent = if spent_claude {
+                "claude/claude-haiku-5-5"
+            } else {
+                "codex/gpt-6-luna"
+            };
+            assert_ne!(format!("{}/{}", dispatch.adapter, dispatch.model), spent);
+            let selection = dispatch.pool_selection.as_ref().ok_or("pool selection")?;
+            if let Some(redraw) = selection.redraws.last() {
+                redrawn += 1;
+                assert_eq!(redraw.rejected_pick, spent);
+                assert_eq!(
+                    redraw.cause,
+                    Some(provenant_records::RouteExclusionReason::Exhausted)
+                );
+            }
+        }
+        assert!(redrawn > 0, "one ordering must pick the spent member first");
+        Ok(())
+    }
+
     #[test]
     fn route_resolve_shows_evidence_from_settled_attempts() -> Result<(), Box<dyn Error>> {
         use provenant_core::{Clock, CancelToken, RootInputs};
