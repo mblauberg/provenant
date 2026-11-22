@@ -698,6 +698,15 @@ pub enum BuildStrategyName {
     Command,
     Wrapper,
 }
+/// The configured spelling of each build strategy. Build strategies are not
+/// adapters: this table is the one place their names are spelled.
+const BUILD_STRATEGY_NAMES: [(&str, BuildStrategyName); 5] = [
+    ("slots", BuildStrategyName::Slots),
+    ("lane_seed", BuildStrategyName::LaneSeed),
+    ("lane", BuildStrategyName::Lane),
+    ("command", BuildStrategyName::Command),
+    ("wrapper", BuildStrategyName::Wrapper),
+];
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BuildOverflow {
     Auto,
@@ -774,13 +783,11 @@ impl BuildPort {
             "strategy",
             &self.strategy,
             BuildStrategyName::LaneSeed,
-            |value| match value {
-                "slots" => Some(BuildStrategyName::Slots),
-                "lane_seed" => Some(BuildStrategyName::LaneSeed),
-                "lane" => Some(BuildStrategyName::Lane),
-                "command" => Some(BuildStrategyName::Command),
-                "wrapper" => Some(BuildStrategyName::Wrapper),
-                _ => None,
+            |value| {
+                BUILD_STRATEGY_NAMES
+                    .iter()
+                    .find(|(name, _)| *name == value)
+                    .map(|(_, strategy)| *strategy)
             },
         )
     }
