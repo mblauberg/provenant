@@ -3051,6 +3051,11 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = tempfile::tempdir()?;
+        let state = tmp.path().join("state");
+        std::fs::create_dir(&state)?;
+        // The host state root is private in an installed host, and project
+        // bindings refuse a public one.
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
         let launcher = tmp.path().join("provenant");
         std::fs::write(
             &launcher,
@@ -3065,7 +3070,7 @@ mod tests {
         let error = match verify_smoke_with(
             &runner,
             &launcher,
-            tmp.path(),
+            &state,
             tmp.path(),
             &cli::Upgrade {
                 yes: false,
@@ -3096,6 +3101,11 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = tempfile::tempdir()?;
+        let state = tmp.path().join("state");
+        std::fs::create_dir(&state)?;
+        // The host state root is private in an installed host, and project
+        // bindings refuse a public one.
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
         let launcher = tmp.path().join("provenant");
         let calls = tmp.path().join("calls");
         std::fs::write(
@@ -3114,7 +3124,7 @@ mod tests {
         let output = preview_smoke(
             &runner,
             &launcher,
-            tmp.path(),
+            &state,
             &cli::Upgrade {
                 yes: false,
                 from_source: None,

@@ -975,11 +975,15 @@ fn session_save_explicit_project_warns_and_wins_over_registered_session() -> Res
 
     let cwd_path = other.to_str().ok_or("other")?;
     let selected_path = original.to_str().ok_or("original")?;
+    // A save under the selected project continues the registered session's
+    // history: new content is a new revision, not a fresh session.
+    std::fs::write(source, "checkpoint after the explicit selection\n")?;
     let mut explicit = args.to_vec();
     explicit.extend(["--project", selected_path]);
     let saved = call(&rig, &explicit, 0)?;
     assert_eq!(saved["data"]["project"], registered);
     assert_eq!(saved["data"]["revision"], 2);
+    assert_eq!(saved["data"]["unchanged"], false);
     assert!(
         !rig.state
             .join(format!(

@@ -505,14 +505,19 @@ mod tests {
         );
         assert!(writer.contains(crate::verification::CHECK_PARAGRAPH));
         assert!(writer.contains("source: default"));
+        // #3790: lanes never compile, so the writer preamble states the
+        // formatting duty and no Cargo target or build directory.
+        assert!(writer.contains("format only"));
+        assert!(!writer.contains("Cargo target"));
+        assert!(!writer.contains("CARGO_TARGET_DIR"));
         assert!(writer.contains("Build slots:"));
         assert!(writer.contains("CI scope:"));
         assert!(writer.contains("git commit -- <paths>"));
-        assert!(writer.contains("Cargo target:"));
         assert!(writer.contains(&format!("Progress handoff JSON: {}", handoff.display())));
         let reader = lane_preamble("Model policy.", &Default::default(), None, Some(handoff));
         assert!(!reader.contains("Build slots"));
         assert!(!reader.contains("CI scope:"));
+        assert!(!reader.contains("format only"));
         assert!(!reader.contains("Cargo target"));
         assert!(reader.contains("Progress handoff JSON:"));
         assert!(

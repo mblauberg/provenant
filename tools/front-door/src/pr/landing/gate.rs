@@ -1045,40 +1045,18 @@ mod tests {
         assert_eq!(failed.commit, cand.commit);
         assert_eq!(failed.tree, cand.tree);
         assert_eq!(failed.definition_digest, def.digest);
-        // The configured strategy must wrap every step while preserving evidence.
-        let marker = dir.join("wrapper-calls");
-        let wrapper = dir.join("wrapper.sh");
-        std::fs::write(
-            &wrapper,
-            format!("printf x >> '{}'; exec \"$@\"\n", marker.display()),
-        )
-        .unwrap();
-        let mut config: serde_json::Value =
-            serde_json::from_str(include_str!("../../../crates/config/assets/ports.json")).unwrap();
-        config["build"]["strategy"] = serde_json::json!("command");
-        config["build"]["command"]["argv"] = serde_json::json!(["/bin/sh", wrapper]);
-        std::fs::create_dir_all(dir.join(".provenant")).unwrap();
-        std::fs::write(
-            dir.join(".provenant/ports.json"),
-            serde_json::to_vec(&config).unwrap(),
-        )
-        .unwrap();
-        def.commands = vec!["true".into(), "true".into()];
-        let wrapped = execute_commands(&dir, &dir, &cand, &def).unwrap();
-        assert_eq!(wrapped.result, GateResult::Passed);
-        assert_eq!(wrapped.checks.len(), 2);
-        assert_eq!(std::fs::read_to_string(marker).unwrap(), "xx");
-        // Restore lane strategy for the deadline case.
-        config["build"]["strategy"] = serde_json::json!("lane");
-        std::fs::write(
-            dir.join(".provenant/ports.json"),
-            serde_json::to_vec(&config).unwrap(),
-        )
-        .unwrap();
+        // #3790: the chair owns one warm-check strategy. The gate runs under
+        // `slots`; the retired command/lane wrapper strategies no longer exist,
+        // so no configured wrapper transforms a step.
+        let ports = provenant_config::PortTable::read_for(Some(&dir), &dir).unwrap();
+        assert_eq!(
+            provenant_run::build::strategy(&ports.build).value.name,
+            provenant_run::build::StrategyName::Slots
+        );
+        // The gate deadline covers admission and execution and still cleans up.
         def.commands = vec!["sleep 30".into()];
         def.timeout_seconds = 1;
         assert!(execute_commands(&dir, &dir, &cand, &def).is_err());
-        let ports = provenant_config::PortTable::read_for(Some(&dir), &dir).unwrap();
         let branch = format!("land-gate-{}-{}", &cand.commit[..12], std::process::id());
         let checkout = dir.join(ports.managed_writer_path(&branch).unwrap());
         let leftover = std::fs::read_dir(checkout.parent().unwrap())
