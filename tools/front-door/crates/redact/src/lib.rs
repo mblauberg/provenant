@@ -29,12 +29,10 @@ impl Mode {
             Self::Secrets => "secrets",
         }
     }
-    /// The retired `full` value is accepted as `secrets`. A caller that knows
-    /// the configuration source warns there; unknown values are still refused.
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "off" => Some(Self::Off),
-            "secrets" | "full" => Some(Self::Secrets),
+            "secrets" => Some(Self::Secrets),
             _ => None,
         }
     }
@@ -1546,8 +1544,6 @@ mod tests {
         assert_eq!(Mode::default(), Mode::Off);
         assert_eq!(Mode::parse(Mode::Off.as_str()), Some(Mode::Off));
         assert_eq!(Mode::parse(Mode::Secrets.as_str()), Some(Mode::Secrets));
-        // The retired config value stays loadable and means `secrets`.
-        assert_eq!(Mode::parse("full"), Some(Mode::Secrets));
         assert_eq!(Mode::parse("invalid"), None);
         let token = b"ghp_0123456789abcdef0123456789abcdef0123";
         let input = b"password=fixture-password actual=registered-value-3391 ghp_0123456789abcdef0123456789abcdef0123";

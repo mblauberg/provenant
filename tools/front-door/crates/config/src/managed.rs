@@ -20,6 +20,12 @@ use thiserror::Error;
 
 pub(crate) use provenant_records::INSTRUCTION_ASSET;
 
+/// The name of the binary a release installs into the host's bin directory.
+pub const STABLE_BINARY_NAME: &str = "provenant";
+
+const PEER_AGENT_PLIST: &str = "Library/LaunchAgents/dev.provenant.peer.plist";
+const TICK_AGENT_PLIST: &str = "Library/LaunchAgents/dev.provenant.tick.plist";
+
 /// Shared path components for installed releases and their owned instructions.
 /// `release_root` and name-based instruction recognition use the same shape.
 const RELEASE_LAYOUT: ReleaseLayout = ReleaseLayout {
@@ -86,8 +92,6 @@ pub enum InstallError {
     ConfigFile(PathBuf),
     #[error("preview output failed")]
     Preview(#[source] std::io::Error),
-    #[error("{0}")]
-    AgentRetirement(String),
     #[error("release smoke check failed")]
     Smoke(#[source] std::io::Error),
     #[error("installation partially applied; resolve the failure and re-apply install")]
@@ -671,9 +675,7 @@ fn desired(
     if let Some(bytes) = &targets.peer_agent {
         let home =
             provenant_os::fs::canonicalize(&targets.home).unwrap_or_else(|_| targets.home.clone());
-        let path = crate::legacy_launch_agent_path(&home, "peer-agent").ok_or(
-            InstallError::InvalidConfig("peer agent name is not declared"),
-        )?;
+        let path = home.join(PEER_AGENT_PLIST);
         insert(
             path,
             Value::File {
@@ -687,11 +689,7 @@ fn desired(
     if let Some(bytes) = &targets.tick_agent {
         let home =
             provenant_os::fs::canonicalize(&targets.home).unwrap_or_else(|_| targets.home.clone());
-        let mut units = vec![(
-            "tick-agent",
-            bytes,
-            crate::legacy_launch_agent_path(&home, "tick-agent"),
-        )];
+        let mut units = vec![("tick-agent", bytes, Some(home.join(TICK_AGENT_PLIST)))];
         if let Some(service) = &targets.tick_service {
             units = vec![
                 (
@@ -858,35 +856,22 @@ fn release_link_matches(current: &Value, desired: &Value) -> bool {
 }
 
 fn declared_agent_path(path: &Path, selector: &str, home: &Path) -> bool {
-    crate::LEGACY_1X_ARTIFACTS.iter().any(|artifact| {
-        let crate::LegacyArtifact::LaunchAgent {
-            selector: name,
-            plist,
-            disposition: crate::ArtifactDisposition::Replace,
-            ..
-        } = artifact
-        else {
-            return false;
-        };
-        *name == selector && home.join(plist) == path
-    })
+    let plist = match selector {
+        "peer-agent" => PEER_AGENT_PLIST,
+        "tick-agent" => TICK_AGENT_PLIST,
+        _ => return false,
+    };
+    home.join(plist) == path
 }
 
 fn declared_binary_name(path: &Path) -> bool {
-    crate::LEGACY_1X_ARTIFACTS.iter().any(|artifact| {
-        matches!(
-            artifact,
-            crate::LegacyArtifact::StableLink {
-                name,
-                disposition: crate::ArtifactDisposition::Replace,
-            } if path.file_name().is_some_and(|actual| actual == *name)
-        )
-    })
+    path.file_name()
+        .is_some_and(|actual| actual == STABLE_BINARY_NAME)
 }
 
 /// Return an asset path inside any declared Provenant release tree, regardless
 /// of its data root name. This recognizes binary, skill and instruction links
-/// across the one-way 1.x cut-over without decoding an old receipt.
+/// across release roots without decoding a receipt.
 pub fn release_instruction_asset(path: &Path) -> Option<PathBuf> {
     let asset = release_asset_path(path)?;
     asset
@@ -898,7 +883,7 @@ pub fn release_instruction_asset(path: &Path) -> Option<PathBuf> {
 
 /// The single per-user agent belongs only to an account's default state root.
 pub fn peer_agent_plist(state: &Path) -> Option<PathBuf> {
-    default_state_home(state).and_then(|home| crate::legacy_launch_agent_path(home, "peer-agent"))
+    default_state_home(state).map(|home| home.join(PEER_AGENT_PLIST))
 }
 
 const LINUX_TIMER: &str = "provenant-tick.timer";
@@ -920,7 +905,7 @@ pub fn user_dir_in(home: &Path, config_home: Option<std::ffi::OsString>) -> Path
 
 /// The host tick shares the per-user default-state ownership scope.
 pub fn tick_agent_plist(state: &Path) -> Option<PathBuf> {
-    default_state_home(state).and_then(|home| crate::legacy_launch_agent_path(home, "tick-agent"))
+    default_state_home(state).map(|home| home.join(TICK_AGENT_PLIST))
 }
 
 /// The Linux systemd user timer, in the same ownership scope.

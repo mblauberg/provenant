@@ -2158,17 +2158,7 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
             })
             .and_then(|config| {
                 let knob = config.knobs.get("redaction")?;
-                let value = knob.value.as_str()?;
-                if value == "full" {
-                    // `full` is retired: load it as `secrets` and warn, naming
-                    // the layer that supplied the value. Never refuse a launch.
-                    let _ = writeln!(
-                        io::stderr().lock(),
-                        "warning: redaction=full is retired; using secrets (source: {:?})",
-                        knob.source
-                    );
-                }
-                provenant_redact::Mode::parse(value)
+                provenant_redact::Mode::parse(knob.value.as_str()?)
             })
             .unwrap_or_default();
         provenant_redact::init(mode);

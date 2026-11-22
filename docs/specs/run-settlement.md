@@ -368,8 +368,7 @@ Filtering JSONL before retention can destroy framing and hide the final answer.
 Local results and provider continuation state are retained without shape-based
 rewriting. External publication follows the `redaction` setting: `off` passes
 text unchanged, while `secrets` masks credential values and token shapes.
-A retired `full` value is accepted as `secrets` with a warning naming its
-source. A failure of an enabled projection withholds publication without changing
+A failure of an enabled projection withholds publication without changing
 the local execution outcome. Raw and exported metadata each bind the bytes they describe; local
 capture paths are private evidence, not safe publication artifacts. A publication
 failure withholds delivery while preserving local sealed bytes.

@@ -34,12 +34,12 @@ Reads create no state.
 
 ### The first install uses a fresh root
 
-The first 2.0 install validates a sibling staging root against the captured
+The first install validates a sibling staging root against the captured
 install root inputs, changing only the state candidate. It validates the
-release and every staged target before stopping 1.x agents or publishing the
-new root. Into an absent or empty default root it copies only owner
-configuration (`config.toml` and `host-id`); 1.x state is not migrated, and
-install never reads a 1.x install receipt. A fresh custom root remains valid.
+release and every staged target before publishing the new root. Into an absent
+or empty default root it copies `config.toml` and `host-id`; the old state is
+not migrated, and install never reads its install receipt. A fresh custom root
+remains valid.
 If the selected root is identified as 1.x by its default v1 path or old-root
 markers and no handoff applies, install reports `STATE_FORMAT_BREAK`, names the
 old root, and directs the operator to the default v2 root for owner-config
@@ -47,13 +47,13 @@ handoff or to a fresh custom root with configuration selected manually.
 The old root remains for the operator to inspect and remove after preserving
 anything needed.
 
-Install owns only its declared Provenant artifact names. It replaces or removes
-those names directly, including obsolete named LaunchAgents, without reading a
-1.x receipt. Unrecognised state and client configuration remain outside that
-ownership set; release notes give any required manual cleanup, and doctor may
-warn about recognised leftovers.
+Install owns only its declared Provenant artifact names. It replaces those
+names directly without reading a receipt from another installation.
+Unrecognised state and client configuration remain outside that ownership set;
+release notes give any required manual cleanup, and doctor may warn about a
+remaining old root.
 - Why: the new root starts with one state format and install cannot infer
-  ownership from a legacy receipt.
+  ownership from another installation's receipt.
 - Owner: `src/state_handoff.rs`, `src/install.rs`, `crates/core/src/roots.rs`
 
 ### Identifiers have one spelling
@@ -177,8 +177,7 @@ warns with the full path of unknown keys and keeps them when publishing an edit
 atomically. `config set` accepts every documented editable domain setting
 through the same typed schema as `config apply`. `config show` reports
 `redaction` and its source on one line. In `off` mode configuration history
-is raw; `secrets` masks credential-shaped values in history. A retired `full`
-value is accepted as `secrets` with a warning naming its source.
+is raw; `secrets` masks credential-shaped values in history.
 Metadata and paths remain visible.
 Project binding directories must be directories owned by the current user and
 private from group and other users. Permission or ownership failures have a
@@ -275,9 +274,8 @@ identity, not publisher trust.
 Managed harness paths and native hook event mappings come from `AdapterSpec`.
 Every supported instruction target links the same release instruction asset.
 An unavailable integration names its reason and source in install findings.
-Provenant has no MCP integration: the CLI is the agent interface. Install
-removes retired 1.x Fabric MCP registrations by their declared names and leaves
-every other MCP server untouched.
+Provenant has no MCP integration: the CLI is the agent interface, and install
+leaves every MCP server untouched.
 - Why: adapters share capability intent while native formats remain replaceable.
 - Owner: `crates/records/src/adapters.rs`, `crates/config/src/harness.rs`
 
