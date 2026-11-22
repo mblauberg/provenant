@@ -918,7 +918,7 @@ fn session_save_warns_and_uses_explicit_project() -> Result {
             .iter()
             .filter_map(Value::as_str)
             .any(|warning| warning.contains(cwd_path) && warning.contains(selected_path)),
-        "{warnings}"
+        "{warnings:?}"
     );
 
     let human = rig.command(&[
@@ -993,7 +993,7 @@ fn session_save_explicit_project_warns_and_wins_over_registered_session() -> Res
             .iter()
             .filter_map(Value::as_str)
             .any(|warning| warning.contains(cwd_path) && warning.contains(selected_path)),
-        "{warnings}"
+        "{warnings:?}"
     );
     Ok(())
 }
