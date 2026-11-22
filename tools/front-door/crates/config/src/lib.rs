@@ -48,6 +48,8 @@ mod loader;
 mod managed;
 pub use harness::{InstallSettings, TargetSettings, apply_install_config_with_domains};
 pub const NATIVE_CAPABILITY_UNAVAILABLE: &str = "native_capability_unavailable";
+pub mod overlays;
+pub use overlays::{OverlayLayer, OverlaySource, OverlayWarning};
 pub mod policy;
 mod presets;
 mod providers;
