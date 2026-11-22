@@ -12,7 +12,7 @@ Those coupled restrictions can prevent ordinary same-host work.
 
 Resolve one lane access model per attempt: `host` by default, or `isolated` as
 an explicit choice. Host access inherits the native environment and credentials
-for same-host work. Isolated retains the pre-2.5.3 restrictions. Sandbox mode
+for same-host work. Isolated restricts the environment, provider home, Git configuration, credentials and processes together. Sandbox mode
 and destination credential grants remain separate decisions. The resolved
 value and its source are recorded and shown at launch.
 
