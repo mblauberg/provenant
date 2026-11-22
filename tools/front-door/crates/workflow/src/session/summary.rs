@@ -128,6 +128,11 @@ pub fn checkpoint_summary_line(markdown: &str) -> Option<SummaryLine> {
             continue;
         }
         if let Some((level, text)) = heading(line) {
+            // A deeper heading is a subheading of the active section, whatever its name:
+            // `## Goal` / `### Done` still belongs to Goal. A peer or shallower heading ends it.
+            if section.is_some() && level > section_level {
+                continue;
+            }
             match text.to_ascii_lowercase().as_str() {
                 "intent" => {
                     section = Some(0);
@@ -141,10 +146,6 @@ pub fn checkpoint_summary_line(markdown: &str) -> Option<SummaryLine> {
                     section = Some(2);
                     section_level = level;
                 }
-                // A deeper heading is a subheading of the active section, not the start of
-                // a new one: `## Intent` / `### Ruling` still belongs to Intent. A peer or
-                // shallower heading ends it.
-                _ if section.is_some() && level > section_level => {}
                 _ => section = None,
             }
             if level == 1 && title.is_none() {
@@ -878,6 +879,12 @@ mod tests {
         let line = checkpoint_summary_line(markdown).unwrap();
         assert_eq!(line.text, "Keep the console useful");
         assert_eq!(line.source, SummarySource::Intent);
+
+        // A deeper heading named like another section stays in its parent.
+        let nested = "## Goal\n### Done\nFinish the slice\n";
+        let line = checkpoint_summary_line(nested).unwrap();
+        assert_eq!(line.text, "Finish the slice");
+        assert_eq!(line.source, SummarySource::Goal);
 
         // A peer heading with a different name ends Intent, so Goal wins.
         let with_peer =

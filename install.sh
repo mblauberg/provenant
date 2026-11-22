@@ -406,7 +406,8 @@ if "$guided"; then
         fi ;;
     esac
 fi
-"$release/bin/provenant" "$@" </dev/null
+# This script owns the app swap and its report line, so the inner install skips its own.
+PROVENANT_INSTALLER_OWNS_APP=true "$release/bin/provenant" "$@" </dev/null
 instructions_committed=true
 if [ -n "$app_stage" ]; then
     agent="$HOME/Library/LaunchAgents/dev.provenant.quota-menubar.plist"

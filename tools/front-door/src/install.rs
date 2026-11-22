@@ -772,7 +772,10 @@ fn output_install_with(
                 human.push_str(&format!("host tick: failed: {message}\n"));
             }
             let app_report = apps::status(&apps::home(), env!("CARGO_PKG_VERSION"));
-            if let Some(app) = &app_report {
+            // install.sh swaps the app after this install and prints the app line itself.
+            let installer_owns_app = std::env::var_os("PROVENANT_INSTALLER_OWNS_APP")
+                .is_some_and(|value| value == "true");
+            if let Some(app) = app_report.as_ref().filter(|_| !installer_owns_app) {
                 human.push_str(&format!(
                     "  app: {} ({})\n",
                     app.path,
