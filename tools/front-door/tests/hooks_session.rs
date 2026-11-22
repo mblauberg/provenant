@@ -773,15 +773,32 @@ fn worktree_hooks_create_and_remove_through_the_worktree_owner() -> Result {
 }
 
 #[test]
-fn worktree_hooks_refuse_bad_names_the_primary_and_foreign_paths() -> Result {
+fn worktree_hooks_sanitise_bad_names_and_refuse_the_primary_and_foreign_paths() -> Result {
     let rig = TestRig::new()?;
     commit_file(&rig)?;
-    for name in ["", "../escape", "a/b", "-flag", "has space"] {
+    // A name that is not a plain slug is rewritten to one with a warning, so
+    // it can never escape the worktree directory or reach git as a flag.
+    let names = [
+        ("", "worktree"),
+        ("../escape", "escape"),
+        ("a/b", "a-b"),
+        ("-flag", "flag"),
+        ("has space", "has-space"),
+    ];
+    for (name, slug) in names {
         let output = run_hook(&rig, "worktree-create", &worktree_input(&rig, name))?;
-        assert_eq!(code(&output), 2, "{name:?}");
-        assert!(output.stdout.bytes.is_empty(), "{name:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr.bytes).into_owned();
+        assert_eq!(code(&output), 0, "{name:?}: {stderr}");
+        assert!(stderr.contains("not a plain slug"), "{name:?}: {stderr}");
+        let printed = String::from_utf8(output.stdout.bytes)?;
+        let path = PathBuf::from(printed.trim_end());
+        assert!(
+            path.ends_with(format!(".worktrees/claude-{slug}")),
+            "{name:?}: {path:?}"
+        );
     }
-    assert!(!rig.project.join(".worktrees").exists());
+    let worktrees = rig.project.join(".worktrees");
+    assert_eq!(fs::read_dir(&worktrees)?.count(), names.len());
     let wrong_event = json!({"hook_event_name":"WorktreeRemove","cwd":rig.project,"name":"x"});
     let skipped = run_hook(&rig, "worktree-create", &wrong_event)?;
     assert_eq!(code(&skipped), 0);
@@ -792,7 +809,8 @@ fn worktree_hooks_refuse_bad_names_the_primary_and_foreign_paths() -> Result {
         Some(b"{"),
     )?;
     assert_eq!(code(&malformed), 0);
-    assert!(!rig.project.join(".worktrees").exists());
+    // Skipped and malformed inputs create nothing further.
+    assert_eq!(fs::read_dir(&worktrees)?.count(), names.len());
     // The primary checkout and a directory the owner does not list stay put.
     let foreign = rig.root.join("foreign");
     fs::create_dir(&foreign)?;
