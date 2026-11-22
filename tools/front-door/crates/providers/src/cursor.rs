@@ -85,7 +85,7 @@ pub fn read_identity(directory: &Path) -> Result<CursorIdentity, CursorIdentityE
     let account_key = config["authInfo"]["authId"]
         .as_str()
         .and_then(crate::identity::digest)
-        .map(|key| provenant_records::Harness::Cursor.spec().account_key(key))
+        .map(|key| provenant_records::Harness::Cursor.spec().account_key(&key))
         .ok_or(CursorIdentityError::Malformed)?;
     Ok(CursorIdentity {
         account_key,
