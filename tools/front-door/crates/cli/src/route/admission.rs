@@ -50,6 +50,18 @@ impl AdmittedRoutes {
         }
     }
 
+    /// The router's own refusal when it offered nothing for admission to judge:
+    /// no candidate and no exclusion. Preparation turns it into its typed
+    /// route-resolution refusal so a login or account classification survives;
+    /// a search that admission emptied reports its exclusions instead.
+    pub(crate) fn router_refusal(&mut self) -> Option<EdgeError> {
+        if self.candidates.is_empty() && self.exclusions.is_empty() {
+            self.refusal.take()
+        } else {
+            None
+        }
+    }
+
     /// Whether the first candidate has live provider readiness. Family
     /// relaxation uses this to avoid trading one unavailable route for another.
     pub(crate) fn first_ready(&self) -> bool {

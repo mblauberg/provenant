@@ -3645,7 +3645,10 @@ pub(super) fn prepare_candidates_inner(
             admitted
         })
     };
-    let admitted = resolve(&availability, &[]).map_err(route_error)?;
+    let mut admitted = resolve(&availability, &[]).map_err(route_error)?;
+    if let Some(error) = admitted.router_refusal() {
+        return Err(route_error(crate::route::DispatchError::from(error)));
+    }
     let named_pool = admitted
         .candidates
         .first()
@@ -6614,6 +6617,45 @@ mod attachment_tests {
 #[cfg(test)]
 mod refusal_cause_tests {
     use super::*;
+
+    #[test]
+    fn router_refusal_with_no_candidates_keeps_its_login_classification() {
+        use crate::route::admission::AdmittedRoutes;
+        let mut admitted = AdmittedRoutes {
+            refusal: Some(crate::route::EdgeError::Routing(
+                provenant_routing::RoutingError::NoEligiblePoolMember {
+                    exclusions: vec!["signed out".into()],
+                    cause: Some(provenant_records::RouteExclusionReason::AuthRequired),
+                    preparation_failure:
+                        provenant_records::run::PreparationFailure::AdapterUnavailable,
+                },
+            )),
+            ..Default::default()
+        };
+        let error = admitted.router_refusal().expect("router refusal");
+        let refusal =
+            route_resolution_refusal(crate::route::DispatchError::from(error)).into_refusal();
+        assert_eq!(
+            refusal.terminal_cause,
+            provenant_records::run::TerminalCause::AccountLoginRequired
+        );
+        assert_eq!(
+            refusal.fallback_outcome,
+            Some(provenant_records::run::PreparationFailure::AuthRequired)
+        );
+        // Once admission has excluded a candidate the exclusions are the
+        // report, so the refusal stays with them.
+        let mut excluded = AdmittedRoutes {
+            exclusions: vec![crate::route::admission::AdmissionExclusion {
+                model: provenant_routing::ModelId::parse("codex/gpt-6-luna").expect("model"),
+                reason: provenant_records::RouteExclusionReason::Exhausted,
+                detail: "allowance exhausted".into(),
+            }],
+            refusal: Some(crate::route::EdgeError::Admission("x".into())),
+            ..Default::default()
+        };
+        assert!(excluded.router_refusal().is_none());
+    }
 
     #[test]
     fn resolver_refusal_retains_closed_classification_without_error_text() {
