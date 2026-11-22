@@ -1,4 +1,5 @@
 import Foundation
+import ProvenantKit
 
 /// A projection of the quota crate's versioned report for the menu-bar views.
 struct QuotaReport {
@@ -28,13 +29,10 @@ struct QuotaReport {
     let coverage: Coverage
     let sources: [Source]
     var display = Display()
-    var alertPercent: Double { 90 }
+    var alertPercent: Double { QuotaPresentation.alertPercent }
 
-    /// Which window a row or the menu bar leads with.
-    enum Headline: String, Equatable {
-        case auto, fiveHour = "5h", weekly
-        init(wire: String?) { self = wire.flatMap(Headline.init(rawValue:)) ?? .auto }
-    }
+    /// Which window a row or the menu bar leads with. Shared with the console's quota panel.
+    typealias Headline = QuotaPresentation.Headline
     /// The global menu bar choices; the defaults are what an older report implies.
     struct Display: Equatable {
         static let mostConstrained = "most_constrained"
@@ -123,10 +121,9 @@ struct QuotaReport {
             }
             observedAt = row.ageSeconds.map { Date(timeIntervalSince1970: generatedAt.timeIntervalSince1970 - Double($0)) }
             let mappedWindows = (row.snapshot?.windows ?? []).map { item in
-                let presentation = QuotaReport.windowPresentation(adapter: adapter, name: item.pool, seconds: item.windowSeconds)
+                let presentation = QuotaPresentation.presentation(adapter: adapter, name: item.pool, seconds: item.windowSeconds)
                 let paceState = item.usedBasisPoints >= 10_000 ? "exhausted" : "on_pace"
-                let minutes = item.windowSeconds.map { Int(clamping: $0 / 60) }
-                    ?? QuotaReport.fallbackWindowMinutes(adapter: adapter, name: item.pool)
+                let minutes = QuotaPresentation.windowMinutes(adapter: adapter, name: item.pool, seconds: item.windowSeconds)
                 return Window(name: item.pool, label: presentation.title, usedPercent: Double(item.usedBasisPoints) / 100,
                               windowMinutes: minutes, resetAt: item.resetsUnixSeconds.map(QuotaReport.date), usedAmount: nil,
                               limitAmount: nil, currency: nil, advisory: presentation.advisory, pool: presentation.pool,
@@ -156,8 +153,9 @@ struct QuotaReport {
         let expiresAt: Date?
     }
     struct Resets { let available: Int; let expiresAt: [Date] }
-    struct Window: Identifiable {
+    struct Window: Identifiable, QuotaWindow {
         var id: String { name }
+        var paceState: String { pace.state }
         let name: String
         let label: String?
         let usedPercent: Double?
@@ -201,74 +199,6 @@ struct QuotaReport {
         }
     }
 
-    private static func windowPresentation(adapter: String, name: String, seconds: UInt64?)
-        -> (title: String, pool: String?, poolLabel: String?, advisory: Bool) {
-        let duration = durationTitle(seconds)
-        if adapter == "claude" {
-            if name.hasPrefix("weekly_scoped:") {
-                let model = String(name.dropFirst("weekly_scoped:".count))
-                return ("Weekly · \(Fmt.human(model))", nil, nil, true)
-            }
-        }
-        if adapter == "agy" {
-            for (prefix, title) in [("gemini.", "Gemini"), ("claude.", "Claude")] where name.hasPrefix(prefix) {
-                let kind = String(name.dropFirst(prefix.count))
-                return (duration ?? namedWindowTitle(kind), String(prefix.dropLast()), title, false)
-            }
-        }
-        if adapter == "codex", let separator = name.lastIndex(of: ".") {
-            let pool = String(name[..<separator])
-            let kind = String(name[name.index(after: separator)...])
-            if ["primary", "secondary"].contains(kind) {
-                return (duration ?? namedWindowTitle(kind), pool, modelPoolTitle(pool), false)
-            }
-        }
-        return (duration ?? namedWindowTitle(name), nil, nil, false)
-    }
-
-    private static func modelPoolTitle(_ slug: String) -> String {
-        slug.split(separator: "-").map { part in
-            let word = String(part)
-            if word.lowercased() == "gpt" { return "GPT" }
-            return Fmt.human(word)
-        }.joined(separator: " ")
-    }
-
-    private static func durationTitle(_ seconds: UInt64?) -> String? {
-        guard let seconds else { return nil }
-        let hour: UInt64 = 3_600, day: UInt64 = 86_400
-        if (4 * hour...6 * hour).contains(seconds) { return "5-hour" }
-        if (22 * hour...26 * hour).contains(seconds) { return "Daily" }
-        if (6 * day...8 * day).contains(seconds) { return "Weekly" }
-        if (27 * day...33 * day).contains(seconds) { return "Monthly" }
-        if seconds >= hour && seconds.isMultiple(of: hour) { return "\(seconds / hour)-hour" }
-        if seconds >= 60 && seconds.isMultiple(of: 60) { return "\(seconds / 60)-minute" }
-        return "\(seconds)-second"
-    }
-
-    private static func namedWindowTitle(_ name: String) -> String {
-        switch name.lowercased() {
-        case "five_hour", "5h": "5-hour"
-        case "seven_day", "weekly", "weekly_all": "Weekly"
-        case "thirty_day": "Monthly"
-        case "billing_cycle": "Billing cycle"
-        case "session": "Session"
-        default: Fmt.human(name)
-        }
-    }
-
-    private static func fallbackWindowMinutes(adapter: String, name: String) -> Int? {
-        switch name.lowercased() {
-        case "five_hour", "5h", "gemini.5h", "session": return 300
-        case "seven_day", "weekly", "weekly_all", "gemini.weekly", "claude.weekly": return 10_080
-        case "thirty_day": return 43_200
-        default:
-            if adapter == "claude" && name.hasPrefix("weekly_scoped:") {
-                return 10_080
-            }
-            return nil
-        }
-    }
     private static func invalid(_ message: String) -> DecodingError {
         .dataCorrupted(.init(codingPath: [], debugDescription: message))
     }
@@ -416,50 +346,14 @@ extension QuotaReport.Account {
     typealias Window = QuotaReport.Window
     var pools: [String] { windows.compactMap(\.pool).reduce(into: []) { if !$0.contains($1) { $0.append($1) } } }
     func windows(in pool: String?) -> [Window] { windows.filter { $0.pool == nil || $0.pool == pool } }
-    static func current(_ windows: [Window], now: Date) -> [Window] {
-        windows.filter { $0.usedPercent != nil && !$0.isExpired(now) && $0.setsState }
-    }
-    static func worst(_ windows: [Window]) -> Window? {
-        windows.filter { $0.pace.state == "exhausted" }.max { ($0.resetAt ?? .distantFuture) < ($1.resetAt ?? .distantFuture) }
-            ?? windows.max { ($0.usedPercent ?? -1) < ($1.usedPercent ?? -1) }
-    }
-    static func shown(_ windows: [Window], alert: Double) -> Window? {
-        if let spent = worst(windows), spent.pace.state == "exhausted" { return spent }
-        let windowsWithUsage = windows.filter { $0.usedPercent != nil }
-        let longest = windowsWithUsage.max {
-            ($0.windowMinutes ?? 0, $0.usedPercent ?? 0) < ($1.windowMinutes ?? 0, $1.usedPercent ?? 0)
-        }
-        let alerts = windowsWithUsage.filter { ($0.usedPercent ?? 0) >= alert && ($0.windowMinutes ?? 0) < (longest?.windowMinutes ?? 0) }
-        return alerts.max { ($0.usedPercent ?? 0) < ($1.usedPercent ?? 0) } ?? longest
-    }
-    fileprivate static func binding(in windows: [Window], now: Date) -> Window? {
-        let worsts = Self.groups(in: windows).compactMap { Self.worst(Self.current($0.windows, now: now)) }
-        let available = worsts.filter { $0.pace.state != "exhausted" }
-        if let binding = available.max(by: { ($0.usedPercent ?? 0) < ($1.usedPercent ?? 0) }) { return binding }
-        return worsts.min(by: { ($0.resetAt ?? .distantFuture) < ($1.resetAt ?? .distantFuture) })
-    }
-    private static func groups(in windows: [Window]) -> [(pool: String?, windows: [Window])] {
-        var groups: [(pool: String?, windows: [Window])] = []
-        let global = windows.filter { $0.pool == nil }
-        if !global.isEmpty { groups.append((nil, global)) }
-        var pools: [String] = []
-        for window in windows {
-            if let pool = window.pool, !pools.contains(pool) { pools.append(pool) }
-        }
-        groups += pools.map { pool in (Optional(pool), windows.filter { $0.pool == nil || $0.pool == pool }) }
-        return groups.isEmpty ? [(nil, windows)] : groups
-    }
+    static func current(_ windows: [Window], now: Date) -> [Window] { QuotaPresentation.current(windows, now: now) }
+    static func worst(_ windows: [Window]) -> Window? { QuotaPresentation.worst(windows) }
+    static func shown(_ windows: [Window], alert: Double) -> Window? { QuotaPresentation.shown(windows, alert: alert) }
+    fileprivate static func binding(in windows: [Window], now: Date) -> Window? { QuotaPresentation.binding(in: windows, now: now) }
+    private static func groups(in windows: [Window]) -> [(pool: String?, windows: [Window])] { QuotaPresentation.groups(in: windows) }
     func binding(now: Date) -> Window? { Self.binding(in: windows, now: now) }
     func display(now: Date, alert: Double, headline: QuotaReport.Headline = .auto) -> Window? {
-        let pool = binding(now: now)?.pool
-        let group = Self.current(pools.isEmpty ? windows : windows(in: pool), now: now)
-        switch headline {
-        case .auto: return Self.shown(group, alert: alert)
-        case .fiveHour:
-            return group.min { ($0.windowMinutes ?? .max) < ($1.windowMinutes ?? .max) } ?? Self.shown(group, alert: alert)
-        case .weekly:
-            return group.max { ($0.windowMinutes ?? 0) < ($1.windowMinutes ?? 0) } ?? Self.shown(group, alert: alert)
-        }
+        QuotaPresentation.headline(windows, now: now, alert: alert, choice: headline)
     }
     var isHidden: Bool { entry?.hidden ?? false }
     func showsShortWindow(now: Date, alert: Double) -> Bool {

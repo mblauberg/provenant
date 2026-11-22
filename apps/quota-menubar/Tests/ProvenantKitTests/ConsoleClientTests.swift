@@ -13,10 +13,9 @@ final class ConsoleClientTests: XCTestCase {
         let (active, _) = client([(["console", "overview"], "console-overview-active", 0)])
         let lanes = try await active.overview().lanes
         XCTAssertEqual(lanes.map(\.title), ["Implement console overview", "Review the change set", "Run the whole test suite"])
-        XCTAssertEqual(lanes.last?.state, "terminal")
+        XCTAssertEqual(lanes.last?.state, "failed")
         XCTAssertEqual(lanes.last?.attention, true)
-        XCTAssertEqual(lanes.last?.outcome, "failed")
-        XCTAssertNil(lanes.first?.outcome)
+        XCTAssertNotNil(lanes.last?.key)
         XCTAssertEqual(lanes.first?.projectLabel, "provenant")
 
         let (console, _) = client([(["console", "overview"], "console-overview", 0)])
@@ -35,7 +34,8 @@ final class ConsoleClientTests: XCTestCase {
         XCTAssertEqual(board.lanes.count, 1)
         let lane = try XCTUnwrap(board.lanes.first)
         XCTAssertEqual(lane.title, "Board fixture")
-        XCTAssertEqual(lane.metadata.attempt.state.state, "queued")
+        XCTAssertEqual(lane.metadata.attempt.state, "queued")
+        XCTAssertEqual(lane.laneId.key?.graph, "board-fixture")
         XCTAssertEqual(lane.metadata.attempt.requestedRoute?.summary, "fixture/model · high")
         XCTAssertEqual(lane.wait?.waitingFor, "launch: not yet handed to a guardian")
         XCTAssertEqual(board.highWater, 101)

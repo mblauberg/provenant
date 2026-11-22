@@ -3,12 +3,18 @@ import Foundation
 // Wire shapes of the `console` reads. Only fields the console shows are decoded, and anything the CLI may leave out
 // is optional, so an added field or a partial answer (a detail that is "unavailable") still decodes.
 
-/// Where an attempt lives. Board and tree rows carry every part; a detail that was not found carries two.
+/// Where an attempt lives. Current wire uses a structured `key` instead of separate run and task ids.
 public struct LaneID: Decodable, Hashable, Sendable {
+    public struct Key: Decodable, Hashable, Sendable {
+        public let attempt: UInt64?
+        public let graph: String?
+        public let node: String?
+        public let project: String?
+    }
+
     public let host: String?
     public let projectId: String?
-    public let runId: String?
-    public let taskId: String?
+    public let key: Key?
     public let attemptId: String
 }
 
@@ -27,24 +33,21 @@ public struct Route: Decodable, Equatable, Sendable {
     }
 }
 
-/// The attempt lifecycle as the CLI reports it: `queued`, `starting`, `running`, `settling` or `terminal`.
-public struct AttemptState: Decodable, Equatable, Sendable {
-    public let state: String
-    public let outcome: String?
-    public let exitCode: Int64?
-    public let finishedAt: String?
-    public let reason: String?
-
-    public var isTerminal: Bool { state == "terminal" }
-}
-
+/// A lane attempt as the CLI projects it. `state` is the current lifecycle or terminal outcome string; the detail
+/// that used to live in a nested object is now carried alongside it.
 public struct AttemptRecord: Decodable, Equatable, Sendable {
     public let attemptId: String
     public let title: String?
-    public let state: AttemptState
+    public let state: String
+    public let reason: String?
+    public let exitCode: Int64?
+    public let finishedAt: String?
     public let attemptNumber: UInt64?
     public let queuedAt: String?
     public let startedAt: String?
+    public let graph: String?
+    public let node: String?
+    public let projectId: String?
     public let requestedRoute: Route?
 }
 
@@ -230,14 +233,15 @@ public struct NeedsYouEntry: Decodable, Equatable, Sendable, Identifiable {
 public struct OverviewLane: Decodable, Equatable, Sendable, Identifiable {
     public let projectId: String
     public let projectLabel: String?
-    public let runId: String
-    public let taskId: String?
+    public let key: LaneID.Key?
     public let attemptId: String
     public let taskLabel: String?
-    /// `queued`, `starting`, `running`, `settling` or `terminal`.
+    /// The current lifecycle state from the lane projection.
     public let state: String
-    /// The terminal outcome (`failed`, `timed_out`, ...); null until the attempt is terminal.
-    public let outcome: String?
+    public let reason: String?
+    public let presence: String?
+    public let queuedAt: String?
+    public let cause: String?
     public let attention: Bool
     public var id: String { attemptId }
     public var title: String { taskLabel ?? "Attempt \(attemptId.prefix(8))" }
@@ -330,10 +334,22 @@ public struct AttemptOutput: Decodable, Equatable, Sendable {
 /// `quota show`: the accounts the menu agent also draws, reduced to what a table needs.
 public struct QuotaShow: Decodable, Equatable, Sendable {
     public struct Scope: Decodable, Equatable, Sendable { public let adapter: String; public let accountKey: String; public let label: String }
+    public struct Display: Decodable, Equatable, Sendable {
+        public let headline: String?
+        public let icon: String?
+    }
+    public struct RowDisplay: Decodable, Equatable, Sendable {
+        public let id: String?
+        public let name: String?
+        public let hidden: Bool?
+        public let order: UInt64?
+        public let headline: String?
+    }
     public struct Window: Decodable, Equatable, Sendable {
         public let pool: String
         public let usedBasisPoints: UInt64
         public let resetsUnixSeconds: Int64?
+        public let windowSeconds: UInt64?
     }
     public struct Snapshot: Decodable, Equatable, Sendable {
         public struct Details: Decodable, Equatable, Sendable { public let coverage: String? }
@@ -353,10 +369,12 @@ public struct QuotaShow: Decodable, Equatable, Sendable {
         public let refusals: [Refusal]?
         public let ageSeconds: UInt64?
         public let error: String?
+        public let display: RowDisplay?
         public var id: String { "\(account.adapter)/\(account.accountKey)" }
     }
     public let generatedUnixSeconds: Int64
     public let accounts: [Account]
+    public let display: Display?
 }
 
 /// `quota history`: dated readings per account.

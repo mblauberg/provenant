@@ -16,35 +16,53 @@
       {
         "project_id": "01010101010101010101010101010101",
         "project_label": "provenant",
-        "run_id": "d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9",
-        "task_id": "03030303030303030303030303030303",
         "attempt_id": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
         "task_label": "Implement console overview",
+        "attention": false,
         "state": "running",
-        "outcome": null,
-        "attention": false
+        "key": {
+          "attempt": 1,
+          "graph": "implement-console-overview",
+          "node": "task",
+          "project": "01010101010101010101010101010101"
+        },
+        "reason": null,
+        "presence": null,
+        "queued_at": null
       },
       {
         "project_id": "01010101010101010101010101010101",
         "project_label": "provenant",
-        "run_id": "dadadadadadadadadadadadadadadada",
-        "task_id": "03030303030303030303030303030303",
         "attempt_id": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
         "task_label": "Review the change set",
+        "attention": false,
         "state": "running",
-        "outcome": null,
-        "attention": false
+        "key": {
+          "attempt": 1,
+          "graph": "review-the-change-set",
+          "node": "task",
+          "project": "01010101010101010101010101010101"
+        },
+        "reason": null,
+        "presence": null,
+        "queued_at": null
       },
       {
         "project_id": "01010101010101010101010101010101",
         "project_label": "provenant",
-        "run_id": "dededededededededededededededede",
-        "task_id": "03030303030303030303030303030303",
         "attempt_id": "c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6",
         "task_label": "Run the whole test suite",
-        "state": "terminal",
-        "outcome": "failed",
-        "attention": true
+        "attention": true,
+        "state": "failed",
+        "key": {
+          "attempt": 1,
+          "graph": "run-the-whole-test-suite",
+          "node": "task",
+          "project": "01010101010101010101010101010101"
+        },
+        "reason": null,
+        "presence": null,
+        "queued_at": null
       }
     ],
     "needs_you": [

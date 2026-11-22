@@ -174,10 +174,10 @@ final class ConsoleModel {
 
 extension ConsoleModel {
     /// The title and state for an attempt, from its board row or else its overview row.
-    func heading(_ id: String) -> (title: String, state: String, outcome: String?)? {
+    func heading(_ id: String) -> (title: String, state: String)? {
         if let lane = runs.board.value?.lanes.first(where: { $0.id == id }) {
-            return (lane.title, lane.metadata.attempt.state.state, lane.metadata.attempt.state.outcome)
+            return (lane.title, lane.metadata.attempt.state)
         }
-        return overview.reader.value?.overview.lanes.first { $0.id == id }.map { ($0.title, $0.state, $0.outcome) }
+        return overview.reader.value?.overview.lanes.first { $0.id == id }.map { ($0.title, $0.state) }
     }
 }

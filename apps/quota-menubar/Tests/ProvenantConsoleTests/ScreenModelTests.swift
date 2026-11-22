@@ -84,20 +84,18 @@ final class ConsoleModelTests: XCTestCase {
         return (ConsoleModel(cli: replay.client, defaults: nil), replay)
     }
 
-    func testAFailedTerminalOverviewLaneKeepsItsOutcomeInRowAndHeading() async throws {
+    func testAFailedOverviewLaneKeepsItsStateInRowAndHeading() async throws {
         let replay = Replay([(["console", "overview"], "console-overview-active", 0), (["inbox"], "inbox-console", 0)])
         let model = ConsoleModel(cli: replay.client, defaults: nil)
         await model.load(.overview)
         let lane = try XCTUnwrap(model.overview.reader.value?.overview.lanes.last)
-        XCTAssertEqual(lane.state, "terminal")
-        XCTAssertEqual(lane.outcome, "failed")
+        XCTAssertEqual(lane.state, "failed")
         let row = LaneRow(lane)
-        XCTAssertEqual(row.style, StatusStyle.attempt(state: "terminal", outcome: "failed"))
+        XCTAssertEqual(row.style, StatusStyle.attempt(state: "failed"))
         XCTAssertEqual(row.style.tone, .bad)
         XCTAssertNotEqual(row.style.label, "Finished")
         let heading = try XCTUnwrap(model.heading(lane.id))
-        XCTAssertEqual(heading.outcome, "failed")
-        XCTAssertEqual(StatusStyle.attempt(state: heading.state, outcome: heading.outcome).tone, .bad)
+        XCTAssertEqual(StatusStyle.attempt(state: heading.state).tone, .bad)
         // The project label is context beside the state, not what the attempt waits on.
         XCTAssertNil(row.waiting)
         XCTAssertEqual(row.project, "provenant")
@@ -321,6 +319,27 @@ final class ScreenModelTests: XCTestCase {
         XCTAssertEqual(window.value, "≥24%")
     }
 
+    func testConsoleHeadlineFollowsTheMenusAutoRuleForAMixedAccount() throws {
+        let json = #"""
+        {"generated_unix_seconds": 1795311983, "display": {"headline": "auto"},
+         "accounts": [{"account": {"adapter": "agy", "account_key": "home", "label": "home"},
+           "status": "available", "display": {"id": "agy-home", "hidden": false},
+           "snapshot": {"windows": [
+             {"pool": "gemini.weekly", "used_basis_points": 4968, "resets_unix_seconds": 1795856159, "window_seconds": 604800},
+             {"pool": "gemini.5h", "used_basis_points": 0, "resets_unix_seconds": 1795329864, "window_seconds": 18000},
+             {"pool": "claude.weekly", "used_basis_points": 10000, "resets_unix_seconds": 1795567522, "window_seconds": 604800},
+             {"pool": "gemini.weekly:2", "used_basis_points": 646, "resets_unix_seconds": 1795855854, "window_seconds": 604800}]}}]}
+        """#
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let show = try decoder.decode(QuotaShow.self, from: Data(json.utf8))
+        let row = try XCTUnwrap(QuotaPanelModel.snapshot(show, history: nil).rows.first)
+        XCTAssertEqual(row.headlineWindow?.label, "Gemini weekly")
+        XCTAssertEqual(row.headlineWindow?.value, "49%")
+        XCTAssertEqual(row.windows.map(\.label),
+                       ["Gemini weekly", "Gemini 5-hour", "Claude weekly", "Gemini weekly (2)"])
+    }
+
     func testQuotaShowsAccountsAndSurvivesMissingHistory() async {
         let (console, replay) = client()
         let quota = QuotaPanelModel(client: console)
@@ -328,6 +347,11 @@ final class ScreenModelTests: XCTestCase {
         let full = quota.reader.value
         XCTAssertFalse(full?.rows.isEmpty ?? true)
         XCTAssertEqual(full?.historyAvailable, true)
+        // One human label per window, and the headline follows the account's chosen window.
+        XCTAssertEqual(full?.rows.first { $0.provider == "claude" }?.headlineWindow?.label, "5-hour")
+        XCTAssertEqual(full?.rows.first { $0.provider == "claude" }?.headlineWindow?.value, "84%")
+        XCTAssertEqual(full?.rows.first { $0.provider == "claude" }?.windows.map(\.label), ["5-hour", "Weekly"])
+        XCTAssertTrue(full?.rows.allSatisfy { row in row.windows.allSatisfy { !$0.label.contains("_") && !$0.label.contains(".") } } ?? false)
         XCTAssertEqual(full?.rows.first { $0.provider == "agy" }?.refusals.first?.pool, "claude")
         XCTAssertEqual(full?.rows.first { $0.provider == "agy" }?.refusals.first?.resetsAt,
                        Stamp.parse("2026-11-02T03:00:00Z"))
@@ -338,12 +362,63 @@ final class ScreenModelTests: XCTestCase {
         XCTAssertTrue(quota.reader.value?.rows.allSatisfy { $0.trend.isEmpty } == true)
     }
 
+    func testHistoryTrendKeepsAReadingWhoseWindowsHaveSinceReset() throws {
+        let showJSON = #"""
+        {"generated_unix_seconds": 1000, "accounts": [
+          {"account": {"adapter": "claude", "account_key": "a", "label": "A"}, "status": "available",
+           "snapshot": {"windows": [
+             {"pool": "five_hour", "used_basis_points": 8400, "resets_unix_seconds": 1500, "window_seconds": 18000}]}}]}
+        """#
+        let historyJSON = #"""
+        {"generated_unix_seconds": 1000, "count": 1, "truncated": false, "readings": [
+          {"observed_unix_seconds": 500, "account_key": "a", "label": "A", "provider": "claude", "status": "available",
+           "windows": [{"pool": "five_hour", "used_basis_points": 3000, "resets_unix_seconds": 900, "window_seconds": 18000}]}]}
+        """#
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let show = try decoder.decode(QuotaShow.self, from: Data(showJSON.utf8))
+        let history = try decoder.decode(QuotaHistory.self, from: Data(historyJSON.utf8))
+        let row = try XCTUnwrap(QuotaPanelModel.snapshot(show, history: history).rows.first)
+        XCTAssertEqual(row.trend.count, 1)
+        XCTAssertEqual(row.trend.first?.date, Date(timeIntervalSince1970: 500))
+        XCTAssertEqual(row.trend.first?.percent, 30)
+    }
+
+    func testConsoleHeadlineIgnoresAnAdvisoryWindowLikeTheMenu() throws {
+        let json = #"""
+        {"generated_unix_seconds": 1, "accounts": [
+          {"account": {"adapter": "claude", "account_key": "a", "label": "A"}, "status": "available",
+           "snapshot": {"windows": [
+             {"pool": "five_hour", "used_basis_points": 1000, "resets_unix_seconds": 1000, "window_seconds": 18000},
+             {"pool": "weekly_scoped:Fable", "used_basis_points": 10000, "resets_unix_seconds": 1000, "window_seconds": 604800}]}}]}
+        """#
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let show = try decoder.decode(QuotaShow.self, from: Data(json.utf8))
+        let row = try XCTUnwrap(QuotaPanelModel.snapshot(show, history: nil).rows.first)
+        XCTAssertEqual(row.headlineWindow?.name, "five_hour")
+        XCTAssertTrue(row.windows.first { $0.name == "weekly_scoped:Fable" }?.advisory == true)
+    }
+
+    func testTerminalOutcomeTonesSeparateFailuresFromOperatorActions() {
+        for state in ["lost", "quarantined", "unsettled", "unclassified"] {
+            XCTAssertEqual(StatusStyle.attempt(state: state).tone, .bad, state)
+        }
+        for state in ["auth_required", "permission_denied", "input_required", "uncommitted",
+                      "model_unavailable", "rate_limited"] {
+            XCTAssertEqual(StatusStyle.attempt(state: state).tone, .caution, state)
+        }
+    }
+
     func testChairsPairSessionsWithTheirProjects() async {
         let (console, _) = client()
         let chairs = ChairsModel(client: console)
         await chairs.refresh()
         let snapshot = chairs.reader.value
         XCTAssertEqual(snapshot?.sessions.count, 1)
+        // Two saved records for one host session collapse to the later save.
+        XCTAssertEqual(snapshot?.sessions.first?.summary?.now, "Implementing the console")
+        XCTAssertEqual(snapshot?.sessions.first?.record.lastSavedAt, "2026-11-02T02:18:00Z")
         XCTAssertEqual(snapshot?.projects.count, 1)
         XCTAssertNil(snapshot?.projectName("no-such-project"))
     }

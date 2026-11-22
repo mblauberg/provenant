@@ -27,7 +27,24 @@ final class ChairsModel {
             async let sessions = client.sessions()
             async let projects = client.projects()
             let page = try await sessions
-            return ChairsSnapshot(sessions: page.sessions, projects: try await projects.projects, truncated: page.truncated)
+            return ChairsSnapshot(sessions: Self.latestPerSession(page.sessions), projects: try await projects.projects,
+                                  truncated: page.truncated)
         }
+    }
+
+    /// The CLI can return several saved records for one host session. Show the most recently saved one only.
+    nonisolated static func latestPerSession(_ sessions: [ChairSession]) -> [ChairSession] {
+        var indices: [String: Int] = [:]
+        var result: [ChairSession] = []
+        for session in sessions {
+            let id = session.record.hostSessionId
+            guard let index = indices[id] else {
+                indices[id] = result.count
+                result.append(session)
+                continue
+            }
+            if (session.record.lastSavedAt ?? "") > (result[index].record.lastSavedAt ?? "") { result[index] = session }
+        }
+        return result
     }
 }

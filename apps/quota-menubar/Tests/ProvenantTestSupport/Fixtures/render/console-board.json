@@ -25,10 +25,14 @@
         "attention": false,
         "chair": null,
         "lane_id": {
-          "attempt_id": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
           "host": null,
-          "run_id": "d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9",
-          "task_id": "03030303030303030303030303030303"
+          "key": {
+            "attempt": 1,
+            "graph": "implement-console-overview",
+            "node": "task",
+            "project": "01010101010101010101010101010101"
+          },
+          "attempt_id": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1"
         },
         "metadata": {
           "attempt": {
@@ -70,16 +74,12 @@
             "result": null,
             "retry_of": null,
             "revision": 1,
-            "run_id": "65656565656565656565656565656565",
             "runtime_deadline": null,
             "schema_version": 1,
             "session": null,
             "started_at": "2026-11-02T08:42:10.000000Z",
-            "state": {
-              "state": "running"
-            },
+            "state": "running",
             "subject": null,
-            "task_id": "03030303030303030303030303030303",
             "title": "Implement console overview",
             "trace": {
               "actor": "02020202020202020202020202020202",
@@ -136,16 +136,22 @@
           "attempt_id": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
           "lane_class": "read_only",
           "waiting_for": "provider response"
-        }
+        },
+        "status": "running",
+        "title": "Implement console overview"
       },
       {
         "attention": false,
         "chair": null,
         "lane_id": {
-          "attempt_id": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
           "host": null,
-          "run_id": "dadadadadadadadadadadadadadadada",
-          "task_id": "03030303030303030303030303030303"
+          "key": {
+            "attempt": 1,
+            "graph": "review-the-change-set",
+            "node": "task",
+            "project": "01010101010101010101010101010101"
+          },
+          "attempt_id": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2"
         },
         "metadata": {
           "attempt": {
@@ -187,16 +193,12 @@
             "result": null,
             "retry_of": null,
             "revision": 1,
-            "run_id": "65656565656565656565656565656565",
             "runtime_deadline": null,
             "schema_version": 1,
             "session": null,
             "started_at": "2026-11-02T08:42:10.000000Z",
-            "state": {
-              "state": "running"
-            },
+            "state": "running",
             "subject": null,
-            "task_id": "03030303030303030303030303030303",
             "title": "Review the change set",
             "trace": {
               "actor": "02020202020202020202020202020202",
@@ -249,16 +251,22 @@
             "reasoning"
           ]
         },
-        "wait": null
+        "wait": null,
+        "status": "running",
+        "title": "Review the change set"
       },
       {
         "attention": false,
         "chair": null,
         "lane_id": {
-          "attempt_id": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
           "host": null,
-          "run_id": "dbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdb",
-          "task_id": "03030303030303030303030303030303"
+          "key": {
+            "attempt": 1,
+            "graph": "write-the-migration-notes",
+            "node": "task",
+            "project": "01010101010101010101010101010101"
+          },
+          "attempt_id": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
         },
         "metadata": {
           "attempt": {
@@ -300,16 +308,12 @@
             "result": null,
             "retry_of": null,
             "revision": 1,
-            "run_id": "65656565656565656565656565656565",
             "runtime_deadline": null,
             "schema_version": 1,
             "session": null,
             "started_at": null,
-            "state": {
-              "state": "queued"
-            },
+            "state": "queued",
             "subject": null,
-            "task_id": "03030303030303030303030303030303",
             "title": "Write the migration notes",
             "trace": {
               "actor": "02020202020202020202020202020202",
@@ -366,16 +370,22 @@
           "attempt_id": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
           "lane_class": "read_only",
           "waiting_for": "launch: not yet handed to a guardian"
-        }
+        },
+        "status": "queued",
+        "title": "Write the migration notes"
       },
       {
         "attention": false,
         "chair": null,
         "lane_id": {
-          "attempt_id": "c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4",
           "host": null,
-          "run_id": "dcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdc",
-          "task_id": "03030303030303030303030303030303"
+          "key": {
+            "attempt": 1,
+            "graph": "settle-quota-fixtures",
+            "node": "task",
+            "project": "01010101010101010101010101010101"
+          },
+          "attempt_id": "c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4"
         },
         "metadata": {
           "attempt": {
@@ -417,17 +427,12 @@
             "result": null,
             "retry_of": null,
             "revision": 1,
-            "run_id": "65656565656565656565656565656565",
             "runtime_deadline": null,
             "schema_version": 1,
             "session": null,
             "started_at": "2026-11-02T08:42:10.000000Z",
-            "state": {
-              "state": "settling",
-              "publication_pending": false
-            },
+            "state": "settling",
             "subject": null,
-            "task_id": "03030303030303030303030303030303",
             "title": "Settle quota fixtures",
             "trace": {
               "actor": "02020202020202020202020202020202",
@@ -480,16 +485,22 @@
             "reasoning"
           ]
         },
-        "wait": null
+        "wait": null,
+        "status": "settling",
+        "title": "Settle quota fixtures"
       },
       {
         "attention": false,
         "chair": null,
         "lane_id": {
-          "attempt_id": "c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5",
           "host": null,
-          "run_id": "dddddddddddddddddddddddddddddddd",
-          "task_id": "03030303030303030303030303030303"
+          "key": {
+            "attempt": 1,
+            "graph": "regenerate-cli-fixtures",
+            "node": "task",
+            "project": "01010101010101010101010101010101"
+          },
+          "attempt_id": "c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5"
         },
         "metadata": {
           "attempt": {
@@ -531,19 +542,12 @@
             "result": null,
             "retry_of": null,
             "revision": 1,
-            "run_id": "65656565656565656565656565656565",
             "runtime_deadline": null,
             "schema_version": 1,
             "session": null,
             "started_at": "2026-11-02T08:42:10.000000Z",
-            "state": {
-              "state": "terminal",
-              "outcome": "succeeded",
-              "exit_code": 0,
-              "finished_at": "2026-11-02T08:50:00Z"
-            },
+            "state": "terminal",
             "subject": null,
-            "task_id": "03030303030303030303030303030303",
             "title": "Regenerate CLI fixtures",
             "trace": {
               "actor": "02020202020202020202020202020202",
@@ -564,7 +568,10 @@
               "source": null,
               "uncached_input": null
             },
-            "verified_owner": "02020202020202020202020202020202"
+            "verified_owner": "02020202020202020202020202020202",
+            "outcome": "succeeded",
+            "exit_code": 0,
+            "finished_at": "2026-11-02T08:50:00Z"
           },
           "run": {
             "actor_id": "02020202020202020202020202020202",
@@ -596,16 +603,22 @@
             "reasoning"
           ]
         },
-        "wait": null
+        "wait": null,
+        "status": "terminal",
+        "title": "Regenerate CLI fixtures"
       },
       {
         "attention": true,
         "chair": null,
         "lane_id": {
-          "attempt_id": "c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6",
           "host": null,
-          "run_id": "dededededededededededededededede",
-          "task_id": "03030303030303030303030303030303"
+          "key": {
+            "attempt": 1,
+            "graph": "run-the-whole-test-suite",
+            "node": "task",
+            "project": "01010101010101010101010101010101"
+          },
+          "attempt_id": "c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6"
         },
         "metadata": {
           "attempt": {
@@ -647,20 +660,12 @@
             "result": null,
             "retry_of": null,
             "revision": 1,
-            "run_id": "65656565656565656565656565656565",
             "runtime_deadline": null,
             "schema_version": 1,
             "session": null,
             "started_at": "2026-11-02T08:42:10.000000Z",
-            "state": {
-              "state": "terminal",
-              "outcome": "task_failed",
-              "exit_code": 1,
-              "finished_at": "2026-11-02T08:55:00Z",
-              "reason": "2 tests failed"
-            },
+            "state": "terminal",
             "subject": null,
-            "task_id": "03030303030303030303030303030303",
             "title": "Run the whole test suite",
             "trace": {
               "actor": "02020202020202020202020202020202",
@@ -681,7 +686,11 @@
               "source": null,
               "uncached_input": null
             },
-            "verified_owner": "02020202020202020202020202020202"
+            "verified_owner": "02020202020202020202020202020202",
+            "outcome": "task_failed",
+            "exit_code": 1,
+            "finished_at": "2026-11-02T08:55:00Z",
+            "reason": "2 tests failed"
           },
           "run": {
             "actor_id": "02020202020202020202020202020202",
@@ -713,7 +722,9 @@
             "reasoning"
           ]
         },
-        "wait": null
+        "wait": null,
+        "status": "terminal",
+        "title": "Run the whole test suite"
       }
     ],
     "next_cursor": "2.101.101.sha256:88fdd1c45d28a6ed462639aaadc725d8f7821fd400d0c5b0481ba269745061c7",

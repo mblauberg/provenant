@@ -5,6 +5,13 @@
 set -eu
 cd "$(dirname "$0")"
 out="${1:-.build/bundle}/Provenant Console.app"
+# The console is stamped with the CLI release it was built against.
+manifest="$PWD/../../tools/front-door/Cargo.toml"
+version="$(awk '/^\[package\]/{p=1; next} /^\[/{p=0} p && /^version[[:space:]]*=/{split($0, parts, "\""); print parts[2]; exit}' "$manifest")"
+if [ -z "$version" ]; then
+  echo "error: no [package] version in $manifest" >&2
+  exit 1
+fi
 swift build -c release
 bin="$(swift build -c release --show-bin-path)"
 rm -rf "$out"
@@ -13,6 +20,7 @@ mkdir -p "$out/Contents/MacOS" "$out/Contents/Resources" "$helper/Contents/MacOS
 cp "$bin/provenant-console" "$out/Contents/MacOS/"
 cp "$bin/quota-menubar" "$helper/Contents/MacOS/"
 cp Resources/Menu-Info.plist "$helper/Contents/Info.plist"
+plutil -replace CFBundleShortVersionString -string "$version" "$helper/Contents/Info.plist"
 # The brand icon (Icon Composer format) is compiled by actool. Without Xcode the app is built with no icon.
 icon_name=Provenant
 icon_source="$PWD/../../assets/brand/$icon_name.icon"
@@ -49,7 +57,7 @@ cat > "$out/Contents/Info.plist" <<PLIST
   <key>CFBundleExecutable</key><string>provenant-console</string>
 $icon_keys
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0</string>
+  <key>CFBundleShortVersionString</key><string>$version</string>
   <key>CFBundleVersion</key><string>1</string>
   <key>LSMinimumSystemVersion</key><string>26.0</string>
   <key>CFBundleURLTypes</key>

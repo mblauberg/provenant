@@ -25,10 +25,14 @@
         "attention": false,
         "chair": null,
         "lane_id": {
-          "attempt_id": "65656565656565656565656565656565",
           "host": null,
-          "run_id": "65656565656565656565656565656565",
-          "task_id": "03030303030303030303030303030303"
+          "key": {
+            "attempt": 1,
+            "graph": "board-fixture",
+            "node": "task",
+            "project": "01010101010101010101010101010101"
+          },
+          "attempt_id": "65656565656565656565656565656565"
         },
         "metadata": {
           "attempt": {
@@ -70,16 +74,12 @@
             "result": null,
             "retry_of": null,
             "revision": 1,
-            "run_id": "65656565656565656565656565656565",
             "runtime_deadline": null,
             "schema_version": 1,
             "session": null,
             "started_at": null,
-            "state": {
-              "state": "queued"
-            },
+            "state": "queued",
             "subject": null,
-            "task_id": "03030303030303030303030303030303",
             "title": "Board fixture",
             "trace": {
               "actor": "02020202020202020202020202020202",
@@ -136,7 +136,9 @@
           "attempt_id": "65656565656565656565656565656565",
           "lane_class": "read_only",
           "waiting_for": "launch: not yet handed to a guardian"
-        }
+        },
+        "status": "queued",
+        "title": "Board fixture"
       }
     ],
     "next_cursor": "2.101.101.sha256:88fdd1c45d28a6ed462639aaadc725d8f7821fd400d0c5b0481ba269745061c7",
