@@ -14,6 +14,7 @@
 use std::path::{Path, PathBuf};
 
 use provenant_records::{CommandResult, Outcome};
+use provenant_workflow::session::{SummarySource, checkpoint_summary_line};
 use serde_json::{Value, json};
 
 const DEFAULT_FIXTURES: &str = "../../../../apps/quota-menubar/Tests/ProvenantTestSupport/Fixtures";
@@ -155,9 +156,13 @@ mod fixtures {
     }
 
     fn lane_id(graph: &str, id: &str) -> Value {
+        lane_key(graph, "task", 1, id)
+    }
+
+    fn lane_key(graph: &str, node: &str, attempt: u32, id: &str) -> Value {
         json!({
             "host": null,
-            "key": {"attempt": 1, "graph": graph, "node": "task", "project": "01010101010101010101010101010101"},
+            "key": {"attempt": attempt, "graph": graph, "node": node, "project": "01010101010101010101010101010101"},
             "attempt_id": id
         })
     }
@@ -181,13 +186,38 @@ mod fixtures {
         })
     }
 
-    fn session(summary: Option<Value>, revision: u64, parent: Option<u64>, saved: &str) -> Value {
-        json!({
+    /// One `console sessions` row, projected as the CLI does: the display line is
+    /// the structured `now`, else the line derived from the checkpoint markdown.
+    /// The fixture chair's checkpoint markdown; its title is the derived line.
+    const CHECKPOINT: &str = "# Console checkpoint\n";
+
+    fn session(
+        summary: Option<Value>,
+        checkpoint: &str,
+        revision: u64,
+        parent: Option<u64>,
+        saved: &str,
+    ) -> Result<Value, String> {
+        let structured = summary
+            .as_ref()
+            .and_then(|summary| summary["now"].as_str())
+            .filter(|now| !now.trim().is_empty())
+            .map(str::to_owned);
+        let (line, source) = match structured {
+            Some(now) => (json!(now), SummarySource::Structured),
+            None => match checkpoint_summary_line(checkpoint) {
+                Some(line) => (json!(line.text), line.source),
+                None => (Value::Null, SummarySource::Unavailable),
+            },
+        };
+        let source =
+            serde_json::to_value(source).map_err(|error| format!("summary source: {error}"))?;
+        Ok(json!({
             "consistency": "current",
             "evidence": "checkpoint_save",
             "record": {
                 "chair_actor": "c7b11347fb1be62dc783521ee94e45bf",
-                "checkpoint": {"bytes": 204, "parent": parent, "revision": revision,
+                "checkpoint": {"bytes": checkpoint.len(), "parent": parent, "revision": revision,
                     "saved_at": saved, "sha256": "sha256:84b0cecfaedafbbb6b1d1bf46206c239f7e8c9644ad51e8a5a09603eb0c60477"},
                 "created_at": "2026-11-02T01:58:26.511922Z",
                 "host": "7249da8d9cb98a25696aa69922cc1866",
@@ -198,9 +228,9 @@ mod fixtures {
                 "summary": summary
             },
             "role": "chair",
-            "summary": summary,
-            "summary_status": if summary.is_some() { "available" } else { "unavailable" }
-        })
+            "summary": line,
+            "summary_status": source
+        }))
     }
 
     fn console() -> Result<Vec<(&'static str, Value)>, String> {
@@ -269,6 +299,8 @@ mod fixtures {
             (
                 "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
                 "implement-console-overview",
+                "task",
+                1,
                 0,
                 json!([{"kind":"dispatch","attempt_id":"c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2"},
                        {"kind":"dispatch","attempt_id":"c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"}]),
@@ -276,36 +308,58 @@ mod fixtures {
             (
                 "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
                 "review-the-change-set",
+                "task",
+                1,
                 1,
                 json!([{"kind":"retry","attempt_id":"c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4"}]),
             ),
             (
                 "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
-                "review-the-change-set",
+                "write-the-migration-notes",
+                "task",
+                1,
                 1,
                 json!([]),
             ),
             (
                 "c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4",
-                "run-the-whole-test-suite",
+                "settle-quota-fixtures",
+                "task",
+                1,
                 2,
                 json!([]),
             ),
-            ("c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5", "fixture", 0, json!([])),
-            ("c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6", "fixture", 0, json!([])),
+            (
+                "c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5",
+                "regenerate-cli-fixtures",
+                "task",
+                1,
+                0,
+                json!([]),
+            ),
+            (
+                "c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6",
+                "run-the-whole-test-suite",
+                "task--writer",
+                2,
+                0,
+                json!([]),
+            ),
         ]
         .iter()
-        .map(|(id, graph, depth, children)| -> Result<Value, String> {
-            let row = lane(&attempt(id, graph, running(), &format!("node {graph}"))?)?;
-            Ok(json!({
-                "lane_id": lane_id(graph, id),
-                "depth": depth,
-                "metadata": {"attempt": row},
-                "children": children,
-                "status": "running",
-                "parents": {"continuation": null, "dispatch": null}
-            }))
-        })
+        .map(
+            |(id, graph, node, attempt_number, depth, children)| -> Result<Value, String> {
+                let row = lane(&attempt(id, graph, running(), &format!("node {graph}"))?)?;
+                Ok(json!({
+                    "lane_id": lane_key(graph, node, *attempt_number, id),
+                    "depth": depth,
+                    "metadata": {"attempt": row},
+                    "children": children,
+                    "status": "running",
+                    "parents": {"continuation": null, "dispatch": null}
+                }))
+            },
+        )
         .collect::<Result<_, _>>()?;
 
         let search_matches = json!([
@@ -431,8 +485,8 @@ mod fixtures {
                     "console sessions",
                     json!({
                         "schema_version": 2,
-                        "sessions": [session(Some(summary), 2, None, "2026-11-02T01:58:26.745295Z"),
-                         session(Some(later), 3, Some(2), "2026-11-02T02:18:00Z")],
+                        "sessions": [session(Some(summary), CHECKPOINT, 2, None, "2026-11-02T01:58:26.745295Z")?,
+                         session(Some(later), CHECKPOINT, 3, Some(2), "2026-11-02T02:18:00Z")?],
                         "coverage": {"scope": "local"},
                         "snapshot": "sha256:9b20d92ab3bb05518444148548bdfcce45638cbac982608e2e274fc8ce398f1f",
                         "next_cursor": null, "truncated": false, "scan_truncated": false
@@ -445,7 +499,7 @@ mod fixtures {
                     "console sessions",
                     json!({
                         "schema_version": 2,
-                        "sessions": [session(None, 1, None, "2026-11-02T01:58:26.511922Z")],
+                        "sessions": [session(None, CHECKPOINT, 1, None, "2026-11-02T01:58:26.511922Z")?],
                         "coverage": {"scope": "local"},
                         "snapshot": "sha256:9b20d92ab3bb05518444148548bdfcce45638cbac982608e2e274fc8ce398f1f",
                         "next_cursor": null, "truncated": false, "scan_truncated": false
