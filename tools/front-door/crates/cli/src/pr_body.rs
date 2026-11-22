@@ -114,7 +114,11 @@ pub fn fill(template: &str, body: &Body<'_>) -> Result<String, String> {
     if body.decision.is_none() {
         sections.retain(|(name, _)| name.as_deref() != Some("Decision requested"));
     }
-    let append_from_bundled = |name: &str, sections: &mut Vec<(Option<String>, Vec<&str>)>| {
+    fn append_from_bundled<'a>(
+        bundled: &'a str,
+        name: &str,
+        sections: &mut Vec<(Option<String>, Vec<&'a str>)>,
+    ) {
         if sections
             .iter()
             .any(|(existing, _)| existing.as_deref() == Some(name))
@@ -130,12 +134,12 @@ pub fn fill(template: &str, body: &Body<'_>) -> Result<String, String> {
             .map(|(_, line)| line)
             .collect();
         sections.push((Some(name.to_owned()), lines));
-    };
+    }
     for wanted in SECTIONS {
-        append_from_bundled(wanted, &mut sections);
+        append_from_bundled(&bundled, wanted, &mut sections);
     }
     if body.decision.is_some() {
-        append_from_bundled("Decision requested", &mut sections);
+        append_from_bundled(&bundled, "Decision requested", &mut sections);
     }
     let mut out = String::new();
     for (name, lines) in &sections {
