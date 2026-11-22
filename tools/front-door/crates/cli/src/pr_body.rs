@@ -98,6 +98,9 @@ fn head_text(facts: &AttemptFacts) -> String {
 /// was recorded.
 pub fn fill(template: &str, body: &Body<'_>) -> Result<String, String> {
     let template = strip_comments(template);
+    let bundled = strip_comments(include_str!(
+        "../../../../../.github/pull_request_template.md"
+    ));
     let mut sections: Vec<(Option<String>, Vec<&str>)> = vec![(None, Vec::new())];
     for line in template.lines() {
         if let Some(name) = line.strip_prefix("## ") {
@@ -111,10 +114,7 @@ pub fn fill(template: &str, body: &Body<'_>) -> Result<String, String> {
     if body.decision.is_none() {
         sections.retain(|(name, _)| name.as_deref() != Some("Decision requested"));
     }
-    let bundled = strip_comments(include_str!(
-        "../../../../../.github/pull_request_template.md"
-    ));
-    let mut append_from_bundled = |name: &str, sections: &mut Vec<(Option<String>, Vec<&str>)>| {
+    let append_from_bundled = |name: &str, sections: &mut Vec<(Option<String>, Vec<&str>)>| {
         if sections
             .iter()
             .any(|(existing, _)| existing.as_deref() == Some(name))
