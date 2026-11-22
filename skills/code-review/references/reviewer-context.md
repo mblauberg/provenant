@@ -49,8 +49,9 @@ Reviewers may use any word from one vocabulary: `critical`, `blocker`,
 `informational`, `note` or `p4` is a note. Only `blocking` contradicts PASS on
 severity. A confirmed, worth-fixing `should-fix` on a default path starts a
 repair writer, and a blocking class (`acceptance` or `default_path_defect`)
-also blocks acceptance and repair, whatever the severity word. A note is
-reported, never repaired. An unrecognised severity word is warned and kept as
+also blocks acceptance and repair, whatever the severity word. A note without
+a blocking class is reported, never repaired, and a finding triage rejects
+never reaches a writer. An unrecognised severity word is warned and kept as
 `should-fix`, not treated as an invalid review.
 
 ## What a finding states

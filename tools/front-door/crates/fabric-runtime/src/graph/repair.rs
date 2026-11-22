@@ -160,9 +160,16 @@ pub(super) fn repair_eligible(finding: &Finding) -> bool {
     if finding.boundary_or_data_loss() {
         return !finding.falsified_with_evidence();
     }
+    // Triage that rejects a finding, or calls it not worth fixing, keeps it from
+    // a writer even at blocking severity; an untriaged blocking finding is work.
+    let declined = finding
+        .triage()
+        .is_some_and(|triage| !(triage.decision == "confirmed" && triage.worth_fixing));
+    if answered(finding) || declined {
+        return false;
+    }
     blocks_acceptance(finding)
-        || (!answered(finding)
-            && confirmed_worth_fixing(finding)
+        || (confirmed_worth_fixing(finding)
             && finding.default_path()
             && severity_class(finding.effective_severity()) == Some(SeverityClass::ShouldFix))
 }
