@@ -2288,7 +2288,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         return Ok(GcData {
             sweep_budget_seconds,
             sweep_budget_source,
-            sweep_warning: takeover_warning,
+            sweep_warning,
             retired_projects,
             notice: Some(
                 "all retention classes had completed before the prior sweep reached its budget"
@@ -2326,6 +2326,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                 sweep_budget_seconds,
                 sweep_budget_source,
                 sweep_cursor: initial_cursor,
+                sweep_warning,
                 retired_projects: retired_projects.clone(),
                 notice: Some("background sweep skipped: free space is above gc.free_floor".into()),
                 ..Default::default()
