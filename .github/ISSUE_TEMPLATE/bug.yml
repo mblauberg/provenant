@@ -85,7 +85,7 @@ body:
     attributes:
       label: Environment
       description: macOS version, Rust toolchain version if relevant, `provenant --version`, and client versions.
-      placeholder: "macOS 15.3, Rust 1.100.0, provenant 2.6.6, Claude Code 2.1.0"
+      placeholder: "macOS 15.3, Rust 1.100.0, provenant 2.7.0, Claude Code 2.1.0"
     validations:
       required: false
 
