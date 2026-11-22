@@ -3054,7 +3054,7 @@ mod tests {
     /// utility's `project_location` plus `bind_project`.
     fn child_project_binding(
         roots: &provenant_core::Roots,
-        project: &Path,
+        project: &std::path::Path,
     ) -> Result<
         (
             provenant_config::ProjectLocation,
