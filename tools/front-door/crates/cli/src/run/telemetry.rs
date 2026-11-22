@@ -94,26 +94,24 @@ pub(super) fn reasoning_line(totals: &provenant_telemetry::Totals) -> Option<Str
 }
 
 /// The reviewed price table shipped with the product.
-pub(super) fn price_table(assets: &Path) -> Result<provenant_telemetry::PriceTable, Fail> {
-    let path = assets.join("config/telemetry-prices.toml");
-    let text = std::fs::read_to_string(&path).map_err(|error| {
-        Fail::new(
-            Status::Error,
-            ErrorKind::Prices,
-            format!("{}: {error}", path.display()),
-        )
-    })?;
-    toml_edit::de::from_str::<provenant_telemetry::ConfiguredPrices>(&text)
-        .map_err(|error| error.to_string())
-        .and_then(|config| {
-            provenant_telemetry::validate_prices(&config).map_err(|error| error.to_string())
-        })
-        .map_err(|error| Fail::new(Status::Error, ErrorKind::Prices, error))
+pub(super) fn price_table(
+    edge: &crate::run::Edge<'_>,
+) -> Result<provenant_telemetry::PriceTable, Fail> {
+    let project = edge.roots.checkout();
+    let key = provenant_config::project_key_for(project);
+    provenant_telemetry::prices_overlay::load(
+        edge.assets,
+        edge.roots.state.as_path(),
+        Some(project),
+        key.as_deref(),
+    )
+    .map(|layered| layered.table)
+    .map_err(|error| Fail::new(Status::Error, ErrorKind::Prices, error.to_string()))
 }
 
 pub(super) fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, String), Fail> {
     use run::AttemptReader;
-    let prices = price_table(edge.assets)?;
+    let prices = price_table(edge)?;
     let instant = |time: Option<jiff::Timestamp>| {
         time.map(|t| WallTime::from_micros(t.as_microsecond()))
             .transpose()

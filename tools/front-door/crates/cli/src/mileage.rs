@@ -9,7 +9,6 @@ use provenant_telemetry::ingest;
 use provenant_telemetry::mileage::{self, Observation, Reading, Series};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
-use std::path::Path;
 
 const SCHEMA_VERSION: u64 = 1;
 
@@ -42,11 +41,17 @@ pub fn run(command: Mileage, edge: &Edge<'_>) -> Reply {
 
 type Failure = (ErrorKind, String);
 
-fn prices(assets: &Path) -> Option<provenant_telemetry::PriceTable> {
-    let text = std::fs::read_to_string(assets.join("config/telemetry-prices.toml")).ok()?;
-    let configured =
-        toml_edit::de::from_str::<provenant_telemetry::ConfiguredPrices>(&text).ok()?;
-    provenant_telemetry::validate_prices(&configured).ok()
+fn prices(edge: &Edge<'_>) -> Option<provenant_telemetry::PriceTable> {
+    let project = edge.roots.checkout();
+    let key = provenant_config::project_key_for(project);
+    provenant_telemetry::prices_overlay::load(
+        edge.assets,
+        edge.roots.state.as_path(),
+        Some(project),
+        key.as_deref(),
+    )
+    .ok()
+    .map(|layered| layered.table)
 }
 
 fn microdollars(numerator: u128) -> Option<u64> {
@@ -178,7 +183,7 @@ fn inner(command: &Mileage, edge: &Edge<'_>) -> Result<(Value, String), Failure>
         },
     )
     .map_err(|error| (ErrorKind::Io, error.to_string()))?;
-    let table = prices(edge.assets);
+    let table = prices(edge);
     let options = mileage::Options {
         min_runs: command.min_runs,
         fall_percent: command.fall_percent,
