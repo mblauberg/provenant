@@ -174,7 +174,7 @@ enum QuotaMenu {
                 let prefix = overview.coverage.runs == "partial" ? "At least " : ""
                 entries.append(.header("\(prefix)\(running) running · \(attention) attention"))
                 entries += overview.lanes.prefix(5).map { lane in
-                    let title = lane.taskLabel.flatMap { $0.isEmpty ? nil : $0 } ?? "Untitled task"
+                    let title = lane.title ?? "Untitled task"
                     let state = lane.attention ? "Needs attention" : Fmt.human(lane.state)
                     let context = [lane.projectLabel, state, age(lane.queuedAt, now: now)].compactMap { $0 }.joined(separator: " · ")
                     return .item(MenuItemSpec(title: clip(title), subtitle: clip(context),
@@ -355,6 +355,7 @@ enum QuotaMenu {
             ("Banked resets", account.banked.map(banked)),
             ("Checked", account.observedAt.map { Fmt.ago($0, now: now) }),
             ("Priority", account.priority.map { $0.formatted(.number.precision(.fractionLength(0))) }),
+            ("Models", Self.modelsLine(account.models)),
             ("Identity", account.fingerprint),
         ]
         let info: [MenuEntry] = facts.compactMap { key, value in value.map { .fact(key, $0) } }
@@ -366,6 +367,14 @@ enum QuotaMenu {
             account.status == .stale && account.error == nil ? .note("Window reset since reading", nil) : nil,
         ].compactMap { $0 } + account.refusals.map { .note(clip(refusalLine($0, now: now)), .orange) }
         return [windows, info, notes].filter { !$0.isEmpty }.reduce([]) { $0.isEmpty ? $1 : $0 + [.separator] + $1 }
+    }
+
+    /// The offered models as one compact fact: a few names, then a count of the rest. A menu grows to its widest row.
+    static func modelsLine(_ models: [String]) -> String? {
+        guard !models.isEmpty else { return nil }
+        let shown = models.prefix(2).joined(separator: ", ")
+        let remaining = models.count - min(models.count, 2)
+        return clip(remaining > 0 ? "\(shown) +\(remaining) more" : shown)
     }
 
     /// The row's one short line for recorded refusals: the model when there is one, otherwise a count, with the

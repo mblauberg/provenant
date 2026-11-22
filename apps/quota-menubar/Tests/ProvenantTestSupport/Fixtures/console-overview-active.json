@@ -17,7 +17,7 @@
         "project_id": "01010101010101010101010101010101",
         "project_label": "provenant",
         "attempt_id": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
-        "task_label": "Implement console overview",
+        "task_label": "task",
         "attention": false,
         "state": "running",
         "key": {
@@ -34,7 +34,7 @@
         "project_id": "01010101010101010101010101010101",
         "project_label": "provenant",
         "attempt_id": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
-        "task_label": "Review the change set",
+        "task_label": "task",
         "attention": false,
         "state": "running",
         "key": {
@@ -51,7 +51,7 @@
         "project_id": "01010101010101010101010101010101",
         "project_label": "provenant",
         "attempt_id": "c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6",
-        "task_label": "Run the whole test suite",
+        "task_label": "task",
         "attention": true,
         "state": "failed",
         "key": {

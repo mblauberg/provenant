@@ -65,7 +65,7 @@
             "started_at": "2026-11-02T08:42:10.000000Z",
             "state": "running",
             "subject": null,
-            "title": "Implement console overview",
+            "title": "task",
             "trace": {
               "actor": "02020202020202020202020202020202",
               "attempt": "65656565656565656565656565656565",
@@ -117,7 +117,7 @@
           }
         ],
         "status": "running",
-        "title": "Implement console overview"
+        "title": "task"
       },
       {
         "lane_id": {
@@ -179,7 +179,7 @@
             "started_at": "2026-11-02T08:42:10.000000Z",
             "state": "running",
             "subject": null,
-            "title": "Review the change set",
+            "title": "task",
             "trace": {
               "actor": "02020202020202020202020202020202",
               "attempt": "65656565656565656565656565656565",
@@ -227,7 +227,7 @@
           }
         ],
         "status": "running",
-        "title": "Review the change set"
+        "title": "task"
       },
       {
         "lane_id": {
@@ -289,7 +289,7 @@
             "started_at": null,
             "state": "queued",
             "subject": null,
-            "title": "Write the migration notes",
+            "title": "task",
             "trace": {
               "actor": "02020202020202020202020202020202",
               "attempt": "65656565656565656565656565656565",
@@ -332,7 +332,7 @@
         },
         "children": [],
         "status": "queued",
-        "title": "Write the migration notes"
+        "title": "task"
       },
       {
         "lane_id": {
@@ -394,7 +394,7 @@
             "started_at": "2026-11-02T08:42:10.000000Z",
             "state": "settling",
             "subject": null,
-            "title": "Settle quota fixtures",
+            "title": "task",
             "trace": {
               "actor": "02020202020202020202020202020202",
               "attempt": "65656565656565656565656565656565",
@@ -437,7 +437,7 @@
         },
         "children": [],
         "status": "settling",
-        "title": "Settle quota fixtures"
+        "title": "task"
       },
       {
         "lane_id": {
@@ -499,7 +499,7 @@
             "started_at": "2026-11-02T08:42:10.000000Z",
             "state": "terminal",
             "subject": null,
-            "title": "Regenerate CLI fixtures",
+            "title": "task",
             "trace": {
               "actor": "02020202020202020202020202020202",
               "attempt": "65656565656565656565656565656565",
@@ -545,15 +545,15 @@
         },
         "children": [],
         "status": "terminal",
-        "title": "Regenerate CLI fixtures"
+        "title": "task"
       },
       {
         "lane_id": {
           "host": null,
           "key": {
-            "attempt": 1,
+            "attempt": 2,
             "graph": "run-the-whole-test-suite",
-            "node": "task",
+            "node": "task--writer",
             "project": "01010101010101010101010101010101"
           },
           "attempt_id": "c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6"
@@ -607,7 +607,7 @@
             "started_at": "2026-11-02T08:42:10.000000Z",
             "state": "terminal",
             "subject": null,
-            "title": "Run the whole test suite",
+            "title": "task",
             "trace": {
               "actor": "02020202020202020202020202020202",
               "attempt": "65656565656565656565656565656565",
@@ -654,7 +654,7 @@
         },
         "children": [],
         "status": "terminal",
-        "title": "Run the whole test suite"
+        "title": "task"
       }
     ],
     "edges": [],

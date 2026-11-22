@@ -68,7 +68,10 @@ public struct BoardLane: Decodable, Equatable, Sendable, Identifiable {
     public let wait: LaneWait?
     public let observationCoverage: String?
     public var id: String { laneId.attemptId }
-    public var title: String { metadata.attempt.title ?? "Attempt \(laneId.attemptId.prefix(8))" }
+    /// The graph is the lane's name; the CLI's task label is only a fallback for older keys.
+    public var title: String {
+        LaneTitle.title(laneId.key) ?? metadata.attempt.title ?? "Attempt \(laneId.attemptId.prefix(8))"
+    }
 }
 
 public struct BoardCoverage: Decodable, Equatable, Sendable {
@@ -102,6 +105,9 @@ public struct TreeNode: Decodable, Equatable, Sendable, Identifiable {
     public let metadata: LaneMetadata
     public let children: [TreeChild]?
     public var id: String { laneId.attemptId }
+    public var title: String {
+        LaneTitle.title(laneId.key) ?? metadata.attempt.title ?? "Attempt \(laneId.attemptId.prefix(8))"
+    }
 }
 
 public struct TreeCoverage: Decodable, Equatable, Sendable {
@@ -203,19 +209,43 @@ public struct OverviewCounts: Decodable, Equatable, Sendable {
     public let attention: UInt64?
 }
 
+/// A coverage statement, with the weight it deserves. A partial read is information, not a fault; an unavailable
+/// read is a real gap. Nested runs are deliberately out of the overview's scope, so they never produce a notice.
+public enum CoverageNotice: Equatable, Hashable, Sendable {
+    case warning(String)
+    case info(String)
+
+    public var text: String {
+        switch self {
+        case .warning(let text), .info(let text): return text
+        }
+    }
+}
+
 public struct OverviewCoverage: Decodable, Equatable, Sendable {
     public let inbox: String?
     public let runs: String?
     public let nestedRuns: String?
     public let scope: String?
 
-    /// What the overview could not see, as short phrases. Empty when nothing is missing.
-    public var warnings: [String] {
-        let parts: [(String, String?)] = [("Inbox", inbox), ("Runs", runs), ("Nested runs", nestedRuns)]
-        return parts.compactMap { name, value in
-            guard let value, value != "complete", value != "empty" else { return nil }
-            return "\(name): \(value.replacingOccurrences(of: "_", with: " "))"
+    /// What the overview could not see, as plain phrases at the right level.
+    public var notices: [CoverageNotice] {
+        var result: [CoverageNotice] = []
+        if let inbox, inbox != "complete", inbox != "empty" {
+            result.append(inbox == "partial" ? .info("Some requests may be missing from these counts.")
+                          : .warning("Inbox requests are unavailable here."))
         }
+        if let runs, runs != "complete", runs != "empty" {
+            result.append(runs == "partial" ? .info("Some runs may be missing from these counts.")
+                          : .warning("Run state is unavailable here."))
+        }
+        return result
+    }
+
+    /// The overview never traverses nested runs. `unavailable` states that scope, not a failure.
+    public var nestedRunsFootnote: String? {
+        guard nestedRuns == "unavailable" else { return nil }
+        return "Nested runs are not included here."
     }
 }
 
@@ -244,7 +274,8 @@ public struct OverviewLane: Decodable, Equatable, Sendable, Identifiable {
     public let cause: String?
     public let attention: Bool
     public var id: String { attemptId }
-    public var title: String { taskLabel ?? "Attempt \(attemptId.prefix(8))" }
+    /// The key names the lane even when the CLI's task label is just the default node.
+    public var title: String { LaneTitle.title(key) ?? taskLabel ?? "Attempt \(attemptId.prefix(8))" }
 }
 
 public struct Overview: Decodable, Equatable, Sendable {

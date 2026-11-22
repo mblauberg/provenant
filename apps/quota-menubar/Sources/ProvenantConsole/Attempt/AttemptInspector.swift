@@ -34,7 +34,7 @@ struct AttemptInspector: View {
         return ScrollView {
             VStack(alignment: .leading, spacing: Space.large) {
                 VStack(alignment: .leading, spacing: Space.tight) {
-                    Text(heading?.title ?? "Attempt \(detail.laneId.attemptId.prefix(8))")
+                    Text(heading?.title ?? LaneTitle.title(detail.laneId.key) ?? "Attempt \(detail.laneId.attemptId.prefix(8))")
                         .font(.title3.weight(.semibold)).accessibilityAddTraits(.isHeader).textSelection(.enabled)
                     if let heading {
                         StatusLabel(.attempt(state: heading.state))

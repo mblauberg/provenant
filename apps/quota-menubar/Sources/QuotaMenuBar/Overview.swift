@@ -11,6 +11,12 @@ struct ConsoleOverview: Decodable, Equatable, Sendable {
         let projectLabel, taskLabel, attemptId, queuedAt: String?
         let state: String
         let attention: Bool
+        /// The graph/node identity the overview also carries; the task label may be just the default node.
+        let key: LaneID.Key?
+
+        var title: String? {
+            LaneTitle.title(key) ?? taskLabel.flatMap { $0.isEmpty ? nil : $0 }
+        }
     }
     struct Counts: Decodable, Equatable, Sendable { let needsYou, running, attention: Int? }
     struct Coverage: Decodable, Equatable, Sendable { let scope, inbox, runs, nestedRuns: String }

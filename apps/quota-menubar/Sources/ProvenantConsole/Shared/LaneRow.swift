@@ -56,7 +56,7 @@ extension LaneRow {
     }
 
     init(_ node: TreeNode) {
-        self.init(title: node.metadata.attempt.title ?? "Attempt \(node.id.prefix(8))", state: node.metadata.attempt.state,
+        self.init(title: node.title, state: node.metadata.attempt.state,
                   route: node.metadata.attempt.requestedRoute, waiting: nil, attention: false, depth: node.depth)
     }
 }
