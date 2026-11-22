@@ -7,9 +7,9 @@
 //! fixture-drift check fails until the fixtures are regenerated and the Swift
 //! decoders are updated.
 //!
-//! Usage:
-//!   cargo run -p provenant-cli --bin generate-swift-fixtures -- --out DIR
-//!   cargo run -p provenant-cli --bin generate-swift-fixtures -- --check DIR
+//! Usage, from the repository root:
+//!   cd tools/front-door && cargo run -p provenant-cli --bin generate-swift-fixtures -- --out ../../apps/quota-menubar/Tests/ProvenantTestSupport/Fixtures
+//!   cd tools/front-door && cargo run -p provenant-cli --bin generate-swift-fixtures -- --check ../../apps/quota-menubar/Tests/ProvenantTestSupport/Fixtures
 
 use std::path::{Path, PathBuf};
 
@@ -17,7 +17,12 @@ use provenant_records::{CommandResult, Outcome};
 use provenant_workflow::session::{SummarySource, checkpoint_summary_line};
 use serde_json::{Value, json};
 
+/// Relative to this crate's manifest, so the default works from any working directory.
 const DEFAULT_FIXTURES: &str = "../../../../apps/quota-menubar/Tests/ProvenantTestSupport/Fixtures";
+
+fn default_fixtures() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(DEFAULT_FIXTURES)
+}
 
 fn envelope(command: &str, data: Value) -> Result<Value, String> {
     serde_json::to_value(CommandResult::new(command, Outcome::Ok, data))
@@ -63,7 +68,7 @@ fn main() -> Result<(), String> {
     }
     let directory = out
         .or_else(|| check.clone())
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_FIXTURES));
+        .unwrap_or_else(default_fixtures);
 
     let fixtures = fixtures::all()?;
     if let Some(committed) = check {
@@ -80,7 +85,7 @@ fn main() -> Result<(), String> {
         }
         if !drifted.is_empty() {
             return Err(format!(
-                "Swift replay fixtures are stale: {}. Regenerate with: cargo run -p provenant-cli --bin generate-swift-fixtures -- --out apps/quota-menubar/Tests/ProvenantTestSupport/Fixtures",
+                "Swift replay fixtures are stale: {}. Regenerate with: cd tools/front-door && cargo run -p provenant-cli --bin generate-swift-fixtures -- --out ../../apps/quota-menubar/Tests/ProvenantTestSupport/Fixtures",
                 drifted.join(", ")
             ));
         }
@@ -228,8 +233,8 @@ mod fixtures {
                 "summary": summary
             },
             "role": "chair",
-            "summary": line,
-            "summary_status": source
+            "summary_line": line,
+            "summary_source": source
         }))
     }
 

@@ -69,42 +69,58 @@ pub fn behind(installed: &str, cli_version: &str) -> bool {
 /// What install, upgrade and doctor report about the installed app.
 #[derive(Clone, Debug, Serialize)]
 pub struct Status {
-    /// Absolute path of the installed bundle.
+    /// Absolute path where the bundle would live.
     pub path: String,
     /// `CFBundleShortVersionString`, when the bundle can be read.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     /// CLI version the app is compared against.
     pub cli_version: String,
-    /// Whether the installed app trails the CLI.
+    /// No bundle exists at the path, so there is nothing to compare.
+    pub missing: bool,
+    /// A version was read and trails the CLI.
     pub behind_cli: bool,
     /// The literal advisory, so JSON readers see it without rendering the human text.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
 }
 
-pub fn status(home: &Path, cli_version: &str) -> Status {
-    let path = app_path(&dir(home));
-    let version = installed_version(&dir(home));
-    let behind_cli = version
-        .as_deref()
-        .is_some_and(|version| behind(version, cli_version))
-        || (!path.exists() && cfg!(target_os = "macos"));
-    let warning = behind_cli.then(|| {
-        format!(
+fn report(path: &Path, version: Option<String>, cli_version: &str, missing: bool) -> Status {
+    let behind_cli = !missing
+        && version
+            .as_deref()
+            .is_some_and(|version| behind(version, cli_version));
+    let warning = if missing {
+        Some(format!("app is not installed at {}.", path.display()))
+    } else if behind_cli {
+        Some(format!(
             "app is behind CLI: {} is version {}; CLI is {}. Run `provenant upgrade` to refresh the app.",
             path.display(),
             version.as_deref().unwrap_or("unknown"),
             cli_version
-        )
-    });
+        ))
+    } else {
+        None
+    };
     Status {
         path: path.to_string_lossy().into_owned(),
         version,
         cli_version: cli_version.to_owned(),
+        missing,
         behind_cli,
         warning,
     }
+}
+
+/// The app report on macOS, or `None` on hosts with no macOS bundle to inspect.
+pub fn status(home: &Path, cli_version: &str) -> Option<Status> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let dir = dir(home);
+    let path = app_path(&dir);
+    let version = installed_version(&dir);
+    Some(report(&path, version, cli_version, !path.exists()))
 }
 
 /// The one-line advisory doctor and upgrade print when the app is stale.
@@ -136,5 +152,32 @@ mod tests {
         .unwrap();
         assert_eq!(super::installed_version(&root).as_deref(), Some("2.6.6"));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn missing_app_is_not_reported_as_behind() {
+        let path = std::path::Path::new("/Applications/Provenant Console.app");
+        let missing = super::report(path, None, "2.7.0", true);
+        assert!(missing.missing);
+        assert!(!missing.behind_cli);
+        let warning = missing.warning.unwrap();
+        assert!(warning.contains("not installed"), "{warning}");
+        assert!(!warning.contains("version"), "{warning}");
+        assert!(!warning.contains("behind"), "{warning}");
+    }
+
+    #[test]
+    fn behind_app_compares_an_actual_version() {
+        let path = std::path::Path::new("/Applications/Provenant Console.app");
+        let behind = super::report(path, Some("2.6.6".into()), "2.7.0", false);
+        assert!(!behind.missing);
+        assert!(behind.behind_cli);
+        let warning = behind.warning.unwrap();
+        assert!(warning.contains("2.6.6"), "{warning}");
+        assert!(warning.contains("2.7.0"), "{warning}");
+
+        let current = super::report(path, Some("2.7.0".into()), "2.7.0", false);
+        assert!(!current.behind_cli);
+        assert!(current.warning.is_none());
     }
 }

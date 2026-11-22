@@ -58,6 +58,9 @@ final class ConsoleDeepLinkTests: XCTestCase {
 }
 
 final class StampTests: XCTestCase {
+    /// Relative-date strings are locale-dependent; pin English so the assertions hold everywhere.
+    private let locale = Locale(identifier: "en_US_POSIX")
+
     func testParsesFractionalAndWholeSecondTimestamps() {
         XCTAssertNotNil(Stamp.parse("2026-11-02T01:57:31.286667Z"))
         XCTAssertNotNil(Stamp.parse("2026-11-02T01:57:31Z"))
@@ -67,17 +70,17 @@ final class StampTests: XCTestCase {
 
     func testRelativeDatesAreFormattedAndUnparseableTextIsKept() throws {
         let now = try XCTUnwrap(Stamp.parse("2026-11-02T02:00:00Z"))
-        XCTAssertEqual(Stamp.relative("2026-11-02T01:50:00Z", now: now), "10 minutes ago")
-        XCTAssertEqual(Stamp.relative("soon-ish", now: now), "soon-ish")
+        XCTAssertEqual(Stamp.relative("2026-11-02T01:50:00Z", now: now, locale: locale), "10 minutes ago")
+        XCTAssertEqual(Stamp.relative("soon-ish", now: now, locale: locale), "soon-ish")
     }
 
     func testPastTimestampFormatsAsPast() throws {
         let now = try XCTUnwrap(Stamp.parse("2026-11-22T09:00:00Z"))
-        let sixDaysAgo = Stamp.relative("2026-11-16T03:41:05.964523Z", now: now)
+        let sixDaysAgo = Stamp.relative("2026-11-16T03:41:05.964523Z", now: now, locale: locale)
         XCTAssertEqual(sixDaysAgo, "6 days ago")
         XCTAssertFalse(sixDaysAgo.contains("next"))
         XCTAssertFalse(sixDaysAgo.contains("in "))
-        XCTAssertEqual(Stamp.relative("2026-11-15T09:00:00Z", now: now), "last week")
+        XCTAssertEqual(Stamp.relative("2026-11-15T09:00:00Z", now: now, locale: locale), "last week")
     }
 
     func testDurations() {
@@ -437,7 +440,7 @@ final class ScreenModelTests: XCTestCase {
         let snapshot = chairs.reader.value
         XCTAssertEqual(snapshot?.sessions.count, 1)
         // Two saved records for one host session collapse to the later save.
-        XCTAssertEqual(snapshot?.sessions.first?.summary, "Implementing the console")
+        XCTAssertEqual(snapshot?.sessions.first?.summaryLine, "Implementing the console")
         XCTAssertEqual(snapshot?.sessions.first?.record.summary?.now, "Implementing the console")
         XCTAssertEqual(snapshot?.sessions.first?.record.lastSavedAt, "2026-11-02T02:18:00Z")
         XCTAssertEqual(snapshot?.projects.count, 1)
@@ -463,7 +466,14 @@ final class ScreenModelTests: XCTestCase {
         let project = chairs.reader.value?.projectName(session.record.projectId)
         let now = try XCTUnwrap(Stamp.parse("2026-11-22T09:00:00Z"))
         XCTAssertNil(session.record.summary)
+        XCTAssertEqual(session.summaryLine, "Console checkpoint")
+        XCTAssertEqual(session.summarySource, "title")
         XCTAssertEqual(ChairsModel.title(session, project: project, now: now), "Console checkpoint")
+        // The derived line does not carry the row context, so the detail line must still show it.
+        let detail = ChairsModel.detailLine(session, project: project, now: now)
+        XCTAssertTrue(detail.contains("project"), detail)
+        XCTAssertTrue(detail.contains("saved"), detail)
+        XCTAssertFalse(detail.contains("Console checkpoint"), detail)
     }
 
     func testChairRowPrefersTheSummaryWhenPresent() async throws {

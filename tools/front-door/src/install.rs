@@ -771,20 +771,22 @@ fn output_install_with(
             if let Some(super::tick_agent::Installed::Failed { message }) = &tick_agent {
                 human.push_str(&format!("host tick: failed: {message}\n"));
             }
-            let app = apps::status(&apps::home(), env!("CARGO_PKG_VERSION"));
-            human.push_str(&format!(
-                "  app: {} ({})\n",
-                app.path,
-                app.version.as_deref().unwrap_or("version unknown")
-            ));
-            if app.behind_cli {
-                human.push_str(&format!("  {}\n", apps::advisory(&app)));
+            let app_report = apps::status(&apps::home(), env!("CARGO_PKG_VERSION"));
+            if let Some(app) = &app_report {
+                human.push_str(&format!(
+                    "  app: {} ({})\n",
+                    app.path,
+                    app.version.as_deref().unwrap_or("version unknown")
+                ));
+                if app.warning.is_some() {
+                    human.push_str(&format!("  {}\n", apps::advisory(app)));
+                }
             }
             let read_only = outcome.dry_run;
             let mut data = InstallData::success(outcome);
             data.peer_agent = peer_agent;
             data.tick_agent = tick_agent;
-            data.app = Some(app);
+            data.app = app_report;
             extend(&mut data);
             super::emit(
                 &CommandResult::new(command, Outcome::Ok, data),
@@ -2359,17 +2361,22 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
         }
         Err(error) => return install_error("upgrade", &error, globals),
     }
-    // The release tag resolved here is also the version the app asset was built
-    // from. Keep it so the final report can compare it with the installed app.
+    // The release tag or source manifest version is the version being installed.
+    // Keep it so the final report can compare the app with the CLI that was just
+    // installed, not with the version of the running binary.
     let mut upgrade_version: Option<String> = None;
+    let mut version_warning: Option<String> = None;
     let upgraded = (|| -> Result<Vec<HostUpgrade>, String> {
         let config = provenant_cli::config_reads::read_for(&targets.roots, "install")
             .map_err(|error| error.to_string())?;
         let fabric = config.domains.fabric;
+        let mut environment: Vec<_> = std::env::vars_os().collect();
+        // The Rust report owns the app line; keep install.sh from printing it twice.
+        environment.push(("PROVENANT_UPGRADE_QUIET_APP".into(), "true".into()));
         let runner = UpgradeRunner {
             executor: provenant_os::exec::SystemExecutor::new(1)
                 .map_err(|error| error.to_string())?,
-            environment: std::env::vars_os().collect(),
+            environment,
             cwd: targets.home.clone(),
         };
         // Resolve latest once so every host downloads the same tag, even during a release.
@@ -2382,6 +2389,23 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
         let script;
         if let Some(source) = &args.from_source {
             script = std::fs::read(source.join("install.sh")).map_err(|error| error.to_string())?;
+            let manifest = source.join("tools/front-door/Cargo.toml");
+            upgrade_version = std::fs::read_to_string(&manifest)
+                .ok()
+                .and_then(|text| text.parse::<toml_edit::DocumentMut>().ok())
+                .and_then(|document| {
+                    document
+                        .get("package")
+                        .and_then(|package| package.get("version"))
+                        .and_then(|version| version.as_str())
+                        .map(str::to_owned)
+                });
+            if upgrade_version.is_none() {
+                version_warning = Some(format!(
+                    "could not read the installed CLI version from {}; the app comparison was skipped",
+                    manifest.display()
+                ));
+            }
             install_args.extend(["--source".into(), source.as_os_str().to_owned()]);
             if !fabric.peers.is_empty() {
                 let files = runner.execute(
@@ -2579,15 +2603,21 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
                     }),
                 }
             }
-            let cli_version = upgrade_version
-                .as_deref()
-                .unwrap_or(env!("CARGO_PKG_VERSION"));
-            let app_status = apps::status(&targets.home, cli_version);
+            let local_installed = hosts
+                .iter()
+                .any(|host| host.host == "local" && host.success);
+            let app_status = if local_installed {
+                upgrade_version
+                    .as_deref()
+                    .and_then(|version| apps::status(&targets.home, version))
+            } else {
+                None
+            };
             if let Some(local) = hosts.iter_mut().find(|host| host.host == "local") {
-                local.app = Some(app_status);
+                local.app = app_status;
             }
             let success = hosts.iter().all(|host| host.success);
-            let human = hosts
+            let mut human: String = hosts
                 .iter()
                 .map(|host| {
                     let mut line = format!(
@@ -2602,13 +2632,16 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
                             app.path,
                             app.version.as_deref().unwrap_or("version unknown")
                         ));
-                        if app.behind_cli {
+                        if app.warning.is_some() {
                             line.push_str(&format!("  {}\n", apps::advisory(app)));
                         }
                     }
                     line
                 })
-                .collect::<String>();
+                .collect();
+            if let Some(warning) = &version_warning {
+                human.push_str(&format!("  Warning: {warning}\n"));
+            }
             let mut result = CommandResult::new(
                 "upgrade",
                 if success { Outcome::Ok } else { Outcome::Error },

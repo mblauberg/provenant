@@ -116,6 +116,7 @@ pub fn checkpoint_summary_line(markdown: &str) -> Option<SummaryLine> {
     let mut sections: [Option<String>; 3] = [None, None, None];
     let mut title = None;
     let mut section = None;
+    let mut section_level = 0usize;
     let mut fenced = false;
     for line in markdown[start..].lines() {
         let trimmed = line.trim();
@@ -127,12 +128,25 @@ pub fn checkpoint_summary_line(markdown: &str) -> Option<SummaryLine> {
             continue;
         }
         if let Some((level, text)) = heading(line) {
-            section = match text.to_ascii_lowercase().as_str() {
-                "intent" => Some(0),
-                "goal" => Some(1),
-                "done" => Some(2),
-                _ => None,
-            };
+            match text.to_ascii_lowercase().as_str() {
+                "intent" => {
+                    section = Some(0);
+                    section_level = level;
+                }
+                "goal" => {
+                    section = Some(1);
+                    section_level = level;
+                }
+                "done" => {
+                    section = Some(2);
+                    section_level = level;
+                }
+                // A deeper heading is a subheading of the active section, not the start of
+                // a new one: `## Intent` / `### Ruling` still belongs to Intent. A peer or
+                // shallower heading ends it.
+                _ if section.is_some() && level > section_level => {}
+                _ => section = None,
+            }
             if level == 1 && title.is_none() {
                 title = meaningful_line(text);
             }
@@ -856,6 +870,20 @@ mod tests {
         let line = checkpoint_summary_line(&without_goal).unwrap();
         assert_eq!(line.text, "Shipped the fix");
         assert_eq!(line.source, SummarySource::Done);
+    }
+
+    #[test]
+    fn checkpoint_summary_line_keeps_a_section_through_deeper_subheadings() {
+        let markdown = "# Session checkpoint\n\n## Intent\n### Ruling\nKeep the console useful\n\n#### Detail\nignored here\n\n## Goal\n**Finish the slice**\n";
+        let line = checkpoint_summary_line(markdown).unwrap();
+        assert_eq!(line.text, "Keep the console useful");
+        assert_eq!(line.source, SummarySource::Intent);
+
+        // A peer heading with a different name ends Intent, so Goal wins.
+        let with_peer = "## Intent\n### Ruling\nKeep the console useful\n\n## Background\nnot the intent\n\n## Goal\nFinish the slice\n";
+        let line = checkpoint_summary_line(with_peer).unwrap();
+        assert_eq!(line.text, "Finish the slice");
+        assert_eq!(line.source, SummarySource::Goal);
     }
 
     #[test]

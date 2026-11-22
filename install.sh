@@ -40,6 +40,8 @@ state=${PROVENANT_STATE_DIR:-"$default_state"}
 # Where the user keeps the bundled macOS app. The Rust side reads the same
 # variable, so install, upgrade and doctor all name the same bundle.
 apps_dir=${PROVENANT_APPS_DIR:-"$HOME/Applications"}
+# `provenant upgrade` prints the app line from its own report; keep this script quiet there.
+quiet_app=${PROVENANT_UPGRADE_QUIET_APP:-false}
 bin_dir=
 upgrade=false
 while [ "$#" -gt 0 ]; do
@@ -454,7 +456,7 @@ if [ -n "$app_stage" ]; then
     fi
     # The new app and migrated agent are now committed; cleanup must not roll them back.
     app_upgrade_committed=true
-    printf '%s\n' "app: $apps_dir/$app ($(app_version "$apps_dir/$app"))"
+    [ "$quiet_app" = true ] || printf '%s\n' "app: $apps_dir/$app ($(app_version "$apps_dir/$app"))"
     if [ -n "$app_backup" ] && ! rm -rf "$app_backup"; then
         printf '%s\n' "Warning: could not remove the previous Provenant app backup; staging remains at $app_stage" >&2
         app_backup=
@@ -468,7 +470,7 @@ if [ -n "$app_stage" ]; then
         app_stage=
     fi
 elif [ -e "$apps_dir/$app" ]; then
-    printf '%s\n' "app: $apps_dir/$app ($(app_version "$apps_dir/$app")); not refreshed"
+    [ "$quiet_app" = true ] || printf '%s\n' "app: $apps_dir/$app ($(app_version "$apps_dir/$app")); not refreshed"
 fi
 if "$guided"; then
     case " $providers " in *' claude '*)

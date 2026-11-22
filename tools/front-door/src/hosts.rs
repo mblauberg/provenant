@@ -411,8 +411,9 @@ pub(crate) fn local(
     if let Some(warning) = legacy_agent_warning(home) {
         warnings.push(warning.into());
     }
-    let app = crate::apps::status(home, env!("CARGO_PKG_VERSION"));
-    if app.behind_cli {
+    if let Some(app) = crate::apps::status(home, env!("CARGO_PKG_VERSION"))
+        && app.warning.is_some()
+    {
         warnings.push(crate::apps::advisory(&app));
     }
     match provenant_config::legacy_harness_selectors(roots, home, &registered_accounts,

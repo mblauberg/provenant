@@ -62,14 +62,17 @@ adds one) and compare revisions with `chair summary diff SESSION --from N`.
 reports stale `needs_you` references against the local inbox; coverage is
 `partial` when the scan was truncated.
 
-`console sessions` shows one short `summary` line per chair and a
-`summary_status` naming its source: `structured` (the header's `now`), `intent`,
-`goal` or `done` (the first meaningful line of that checkpoint section, in that
-priority), `title` (the checkpoint's first `#` heading), or `unavailable` (no
-checkpoint or no usable line). The line is derived deterministically from the
+`console sessions` shows one short `summary_line` per chair (a string, or null
+when no line is usable) and a `summary_source` naming its source: `structured`
+(the header's `now`), `intent`, `goal` or `done` (the first meaningful line of
+that checkpoint section, in that priority; a deeper subheading stays in its
+parent section), `title` (the checkpoint's first `#` heading), or `unavailable`
+(no checkpoint or no usable line). The line is derived deterministically from the
 current checkpoint without a model call, is bounded to 200 bytes and may be
 clipped with an ellipsis; frontmatter and fenced code are skipped. The full
-structured summary remains at `record.summary`. A stale or changed checkpoint
+structured summary remains at `record.summary`. The data schema version stays 2:
+these are additive field names on an evolving envelope, named in the release
+notes, not a shape change to the structured summary. A stale or changed checkpoint
 updates the derived line on the next read; it never edits the checkpoint.
 
 Append a substantive update once with

@@ -41,8 +41,8 @@ timestamps); no live CLI capture belongs in the checkout. Regenerate after any
 wire change from the repository root:
 
 ```sh
-cargo run -p provenant-cli --bin generate-swift-fixtures -- \
-  --out apps/quota-menubar/Tests/ProvenantTestSupport/Fixtures
+cd tools/front-door && cargo run -p provenant-cli --bin generate-swift-fixtures -- \
+  --out ../../apps/quota-menubar/Tests/ProvenantTestSupport/Fixtures
 ```
 
 `scripts/check-swift-fixtures` regenerates in memory and fails on drift; CI

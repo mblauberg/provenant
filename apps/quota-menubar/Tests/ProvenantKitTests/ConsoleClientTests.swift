@@ -101,16 +101,41 @@ final class ConsoleClientTests: XCTestCase {
         XCTAssertEqual(projects.map(\.label), ["project"])
         XCTAssertEqual(projects.first?.commonDir?.path, "/fixture/project/.git")
         let sessions = try await console.sessions().sessions
-        XCTAssertEqual(sessions.first?.summary, "Implementing console")
+        XCTAssertEqual(sessions.first?.summaryLine, "Implementing console")
         XCTAssertEqual(sessions.first?.record.summary?.now, "Implementing console")
-        XCTAssertEqual(sessions.first?.summaryStatus, "structured")
+        XCTAssertEqual(sessions.first?.summarySource, "structured")
         XCTAssertEqual(sessions.first?.id, "console-chair")
 
         let (bare, _) = client([(["console", "sessions"], "console-sessions-without-summary", 0)])
         let derived = try await bare.sessions().sessions
         XCTAssertFalse(derived.isEmpty)
-        XCTAssertTrue(derived.allSatisfy { $0.summary == "Console checkpoint" })
-        XCTAssertTrue(derived.allSatisfy { $0.summaryStatus == "title" })
+        XCTAssertTrue(derived.allSatisfy { $0.summaryLine == "Console checkpoint" })
+        XCTAssertNil(derived.first?.record.summary)
+        XCTAssertTrue(derived.allSatisfy { $0.summarySource == "title" })
+    }
+
+    /// Older CLIs send `summary` with no display-line fields, either as the structured object
+    /// or as the short-lived string. Ignoring those names must still produce a decodable page;
+    /// the title falls back to project and save time.
+    func testOlderSessionsPayloadsStillDecode() throws {
+        let json = #"""
+        {"schema_version":2,"sessions":[
+          {"role":"chair","consistency":"current","summary_status":"structured",
+           "summary":{"now":"Old CLI","next":null,"risk":null,"updated_at":"2026-11-02T01:58:26Z","needs_you":[]},
+           "record":{"host_session_id":"object-summary","project_id":null,"created_at":null,
+           "last_saved_at":null,"summary":{"now":"Old CLI","next":null,"risk":null,
+           "updated_at":"2026-11-02T01:58:26Z","needs_you":[],"revision":1,"schema_version":1}}},
+          {"role":"chair","consistency":"current","summary":"Old CLI display line","summary_status":"title",
+           "record":{"host_session_id":"string-summary","project_id":null,"created_at":null,
+           "last_saved_at":null,"summary":null}}],
+          "next_cursor":null,"truncated":false,"scan_truncated":false}
+        """#
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let page = try decoder.decode(Sessions.self, from: Data(json.utf8))
+        XCTAssertEqual(page.sessions.count, 2)
+        XCTAssertTrue(page.sessions.allSatisfy { $0.summaryLine == nil && $0.summarySource == nil })
+        XCTAssertEqual(page.sessions.first?.record.summary?.now, "Old CLI")
     }
 
     func testTreeSearchOutputAndQuotaDecode() async throws {

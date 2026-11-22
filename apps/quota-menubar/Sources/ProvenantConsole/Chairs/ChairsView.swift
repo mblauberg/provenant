@@ -52,19 +52,11 @@ private struct SessionRow: View {
         .accessibilityElement(children: .combine)
     }
 
-    /// Enough of the id to tell saved sessions apart: several share the same first eight characters.
-    private var shortID: String { String(session.id.prefix(18)) }
-
     private var summaryLine: String {
         ChairsModel.title(session, project: project, now: now)
     }
 
     private var detailLine: String {
-        // The fallback title already carries the project, session and save time; do not repeat them.
-        guard session.record.summary != nil else { return "" }
-        return [project, "Session \(shortID)", session.record.summary?.next.map { "Next: \($0)" },
-         session.record.summary?.risk.flatMap { $0 == "none" ? nil : "Risk: \($0)" },
-         session.record.lastSavedAt.map { "saved \(Stamp.relative($0, now: now))" }]
-            .compactMap { $0 }.joined(separator: " · ")
+        ChairsModel.detailLine(session, project: project, now: now)
     }
 }

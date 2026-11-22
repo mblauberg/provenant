@@ -355,7 +355,7 @@ fn read_with_budget(
                     .as_ref()
                     .filter(|summary| !summary.now.trim().is_empty())
                     .map(|summary| summary.now.clone());
-                let (summary, status) = match structured {
+                let (summary_line, summary_source) = match structured {
                     Some(now) => (json!(now), SummarySource::Structured),
                     None => match found.summary_line {
                         Some(line) => (json!(line.text), line.source),
@@ -364,8 +364,8 @@ fn read_with_budget(
                 };
                 sessions.push(
                     json!({"record":found.record, "consistency":found.consistency,
-                    "role":"chair", "evidence":"checkpoint_save", "summary":summary,
-                    "summary_status":status}),
+                    "role":"chair", "evidence":"checkpoint_save", "summary_line":summary_line,
+                    "summary_source":summary_source}),
                 );
             }
         }

@@ -317,14 +317,14 @@ public struct SessionRecord: Decodable, Equatable, Sendable {
 public struct ChairSession: Decodable, Equatable, Sendable, Identifiable {
     public let role: String
     public let consistency: String?
-    public let summaryStatus: String?
-    public let summary: String?
+    public let summarySource: String?
+    public let summaryLine: String?
     public let record: SessionRecord
     public var id: String { record.hostSessionId }
 }
 
-/// `console sessions` (data version 2). `summary` is one display line: the
-/// chair-authored `now`, or a line derived from the checkpoint. `summaryStatus`
+/// `console sessions` (data version 2). `summaryLine` is one display line: the
+/// chair-authored `now`, or a line derived from the checkpoint. `summarySource`
 /// names its source; the full structured summary stays in `record.summary`.
 public struct Sessions: Decodable, Equatable, Sendable {
     public let sessions: [ChairSession]

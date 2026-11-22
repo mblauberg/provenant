@@ -37,8 +37,8 @@
           }
         },
         "role": "chair",
-        "summary": "Implementing console",
-        "summary_status": "structured"
+        "summary_line": "Implementing console",
+        "summary_source": "structured"
       }
     ],
     "snapshot": "sha256:3a537e05ccbd68a2836eeaeedce5c318032bcfae940ba99f665a1ca5674d4bda",
