@@ -211,7 +211,10 @@ fn delivery_restart_case(
                 &attempt,
                 &format!("Run {}\nAttempt {id}", input.attempt_id)
             ),
-            Err(RunError::Delivery(WriterDeliveryStage::Push))
+            Err(RunError::Delivery {
+                stage: WriterDeliveryStage::Push,
+                ..
+            })
         ));
         assert!(artifacts::read_sealed(&attempt, "delivery.json", RECORD_LIMIT)?.is_none());
     } else if mode == RestartMode::DefiniteFailed {

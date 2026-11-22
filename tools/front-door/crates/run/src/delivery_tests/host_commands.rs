@@ -1,5 +1,127 @@
 use super::*;
 
+/// A failing host command's stderr is the leaf cause of a delivery failure: it
+/// reaches the rendered error, the receipt reason and the diagnostic detail.
+#[test]
+fn a_failing_git_step_stderr_reaches_the_rendered_delivery_error()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    const MARKER: &str = "GIT_DELIVERY_STDERR_MARKER";
+    let fixture = PrepareFixture::new()?;
+    let git = fixture.root.join("git");
+    let real_git = provenant_os::git::git_executable().ok_or("git executable")?;
+    fixture.executable(
+        &git,
+        &format!(
+            "#!/bin/sh\nif [ \"$1\" = hash-object ]; then printf '{MARKER} fatal: rejected\\n' >&2; exit 42; fi\nexec '{}' \"$@\"\n",
+            real_git.display()
+        ),
+    )?;
+    let mut environment = fixture.environment.clone();
+    environment.push(("PROVENANT_GIT".into(), git.into_os_string()));
+    let host = HostDeliveryContext::new(environment.clone())
+        .with_lane_access(
+            Some(provenant_records::LaneAccessReceipt {
+                access: provenant_records::LaneAccess::Isolated,
+                source: provenant_records::LaneAccessSource::Launch,
+                key: "lanes.access".into(),
+                extra: Default::default(),
+            }),
+            Some(true),
+        )
+        .with_host_state(&fixture.root.join("state"))
+        .prepare(&fixture.writer, &fixture.request)?;
+    let error = host
+        .command(
+            &fixture.writer.worktree,
+            "git",
+            &["hash-object", "--stdin"],
+            WriterDeliveryStage::Head,
+        )
+        .expect_err("the wrapped git step must fail");
+    let rendered = error.to_string();
+    assert!(rendered.contains(MARKER), "{rendered}");
+    assert!(rendered.contains("Head"), "{rendered}");
+    let WriterDeliveryState::Failed { stage, reason, .. } = failed_state(&error) else {
+        return Err("a command failure must fail its receipt".into());
+    };
+    assert_eq!(stage, WriterDeliveryStage::Head);
+    assert!(
+        reason
+            .as_ref()
+            .is_some_and(|reason| reason.contains(MARKER)),
+        "{reason:?}"
+    );
+    let diagnostic = error.diagnostic(provenant_records::diagnostic::Destination::Local);
+    assert!(
+        diagnostic
+            .detail
+            .as_ref()
+            .is_some_and(|detail| detail.contains(MARKER)),
+        "{diagnostic:?}"
+    );
+    Ok(())
+}
+
+/// The same leaf cause survives a failing `gh` step through the forge port.
+#[test]
+fn a_failing_gh_step_stderr_reaches_the_rendered_delivery_error()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    const MARKER: &str = "GH_DELIVERY_STDERR_MARKER";
+    let mut fixture = PrepareFixture::new()?;
+    let base = fixture.prepare()?.head(&fixture.writer)?;
+    fixture.commit(&fixture.writer.worktree, "Graph work")?;
+    fixture.git(&["branch", "integration", "lane"])?;
+    fixture.git(&[
+        "config",
+        &format!(
+            "url.{}.insteadOf",
+            fixture.root.join("remote.git").display()
+        ),
+        "https://github.com/fixture/repo.git",
+    ])?;
+    let git = provenant_os::git::git_executable().ok_or("git executable")?;
+    let wrapper = fixture.root.join("git-wrapper");
+    fixture.executable(&wrapper, &format!("#!/bin/sh\nif [ \"$5\" = remote ] && [ \"$6\" = get-url ]; then printf 'https://github.com/fixture/repo.git\\n'; exit 0; fi\nexec '{}' \"$@\"\n", git.display()))?;
+    let gh = fixture.root.join("gh");
+    fixture.executable(
+        &gh,
+        &format!(
+            "#!/bin/sh\ncd \"$(dirname \"$0\")\" || exit 1\nif [ \"$1\" = repo ]; then printf '{{\"defaultBranchRef\":{{\"name\":\"main\"}}}}\\n'; exit 0; fi\nif [ \"$2\" = list ]; then printf '[]\\n'; exit 0; fi\nif [ \"$2\" = create ]; then printf '{MARKER} 422 validation failed\\n' >&2; exit 1; fi\nexit 1\n"
+        ),
+    )?;
+    fixture
+        .environment
+        .push(("PROVENANT_GIT".into(), wrapper.into_os_string()));
+    fixture.environment.retain(|(key, _)| key != "PATH");
+    fixture.environment.push((
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", fixture.root.display()).into(),
+    ));
+    fixture.request.open_pr = true;
+    let error = HostDeliveryContext::new(fixture.environment.clone())
+        .deliver_graph_pr(
+            &fixture.writer.project,
+            "integration",
+            base,
+            "Graph fixture",
+        )
+        .expect_err("gh pr create must fail");
+    let rendered = error.to_string();
+    assert!(rendered.contains(MARKER), "{rendered}");
+    assert!(rendered.contains("PullRequest"), "{rendered}");
+    let WriterDeliveryState::Failed { stage, reason, .. } = failed_state(&error) else {
+        return Err("a command failure must fail its receipt".into());
+    };
+    assert_eq!(stage, WriterDeliveryStage::PullRequest);
+    assert!(
+        reason
+            .as_ref()
+            .is_some_and(|reason| reason.contains(MARKER)),
+        "{reason:?}"
+    );
+    Ok(())
+}
+
 #[test]
 fn existing_pr_delivery_only_creates_after_positive_absence()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -81,7 +203,10 @@ fn existing_pr_delivery_only_creates_after_positive_absence()
                 "reused" => assert_eq!(result?, url),
                 "moved" => assert!(matches!(
                     result,
-                    Err(RunError::Delivery(WriterDeliveryStage::Verify))
+                    Err(RunError::Delivery {
+                        stage: WriterDeliveryStage::Verify,
+                        ..
+                    })
                 )),
                 _ => assert!(result.is_err(), "{state} must block"),
             }

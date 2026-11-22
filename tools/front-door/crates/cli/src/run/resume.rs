@@ -70,8 +70,14 @@ pub fn lane(command: crate::Lane, edge: &Edge<'_>) -> Reply {
                 accept_review,
                 &call,
             )?;
-            if let run::WriterDeliveryState::Failed { stage, .. } = &receipt.state {
-                return Err(run::RunError::Delivery(*stage).into());
+            if let run::WriterDeliveryState::Failed { stage, reason, .. } = &receipt.state {
+                return Err(run::RunError::Delivery {
+                    stage: *stage,
+                    cause: run::DeliveryCause::Parse {
+                        detail: reason.clone().unwrap_or_else(|| "delivery failed".into()),
+                    },
+                }
+                .into());
             }
             Ok((
                 json!({"attempt_id": id, "delivery": receipt}),
