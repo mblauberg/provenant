@@ -976,6 +976,51 @@ fn smoke_template_compiles_the_read_review_and_write_nodes() {
 }
 
 #[test]
+fn smoke_template_pins_its_review_nodes_only_when_a_base_is_supplied() {
+    let library = library();
+    let review_bases = |with: Value| -> Vec<Option<String>> {
+        let compiled = Compiler::new(&library)
+            .compile(&json!({"id":"smoke", "use":"smoke", "with":with}))
+            .unwrap();
+        let composite = compiled.composite.unwrap();
+        // The read and write nodes stay in the graph in either case.
+        assert_eq!(
+            composite
+                .nodes
+                .iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>(),
+            ["read", "review", "write"]
+        );
+        composite
+            .nodes
+            .into_iter()
+            .find(|node| node.id == "review")
+            .unwrap()
+            .composite
+            .unwrap()
+            .nodes
+            .into_iter()
+            .map(|lens| lens.review_base)
+            .collect()
+    };
+    // A launch binds the fixture's base so every review lens has that range.
+    let base = "1111111111111111111111111111111111111111";
+    let bound = review_bases(json!({"diff_base":base}));
+    assert_eq!(bound.len(), 2);
+    assert!(bound.iter().all(|value| value.as_deref() == Some(base)));
+
+    // Without a launch binding no review lens carries a base at all, so the
+    // per-node no-base refusal applies while read and write compile unchanged.
+    let unbound = review_bases(json!({}));
+    assert_eq!(unbound.len(), bound.len());
+    assert!(
+        unbound.iter().all(|value| value.is_none()),
+        "a smoke review lens was pinned without diff_base: {unbound:?}"
+    );
+}
+
+#[test]
 fn malformed_review_repair_behaviour_reports_an_error() {
     let mut library = library();
     library

@@ -2033,11 +2033,20 @@ fn verify_graph_name() -> String {
     )
 }
 
-struct SmokeProject(crate::scratch_dir::ScratchDir);
+struct SmokeProject {
+    directory: crate::scratch_dir::ScratchDir,
+    /// The commit the fixture's change sits on, so the review nodes have a
+    /// non-empty range to inspect.
+    base: String,
+}
 
 impl SmokeProject {
     fn path(&self) -> &Path {
-        self.0.path()
+        self.directory.path()
+    }
+
+    fn base(&self) -> &str {
+        &self.base
     }
 }
 
@@ -2099,11 +2108,24 @@ fn verify_smoke(
     )
 }
 
+fn smoke_git(runner: &UpgradeRunner, project: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
+    let mut argv = vec![
+        provenant_os::git::git_executable()
+            .ok_or("Git unavailable")?
+            .into_os_string(),
+    ];
+    argv.extend(args.iter().map(std::ffi::OsString::from));
+    runner.execute_at(&argv, project, None, 65_536, 30)
+}
+
 fn smoke_project(runner: &UpgradeRunner, scratch: &Path) -> Result<SmokeProject, String> {
-    let project = crate::scratch_dir::ScratchDir::new_in(scratch, "provenant-smoke-project-")
+    let directory = crate::scratch_dir::ScratchDir::new_in(scratch, "provenant-smoke-project-")
         .map_err(|error| error.to_string())?;
-    let project = SmokeProject(project);
-    std::fs::write(project.path().join("fixture.txt"), "smoke fixture\n")
+    let project = directory.path();
+    // Two commits: the review nodes inspect the fixture change, so their base
+    // and subject must be different commits even though the writer starts at
+    // HEAD.
+    std::fs::write(project.join("fixture.txt"), "smoke base\n")
         .map_err(|error| error.to_string())?;
     for args in [
         vec!["init", "-q"],
@@ -2115,18 +2137,34 @@ fn smoke_project(runner: &UpgradeRunner, scratch: &Path) -> Result<SmokeProject,
             "user.email=smoke@localhost",
             "commit",
             "-qm",
+            "smoke base",
+        ],
+    ] {
+        smoke_git(runner, project, &args)?;
+    }
+    let base = String::from_utf8_lossy(&smoke_git(runner, project, &["rev-parse", "HEAD"])?)
+        .trim()
+        .to_owned();
+    if base.is_empty() {
+        return Err("smoke fixture has no base commit".to_owned());
+    }
+    std::fs::write(project.join("fixture.txt"), "smoke fixture\n")
+        .map_err(|error| error.to_string())?;
+    for args in [
+        vec!["add", "fixture.txt"],
+        vec![
+            "-c",
+            "user.name=Provenant Smoke",
+            "-c",
+            "user.email=smoke@localhost",
+            "commit",
+            "-qm",
             "smoke fixture",
         ],
     ] {
-        let mut argv = vec![
-            provenant_os::git::git_executable()
-                .ok_or("Git unavailable")?
-                .into_os_string(),
-        ];
-        argv.extend(args.iter().map(std::ffi::OsString::from));
-        runner.execute_at(&argv, project.path(), None, 65_536, 30)?;
+        smoke_git(runner, project, &args)?;
     }
-    Ok(project)
+    Ok(SmokeProject { directory, base })
 }
 
 fn verify_smoke_with(
@@ -2176,11 +2214,17 @@ fn verify_smoke_with(
         run.extend(["--route".into(), route.into()]);
     }
     for setting in &args.set {
-        if setting.starts_with("worktree=") {
+        if setting.starts_with("worktree=") || setting.starts_with("diff_base=") {
             continue;
         }
         run.extend(["--set".into(), setting.into()]);
     }
+    // The review nodes inspect the fixture's change; give them the base the
+    // fixture committed before it, not the writer's start point.
+    run.extend([
+        "--set".into(),
+        format!("diff_base={}", project.base()).into(),
+    ]);
     let outcome = match runner.execute(&run, None, 1_048_576, 3600) {
         Ok(launched) => {
             let wait = runner.execute(
@@ -2287,8 +2331,15 @@ fn preview_smoke(
         argv.extend(["--route".into(), route.into()]);
     }
     for setting in &args.set {
+        if setting.starts_with("diff_base=") {
+            continue;
+        }
         argv.extend(["--set".into(), setting.into()]);
     }
+    argv.extend([
+        "--set".into(),
+        format!("diff_base={}", project.base()).into(),
+    ]);
     let outcome = runner.execute(&argv, None, 1_048_576, 60);
     report_smoke_cleanup(
         outcome,
@@ -3224,6 +3275,58 @@ mod tests {
     }
 
     #[test]
+    fn smoke_verify_gives_the_review_a_non_empty_range() -> Result<(), Box<dyn std::error::Error>> {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir()?;
+        let state = tmp.path().join("state");
+        provenant_os::fixture::private_state_dir(&state)?;
+        let scratch = tmp.path().join("scratch");
+        std::fs::create_dir(&scratch)?;
+        let calls = tmp.path().join("calls");
+        let launcher = tmp.path().join("provenant");
+        // The launch must name a base the live fixture can resolve to an
+        // ancestor of HEAD; an empty range stops the run before any provider.
+        std::fs::write(
+            &launcher,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nargs=\"$*\"\nproject=\"\"\ndiff_base=\"\"\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    --project) project=\"$2\"; shift 2;;\n    --set) case \"$2\" in diff_base=*) diff_base=\"${{2#diff_base=}}\";; esac; shift 2;;\n    *) shift;;\n  esac\ndone\ncase \" $args \" in\n  *' run smoke '*)\n    [ -n \"$project\" ] || exit 90\n    [ -n \"$diff_base\" ] || exit 91\n    head=$(git -C \"$project\" rev-parse HEAD) || exit 92\n    base=$(git -C \"$project\" rev-parse \"$diff_base\") || exit 93\n    [ \"$base\" != \"$head\" ] || exit 94\n    [ \"$(git -C \"$project\" merge-base \"$base\" \"$head\")\" = \"$base\" ] || exit 95\n    printf '%s\\n' '{{\"status\":\"pending\"}}';;\n  *' wait '*) printf '%s\\n' '{{\"status\":\"complete\"}}';;\n  *' status '*) printf '%s\\n' '{{\"status\":\"complete\"}}';;\n  *) exit 77;;\nesac\n",
+                calls.display()
+            ),
+        )?;
+        std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755))?;
+        let runner = UpgradeRunner {
+            executor: provenant_os::exec::SystemExecutor::new(1)?,
+            environment: std::env::vars_os().collect(),
+            cwd: tmp.path().to_owned(),
+        };
+        let output = verify_smoke_with(
+            &runner,
+            &launcher,
+            &state,
+            &scratch,
+            &cli::Upgrade {
+                yes: false,
+                from_source: None,
+                hosts: "all".into(),
+                verify: true,
+                dry_run: false,
+                host: None,
+                route: None,
+                set: Vec::new(),
+            },
+        )?;
+        assert!(output.contains("complete"), "{output}");
+        let calls = std::fs::read_to_string(&calls)?;
+        let run = calls.lines().next().ok_or("run call")?;
+        assert!(run.contains(" run smoke "), "{calls}");
+        assert!(run.contains(" --base HEAD "), "{calls}");
+        assert!(run.contains(" --set diff_base="), "{calls}");
+        Ok(())
+    }
+
+    #[test]
     fn failed_smoke_node_is_reported_by_verify() -> Result<(), Box<dyn std::error::Error>> {
         use super::*;
         use std::os::unix::fs::PermissionsExt;
@@ -3321,6 +3424,60 @@ mod tests {
         let calls = std::fs::read_to_string(calls)?;
         assert_eq!(calls.lines().count(), 1, "{calls}");
         assert!(calls.contains("run smoke --explain"), "{calls}");
+        Ok(())
+    }
+
+    #[test]
+    fn smoke_dry_run_pins_the_fixture_base_and_drops_a_user_base()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir()?;
+        let state = tmp.path().join("state");
+        std::fs::create_dir(&state)?;
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
+        let launcher = tmp.path().join("provenant");
+        let calls = tmp.path().join("calls");
+        // The host owns the review range: the launch must carry the fixture's
+        // own base (its first commit), never a caller-supplied one.
+        std::fs::write(
+            &launcher,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nargs=\"$*\"\nproject=\"\"\ndiff_base=\"\"\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    --project) project=\"$2\"; shift 2;;\n    --set) case \"$2\" in diff_base=*) diff_base=\"${{2#diff_base=}}\";; esac; shift 2;;\n    *) shift;;\n  esac\ndone\nexpected=$(git -C \"$project\" rev-parse HEAD^) || exit 90\n[ \"$diff_base\" = \"$expected\" ] || exit 91\ncase \"$args\" in\n  *'run smoke --explain'*) printf '%s\\n' '{{\"nodes\":[{{\"id\":\"read\"}},{{\"id\":\"review\"}},{{\"id\":\"write\"}}]}}';;\n  *) exit 77;;\nesac\n",
+                calls.display()
+            ),
+        )?;
+        std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755))?;
+        let runner = UpgradeRunner {
+            executor: provenant_os::exec::SystemExecutor::new(1)?,
+            environment: std::env::vars_os().collect(),
+            cwd: tmp.path().to_owned(),
+        };
+        let output = preview_smoke(
+            &runner,
+            &launcher,
+            &state,
+            &cli::Upgrade {
+                yes: false,
+                from_source: None,
+                hosts: "all".into(),
+                verify: true,
+                dry_run: true,
+                host: None,
+                route: None,
+                set: vec!["diff_base=2222222222222222222222222222222222222222".into()],
+            },
+        )?;
+        assert!(String::from_utf8(output)?.contains("\"review\""));
+        let calls = std::fs::read_to_string(calls)?;
+        let run = calls.lines().next().ok_or("run call")?;
+        assert!(run.contains("run smoke --explain"), "{calls}");
+        assert_eq!(run.matches("--set diff_base=").count(), 1, "{calls}");
+        assert!(
+            !run.contains("2222222222222222222222222222222222222222"),
+            "{calls}"
+        );
         Ok(())
     }
 
