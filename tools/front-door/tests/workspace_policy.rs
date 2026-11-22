@@ -483,6 +483,8 @@ fn is_test_source(name: &str) -> bool {
         || stem.starts_with("tests_")
         || stem.ends_with("_test")
         || stem.ends_with("_tests")
+        // A fixture generator binary writes test data, so it is fixture source.
+        || stem.ends_with("-fixtures")
 }
 
 // Method-level bans (including direct sleep) live in clippy.toml. The remaining

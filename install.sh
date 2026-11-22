@@ -10,7 +10,7 @@ die() { printf '%s\n' "$2" >&2; exit "$1"; }
 # upgrade. Print to stdout so `provenant upgrade` carries the warning in its
 # captured host report, then leave the installed app untouched.
 app_unavailable() {
-    printf '%s\n' "Warning: $1; the app is left as-is and may be behind the CLI."
+    printf '%s\n' "Warning: $1; the app is left as-is and may be behind the CLI." >&2
     [ -z "$app_stage" ] || rm -rf "$app_stage" || :
     app_stage=
 }

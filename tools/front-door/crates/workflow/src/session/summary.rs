@@ -880,7 +880,8 @@ mod tests {
         assert_eq!(line.source, SummarySource::Intent);
 
         // A peer heading with a different name ends Intent, so Goal wins.
-        let with_peer = "## Intent\n### Ruling\nKeep the console useful\n\n## Background\nnot the intent\n\n## Goal\nFinish the slice\n";
+        let with_peer =
+            "## Intent\n### Ruling\n\n## Background\nnot the intent\n\n## Goal\nFinish the slice\n";
         let line = checkpoint_summary_line(with_peer).unwrap();
         assert_eq!(line.text, "Finish the slice");
         assert_eq!(line.source, SummarySource::Goal);
