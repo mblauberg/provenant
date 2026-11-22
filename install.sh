@@ -497,7 +497,6 @@ if [ -n "$app_stage" ]; then
         app_stage=
     fi
 elif [ -e "$apps_dir/$app" ]; then
-    clean_menu_login_item
     [ "$quiet_app" = true ] || printf '%s\n' "app: $apps_dir/$app ($(app_version "$apps_dir/$app")); not refreshed"
 fi
 if "$guided"; then
