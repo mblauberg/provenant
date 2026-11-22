@@ -248,10 +248,17 @@ fn command(provider: &str, executable: &Path, setting: &ProviderUpdate) -> Optio
         }
         ProviderUpdate::Enabled(true) => {}
     }
-    match provider {
-        "claude" => Some(vec![executable.into(), "update".into()]),
-        "opencode" => Some(vec![executable.into(), "upgrade".into()]),
-        "codex" => {
+    let update = provenant_records::AdapterSpec::get(provider)?.update;
+    match update {
+        provenant_records::UpdateCommand::None => None,
+        provenant_records::UpdateCommand::Subcommand(subcommand) => {
+            Some(vec![executable.into(), subcommand.into()])
+        }
+        provenant_records::UpdateCommand::HomebrewOrNpm {
+            formula,
+            module,
+            package,
+        } => {
             let resolved = provenant_os::fs::canonicalize(executable).ok()?;
             let text = resolved.to_str()?;
             if text.contains("/Cellar/") || text.contains("/Caskroom/") {
@@ -265,21 +272,20 @@ fn command(provider: &str, executable: &Path, setting: &ProviderUpdate) -> Optio
                 Some(vec![
                     Path::new(root).join("bin/brew").into(),
                     "upgrade".into(),
-                    "codex".into(),
+                    formula.into(),
                 ])
-            } else if text.contains("/node_modules/@openai/codex/") {
-                let prefix = text.split_once("/lib/node_modules/@openai/codex/")?.0;
+            } else if text.contains(&format!("/node_modules/{module}/")) {
+                let prefix = text.split_once(&format!("/lib/node_modules/{module}/"))?.0;
                 Some(vec![
                     Path::new(prefix).join("bin/npm").into(),
                     "install".into(),
                     "-g".into(),
-                    "@openai/codex@latest".into(),
+                    package.into(),
                 ])
             } else {
                 None
             }
         }
-        _ => None,
     }
 }
 

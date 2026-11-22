@@ -339,9 +339,9 @@ pub(super) fn continuation_for_policy(
         .join(prior.attempt_id.to_string())
         .join("provider-state");
     if let Some(current_root) = opencode_data_root {
-        if !AdapterSpec::get(&route.adapter)
-            .is_some_and(|spec| spec.id == provenant_records::Harness::Opencode)
-            || !current_root.is_absolute()
+        if !AdapterSpec::get(&route.adapter).is_some_and(|spec| {
+            spec.model_observation == provenant_records::ModelObservation::SessionDatabase
+        }) || !current_root.is_absolute()
         {
             return Err(ContinuationError::Provider(
                 provenant_providers::ProviderError::UnknownIdentity,
@@ -363,9 +363,9 @@ pub(super) fn continuation_for_policy(
         provenant_providers::opencode::session_exists(current_root, session)?;
         return Ok(continuation);
     }
-    if AdapterSpec::get(&route.adapter)
-        .is_some_and(|spec| spec.id == provenant_records::Harness::Opencode)
-    {
+    if AdapterSpec::get(&route.adapter).is_some_and(|spec| {
+        spec.model_observation == provenant_records::ModelObservation::SessionDatabase
+    }) {
         match super::observation::native_session_location_for_route(
             &prior_state,
             &route.adapter,
@@ -465,23 +465,27 @@ pub(super) fn prior_uses_native_session_state(
     provider: &str,
     provider_state: Option<&Path>,
 ) -> bool {
-    let host_profile_session = AdapterSpec::get(provider)
-        .is_some_and(|spec| spec.id == provenant_records::Harness::Opencode)
-        && provider_state.is_some_and(|provider_state| {
-            applied
-                .model
-                .as_deref()
-                .and_then(|model| model.strip_prefix("opencode/"))
-                .is_some_and(|model| {
-                    super::observation::native_session_location_for_route(
-                        provider_state,
-                        provider,
-                        model,
-                        applied.account_key.as_deref(),
-                    )
-                    .is_ok()
-                })
-        });
+    let spec = AdapterSpec::get(provider);
+    let host_profile_session = spec.is_some_and(|spec| {
+        spec.model_observation == provenant_records::ModelObservation::SessionDatabase
+    }) && provider_state.is_some_and(|provider_state| {
+        applied
+            .model
+            .as_deref()
+            .and_then(|model| {
+                spec.and_then(|spec| spec.model_id_prefix)
+                    .and_then(|prefix| model.strip_prefix(prefix))
+            })
+            .is_some_and(|model| {
+                super::observation::native_session_location_for_route(
+                    provider_state,
+                    provider,
+                    model,
+                    applied.account_key.as_deref(),
+                )
+                .is_ok()
+            })
+    });
     host_profile_session
         || ((applied
             .sandbox

@@ -1337,6 +1337,30 @@ fn adapter_policy_detects_registry_names_and_harness_comparisons() -> Result<(),
     Ok(())
 }
 
+/// Provider and config sources are scanned for policy comparisons even though
+/// their own binding literals are declarative. A new adapter-identity branch in
+/// either crate must still come from the registry.
+#[test]
+fn adapter_policy_detects_provider_and_config_identity_branches() -> Result<(), Box<dyn Error>> {
+    let comparison = adapter_identity_comparison()?;
+    for source in [
+        "if adapter == \"agy\" { detect(); }",
+        "if target.harness == Harness::Claude { sync(); }",
+        "match adapter { \"codex\" => update(), _ => {} }",
+        "matches!(adapter, Harness::Opencode)",
+    ] {
+        assert!(comparison.is_match(source), "missed: {source}");
+    }
+    for source in [
+        "crate::adapter!(Agy, \"agy\", prepare);",
+        "adapter: \"agy\",",
+        "provenant_records::Harness::Agy.spec().name",
+    ] {
+        assert!(!comparison.is_match(source), "false positive: {source}");
+    }
+    Ok(())
+}
+
 /// Adapter policy belongs to the records registry; hooks are declarative
 /// provider command data. Test fixtures may still name their provider.
 #[test]
@@ -1350,7 +1374,11 @@ fn adapter_policy_uses_registry_data() -> Result<(), Box<dyn Error>> {
     let literal = regex::Regex::new(&format!(r#""(?:{names})""#))?;
     let comparison = adapter_identity_comparison()?;
     let mut sources = Vec::new();
-    for name in ["cli", "routing", "quota"] {
+    // Every production crate that can dispatch on adapter identity is in scope.
+    // Providers and config declare their own adapter bindings and name adapters
+    // in declarative data and diagnostics, so only identity comparisons are
+    // policy there; the routing/cli/quota side has no such declarations.
+    for name in ["cli", "routing", "quota", "providers", "config"] {
         rust_sources(&root.join("crates").join(name).join("src"), &mut sources)?;
     }
     rust_sources(&root.join("src"), &mut sources)?;
@@ -1362,12 +1390,15 @@ fn adapter_policy_uses_registry_data() -> Result<(), Box<dyn Error>> {
         let tests = selected_test_scopes(&source, is_test_source(&path.to_string_lossy()), true);
         // Hook command literals are declarative data; comparisons still
         // represent policy and must be checked.
-        let checks: Vec<_> =
-            if path.starts_with(root.join("src")) || path == root.join("crates/cli/src/hooks.rs") {
-                vec![&comparison]
-            } else {
-                vec![&literal, &comparison]
-            };
+        let declarative = path.starts_with(root.join("src"))
+            || path == root.join("crates/cli/src/hooks.rs")
+            || path.starts_with(root.join("crates/providers/src"))
+            || path.starts_with(root.join("crates/config/src"));
+        let checks: Vec<_> = if declarative {
+            vec![&comparison]
+        } else {
+            vec![&literal, &comparison]
+        };
         for found in checks
             .into_iter()
             .flat_map(|check| check.find_iter(&source))
@@ -1376,6 +1407,10 @@ fn adapter_policy_uses_registry_data() -> Result<(), Box<dyn Error>> {
             let non_adapter_literal = (path.ends_with("grammar.rs")
                 && line_text.contains("conflicts_with_all"))
                 || (path.ends_with("fabric.rs") && line_text.contains("InvalidField("))
+                // Declared under #[cfg(test)] in lib.rs; the source scanner cannot see that.
+                || path.ends_with("seatbelt_snapshots.rs")
+                // A build strategy name, not an adapter identity.
+                || (path.ends_with("lane.rs") && line_text.contains("build_port.strategy"))
                 || (path.ends_with("run/provider/command.rs") && line_text.contains(".join("))
                 || (path.ends_with("run/status.rs")
                     && source[found.end()..].starts_with(": cursor"))

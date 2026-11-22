@@ -5,7 +5,7 @@ pub(crate) fn decode_source(
     capture: &provenant_quota::ProbeCapture,
 ) -> Result<QuotaSnapshot, QuotaError> {
     super::decode_source(
-        "codex",
+        provenant_records::Harness::Codex.spec().name,
         plan,
         capture,
         |payload, windows, details| {
@@ -89,8 +89,9 @@ fn decode_codex(
 
     decode_codex_group(main, "", windows);
     if let Some(by_id) = by_id.and_then(Value::as_object) {
+        let adapter = provenant_records::Harness::Codex.spec().name;
         for (key, group) in by_id {
-            if key == "codex" || !group.is_object() {
+            if key == adapter || !group.is_object() {
                 continue;
             }
             decode_codex_group(group, &format!("{}.", slug(key)), windows);

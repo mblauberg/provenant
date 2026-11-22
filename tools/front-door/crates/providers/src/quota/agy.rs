@@ -4,7 +4,13 @@ pub(crate) fn decode_source(
     plan: &QuotaProbePlan,
     capture: &provenant_quota::ProbeCapture,
 ) -> Result<QuotaSnapshot, QuotaError> {
-    super::decode_source("agy", plan, capture, decode_agy, status)
+    super::decode_source(
+        provenant_records::Harness::Agy.spec().name,
+        plan,
+        capture,
+        decode_agy,
+        status,
+    )
 }
 
 fn status(_: &str, _: &Value, windows: &[QuotaWindow], _: Option<&QuotaDetails>) -> QuotaStatus {

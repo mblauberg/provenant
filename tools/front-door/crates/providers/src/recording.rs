@@ -151,7 +151,9 @@ pub fn answering_model(
     stream_model: Option<&str>,
     codex_home: &Path,
 ) -> Option<String> {
-    if adapter == "codex" {
+    if provenant_records::AdapterSpec::get(adapter)
+        .is_some_and(|spec| spec.model_observation == provenant_records::ModelObservation::Rollout)
+    {
         session
             .and_then(|thread| crate::codex_rollout::observe(codex_home, thread).ok())
             .map(|turn| turn.model)

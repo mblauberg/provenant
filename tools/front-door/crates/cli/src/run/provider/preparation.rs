@@ -4293,9 +4293,9 @@ pub(super) fn prepare_candidates_inner(
             reasons.push(setup_skip(&label, error));
             continue;
         }
-        let opencode_host = adapter_spec
-            .is_some_and(|spec| spec.id == provenant_records::Harness::Opencode)
-            && !lane_access.access.is_isolated();
+        let opencode_host = adapter_spec.is_some_and(|spec| {
+            spec.model_observation == provenant_records::ModelObservation::SessionDatabase
+        }) && !lane_access.access.is_isolated();
         let opencode_homes = provenant_providers::opencode::host_xdg_homes(&home, &|key| {
             host_provider_var(registry, key)
         });
@@ -4464,7 +4464,7 @@ pub(super) fn prepare_candidates_inner(
                 continue;
             }
         };
-        if adapter_spec.is_some_and(|spec| spec.id == provenant_records::Harness::Codex) {
+        if adapter_spec.is_some_and(|spec| spec.codex_policy) {
             request.codex = if writer.is_none()
                 || config
                     .providers
@@ -4648,19 +4648,13 @@ pub(super) fn prepare_candidates_inner(
             // host profile reads the provider's own login. Take that set and
             // its expected mechanism from the registry rather than restating
             // adapter names here.
-            let native_auth = adapter_spec.is_some_and(|spec| {
-                spec.id == provenant_records::Harness::Codex
-                    || spec.id == provenant_records::Harness::Cursor
-                    || spec.id == provenant_records::Harness::Agy
-                    || spec.id == provenant_records::Harness::Claude
-            });
-            let claude_native =
-                adapter_spec.is_some_and(|spec| spec.id == provenant_records::Harness::Claude);
+            let warning = adapter_spec.map(|spec| spec.native_auth_warning);
             let expected = adapter_spec.and_then(|spec| spec.authentication);
-            if native_auth
-                && (claude_native
-                    || plan.permissions().selected_authentication.as_deref() != expected)
-            {
+            if warning.is_some_and(|warning| {
+                warning == provenant_records::NativeAuthWarning::Always
+                    || (warning == provenant_records::NativeAuthWarning::WhenMismatch
+                        && plan.permissions().selected_authentication.as_deref() != expected)
+            }) {
                 let detail = format!(
                     "{} uses native provider authentication (lanes.access={}, source: {})",
                     adapter.id(),
@@ -5456,7 +5450,9 @@ pub(super) fn prepare_candidates_inner(
                 .map(|tool| tool.receipt())
                 .collect(),
         ))?);
-        if adapter_spec.is_some_and(|spec| spec.id == provenant_records::Harness::Opencode) {
+        if adapter_spec.is_some_and(|spec| {
+            spec.model_observation == provenant_records::ModelObservation::SessionDatabase
+        }) {
             let message = opencode_access_message(&lane_access);
             let _ = writeln!(std::io::stderr().lock(), "{message}");
             for warning in spec.warnings.iter().chain(continuation_warning.iter()) {
@@ -5464,17 +5460,19 @@ pub(super) fn prepare_candidates_inner(
             }
             provider.launch_warnings.push(message);
         }
-        if adapter_spec.is_some_and(|spec| spec.id == provenant_records::Harness::Codex) {
+        if let Some(spec) = adapter_spec.filter(|spec| spec.codex_policy) {
+            let setting = format!("providers.{}.clean_config", spec.name);
             let source = if writer.is_none() {
                 "read-only extension authority"
             } else {
-                match config.origins.get("providers.codex.clean_config") {
+                match config.origins.get(&setting) {
                     Some(provenant_config::Origin::User { .. }) => "host configuration",
                     _ => "compiled default",
                 }
             };
             provider.launch_warnings.push(format!(
-                "Codex clean_config={} (providers.codex.clean_config; source: {source})",
+                "{} clean_config={} ({setting}; source: {source})",
+                spec.name,
                 plan.codex_policy() == provenant_confinement::CodexPolicy::Clean,
             ));
         }
