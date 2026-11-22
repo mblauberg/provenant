@@ -359,10 +359,6 @@ fn config_detection_and_project_path_are_inspectable() -> Result {
     let out = rig.command(&["config", "show", "--full", "--json"])?;
     assert_eq!(code(&out), 0, "{out:?}");
     let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
-    assert_eq!(
-        value["data"]["port_leaves"]["build.strategy"]["source"],
-        "builtin"
-    );
     assert_eq!(value["data"]["detection"]["stacks"][0]["stack"], "node");
     Ok(())
 }

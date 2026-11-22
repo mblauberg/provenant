@@ -1,4 +1,4 @@
-//! Process execution shared by the lane, lane_seed and command strategies.
+//! Local process execution for the chair's host-owned warm check.
 
 use super::{
     BuildError, Captured, ExecPlace, ExecSite, ExitStatus, InfraKind, Job, JobOutcome, JobResult,

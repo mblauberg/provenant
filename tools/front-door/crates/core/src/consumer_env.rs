@@ -75,7 +75,6 @@ pub const LANE_PORT_BASE: &str = "PROVENANT_LANE_PORT_BASE";
 pub const LANE_PORT_COUNT: &str = "PROVENANT_LANE_PORT_COUNT";
 pub const CARGO_SOURCE_WRITES: &str = "PROVENANT_CARGO_SOURCE_WRITES";
 pub const CARGO_SOURCE_WRITES_SOURCE: &str = "PROVENANT_CARGO_SOURCE_WRITES_SOURCE";
-pub const LOCAL_CARGO: &str = "PROVENANT_LOCAL_CARGO";
 pub const ADMISSION_CLASS: &str = "PROVENANT_ADMISSION_CLASS";
 pub const ADMISSION_SLOT: &str = "PROVENANT_ADMISSION_SLOT";
 pub const ADMISSION_SLOT_STATE: &str = "PROVENANT_ADMISSION_SLOT_STATE";
@@ -86,7 +85,6 @@ pub const ADMISSION_DISK_LIMITS: &str = "PROVENANT_ADMISSION_DISK_LIMITS";
 pub const ADMISSION_MEMORY_LIMIT: &str = "PROVENANT_ADMISSION_MEMORY_LIMIT";
 pub const ADMISSION_TRIM_ACTION: &str = "PROVENANT_ADMISSION_TRIM_ACTION";
 pub const PORT_OPERATION: &str = "PROVENANT_PORT_OPERATION";
-pub const PORT_SOURCE: &str = "PROVENANT_PORT_SOURCE";
 pub const PORT_PHASE: &str = "PROVENANT_PORT_PHASE";
 pub const ADMISSION_ATTEMPT: &str = "PROVENANT_ADMISSION_ATTEMPT";
 pub const ADMISSION_WORKTREE: &str = "PROVENANT_ADMISSION_WORKTREE";
@@ -99,7 +97,6 @@ pub const VERIFY_SELECTION: &str = "PROVENANT_VERIFY_SELECTION";
 pub const VERIFY_TIER: &str = "PROVENANT_VERIFY_TIER";
 pub const VERIFY_PROJECT_ROOT: &str = "PROVENANT_VERIFY_PROJECT_ROOT";
 pub const VERIFY_EFFECTIVE_CONFIG_JSON: &str = "PROVENANT_VERIFY_EFFECTIVE_CONFIG_JSON";
-pub const SEED_ORIGIN: &str = "PROVENANT_SEED_ORIGIN";
 pub const SESSION_ID: &str = "PROVENANT_SESSION_ID";
 
 const fn var(
@@ -122,10 +119,8 @@ use Channel::{Caller, Lane, LaneOrCaller, PortCommand};
 use Stability::{Evolving, Internal, Stable};
 
 const EVERY_LANE: &str = "every lane";
-const BUILD_SHIM: &str = "only for the cargo child of the lane's cargo shim";
 const ADMITTED_COMMAND: &str = "only for admitted commands";
 const ADMISSION: &str = "admission port commands";
-const SEED_PREPARE: &str = "build.prepare children of a standalone seed clone";
 
 /// Every declared variable. Order is presentation order only.
 pub const CONSUMER_ENV: &[EnvVar] = &[
@@ -319,20 +314,6 @@ pub const CONSUMER_ENV: &[EnvVar] = &[
         "forge port commands",
     ),
     var(
-        PORT_SOURCE,
-        PortCommand,
-        Evolving,
-        "Source of the selected build admission wrapper.",
-        "build admission port commands",
-    ),
-    var(
-        SEED_ORIGIN,
-        PortCommand,
-        Evolving,
-        "The absolute path of the origin checkout a standalone seed clone was made from.",
-        SEED_PREPARE,
-    ),
-    var(
         PORT_REQUEST_PATH,
         PortCommand,
         Evolving,
@@ -403,13 +384,6 @@ pub const CONSUMER_ENV: &[EnvVar] = &[
         "lanes with a Cargo home",
     ),
     var(
-        LOCAL_CARGO,
-        Lane,
-        Internal,
-        "The real cargo the shim runs.",
-        BUILD_SHIM,
-    ),
-    var(
         ADMISSION_CLASS,
         Lane,
         Internal,
@@ -448,8 +422,8 @@ pub const CONSUMER_ENV: &[EnvVar] = &[
         BUILD_CONTEXT,
         Lane,
         Internal,
-        "Frozen host-side build strategy, repository and toolchain context.",
-        "every lane and its build shim",
+        "Frozen host-side repository and toolchain context for a build job.",
+        "the chair's host-owned warm check",
     ),
     var(
         ADMISSION_DISK_LIMITS,

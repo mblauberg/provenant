@@ -3,10 +3,6 @@
 
 // The Claude read-only case runs in the nightly native harness tier.
 
-/// A writer builds and tests a SwiftPM package in its registered worktree.
-/// The real compile runs in the nightly native tier with a longer timeout.
-/// This fixture prepares and executes the lane directly, so it has no queued
-/// writer event to wait for.
 use super::*;
 
 pub(super) fn lane_prepare_isolates_nested_state() -> Result {
@@ -73,32 +69,6 @@ fn fixture_io<T>(operation: &str, path: &Path, result: std::io::Result<T>) -> Re
     result.map_err(|error| format!("{operation} {}: {error}", path.display()).into())
 }
 
-pub(super) fn lane_builds_and_tests_swift_in_a_registered_worktree() -> Result {
-    let selected = cfg!(target_os = "macos")
-        && Path::new("/usr/bin/swift").exists()
-        && provenant_providers::swift_toolchain_available(&|name| std::env::var_os(name));
-    if !selected {
-        provenant_test_support::skip_sandbox_dependent_test("no Swift toolchain is selected")?;
-        return Ok(());
-    }
-    lane_prepare_with(&[("claude", true, false, 97)], Probe::Swift)
-}
-
-pub(super) fn read_only_lane_builds_and_tests_swift_in_scratch() -> Result {
-    let selected = cfg!(target_os = "macos")
-        && Path::new("/usr/bin/swift").exists()
-        && provenant_providers::swift_toolchain_available(&|name| std::env::var_os(name));
-    if !selected {
-        provenant_test_support::skip_sandbox_dependent_test("no Swift toolchain is selected")?;
-        return Ok(());
-    }
-    lane_prepare_with(&[("claude", false, false, 98)], Probe::SwiftReadOnly)
-}
-
-pub(super) fn read_only_lane_builds_and_tests_cargo_in_scratch() -> Result {
-    lane_prepare_with(&[("claude", false, false, 99)], Probe::CargoReadOnly)
-}
-
 /// Which native proof a lane case runs inside its compiled profile.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Probe {
@@ -132,26 +102,6 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
         ],
     )?;
     let worktree = rig.project.join(".worktrees/writer");
-    // The repository's Cargo config names a checked-in rustc wrapper.
-    fs::create_dir_all(worktree.join(".cargo"))?;
-    fs::write(
-        worktree.join(".cargo/config.toml"),
-        "[build]\nrustc-wrapper = \".cargo/rustc-wrapper.sh\"\n",
-    )?;
-    fs::write(
-        worktree.join(".cargo/rustc-wrapper.sh"),
-        "#!/bin/sh\nexec \"$@\"\n",
-    )?;
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(
-            worktree.join(".cargo/rustc-wrapper.sh"),
-            fs::Permissions::from_mode(0o755),
-        )?;
-    }
-    let worktree_arg = worktree.to_str().ok_or("worktree path")?;
-    git(&rig, &["-C", worktree_arg, "add", ".cargo"])?;
-    git(&rig, &["-C", worktree_arg, "commit", "-q", "-m", "wrapper"])?;
     let (roots, context) = verified_primary_writer_context(&rig)?;
     let identity = command(&rig, &["fabric", "identity", "--json"])?;
     assert_eq!(

@@ -193,19 +193,16 @@ replayable authority.
   leave the old or new file whole.
 - Owner: `crates/os/src/fs.rs`
 
-### Build strategy context
+### Build context
 
-Lane `cargo`, `nextest` and `cargo-nextest` PATH shims run
-`provenant admit build -- <real>` and carry the host-resolved build port in
-`PROVENANT_BUILD_CONTEXT`: strategy and source, host toolchain paths and the
-lane's private Git binding. The strategy selects local lane execution, a
-repository command wrapper or a reusable build slot (an unavailable pool falls
-back locally with a recorded exception) and never changes attempt custody. The
-local-Cargo advisory still applies to shim invocations. Admission limits are
+Lanes have no Cargo shims and carry no `PROVENANT_BUILD_CONTEXT`: they never
+compile, seed or admit a build. The chair's host-owned warm check and
+`provenant verify` tiers use the one `slots` strategy, bounded by
 `[admission.build].slots`; layered `build.*` ports are in
-[state](state.md#configuration).
-- Why: build coordination varies by repository without changing custody.
-- Owner: `crates/providers/src/lane.rs`; `src/admit.rs`; `crates/run/src/build/`
+[state](state.md#configuration). `.worktrees/.cargo/config.toml` is the single
+mechanism that disables lane cargo.
+- Why: one build model keeps lane custody independent of host compilation.
+- Owner: `src/admit.rs`; `src/verify.rs`; `crates/run/src/build/`
 
 ## Permission policy
 

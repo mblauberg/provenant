@@ -55,7 +55,6 @@ mod staging_gc;
 mod state_handoff;
 mod status_wait;
 mod stranded_work;
-mod target_seed_build;
 mod usage;
 mod verify;
 #[cfg(test)]
@@ -1653,7 +1652,6 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::Internal(provenant_cli::Internal::EventListen { repository }) => {
             event_delivery::listen(&repository, globals)
         }
-        Command::Internal(provenant_cli::Internal::TickSeed) => tick::seed_worker(globals),
         Command::Internal(provenant_cli::Internal::Launch {
             attempt,
             provider_lease_wait,

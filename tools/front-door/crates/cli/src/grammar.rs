@@ -1057,14 +1057,6 @@ pub struct PipelineOptions {
 }
 #[derive(Debug, Subcommand)]
 pub enum Worktree {
-    /// Build and publish a host-owned Cargo target seed from the configured verify base
-    SeedBuild,
-    /// Seed a checkout's private Cargo target warm from the host seed and print
-    /// the CARGO_TARGET_DIR to use; an existing target is kept
-    SeedTarget {
-        /// Checkout path, relative to the selected project when not absolute
-        path: std::path::PathBuf,
-    },
     /// Create a worktree on a new branch
     Create {
         /// New branch name
@@ -1194,8 +1186,6 @@ pub enum Internal {
     LaneCleanup {
         request: String,
     },
-    /// Detached cargo-seed refresh queued by the daily collector.
-    TickSeed,
     /// Host-owned forge forwarder; one instance per repository.
     EventListen {
         repository: String,

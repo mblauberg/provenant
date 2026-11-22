@@ -185,21 +185,7 @@
   "build": {
     "source": "builtin",
     "prepare": [],
-    "seed": {
-      "stale_after": "24h"
-    },
-    "strategy": "lane_seed",
-    "wrapper": {
-      "argv": []
-    },
-    "command": {
-      "argv": [],
-      "exit_codes": {
-        "success": [0],
-        "unknown": [],
-        "other": "refused"
-      }
-    },
+    "strategy": "slots",
     "offload": "auto",
     "overflow": "auto",
     "clean": "untracked",

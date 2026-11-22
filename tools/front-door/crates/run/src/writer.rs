@@ -1,5 +1,4 @@
 //! Writer identity and confinement composition. Supervisor owns the lease.
-use crate::cargo_seed::codes;
 use crate::{PathCheck, Result, RunError, WriterRequest};
 use provenant_confinement::{
     ConfinedPlan, UtilityBudget, UtilityRuntime, VerifiedWorktree,
@@ -17,12 +16,29 @@ use provenant_os::{
     fs::{Directory, FsError, canonicalize},
 };
 use provenant_supervisor::custody::WriterBinding;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::{
     ffi::{OsStr, OsString},
     path::{Path, PathBuf},
     time::Duration,
 };
+
+/// Fixed, non-secret codes for the host toolchain check. The host's warm-check
+/// reports these verbatim, so their text is part of that interface.
+mod codes {
+    pub(super) const WORKTREE_UNRESOLVABLE: &str = "worktree_unresolvable";
+    pub(super) const RUSTUP_HOME_WRITABLE: &str = "rustup_home_writable";
+    pub(super) const CARGO_BIN_WRITABLE: &str = "cargo_bin_writable";
+    pub(super) const PATH_MISSING: &str = "path_missing";
+    pub(super) const PATH_DUPLICATED: &str = "path_duplicated";
+    pub(super) const RUSTUP_SHIM_UNRESOLVABLE: &str = "rustup_shim_unresolvable";
+    pub(super) const RUSTUP_SHIM_WRITABLE: &str = "rustup_shim_writable";
+    pub(super) const PATH_ENTRY_RELATIVE: &str = "path_entry_relative";
+    pub(super) const PATH_ENTRY_WRITABLE: &str = "path_entry_writable";
+    pub(super) const RUSTC_NOT_RUSTUP_SHIM: &str = "rustc_not_rustup_shim";
+    pub(super) const RUSTC_PATH_UNRESOLVABLE: &str = "rustc_path_unresolvable";
+    pub(super) const RUSTC_NOT_ON_PATH: &str = "rustc_not_on_path";
+}
 
 /// Distinguishes a refusal before custody from a failed withdrawal after it.
 #[derive(Debug)]
@@ -33,9 +49,6 @@ pub(crate) enum WriterCustodyError {
         release: provenant_supervisor::custody::CustodyError,
     },
 }
-
-/// Held while the writer's Cargo cache is seeded, so observers can name the phase.
-pub(crate) const SEED_WAIT_LOCK: &str = "seed-wait.lock";
 
 #[cfg(test)]
 thread_local! {
@@ -1583,11 +1596,9 @@ pub struct LaunchConfinement {
     pub writer: Option<WriterLaunch>,
     /// Canonical host home; the writer's lane cargo cache derives from it.
     pub home: PathBuf,
-    /// Opt in to private host target seeding.
-    pub cargo_target_seed: bool,
     /// Resolved once by the host, reused after all late environment additions.
     pub cargo_home: provenant_confinement::cargo::CargoHome,
-    /// Host state root containing target seed generations.
+    /// Host state root used for run state and live target custody.
     pub state_root: PathBuf,
     /// Root context used to refresh live Cargo target custody at eviction.
     pub roots: Option<provenant_core::Roots>,
@@ -1598,8 +1609,6 @@ pub struct LaunchConfinement {
     /// Bound once before sealing launch evidence; compilation uses this exact
     /// probed backend under writer custody, without a second selection.
     pub backend: Option<BoundSandboxBackend>,
-    /// Cargo target resolution mode and source.
-    pub cargo_target: crate::ResolvedCargoTarget,
     /// Host/profile Cargo cache budget resolved before the lane starts.
     pub cargo_cache_budget: Option<provenant_config::CargoCacheBudget>,
     /// Live lane target owners observed before launch eviction.
@@ -1680,20 +1689,10 @@ fn launch_resource_limits(
 }
 
 impl LaunchConfinement {
-    /// Reclaim least-recently-used unheld profiles after target seeding. Failure
-    /// is advisory: a lane starts and the effective limit/source are reported.
+    /// Reclaim least-recently-used unheld profiles before the lane starts.
+    /// Failure is advisory: a lane starts and the effective limit/source are
+    /// reported.
     pub(crate) fn enforce_cargo_cache_budget(&self) {
-        self.enforce_cargo_cache_budget_reserving(crate::build_dir_gc::SeedReservation::default());
-    }
-
-    /// `reservation` carries the incoming seed's recorded allocated size. The
-    /// collector resolves it against the byte unit its census used: near zero
-    /// for a private-byte census, the full allocated size for an allocated-byte
-    /// census. The caller never picks the unit.
-    fn enforce_cargo_cache_budget_reserving(
-        &self,
-        reservation: crate::build_dir_gc::SeedReservation,
-    ) {
         let Some(budget) = &self.cargo_cache_budget else {
             return;
         };
@@ -1731,7 +1730,6 @@ impl LaunchConfinement {
             budget,
             &self.cargo_target_protection,
             &mut refresh_protection,
-            reservation,
         );
         let report = match result {
             Ok(report) => report,
@@ -1755,16 +1753,11 @@ impl LaunchConfinement {
                 "warning: Cargo cache collection: {error}"
             );
         }
-        // The census named its unit; project the incoming clone in that same
-        // unit so the over-budget warning cannot disagree with the reservation
-        // the collector just applied.
-        let projected_bytes = reservation.resolved(report.byte_method);
-        if report.cache_bytes.saturating_add(projected_bytes) > budget.bytes {
+        if report.cache_bytes > budget.bytes {
             let _ = writeln!(
                 std::io::stderr().lock(),
-                "warning: Cargo targets remain over budget: {} + {} projected / {} bytes (setting {}; source: {}); launch continues",
+                "warning: Cargo targets remain over budget: {} / {} bytes (setting {}; source: {}); launch continues",
                 report.cache_bytes,
-                projected_bytes,
                 budget.bytes,
                 budget.setting,
                 budget.source.as_str(),
@@ -1853,230 +1846,26 @@ impl LaunchConfinement {
             (access, Some(self.sandbox.effective)),
         )
     }
-    /// Prepare a private target from host-built output while writer custody is held.
-    pub(crate) fn seed_cargo(
-        &self,
-        environment: &mut Vec<(OsString, OsString)>,
-        attempt_dir: &Directory,
-        cancel: &CancelToken,
-    ) -> bool {
-        if cancel.is_cancelled() {
-            return false;
-        }
-        let worktree = match &self.plan.permissions().mode {
-            AccessMode::WorktreeWrite(_) => self.writer.as_ref().map(|w| w.worktree.path()),
-            AccessMode::ReadOnly => None,
-        };
+    /// Apply the host-resolved Cargo home and source policy to the lane
+    /// environment. The lane builds in its own cache; no build output is
+    /// provisioned or copied into it here.
+    pub(crate) fn prepare_cargo_environment(&self, environment: &mut Vec<(OsString, OsString)>) {
         let private_cache = match &self.plan.permissions().mode {
             AccessMode::WorktreeWrite(authority) => &authority.cargo_cache().path,
             AccessMode::ReadOnly => &self.plan.permissions().scratch.path,
         };
-        let workspace = self
-            .cargo_target
-            .project_workspace(worktree, &self.state_root);
-        let (target, lint_target) = self
-            .cargo_target
-            .target_paths(workspace.as_deref(), private_cache);
         self.cargo_home
-            .lane_cargo_environment_with_target(&self.home, &target, environment);
+            .lane_cargo_environment(&self.home, private_cache, environment);
         if matches!(&self.plan.permissions().mode, AccessMode::WorktreeWrite(_)) {
             environment
                 .retain(|(key, _)| key != provenant_core::consumer_env::LANE_CARGO_LINT_TARGET);
             environment.push((
                 provenant_core::consumer_env::LANE_CARGO_LINT_TARGET.into(),
-                lint_target.clone().into_os_string(),
+                private_cache.join("target-lint").into_os_string(),
             ));
         }
         self.cargo_home
             .source_environment(self.plan.permissions().network, environment);
-        let writer = self.writer.as_ref().map(|w| (&w.worktree, &w.branch));
-        let (target_outcome, lint_outcome) = match (&self.plan.permissions().mode, writer) {
-            (AccessMode::WorktreeWrite(authority), Some((worktree, _))) => {
-                if self.cargo_target.value.is_project() {
-                    skipped_cargo_targets("project_target")
-                } else if self.cargo_target.value.is_custom() {
-                    let _ = std::fs::create_dir_all(&target);
-                    skipped_cargo_targets("custom_target")
-                } else {
-                    seed_both_cargo_targets(|destination| {
-                        self.seed_cargo_target(
-                            worktree,
-                            &authority.cargo_cache().path,
-                            environment,
-                            cancel,
-                            destination,
-                        )
-                    })
-                }
-            }
-            _ => skipped_cargo_targets("read_only_lane"),
-        };
-        if self.cargo_target.value.is_private() {
-            if matches!(&self.plan.permissions().mode, AccessMode::WorktreeWrite(_)) {
-                for managed_target in [&target, &lint_target] {
-                    let _ = std::fs::create_dir_all(managed_target);
-                }
-            }
-            for managed_target in [&target, &lint_target] {
-                if let Err(error) =
-                    crate::build_dir_gc::mark_managed_target_use(&self.home, managed_target)
-                {
-                    use std::io::Write;
-                    let _ = writeln!(
-                        std::io::stderr().lock(),
-                        "warning: could not update Cargo target last-use time: {error}"
-                    );
-                }
-            }
-        }
-        for (outcome, name) in [
-            (&target_outcome, "the Cargo target"),
-            (&lint_outcome, "the Cargo lint target"),
-        ] {
-            if let Some(warning) = outcome.fallback_warning(name, "this lane builds without it") {
-                use std::io::Write;
-                let _ = writeln!(std::io::stderr().lock(), "{warning}");
-            }
-        }
-        if let Err(error) = record_cargo_setup_file(
-            attempt_dir,
-            "cargo-target-setup.json",
-            &target_outcome,
-            &lint_outcome,
-        ) {
-            use std::io::Write;
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: could not record Cargo target setup: {error}"
-            );
-        }
-        target_outcome.is_seeded() || lint_outcome.is_seeded()
-    }
-
-    /// Show seed health once at lane start. Every read is advisory: a bad
-    /// policy or unreadable store warns but never stops the lane.
-    fn warn_seed_health(&self, project_key: &str, worktree: &VerifiedWorktree) {
-        let Ok(now) = provenant_os::clock::SystemClock::new().wall_now() else {
-            return;
-        };
-        let (stale_after, stale_after_text, source, policy_warning) =
-            match provenant_config::PortTable::read_for(Some(worktree.path()), &self.state_root) {
-                Ok(table) => crate::target_seed_health::stale_after_policy(&table),
-                Err(error) => (
-                    crate::target_seed_health::DEFAULT_STALE_AFTER,
-                    "24h".to_owned(),
-                    "default".to_owned(),
-                    Some(format!(
-                        "build.seed.stale_after could not be read ({error}); using 24h from default"
-                    )),
-                ),
-            };
-        let health = crate::target_seed_health::seed_health(
-            &self.state_root,
-            project_key,
-            stale_after,
-            &stale_after_text,
-            &source,
-            now,
-        );
-        let mut warnings = health.warnings();
-        if let Some(warning) = policy_warning {
-            warnings.insert(0, warning);
-        }
-        for warning in warnings {
-            let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
-        }
-    }
-
-    fn seed_cargo_target(
-        &self,
-        worktree: &VerifiedWorktree,
-        cache: &Path,
-        environment: &[(OsString, OsString)],
-        cancel: &CancelToken,
-        destination: &str,
-    ) -> crate::cargo_seed::Outcome {
-        use crate::cargo_seed::Outcome;
-        let seed_target = match provenant_config::PortTable::read_for(
-            Some(worktree.path()),
-            &self.state_root,
-        ) {
-            Ok(table) => {
-                let resolved = crate::build::strategy(&table.build);
-                for warning in &resolved.warnings {
-                    let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
-                }
-                resolved.value.lane_preparation().seed_target
-            }
-            Err(error) => {
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: build strategy could not be read ({error}); using lane_seed from default"
-                );
-                true
-            }
-        };
-        if !seed_target {
-            return Outcome::skipped("disabled");
-        }
-        let build =
-            match crate::target_seed::cargo_build_directory(worktree.path(), &self.state_root) {
-                Ok(Some(build)) => build,
-                Ok(None) => return Outcome::skipped("non_cargo_project"),
-                Err(_) => {
-                    return Outcome::fallback_detail(
-                        "toolchain_unverified",
-                        codes::CARGO_WORKSPACE_UNREADABLE,
-                    );
-                }
-            };
-        let project_key = crate::target_seed::project_key(worktree.repo().common_git_dir());
-        self.warn_seed_health(&project_key, worktree);
-        if cfg!(unix)
-            && let Err(detail) =
-                verified_cargo_config(&build, &self.cargo_home.path).and_then(|()| {
-                    trusted_lane_toolchain_diagnostic(
-                        &self.home,
-                        worktree.path(),
-                        environment,
-                        &provenant_confinement::write_grants(
-                            self.plan.permissions(),
-                            &self.profile,
-                        ),
-                    )
-                })
-        {
-            return Outcome::fallback_detail("toolchain_unverified", detail);
-        }
-        crate::cargo_seed::seed_target_with_reservation(
-            &self.state_root,
-            cache,
-            worktree.path(),
-            &project_key,
-            &self.home,
-            environment,
-            cancel,
-            destination,
-            true,
-            |allocated_bytes| {
-                // A generation built before sizes were recorded has no figure
-                // to reserve, so nothing is evicted for it. The outcome records
-                // `size_recorded: false` in cargo-target-setup.json instead of
-                // warning every launch; accounting resumes once the seed is
-                // refreshed with a recorded size.
-                //
-                // Carry the seed's recorded allocated size to the collector.
-                // It resolves the reservation against the byte unit its census
-                // used: near zero for a private-byte census, the full allocated
-                // size where private size is unavailable. The caller never
-                // chooses the unit.
-                if let Some(allocated_bytes) = allocated_bytes {
-                    self.enforce_cargo_cache_budget_reserving(
-                        crate::build_dir_gc::SeedReservation::clone_of(allocated_bytes),
-                    );
-                }
-            },
-        )
     }
     /// Run holds writer custody here: create the derived ref parents and the
     /// private lane cache, before they are anchored or used unsandboxed.
@@ -2101,15 +1890,6 @@ impl LaunchConfinement {
                 lane_access,
             )
             .map_err(RunError::Confinement)?;
-            // Custom targets need directories now; private targets are created
-            // after seeding, and project targets belong to the worktree.
-            if self.cargo_target.value.is_custom() {
-                let (target, lint_target) = self
-                    .cargo_target
-                    .target_paths(None, &authority.cargo_cache().path);
-                let _ = std::fs::create_dir_all(&target);
-                let _ = std::fs::create_dir_all(&lint_target);
-            }
         }
         Ok(())
     }
@@ -2450,52 +2230,6 @@ pub(super) fn verify_writer_git_paths(common: &Path, branch: &GitRefName) -> Res
     Ok(())
 }
 
-// Cargo configuration can override rustc independently of the rustup pin.
-// Refuse ambiguous configurations without executing or interpreting them.
-// Refusals are stable snake_case codes, recorded as the outcome `detail`.
-pub(crate) fn verified_cargo_config(
-    build: &Path,
-    cargo_home: &Path,
-) -> std::result::Result<(), &'static str> {
-    let present = |directory: &Path| {
-        provenant_confinement::cargo::CONFIG_FILES
-            .iter()
-            .map(|name| directory.join(name))
-            .filter(|path| {
-                !matches!(std::fs::symlink_metadata(path),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound)
-            })
-            .collect::<Vec<_>>()
-    };
-    // The host config is data, with the same seed-eligibility check as project config.
-    for path in present(cargo_home) {
-        cargo_config_ineligible_for_seed(&path)?;
-    }
-    // A checked-in `.cargo/config.toml` is ordinary (this repository has one).
-    // It is read as data and refused only for unrepresented build settings.
-    for ancestor in build.ancestors() {
-        for path in present(&ancestor.join(".cargo")) {
-            cargo_config_ineligible_for_seed(&path)?;
-        }
-    }
-    Ok(())
-}
-
-// Read a Cargo config file as data, without executing it. A config is refused
-// when it is not a small regular UTF-8 TOML file or can select a different
-// compiler/build target or unrecorded build flags.
-fn cargo_config_ineligible_for_seed(path: &Path) -> std::result::Result<(), &'static str> {
-    use std::io::Read;
-    if !std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file()) {
-        return Err(codes::CARGO_CONFIG_UNREADABLE);
-    }
-    let mut bytes = Vec::new();
-    std::fs::File::open(path)
-        .and_then(|file| file.take(65537).read_to_end(&mut bytes))
-        .map_err(|_| codes::CARGO_CONFIG_UNREADABLE)?;
-    crate::target_seed::cargo_config_seed_eligibility(&bytes)
-}
-
 // Refuse the host probe if a lane can alter the host compiler or an earlier
 // PATH entry, or if its rustc does not resolve to the host rustup shim.
 pub fn trusted_lane_toolchain_diagnostic(
@@ -2580,51 +2314,6 @@ pub fn trusted_lane_toolchain_diagnostic(
         }
     }
     Err(codes::RUSTC_NOT_ON_PATH)
-}
-
-fn skipped_cargo_targets(
-    reason: &'static str,
-) -> (crate::cargo_seed::Outcome, crate::cargo_seed::Outcome) {
-    (
-        crate::cargo_seed::Outcome::skipped(reason),
-        crate::cargo_seed::Outcome::skipped(reason),
-    )
-}
-
-pub(crate) fn seed_both_cargo_targets(
-    mut seed: impl FnMut(&str) -> crate::cargo_seed::Outcome,
-) -> (crate::cargo_seed::Outcome, crate::cargo_seed::Outcome) {
-    (seed("target"), seed("target-lint"))
-}
-
-#[derive(serde::Serialize)]
-struct CargoTargetSetup<'a> {
-    #[serde(flatten)]
-    target: &'a crate::cargo_seed::Outcome,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    lint_target: Option<&'a crate::cargo_seed::Outcome>,
-}
-
-pub(crate) fn record_cargo_setup_file(
-    directory: &Directory,
-    name: &str,
-    outcome: &crate::cargo_seed::Outcome,
-    lint_outcome: &crate::cargo_seed::Outcome,
-) -> std::result::Result<(), String> {
-    let bytes = serde_json::to_vec(&CargoTargetSetup {
-        target: outcome,
-        lint_target: (!lint_outcome.is_skipped()).then_some(lint_outcome),
-    })
-    .map_err(|error| error.to_string())?;
-    directory
-        .atomic_write(
-            OsStr::new(name),
-            ".cargo-setup-",
-            &bytes,
-            provenant_os::fs::PublishMode::Replace,
-        )
-        .and_then(|publication| publication.require_durable())
-        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
@@ -3681,192 +3370,6 @@ mod cargo_setup_tests {
         assert_eq!(
             trusted_lane_toolchain_diagnostic(&home, &worktree, &scratch_env, &grants),
             Err(codes::RUSTC_NOT_RUSTUP_SHIM)
-        );
-    }
-
-    #[test]
-    fn cargo_config_makes_toolchain_unverifiable() {
-        let tmp = tempfile::tempdir().unwrap();
-        let worktree = tmp.path().join("worktree");
-        let cache = tmp.path().join("cache");
-        std::fs::create_dir_all(&worktree).unwrap();
-        std::fs::create_dir_all(cache.join(".cargo")).unwrap();
-        assert!(verified_cargo_config(&worktree, &cache.join(".cargo")).is_ok());
-        let host_config = cache.join(".cargo/config.toml");
-        std::fs::write(&host_config, "[build]\nrustc = 'evil'\n").unwrap();
-        assert_eq!(
-            verified_cargo_config(&worktree, &cache.join(".cargo")),
-            Err(codes::CARGO_CONFIG_SELECTS_COMPILER)
-        );
-        std::fs::write(&host_config, "[build]\njobs = 2\n").unwrap();
-        assert!(verified_cargo_config(&worktree, &cache.join(".cargo")).is_ok());
-        std::fs::create_dir_all(worktree.join(".cargo")).unwrap();
-        let config = worktree.join(".cargo/config.toml");
-        // Selecting a compiler/target, directly or through include or [env], is refused.
-        for (text, expected) in [
-            (
-                "[build]\nrustc = 'evil'\n",
-                codes::CARGO_CONFIG_SELECTS_COMPILER,
-            ),
-            (
-                "[build]\nrustc-wrapper = 'evil'\n",
-                codes::CARGO_CONFIG_SELECTS_COMPILER,
-            ),
-            (
-                "build.rustc-workspace-wrapper = 'evil'\n",
-                codes::CARGO_CONFIG_SELECTS_COMPILER,
-            ),
-            (
-                "[build]\ntarget = 'x86_64-unknown-linux-gnu'\n",
-                codes::CARGO_CONFIG_CHANGES_BUILD_TARGET,
-            ),
-            (
-                "[target.x86_64-unknown-linux-gnu]\nlinker = 'secret-linker'\n",
-                codes::CARGO_CONFIG_CHANGES_BUILD_TARGET,
-            ),
-            (
-                "[target.aarch64-apple-darwin]\nrustflags = ['-C', 'link-arg=-s']\n",
-                codes::CARGO_CONFIG_CHANGES_BUILD_TARGET,
-            ),
-            (
-                "[env]\nCARGO_BUILD_TARGET = 'x86_64-unknown-linux-gnu'\n",
-                codes::CARGO_CONFIG_CHANGES_BUILD_TARGET,
-            ),
-            (
-                "include = 'elsewhere.toml'\n",
-                codes::CARGO_CONFIG_SELECTS_COMPILER,
-            ),
-            (
-                "[env]\nRUSTUP_TOOLCHAIN = 'nightly'\n",
-                codes::CARGO_CONFIG_SELECTS_COMPILER,
-            ),
-            (
-                "[env]\nPATH = { value = '/tmp', force = true }\n",
-                codes::CARGO_CONFIG_SELECTS_COMPILER,
-            ),
-            ("build = 'rustc'\n", codes::CARGO_CONFIG_SELECTS_COMPILER),
-            // Only text that is not TOML is "invalid".
-            ("[build\n", codes::CARGO_CONFIG_INVALID),
-        ] {
-            std::fs::write(&config, text).unwrap();
-            assert_eq!(
-                verified_cargo_config(&worktree, &cache.join(".cargo")),
-                Err(expected),
-                "{text:?}"
-            );
-        }
-        std::fs::write(worktree.join(".cargo/config"), "[build]\nrustc = 'evil'\n").unwrap();
-        std::fs::remove_file(&config).unwrap();
-        assert_eq!(
-            verified_cargo_config(&worktree, &cache.join(".cargo")),
-            Err(codes::CARGO_CONFIG_SELECTS_COMPILER)
-        );
-    }
-
-    // Regression for #2484: harmless checked-in Cargo configuration must not
-    // disable seed use, while unrecorded target flags must.
-    #[test]
-    fn checked_in_cargo_config_without_unrecorded_build_settings_is_accepted() {
-        let tmp = tempfile::tempdir().unwrap();
-        let worktree = tmp.path().join("worktree");
-        let cache = tmp.path().join("cache");
-        let nested = worktree.join("any/depth/rust/workspace");
-        std::fs::create_dir_all(nested.join(".cargo")).unwrap();
-        std::fs::create_dir_all(worktree.join(".provenant")).unwrap();
-        let mut ports = provenant_config::PortTable::builtin();
-        ports.verify.workspace = "any/depth/rust/workspace".into();
-        std::fs::write(
-            worktree.join(provenant_config::PORTS_CONFIG),
-            serde_json::to_vec(&ports).unwrap(),
-        )
-        .unwrap();
-        std::fs::write(nested.join("Cargo.toml"), "[workspace]\n").unwrap();
-        let build = crate::target_seed::cargo_build_directory(&worktree, tmp.path())
-            .unwrap()
-            .unwrap();
-        std::fs::create_dir_all(cache.join(".cargo")).unwrap();
-        let config = nested.join(".cargo/config.toml");
-        for text in [
-            "# comments only\n",
-            "[alias]\nxtask = 'run -p xtask'\n[env]\nFOO = 'bar'\n",
-        ] {
-            std::fs::write(&config, text).unwrap();
-            assert_eq!(verified_cargo_config(&build, &cache.join(".cargo")), Ok(()));
-        }
-        std::fs::write(
-            &config,
-            "[target.aarch64-apple-darwin]\nrustflags = ['-C', 'link-arg=-s']\n",
-        )
-        .unwrap();
-        assert_eq!(
-            verified_cargo_config(&build, &cache.join(".cargo")),
-            Err(codes::CARGO_CONFIG_CHANGES_BUILD_TARGET)
-        );
-        // Keep the ancestor-compiler assertion independent of the target flag
-        // already rejected above; the first ineligible config owns the result.
-        std::fs::remove_file(&config).unwrap();
-        // An intermediate config belongs to this Cargo invocation's cone too.
-        let ancestor_config = nested.parent().unwrap().join(".cargo/config.toml");
-        std::fs::create_dir_all(ancestor_config.parent().unwrap()).unwrap();
-        std::fs::write(&ancestor_config, "[build]\nrustc = 'evil'\n").unwrap();
-        assert_eq!(
-            verified_cargo_config(&build, &cache.join(".cargo")),
-            Err(codes::CARGO_CONFIG_SELECTS_COMPILER)
-        );
-        std::fs::remove_file(ancestor_config).unwrap();
-        std::os::unix::fs::symlink("/etc/hosts", nested.join(".cargo/config")).unwrap();
-        assert_eq!(
-            verified_cargo_config(&build, &cache.join(".cargo")),
-            Err(codes::CARGO_CONFIG_UNREADABLE)
-        );
-    }
-
-    #[test]
-    fn target_setup_record_reports_seed_outcomes_and_publication_failures() {
-        let tmp = tempfile::tempdir().unwrap();
-        let directory = Directory::open_anchor(tmp.path()).unwrap();
-        for reason in [
-            "disabled",
-            "read_only_lane",
-            "project_target",
-            "custom_target",
-            "non_cargo_project",
-        ] {
-            let outcome = crate::cargo_seed::Outcome::skipped(reason);
-            record_cargo_setup_file(&directory, "cargo-target-setup.json", &outcome, &outcome)
-                .unwrap();
-            let record: serde_json::Value = serde_json::from_slice(
-                &std::fs::read(tmp.path().join("cargo-target-setup.json")).unwrap(),
-            )
-            .unwrap();
-            assert_eq!(record["status"], "skipped");
-            assert_eq!(record["reason"], reason);
-            assert!(record.get("lint_target").is_none());
-        }
-        // A fallback names the specific refusal; other outcomes carry no detail.
-        let refusal = crate::cargo_seed::Outcome::fallback_detail(
-            "toolchain_unverified",
-            codes::PATH_ENTRY_WRITABLE,
-        );
-        record_cargo_setup_file(&directory, "cargo-target-setup.json", &refusal, &refusal).unwrap();
-        let record: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(tmp.path().join("cargo-target-setup.json")).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(
-            record,
-            serde_json::json!({"status":"fallback","reason":"toolchain_unverified","detail":codes::PATH_ENTRY_WRITABLE,"lint_target":{"status":"fallback","reason":"toolchain_unverified","detail":codes::PATH_ENTRY_WRITABLE}})
-        );
-        std::fs::remove_file(tmp.path().join("cargo-target-setup.json")).unwrap();
-        std::fs::create_dir(tmp.path().join("cargo-target-setup.json")).unwrap();
-        assert!(
-            record_cargo_setup_file(
-                &directory,
-                "cargo-target-setup.json",
-                &crate::cargo_seed::Outcome::skipped("disabled"),
-                &crate::cargo_seed::Outcome::skipped("disabled")
-            )
-            .is_err()
         );
     }
 }

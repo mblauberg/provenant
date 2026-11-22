@@ -152,13 +152,6 @@ strength = "refuse"
 justification = "Applied write grants cannot overlap host indexes that carry durable authority and run state."
 
 [[rule]]
-code = "CONFINEMENT_TARGET_SEEDS_PROTECTED_DATA_INTEGRITY"
-site = "cli/src/run/provider/confinement.rs#target_seeds_protected"
-boundary = "other_work"
-strength = "refuse"
-justification = "Applied write grants cannot overlap the host-owned target seed store."
-
-[[rule]]
 code = "PREPARATION_PREPARE_CANDIDATES_AUTHORITY"
 site = "cli/src/run/provider/preparation.rs#prepare_candidates"
 boundary = "authority"
@@ -902,15 +895,6 @@ site = "providers/src/lane.rs#git_wrapper"
 boundary = "operation"
 strength = "refuse"
 justification = "A Git executable containing a NUL cannot identify an executable to launch; native non-UTF-8 and shell-special bytes are preserved."
-
-[[rule]]
-code = "LANE_LAUNCHSPEC_CONFIGURE_BUILD_SLOTS_NONE"
-site = "providers/src/lane.rs#LaunchSpec::configure_build_slots"
-boundary = "none"
-strength = "warn"
-refusable = true
-knob = "policy.LANE_LAUNCHSPEC_CONFIGURE_BUILD_SLOTS_NONE"
-justification = "Unrepresentable optional build-slot shim configuration leaves the launch ungated and emits a warning."
 
 [[rule]]
 code = "GRAPH_CONCURRENCY_CAP"

@@ -43,14 +43,13 @@ help carrying that metadata. Clap parse errors never echo a fence token.
 
 ## Build commands
 
-`provenant build` inspects and resets build slots without reading their files,
-and `provenant verify` runs a tier through the same build strategy as a lane's
-builds. A skipped `build maintain` reports why as a warning, never a failure,
-and a `build report` row whose affected-package selection cannot be computed
-stays unknown.
+`provenant build` inspects and resets the host's build slots without reading
+their files, and `provenant verify` runs a tier through the chair's one
+host-owned warm check. Lanes never build. A skipped `build maintain` reports why
+as a warning, never a failure, and a `build report` row whose affected-package
+selection cannot be computed stays unknown.
 
-- Why: verifying a candidate or a selected subset must use the strategy the
-  lane's builds use.
+- Why: the chair's warm check and CI are the only places that compile.
 
 ## Console catalogue and peer coverage
 

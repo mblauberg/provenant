@@ -820,7 +820,6 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
                 home: self.home.clone(),
                 cargo_home: provenant_confinement::cargo::CargoHome::resolve(&self.home, |_| None)
                     .unwrap(),
-                cargo_target_seed: false,
                 state_root: self.state.clone(),
                 roots: None,
                 // The test's fake handoff never starts a provider. Keep the
@@ -833,7 +832,6 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
                     None,
                 ),
                 backend: None,
-                cargo_target: Default::default(),
                 cargo_cache_budget: None,
                 cargo_target_protection: Default::default(),
             });

@@ -77,14 +77,6 @@ pub(crate) enum Error {
     DiskSpace(std::io::Error),
     #[error("invalid worktree removal scope")]
     InvalidScope,
-    #[error("target seed build: {message}")]
-    SeedBuild {
-        message: String,
-        /// Bounded output tail of a failed `build.prepare` command, when that
-        /// is the cause. The renderer shows it as an indented human cause and
-        /// as `error.cause` in JSON.
-        tail: Option<String>,
-    },
     #[error("{0}")]
     Settlement(String),
 }
@@ -154,9 +146,6 @@ impl Error {
             Self::InvalidScope => {
                 "name a worktree or pass --all to `provenant worktree remove`"
             }
-            Self::SeedBuild { .. } => {
-                "fix the reported build.prepare failure, then rerun `provenant worktree seed-build`"
-            }
             Self::Settlement(_) => "wait for the writer to settle, then retry the worktree command",
         }
     }
@@ -197,40 +186,16 @@ impl Error {
         }
     }
 
-    pub(crate) fn cause(&self) -> Option<&str> {
-        match self {
-            Self::SeedBuild {
-                tail: Some(tail), ..
-            } => Some(tail),
-            _ => None,
-        }
-    }
-
     /// The one mapping from a worktree refusal to its transport facts. Used by
     /// the production emit path and by the render tests, so the two cannot drift.
     pub(crate) fn command_error(&self, code: &str) -> provenant_records::CommandError {
-        crate::command_error(code, &self.local_message(), self.cause(), self.repair())
-    }
-}
-
-/// Keep a failing `build.prepare` command's bounded output alongside its
-/// message. A seed-build operator otherwise sees only the command and exit
-/// status and has to reproduce the failure to learn why it happened. The tail
-/// was masked on the capture stream, ahead of the Tail window, so it is already
-/// safe to carry as `error.cause` in both human and JSON output.
-pub(crate) fn seed_build_failure(error: &(dyn std::error::Error + 'static)) -> Error {
-    Error::SeedBuild {
-        message: error.to_string(),
-        tail: crate::target_seed_build::prepare_failed_of(error)
-            .map(|prepare| prepare.tail.clone()),
+        crate::command_error(code, &self.local_message(), None, self.repair())
     }
 }
 
 #[derive(Serialize)]
 #[serde(untagged)]
 enum Data {
-    SeedBuilt(String),
-    SeedTarget(provenant_run::WorktreeSeed),
     Created(Box<worktrees::WorktreeInfo>),
     Listed(Vec<worktrees::WorktreeInfo>),
     Diagnosed(worktrees::WorktreeDiagnosis),
@@ -242,8 +207,6 @@ pub fn run(command: Worktree, globals: &Globals, workers: &dyn WorkerObserver) -
         return session_list(globals, workers);
     }
     let name = match &command {
-        Worktree::SeedBuild => "worktree seed-build",
-        Worktree::SeedTarget { .. } => "worktree seed-target",
         Worktree::Create { .. } => "worktree create",
         Worktree::List => "worktree list",
         Worktree::Doctor { .. } => "worktree doctor",
@@ -255,8 +218,6 @@ pub fn run(command: Worktree, globals: &Globals, workers: &dyn WorkerObserver) -
         Ok(data) => match serde_json::to_value(&data) {
             Ok(value) => {
                 let human = match &data {
-                    // Only the path on stdout, for `CARGO_TARGET_DIR=$(...)`.
-                    Data::SeedTarget(seed) => seed_target_human(seed),
                     Data::Listed(_) => {
                         let mut text = human(value);
                         text.push_str(&worktree_list_stranded_human(globals, workers));
@@ -292,86 +253,6 @@ pub fn run(command: Worktree, globals: &Globals, workers: &dyn WorkerObserver) -
             ),
             globals,
         ),
-    }
-}
-
-/// The target path alone; how it was seeded goes to stderr.
-#[allow(clippy::print_stderr)]
-fn seed_target_human(seed: &provenant_run::WorktreeSeed) -> String {
-    match &seed.warning {
-        Some(warning) => {
-            eprintln!("{warning}");
-            if let Some(repair) = seed.repair {
-                eprintln!("  to fix: {repair}");
-            }
-        }
-        None => eprintln!(
-            "Cargo target {} ({}{})",
-            seed.status,
-            seed.reason,
-            seed.generation
-                .as_deref()
-                .map(|generation| format!(" from seed generation {generation}"))
-                .unwrap_or_default()
-        ),
-    }
-    if let Some(source) = seed.cargo_home {
-        eprintln!("  Cargo home: {source}");
-    }
-    seed.target.display().to_string()
-}
-
-/// Render the doctor's seed section from already-resolved policy. The health
-/// module owns all store reads; this function only projects them and repeats
-/// the warnings on stderr so a human run sees them without `--json`.
-fn seed_diagnosis(
-    state: &Path,
-    project_key: &str,
-    stale_after: Duration,
-    stale_after_text: &str,
-    source: &str,
-    policy_warning: Option<String>,
-    now: provenant_core::WallTime,
-) -> worktrees::SeedDiagnosis {
-    use std::io::Write;
-    let health = provenant_run::target_seed_health::seed_health(
-        state,
-        project_key,
-        stale_after,
-        stale_after_text,
-        source,
-        now,
-    );
-    let newest_generation = health
-        .newest
-        .as_ref()
-        .map(|generation| generation.id.clone());
-    let newest_age = health
-        .age
-        .map(provenant_run::target_seed_health::format_duration);
-    let last_refresh_outcome = health
-        .last_refresh
-        .as_ref()
-        .map(|record| record.outcome.clone());
-    let last_refresh_reason = health
-        .last_refresh
-        .as_ref()
-        .and_then(|record| record.reason.clone());
-    let mut warnings = health.warnings();
-    if let Some(warning) = policy_warning {
-        warnings.insert(0, warning);
-    }
-    for warning in &warnings {
-        let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
-    }
-    worktrees::SeedDiagnosis {
-        newest_generation,
-        newest_age,
-        last_refresh_outcome,
-        last_refresh_reason,
-        stale_after: health.stale_after_text.clone(),
-        stale_after_source: source.to_owned(),
-        warnings,
     }
 }
 
@@ -448,11 +329,6 @@ fn execute(
         roots::Product::Required,
     )?;
     let (roots, home, project) = (&resolved.roots, &resolved.home, &resolved.project);
-    if matches!(command, Worktree::SeedBuild) {
-        let generation = crate::target_seed_build::build(roots.state.as_path(), project)
-            .map_err(|error| seed_build_failure(error.as_ref()))?;
-        return Ok(Data::SeedBuilt(generation));
-    }
     let facts = worktrees::RepoFacts::default();
     with_context_using_facts(
         roots,
@@ -463,42 +339,6 @@ fn execute(
         &facts,
         |context, cancel| {
             Ok(match command {
-                Worktree::SeedBuild => unreachable!(),
-                Worktree::SeedTarget { path } => {
-                    let path = if path.is_absolute() {
-                        path
-                    } else {
-                        context.repo.root_path().join(path)
-                    };
-                    let verified = provenant_confinement::verify_worktree(context.repo, &path)
-                        .map_err(WorktreeError::from)?;
-                    let cache = provenant_confinement::permissions::prepare_worktree_cargo_cache(
-                        home,
-                        &verified,
-                        &provenant_core::CredentialRoots::for_home(home),
-                    )?;
-                    let environment: Vec<_> = std::env::vars_os().collect();
-                    let mut seed = provenant_run::seed_worktree_target(
-                        roots.state.as_path(),
-                        home,
-                        verified.path(),
-                        verified.repo().common_git_dir(),
-                        &cache,
-                        &environment,
-                    );
-                    // GC dates a seeded target from this stamp, not from the
-                    // file times the clone carried over.
-                    if let Err(error) =
-                        provenant_run::build_dir_gc::mark_cache_targets_used(home, &cache)
-                    {
-                        let warning = format!("could not stamp the target's last use: {error}");
-                        seed.warning = Some(match seed.warning.take() {
-                            Some(existing) => format!("{existing}; {warning}"),
-                            None => warning,
-                        });
-                    }
-                    Data::SeedTarget(seed)
-                }
                 Worktree::Create { branch, base } => {
                     let info = worktrees::create(context, WorktreeCreate { branch, base }, cancel)?;
                     let verified = provenant_confinement::verify_worktree(context.repo, &info.path)
@@ -530,37 +370,7 @@ fn execute(
                             .and_then(|snapshot| snapshot.get(candidate).copied())
                             .unwrap_or(false)
                     };
-                    let mut diagnosis = worktrees::doctor(context, &path, &terminal, cancel)?;
-                    if let Ok(now) = SystemClock::new().wall_now() {
-                        let (stale_after, stale_after_text, source, policy_warning) =
-                            match provenant_config::PortTable::read_for(
-                                Some(project.as_path()),
-                                roots.state.as_path(),
-                            ) {
-                                Ok(table) => {
-                                    provenant_run::target_seed_health::stale_after_policy(&table)
-                                }
-                                Err(error) => (
-                                    provenant_run::target_seed_health::DEFAULT_STALE_AFTER,
-                                    "24h".to_owned(),
-                                    "default".to_owned(),
-                                    Some(format!(
-                                        "build.seed.stale_after could not be read ({error}); using 24h from default"
-                                    )),
-                                ),
-                            };
-                        let key =
-                            provenant_run::target_seed::project_key(context.repo.common_git_dir());
-                        diagnosis.seed = Some(seed_diagnosis(
-                            roots.state.as_path(),
-                            &key,
-                            stale_after,
-                            &stale_after_text,
-                            &source,
-                            policy_warning,
-                            now,
-                        ));
-                    }
+                    let diagnosis = worktrees::doctor(context, &path, &terminal, cancel)?;
                     Data::Diagnosed(diagnosis)
                 }
                 Worktree::SessionList => unreachable!(),
@@ -705,7 +515,6 @@ struct GcData {
     sweep_warning: Option<String>,
     sweep_stopped: bool,
     chair_logs: crate::chair_log_retention::Report,
-    target_seeds: provenant_run::target_seed_gc::Report,
     build_dirs: provenant_run::build_dir_gc::Report,
     graph_checkpoints_removed: usize,
     /// Import-extra pins removed (apply) or that would be removed (preview).
@@ -859,11 +668,6 @@ impl provenant_config::RetentionMeasurements for GcData {
             provenant_config::ByteObservation::Partial { bytes }
         } else {
             provenant_config::ByteObservation::Measured { bytes }
-        }
-    }
-    fn target_seeds(&self) -> provenant_config::ByteObservation {
-        provenant_config::ByteObservation::Measured {
-            bytes: self.target_seeds.bytes,
         }
     }
     fn build_directories(&self) -> provenant_config::ByteObservation {
@@ -1087,7 +891,6 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
                 skipped_transient,
                 provider_state: *provider_state,
                 chair_logs: Default::default(),
-                target_seeds: Default::default(),
                 build_dirs: Default::default(),
                 graph_checkpoints_removed: 0,
                 stale_graphs: Vec::new(),
@@ -1225,20 +1028,6 @@ fn gc_data_summary(data: &GcData) -> String {
         }
     ));
     let not_run = |class| data.classes_not_run.contains(&class);
-    if not_run(provenant_config::RetentionKind::TargetSeeds) {
-        human.push_str("target seed generations: not run in this pass\n");
-    } else {
-        human.push_str(&format!(
-            "{} target seed generation(s), {} apparent bytes {}\n",
-            data.target_seeds.removed.len(),
-            data.target_seeds.bytes,
-            if data.report.dry_run {
-                "reclaimable"
-            } else {
-                "removed"
-            }
-        ));
-    }
     let archives_count = if data.report.dry_run {
         data.discard_archives.would_remove.len()
     } else {
@@ -3870,36 +3659,6 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
 
         Ok(())
     }
-    fn target_seeds(&mut self) -> Result<(), Error> {
-        if self.stop_at_resume()? {
-            return Ok(());
-        }
-        let command = self.command;
-        let roots = self.roots;
-        let config = self.config;
-
-        let result = {
-            let deadline = self.deadline;
-            let lease = self.lease.as_ref();
-            let keep_going = || sweep_should_continue(deadline, lease);
-            let control =
-                self.sweep_control(self.resume_candidate(), self.resume_detail(), &keep_going);
-            provenant_run::target_seed_gc::collect(
-                roots.state.as_path(),
-                config.domains.fabric.lanes.cargo_seed.max_generations,
-                config.domains.fabric.lanes.cargo_seed.max_bytes,
-                command.dry_run,
-                &control,
-            )
-        }
-        .map_err(|error| Error::RetentionCollection(error.to_string()))?;
-        if let Some(candidate) = result.interrupted_at.clone() {
-            self.stop_at(None, Some(candidate), result.continuation.clone())?;
-        }
-        self.data.target_seeds = result;
-
-        Ok(())
-    }
     fn build_directories(&mut self) -> Result<(), Error> {
         if self.stop_at_resume()? {
             return Ok(());
@@ -3937,13 +3696,6 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                 .collect::<Vec<_>>();
             for lane in &live {
                 protection.worktrees.insert(lane.path.clone());
-            }
-            if !live.is_empty() {
-                protection
-                    .shared_projects
-                    .insert(provenant_run::target_seed::project_key(
-                        project.binding.common_dir(),
-                    ));
             }
         }
         protection.unobserved = !self.data.unobserved_projects.is_empty();
@@ -4559,70 +4311,6 @@ mod human_tests {
         );
     }
 
-    /// Spec: docs/specs/run.md#cargo-target-seed
-    #[test]
-    fn failing_prepare_marker_is_visible_in_human_and_json_renderings()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let marker = "Cannot find package 'zod'";
-        let tail = format!("npm ERR! {marker}\ninstall the missing dependency\n");
-        let prepare = crate::target_seed_build::PrepareFailed {
-            index: 0,
-            argv: vec!["node".into(), "scripts/generate.mjs".into()],
-            exit: Some(1),
-            tail: tail.clone(),
-        };
-        let boxed: Box<dyn std::error::Error> = Box::new(prepare);
-        let failure = seed_build_failure(boxed.as_ref());
-        assert!(
-            failure
-                .local_message()
-                .contains("build.prepare[0] command failed")
-        );
-        // Drive the production emission path with the one Error::command_error
-        // mapping; human refusals render on stderr, JSON on stdout.
-        let human_globals = provenant_cli::Globals {
-            json: false,
-            full: true,
-            ..Default::default()
-        };
-        let (mut human_out, mut human_err) = (Vec::new(), Vec::new());
-        crate::fail_with_command_error_with_writers(
-            "worktree seed-build",
-            failure.outcome(),
-            failure.command_error("WORKTREE"),
-            &human_globals,
-            &mut human_out,
-            &mut human_err,
-        );
-        let human = String::from_utf8(human_err)?;
-        assert!(human.contains("build.prepare[0] command failed"), "{human}");
-        assert!(human.contains(marker), "{human}");
-        assert!(human.contains("install the missing dependency"), "{human}");
-
-        let json_globals = provenant_cli::Globals {
-            json: true,
-            ..Default::default()
-        };
-        let (mut json_out, mut json_err) = (Vec::new(), Vec::new());
-        crate::fail_with_command_error_with_writers(
-            "worktree seed-build",
-            failure.outcome(),
-            failure.command_error("WORKTREE"),
-            &json_globals,
-            &mut json_out,
-            &mut json_err,
-        );
-        let value: serde_json::Value = serde_json::from_slice(&json_out)?;
-        assert_eq!(value["error"]["cause"].as_str(), Some(tail.as_str()));
-        assert!(
-            value["error"]["message"]
-                .as_str()
-                .is_some_and(|message| message.contains("build.prepare[0]")),
-            "{value}"
-        );
-        Ok(())
-    }
-
     #[allow(dead_code)] // The harness=false driver compiles only the helpers.
     fn info(path: &str) -> Result<worktrees::WorktreeInfo, Box<dyn std::error::Error>> {
         Ok(worktrees::WorktreeInfo {
@@ -4936,14 +4624,13 @@ mod gc_preview_tests {
             data.classes_not_run
                 .contains(&RetentionKind::BuildDirectories)
         );
-        assert!(data.classes_not_run.contains(&RetentionKind::TargetSeeds));
         assert!(
             !data
                 .classes_not_run
                 .contains(&RetentionKind::LaneCargoCaches)
         );
         let rows = gc_retention_bytes(&data);
-        for class in [RetentionKind::BuildDirectories, RetentionKind::TargetSeeds] {
+        for class in [RetentionKind::BuildDirectories] {
             assert_eq!(
                 rows.iter()
                     .find(|row| row.class == class)
@@ -4958,7 +4645,6 @@ mod gc_preview_tests {
             summary.contains("Cargo targets: not run in this pass\n"),
             "{summary}"
         );
-        assert!(summary.contains("target seed generations: not run in this pass\n"));
         assert!(!summary.contains("Cargo target(s)"), "{summary}");
         assert!(!summary.contains("budget setting ;"), "{summary}");
         let json = serde_json::to_value(gc_result_data(&data, false)).unwrap();
@@ -5011,7 +4697,6 @@ mod gc_preview_tests {
         use provenant_config::{ByteObservation, RETENTION_CLASSES, RetentionKind};
         let mut data = GcData::default();
         data.report.bytes_freed = 19;
-        data.target_seeds.bytes = 23;
         data.build_dirs.bytes = 7;
         data.build_dirs.cache_bytes = 29;
         data.provider_state.payload.reclaimed_bytes = 31;
@@ -5059,10 +4744,6 @@ mod gc_preview_tests {
             ByteObservation::Measured { bytes: 19 }
         );
         assert_eq!(
-            observation(RetentionKind::TargetSeeds),
-            ByteObservation::Measured { bytes: 23 }
-        );
-        assert_eq!(
             observation(RetentionKind::BuildDirectories),
             ByteObservation::Measured { bytes: 29 }
         );
@@ -5085,11 +4766,7 @@ mod gc_preview_tests {
 
         data.report.dry_run = true;
         let preview = gc_retention_bytes(&data);
-        for class in [
-            RetentionKind::TargetSeeds,
-            RetentionKind::BuildDirectories,
-            RetentionKind::GitWorktrees,
-        ] {
+        for class in [RetentionKind::BuildDirectories, RetentionKind::GitWorktrees] {
             assert_eq!(
                 preview
                     .iter()
@@ -5397,101 +5074,5 @@ mod gc_subpass_removal_tests {
         };
         append_gc_subpass_removals(&mut preview, vec![record]);
         assert!(preview.removals.is_empty());
-    }
-}
-
-#[cfg(test)]
-#[allow(unused_imports)] // The harness-free target includes this module without its tests.
-mod seed_diagnosis_tests {
-    #[allow(unused_imports)] // Also compiled by the harness=false worktree driver.
-    use super::*;
-    #[allow(unused_imports)] // Also compiled by the harness=false worktree driver.
-    use provenant_core::WallTime;
-    #[allow(unused_imports)] // Also compiled by the harness=false worktree driver.
-    use provenant_run::target_seed_health as health;
-    #[allow(unused_imports)] // Also compiled by the harness=false worktree driver.
-    use std::fs;
-
-    #[test]
-    fn doctor_reports_seed_age_and_last_outcome() {
-        let state = tempfile::tempdir().unwrap();
-        let key = "project-a";
-        let now = WallTime::from_micros(1_800_000_000_000_000).unwrap();
-        let built = WallTime::from_micros(now.as_micros() - 3 * 3_600 * 1_000_000).unwrap();
-        let generation = provenant_run::target_seed::store_path(state.path())
-            .join("generations")
-            .join("007");
-        fs::create_dir_all(&generation).unwrap();
-        let manifest = provenant_run::target_seed::Manifest {
-            project_key: key.into(),
-            rustc_vv: "rustc 1.100.0".into(),
-            host_triple: "aarch64-apple-darwin".into(),
-            commit: "abc".into(),
-            identity: None,
-            profile: "default".into(),
-            cargo_profile: provenant_config::CargoBuildProfile {
-                incremental: "1".into(),
-                debug: "1".into(),
-            },
-            features: Vec::new(),
-            flags: Vec::new(),
-            allocated_bytes: None,
-            contents: "deps".into(),
-        };
-        fs::write(
-            generation.join("manifest.json"),
-            serde_json::to_vec(&manifest).unwrap(),
-        )
-        .unwrap();
-        let marker = generation.join("complete");
-        fs::write(&marker, b"complete\n").unwrap();
-        let modified = std::time::UNIX_EPOCH
-            + Duration::from_micros(u64::try_from(built.as_micros()).unwrap());
-        fs::File::options()
-            .write(true)
-            .open(&marker)
-            .unwrap()
-            .set_modified(modified)
-            .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&generation, fs::Permissions::from_mode(0o500)).unwrap();
-        }
-        health::record_refresh(
-            state.path(),
-            key,
-            "failed",
-            Some("missing generated module"),
-            built,
-        )
-        .unwrap();
-
-        let diagnosis = seed_diagnosis(
-            state.path(),
-            key,
-            Duration::from_secs(24 * 3_600),
-            "24h",
-            "project",
-            None,
-            now,
-        );
-        assert_eq!(diagnosis.newest_generation.as_deref(), Some("007"));
-        assert_eq!(diagnosis.newest_age.as_deref(), Some("3h"));
-        assert_eq!(diagnosis.last_refresh_outcome.as_deref(), Some("failed"));
-        assert_eq!(
-            diagnosis.last_refresh_reason.as_deref(),
-            Some("missing generated module")
-        );
-        assert_eq!(diagnosis.stale_after, "24h");
-        assert_eq!(diagnosis.stale_after_source, "project");
-        assert!(
-            diagnosis
-                .warnings
-                .iter()
-                .any(|warning| warning.contains("failed")
-                    && warning.contains("build.seed.stale_after")
-                    && warning.contains("provenant worktree seed-build"))
-        );
     }
 }
