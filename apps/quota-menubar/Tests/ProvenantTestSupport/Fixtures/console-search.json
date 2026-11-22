@@ -1,49 +1,49 @@
 {
-  "schema_version": 1,
   "command": "console search",
-  "status": "ok",
   "data": {
-    "schema_version": 1,
-    "snapshot": "sha256:x",
-    "query": "fixture",
-    "part": "result",
+    "coverage": {
+      "scope": "local"
+    },
     "matches": [
       {
+        "artifact_bytes": 512,
         "lane_id": {
+          "attempt_id": "c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5",
           "host": null,
           "key": {
             "attempt": 1,
             "graph": "fixture",
             "node": "task",
-            "project": null
-          },
-          "attempt_id": "c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5"
+            "project": "01010101010101010101010101010101"
+          }
         },
         "part": "result",
-        "snippet": "…regenerated every fixture under tests/fixtures/console…",
-        "artifact_bytes": 512
+        "snippet": "…regenerated every fixture under tests/fixtures/console…"
       },
       {
+        "artifact_bytes": 900,
         "lane_id": {
+          "attempt_id": "c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6",
           "host": null,
           "key": {
             "attempt": 1,
             "graph": "fixture",
             "node": "task",
-            "project": null
-          },
-          "attempt_id": "c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6"
+            "project": "01010101010101010101010101010101"
+          }
         },
         "part": "result",
-        "snippet": "2 tests failed: fixture drift in board.json",
-        "artifact_bytes": 900
+        "snippet": "2 tests failed: fixture drift in board.json"
       }
     ],
     "next_cursor": null,
-    "truncated": false,
-    "coverage": {
-      "scope": "local"
-    }
+    "part": "result",
+    "query": "fixture",
+    "schema_version": 1,
+    "snapshot": "sha256:x",
+    "truncated": false
   },
-  "error": null
+  "error": null,
+  "schema_version": 1,
+  "status": "ok"
 }

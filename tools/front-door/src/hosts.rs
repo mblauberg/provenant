@@ -411,6 +411,11 @@ pub(crate) fn local(
     if let Some(warning) = legacy_agent_warning(home) {
         warnings.push(warning.into());
     }
+    if let Some(app) = crate::apps::status(home, env!("CARGO_PKG_VERSION"))
+        && app.warning.is_some()
+    {
+        warnings.push(crate::apps::advisory(&app));
+    }
     match provenant_config::legacy_harness_selectors(roots, home, &registered_accounts,
         // Host inspection has no project binding.
         std::sync::Arc::new(provenant_config::policy::read(roots.state.as_path(), "", &Default::default()))) {

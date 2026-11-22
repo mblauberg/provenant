@@ -9,17 +9,21 @@ public enum Stamp {
     }
 
     /// "2 minutes ago", "yesterday", "in 3 hours". An unreadable stamp comes back as it was, so nothing is hidden.
-    public static func relative(_ text: String?, now: Date, style: RelativeDateTimeFormatter.UnitsStyle = .full) -> String {
+    /// Pass `locale` to pin the wording, e.g. in tests that assert English strings.
+    public static func relative(_ text: String?, now: Date, style: RelativeDateTimeFormatter.UnitsStyle = .full,
+                                locale: Locale? = nil) -> String {
         guard let text else { return "" }
         guard let date = parse(text) else { return text }
-        return relative(date, now: now, style: style)
+        return relative(date, now: now, style: style, locale: locale)
     }
 
-    public static func relative(_ date: Date, now: Date, style: RelativeDateTimeFormatter.UnitsStyle = .full) -> String {
+    public static func relative(_ date: Date, now: Date, style: RelativeDateTimeFormatter.UnitsStyle = .full,
+                                locale: Locale? = nil) -> String {
         if abs(now.timeIntervalSince(date)) < 45 { return "just now" }
         let formatter = RelativeDateTimeFormatter()
         formatter.unitsStyle = style
         formatter.dateTimeStyle = .named
+        if let locale { formatter.locale = locale }
         return formatter.localizedString(for: date, relativeTo: now)
     }
 

@@ -1,81 +1,94 @@
 {
-  "schema_version": 1,
   "command": "quota show",
-  "status": "ok",
   "data": {
-    "schema_version": 1,
-    "generated_unix_seconds": 1793610000,
     "accounts": [
       {
         "account": {
-          "adapter": "claude",
           "account_key": "anese",
+          "adapter": "claude",
           "label": "Anese"
         },
+        "age_seconds": 120,
+        "display": {
+          "headline": "5h",
+          "hidden": false,
+          "id": "claude-anese"
+        },
+        "error": null,
+        "next_due_unix_seconds": null,
+        "refreshing": false,
         "snapshot": {
+          "account": {
+            "account_key": "anese",
+            "adapter": "claude",
+            "label": "Anese"
+          },
+          "authority_ref": null,
+          "observed_unix_seconds": 1793609880,
+          "revision": 1,
+          "schema_version": 1,
+          "source_ref": "fixture",
+          "status": "available",
           "windows": [
             {
               "pool": "five_hour",
-              "used_basis_points": 8400,
               "resets_unix_seconds": 1793620800,
+              "used_basis_points": 8400,
               "window_seconds": 18000
             },
             {
               "pool": "seven_day",
-              "used_basis_points": 5200,
               "resets_unix_seconds": 1793869200,
+              "used_basis_points": 5200,
               "window_seconds": 604800
             }
           ]
         },
-        "status": "available",
-        "age_seconds": 120,
-        "refreshing": false,
-        "error": null,
-        "display": {
-          "id": "claude-anese",
-          "headline": "5h",
-          "hidden": false
-        }
+        "status": "available"
       },
       {
         "account": {
-          "adapter": "codex",
           "account_key": "default",
+          "adapter": "codex",
           "label": "default"
         },
+        "age_seconds": 120,
+        "error": null,
+        "next_due_unix_seconds": null,
+        "refreshing": false,
         "snapshot": {
+          "account": {
+            "account_key": "default",
+            "adapter": "codex",
+            "label": "default"
+          },
+          "authority_ref": null,
+          "observed_unix_seconds": 1793609880,
+          "revision": 1,
+          "schema_version": 1,
+          "source_ref": "fixture",
+          "status": "credit_only",
           "windows": [
             {
               "pool": "primary",
-              "used_basis_points": 10000,
               "resets_unix_seconds": 1793782800,
+              "used_basis_points": 10000,
               "window_seconds": 604800
             }
           ]
         },
-        "status": "credit_only",
-        "age_seconds": 120,
-        "refreshing": false,
-        "error": null
+        "status": "credit_only"
       },
       {
         "account": {
-          "adapter": "agy",
           "account_key": "g1",
+          "adapter": "agy",
           "label": "Account 01"
         },
-        "snapshot": {
-          "windows": [
-            {
-              "pool": "gemini.weekly",
-              "used_basis_points": 2100,
-              "resets_unix_seconds": 1793642400,
-              "window_seconds": 604800
-            }
-          ]
-        },
-        "status": "available",
+        "age_seconds": 120,
+        "error": null,
+        "next_due_unix_seconds": null,
+        "refreshing": false,
         "refusals": [
           {
             "model": "agy/claude-sonnet",
@@ -83,21 +96,46 @@
             "resets_at": "2026-11-02T03:00:00Z"
           }
         ],
-        "age_seconds": 120,
-        "refreshing": false,
-        "error": null
+        "snapshot": {
+          "account": {
+            "account_key": "g1",
+            "adapter": "agy",
+            "label": "Account 01"
+          },
+          "authority_ref": null,
+          "observed_unix_seconds": 1793609880,
+          "revision": 1,
+          "schema_version": 1,
+          "source_ref": "fixture",
+          "status": "available",
+          "windows": [
+            {
+              "pool": "gemini.weekly",
+              "resets_unix_seconds": 1793642400,
+              "used_basis_points": 2100,
+              "window_seconds": 604800
+            }
+          ]
+        },
+        "status": "available"
       }
     ],
     "coverage": {
-      "total": 3,
-      "known": 3
+      "known": 3,
+      "total": 3
     },
-    "refreshing_ids": [],
-    "report_path": "/tmp/provenant/quota/report.json",
     "display": {
       "headline": "auto",
       "icon": "most_constrained"
-    }
+    },
+    "generated_unix_seconds": 1793610000,
+    "next_due_unix_seconds": 1793620800,
+    "refreshing_ids": [],
+    "report_path": "/fixture/quota/report.json",
+    "schema_version": 1,
+    "sources": []
   },
-  "error": null
+  "error": null,
+  "schema_version": 1,
+  "status": "ok"
 }

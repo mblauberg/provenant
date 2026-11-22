@@ -61,6 +61,18 @@ reconciliation compares only the matching host, project and chair; anything
 observed elsewhere or missed by an incomplete scan is unknown, not stale.
 - Why: partial observation must not represent a live request as resolved.
 
+A console catalogue row derives its display line from the current checkpoint
+without a model call: a structured `now` wins, then the first meaningful line of
+`## Intent`, `## Goal`, `## Done`, then the H1 title; a deeper subheading stays in
+its parent section. The line is published as `summary_line` (string or null) and
+its source as `summary_source` (`structured`, `intent`, `goal`, `done`, `title`,
+`unavailable`). The line is bounded. The full structured summary stays at
+`record.summary`, so the fields a consumer decodes change only by these additive
+names, with no data schema version bump (see [consumer contract](consumer-contract.md)).
+- Why: chairs save Markdown checkpoints, not structured summaries, so the
+  catalogue must remain useful without inventing content or spending a model call.
+- Owner: `crates/workflow/src/session/summary.rs`, `crates/cli/src/console.rs`
+
 ### Explicit chairs are discoverable
 
 Only an explicit checkpoint save registers a chair; lanes, autosave and reads

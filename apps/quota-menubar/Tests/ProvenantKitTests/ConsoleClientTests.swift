@@ -12,7 +12,7 @@ final class ConsoleClientTests: XCTestCase {
     func testOverviewKeepsNullCountsUnknownAndNamesCoverage() async throws {
         let (active, _) = client([(["console", "overview"], "console-overview-active", 0)])
         let lanes = try await active.overview().lanes
-        XCTAssertEqual(lanes.map(\.title), ["Implement console overview", "Review the change set", "Run the whole test suite"])
+        XCTAssertEqual(lanes.map(\.title), ["implement-console-overview", "review-the-change-set", "run-the-whole-test-suite"])
         XCTAssertEqual(lanes.last?.state, "failed")
         XCTAssertEqual(lanes.last?.attention, true)
         XCTAssertNotNil(lanes.last?.key)
@@ -25,7 +25,42 @@ final class ConsoleClientTests: XCTestCase {
         XCTAssertEqual(overview.counts.needsYou, 1)
         XCTAssertEqual(overview.needsYou.map(\.title), ["Review console"])
         XCTAssertEqual(overview.needsYou.first?.projectLabel, "project")
-        XCTAssertEqual(overview.coverage.warnings, ["Nested runs: unavailable"])
+        // Nested runs are out of scope by design: a quiet footnote, never a coverage warning.
+        XCTAssertEqual(overview.coverage.notices, [])
+        XCTAssertEqual(overview.coverage.nestedRunsFootnote, "Nested runs are not included here.")
+    }
+
+    func testPartialCoverageIsInformationAndUnavailableCoverageIsAWarning() throws {
+        func coverage(_ json: String) throws -> OverviewCoverage {
+            let decoder = JSONDecoder()
+            decoder.keyDecodingStrategy = .convertFromSnakeCase
+            return try decoder.decode(OverviewCoverage.self, from: Data(json.utf8))
+        }
+        let partial = try coverage(#"{"inbox":"complete","runs":"partial","nested_runs":"unavailable"}"#)
+        XCTAssertEqual(partial.notices, [.info("Some runs may be missing from these counts.")])
+        XCTAssertEqual(partial.nestedRunsFootnote, "Nested runs are not included here.")
+        let unavailable = try coverage(#"{"inbox":"complete","runs":"unavailable","nested_runs":"unavailable"}"#)
+        XCTAssertEqual(unavailable.notices, [.warning("Run state is unavailable here.")])
+        let complete = try coverage(#"{"inbox":"complete","runs":"complete","nested_runs":"unavailable"}"#)
+        XCTAssertTrue(complete.notices.isEmpty)
+    }
+
+    func testLaneTitleComesFromTheKeyNotTheTaskLabel() throws {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let json = #"""
+        {"coverage":{"inbox":"complete","runs":"complete","nested_runs":"unavailable","scope":"local"},
+         "counts":{},"needs_you":[],
+         "lanes":[{"project_id":"p","project_label":"P","attempt_id":"a1","task_label":"task",
+                   "key":{"attempt":1,"graph":"lane-default","node":"task","project":"p"},
+                   "state":"running","attention":false},
+                  {"project_id":"p","project_label":"P","attempt_id":"a2","task_label":"task",
+                   "key":{"attempt":2,"graph":"lane-retry","node":"task--writer","project":"p"},
+                   "state":"running","attention":false}],
+         "schema_version":2}
+        """#
+        let overview = try decoder.decode(Overview.self, from: Data(json.utf8))
+        XCTAssertEqual(overview.lanes.map(\.title), ["lane-default", "lane-retry · task--writer · attempt 2"])
     }
 
     func testBoardDecodesLanesAndPassesPagingArguments() async throws {
@@ -33,7 +68,7 @@ final class ConsoleClientTests: XCTestCase {
         let board = try await console.board(all: true, limit: 25, cursor: "C1")
         XCTAssertEqual(board.lanes.count, 1)
         let lane = try XCTUnwrap(board.lanes.first)
-        XCTAssertEqual(lane.title, "Board fixture")
+        XCTAssertEqual(lane.title, "board-fixture")
         XCTAssertEqual(lane.metadata.attempt.state, "queued")
         XCTAssertEqual(lane.laneId.key?.graph, "board-fixture")
         XCTAssertEqual(lane.metadata.attempt.requestedRoute?.summary, "fixture/model · high")
@@ -66,13 +101,41 @@ final class ConsoleClientTests: XCTestCase {
         XCTAssertEqual(projects.map(\.label), ["project"])
         XCTAssertEqual(projects.first?.commonDir?.path, "/fixture/project/.git")
         let sessions = try await console.sessions().sessions
-        XCTAssertEqual(sessions.first?.summary?.now, "Implementing console")
+        XCTAssertEqual(sessions.first?.summaryLine, "Implementing console")
+        XCTAssertEqual(sessions.first?.record.summary?.now, "Implementing console")
+        XCTAssertEqual(sessions.first?.summarySource, "structured")
         XCTAssertEqual(sessions.first?.id, "console-chair")
 
         let (bare, _) = client([(["console", "sessions"], "console-sessions-without-summary", 0)])
-        let none = try await bare.sessions().sessions
-        XCTAssertFalse(none.isEmpty)
-        XCTAssertTrue(none.allSatisfy { $0.summary == nil })
+        let derived = try await bare.sessions().sessions
+        XCTAssertFalse(derived.isEmpty)
+        XCTAssertTrue(derived.allSatisfy { $0.summaryLine == "Console checkpoint" })
+        XCTAssertNil(derived.first?.record.summary)
+        XCTAssertTrue(derived.allSatisfy { $0.summarySource == "title" })
+    }
+
+    /// Older CLIs send `summary` with no display-line fields, either as the structured object
+    /// or as the short-lived string. Ignoring those names must still produce a decodable page;
+    /// the title falls back to project and save time.
+    func testOlderSessionsPayloadsStillDecode() throws {
+        let json = #"""
+        {"schema_version":2,"sessions":[
+          {"role":"chair","consistency":"current","summary_status":"structured",
+           "summary":{"now":"Old CLI","next":null,"risk":null,"updated_at":"2026-11-02T01:58:26Z","needs_you":[]},
+           "record":{"host_session_id":"object-summary","project_id":null,"created_at":null,
+           "last_saved_at":null,"summary":{"now":"Old CLI","next":null,"risk":null,
+           "updated_at":"2026-11-02T01:58:26Z","needs_you":[],"revision":1,"schema_version":1}}},
+          {"role":"chair","consistency":"current","summary":"Old CLI display line","summary_status":"title",
+           "record":{"host_session_id":"string-summary","project_id":null,"created_at":null,
+           "last_saved_at":null,"summary":null}}],
+          "next_cursor":null,"truncated":false,"scan_truncated":false}
+        """#
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let page = try decoder.decode(Sessions.self, from: Data(json.utf8))
+        XCTAssertEqual(page.sessions.count, 2)
+        XCTAssertTrue(page.sessions.allSatisfy { $0.summaryLine == nil && $0.summarySource == nil })
+        XCTAssertEqual(page.sessions.first?.record.summary?.now, "Old CLI")
     }
 
     func testTreeSearchOutputAndQuotaDecode() async throws {
@@ -81,6 +144,8 @@ final class ConsoleClientTests: XCTestCase {
                                         (["quota", "history"], "quota-history", 0)])
         let tree = try await console.tree()
         XCTAssertEqual(tree.nodes.map(\.depth), [0, 1, 1, 2, 0, 0])
+        XCTAssertEqual(tree.nodes.first?.title, "implement-console-overview")
+        XCTAssertEqual(tree.nodes.last?.title, "run-the-whole-test-suite · task--writer · attempt 2")
         XCTAssertEqual(tree.nodes.first?.children?.map(\.kind), ["dispatch", "dispatch"])
         let search = try await console.search("fixture", part: "result")
         XCTAssertEqual(search.matches.count, 2)

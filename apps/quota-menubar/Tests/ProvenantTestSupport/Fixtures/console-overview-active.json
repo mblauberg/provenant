@@ -2,9 +2,9 @@
   "command": "console overview",
   "data": {
     "counts": {
+      "attention": 1,
       "needs_you": 3,
-      "running": 2,
-      "attention": 1
+      "running": 2
     },
     "coverage": {
       "inbox": "complete",
@@ -14,55 +14,64 @@
     },
     "lanes": [
       {
-        "project_id": "01010101010101010101010101010101",
-        "project_label": "provenant",
         "attempt_id": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
-        "task_label": "Implement console overview",
         "attention": false,
-        "state": "running",
+        "cause": null,
         "key": {
           "attempt": 1,
           "graph": "implement-console-overview",
           "node": "task",
           "project": "01010101010101010101010101010101"
         },
-        "reason": null,
-        "presence": null,
-        "queued_at": null
-      },
-      {
+        "presence": "unknown",
         "project_id": "01010101010101010101010101010101",
         "project_label": "provenant",
+        "queued_at": "2026-11-02T01:57:31.075623Z",
+        "reason": "the writer process state cannot be verified; run `provenant reconcile implement-console-overview/task#1` to inspect recovery before retrying",
+        "retry_of": null,
+        "state": "unknown",
+        "superseded_by": null,
+        "task_label": "Implement console overview"
+      },
+      {
         "attempt_id": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
-        "task_label": "Review the change set",
         "attention": false,
-        "state": "running",
+        "cause": null,
         "key": {
           "attempt": 1,
           "graph": "review-the-change-set",
           "node": "task",
           "project": "01010101010101010101010101010101"
         },
-        "reason": null,
-        "presence": null,
-        "queued_at": null
-      },
-      {
+        "presence": "unknown",
         "project_id": "01010101010101010101010101010101",
         "project_label": "provenant",
+        "queued_at": "2026-11-02T01:57:31.075623Z",
+        "reason": "the writer process state cannot be verified; run `provenant reconcile review-the-change-set/task#1` to inspect recovery before retrying",
+        "retry_of": null,
+        "state": "unknown",
+        "superseded_by": null,
+        "task_label": "Review the change set"
+      },
+      {
         "attempt_id": "c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6",
-        "task_label": "Run the whole test suite",
         "attention": true,
-        "state": "failed",
+        "cause": null,
         "key": {
           "attempt": 1,
           "graph": "run-the-whole-test-suite",
           "node": "task",
           "project": "01010101010101010101010101010101"
         },
-        "reason": null,
         "presence": null,
-        "queued_at": null
+        "project_id": "01010101010101010101010101010101",
+        "project_label": "provenant",
+        "queued_at": "2026-11-02T01:57:31.075623Z",
+        "reason": "the lane failed; inspect its result and local evidence",
+        "retry_of": null,
+        "state": "failed",
+        "superseded_by": null,
+        "task_label": "Run the whole test suite"
       }
     ],
     "needs_you": [
