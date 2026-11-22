@@ -852,15 +852,47 @@ pub(super) fn execute_in(
                 };
                 let request = resolve_request(query, context)?;
                 let rules = effective_exclusion_rules(&query.request.exclude, roots)?;
-                let mut route = provenant_routing::resolve_for_account_with_seed_excluding(
+                // Preview chooses with the same admission-aware resolver as
+                // dispatch. With no live probe it judges every cached account
+                // of each pool member, so a spent member cannot be shown as
+                // the route a dispatch would pick.
+                let facts = super::admission::AdmissionFacts {
+                    policy: &context.config.launch_policy,
+                    policies,
+                    now_unix_seconds: context.now.as_timestamp().as_second(),
+                    records,
+                    catalogue: context.catalogue,
+                };
+                let admitted = super::admission::resolve_admitted(
                     &request,
-                    context,
-                    None,
-                    "route-preview",
-                    0,
-                    &[],
-                    &rules,
+                    &facts,
+                    super::admission::AdmissionOptions {
+                        account: None,
+                        mode: super::admission::AdmitMode::CachedAccounts,
+                        initial_excluded: &[],
+                        narrow_accounts: false,
+                    },
+                    |narrowing| {
+                        provenant_routing::resolve_for_account_with_seed_excluding(
+                            &request,
+                            context,
+                            None,
+                            "route-preview",
+                            0,
+                            narrowing.excluded,
+                            &rules,
+                        )
+                        .map_err(super::EdgeError::from)
+                    },
                 )?;
+                let mut route = admitted
+                    .candidates
+                    .into_iter()
+                    .next()
+                    .or(admitted.last_refused)
+                    .ok_or(super::EdgeError::Admission(
+                        "no eligible pool member".into(),
+                    ))?;
                 if matches!(request.choice, RouteChoice::Model(_))
                     && let Some(scope) = context.config.provider_scopes.get(&route.adapter)
                     && let Some(warning) = scope.pin_warning(&route.adapter, &route.model)

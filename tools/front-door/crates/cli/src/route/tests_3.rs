@@ -41,10 +41,8 @@
     #[test]
     fn admission_redraw_keeps_a_stale_member_for_preparation() -> Result<(), Box<dyn Error>> {
         let first = resolved("codex", "paid", 17);
-        let mut stale = resolved("claude", "stale", 3);
-        stale.readiness = RouteReadiness::stale();
-        let mut replacement = super::admission_replacement(Ok(stale))?
-            .ok_or("stale member was treated as exhaustion")?;
+        let mut replacement = resolved("claude", "stale", 3);
+        replacement.readiness = RouteReadiness::stale();
         super::record_pool_redraw(&first, &mut replacement, "admission refused")?;
         assert!(matches!(replacement.readiness, RouteReadiness::Unavailable { reason: provenant_records::RouteExclusionReason::StaleAvailability, .. }));
         assert_eq!(replacement.pool_selection.unwrap().redraws[0].rejected_pick, "codex/paid");
@@ -854,6 +852,65 @@
             1,
             "{reason}"
         );
+        Ok(())
+    }
+
+    /// The route resolve preview must pick the same candidate dispatch picks
+    /// for one quota state: a spent pool member redraws in both, and the next
+    /// admitted member is what both show.
+    #[test]
+    fn route_resolve_preview_and_dispatch_pick_the_same_candidate()
+    -> Result<(), Box<dyn Error>> {
+        use provenant_os::clock::SystemClock;
+        use super::{config::execute_in, Data, Route, RouteResolve};
+        let fixture = pair_fixture(exhaust, |_| {})?;
+        let request = super::RouteRequest {
+            read_heavy: false,
+            model: None,
+            route: Some("principal".into()),
+            effort: None,
+            confidential: false,
+            fallback: vec![],
+            exclude: vec![],
+        }
+        .to_domain()?;
+        let dispatch = super::resolve_dispatch(
+            &request,
+            &fixture.roots,
+            None,
+            ("fixture", 0),
+            &fixture.availability,
+            &fixture.access,
+            "fixture",
+            None,
+            &[],
+        )?;
+        let query = RouteResolve {
+            writes: false,
+            account: None,
+            name: None,
+            request: super::RouteRequest {
+                read_heavy: false,
+                model: None,
+                route: Some("principal".into()),
+                effort: None,
+                confidential: false,
+                fallback: vec![],
+                exclude: vec![],
+            },
+        };
+        let Data::Resolved(preview) = execute_in(
+            &Route::Resolve(query),
+            &fixture.roots,
+            SystemClock::new().wall_now()?,
+            &fixture._temp.path().join("home"),
+            &fixture._temp.path().join("checkout"),
+        )? else {
+            return Err("expected a resolved route preview".into());
+        };
+        let dispatch_pick = format!("{}/{}", dispatch.adapter, dispatch.model);
+        let preview_pick = format!("{}/{}", preview.route.adapter, preview.route.model);
+        assert_eq!(dispatch_pick, preview_pick);
         Ok(())
     }
 
