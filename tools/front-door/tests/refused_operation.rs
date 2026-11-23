@@ -23,9 +23,9 @@ fn dirty_writer_refusal_is_durable_visible_and_notified_once() -> Result {
         fs::write(
             rig.state.join("config.toml"),
             format!(
-                "schema_version=1\n[gc]\nfree_floor='1B'\n{}",
+                "schema_version=1\n[gc]\nfree_floor='1B'\n[knobs]\n'lanes.writer_dirty'='refuse'\n{}",
                 if notice == "off" {
-                    "[knobs]\n'chair.refusal_notice'='off'\n"
+                    "'chair.refusal_notice'='off'\n"
                 } else {
                     ""
                 },
@@ -283,7 +283,7 @@ fn nested_deliver_dirty_writer_refuses_before_plan() -> Result {
     let (rig, writer) = dirty_checkout()?;
     fs::write(
         rig.state.join("config.toml"),
-        "schema_version=1\n[gc]\nfree_floor='1B'\n",
+        "schema_version=1\n[gc]\nfree_floor='1B'\n[knobs]\n'lanes.writer_dirty'='refuse'\n",
     )?;
     let worktree = format!("worktree={}", writer.display());
     let output = rig.command(&[
@@ -343,7 +343,7 @@ fn submitted_writer_cannot_forge_preflight_warning() -> Result {
 }
 
 #[test]
-fn wip_preflight_does_not_change_head_under_writer_custody() -> Result {
+fn held_writer_preflight_refuses_without_changing_head() -> Result {
     use provenant_core::{Clock, WaitBudget};
     use provenant_os::fs::Directory;
     let (rig, writer) = dirty_checkout()?;
@@ -389,21 +389,20 @@ fn wip_preflight_does_not_change_head_under_writer_custody() -> Result {
         )?,
     )?;
     let output = rig.command(&["run", "--file", graph.to_str().ok_or("graph")?, "--json"])?;
-    // A held lease no longer refuses the run: the worktree is shared. What
-    // must hold is that the preflight leaves another lane's edits alone and
-    // says why it skipped the dirty check. The typed warning travels in the
-    // JSON envelope, not on stderr.
-    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    // Boundary 2: a tree another lane holds is never adopted, even when
+    // wip_commit is requested explicitly. The refusal names the holding lane
+    // and leaves its edits and head untouched.
+    // Spec: docs/specs/next-batch.md#seam-5-the-worktree-and-landing-loop-a-chair-actually-uses
     let result: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_ne!(code(&output), 0, "{result}");
+    let text = result.to_string();
     assert!(
-        result["warnings"].as_array().is_some_and(|warnings| {
-            warnings.iter().any(|warning| {
-                warning["message"].as_str().is_some_and(|message| {
-                    message.contains("skipping the dirty-worktree preflight")
-                })
-            })
-        }),
-        "the envelope must explain the skipped preflight: {result}"
+        text.contains("in use by"),
+        "the refusal must name the holder: {result}"
+    );
+    assert!(
+        text.contains("another lane"),
+        "the refusal must name boundary 2: {result}"
     );
     assert_eq!(head()?, before);
     assert_eq!(fs::read_to_string(writer.join("tracked"))?, "draft");

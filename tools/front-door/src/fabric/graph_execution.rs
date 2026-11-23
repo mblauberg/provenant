@@ -39,7 +39,7 @@ use serde_json::Value;
 
 /// The effective writer-dirty setting and the layer that set it, read once at
 /// graph submission. An unreadable host config is advisory: warn and use the
-/// compiled default (`refuse`) rather than refusing to observe the setting.
+/// compiled default (`wip_commit`) rather than refusing to observe the setting.
 fn writer_dirty_setting(
     factory: &super::Factory,
 ) -> provenant_run::writer_dirty::ResolvedWriterDirty {
@@ -56,7 +56,7 @@ fn writer_dirty_setting(
             let safe = provenant_records::diagnostic::safe_text(&error.to_string());
             provenant_records::warning::warn(provenant_records::warning::Warning::new(
                 provenant_records::warning::CONFIG_UNAVAILABLE,
-                format!("writer dirty setting unavailable ({safe}); using default refuse"),
+                format!("writer dirty setting unavailable ({safe}); using default wip_commit"),
             ));
             (None, "default".to_owned())
         }
@@ -65,8 +65,10 @@ fn writer_dirty_setting(
 }
 
 /// Preflight every existing writer worktree at graph submission, before any
-/// plan node can spend tokens. WIP and continued-edit outcomes are recorded
-/// on the node so they reach the graph events.
+/// plan node can spend tokens. An unheld dirty tree is adopted as a WIP commit
+/// and warned with `WORKTREE_ADOPTED_DIRTY`; a tree another lane holds is
+/// refused (boundary 2). WIP and continued-edit outcomes are recorded on the
+/// node so they reach the graph events.
 fn preflight_writer_worktrees(
     factory: &super::Factory,
     facts: &provenant_confinement::worktrees::RepoFacts,
@@ -134,20 +136,15 @@ fn preflight_writer_worktrees(
         }
         canonical_paths.insert(canonical, path.to_owned());
         // Another lane's edits in a shared worktree are that lane's work, not
-        // leftovers: refusing or committing them would act on someone else's
-        // files. Skip the dirty check for this path and say why.
+        // leftovers: committing or moving them would act on someone else's
+        // files. Boundary 2 refuses the whole graph instead of adopting them.
         let attached = writer.attached_lanes().map_err(run_error)?;
         if !attached.is_empty() {
-            provenant_records::warning::warn(
-                provenant_records::warning::Warning::new(
-                    provenant_records::warning::WORKTREE_ADOPTED_DIRTY,
-                    format!(
-                        "worktree {path} is in use by {}; skipping the dirty-worktree preflight for it",
-                        attached.join(", ")
-                    ),
-                )
-                .subject(path.to_owned()),
-            );
+            refusals.push((
+                node.id.clone(),
+                path.to_owned(),
+                writer_dirty::held_refusal(&attached, path),
+            ));
             outcomes.insert(path.to_owned(), (None, None));
             continue;
         }
@@ -205,7 +202,24 @@ fn preflight_writer_worktrees(
         let head = writer
             .commit_wip(&git, &message, &paths)
             .map_err(run_error)?;
-        outcomes.insert(path, (Some(head.to_string()), None));
+        let commit = head.to_string();
+        // An unheld tree is adopted as WIP: say so, naming the commit and the
+        // setting (with its source) that chose this outcome.
+        let warning = format!(
+            "adopted unheld worktree {path} with uncommitted edits as WIP commit {commit}; set {} to refuse or continue_in_place to change this",
+            resolved.setting()
+        );
+        provenant_records::warning::warn(
+            provenant_records::warning::Warning::new(
+                provenant_records::warning::WORKTREE_ADOPTED_DIRTY,
+                warning,
+            )
+            .subject(path.clone()),
+        );
+        // The typed warning is the record; do not set `writer_dirty_warning`
+        // here, because that would mark the launch as tolerating further
+        // edits. The WIP commit leaves a clean tree for the normal launch path.
+        outcomes.insert(path, (Some(commit), None));
     }
     for (alias, original) in aliases {
         if let Some(outcome) = outcomes.get(&original).cloned() {

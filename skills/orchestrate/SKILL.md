@@ -33,6 +33,15 @@ each slice its own worktree and integrates slices as they settle (see the
 routing-and-templates runbook for `after` ordering and `max_parallel`). Name
 disjoint write scopes for parallel writers.
 
+`lanes.writer_dirty` decides how a launch treats uncommitted edits already in
+an existing worktree. By default (`wip_commit`) an unheld tree's edits are
+committed as a local WIP commit and reported with *WORKTREE_ADOPTED_DIRTY*
+naming the commit; `refuse` stops the submission before a node spends tokens,
+and `continue_in_place` keeps the edits and warns. A tree another lane holds is
+always refused (boundary 2), whatever the value. The effective value and its
+source are named in each refusal and warning; override per run with `--knob
+lanes.writer_dirty=refuse`.
+
 Inside a lane, `provenant run TEMPLATE` adds a child node to the calling graph
 and `--name` names it. Attached children are cancelled when their parent
 settles; `wait` collects them first, and `--detached` lets one outlive its
