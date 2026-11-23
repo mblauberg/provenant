@@ -135,7 +135,7 @@ fn compose_steer_restart_notice(
         ),
     };
     provenant_records::warning::Warning::new(
-        provenant_records::warning::ADVISORY_FINDING,
+        provenant_records::warning::STEER_INTERRUPTS_ATTEMPT,
         format!("steer will interrupt this attempt and launch a successor; fallback={name} (source: {source}); {behaviour}"),
     )
     .subject("steer restart")
@@ -1526,7 +1526,7 @@ mod tests {
             // Spec: docs/specs/cli.md#warnings-are-typed-values
             assert_eq!(
                 notice.code.as_ref(),
-                provenant_records::warning::ADVISORY_FINDING.as_str()
+                provenant_records::warning::STEER_INTERRUPTS_ATTEMPT.as_str()
             );
             assert!(
                 !notice.message.contains('\n'),
@@ -1550,7 +1550,7 @@ mod tests {
         assert_eq!(captured.len(), 1);
         assert_eq!(
             captured[0].code.as_ref(),
-            provenant_records::warning::ADVISORY_FINDING.as_str()
+            provenant_records::warning::STEER_INTERRUPTS_ATTEMPT.as_str()
         );
         assert_eq!(captured[0].message, warning.message);
     }
@@ -1561,7 +1561,7 @@ mod tests {
         use std::cell::RefCell;
         let events = RefCell::new(Vec::new());
         let notice = provenant_records::warning::Warning::new(
-            provenant_records::warning::ADVISORY_FINDING,
+            provenant_records::warning::STEER_INTERRUPTS_ATTEMPT,
             "steer will interrupt this attempt",
         );
         let result = announce_before(

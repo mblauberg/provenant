@@ -23,28 +23,29 @@ const ERROR_CAUSE_BYTES: usize = 4 * 1024;
 /// nested dispatch cannot replace the edge's seam.
 ///
 /// Spec: docs/specs/cli.md#warnings-are-typed-values
-struct CommandWarningSeam {
-    take: fn() -> Vec<Warning>,
-    remember: fn(&[Warning]),
-    give_back: fn(Vec<Warning>),
+/// The edge's standard output and error writers.
+pub type Streams = (Box<dyn Write>, Box<dyn Write>);
+
+pub struct CommandSeam {
+    /// Drain the warnings raised while the command ran.
+    pub take: fn() -> Vec<Warning>,
+    /// Record per-change keys once the envelope reached the reader.
+    pub remember: fn(&[Warning]),
+    /// Return undelivered warnings so the edge's guard shows them on exit.
+    pub give_back: fn(Vec<Warning>),
+    /// The edge's standard output and error, the only writers a command
+    /// surface renders to.
+    pub streams: fn() -> Streams,
 }
 
-static COMMAND_WARNING_SEAM: std::sync::OnceLock<CommandWarningSeam> = std::sync::OnceLock::new();
+static COMMAND_SEAM: std::sync::OnceLock<CommandSeam> = std::sync::OnceLock::new();
 
 /// Install the binary edge's drain for command warnings. Called once before any
 /// command is dispatched.
 ///
 /// Spec: docs/specs/cli.md#warnings-are-typed-values
-pub fn install_command_warning_seam(
-    take: fn() -> Vec<Warning>,
-    remember: fn(&[Warning]),
-    give_back: fn(Vec<Warning>),
-) {
-    let _ = COMMAND_WARNING_SEAM.set(CommandWarningSeam {
-        take,
-        remember,
-        give_back,
-    });
+pub fn install_command_seam(seam: CommandSeam) {
+    let _ = COMMAND_SEAM.set(seam);
 }
 
 /// The one emit path for a library command surface: move the command's held
@@ -60,20 +61,17 @@ pub fn render_command_result<T: Serialize>(
     publish: impl FnOnce(&CommandResult<T>) -> io::Result<provenant_records::AbsolutePath>,
     policy: OverflowPolicy,
 ) -> Result<Outcome, RenderError> {
-    let warnings = COMMAND_WARNING_SEAM
-        .get()
-        .map(|seam| (seam.take)())
-        .unwrap_or_default();
-    result.warnings = warnings;
-    let rendered = render_or_publish(
-        result,
-        mode,
-        &mut io::stdout().lock(),
-        &mut io::stderr().lock(),
-        publish,
-        policy,
-    );
-    if let Some(seam) = COMMAND_WARNING_SEAM.get() {
+    let seam = COMMAND_SEAM.get();
+    result.warnings = seam.map(|seam| (seam.take)()).unwrap_or_default();
+    // Without an installed edge (a library caller or a test) there is no
+    // reader, so the rendered bytes go nowhere rather than to process streams.
+    let (mut out, mut err): Streams = match seam {
+        Some(seam) => (seam.streams)(),
+        None => (Box::new(io::sink()), Box::new(io::sink())),
+    };
+    let rendered = render_or_publish(result, mode, &mut out, &mut err, publish, policy);
+    drop((out, err));
+    if let Some(seam) = seam {
         if rendered.is_ok() {
             (seam.remember)(&result.warnings);
         } else {

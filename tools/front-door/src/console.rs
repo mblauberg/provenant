@@ -629,8 +629,7 @@ fn capped_warning(command: &str, source: &str, repair: &str, omitted: usize) -> 
 /// Spec: docs/specs/cli.md#warnings-are-typed-values
 fn take_cap_warning(notice: Warning) -> Vec<Warning> {
     warning::warn(notice.clone());
-    let (take, _remember, _give_back) = crate::output::command_warning_seam();
-    let mut held = take();
+    let mut held = crate::output::take_warnings();
     if !held
         .iter()
         .any(|warning| warning.code.as_ref() == RESULT_TOO_LARGE.as_str())

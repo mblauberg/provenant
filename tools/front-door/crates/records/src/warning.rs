@@ -325,6 +325,8 @@ pub const REFUSAL_NOTICE_UNDELIVERED: WarningCode = WarningCode("REFUSAL_NOTICE_
 pub const PRIVATE_CACHE_RELEASE_FAILED: WarningCode = WarningCode("PRIVATE_CACHE_RELEASE_FAILED");
 /// A steer restart was staggered to avoid a collision.
 pub const STEER_RESTART_STAGGERED: WarningCode = WarningCode("STEER_RESTART_STAGGERED");
+/// A steer will interrupt the running attempt and launch a successor.
+pub const STEER_INTERRUPTS_ATTEMPT: WarningCode = WarningCode("STEER_INTERRUPTS_ATTEMPT");
 /// A repository worktree inventory could not be read.
 pub const WORKTREE_INVENTORY_UNAVAILABLE: WarningCode =
     WarningCode("WORKTREE_INVENTORY_UNAVAILABLE");
@@ -701,6 +703,7 @@ mod tests {
             super::REFUSAL_NOTICE_UNDELIVERED,
             super::PRIVATE_CACHE_RELEASE_FAILED,
             super::STEER_RESTART_STAGGERED,
+            super::STEER_INTERRUPTS_ATTEMPT,
             super::WORKTREE_INVENTORY_UNAVAILABLE,
             super::ACCOUNT_OFFER_MISMATCH,
             super::ACCOUNT_READINESS_STALE,

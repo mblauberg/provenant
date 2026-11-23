@@ -1415,10 +1415,7 @@ pub fn dispatch(
     // The CLI crate's command surfaces drain this sink through one shared seam
     // so warnings raised while a command runs reach its envelope, not stderr.
     // Spec: docs/specs/cli.md#warnings-are-typed-values
-    {
-        let (take, remember, give_back) = output::command_warning_seam();
-        provenant_cli::install_command_warning_seam(take, remember, give_back);
-    }
+    provenant_cli::install_command_seam(output::command_seam());
     // Warnings raised by Clap's value parsers happened before the sink existed;
     // replay them now so they reach the same envelope as every other warning.
     output::replay_warnings(parse_warnings);

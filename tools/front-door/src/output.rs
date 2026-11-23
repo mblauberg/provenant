@@ -234,7 +234,7 @@ fn remember_for_change(warning: &Warning) {
 /// moves them out of the sink. A per-change key is remembered once the reader
 /// has the envelope (`remember_warnings`) or once the guard shows the warning on
 /// a path that never emits — never before it has been delivered.
-fn take_warnings() -> Vec<Warning> {
+pub(crate) fn take_warnings() -> Vec<Warning> {
     let sink = COMMAND_SINK
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -254,8 +254,13 @@ fn remember_warnings(warnings: &[Warning]) {
 /// the sink; a library command surface only carries the warnings as data onto
 /// the envelope it renders, so none is printed bare under `--json`.
 /// Spec: docs/specs/cli.md#warnings-are-typed-values
-pub(crate) fn command_warning_seam() -> (fn() -> Vec<Warning>, fn(&[Warning]), fn(Vec<Warning>)) {
-    (take_warnings, remember_warnings, return_warnings)
+pub(crate) fn command_seam() -> provenant_cli::CommandSeam {
+    provenant_cli::CommandSeam {
+        take: take_warnings,
+        remember: remember_warnings,
+        give_back: return_warnings,
+        streams: || (Box::new(io::stdout().lock()), Box::new(io::stderr().lock())),
+    }
 }
 
 /// Return warnings to the sink when no envelope reached the reader, so the
