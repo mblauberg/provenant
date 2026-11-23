@@ -36,13 +36,17 @@ pub enum ForgeContextError {
         #[source]
         source: io::Error,
     },
-    #[error("no Git remote is declared and none can be inferred; remotes seen: {remotes:?}{close}")]
+    #[error(
+        "no Git remote is declared and none can be inferred; remotes seen: {remotes:?}{}",
+        close_hint(.close)
+    )]
     NoRemote {
         remotes: Vec<String>,
         close: Vec<String>,
     },
     #[error(
-        "the default branch for remote {remote:?} is unknown; branches seen: {branches:?}{close}"
+        "the default branch for remote {remote:?} is unknown; branches seen: {branches:?}{}",
+        close_hint(.close)
     )]
     NoDefaultBranch {
         remote: String,
@@ -283,7 +287,7 @@ fn port_source(ports: &PortTable, leaf: &str, key: &str) -> Source {
     let origin = match layer {
         Layer::Project => format!("{}#git.{key}", crate::ports::PORTS_CONFIG),
         Layer::Host | Layer::HostProject => format!("ports.json#git.{key}"),
-        other => format!("{other}#git.{key}"),
+        other => format!("{}#git.{key}", other.description()),
     };
     Source {
         layer,
