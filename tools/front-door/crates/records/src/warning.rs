@@ -314,6 +314,8 @@ pub const FORGE_DISCOVERY_UNAVAILABLE: WarningCode = WarningCode("FORGE_DISCOVER
 pub const FORGE_SOURCE_UNRESOLVED: WarningCode = WarningCode("FORGE_SOURCE_UNRESOLVED");
 /// A forge forwarder was unavailable; reconciliation continued.
 pub const FORWARDER_UNAVAILABLE: WarningCode = WarningCode("FORWARDER_UNAVAILABLE");
+/// Retry admission skipped ambient credentials outside the bounded exact matcher.
+pub const RETRY_CREDENTIALS_SKIPPED: WarningCode = WarningCode("RETRY_CREDENTIALS_SKIPPED");
 
 impl Warning {
     /// A warning with no subject, source or repair.
@@ -657,6 +659,7 @@ mod tests {
             super::FORGE_DISCOVERY_UNAVAILABLE,
             super::FORGE_SOURCE_UNRESOLVED,
             super::FORWARDER_UNAVAILABLE,
+            super::RETRY_CREDENTIALS_SKIPPED,
         ] {
             let name = code.as_str();
             assert!(

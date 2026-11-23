@@ -3358,7 +3358,7 @@ fn placeholder_and_oversized_ambient_credentials_allow_retry() -> Result {
     );
 
     // An out-of-bounds ambient credential variable (>16 KiB) is skipped only
-    // for retry admission, with a generic warning and no disclosed name/value.
+    // for retry admission, with one typed warning and no disclosed name/value.
     let oversized = "x".repeat(16 * 1024 + 1);
     let output = rig
         .command()
@@ -3370,25 +3370,36 @@ fn placeholder_and_oversized_ambient_credentials_allow_retry() -> Result {
         output.status.success(),
         "out-of-bounds ambient credentials must not refuse: {reply}"
     );
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("retry admission skipped out-of-bounds ambient credentials"),
-        "expected the retry admission warning in stderr: {stderr}"
+        stderr.is_empty(),
+        "--json carries warnings in the envelope, never on stderr: {stderr}"
     );
+    let warnings = reply["warnings"].as_array().ok_or("warning envelope")?;
+    let skipped: Vec<&Value> = warnings
+        .iter()
+        .filter(|warning| warning["code"] == "RETRY_CREDENTIALS_SKIPPED")
+        .collect();
     assert_eq!(
-        stderr
-            .matches("retry admission skipped out-of-bounds ambient credentials")
-            .count(),
+        skipped.len(),
         1,
-        "warning should be emitted once per process: {stderr}"
+        "one typed retry-admission warning per invocation: {reply}"
     );
     assert!(
-        !stderr.contains("FIXTURE_API_KEY"),
-        "warning must omit variable names: {stderr}"
+        skipped[0]["message"]
+            .as_str()
+            .is_some_and(|message| message
+                .contains("retry admission skipped out-of-bounds ambient credentials")),
+        "{reply}"
     );
     assert!(
-        !stderr.contains(&oversized),
-        "warning must omit credential values: {stderr}"
+        !reply["warnings"].to_string().contains("FIXTURE_API_KEY"),
+        "warning must omit variable names: {reply}"
+    );
+    assert!(
+        !reply["warnings"].to_string().contains(&oversized),
+        "warning must omit credential values: {reply}"
     );
     Ok(())
 }
