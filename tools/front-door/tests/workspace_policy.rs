@@ -1868,7 +1868,8 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         ("crates/workflow/src/session.rs", 3252),
         ("src/ci.rs", 2243),
         ("src/fabric/graph_execution.rs", 2263),
-        ("src/fabric/interface.rs", 8304),
+        // #3870 adds the role-resolved writer tests inline; #3866 moves `mod tests` out.
+        ("src/fabric/interface.rs", 8552),
         ("src/fabric/owner.rs", 5533),
         ("src/fabric/peer.rs", 2594),
         ("src/fabric/run_owner.rs", 2748),
