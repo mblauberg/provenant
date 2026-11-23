@@ -30,6 +30,18 @@ use std::fs;
 
 use std::os::unix::fs::PermissionsExt;
 
+/// Give a bare fixture the one forge context a retirement needs: a sole remote
+/// named by its HEAD symref, so fail-closed protection does not retain every
+/// candidate. Tests of unresolved contexts deliberately omit this call.
+pub(super) fn declare_forge_default(fixture: &Fixture) -> Result<(), Box<dyn Error>> {
+    fixture.run(&[
+        "symbolic-ref",
+        "refs/remotes/origin/HEAD",
+        "refs/heads/main",
+    ])?;
+    Ok(())
+}
+
 pub(super) fn worktree_subject_matches_path(
     subject: &provenant_records::custody::Subject,
     path: &Path,
@@ -857,6 +869,7 @@ pub(super) fn gc_foreign_without_state_holds_writer_through_final_recheck_and_re
     ] {
         let refuse = !matches!(scenario, "remove" | "detached-unique");
         let fixture = Fixture::new()?;
+        declare_forge_default(&fixture)?;
         let test_context = TestContext::new(&fixture)?;
         let mut context = test_context.context();
         let clock = provenant_core::TestClock::new(
@@ -972,6 +985,7 @@ pub(super) fn gc_foreign_without_state_holds_writer_through_final_recheck_and_re
 
 fn merge_proof_scenario() -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;
+    declare_forge_default(&fixture)?;
     let test_context = TestContext::new(&fixture)?;
     let context = test_context.context();
     let new_lane = |name: &str| -> Result<WorktreeInfo, Box<dyn Error>> {

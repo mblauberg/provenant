@@ -267,6 +267,17 @@ pub(super) fn gc_collects_bound_bare_worktrees() -> Result {
             ],
         )
         .map_err(|error| format!("add bare checkout: {error}"))?;
+        // Name a default branch so GC does not fail closed on this fixture.
+        git(
+            &rig,
+            &[
+                "--git-dir",
+                bare.to_str().ok_or("path")?,
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/heads/main",
+            ],
+        )?;
         rig.project = linked;
         let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
         inputs.state_dir = Some(rig.state.clone());
@@ -1697,6 +1708,15 @@ pub(super) fn completion_and_sweep_retain_unlanded_or_dirty_lanes() -> Result {
     for dirty in [false, true] {
         let fixture = crate::fabric::peer_tests::SettlementFixture::resumed_with_lane_commit()?;
         let rig = &fixture.rig;
+        // One resolved forge context lets the later sweep collect the clean lane.
+        git(
+            rig,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/heads/main",
+            ],
+        )?;
         if dirty {
             let merged = merged_upstream(rig, &fixture.worktree)?;
             publish_upstream(rig, &merged)?;

@@ -620,7 +620,7 @@ fn output_pruning_runs_when_the_forge_context_is_unresolved() -> Result<(), Box<
         integration_patterns: &[],
         excluded_paths: &[],
         upstream: None,
-        terminal: &|_| false,
+        terminal: &|_| true,
         no_live_lanes: &|_| true,
         regenerable: &["target".into()],
         keep: &[],
@@ -1294,6 +1294,7 @@ fn gc_output_pruning_holds_writer_custody() -> Result<(), Box<dyn Error>> {
 fn landing_output_pruning_keeps_the_writer_lease_through_retirement() -> Result<(), Box<dyn Error>>
 {
     let fixture = Fixture::new()?;
+    declare_forge_default(&fixture)?;
     fs::write(fixture.root.join(".gitignore"), "target/\n")?;
     fixture.run(&["add", ".gitignore"])?;
     fixture.run(&["commit", "-m", "ignore output"])?;

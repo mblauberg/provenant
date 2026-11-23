@@ -1171,6 +1171,7 @@ fn retention_proofs_distinguish_preservation_completion_and_new_work() -> Result
 #[test]
 fn first_foreign_pass_previews_then_subsumed_detached_tree_can_go() -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;
+    declare_forge_default(&fixture)?;
     fs::create_dir_all(fixture.root.join("nested/deeper"))?;
     fs::write(
         fixture.root.join("nested/deeper/payload"),
@@ -1257,6 +1258,7 @@ fn retirement_preserves_work_and_unknown_feeds_keep_the_candidate() -> Result<()
             Feed::MovedAfterClose,
         ] {
             let fixture = Fixture::new()?;
+            declare_forge_default(&fixture)?;
             let host = TestContext::new(&fixture)?;
             let mut context = host.context();
             let created = if class == Class::Managed {
@@ -1415,6 +1417,7 @@ fn submodule_cleanup_requires_clean_retained_heads_and_surviving_git_stores()
         "store_inside_tree",
     ] {
         let fixture = Fixture::new()?;
+        declare_forge_default(&fixture)?;
         let owner = TestContext::new(&fixture)?;
         let context = owner.context();
         // An owned lane, so only the submodule proof decides the outcome.

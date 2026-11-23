@@ -860,6 +860,9 @@ pub(crate) fn sweep_remote(
     retirement: &dyn RetirementPort,
     cancel: &CancelToken,
 ) -> Vec<ArtefactOutcome> {
+    // Supply the same scope the production sweep passes, so `None` keeps its
+    // one meaning: the worktree inventory could not be read.
+    let scope = worktrees::local_retirement_scope(context, target, cancel).ok();
     let outcomes = remote_outcomes(
         context,
         ledger,
@@ -869,7 +872,7 @@ pub(crate) fn sweep_remote(
         sweep,
         &PortLookup(retirement),
         Some(retirement),
-        None,
+        scope.as_ref(),
         None,
         cancel,
     );
@@ -1909,6 +1912,12 @@ mod tests {
                 &project,
                 &["push", "bound", "main", "lane/old", "lane/changed"],
             )?;
+            // One resolved forge context needs a default branch; name it through
+            // the remote's HEAD symref so retirement is not fail-closed in tests.
+            run_git(
+                &project,
+                &["symbolic-ref", "refs/remotes/bound/HEAD", "refs/heads/main"],
+            )?;
             let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
             inputs.state_dir = Some(state);
             let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
@@ -2393,6 +2402,7 @@ mod tests {
         let mut ports = provenant_config::PortTable::builtin();
         ports.git.protected = vec!["refs/heads/protected".to_owned()];
         ports.git.source = provenant_records::Layer::Project;
+        std::fs::create_dir_all(fixture.project.join(".provenant"))?;
         std::fs::write(
             fixture.project.join(provenant_config::PORTS_CONFIG),
             serde_json::to_vec(&ports)?,
