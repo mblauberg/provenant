@@ -24,6 +24,7 @@ mod peer;
 pub(crate) mod run_owner;
 pub(crate) mod settlement;
 mod steer;
+mod writer_base;
 
 pub(crate) use git_facts::*;
 pub(crate) use owner::*;

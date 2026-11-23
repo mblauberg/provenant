@@ -1,4 +1,8 @@
 //! Document-based graph service shared by the CLI and the lane relay.
+use super::writer_base::{
+    DEFAULT_WRITER_BASE, bind_default_read_only_source, bind_writer_base_source,
+    resolve_writer_base,
+};
 use super::*;
 use provenant_fabric_runtime::graph::{
     FileJournal, GraphDocument, GraphJournal, GraphStatus, Layer, Template, TemplateLibrary,
@@ -610,54 +614,6 @@ fn bind_submission_subject(node: &mut provenant_fabric_runtime::graph::GraphNode
     }
 }
 
-/// Pin a plain read-only node to the resolved upstream head. Explicit source
-/// bindings, continuations and writer nodes keep their own subject; nested
-/// templates are visited so every reader in a composite sees the same tree.
-fn bind_default_read_only_source(
-    node: &mut provenant_fabric_runtime::graph::GraphNode,
-    commit: &str,
-) {
-    if node.access == provenant_fabric_runtime::graph::AccessMode::ReadOnly
-        && node.source.is_none()
-        && node.continues.is_none()
-    {
-        node.source = Some(provenant_fabric_runtime::graph::SourceBinding::Commit {
-            commit: commit.into(),
-        });
-    }
-    if let Some(composite) = &mut node.composite {
-        for child in &mut composite.nodes {
-            bind_default_read_only_source(child, commit);
-        }
-    }
-    if let Some(loop_spec) = &mut node.loop_body {
-        for child in &mut loop_spec.body {
-            bind_default_read_only_source(child, commit);
-        }
-    }
-}
-
-/// Bind the plan node of `implement --plan` to the commit named by the
-/// launch's `--base`, resolved through the same read-source resolver. The plan
-/// then reads the base it will implement instead of the caller's checkout.
-fn bind_plan_base_source(node: &mut provenant_fabric_runtime::graph::GraphNode, commit: &str) {
-    if node.template.as_deref() == Some("plan") || node.id == "plan" {
-        node.source = Some(provenant_fabric_runtime::graph::SourceBinding::Commit {
-            commit: commit.into(),
-        });
-    }
-    if let Some(composite) = &mut node.composite {
-        for child in &mut composite.nodes {
-            bind_plan_base_source(child, commit);
-        }
-    }
-    if let Some(loop_spec) = &mut node.loop_body {
-        for child in &mut loop_spec.body {
-            bind_plan_base_source(child, commit);
-        }
-    }
-}
-
 fn bind_review_base(node: &mut provenant_fabric_runtime::graph::GraphNode, base: &str) {
     node.review_base = Some(base.into());
     if let Some(composite) = &mut node.composite {
@@ -765,9 +721,6 @@ fn bind_review_warning(node: &mut provenant_fabric_runtime::graph::GraphNode, wa
 
 /// Launch controls that bind a writer; a composite template can take none of them.
 const LAUNCH_CONTROLS: [&str; 5] = ["access", "worktree", "branch", "base", "write_scope"];
-
-/// The base a `--branch` writer starts from when it names no `--base`.
-const DEFAULT_WRITER_BASE: &str = "refs/remotes/origin/HEAD";
 
 /// The `--source` flag is the launch layer of `lanes.read_source`. A host or
 /// project knob supplies the value and the fetch-first flag; `auto` (including
@@ -2157,11 +2110,40 @@ impl Factory {
             Some(launch) => launch.writes_worktree(&library, &resolver)?,
             None => false,
         };
+        // Resolve the one base a writer starts from before sealing its identity.
+        // Its read-only members read that base; only a writer that names no base
+        // falls back to the caller checkout, and only then does a read-only
+        // source pin still apply to it.
+        let writer_base = if writer_launch {
+            Some(resolve_writer_base(
+                input,
+                &self.context.project_root,
+                &self.cwd,
+                self.context.roots.state.as_path(),
+                &read_source,
+                git.as_deref(),
+            ))
+        } else {
+            None
+        };
+        if let Some(warning) = writer_base
+            .as_ref()
+            .and_then(|base| base.fallback_warning(&self.cwd))
+        {
+            input_warnings.push(warning);
+        }
         // A plain read-only task from a checkout behind its fetched upstream
         // reviews that upstream head, not its stale local tree. Explicit source
-        // choices, authored documents, writer launches and review ranges keep
-        // resolving their own subject. Absent Git evidence stays advisory.
-        let default_source = if !writer_launch && review_subject.is_none() && raw.is_none() {
+        // choices, authored documents, review ranges and a writer with a known
+        // base keep resolving their own subject. A writer with no base still
+        // pins its read-only members, but never its own identity. Absent Git
+        // evidence stays advisory.
+        let default_source = if review_subject.is_none()
+            && raw.is_none()
+            && writer_base
+                .as_ref()
+                .is_none_or(|base| base.commit.is_none())
+        {
             provenant_cli::run::read_only_source_ref(
                 self.context.roots.state.as_path(),
                 &self.cwd,
@@ -2170,44 +2152,29 @@ impl Factory {
         } else {
             None
         };
-        // The plan node of `implement --plan` reads the base the launch names,
-        // resolved through the same resolver as any other explicit ref. A
-        // writer that names only its branch starts from the remote default.
-        let base_ref = input.get("base").and_then(Value::as_str).or_else(|| {
-            (writer_launch && input.get("branch").is_some_and(|value| !value.is_null()))
-                .then_some(DEFAULT_WRITER_BASE)
-        });
-        let base_source = if review_subject.is_none() {
-            base_ref.and_then(|base| {
-                let choice = provenant_cli::run::ReadSourceChoice {
-                    value: base.to_owned(),
-                    fetch_first: read_source.fetch_first,
-                    layer: provenant_records::Layer::Launch,
-                    origin: Some("--base".into()),
-                };
-                provenant_cli::run::read_only_source_ref(
-                    self.context.roots.state.as_path(),
-                    &self.cwd,
-                    &choice,
-                )
-            })
-        } else {
-            None
-        };
         // The commit the launch starts from belongs to its identity: a writer
         // starts from its base, a reader from its resolved source. A checkout
         // with no commit yet simply has none.
-        let source_commit = resolved_head.clone().or_else(|| match &default_source {
-            Some(selected) => Some(selected.commit.to_string()),
-            None => base_source
-                .as_ref()
-                .filter(|_| writer_launch)
-                .map(|selected| selected.commit.to_string())
-                .or_else(|| {
-                    git.as_deref().and_then(|git| {
-                        provenant_run::resolve_git_base(git, &self.cwd, "HEAD").ok()
+        let source_commit = resolved_head.clone().or_else(|| {
+            if writer_launch {
+                writer_base
+                    .as_ref()
+                    .and_then(|base| base.commit.clone())
+                    .or_else(|| {
+                        git.as_deref().and_then(|git| {
+                            provenant_run::resolve_git_base(git, &self.cwd, "HEAD").ok()
+                        })
                     })
-                }),
+            } else {
+                default_source
+                    .as_ref()
+                    .map(|selected| selected.commit.to_string())
+                    .or_else(|| {
+                        git.as_deref().and_then(|git| {
+                            provenant_run::resolve_git_base(git, &self.cwd, "HEAD").ok()
+                        })
+                    })
+            }
         });
         if resolved_head.is_none() && raw.and_then(|document| document.get("graph_id")).is_none() {
             resolved_head = source_commit.clone();
@@ -2400,19 +2367,19 @@ impl Factory {
                 provenant_fabric_runtime::graph::minimum_schema_version(&document),
             ));
         }
-        if let Some(selected) = &default_source {
-            let commit = selected.commit.to_string();
+        let writer_commit = writer_base.as_ref().and_then(|base| base.commit.as_deref());
+        if let Some(commit) = writer_commit {
+            let commit = commit.to_owned();
             for node in &mut document.nodes {
-                bind_default_read_only_source(node, &commit);
+                bind_writer_base_source(node, &commit);
             }
             document.schema_version = document.schema_version.max(u64::from(
                 provenant_fabric_runtime::graph::minimum_schema_version(&document),
             ));
-        }
-        if let Some(selected) = &base_source {
+        } else if let Some(selected) = &default_source {
             let commit = selected.commit.to_string();
             for node in &mut document.nodes {
-                bind_plan_base_source(node, &commit);
+                bind_default_read_only_source(node, &commit);
             }
             document.schema_version = document.schema_version.max(u64::from(
                 provenant_fabric_runtime::graph::minimum_schema_version(&document),
@@ -2492,7 +2459,7 @@ impl Factory {
         if let Some(warning) = review_subject.and_then(|subject| subject.warning) {
             input_warnings.push(warning);
         }
-        if let Some(selected) = &default_source {
+        if !writer_launch && let Some(selected) = &default_source {
             let warning =
                 provenant_cli::run::read_only_source_warning(&self.cwd, selected, &read_source);
             warn_operator(&warning);
@@ -3974,6 +3941,10 @@ fn add(row: &mut Value, key: &str, value: u64) {
 }
 
 #[cfg(test)]
+#[path = "interface_writer_source_tests.rs"]
+mod writer_source_tests;
+
+#[cfg(test)]
 #[allow(
     dead_code,
     unused_imports,
@@ -4256,7 +4227,7 @@ mod tests {
         Ok(())
     }
 
-    fn factory(rig: &TestRig) -> Result<Factory> {
+    pub(super) fn factory(rig: &TestRig) -> Result<Factory> {
         let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
         // Library unit tests inherit the lane environment, where Context::open
         // requires a project binding instead of creating one as a CLI would.
@@ -6591,25 +6562,31 @@ mod tests {
     }
 
     /// A writer hidden under a composite still makes the launch a writer; a
-    /// writer whose condition does not hold leaves it a reader.
+    /// writer whose condition does not hold leaves it a reader. Fixtures come
+    /// from the bundled templates' own lowering, so the roles under test are
+    /// the ones the compiler produces.
     #[test]
     fn writer_roles_follow_the_lowered_graph_and_its_conditions() {
-        let writer = json!({"id":"write","access":"worktree_write"});
-        assert!(lowered_writes_worktree(&writer));
-        let skipped = json!({
-            "id":"write","access":"worktree_write",
-            "when":[{"name":"smoke-write","expected":"true","actual":"false"}]
-        });
-        assert!(!lowered_writes_worktree(&skipped));
-        assert!(lowered_writes_worktree(&json!({
-            "id":"task","access":"read_only",
-            "composite":{"nodes":[writer]}
-        })));
-        assert!(!lowered_writes_worktree(&json!({
-            "id":"task","access":"read_only",
-            "when":[{"name":"stage","expected":"on","actual":"off"}],
-            "composite":{"nodes":[writer]}
-        })));
+        let library = TemplateLibrary::bundled();
+        let resolvers = BTreeMap::new();
+        let lower = |node: Value| -> Value {
+            provenant_fabric_runtime::graph::template::Compiler {
+                library: &library,
+                resolvers: &resolvers,
+            }
+            .lower(&node)
+            .expect("bundled template lowers")
+        };
+        // A bundled writer template lowers to a worktree writer.
+        assert!(lowered_writes_worktree(&lower(json!({"use":"implement"}))));
+        // The bundled smoke template carries a writer under `smoke-write`,
+        // which defaults to false: the same launch stays read-only until the
+        // condition holds.
+        assert!(!lowered_writes_worktree(&lower(json!({"use":"smoke"}))));
+        assert!(lowered_writes_worktree(&lower(json!({
+            "use":"smoke",
+            "with":{"smoke-write":true, "worktree":"/tmp/writer"}
+        }))));
     }
 
     /// Spec: docs/specs/run-launch.md#inputs-and-resources
