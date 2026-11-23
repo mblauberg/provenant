@@ -3328,6 +3328,8 @@ mod tests {
 
     #[test]
     fn failed_smoke_node_is_reported_by_verify() -> Result<(), Box<dyn std::error::Error>> {
+        // Spec: docs/specs/fabric.md#bundled-template-declarations — a failed
+        // smoke node is reported by its own node id, including retry and steer.
         use super::*;
         use std::os::unix::fs::PermissionsExt;
 
@@ -3340,7 +3342,7 @@ mod tests {
         let launcher = tmp.path().join("provenant");
         std::fs::write(
             &launcher,
-            "#!/bin/sh\ncase \" $* \" in *\" run smoke \"*) printf '%s\\n' '{\"node\":\"smoke/write\",\"state\":\"failed\"}'; exit 1;; esac\nexit 0\n",
+            "#!/bin/sh\ncase \" $* \" in *\" run smoke \"*) printf '%s\\n' '{\"node\":\"smoke/write\",\"state\":\"failed\"}' '{\"node\":\"smoke/retry\",\"state\":\"failed\"}' '{\"node\":\"smoke/steer\",\"state\":\"failed\"}'; exit 1;; esac\nexit 0\n",
         )?;
         std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755))?;
         let runner = UpgradeRunner {
@@ -3372,12 +3374,16 @@ mod tests {
             }
         };
         assert!(error.contains("\"node\":\"smoke/write\""));
+        assert!(error.contains("\"node\":\"smoke/retry\""), "{error}");
+        assert!(error.contains("\"node\":\"smoke/steer\""), "{error}");
         assert!(error.contains("failed"));
         Ok(())
     }
 
     #[test]
     fn smoke_dry_run_previews_nodes_without_launching() -> Result<(), Box<dyn std::error::Error>> {
+        // Spec: docs/specs/fabric.md#bundled-template-declarations — the dry run
+        // lists every node the bundled smoke template declares, by node id.
         use super::*;
         use std::os::unix::fs::PermissionsExt;
 
@@ -3392,7 +3398,7 @@ mod tests {
         std::fs::write(
             &launcher,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n[ \"$1\" = --project ] || exit 78\n[ \"$2\" != \"$PWD\" ] || exit 79\n[ -f \"$2/fixture.txt\" ] || exit 80\ngit -C \"$2\" rev-parse --verify HEAD >/dev/null || exit 81\ncase \"$*\" in *'run smoke --explain'*) printf '%s\\n' '{{\"nodes\":[{{\"id\":\"read\"}},{{\"id\":\"review\"}},{{\"id\":\"write\"}}]}}';; *) exit 77;; esac\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n[ \"$1\" = --project ] || exit 78\n[ \"$2\" != \"$PWD\" ] || exit 79\n[ -f \"$2/fixture.txt\" ] || exit 80\ngit -C \"$2\" rev-parse --verify HEAD >/dev/null || exit 81\ncase \"$*\" in *'run smoke --explain'*) printf '%s\\n' '{{\"nodes\":[{{\"id\":\"read\"}},{{\"id\":\"review\"}},{{\"id\":\"write\"}},{{\"id\":\"retry\"}},{{\"id\":\"steer\"}}]}}';; *) exit 77;; esac\n",
                 calls.display()
             ),
         )?;
@@ -3421,6 +3427,8 @@ mod tests {
         assert!(output.contains("\"read\""));
         assert!(output.contains("\"review\""));
         assert!(output.contains("\"write\""));
+        assert!(output.contains("\"id\":\"retry\""), "{output}");
+        assert!(output.contains("\"id\":\"steer\""), "{output}");
         let calls = std::fs::read_to_string(calls)?;
         assert_eq!(calls.lines().count(), 1, "{calls}");
         assert!(calls.contains("run smoke --explain"), "{calls}");

@@ -3,6 +3,8 @@ nodes = [
   { id = "read", use = "task", tier = "junior", prompt = "Read the supplied fixture and report its single stated fact." },
   { id = "review", use = "review", tier = "junior", review_base = "${diff_base}", over = ["correctness", "tests"], min_ok = 2, after = ["read"], prompt = "Review this trivial fixture: the only expected fact is that smoke checks work." },
   { id = "write", use = "implement", tier = "junior", after = ["review"], worktree = "${worktree}", attempt = "${write_attempt}", when = { smoke-write = true }, prompt = "In the supplied scratch worktree, create exactly one file named smoke.txt containing 'smoke ok', then commit it." },
+  { id = "retry", use = "task", tier = "utility", after = ["review"], when = { smoke-retry = true }, prompt = "Exercise the retry path on the cheapest route: retry the smoke fixture's deliberately failed node and report whether it is now available." },
+  { id = "steer", use = "task", tier = "utility", after = ["review"], when = { smoke-steer = true }, prompt = "Exercise the steer path on the cheapest route: send a bounded steering continuation to the smoke lane and report whether it was accepted." },
 ]
 exports = [
   { node = "review", outputs = ["result"], when = { smoke-write = false } },
@@ -14,3 +16,5 @@ worktree = { type = "string", default = "", doc = "Scratch worktree for the writ
 write_attempt = { type = "table", default = {}, doc = "Attempt settings for the writer node, such as a new worktree; bound from --branch and --base." }
 smoke-write = { type = "boolean", default = false, doc = "Whether to run the write node; enabled when worktree is provided and local." }
 diff_base = { type = "string", default = "", doc = "Commit the review nodes compare against; a launch supplies the fixture's base. Empty leaves the review nodes unbound, so the per-node no-base refusal applies." }
+smoke-retry = { type = "boolean", default = true, doc = "Whether to run the retry node on the cheapest route; disable with --set smoke-retry=false." }
+smoke-steer = { type = "boolean", default = true, doc = "Whether to run the steer node on the cheapest route; disable with --set smoke-steer=false." }

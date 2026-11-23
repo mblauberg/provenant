@@ -945,7 +945,9 @@ fn every_bundled_template_compiles_with_required_bindings() {
 }
 
 #[test]
-fn smoke_template_compiles_the_read_review_and_write_nodes() {
+// Spec: docs/specs/fabric.md#bundled-template-declarations — the bundled smoke
+// template declares the read, review, write, retry and steer nodes.
+fn smoke_template_compiles_the_read_review_write_retry_and_steer_nodes() {
     let library = library();
     let node = Compiler::new(&library)
         .compile(&json!({"id":"smoke", "use":"smoke"}))
@@ -960,11 +962,13 @@ fn smoke_template_compiles_the_read_review_and_write_nodes() {
             .iter()
             .map(|node| node.id.as_str())
             .collect::<Vec<_>>(),
-        ["read", "review", "write"]
+        ["read", "review", "write", "retry", "steer"]
     );
     assert_eq!(by_id("read").access, AccessMode::ReadOnly);
     assert_eq!(by_id("review").access, AccessMode::ReadOnly);
     assert_eq!(by_id("write").access, AccessMode::WorktreeWrite);
+    assert_eq!(by_id("retry").access, AccessMode::ReadOnly);
+    assert_eq!(by_id("steer").access, AccessMode::ReadOnly);
 
     let node = Compiler::new(&library)
         .compile(&json!({
@@ -976,6 +980,8 @@ fn smoke_template_compiles_the_read_review_and_write_nodes() {
 }
 
 #[test]
+// Spec: docs/specs/fabric.md#sources-and-read-roots — a smoke review node is
+// pinned to its base only when a launch supplies one.
 fn smoke_template_pins_its_review_nodes_only_when_a_base_is_supplied() {
     let library = library();
     let review_bases = |with: Value| -> Vec<Option<String>> {
@@ -983,14 +989,14 @@ fn smoke_template_pins_its_review_nodes_only_when_a_base_is_supplied() {
             .compile(&json!({"id":"smoke", "use":"smoke", "with":with}))
             .unwrap();
         let composite = compiled.composite.unwrap();
-        // The read and write nodes stay in the graph in either case.
+        // The non-review nodes stay in the graph in either case.
         assert_eq!(
             composite
                 .nodes
                 .iter()
                 .map(|node| node.id.as_str())
                 .collect::<Vec<_>>(),
-            ["read", "review", "write"]
+            ["read", "review", "write", "retry", "steer"]
         );
         composite
             .nodes
