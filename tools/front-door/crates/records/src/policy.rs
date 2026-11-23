@@ -8,9 +8,6 @@ pub enum Boundary {
     /// Credentials and secrets never reach a lane, provider or output not granted them.
     Credentials,
     /// No lane moves, rewrites or deletes another lane's refs, commits or uncommitted files.
-    /// Records written before the boundary merge named this class `git_isolation`
-    /// or `data_integrity`; both are the same boundary, so both decode here.
-    #[serde(alias = "git_isolation", alias = "data_integrity")]
     OtherWork,
     /// User gates, merge, release and ruleset changes need the held authority.
     Authority,
@@ -366,44 +363,6 @@ const fn strength_name(strength: Strength) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The serialised boundary vocabulary is part of the stored-record
-    /// contract. Renaming a variant is a deliberate record-format decision:
-    /// add aliases for every retired name before changing this list.
-    #[test]
-    fn boundary_names_are_a_deliberate_contract() {
-        let names = [
-            Boundary::Credentials,
-            Boundary::OtherWork,
-            Boundary::Authority,
-            Boundary::Operation,
-            Boundary::None,
-        ]
-        .map(|boundary| serde_json::to_value(boundary).expect("boundary name"));
-        assert_eq!(
-            names,
-            [
-                "credentials",
-                "other_work",
-                "authority",
-                "operation",
-                "none"
-            ]
-            .map(serde_json::Value::from)
-        );
-    }
-
-    #[test]
-    fn legacy_boundary_names_decode_as_the_merged_class() {
-        for legacy in ["git_isolation", "data_integrity"] {
-            let decoded: Boundary = serde_json::from_value(serde_json::json!(legacy))
-                .unwrap_or_else(|error| panic!("{legacy}: {error}"));
-            assert_eq!(decoded, Boundary::OtherWork, "{legacy}");
-        }
-        assert!(
-            serde_json::from_value::<Boundary>(serde_json::json!("unrelated_boundary")).is_err()
-        );
-    }
 
     #[test]
     fn generated_guidance_tracks_every_supported_strength() {

@@ -2545,33 +2545,6 @@ pub struct StopWorkSummary {
     pub push: StopWorkPush,
 }
 
-/// The resolved launch policy is dispatch state: the request seals it for the
-/// process that enforces it, and no attempt reader consumes it after launch.
-/// An attempt record therefore never carries it, so a change to the enforcement
-/// vocabulary cannot invalidate stored attempts. A value in a record written
-/// before this split is discarded on read.
-fn encode_attempt_profile<S>(profile: &HarnessProfile, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    let mut value = serde_json::to_value(profile).map_err(serde::ser::Error::custom)?;
-    if let Some(object) = value.as_object_mut() {
-        object.remove("launch_policy");
-    }
-    value.serialize(serializer)
-}
-
-fn decode_attempt_profile<'de, D>(deserializer: D) -> Result<HarnessProfile, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let mut value = serde_json::Value::deserialize(deserializer)?;
-    if let Some(object) = value.as_object_mut() {
-        object.remove("launch_policy");
-    }
-    HarnessProfile::deserialize(value).map_err(serde::de::Error::custom)
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttemptRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2599,12 +2572,7 @@ pub struct AttemptRecord {
         deserialize_with = "decode_continuation"
     )]
     pub continuation: Option<String>,
-    #[serde(
-        default,
-        skip_serializing_if = "HarnessProfile::is_empty",
-        serialize_with = "encode_attempt_profile",
-        deserialize_with = "decode_attempt_profile"
-    )]
+    #[serde(default, skip_serializing_if = "HarnessProfile::is_empty")]
     pub profile: HarnessProfile,
     /// The limits resolved when the attempt was admitted to launch.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -344,37 +344,6 @@ fn attempt_record_preserves_digest() -> TestResult {
 }
 
 #[test]
-fn schema_two_attempt_with_legacy_boundary_names_decodes_without_policy() -> TestResult {
-    let mut value = attempt();
-    value["schema_version"] = 2.into();
-    let rule = |boundary: &str| {
-        json!({
-            "code": format!("LEGACY_{boundary}"),
-            "boundary": boundary,
-            "strength": "refuse",
-            "knob": null,
-            "justification": "pre-rename boundary",
-            "site": "fixture",
-            "threshold": null,
-            "refusable": false,
-            "source": "dispatch"
-        })
-    };
-    value["profile"] = json!({
-        "name": "rigorous",
-        "knobs": {},
-        "overrides": [],
-        "launch_policy": {"rules": [rule("git_isolation"), rule("data_integrity")]}
-    });
-    let decoded: run::AttemptRecord = serde_json::from_value(value)?;
-    // The attempt record does not depend on the dispatch policy vocabulary.
-    assert!(decoded.profile.launch_policy.is_none());
-    let reencoded = serde_json::to_value(decoded)?;
-    assert!(reencoded["profile"].get("launch_policy").is_none());
-    Ok(())
-}
-
-#[test]
 fn lane_wait_preserves_digest() -> TestResult {
     let mut value = normalise::<run::LaneWait>(
         json!({"attempt_id":ID,"lane_class":"writer","waiting_for":{"kind":"recovery_worker_refused","used":5,"limit":10}}),

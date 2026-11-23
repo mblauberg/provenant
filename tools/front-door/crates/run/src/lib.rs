@@ -207,6 +207,9 @@ impl From<provenant_sqlite::VersionError> for RunError {
     fn from(error: provenant_sqlite::VersionError) -> Self {
         match error {
             provenant_sqlite::VersionError::Refused { found, .. } => Self::Version(found),
+            provenant_sqlite::VersionError::MigrationRequired { .. } => {
+                Self::Validation("run store schema needs a writable open to migrate")
+            }
             provenant_sqlite::VersionError::Sqlite(error) => error.into(),
             provenant_sqlite::VersionError::MissingBaseTable { .. } => {
                 Self::Validation("STATE_RESET_REQUIRED: missing known base table")
@@ -216,6 +219,9 @@ impl From<provenant_sqlite::VersionError> for RunError {
             }
             provenant_sqlite::VersionError::InvalidStep { .. } => {
                 Self::Validation("invalid additive schema step declaration")
+            }
+            provenant_sqlite::VersionError::InvalidMigration { .. } => {
+                Self::Validation("invalid data migration declaration")
             }
         }
     }

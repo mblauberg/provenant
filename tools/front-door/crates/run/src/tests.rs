@@ -2824,7 +2824,7 @@ fn host_stores_match_their_schema_and_refuse_other_versions_unchanged() -> TestR
 }
 
 #[test]
-fn a_fresh_store_matches_its_schema_and_other_versions_are_refused_unchanged() -> TestResult {
+fn a_fresh_store_matches_its_schema_and_only_an_undeclared_version_is_refused() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
     let clock = clock();
@@ -2837,18 +2837,34 @@ fn a_fresh_store_matches_its_schema_and_other_versions_are_refused_unchanged() -
     )?);
     drop(store);
     let path = context.state_root.as_path().join("run.sqlite3");
-    for version in [crate::db::SCHEMA.version - 1, crate::db::SCHEMA.version + 1] {
-        let db = provenant_sqlite::open_connection(&path, false)?;
-        db.pragma_update(None, "user_version", version)?;
-        db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
-        drop(db);
-        let before = std::fs::read(&path)?;
-        assert!(matches!(
-            RunStore::open(&context, &call),
-            Err(RunError::Version(found)) if found == version
-        ));
-        assert_eq!(std::fs::read(&path)?, before, "version {version}");
-    }
+    // The previous base has a declared migration and is rewritten on open.
+    let older = crate::db::SCHEMA.version - 1;
+    let db = provenant_sqlite::open_connection(&path, false)?;
+    db.pragma_update(None, "user_version", older)?;
+    db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+    drop(db);
+    let migrated = RunStore::open(&context, &call)?;
+    assert_eq!(
+        provenant_sqlite::stored_version(&migrated.db)?,
+        crate::db::SCHEMA.version
+    );
+    assert!(provenant_sqlite::schema_matches(
+        &migrated.db,
+        crate::db::SCHEMA
+    )?);
+    drop(migrated);
+    // A base without a declared path is refused without changing the file.
+    let newer = crate::db::SCHEMA.version + 1;
+    let db = provenant_sqlite::open_connection(&path, false)?;
+    db.pragma_update(None, "user_version", newer)?;
+    db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+    drop(db);
+    let before = std::fs::read(&path)?;
+    assert!(matches!(
+        RunStore::open(&context, &call),
+        Err(RunError::Version(found)) if found == newer
+    ));
+    assert_eq!(std::fs::read(&path)?, before, "version {newer}");
     Ok(())
 }
 

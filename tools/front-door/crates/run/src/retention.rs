@@ -2362,73 +2362,83 @@ mod tests {
         provenant_config::RetentionSettings::default().logs_days
     }
 
-    fn legacy_boundary_record(record: &[u8]) -> serde_json::Value {
-        let mut value: serde_json::Value =
-            serde_json::from_slice(record).expect("stored attempt record");
-        value["schema_version"] = 2.into();
-        value["profile"] = serde_json::json!({
-            "name": "rigorous",
-            "knobs": {},
-            "overrides": [],
-            "launch_policy": {"rules": [
-                {
-                    "code": "GIT_ISOLATION",
-                    "boundary": "git_isolation",
-                    "strength": "refuse",
-                    "knob": null,
-                    "justification": "pre-rename boundary",
-                    "site": "fixture",
-                    "threshold": null,
-                    "refusable": false,
-                    "source": "dispatch"
-                },
-                {
-                    "code": "DATA_INTEGRITY",
-                    "boundary": "data_integrity",
-                    "strength": "refuse",
-                    "knob": null,
-                    "justification": "pre-rename boundary",
-                    "site": "fixture",
-                    "threshold": null,
-                    "refusable": false,
-                    "source": "dispatch"
-                }
-            ]}
-        });
-        value
-    }
-
     #[test]
-    fn a_legacy_boundary_record_is_retained_without_an_error() -> TestResult {
+    fn a_base_twelve_attempt_with_retired_names_and_a_lane_cache_grant_migrates() -> TestResult {
         let (_temp, context, store, input, _attempt) = seeded()?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
-
-        // A healthy attempt beside the legacy row proves one old row does not
-        // stop the pass for the rest.
-        let mut healthy = crate::tests::input();
-        healthy.attempt_id = AttemptId::from_bytes([7; 16]);
-        healthy.operation_id = provenant_core::OperationId::parse("run-healthy")?;
-        crate::tests::rekey(&mut healthy);
-        store.create(&healthy, &call)?;
-        withdraw(&store, &healthy, &call)?;
-
+        withdraw(&store, &input, &call)?;
         let stored: Vec<u8> = store.db.query_row(
             "SELECT record FROM attempts WHERE id=?1",
             [input.attempt_id.to_string()],
             |row| row.get(0),
         )?;
-        let legacy = legacy_boundary_record(&stored);
-        // The row is still queued here: a terminal attempt row is immutable.
+        let rule = |boundary: &str| {
+            serde_json::json!({
+                "code": format!("LEGACY_{boundary}"),
+                "boundary": boundary,
+                "strength": "refuse",
+                "knob": null,
+                "justification": "pre-rename boundary",
+                "site": "fixture",
+                "threshold": null,
+                "refusable": false,
+                "source": "dispatch"
+            })
+        };
+        let mut legacy: serde_json::Value = serde_json::from_slice(&stored)?;
+        legacy["schema_version"] = 2.into();
+        legacy["profile"] = serde_json::json!({
+            "name": "rigorous",
+            "knobs": {},
+            "overrides": [],
+            "launch_policy": {"rules": [rule("git_isolation"), rule("data_integrity")]}
+        });
+        legacy["write_grants"] = serde_json::json!([
+            {
+                "source": "lane_cache",
+                "path": {"relative_to_root": {
+                    "encoding": "utf8",
+                    "path": "Library/Caches/provenant-lane-cargo/fixture"
+                }},
+                "scope": "subtree"
+            },
+            {
+                "source": "scratch",
+                "path": {"relative_to_root": {
+                    "encoding": "utf8",
+                    "path": "attempt-scratch"
+                }},
+                "scope": "subtree"
+            }
+        ]);
+        // A terminal attempt is immutable to ordinary writers; the migration
+        // lifts the trigger inside its own transaction.
+        store
+            .db
+            .execute_batch("DROP TRIGGER immutable_terminal_update")?;
         store.db.execute(
             "UPDATE attempts SET record=?1 WHERE id=?2",
             rusqlite::params![serde_json::to_vec(&legacy)?, input.attempt_id.to_string()],
         )?;
-        withdraw(&store, &input, &call)?;
-        // The owner read a graph advance performs decodes the row.
+        store.db.execute_batch(
+            "CREATE TRIGGER immutable_terminal_update
+             BEFORE UPDATE OF rowid,oid,_rowid_,sequence,id,project,graph,node,attempt,digest,actor,operation,number,continues,refused,revision,terminal,record,sealed,repository,head ON attempts
+             WHEN OLD.terminal=1
+             BEGIN SELECT RAISE(ABORT,'terminal attempt is immutable'); END;
+             PRAGMA user_version=12;",
+        )?;
+        drop(store);
+
+        let store = RunStore::open(&context, &call)?;
+        assert_eq!(provenant_sqlite::stored_version(&store.db)?, 13);
         let record = store.record(input.attempt_id, &call)?;
         assert!(record.profile.launch_policy.is_none());
-
+        assert_eq!(record.write_grants.len(), 1);
+        assert!(matches!(
+            record.write_grants[0].source,
+            WriteSource::Scratch
+        ));
         let report = sweep(&store, &context, 7, DAY_MICROS, false, &call)?;
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         Ok(())

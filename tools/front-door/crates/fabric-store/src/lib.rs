@@ -88,6 +88,9 @@ impl From<provenant_sqlite::VersionError> for Error {
         use provenant_sqlite::VersionError as E;
         match error {
             E::Refused { found, .. } => Self::SchemaVersion(found),
+            E::MigrationRequired { .. } => {
+                Self::Invalid("store schema needs a writable open to migrate")
+            }
             E::Sqlite(error) => error.into(),
             E::MissingBaseTable { .. } => {
                 Self::Invalid("STATE_RESET_REQUIRED: missing known base table")
@@ -96,6 +99,7 @@ impl From<provenant_sqlite::VersionError> for Error {
                 Self::Invalid("missing schema step; a writable open applies it")
             }
             E::InvalidStep { .. } => Self::Invalid("invalid additive schema step declaration"),
+            E::InvalidMigration { .. } => Self::Invalid("invalid data migration declaration"),
         }
     }
 }
