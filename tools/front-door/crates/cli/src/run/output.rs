@@ -155,11 +155,17 @@ pub fn render_output(command: Output, read: Result<(Value, String), Fail>) -> Re
     out.read_only = true;
     if out.result.error.is_none() {
         let full = std::env::args_os().any(|arg| arg == "--full");
-        out.summary = Some(if full {
-            output_summary(&out.result.data, &out.human, headed)
+        if full {
+            // The full view renders the owner's human text, so the host-fact
+            // headers and the whole result become that text; compact keeps the
+            // bounded summary.
+            // Spec: docs/specs/lane-contracts.md#result-projection
+            let summary = output_summary(&out.result.data, &out.human, headed);
+            out.human = format!("{}\n", summary.lines.join("\n"));
+            out.summary = Some(summary);
         } else {
-            output_summary_default(&out.result.data, &out.human, headed)
-        });
+            out.summary = Some(output_summary_default(&out.result.data, &out.human, headed));
+        }
         out.result.next = output_next_step(&out.result.data, Some(&command.target))
             .into_iter()
             .collect();
@@ -170,7 +176,7 @@ pub fn render_output(command: Output, read: Result<(Value, String), Fail>) -> Re
                 .get("git_import_failure")
                 .is_some_and(|value| !value.is_null())
             && let Some(reason) = out.result.data["reason"].as_str()
-            && out.human.trim() != reason
+            && !out.human.contains(reason)
         {
             out.human = format!("{reason}\n\n{}", out.human);
         }
@@ -374,7 +380,11 @@ fn summary(data: &Value, text: &str, headed: bool, full: bool) -> crate::Summary
     // An empty result uses its safe diagnostic as human text. The settlement
     // header already contains that detail, so render it only once.
     if !headed || data["reason"].as_str() != Some(text.trim()) {
-        let body = crate::head_and_tail(text, limits::OUTPUT_BYTES);
+        let body = if full {
+            text.to_owned()
+        } else {
+            crate::head_and_tail(text, limits::OUTPUT_BYTES)
+        };
         lines.extend(body.lines().map(str::to_owned));
     }
     crate::Summary { lines, omitted: 0 }
