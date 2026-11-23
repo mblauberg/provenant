@@ -518,18 +518,13 @@ impl<'de> Deserialize<'de> for TierCommand {
 /// takes the same string or table forms as a [`TierCommand`], plus the literal
 /// string `"none"`, which turns format carry off. When no layer declares the
 /// leaf, stack detection supplies a command (see [`crate::detect::detect`]).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum VerifyFormat {
     /// Explicitly turned off with `"format": "none"`.
+    #[default]
     None,
     /// Run exactly this command from the verify workspace.
     Command(TierCommand),
-}
-
-impl Default for VerifyFormat {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 impl Serialize for VerifyFormat {
@@ -2272,30 +2267,29 @@ impl PortTable {
             .sourced_leaf("verify.format")
             .last()
             .is_some_and(|winner| winner.source.layer == Layer::Detected)
+            && let Some(VerifyFormat::Command(command)) = &mut table.verify.format
         {
-            if let Some(VerifyFormat::Command(command)) = &mut table.verify.format {
-                let normal = |path: &Path| -> PathBuf {
-                    let parts: PathBuf = path
-                        .components()
-                        .filter(|part| !matches!(part, Component::CurDir))
-                        .collect();
-                    if parts.as_os_str().is_empty() {
-                        PathBuf::from(".")
-                    } else {
-                        parts
-                    }
-                };
-                let cwd = normal(&command.cwd);
-                let workspace = normal(&table.verify.workspace);
-                if workspace != Path::new(".") {
-                    command.cwd = if cwd == workspace {
-                        PathBuf::from(".")
-                    } else {
-                        cwd.strip_prefix(&workspace)
-                            .map(Path::to_path_buf)
-                            .unwrap_or(cwd)
-                    };
+            let normal = |path: &Path| -> PathBuf {
+                let parts: PathBuf = path
+                    .components()
+                    .filter(|part| !matches!(part, Component::CurDir))
+                    .collect();
+                if parts.as_os_str().is_empty() {
+                    PathBuf::from(".")
+                } else {
+                    parts
                 }
+            };
+            let cwd = normal(&command.cwd);
+            let workspace = normal(&table.verify.workspace);
+            if workspace != Path::new(".") {
+                command.cwd = if cwd == workspace {
+                    PathBuf::from(".")
+                } else {
+                    cwd.strip_prefix(&workspace)
+                        .map(Path::to_path_buf)
+                        .unwrap_or(cwd)
+                };
             }
         }
         table.provenance = walk.layers;
