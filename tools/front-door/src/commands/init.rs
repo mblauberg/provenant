@@ -37,6 +37,27 @@ struct Report {
     path: PathBuf,
 }
 
+/// Where init reads and writes the port table. Checkout-scoped commands
+/// (`verify`) read the table at the checkout root, so init must write there too
+/// when the selected or working directory sits inside a checkout. Outside a
+/// checkout a plain directory stays a valid init target, as before.
+fn resolve_project(
+    globals: &provenant_cli::Globals,
+) -> Result<crate::roots::Resolved, crate::roots::RootError> {
+    match crate::roots::resolve(
+        globals,
+        crate::roots::Workspace::Checkout,
+        crate::roots::Product::Optional,
+    ) {
+        Ok(context) => Ok(context),
+        Err(_) => crate::roots::resolve(
+            globals,
+            crate::roots::Workspace::Project,
+            crate::roots::Product::Optional,
+        ),
+    }
+}
+
 /// Resolve the choices for a checkout. Host declarations are part of the
 /// effective port table, so a remote declared outside the repository reaches
 /// the forge context with its own source.
@@ -115,11 +136,7 @@ fn run(inv: &Call) -> Result<Outcome, CommandError> {
     let status = match command {
         Command::Init => {
             let result = (|| -> Result<Report, Box<dyn std::error::Error>> {
-                let context = crate::roots::resolve(
-                    globals,
-                    crate::roots::Workspace::Project,
-                    crate::roots::Product::Optional,
-                )?;
+                let context = resolve_project(globals)?;
                 let plan = plan(&context.project, context.roots.state.as_path())?;
                 let path = context.project.join(provenant_config::PORTS_CONFIG);
                 let wrote = write_initial(&path, &plan.document)?;
@@ -270,5 +287,61 @@ mod tests {
         assert!(human.contains("left untouched"), "{human}");
         assert!(human.contains("verify.base"), "{human}");
         assert!(human.contains("refs/remotes/upstream/HEAD"), "{human}");
+    }
+
+    /// A subdirectory binds to the checkout root, matching where checkout-scoped
+    /// readers (`verify`) look for the port table.
+    #[test]
+    fn init_from_a_subdirectory_writes_the_table_at_the_checkout_root() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let checkout = root.path();
+        provenant_os::fixture::run_git(checkout, &["init", "-q"]).expect("git init");
+        provenant_os::fixture::run_git(
+            checkout,
+            &["remote", "add", "upstream", "git@example.com:up.git"],
+        )
+        .expect("remote");
+        write(
+            checkout,
+            ".git/refs/remotes/upstream/HEAD",
+            "ref: refs/heads/trunk\n",
+        );
+        let subdir = checkout.join("tools/front-door");
+        fs::create_dir_all(&subdir).expect("subdir");
+        let state = root.path().join("state");
+        fs::create_dir_all(&state).expect("state");
+
+        let globals = provenant_cli::Globals {
+            project: Some(subdir.clone()),
+            ..Default::default()
+        };
+        let context = resolve_project(&globals).expect("checkout from a subdirectory");
+        assert_eq!(
+            context.project,
+            fs::canonicalize(checkout).expect("canonical checkout")
+        );
+
+        let document = plan(&context.project, &state)
+            .expect("plan at checkout root")
+            .document;
+        let path = context.project.join(provenant_config::PORTS_CONFIG);
+        assert!(write_initial(&path, &document).expect("write at checkout root"));
+        assert!(path.is_file());
+        assert!(!subdir.join(provenant_config::PORTS_CONFIG).exists());
+    }
+
+    /// Outside any checkout init still accepts a plain directory.
+    #[test]
+    fn init_outside_a_checkout_keeps_the_plain_directory() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let globals = provenant_cli::Globals {
+            project: Some(root.path().to_path_buf()),
+            ..Default::default()
+        };
+        let context = resolve_project(&globals).expect("plain directory");
+        assert_eq!(
+            context.project,
+            fs::canonicalize(root.path()).expect("canonical directory")
+        );
     }
 }

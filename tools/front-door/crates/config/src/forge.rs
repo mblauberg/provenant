@@ -660,6 +660,60 @@ mod tests {
         assert!(Git::new(outside.path()).is_err());
     }
 
+    /// The nearest `.git` wins: a checkout nested inside another binds its own
+    /// metadata, from the nested root and from a directory beneath it.
+    #[test]
+    fn a_nested_repository_binds_the_nearest_checkout() {
+        let outer = Fixture::new("[remote \"outer\"]\n");
+        let nested = outer.root.path().join("nested");
+        let git = nested.join(".git");
+        std::fs::create_dir_all(git.join("refs/remotes")).expect("nested metadata");
+        std::fs::write(git.join("config"), "[remote \"inner\"]\n").expect("nested config");
+        std::fs::write(git.join("HEAD"), "ref: refs/heads/topic\n").expect("nested HEAD");
+        assert_eq!(
+            Git::new(&nested).expect("nearest checkout").remotes(),
+            ["inner"]
+        );
+        let deeper = nested.join("src/deep");
+        std::fs::create_dir_all(&deeper).expect("deep directory");
+        assert_eq!(
+            Git::new(&deeper)
+                .expect("nearest from a subdirectory")
+                .remotes(),
+            ["inner"]
+        );
+        assert_eq!(outer.git().remotes(), ["outer"]);
+    }
+
+    /// A linked worktree's `.git` is a `gitdir:` pointer. Read from a
+    /// subdirectory, it must follow the pointer and its `commondir` to the
+    /// shared config and refs.
+    #[test]
+    fn a_linked_worktree_subdirectory_follows_gitdir_and_commondir() {
+        let common = Fixture::new("[remote \"upstream\"]\n");
+        common.set_remote_head("upstream", "main");
+        let worktree = tempfile::tempdir().expect("worktree");
+        let private = worktree.path().join("private-gitdir");
+        std::fs::create_dir_all(&private).expect("private gitdir");
+        std::fs::write(private.join("HEAD"), "ref: refs/heads/topic\n").expect("HEAD");
+        std::fs::write(
+            private.join("commondir"),
+            format!("{}\n", common.root.path().join(".git").display()),
+        )
+        .expect("commondir");
+        std::fs::write(
+            worktree.path().join(".git"),
+            format!("gitdir: {}\n", private.display()),
+        )
+        .expect("gitdir pointer");
+        let subdir = worktree.path().join("crates/config/src");
+        std::fs::create_dir_all(&subdir).expect("subdir");
+
+        let from_subdir = Git::new(&subdir).expect("worktree from a subdirectory");
+        assert_eq!(from_subdir.remotes(), common.git().remotes());
+        assert_eq!(from_subdir.remote_head("upstream").as_deref(), Some("main"));
+    }
+
     /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
     #[test]
     fn a_sole_remote_is_detected_with_its_source() {
