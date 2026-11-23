@@ -1415,6 +1415,27 @@ fn explain_refuses_a_writer_on_the_integration_branch_like_launch() -> Result {
 fn explain_previews_a_new_writer_without_creating_its_checkout() -> Result {
     let mut rig = GraphProject::new()?;
     rig.enable_codex_fixture()?;
+    // Push delivery needs a remote; a local bare repository stands in for it.
+    let remote = rig.temp.path().join("origin.git");
+    for args in [
+        vec![
+            "init",
+            "-q",
+            "--bare",
+            remote.to_str().ok_or("remote path")?,
+        ],
+        vec![
+            "-C",
+            rig.project.to_str().ok_or("project path")?,
+            "remote",
+            "add",
+            "origin",
+            remote.to_str().ok_or("remote path")?,
+        ],
+    ] {
+        let output = provenant_os::fixture::git_command().args(args).output()?;
+        assert!(output.status.success(), "{output:?}");
+    }
     let checkout = rig.project.join(".worktrees/explain-new-writer");
     let document = rig.document(&json!({
         "schema_version": support::GRAPH_DOCUMENT_SCHEMA_VERSION,
@@ -1426,7 +1447,7 @@ fn explain_previews_a_new_writer_without_creating_its_checkout() -> Result {
             "worktree": ".worktrees/explain-new-writer",
             "write_scope": ["."],
             "delivery": "push",
-            "attempt": {"new_worktree": {"branch": "topic/explain-new-writer", "base": "HEAD"}},
+            "attempt": {"new_worktree": {"branch": "explain-new-writer", "base": "HEAD"}},
             "route": {"adapter": "codex", "model": "codex/gpt-6-luna"},
         }],
     }))?;
