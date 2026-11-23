@@ -2148,7 +2148,6 @@ impl Factory {
                 lane_document,
                 route.as_ref(),
                 &context,
-                review_launch,
                 &mut input_warnings,
             )?)
         } else {
@@ -2639,7 +2638,6 @@ impl Factory {
         lane_document: Option<&Value>,
         route: Option<&RouteChoice>,
         context: &PatchContext<'_>,
-        review_launch: bool,
         input_warnings: &mut Vec<String>,
     ) -> Result<TemplateLaunch, FacadeError> {
         let mut node = match lane_document {
@@ -2673,6 +2671,9 @@ impl Factory {
             .library
             .resolve(node["use"].as_str().unwrap_or("task"))
             .map_err(graph_input_reason)?;
+        // The same template the launch declared: review ranges are bound on
+        // the host, so the node never carries its own subject or base.
+        let review_launch = template.accepts_review_range();
         let bundled_smoke =
             node["use"] == "smoke" && context.library.layer("smoke") == Some(Layer::Default);
         // Launch controls bind to one leaf. A composite has no single
