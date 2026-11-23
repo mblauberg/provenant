@@ -1,7 +1,8 @@
 //! Command configuration dependencies. Parser paths, readers and help share
 //! this declaration; children inherit their nearest declared parent.
-use provenant_config::{ConfigError, ResolvedConfig};
+use provenant_config::{ConfigError, Origin, ResolvedConfig};
 use provenant_core::Roots;
+use provenant_records::{Layer, Source};
 
 pub struct CommandConfigDeclaration {
     pub command: &'static str,
@@ -96,6 +97,26 @@ pub fn show_for(
     command: &str,
 ) -> Result<ResolvedConfig<crate::domains::Domains>, ConfigError> {
     provenant_config::config_show(roots, &sections_for(command)?)
+}
+
+/// Map one configuration origin to the shared layer vocabulary and the exact
+/// place it came from. `config show` prints this beside each leaf's value, so
+/// a setting's layer and origin keep one spelling across every reader.
+pub fn origin_source(origin: Option<&Origin>, field: &str) -> Source {
+    match origin {
+        Some(Origin::User { .. }) => Source {
+            layer: Layer::Host,
+            origin: Some(format!("config.toml#{field}")),
+        },
+        Some(Origin::Compiled { profile }) => Source {
+            layer: Layer::Profile,
+            origin: Some(format!("compiled {profile:?} profile#{field}")),
+        },
+        None => Source {
+            layer: Layer::Default,
+            origin: None,
+        },
+    }
 }
 
 /// Name the layer that set `field`, for one-line warnings that state an action
