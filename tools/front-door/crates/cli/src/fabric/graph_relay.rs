@@ -1374,6 +1374,7 @@ fn recover_provisioning(
                     | WorktreeError::DetachedWorktree { .. }
                     | WorktreeError::CheckedOut
                     | WorktreeError::InvalidRequest
+                    | WorktreeError::WorktreeExists { .. }
                     | WorktreeError::BranchCollision { .. }
                     | WorktreeError::BranchExistsWithBase { .. }
                     | WorktreeError::RemoteOnlyBranch { .. }
@@ -1396,8 +1397,9 @@ fn recover_provisioning(
                 progress.advance_error_code = Some("launch_refused".into());
                 progress.advance_owner_code = Some(error.code().into());
                 progress.advance_error = Some(format!(
-                    "writer provisioning refused [{}]; correct the cause, then retry with `provenant retry {}/{node}`",
+                    "writer provisioning refused [{}]: {}; correct the cause, then retry with `provenant retry {}/{node}`",
                     error.code(),
+                    error.to_string().chars().take(512).collect::<String>(),
                     checkpoint.graph_id,
                 ));
                 progress.last_launch_retry = progress.launch_retry.take().map(|mut retry| {
@@ -2016,6 +2018,16 @@ fn provisioning_refusal(error: provenant_confinement::worktrees::WorktreeError) 
                         .into()
                 })
             ),
+        });
+    }
+    if let WorktreeError::WorktreeExists { reason, .. } = &error {
+        // `Display` names the branch and path but drops the typed reason,
+        // which is the actionable part of an existing-checkout refusal. Keep
+        // it in the refusal the lane sees, as for a managed-path mismatch.
+        return ServiceError::Facade(FacadeError::DispatchRefused {
+            reason: format!("{error}: {reason}"),
+            disk: None,
+            fact: None,
         });
     }
     let fact = match &error {
@@ -3095,6 +3107,121 @@ mod provisioning_tests {
         assert!(relay::pending_provisioning(&checkpoint).is_empty());
         assert_eq!(git(&["-C", path, "rev-parse", "HEAD"])?, source);
         assert_eq!(checkpoint.nodes[0].state, NodeState::Running);
+        Ok(())
+    }
+
+    // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
+    #[test]
+    fn worktree_exists_refusal_blocks_the_node_with_its_reason()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // A directory at the managed path with no Git registration makes
+        // create refuse before any mutation, with a typed WorktreeExists
+        // reason that must reach the node alongside the refusal.
+        refused_provisioning_blocks_the_node(
+            ".worktrees/unregistered-writer",
+            true,
+            Some("the path is not a registered worktree"),
+        )
+    }
+
+    // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
+    #[test]
+    fn writer_path_outside_the_layout_blocks_the_node() -> Result<(), Box<dyn std::error::Error>> {
+        // A path that maps to no managed branch is refused before any Git
+        // mutation, so the node blocks and its fence clears.
+        refused_provisioning_blocks_the_node("elsewhere/writer", false, None)
+    }
+
+    fn refused_provisioning_blocks_the_node(
+        path: &str,
+        occupy: bool,
+        cause: Option<&str>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_fabric_runtime::graph::{
+            GraphCheckpoint, GraphDocument, GraphExecution, NodeState,
+        };
+        let root = tempfile::tempdir()?;
+        let home = root.path().join("home");
+        let project = home.join("project");
+        std::fs::create_dir_all(&project)?;
+        let git = |args: &[&str]| -> Result<String, Box<dyn std::error::Error>> {
+            let output = provenant_os::fixture::git_command()
+                .current_dir(&project)
+                .args(args)
+                .output()?;
+            assert!(output.status.success());
+            Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+        };
+        git(&["init", "-q"])?;
+        git(&["commit", "--allow-empty", "-qm", "base"])?;
+        let source = git(&["rev-parse", "HEAD"])?;
+        let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
+        inputs.state_dir = Some(root.path().join("state"));
+        let context = Context::open(
+            inputs.resolve(&provenant_os::fs::SystemPathResolver)?,
+            &home,
+            &project,
+        )?;
+        let cancel = CancelToken::new();
+        let clock = provenant_os::clock::SystemClock::new();
+        let budget = WaitBudget::cli(clock.mono_now(), 30)?;
+        if occupy {
+            std::fs::create_dir_all(project.join(path))?;
+        }
+        let document: GraphDocument = serde_json::from_value(json!({
+            "schema_version":1,"graph_id":"g-exists","nodes":[{
+                "id":"writer","access":"worktree_write","worktree":path,"prompt":"Write","route":{"alias":"junior"}
+            }]
+        }))?;
+        let mut checkpoint: GraphCheckpoint = serde_json::from_value(json!({
+            "schema_version":2,"graph_id":"g-exists","plan_digest":"fixture","nodes":[{
+                "id":"writer","state":"pending","worktree":path,"attempts":[]
+            }]
+        }))?;
+        relay::fence_provisioning(&mut checkpoint, "writer", path, &source);
+        let mut journal = FileJournal::open(
+            &context.roots.state,
+            context.identity.project,
+            "g-exists",
+            budget,
+            &cancel,
+            &clock,
+        )?;
+        journal.bind(GraphExecution {
+            peer_origin_context: None,
+            peer_submission_digest: None,
+            requester_path: None,
+            extra: Default::default(),
+            bases: None,
+            directory: project.clone(),
+            document,
+        })?;
+        journal.prepare_fixture_checkpoint(&mut checkpoint)?;
+        journal.save(&checkpoint)?;
+        let error = recover_provisioning(
+            &context,
+            &mut journal,
+            &mut checkpoint,
+            &["writer".into()],
+            budget,
+            &cancel,
+        )?
+        .ok_or("existing worktree refusal")?;
+        let message = error.to_string();
+        if let Some(cause) = cause {
+            assert!(message.contains(cause), "{message}");
+        }
+        assert_eq!(checkpoint.nodes[0].state, NodeState::Blocked);
+        assert_eq!(
+            checkpoint.nodes[0].advance_error_code.as_deref(),
+            Some("launch_refused")
+        );
+        let blocked = checkpoint.nodes[0]
+            .advance_error
+            .as_deref()
+            .ok_or("blocked node reason")?;
+        assert!(blocked.contains(cause.unwrap_or(error.code())), "{blocked}");
+        assert!(relay::pending_provisioning(&checkpoint).is_empty());
         Ok(())
     }
 

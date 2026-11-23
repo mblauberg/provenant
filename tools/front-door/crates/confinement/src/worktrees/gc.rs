@@ -196,6 +196,7 @@ pub fn branch_candidate(
         dirty: WorktreeCondition::Clean,
         owner: Ok(None),
         primary: true,
+        reused: false,
         occupancy: Occupancy::Available,
     }
 }

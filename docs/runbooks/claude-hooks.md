@@ -73,11 +73,13 @@ prints the new worktree's absolute path and nothing else on stdout.
 - `worktree-create` accepts a name of 1 to 64 letters, digits, `.`, `_` and `-`
   (starting alphanumeric) and creates branch `claude/<name>` at
   `<repo>/.worktrees/claude-<name>`. The worktree already holding that branch is
-  reused when it is clean and idle. A clean, idle tree is adopted with a warning
-  even when it is off the hook's usual path or has no ownership record under
+  reused when it is clean and idle. Ignored (declared build) output does not
+  block reuse; tracked or untracked changes and a live or held writer still do.
+  A clean, idle tree is adopted with a warning even when it is off the hook's
+  usual path or has no ownership record under
   `<state>/hooks/claude-worktrees/` or the Git admin directory: those are
   preferences, not boundaries. The primary checkout, a live or held writer
-  (`live`/`busy`), uncommitted or ignored files and an unknown layout stay
+  (`live`/`busy`), uncommitted or untracked changes and an unknown layout stay
   refused with exit 2 and the reason. Invalid event input abstains.
 - `worktree-remove` removes a clean, idle linked worktree the repository lists,
   through `provenant worktree remove <name>` without `--discard`. A tree without

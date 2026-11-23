@@ -501,6 +501,128 @@ pub(super) fn existing_branch_with_base_names_the_repair_in_json_and_human_outpu
     Ok(())
 }
 
+// Spec: docs/specs/run-launch.md#writer-binding
+pub(super) fn create_reuses_a_clean_worktree_and_names_an_existing_conflict() -> Result {
+    let rig = repository()?;
+    let base = git(&rig, &["rev-parse", "HEAD"])?;
+    let created = ok(
+        &rig,
+        &[
+            "worktree",
+            "create",
+            "feature/reuse",
+            "--base",
+            "HEAD",
+            "--json",
+        ],
+    )?;
+    let path = created_worktree_path(&created)?;
+    assert_eq!(created["data"]["head"], base);
+
+    let reused = ok(
+        &rig,
+        &[
+            "worktree",
+            "create",
+            "feature/reuse",
+            "--base",
+            "HEAD",
+            "--json",
+        ],
+    )?;
+    assert_eq!(reused["data"]["path"], created["data"]["path"]);
+    assert_eq!(reused["data"]["head"], base);
+    let warnings = reused["data"]["warnings"]
+        .as_array()
+        .ok_or("reuse warning array")?;
+    assert!(
+        warnings.iter().any(|warning| {
+            warning
+                .as_str()
+                .is_some_and(|text| text.contains("reusing") && text.contains("feature/reuse"))
+        }),
+        "{reused}"
+    );
+    let listed = ok(&rig, &["worktree", "list", "--json"])?;
+    assert_eq!(listed["data"].as_array().map(Vec::len), Some(2));
+
+    // A checkout advanced past --base is admitted on the occupied path just
+    // as it would be on a free path: the base is an ancestor of its HEAD.
+    let path_text = path.to_str().ok_or("worktree path text")?.to_owned();
+    git(
+        &rig,
+        &[
+            "-C",
+            &path_text,
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "advance",
+        ],
+    )?;
+    let tip = git(&rig, &["-C", &path_text, "rev-parse", "HEAD"])?;
+    assert_ne!(tip, base);
+    let advanced = ok(
+        &rig,
+        &[
+            "worktree",
+            "create",
+            "feature/reuse",
+            "--base",
+            &base,
+            "--json",
+        ],
+    )?;
+    assert_eq!(advanced["data"]["path"], created["data"]["path"]);
+    assert_eq!(advanced["data"]["head"], tip);
+    assert_eq!(advanced["data"]["reused"], true);
+
+    // A base that is not an ancestor of the checkout HEAD stays refused and
+    // names both the path and the repair.
+    git(&rig, &["commit", "--allow-empty", "-qm", "sibling"])?;
+    let sibling = git(&rig, &["rev-parse", "HEAD"])?;
+    let conflict = command(
+        &rig,
+        &[
+            "worktree",
+            "create",
+            "feature/reuse",
+            "--base",
+            &sibling,
+            "--json",
+        ],
+    )?;
+    assert_ne!(code(&conflict), 0);
+    let value = json(&conflict)?;
+    let message = value["error"]["message"].as_str().ok_or("error message")?;
+    assert!(message.contains("feature/reuse"), "{value}");
+    assert!(message.contains(path_text.as_str()), "{value}");
+    let cause = value["error"]["cause"].as_str().ok_or("named cause")?;
+    assert!(cause.contains("omit --base"), "{value}");
+    let repair = value["error"]["repair"].as_str().ok_or("repair")?;
+    assert!(repair.contains("matching base"), "{value}");
+
+    fs::write(path.join("uncommitted"), "work in progress")?;
+    let dirty = command(
+        &rig,
+        &[
+            "worktree",
+            "create",
+            "feature/reuse",
+            "--base",
+            &base,
+            "--json",
+        ],
+    )?;
+    assert_ne!(code(&dirty), 0);
+    let value = json(&dirty)?;
+    let message = value["error"]["message"].as_str().ok_or("error message")?;
+    assert!(message.contains("feature/reuse"), "{value}");
+    let cause = value["error"]["cause"].as_str().ok_or("named cause")?;
+    assert!(cause.contains("uncommitted changes"), "{value}");
+    Ok(())
+}
+
 pub(super) fn merged_pruning_keeps_dirty_unmerged_and_out_of_scope_worktrees() -> Result {
     for since_scope in [false, true] {
         let rig = repository()?;

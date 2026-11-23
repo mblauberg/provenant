@@ -419,6 +419,7 @@ fn list_impl(
             occupancy,
             owner,
             primary: is_primary,
+            reused: false,
         };
         report(total, Some(&info));
         result.push(info);
@@ -510,6 +511,92 @@ fn open_or_create_layout_directory(
     current.ok_or(WorktreeError::InvalidRequest)
 }
 
+/// Reuse a clean registered checkout already at the managed path when it
+/// matches the request. Every conflict names the path and branch so a caller
+/// can tell which checkout to inspect instead of seeing a generic invalid
+/// request.
+fn reuse_existing_worktree(
+    context: &WorktreeContext<'_>,
+    request: &WorktreeCreate,
+    branch: &GitRefName,
+    target: &Path,
+    entries: &[GitWorktree],
+    cancel: &CancelToken,
+    mut warnings: Vec<String>,
+) -> Result<WorktreeInfo, WorktreeError> {
+    let conflict = |reason: String| WorktreeError::WorktreeExists {
+        path: target.to_path_buf(),
+        branch: request.branch.clone(),
+        reason,
+    };
+    let entry = entries
+        .iter()
+        .find(|entry| canonicalize(&entry.path).ok().as_deref() == Some(target))
+        .ok_or_else(|| conflict("the path is not a registered worktree".to_owned()))?;
+    if entry.bare || entry.locked || entry.prunable {
+        return Err(conflict(
+            "the Git registration is bare, locked or prunable".to_owned(),
+        ));
+    }
+    if entry.branch.as_ref() != Some(branch) {
+        let found = entry
+            .branch
+            .as_ref()
+            .map_or_else(|| "no branch".to_owned(), |found| found.as_str().to_owned());
+        return Err(conflict(format!("the checkout is on {found}")));
+    }
+    let head = entry
+        .head
+        .ok_or_else(|| conflict("the checkout has no HEAD".to_owned()))?;
+    if let Some(base) = request.base.as_deref() {
+        let base_oid = pin_revision(context, context.facts, base, cancel)?;
+        // Admission on an occupied path must match a free path: a base that
+        // the checkout's HEAD descends from is already satisfied. Only a base
+        // outside that history is a conflict.
+        if !is_ancestor(context, base_oid, head, cancel)? {
+            return Err(conflict(format!(
+                "base {base} at {base_oid} does not contain the checkout at {head}; omit --base or pick a base at or before that commit"
+            )));
+        }
+    }
+    let verified = verify_probed_worktree(context, &entry.path, cancel)?;
+    let dirty = worktree_dirty_at(context, verified.repo(), cancel)?;
+    // Ignored files (build output) are not uncommitted work and do not block reuse.
+    if !matches!(dirty, WorktreeCondition::Clean | WorktreeCondition::Ignored) {
+        let condition = match dirty {
+            WorktreeCondition::Dirty => "has uncommitted changes",
+            WorktreeCondition::GitOperationInProgress => "has a Git operation in progress",
+            WorktreeCondition::Unknown | WorktreeCondition::Clean | WorktreeCondition::Ignored => {
+                "has unknown cleanliness"
+            }
+        };
+        return Err(conflict(format!("the checkout {condition}")));
+    }
+    let path = canonicalize(&entry.path)?;
+    let owner =
+        load_owner(&verified).map_err(|error| format!("owner record could not be read: {error}"));
+    let worker = context.workers.observe_roots(std::slice::from_ref(&path));
+    let writer = worker.get(&path).cloned().unwrap_or_else(|| {
+        Occupancy::census_unknown(path.clone(), context.workers.incomplete_census_detail())
+    });
+    warnings.push(format!(
+        "reusing the existing worktree for branch {}; no new checkout was created",
+        branch.as_str()
+    ));
+    let occupancy = combine_occupancy(&path, Occupancy::Available, writer);
+    Ok(WorktreeInfo {
+        warnings,
+        path,
+        branch: Some(branch.as_str().to_owned()),
+        head,
+        dirty,
+        owner,
+        primary: false,
+        reused: true,
+        occupancy,
+    })
+}
+
 fn create_with_default(
     context: &WorktreeContext<'_>,
     request: WorktreeCreate,
@@ -584,12 +671,23 @@ fn create_with_default(
     if !parent_identity.same_identity(&named_parent.metadata()?) {
         return Err(WorktreeError::UnknownWriter);
     }
-    match worktree_parent.metadata_at(path_name, false) {
-        Ok(_) => return Err(WorktreeError::InvalidRequest),
-        Err(error) if error.is_not_found() => {}
+    let path_exists = match worktree_parent.metadata_at(path_name, false) {
+        Ok(_) => true,
+        Err(error) if error.is_not_found() => false,
         Err(_) => return Err(WorktreeError::UnknownWriter),
-    }
+    };
     let entries = context.facts.fresh_inventory(context, cancel)?;
+    if path_exists {
+        return reuse_existing_worktree(
+            context,
+            &request,
+            &branch,
+            &target,
+            &entries,
+            cancel,
+            naming_warnings,
+        );
+    }
     for (path, _) in canonical_worktree_paths(&entries)? {
         if path == target {
             return Err(WorktreeError::UnknownWriter);
@@ -765,6 +863,7 @@ fn create_with_default(
         dirty,
         owner: Ok(None),
         primary: false,
+        reused: false,
         occupancy: combine_occupancy(&target, Occupancy::Available, writer),
     })
 }
@@ -1338,6 +1437,7 @@ pub(super) fn remove_tree_when_before_delete_locked(
         dirty: WorktreeCondition::Clean,
         owner: Err("worktree registration was not observed".into()),
         primary: false,
+        reused: false,
         occupancy: Occupancy::Available,
     };
     let writer = locked.writer.take().ok_or(WorktreeError::UnknownWriter)?;
@@ -1797,6 +1897,7 @@ pub(super) fn remove_merged_candidate(
                             dirty: WorktreeCondition::Clean,
                             owner: Ok(owner),
                             primary: false,
+                            reused: false,
                             occupancy: Occupancy::Available,
                         };
                         record_started = Some(super::gc::begin_worktree_retirement(
@@ -2220,6 +2321,7 @@ fn remove_with_owner(
                                     dirty: WorktreeCondition::Clean,
                                     owner: Ok(owner),
                                     primary: false,
+                                    reused: false,
                                     occupancy: Occupancy::Available,
                                 };
                                 retirement_record = Some(super::gc::begin_worktree_retirement(

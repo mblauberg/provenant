@@ -163,7 +163,8 @@ impl Error {
                 | WorktreeError::BranchCollision { .. },
             ) => Outcome::Invalid,
             Self::Worktree(
-                WorktreeError::Dirty(_)
+                WorktreeError::WorktreeExists { .. }
+                | WorktreeError::Dirty(_)
                 | WorktreeError::DetachedPrimary
                 | WorktreeError::DetachedUnmerged { .. }
                 | WorktreeError::UnprovenLanding { .. }
@@ -189,7 +190,13 @@ impl Error {
     /// The one mapping from a worktree refusal to its transport facts. Used by
     /// the production emit path and by the render tests, so the two cannot drift.
     pub(crate) fn command_error(&self, code: &str) -> provenant_records::CommandError {
-        crate::command_error(code, &self.local_message(), None, self.repair())
+        // The conflict reason is evidence beside the short refusal: the
+        // message names the path and branch, the cause names what clashed.
+        let cause = match self {
+            Self::Worktree(WorktreeError::WorktreeExists { reason, .. }) => Some(reason.as_str()),
+            _ => None,
+        };
+        crate::command_error(code, &self.local_message(), cause, self.repair())
     }
 }
 
@@ -4376,6 +4383,7 @@ mod human_tests {
             occupancy: worktrees::Occupancy::Observed { process: None },
             owner: Err("worktree registration was not observed".into()),
             primary: false,
+            reused: false,
         })
     }
 
@@ -4859,6 +4867,7 @@ mod gc_preview_tests {
             occupancy: worktrees::Occupancy::Available,
             owner: Ok(None),
             primary: false,
+            reused: false,
         };
         let mut report = worktrees::WorktreeGcReport::default();
         report.worktrees.pruned_refs.push("topic".into());
