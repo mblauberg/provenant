@@ -362,8 +362,8 @@ pub(super) fn check_capacity_policy(
         Effect::Warn(warning) => Ok(Some(warning)),
         Effect::Refuse(diagnostic) | Effect::Stop(diagnostic) => {
             if let Some(detail) = diagnostic.detail {
-                use provenant_records::warning::{POLICY_WARNING, Warning};
-                report_policy_message(Warning::new(POLICY_WARNING, detail));
+                use provenant_records::warning::{POLICY_STRICT_REFUSAL, Warning};
+                report_policy_message(Warning::new(POLICY_STRICT_REFUSAL, detail));
             }
             Err(strict_error)
         }

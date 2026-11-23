@@ -339,7 +339,7 @@ fn report_input_warnings(warnings: Vec<provenant_records::InputWarning>) {
 /// it is no longer duplicated into the command's data payload.
 fn report_text_warning(message: impl Into<String>) {
     warn(Warning::new(
-        provenant_records::warning::ADVISORY_FINDING,
+        provenant_records::warning::SESSION_ADVISORY,
         message,
     ));
 }
@@ -1506,7 +1506,7 @@ mod tests {
         assert_eq!(warnings.len(), 1);
         assert_eq!(
             warnings[0].code.as_ref(),
-            provenant_records::warning::ADVISORY_FINDING.as_str()
+            provenant_records::warning::SESSION_ADVISORY.as_str()
         );
     }
 

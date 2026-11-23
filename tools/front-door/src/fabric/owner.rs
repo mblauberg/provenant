@@ -1662,7 +1662,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             .map_err(git_facts::repository_fact_error)?;
             for warning in warnings {
                 warn(Warning::new(
-                    provenant_records::warning::ADVISORY_FINDING,
+                    provenant_records::warning::BASE_FALLBACK_ADVISORY,
                     warning.clone(),
                 ));
                 self.launch_warnings.push(warning);
@@ -3390,7 +3390,7 @@ impl BoundGraphOwner<'_> {
                 &self.factory.context.roots,
             ) {
                 warn(Warning::new(
-                    provenant_records::warning::ADVISORY_FINDING,
+                    provenant_records::warning::EXCLUSION_ADVISORY,
                     warning.clone(),
                 ));
                 self.launch_warnings.push(warning);
@@ -3669,7 +3669,7 @@ impl BoundGraphOwner<'_> {
             );
             warn(
                 Warning::new(
-                    provenant_records::warning::ADVISORY_FINDING,
+                    provenant_records::warning::MODEL_SEGMENT_ADVISORY,
                     warning.clone(),
                 )
                 .subject(model.as_str()),

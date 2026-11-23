@@ -545,7 +545,7 @@ pub fn install_page(
         {
             if reported.insert(detail.clone()) {
                 warn(Warning::new(
-                    provenant_records::warning::ADVISORY_FINDING,
+                    provenant_records::warning::INSTALL_FINDING_ADVISORY,
                     detail.clone(),
                 ));
             }
@@ -688,7 +688,7 @@ mod tests {
                 assert_eq!(warnings.len(), 1);
                 assert_eq!(
                     warnings[0].code.as_ref(),
-                    provenant_records::warning::ADVISORY_FINDING.as_str()
+                    provenant_records::warning::INSTALL_FINDING_ADVISORY.as_str()
                 );
                 assert_eq!(warnings[0].message, detail);
             }
