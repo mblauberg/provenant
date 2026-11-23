@@ -11,6 +11,10 @@ pub struct ApprovalCarryReceipt {
     pub current_head: String,
     pub base_head: String,
     pub kind: provenant_cli::domains::ApprovalCarry,
+    /// The layer and key that declared the format command, when this carry was
+    /// a format carry. Named so a reader can tell configured from detected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format_source: Option<provenant_records::Source>,
     #[serde(default)]
     pub extra: provenant_records::ExtraFields,
 }
@@ -725,6 +729,7 @@ pub(crate) mod tests {
             current_head: "bbbb".into(),
             base_head: "cccc".into(),
             kind: provenant_cli::domains::ApprovalCarry::CleanMerge,
+            format_source: None,
             extra: Default::default(),
         };
         write_approval_carry(dir.path(), &valid)?;

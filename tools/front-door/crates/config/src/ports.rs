@@ -299,6 +299,11 @@ pub struct VerifyPort {
     pub test_threads: Option<u32>,
     pub package_paths: Vec<PackagePath>,
     pub quarantine_command: Vec<String>,
+    /// The command approval carry runs to prove a delta is formatting-only.
+    /// An absent leaf is filled by stack detection; `"none"` turns the carry
+    /// off. A declared command is run exactly as written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<VerifyFormat>,
     /// Tier names are repository-defined strings, not a closed numeric enum.
     pub tiers: BTreeMap<String, VerifyTier>,
     pub default_tier: String,
@@ -506,6 +511,51 @@ impl<'de> Deserialize<'de> for TierCommand {
         D: serde::Deserializer<'de>,
     {
         deserializer.deserialize_any(TierCommandVisitor)
+    }
+}
+
+/// The command approval carry runs to prove a delta is formatting-only. It
+/// takes the same string or table forms as a [`TierCommand`], plus the literal
+/// string `"none"`, which turns format carry off. When no layer declares the
+/// leaf, stack detection supplies a command (see [`crate::detect::detect`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VerifyFormat {
+    /// Explicitly turned off with `"format": "none"`.
+    None,
+    /// Run exactly this command from the verify workspace.
+    Command(TierCommand),
+}
+
+impl Default for VerifyFormat {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+impl Serialize for VerifyFormat {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::None => serializer.serialize_str("none"),
+            Self::Command(command) => command.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for VerifyFormat {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if value.as_str() == Some("none") {
+            return Ok(Self::None);
+        }
+        serde_json::from_value(value)
+            .map(Self::Command)
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -1987,6 +2037,23 @@ impl PortTable {
         &self.sourced_leaves
     }
 
+    /// The format command for approval carry, with the exact source that
+    /// declared it. An absent leaf resolves to the built-in `none`, so a caller
+    /// can tell an explicit refusal from a command it may run.
+    /// Spec: docs/specs/next-batch.md#seam-2-one-sourced-settings-vocabulary
+    pub fn verify_format(&self) -> Sourced<VerifyFormat> {
+        let value = self.verify.format.clone().unwrap_or(VerifyFormat::None);
+        let source = self
+            .sourced_leaf("verify.format")
+            .last()
+            .map(|candidate| candidate.source.clone())
+            .unwrap_or(Source {
+                layer: Layer::Default,
+                origin: None,
+            });
+        Sourced { value, source }
+    }
+
     /// Resolve the affected-verification full-run interval with its exact
     /// layer source. Invalid durations warn and fall back to the builtin 24h.
     pub fn verify_affected_full_after_duration(&self) -> ResolvedBuildValue<Duration> {
@@ -2111,6 +2178,7 @@ impl PortTable {
                 );
                 document["verify"]["tiers"] = serde_json::json!({});
                 walk.remove_prefix("verify.tiers.");
+                let detected_format = detected.format.clone();
                 for (name, commands) in detected.tiers {
                     let selection =
                         if name == "2" || commands.iter().any(|command| command.stack != "rust") {
@@ -2129,6 +2197,16 @@ impl PortTable {
                         "detected",
                         &format!("verify.tiers.{name}"),
                         &mut walk,
+                    );
+                }
+                if let Some(command) = detected_format {
+                    let value = serde_json::to_value(&command).map_err(io::Error::other)?;
+                    document["verify"]["format"] = value.clone();
+                    walk.record(
+                        "verify.format",
+                        Layer::Detected,
+                        "detected#verify.format",
+                        value,
                     );
                 }
             }
@@ -2187,6 +2265,39 @@ impl PortTable {
             }
         }
         let mut table: Self = serde_json::from_value(document).map_err(io::Error::other)?;
+        // Detection declares project-root paths; commands run from the verify
+        // workspace. Rebase a detected format command under the workspace that
+        // won, so the carry starts where detection found the stack.
+        if table
+            .sourced_leaf("verify.format")
+            .last()
+            .is_some_and(|winner| winner.source.layer == Layer::Detected)
+        {
+            if let Some(VerifyFormat::Command(command)) = &mut table.verify.format {
+                let normal = |path: &Path| -> PathBuf {
+                    let parts: PathBuf = path
+                        .components()
+                        .filter(|part| !matches!(part, Component::CurDir))
+                        .collect();
+                    if parts.as_os_str().is_empty() {
+                        PathBuf::from(".")
+                    } else {
+                        parts
+                    }
+                };
+                let cwd = normal(&command.cwd);
+                let workspace = normal(&table.verify.workspace);
+                if workspace != Path::new(".") {
+                    command.cwd = if cwd == workspace {
+                        PathBuf::from(".")
+                    } else {
+                        cwd.strip_prefix(&workspace)
+                            .map(Path::to_path_buf)
+                            .unwrap_or(cwd)
+                    };
+                }
+            }
+        }
         table.provenance = walk.layers;
         table.sourced_leaves = walk.candidates;
         table.sync_sources_from_provenance();
@@ -2885,6 +2996,56 @@ mod tests {
             }
             assert!(!table.verify.tiers.contains_key("3"));
         }
+    }
+
+    #[test]
+    fn verify_format_is_detected_then_configured_then_off() {
+        // Spec: docs/specs/next-batch.md#seam-2-one-sourced-settings-vocabulary
+        let root = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("Cargo.toml"), "[workspace]\n").unwrap();
+        let table = PortTable::read_for(Some(root.path()), state.path()).unwrap();
+        let detected = table.verify_format();
+        assert_eq!(detected.source.layer, Layer::Detected);
+        assert_eq!(
+            detected.source.origin.as_deref(),
+            Some("detected#verify.format")
+        );
+        let VerifyFormat::Command(command) = detected.value else {
+            panic!("stack detection must supply a write-mode formatter");
+        };
+        assert_eq!(command.argv, ["cargo", "fmt"]);
+        assert_eq!(command.cwd.as_path(), std::path::Path::new("."));
+
+        // A declared command keeps the configured layer that supplied it.
+        std::fs::create_dir(root.path().join(".provenant")).unwrap();
+        std::fs::write(
+            root.path().join(PORTS_CONFIG),
+            r#"{"verify":{"format":"myfmt --write"}}"#,
+        )
+        .unwrap();
+        let table = PortTable::read_for(Some(root.path()), state.path()).unwrap();
+        let configured = table.verify_format();
+        assert_eq!(configured.source.layer, Layer::Project);
+        assert_eq!(
+            configured.source.origin.as_deref(),
+            Some(".provenant/ports.json#verify.format")
+        );
+        let VerifyFormat::Command(command) = configured.value else {
+            panic!("a declared command must be kept verbatim");
+        };
+        assert_eq!(command.argv, ["myfmt", "--write"]);
+
+        // The literal "none" turns the carry off, whatever detection found.
+        std::fs::write(
+            root.path().join(PORTS_CONFIG),
+            r#"{"verify":{"format":"none"}}"#,
+        )
+        .unwrap();
+        let table = PortTable::read_for(Some(root.path()), state.path()).unwrap();
+        let off = table.verify_format();
+        assert_eq!(off.source.layer, Layer::Project);
+        assert_eq!(off.value, VerifyFormat::None);
     }
 
     #[test]

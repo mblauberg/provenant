@@ -17,6 +17,10 @@ pub struct Detection {
     pub stacks: Vec<DetectedStack>,
     pub tiers: BTreeMap<String, Vec<TierCommand>>,
     pub default_tier: Option<String>,
+    /// A write-mode format command for approval carry, when the stack declares
+    /// one. Carried with the rest of detection so the port table can place it
+    /// at the `Detected` layer like any other inferred value.
+    pub format: Option<TierCommand>,
     pub warnings: Vec<String>,
 }
 
@@ -59,6 +63,11 @@ pub fn detect(project: &Path) -> Detection {
             result.stacks.push(DetectedStack {
                 stack: "rust".into(),
                 cwd: cwd.clone(),
+            });
+            result.format = Some(TierCommand {
+                stack: "rust".into(),
+                cwd: cwd.clone(),
+                argv: vec!["cargo".into(), "fmt".into()],
             });
             for (tier, argv) in [
                 ("0", vec!["cargo", "fmt", "{packages}", "--", "--check"]),
@@ -125,6 +134,17 @@ pub fn detect(project: &Path) -> Detection {
                     stack: "node".into(),
                     cwd: cwd.into(),
                 });
+                if value
+                    .get("scripts")
+                    .and_then(|scripts| scripts.get("format"))
+                    .is_some_and(|script| script.is_string())
+                {
+                    result.format = Some(TierCommand {
+                        stack: "node".into(),
+                        cwd: cwd.into(),
+                        argv: vec![manager.clone(), "run".into(), "format".into()],
+                    });
+                }
                 for (tier, script) in [
                     ("0", "lint"),
                     ("0", "typecheck"),

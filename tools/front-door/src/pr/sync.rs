@@ -541,6 +541,7 @@ fn sync_one(
                     current_head: current_head.clone(),
                     base_head,
                     kind: provenant_cli::domains::ApprovalCarry::CleanMerge,
+                    format_source: None,
                     extra: Default::default(),
                 },
             )?;

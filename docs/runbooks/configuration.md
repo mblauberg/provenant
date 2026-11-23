@@ -58,6 +58,13 @@ location.
   `{integration_args}` and `{quarantine_args}` expand to zero or more arguments;
   other elements are literal and never shell split. An invalid tier command
   warns with its layer and tier, and that tier falls back to the next lower layer.
+- `verify.format` declares the command approval carry runs to prove a delta is
+  formatting-only, in the same string or table form as a tier command, for
+  example `{"verify": {"format": "cargo fmt"}}`. It runs exactly as declared
+  from the verify workspace joined with its `cwd`. When no layer declares it,
+  stack detection supplies a write-mode default and the carry receipt names
+  whether the command came from `detected` or from a configured layer. The
+  literal string `"none"` turns format carry off and says so in the warning.
 
 This repository keeps its ports at `config/ports.json` and links the optional
 `.provenant/ports.json` to it, so direct CI reads it without Provenant. Put
