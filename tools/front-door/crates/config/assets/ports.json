@@ -188,6 +188,7 @@
       "kind": "builtin"
     },
     "remote": "",
+    "default_branch": "",
     "protected": []
   },
   "build": {

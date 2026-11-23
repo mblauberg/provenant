@@ -47,8 +47,8 @@ policy, each with the layer and key that produced the value.
 
 The remote is the declared `git.remote`, else the current branch's upstream remote, else the sole
 remote. A refusal lists the remotes seen with close matches, never an assumed `origin`. The default
-branch is declared, else `refs/remotes/<remote>/HEAD`, else the forge API; protected branches are
-declared, else the default branch plus forge-reported protection.
+branch is the declared `git.default_branch`, else `refs/remotes/<remote>/HEAD`, else the forge API;
+protected branches are declared, else the default branch plus forge-reported protection.
 - Why: a hidden guess can retire the wrong branch or push to the wrong repository.
 
 ## Delivery

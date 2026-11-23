@@ -269,8 +269,9 @@ pub struct Port {
 
 /// The one declaration of the Git context every forge operation shares.
 ///
-/// An empty `remote` or `protected` means "detect": [`crate::forge::ForgeContext`]
-/// resolves the value from the repository when no layer declared it.
+/// An empty `remote`, `default_branch` or `protected` means "detect":
+/// [`crate::forge::ForgeContext`] resolves the value from the repository when
+/// no layer declared it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GitPort {
     pub source: Layer,
@@ -278,6 +279,10 @@ pub struct GitPort {
     /// The remote name. Empty means detect it from the branch upstream or the
     /// sole remote.
     pub remote: String,
+    /// The default branch name. Empty means resolve it from
+    /// `refs/remotes/<remote>/HEAD`, then the forge API. A declaration wins
+    /// ahead of both detections.
+    pub default_branch: String,
     /// Branch names that must never be rewritten or retired. Empty means the
     /// default branch plus the forge-reported protected branches.
     pub protected: Vec<String>,
@@ -1084,6 +1089,9 @@ impl PortEntry for GitPort {
             && (self.remote.is_empty()
                 || (relative(Path::new(&self.remote), false)
                     && !self.remote.contains(BRANCH_TOKEN)))
+            && (self.default_branch.is_empty()
+                || (relative(Path::new(&self.default_branch), false)
+                    && !self.default_branch.contains(BRANCH_TOKEN)))
             && self
                 .protected
                 .iter()
