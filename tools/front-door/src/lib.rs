@@ -563,11 +563,60 @@ fn read_patch(path: &std::path::Path) -> Result<serde_json::Value, Box<dyn std::
     }
     Ok(serde_json::from_slice(&bytes)?)
 }
-/// The effective verify port for `config show`: each value with the layer that
-/// supplied it. An unset base is inferred from the effective remote's HEAD and
+/// Render one leaf's winning `Sourced` as wire JSON. Under `--full` the
+/// layers it shadowed are appended, lowest first, so an explanation shows
+/// both the effective source and the candidates it replaced.
+fn sourced_leaf_json<T: serde::Serialize>(
+    winner: &provenant_records::Sourced<T>,
+    shadowed: &[provenant_records::Sourced<serde_json::Value>],
+    full: bool,
+) -> serde_json::Value {
+    let mut value = serde_json::to_value(winner).unwrap_or_default();
+    if full && !shadowed.is_empty() {
+        value["shadowed"] = serde_json::to_value(shadowed).unwrap_or_default();
+    }
+    value
+}
+
+/// One dotted port leaf as its winning `Sourced`, using the effective value
+/// (which may have been derived after the layer walk) and the winner's own
+/// layer and origin. A port-level label is never printed for a leaf.
+fn config_port_leaf(
+    table: &provenant_config::PortTable,
+    leaf: &str,
+    value: serde_json::Value,
+    full: bool,
+) -> serde_json::Value {
+    let candidates = table.sourced_leaf(leaf);
+    let Some((winner, shadowed)) = candidates.split_last() else {
+        return serde_json::to_value(provenant_records::Sourced {
+            value,
+            source: provenant_records::Source {
+                layer: provenant_records::Layer::Default,
+                origin: None,
+            },
+        })
+        .unwrap_or_default();
+    };
+    sourced_leaf_json(
+        &provenant_records::Sourced {
+            value,
+            source: winner.source.clone(),
+        },
+        shadowed,
+        full,
+    )
+}
+
+/// The effective verify port for `config show`: each leaf with its own layer
+/// and origin. An unset base is inferred from the effective remote's HEAD and
 /// labelled with the ref it came from; a port table that cannot be read stays
 /// a warning instead of stopping a command that does not need verify.
-fn config_show_ports(project: &std::path::Path, state: &std::path::Path) -> serde_json::Value {
+fn config_show_ports(
+    project: &std::path::Path,
+    state: &std::path::Path,
+    full: bool,
+) -> serde_json::Value {
     use provenant_os::exec::{SystemExecutor, Termination};
     let ports = match provenant_config::PortTable::read_for_inspection(Some(project), state) {
         Ok(ports) => ports,
@@ -608,48 +657,69 @@ fn config_show_ports(project: &std::path::Path, state: &std::path::Path) -> serd
                 .and_then(|target| provenant_config::infer_verify_base(&remote, &target))
         };
         match inferred {
-            Some((base, source)) => serde_json::json!({
-                "value": base,
-                "source": format!("inferred from {source}"),
-            }),
-            None => serde_json::json!({
-                "value": serde_json::Value::Null,
-                "source": "unresolved",
-                "remedy": provenant_config::verify_base_unset_error().to_string(),
-            }),
+            Some((base, origin)) => sourced_leaf_json(
+                &provenant_records::Sourced {
+                    value: base,
+                    source: provenant_records::Source {
+                        layer: provenant_records::Layer::Detected,
+                        origin: Some(origin),
+                    },
+                },
+                &[],
+                full,
+            ),
+            None => {
+                let mut value = sourced_leaf_json(
+                    &provenant_records::Sourced {
+                        value: serde_json::Value::Null,
+                        source: provenant_records::Source {
+                            layer: provenant_records::Layer::Detected,
+                            origin: None,
+                        },
+                    },
+                    &[],
+                    full,
+                );
+                value["remedy"] = provenant_config::verify_base_unset_error()
+                    .to_string()
+                    .into();
+                value
+            }
         }
     } else {
-        serde_json::json!({
-            "value": ports.verify.base,
-            "source": provenant_config::port_source_layer(ports.verify.source),
-        })
+        config_port_leaf(
+            &ports,
+            "verify.base",
+            serde_json::Value::String(ports.verify.base.clone()),
+            full,
+        )
     };
     serde_json::json!({
         "verify.base": base,
-        "verify.remote": {
-            "value": remote,
-            "source": provenant_config::port_source_layer(ports.verify.source),
-        },
+        "verify.remote": config_port_leaf(
+            &ports,
+            "verify.remote",
+            serde_json::Value::String(remote),
+            full,
+        ),
     })
 }
 
-/// The effective `build.prepare` list with the leaf's own source. A port's
-/// label follows its highest leaf, which may be a different key, so read the
-/// provenance of `build.prepare` rather than `table.build.source`.
-fn config_ports_prepare(table: &provenant_config::PortTable) -> serde_json::Value {
-    let source = table
-        .provenance()
-        .get("build.prepare")
-        .copied()
-        .unwrap_or(table.build.source);
-    serde_json::json!({
-        "value": table.build.prepare,
-        "source": provenant_config::port_source_layer(source),
-    })
+/// The effective `build.prepare` list with the leaf's own layer and origin.
+/// A port's label follows its highest leaf, which may be a different key, so
+/// read the source history of `build.prepare` rather than `table.build.source`.
+fn config_ports_prepare(table: &provenant_config::PortTable, full: bool) -> serde_json::Value {
+    config_port_leaf(
+        table,
+        "build.prepare",
+        serde_json::to_value(&table.build.prepare).unwrap_or_default(),
+        full,
+    )
 }
 
 #[cfg(test)]
 mod config_ports_tests {
+    /// Spec: docs/specs/state.md#every-setting-reports-its-layer
     #[test]
     fn reports_effective_prepare_with_its_own_leaf_source() {
         let temp = tempfile::tempdir().unwrap();
@@ -667,9 +737,16 @@ mod config_ports_tests {
         )
         .unwrap();
         let table = provenant_config::PortTable::read_for(Some(&project), &state).unwrap();
-        let value = super::config_ports_prepare(&table);
-        assert_eq!(value["source"], "host_project");
+        let value = super::config_ports_prepare(&table, false);
+        assert_eq!(value["layer"], "host_project");
+        assert!(
+            value["origin"]
+                .as_str()
+                .unwrap()
+                .ends_with("ports.json#build.prepare")
+        );
         assert_eq!(value["value"][0][1], "gen.mjs");
+        assert!(value.get("shadowed").is_none());
 
         // A higher layer setting a different leaf must not relabel prepare.
         std::fs::write(
@@ -679,9 +756,60 @@ mod config_ports_tests {
         .unwrap();
         let table = provenant_config::PortTable::read_for(Some(&project), &state).unwrap();
         assert_eq!(
-            super::config_ports_prepare(&table)["source"],
+            super::config_ports_prepare(&table, false)["layer"],
             "host_project"
         );
+
+        // --full also shows the layers this leaf shadowed.
+        let full = super::config_ports_prepare(&table, true);
+        let shadowed = full["shadowed"].as_array().unwrap();
+        assert!(
+            shadowed
+                .iter()
+                .any(|candidate| candidate["layer"] == "default")
+        );
+    }
+
+    /// Spec: docs/specs/state.md#every-setting-reports-its-layer
+    #[test]
+    fn config_show_ports_reports_per_leaf_sources_and_full_shadowed_layers() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::create_dir_all(project.join(".git")).unwrap();
+        std::fs::create_dir_all(project.join(".provenant")).unwrap();
+        let keyed = provenant_config::host_project_dir(&state, &project).unwrap();
+        std::fs::create_dir_all(&keyed).unwrap();
+        // verify.remote is declared at both host and project; verify.base only
+        // at project, so neither leaf needs the port-level label.
+        std::fs::write(
+            state.join("ports.json"),
+            r#"{"verify":{"remote":"host-remote"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            project.join(".provenant/ports.json"),
+            r#"{"verify":{"remote":"project-remote","base":"project/main"}}"#,
+        )
+        .unwrap();
+
+        let shown = super::config_show_ports(&project, &state, false);
+        let remote = &shown["verify.remote"];
+        assert_eq!(remote["value"], "project-remote");
+        assert_eq!(remote["layer"], "project");
+        assert_eq!(
+            remote["origin"].as_str().unwrap(),
+            ".provenant/ports.json#verify.remote"
+        );
+        assert!(remote.get("shadowed").is_none());
+        assert_eq!(shown["verify.base"]["layer"], "project");
+
+        let full = super::config_show_ports(&project, &state, true);
+        let shadowed = full["verify.remote"]["shadowed"].as_array().unwrap();
+        assert!(shadowed.iter().any(|candidate| {
+            candidate["layer"] == "host" && candidate["value"] == "host-remote"
+        }));
     }
 }
 
@@ -736,7 +864,7 @@ fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::
                     "schema_version": table.schema_version,
                     "ports": ports,
                     "build": {
-                        "prepare": config_ports_prepare(&table),
+                        "prepare": config_ports_prepare(&table, globals.full),
                     },
                 })
             }
@@ -776,30 +904,38 @@ fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::
                 );
                 value["policy"] = serde_json::to_value(&policy)?;
                 value["policy_render"] = policy.render().into();
-                value["ports"] = config_show_ports(&context.project, roots.state.as_path());
+                // Every config-owned leaf carries the same `Sourced` shape a
+                // knob already has: a value beside its layer and exact origin.
+                let setting_sources: serde_json::Map<String, serde_json::Value> = resolved
+                    .origins
+                    .iter()
+                    .filter_map(|(field, origin)| {
+                        let pointer = format!("/{}", field.replace('.', "/"));
+                        let leaf = value.pointer(&pointer)?.clone();
+                        let sourced = provenant_records::Sourced {
+                            value: leaf,
+                            source: provenant_cli::config_reads::origin_source(Some(origin), field),
+                        };
+                        Some((
+                            field.clone(),
+                            serde_json::to_value(sourced).unwrap_or_default(),
+                        ))
+                    })
+                    .collect();
+                value["setting_sources"] = setting_sources.into();
+                value["ports"] =
+                    config_show_ports(&context.project, roots.state.as_path(), globals.full);
                 if globals.full {
                     let table = config::PortTable::read_for_inspection(
                         Some(&context.project),
                         roots.state.as_path(),
                     )?;
-                    let serialized = serde_json::to_value(&table)?;
                     let leaves: serde_json::Map<String, serde_json::Value> = table
-                        .provenance()
+                        .sourced_leaves()
                         .iter()
-                        .filter(|(key, _)| {
-                            key.starts_with("build.")
-                                || key.starts_with("verify.tiers.")
-                                || *key == "verify.default_tier"
-                        })
-                        .filter_map(|(key, source)| {
-                            let mut v = &serialized;
-                            for part in key.split('.') {
-                                v = v.get(part)?;
-                            }
-                            Some((
-                                key.clone(),
-                                serde_json::json!({"value": v, "source": source}),
-                            ))
+                        .filter_map(|(key, candidates)| {
+                            let (winner, shadowed) = candidates.split_last()?;
+                            Some((key.clone(), sourced_leaf_json(winner, shadowed, true)))
                         })
                         .collect();
                     value["port_leaves"] = leaves.into();
@@ -877,7 +1013,12 @@ fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::
                         .map(|object| {
                             object
                                 .keys()
-                                .filter(|key| !matches!(key.as_str(), "origins" | "policy_render"))
+                                .filter(|key| {
+                                    !matches!(
+                                        key.as_str(),
+                                        "origins" | "policy_render" | "setting_sources"
+                                    )
+                                })
                                 .map(String::as_str)
                                 .collect::<Vec<_>>()
                                 .join(", ")

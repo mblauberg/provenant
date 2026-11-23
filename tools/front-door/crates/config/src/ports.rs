@@ -6,6 +6,7 @@ pub use provenant_records::{
     PORT_PRECEDENCE, PortCommand, PortCommandBackend, PortCommandDisposition, PortCommandReceipt,
     PortReceiptLifetime, port_layer_rank,
 };
+use provenant_records::{Source, Sourced};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -1159,6 +1160,12 @@ macro_rules! declare_ports {
             /// that labels ports, excluded from every serialised layer.
             #[serde(skip)]
             provenance: BTreeMap<String, Layer>,
+            /// Every layer that declared each leaf, lowest first, with its
+            /// exact origin. The last candidate is the effective winner and
+            /// the rest are shadowed; this is the per-leaf source an
+            /// explanation prints. Derived state, never read from a file.
+            #[serde(skip)]
+            sourced_leaves: BTreeMap<String, Vec<Sourced<serde_json::Value>>>,
         }
 
         impl PortTable {
@@ -1338,14 +1345,47 @@ fn first_type_mismatch(
     }
 }
 
+/// The layer walk's two derived products: the winning layer per leaf, kept
+/// for the per-port fold, and every declared candidate with its exact origin
+/// in application order (lowest layer first).
+#[derive(Clone, Default)]
+struct LeafWalk {
+    layers: BTreeMap<String, Layer>,
+    candidates: BTreeMap<String, Vec<Sourced<serde_json::Value>>>,
+}
+
+impl LeafWalk {
+    fn record(&mut self, path: &str, layer: Layer, origin: &str, value: serde_json::Value) {
+        self.layers.insert(path.to_owned(), layer);
+        self.candidates
+            .entry(path.to_owned())
+            .or_default()
+            .push(Sourced {
+                value,
+                source: Source {
+                    layer,
+                    origin: Some(origin.to_owned()),
+                },
+            });
+    }
+
+    fn remove_prefix(&mut self, prefix: &str) {
+        self.layers.retain(|key, _| !key.starts_with(prefix));
+        self.candidates.retain(|key, _| !key.starts_with(prefix));
+    }
+}
+
 /// Record the leaves an overlay declares against its layer. Objects recurse
 /// (tier names are object keys); arrays and scalars are leaves. The synthetic
-/// `source` label and `schema_version` are not configuration leaves.
+/// `source` label and `schema_version` are not configuration leaves. Each
+/// declaration becomes one candidate in the leaf's source history, so an
+/// explanation can name both the winner and the layers it shadowed.
 fn record_leaf_sources(
     value: &serde_json::Value,
-    source: Layer,
+    layer: Layer,
+    origin_base: &str,
     prefix: &str,
-    provenance: &mut BTreeMap<String, Layer>,
+    walk: &mut LeafWalk,
 ) {
     match value {
         serde_json::Value::Object(map) => {
@@ -1364,12 +1404,17 @@ fn record_leaf_sources(
                 {
                     continue;
                 }
-                record_leaf_sources(child, source, &path, provenance);
+                record_leaf_sources(child, layer, origin_base, &path, walk);
             }
         }
         _ => {
             if !prefix.is_empty() {
-                provenance.insert(prefix.to_owned(), source);
+                walk.record(
+                    prefix,
+                    layer,
+                    &format!("{origin_base}#{prefix}"),
+                    value.clone(),
+                );
             }
         }
     }
@@ -1377,7 +1422,7 @@ fn record_leaf_sources(
 
 fn apply_layer(
     table: &mut serde_json::Value,
-    provenance: &mut BTreeMap<String, Layer>,
+    walk: &mut LeafWalk,
     path: &Path,
     source: Layer,
     on_unknown: &mut impl FnMut(&[u8], &provenant_records::InputWarning),
@@ -1438,7 +1483,16 @@ fn apply_layer(
             true
         });
     }
-    record_leaf_sources(&overlay, source, "", provenance);
+    // The origin names the exact declaration: a file plus the dotted leaf.
+    // The project layer uses its stable relative path so the wire origin
+    // matches the documented `.provenant/ports.json#verify.remote` spelling.
+    let origin_base = match source {
+        Layer::Default => "builtin".to_owned(),
+        Layer::Detected => "detected".to_owned(),
+        Layer::Project => PORTS_CONFIG.to_owned(),
+        _ => path.display().to_string(),
+    };
+    record_leaf_sources(&overlay, source, &origin_base, "", walk);
     let object = overlay
         .as_object_mut()
         .ok_or_else(|| layer_error(path, "<root>", "port table must be an object"))?;
@@ -1685,6 +1739,21 @@ impl PortTable {
         &self.provenance
     }
 
+    /// Every layer that declared one dotted leaf, lowest first, with its
+    /// origin. The final candidate is the effective winner; the rest are the
+    /// layers it shadowed. An unknown leaf has no candidates.
+    pub fn sourced_leaf(&self, leaf: &str) -> &[Sourced<serde_json::Value>] {
+        self.sourced_leaves
+            .get(leaf)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// Every leaf's source history, keyed by dotted path.
+    pub fn sourced_leaves(&self) -> &BTreeMap<String, Vec<Sourced<serde_json::Value>>> {
+        &self.sourced_leaves
+    }
+
     /// Resolve the affected-verification full-run interval with its exact
     /// layer source. Invalid durations warn and fall back to the builtin 24h.
     pub fn verify_affected_full_after_duration(&self) -> ResolvedBuildValue<Duration> {
@@ -1791,16 +1860,22 @@ impl PortTable {
         mut on_malformed: impl FnMut(&Path, &io::Error),
     ) -> io::Result<Self> {
         let mut document = serde_json::to_value(Self::builtin()).map_err(io::Error::other)?;
-        let mut provenance = BTreeMap::new();
-        record_leaf_sources(&document, Layer::Default, "", &mut provenance);
+        let mut walk = LeafWalk::default();
+        record_leaf_sources(&document, Layer::Default, "builtin", "", &mut walk);
         if let Some(project) = project {
             let detected = crate::detect::detect(project);
             if !detected.stacks.is_empty() {
+                let default_tier = detected.default_tier.unwrap_or_default();
                 document["verify"]["default_tier"] =
-                    detected.default_tier.unwrap_or_default().into();
-                provenance.insert("verify.default_tier".into(), Layer::Detected);
+                    serde_json::Value::String(default_tier.clone());
+                walk.record(
+                    "verify.default_tier",
+                    Layer::Detected,
+                    "detected#verify.default_tier",
+                    serde_json::Value::String(default_tier),
+                );
                 document["verify"]["tiers"] = serde_json::json!({});
-                provenance.retain(|key, _| !key.starts_with("verify.tiers."));
+                walk.remove_prefix("verify.tiers.");
                 for (name, commands) in detected.tiers {
                     let selection =
                         if name == "2" || commands.iter().any(|command| command.stack != "rust") {
@@ -1816,8 +1891,9 @@ impl PortTable {
                     record_leaf_sources(
                         &document["verify"]["tiers"][&name],
                         Layer::Detected,
+                        "detected",
                         &format!("verify.tiers.{name}"),
-                        &mut provenance,
+                        &mut walk,
                     );
                 }
             }
@@ -1825,7 +1901,7 @@ impl PortTable {
         if let Some(host_state) = host_state {
             apply_layer(
                 &mut document,
-                &mut provenance,
+                &mut walk,
                 &host_state.join("ports.json"),
                 Layer::Host,
                 &mut on_unknown,
@@ -1840,7 +1916,7 @@ impl PortTable {
             {
                 apply_layer(
                     &mut document,
-                    &mut provenance,
+                    &mut walk,
                     &dir.join("ports.json"),
                     Layer::HostProject,
                     &mut on_unknown,
@@ -1851,11 +1927,11 @@ impl PortTable {
         if let Some(project) = project {
             let path = project.join(PORTS_CONFIG);
             let mut candidate = document.clone();
-            let mut candidate_provenance = provenance.clone();
+            let mut candidate_walk = walk.clone();
             let mut warnings = Vec::new();
             let applied = apply_layer(
                 &mut candidate,
-                &mut candidate_provenance,
+                &mut candidate_walk,
                 &path,
                 Layer::Project,
                 &mut |bytes, warning| warnings.push((bytes.to_vec(), warning.clone())),
@@ -1864,7 +1940,7 @@ impl PortTable {
             match applied {
                 Ok(()) => {
                     document = candidate;
-                    provenance = candidate_provenance;
+                    walk = candidate_walk;
                     for (bytes, warning) in warnings {
                         on_unknown(&bytes, &warning);
                     }
@@ -1876,7 +1952,8 @@ impl PortTable {
             }
         }
         let mut table: Self = serde_json::from_value(document).map_err(io::Error::other)?;
-        table.provenance = provenance;
+        table.provenance = walk.layers;
+        table.sourced_leaves = walk.candidates;
         table.sync_sources_from_provenance();
         Ok(table)
     }
@@ -2947,6 +3024,50 @@ mod tests {
                 .len(),
             0
         );
+    }
+
+    // Spec: docs/specs/state.md#every-setting-reports-its-layer
+    #[test]
+    fn sourced_leaves_report_the_winner_origin_and_shadowed_layers() {
+        let temp = tempfile::tempdir().unwrap();
+        let (host, project, keyed) = checkout_with_key(temp.path());
+        std::fs::create_dir_all(&keyed).unwrap();
+        std::fs::write(
+            host.join("ports.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "verify": {"remote": "host-remote"},
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            project.join(PORTS_CONFIG),
+            serde_json::to_vec(&serde_json::json!({
+                "verify": {"remote": "project-remote"},
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let table = PortTable::read_for(Some(&project), &host).unwrap();
+        let candidates = table.sourced_leaf("verify.remote");
+        // The compiled default, the host declaration and the project override.
+        assert_eq!(candidates.len(), 3);
+        let winner = candidates.last().unwrap();
+        assert_eq!(winner.value, serde_json::json!("project-remote"));
+        assert_eq!(winner.source.layer, Layer::Project);
+        assert_eq!(
+            winner.source.origin.as_deref(),
+            Some(".provenant/ports.json#verify.remote")
+        );
+        let shadowed: Vec<_> = candidates[..candidates.len() - 1]
+            .iter()
+            .map(|candidate| (&candidate.value, candidate.source.layer))
+            .collect();
+        assert_eq!(shadowed[1].0, &serde_json::json!("host-remote"));
+        assert_eq!(shadowed[1].1, Layer::Host);
+        assert_eq!(shadowed[0].1, Layer::Default);
+        assert!(table.sourced_leaf("absent.leaf").is_empty());
     }
 
     #[test]
