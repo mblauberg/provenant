@@ -573,160 +573,36 @@ mod tests {
 
     // Spec: docs/specs/cli.md#warnings-are-typed-values
     #[test]
-    fn the_catalogue_codes_are_upper_snake() {
-        // Lists exactly the declared consts; adding or removing one must update this list.
-        for code in [
-            super::CONFIG_KEY_IGNORED,
-            super::CONFIG_MALFORMED,
-            super::SETTING_LAYER_IGNORED,
-            super::NAME_CASE_FOLDED,
-            super::NAME_ALIAS_USED,
-            super::BRANCH_BEHIND_BASE,
-            super::WORKTREE_ADOPTED_DIRTY,
-            super::LIVE_RECORD_FORMAT_CHANGED,
-            super::MIGRATION_STEP_FAILED,
-            super::STATE_ROOT_OVERLAP,
-            super::FORGE_CONTEXT_UNRESOLVED,
-            super::RESULT_TOO_LARGE,
-            super::GIT_OPERATION_RETAINED,
-            super::ANSWER_DELIVERY_SKIPPED,
-            super::ANSWER_DELIVERY_RETAINED,
-            super::TERMINAL_FAILURE_UNRETAINED,
-            super::TERMINAL_PUBLICATION_INCOMPLETE,
-            super::POLICY_STRICT_REFUSAL,
-            super::SECRET_INPUT_POLICY_UNEXPECTED,
-            super::PROVIDER_POLICY_UNEXPECTED,
-            super::PRE_PUSH_POLICY_ADVISORY,
-            super::CONFIG_UNAVAILABLE,
-            super::PROJECT_DIRECTORY_IGNORED,
-            super::DISK_FLOOR_LOW,
-            super::PACKAGE_CACHE_SETTINGS_UNRESOLVED,
-            super::LEGACY_PNPM_CACHE_SETTINGS,
-            super::PNPM_FAMILY_UNRESOLVED,
-            super::PNPM_SELECTOR_CONFLICT,
-            super::LEGACY_PNPM_ENV_SELECTOR,
-            super::ACCOUNT_SWITCH_RECONCILE_FAILED,
-            super::CHANGE_SIGNAL_UNPUBLISHED,
-            super::PROCESS_BUDGET_PROBE_FAILED,
-            super::CREDENTIAL_INVENTORY_INCOMPLETE,
-            super::HOST_INVENTORY_INCOMPLETE,
-            super::UNREADABLE_PROCESS_CENSUS,
-            super::DEFAULT_BASE_FALLBACK,
-            super::WORKTREE_SETUP_INCOMPLETE,
-            super::CACHE_REMOVAL_FAILED,
-            super::DEFAULT_BRANCH_REWRITTEN,
-            super::CONFLICT_MARKERS_PUSHED,
-            super::CUSTODY_CHANGED,
-            super::CUSTODY_HELD,
-            super::SECRET_SHAPE_IN_FIELD,
-            super::GRAPH_OBSERVATION_DEFERRED,
-            super::RESOURCE_PROBE_FAILED,
-            super::MEMORY_FLOOR_LOW,
-            super::BUILD_SLOT_UNAVAILABLE,
-            super::BUILD_PORT_UNAVAILABLE,
-            super::BUILD_LEDGER_NOTE,
-            super::DELIVERY_TRANSPORT_FALLBACK,
-            super::PRIVATE_GIT_RETAINED,
-            super::STRAY_WORK_CHECK_FAILED,
-            super::STRAY_LANE_WORK,
-            super::SANDBOX_UNAVAILABLE,
-            super::LANE_PRIORITY_FALLBACK,
-            super::RUN_SETTINGS_UNAVAILABLE,
-            super::PR_CONTRIBUTION_BINDING_FAILED,
-            super::WRITER_FENCE_LIST_FAILED,
-            super::TOOL_STATE_COMMIT_FAILED,
-            super::ADMISSION_RECEIPT_UNCONFIRMED,
-            super::ADMISSION_RELEASE_PENDING,
-            super::REPOSITORY_ADMISSION_SKIPPED,
-            super::RUN_STORE_MODE_TIGHTENED,
-            super::LANE_HISTORY_PUBLICATION_ADJUSTED,
-            super::LANE_GIT_IMPORT_STDERR,
-            super::NATIVE_INDEX_SYNC_FAILED,
-            super::HANDOFF_PARSE_NOTICE,
-            super::BUILD_SLOT_CUSTODY_UNPUBLISHED,
-            super::BUILD_DIR_GC_TARGET_RETAINED,
-            super::DELIVERY_REFRESH_FAILED,
-            super::BASE_FETCH_FALLBACK,
-            super::STOP_PUBLICATION_UNAVAILABLE,
-            super::WRITER_UNPUSHED_WORK,
-            super::PRIMARY_POSITION_UNRECORDED,
-            super::ADMISSION_RECORD_MALFORMED,
-            super::POOL_EFFORT_UNSUPPORTED,
-            super::PORT_DECLARATION_IGNORED,
-            super::PORT_DURATION_INVALID,
-            super::AGENT_TOOLCHAIN_PATH,
-            super::STALE_LOGIN_ITEM_ADVISORY,
-            super::BUILD_PRIORITY_ADVISORY,
-            super::BUILD_HYGIENE_ADVISORY,
-            super::BUILD_OUTCOME_ADVISORY,
-            super::SESSION_ADVISORY,
-            super::MODEL_SEGMENT_ADVISORY,
-            super::LAUNCH_ADVISORY,
-            super::BASE_FALLBACK_ADVISORY,
-            super::EXCLUSION_ADVISORY,
-            super::LOCAL_GATE_ADVISORY,
-            super::INSTALL_FINDING_ADVISORY,
-            super::WAIT_BUDGET_CLAMPED,
-            super::MODEL_CATALOGUE_UNAVAILABLE,
-            super::QUOTA_READINESS_UNSYNCED,
-            super::LOGIN_RECORD_UNRETAINED,
-            super::CONFIG_DEPRECATION,
-            super::LAUNCH_ACCESS_PROFILE,
-            super::GC_SCHEDULE_FAILED,
-            super::DISK_OBSERVATION_UNAVAILABLE,
-            super::STEER_PACING_RECORD_INVALID,
-            super::SANDBOX_MODE_OVERRIDDEN,
-            super::UPSTREAM_UNRESOLVED,
-            super::BRANCH_CONFIG_UNREADABLE,
-            super::NOTES_CURSOR_UNACKNOWLEDGED,
-            super::PR_JOURNAL_UNAVAILABLE,
-            super::BUILD_CONTEXT_UNAVAILABLE,
-            super::CHAIR_SWITCH_QUOTA_STALE,
-            super::NOTE_OBSERVATION_DEFERRED,
-            super::GC_SWEEP_LEASE_UNRELEASED,
-            super::GC_SWEEP_CURSOR_UNWRITTEN,
-            super::ADMISSION_SLOTS_UNAVAILABLE,
-            super::ARGUMENT_VALUE_SUSPECT,
-            super::PRIVATE_CHECK_DIR_UNCLEAN,
-            super::PROJECT_UNAVAILABLE,
-            super::CHECK_UNAVAILABLE,
-            super::IMPORT_PIN_COLLECTION_FAILED,
-            super::SETTLED_LANE_COLLECTION_FAILED,
-            super::VERIFY_UNAVAILABLE,
-            super::AFFECTED_SELECTION_UNAVAILABLE,
-            super::TEMP_CHECKOUT_RETAINED,
-            super::SMOKE_BINDING_RETAINED,
-            super::BUILD_LEDGER_ROTATED,
-            super::CI_DURATION_CACHE_UNAVAILABLE,
-            super::APPROVAL_RECEIPT_UNREADABLE,
-            super::PREFLIGHT_CONTINUE_IN_PLACE,
-            super::REFUSAL_NOTICE_UNDELIVERED,
-            super::PRIVATE_CACHE_RELEASE_FAILED,
-            super::STEER_RESTART_STAGGERED,
-            super::STEER_INTERRUPTS_ATTEMPT,
-            super::WORKTREE_INVENTORY_UNAVAILABLE,
-            super::ACCOUNT_OFFER_MISMATCH,
-            super::ACCOUNT_READINESS_STALE,
-            super::ACCOUNT_IDENTITY_UNVERIFIED,
-            super::GH_LOGIN_UNAVAILABLE,
-            super::GH_PUBLISHING_UNAVAILABLE,
-            super::GH_CREDENTIALS_WITHHELD,
-            super::GH_RATE_LIMITED,
-            super::ACTIONS_RUNS_UNAVAILABLE,
-            super::REMOTE_FETCH_FAILED,
-            super::FORGE_DISCOVERY_UNAVAILABLE,
-            super::FORGE_SOURCE_UNRESOLVED,
-            super::FORWARDER_UNAVAILABLE,
-            super::RETRY_CREDENTIALS_SKIPPED,
-        ] {
-            let name = code.as_str();
+    fn every_declared_code_names_itself_in_upper_snake_once() {
+        // Read the declarations from this file, so a new const is covered
+        // without a hand-kept list.
+        let source = include_str!("warning.rs");
+        let mut seen = std::collections::BTreeSet::new();
+        let mut rest = source;
+        while let Some(start) = rest.find("pub const ") {
+            rest = &rest[start + "pub const ".len()..];
+            let Some((name, tail)) = rest.split_once(':') else {
+                break;
+            };
+            let Some(body) = tail.trim_start().strip_prefix("WarningCode =") else {
+                continue;
+            };
+            let value = body
+                .split_once("WarningCode(\"")
+                .and_then(|(_, after)| after.split_once('"'))
+                .map(|(value, _)| value)
+                .unwrap_or_default();
+            assert_eq!(value, name, "the code string must equal its const name");
             assert!(
-                !name.is_empty()
-                    && name
-                        .bytes()
-                        .all(|byte| byte.is_ascii_uppercase() || byte == b'_'),
-                "{name}"
+                !value.is_empty()
+                    && value.bytes().all(|byte| byte.is_ascii_uppercase()
+                        || byte.is_ascii_digit()
+                        || byte == b'_'),
+                "{value}"
             );
+            assert!(seen.insert(value.to_owned()), "{value} is declared twice");
         }
+        assert!(seen.contains("STEER_TARGET_SETTLED"), "{seen:?}");
+        assert!(seen.len() > 50, "the scan found only {seen:?}");
     }
 }
