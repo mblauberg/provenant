@@ -352,6 +352,13 @@ fn read_only_worktree_branch(
     node: &provenant_fabric_runtime::graph::GraphNode,
     path: &str,
 ) -> Result<String, FacadeError> {
+    if let Some(new) = node
+        .attempt
+        .as_ref()
+        .and_then(|spec| spec.new_worktree.as_ref())
+    {
+        return Ok(new.branch.clone());
+    }
     let given = Path::new(path);
     let worktree = if given.is_absolute() {
         given.to_path_buf()

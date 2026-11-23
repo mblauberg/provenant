@@ -7148,6 +7148,20 @@ mod tests {
         let original = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
         crate::worktree_tests::git(&rig, &["commit", "--allow-empty", "-m", "writer subject"])?;
         let writer_commit = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+        // Push delivery must target a writer checkout on its own branch, not the
+        // primary checkout's protected default.
+        let writer_tree = rig.root.join("writer-subject-worktree");
+        crate::worktree_tests::git(
+            &rig,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "writer-subject",
+                writer_tree.to_str().ok_or("writer worktree")?,
+            ],
+        )?;
         let factory = factory(&rig)?;
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
@@ -7158,7 +7172,7 @@ mod tests {
                     "schema_version":2, "graph_id":format!("writer-review-{risk}"),
                     "review_base":original, "context":{"risk_tier":risk},
                     "nodes":[
-                        {"id":"writer", "use":"implement", "with":{"plan":false}, "worktree":rig.project, "write_scope":["."]},
+                        {"id":"writer", "use":"implement", "with":{"plan":false}, "worktree":writer_tree, "write_scope":["."], "delivery":"push"},
                         {"id":"review", "use":"review-panel", "after":["writer"], "source":{"type":"head","node":"writer"}}
                     ]
                 }
