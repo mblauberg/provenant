@@ -565,13 +565,15 @@ fn envelopes_validate_for_every_command_and_for_errors() {
     let lanes = command_schema("lanes").unwrap();
     let ok = json!({
         "schema_version": ENVELOPE_VERSION, "command": "lanes", "status": "ok",
-        "data": serde_json::to_value(list(vec![row()])).unwrap(), "error": null
+        "data": serde_json::to_value(list(vec![row()])).unwrap(), "error": null,
+        "warnings": [], "next": []
     });
     validate(&lanes, &ok).unwrap();
     // A failed command carries null data and the error envelope.
     let failed = json!({
         "schema_version": ENVELOPE_VERSION, "command": "lanes", "status": "failed", "data": null,
-        "error": {"code": "NOT_FOUND", "message": "m", "cause": null, "repair": null}
+        "error": {"code": "NOT_FOUND", "message": "m", "cause": null, "repair": null},
+        "warnings": [], "next": []
     });
     validate(&lanes, &failed).unwrap();
     let errors = error_envelope_schema();

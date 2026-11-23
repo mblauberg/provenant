@@ -1017,14 +1017,10 @@ mod test_presentation {
             .iter()
             .filter(|node| matches!(node.state, NodeState::Running | NodeState::Pending))
             .count();
-        let mut status = String::from("provenant");
-        if let Some(state_dir) = &globals.state_dir {
-            status.push_str(&format!(" --state-dir {}", shell_path(state_dir)));
-        }
-        if let Some(project) = &globals.project {
-            status.push_str(&format!(" --project {}", shell_path(project)));
-        }
-        status.push_str(&format!(" status {}", run.checkpoint.graph_id));
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let status = crate::output::command_prefix(globals, &cwd)
+            .runnable(&format!("status {}", run.checkpoint.graph_id))
+            .unwrap_or_else(|| format!("provenant status {}", run.checkpoint.graph_id));
         format!(
             "Graph {}: waiting ({in_flight} nodes in flight); status: {status}\n{}",
             run.checkpoint.graph_id,

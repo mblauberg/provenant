@@ -483,11 +483,14 @@ fn sync_one(
                 let brief = format!(
                     "Merge base {base_ref} at {base_head} into this pull request branch, resolve the conflicts in {conflicts}, commit the resolution, and leave the worktree clean."
                 );
-                let next = format!(
-                    "provenant run implement --worktree {} --brief {}",
+                let rest = format!(
+                    "run implement --worktree {} --brief {}",
                     quote_if_needed(&path.to_string_lossy()),
                     quote(&brief)
                 );
+                let next = provenant_workflow::session::CommandPrefix::default()
+                    .runnable(&rest)
+                    .unwrap_or_else(|| format!("provenant {rest}"));
                 if !no_lane {
                     if let Some(held) = writer.take() {
                         held.withdraw_unlaunched()?;
