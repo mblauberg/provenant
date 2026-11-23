@@ -172,6 +172,12 @@ pub struct HostDeliveryContext {
     /// unset, the captured PROVENANT_STATE_DIR or the default root is used.
     #[serde(skip)]
     host_state: Option<PathBuf>,
+    /// The one forge context resolved by the owner for this command. When it is
+    /// absent (older sealed holders), preparation resolves one from the host or
+    /// project port table and falls back to the request's remote.
+    /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    #[serde(skip)]
+    forge: Option<provenant_config::ForgeContext>,
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct BoundDelivery {
@@ -444,6 +450,7 @@ impl Clone for HostDeliveryContext {
             cancellation: self.cancellation.clone(),
             facts: self.facts.clone(),
             host_state: self.host_state.clone(),
+            forge: self.forge.clone(),
         }
     }
 }
@@ -727,6 +734,25 @@ impl HostDeliveryContext {
         self.host_state = Some(state.to_path_buf());
         self
     }
+    /// Reuse the owner's already-resolved forge context rather than resolving a
+    /// second one for this command.
+    /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    pub fn with_forge(mut self, forge: &provenant_config::ForgeContext) -> Self {
+        self.forge = Some(forge.clone());
+        self
+    }
+    /// The remote named by the sealed launch destination.
+    pub(crate) fn delivery_remote(&self) -> Option<&str> {
+        self.bound
+            .as_ref()
+            .map(|bound| bound.destination.remote.as_str())
+    }
+    /// The remote named by the sealed stop-publication destination.
+    pub(crate) fn stop_publish_remote(&self) -> Option<&str> {
+        self.stop_publish_bound
+            .as_ref()
+            .map(|bound| bound.destination.remote.as_str())
+    }
     /// The explicit state root, else the captured PROVENANT_STATE_DIR, else
     /// the default root under the captured HOME.
     fn host_state(&self) -> Option<PathBuf> {
@@ -1009,24 +1035,14 @@ impl HostDeliveryContext {
                 "symbolic branch targets are refused",
             ));
         }
-        // Read the default branch from the one resolved remote's HEAD. A
-        // compiled-in `main`/`master` fallback could retire a differently
-        // named default, so an unknown default protects nothing here; the
-        // owner's ForgeContext.is_protected still governs GC retirement.
+        // The one resolved context already carries the default branch, the
+        // declared protected set and any forge-reported protection. Reading
+        // `refs/remotes/<remote>/HEAD` here rebuilt that decision from a second
+        // source and failed outright when the remote was absent (a local
+        // integration). A compiled-in `main`/`master` fallback could retire a
+        // differently named default, so an unknown default protects nothing.
         // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
-        let default = self.command(
-            &writer.worktree,
-            "git",
-            &[
-                "symbolic-ref",
-                "--quiet",
-                &format!("refs/remotes/{}/HEAD", forge.remote.value),
-            ],
-            stage,
-        )?;
-        let protected_default = default
-            .strip_prefix(&format!("refs/remotes/{}/", forge.remote.value))
-            .is_some_and(|branch| branch == target);
+        let protected_default = forge.is_protected(target);
         let trees = self.command(
             &writer.worktree,
             "git",
@@ -1315,6 +1331,7 @@ impl HostDeliveryContext {
             cancellation: None,
             facts: Default::default(),
             host_state: None,
+            forge: None,
         }
     }
     pub(crate) fn with_lane_access(
@@ -1414,6 +1431,31 @@ impl HostDeliveryContext {
         self.prepare_with_fetch(writer, request, true)
     }
 
+    /// The forge context for a preparation guard. Prefer the owner's resolved
+    /// context; sealed holders from before that was carried resolve one from
+    /// the host/project port table. A checkout with no declared default keeps
+    /// working: the guard falls back to the request's remote and reports no
+    /// protected names, while the primary-checkout rule still applies.
+    /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    fn forge_for_preparation(
+        &self,
+        writer: &WriterRequest,
+        request: &WriterDeliveryRequest,
+    ) -> provenant_config::ForgeContext {
+        let fallback = forge_for(&request.remote, "", &[]);
+        let Some(forge) = &self.forge else {
+            let Some(state) = self.host_state() else {
+                return fallback;
+            };
+            let Ok(ports) = provenant_config::PortTable::read_for(Some(&writer.project), &state)
+            else {
+                return fallback;
+            };
+            return resolve_forge(&state, &writer.project, &ports).unwrap_or(fallback);
+        };
+        forge.clone()
+    }
+
     fn prepare_with_fetch(
         mut self,
         writer: &WriterRequest,
@@ -1443,7 +1485,7 @@ impl HostDeliveryContext {
         let common_git_dir = self.trusted_common_git_dir(writer, stage)?;
         self.set_host_project(&common_git_dir);
         // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
-        let forge = forge_for(&request.remote, "", &[]);
+        let forge = self.forge_for_preparation(writer, request);
         self.refuse_protected_target(writer, &request.branch, stage, &forge)?;
         if matches!(request.mode, crate::DeliveryMode::Integrate(_)) && request.remote.is_empty() {
             let branch = self.command(
@@ -1797,8 +1839,10 @@ impl HostDeliveryContext {
         self.validate_transport_helpers(writer)?;
         let source = format!("refs/heads/{branch}");
         // Read and fetch the same sealed destination used for the later push.
-        // A configured origin may have different fetch and push URLs.
-        let remote = &self
+        // A configured remote may have different fetch and push URLs: use the
+        // URL for transport, but keep the remote's name for the tracking ref
+        // and its hardened config key. A URL is not a valid ref namespace.
+        let push_url = &self
             .bound
             .as_ref()
             .ok_or_else(|| delivery_refusal(stage, "delivery launch binding was not sealed"))?
@@ -1813,7 +1857,7 @@ impl HostDeliveryContext {
                     "ls-remote",
                     "--exit-code",
                     "--",
-                    remote,
+                    push_url,
                     &source,
                 ],
                 stage,
@@ -1846,7 +1890,7 @@ impl HostDeliveryContext {
                 "--no-recurse-submodules",
                 "--refmap=",
                 "--",
-                remote,
+                push_url,
                 &refspec,
             ],
             stage,

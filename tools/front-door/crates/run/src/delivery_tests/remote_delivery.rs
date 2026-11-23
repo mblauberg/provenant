@@ -155,49 +155,79 @@ fn integration_refuses_default_fallbacks_remote_head_and_primary_branch()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let mut fixture = PrepareFixture::new()?;
     fixture.git(&["branch", "-m", "primary-live"])?;
-    for target in [
-        "main",
-        "master",
-        "primary-live",
-        "origin/main",
-        "origin/primary-live",
-    ] {
+    let forge = crate::forge_for("origin", "main", &[]);
+    // Protection now comes from the one resolved context: its default branch
+    // and the primary checkout. The old compiled-in `master` fallback is gone.
+    // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    for target in ["main", "origin/main", "primary-live", "origin/primary-live"] {
         fixture.request = HostDeliveryContext::destination(
             DeliveryMode::Integrate(target.into()),
             "lane",
-            &crate::forge_for("origin", "main", &[]),
+            &forge,
         )?
         .ok_or("destination")?;
         assert!(
-            matches!(fixture.prepare(), Err(RunError::ProtectedDeliveryBranch)),
+            matches!(
+                fixture.prepare_with_forge(&forge),
+                Err(RunError::ProtectedDeliveryBranch)
+            ),
             "{target}"
         );
     }
+    fixture.request =
+        HostDeliveryContext::destination(DeliveryMode::Integrate("master".into()), "lane", &forge)?
+            .ok_or("destination")?;
+    assert!(
+        fixture.prepare_with_forge(&forge).is_ok(),
+        "master is not a compiled-in default any more"
+    );
+
+    // A declared protected branch is refused by the delivery guard itself,
+    // not only by admission.
+    let declared = crate::forge_for("origin", "main", &["release"]);
+    fixture.request = HostDeliveryContext::destination(
+        DeliveryMode::Integrate("release".into()),
+        "lane",
+        &declared,
+    )?
+    .ok_or("destination")?;
+    assert!(matches!(
+        fixture.prepare_with_forge(&declared),
+        Err(RunError::ProtectedDeliveryBranch)
+    ));
+
+    // A remote HEAD names a default only for the context that resolved it.
     fixture.git(&[
         "symbolic-ref",
         "refs/remotes/origin/HEAD",
         "refs/remotes/origin/trunk",
     ])?;
+    let trunk = crate::forge_for("origin", "trunk", &[]);
     for target in ["trunk", "origin/trunk"] {
         fixture.request = HostDeliveryContext::destination(
             DeliveryMode::Integrate(target.into()),
             "lane",
-            &crate::forge_for("origin", "main", &[]),
+            &trunk,
         )?
         .ok_or("destination")?;
         assert!(
-            matches!(fixture.prepare(), Err(RunError::ProtectedDeliveryBranch)),
+            matches!(
+                fixture.prepare_with_forge(&trunk),
+                Err(RunError::ProtectedDeliveryBranch)
+            ),
             "{target}"
         );
     }
+
+    // Integration re-checks protection with the context it is given.
     fixture.git(&["branch", "integration"])?;
     fixture.request = HostDeliveryContext::destination(
         DeliveryMode::Integrate("integration".into()),
         "lane",
-        &crate::forge_for("origin", "main", &[]),
+        &forge,
     )?
     .ok_or("destination")?;
-    let host = fixture.prepare()?;
+    let host = fixture.prepare_with_forge(&forge)?;
     fixture.commit(&fixture.writer.worktree, "lane change")?;
     fixture.git(&[
         "symbolic-ref",
@@ -205,13 +235,9 @@ fn integration_refuses_default_fallbacks_remote_head_and_primary_branch()
         "refs/remotes/origin/integration",
     ])?;
     let head = host.head(&fixture.writer)?;
+    let integration = crate::forge_for("origin", "integration", &[]);
     assert!(matches!(
-        host.integrate(
-            &fixture.writer,
-            &fixture.request,
-            head,
-            &crate::forge_for("origin", "main", &[])
-        ),
+        host.integrate(&fixture.writer, &fixture.request, head, &integration),
         Err(RunError::Delivery {
             stage: WriterDeliveryStage::Integrate,
             ..
@@ -222,14 +248,11 @@ fn integration_refuses_default_fallbacks_remote_head_and_primary_branch()
         "refs/heads/alias",
         "refs/heads/primary-live",
     ])?;
-    fixture.request = HostDeliveryContext::destination(
-        DeliveryMode::Integrate("alias".into()),
-        "lane",
-        &crate::forge_for("origin", "main", &[]),
-    )?
-    .ok_or("destination")?;
+    fixture.request =
+        HostDeliveryContext::destination(DeliveryMode::Integrate("alias".into()), "lane", &forge)?
+            .ok_or("destination")?;
     assert!(matches!(
-        fixture.prepare(),
+        fixture.prepare_with_forge(&forge),
         Err(RunError::DeliveryPrepare {
             step: DeliveryPrepareStep::IntegrationTarget,
             ..
@@ -276,7 +299,7 @@ fn integration_rechecks_primary_checkout_after_preparation()
 }
 
 #[test]
-fn integration_refuses_the_default_branch_of_a_non_origin_remote()
+fn integration_protection_follows_the_resolved_forge_not_remote_heads()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let mut fixture = PrepareFixture::new()?;
     fixture.git(&["branch", "-m", "primary-live"])?;
@@ -296,21 +319,46 @@ fn integration_refuses_the_default_branch_of_a_non_origin_remote()
     fixture.git(&["branch", "release"])?;
     fixture.git(&["config", "branch.release.remote", "upstream"])?;
     fixture.git(&["config", "branch.release.merge", "refs/heads/release"])?;
+
+    // The resolved context is origin's. A different remote's HEAD never
+    // decides protection for this command, and neither does the branch's own
+    // upstream configuration.
+    // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    let origin = crate::forge_for("origin", "trunk", &[]);
     fixture.request = HostDeliveryContext::destination(
         DeliveryMode::Integrate("release".into()),
         "lane",
-        &crate::forge_for("origin", "main", &[]),
+        &origin,
+    )?
+    .ok_or("destination")?;
+    assert!(fixture.prepare_with_forge(&origin).is_ok());
+    assert!(
+        HostDeliveryContext::validate_integration_target(
+            &fixture.writer.project,
+            "release",
+            &origin
+        )
+        .is_ok()
+    );
+
+    // Declaring the branch protected in that one context refuses it at both
+    // admission and delivery.
+    let protected = crate::forge_for("origin", "trunk", &["release"]);
+    fixture.request = HostDeliveryContext::destination(
+        DeliveryMode::Integrate("release".into()),
+        "lane",
+        &protected,
     )?
     .ok_or("destination")?;
     assert!(matches!(
-        fixture.prepare(),
+        fixture.prepare_with_forge(&protected),
         Err(RunError::ProtectedDeliveryBranch)
     ));
     assert!(matches!(
         HostDeliveryContext::validate_integration_target(
             &fixture.writer.project,
             "release",
-            &crate::forge_for("origin", "main", &[])
+            &protected
         ),
         Err(RunError::ProtectedDeliveryBranch)
     ));

@@ -5084,6 +5084,17 @@ File exists\nfatal: could not lock config file .git/config: File exists\n";
         }
 
         let fixture = Fixture::new()?;
+        // The lane's upstream now comes from the resolved forge context, so
+        // give the fixture the sole remote that makes that context "origin".
+        // Without one the key legitimately becomes empty and the snapshot
+        // assertion would name an absence rather than the configured remote.
+        // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+        fixture.run(&[
+            "remote",
+            "add",
+            "origin",
+            fixture.root.to_str().ok_or("non-UTF8 fixture root")?,
+        ])?;
         let worktrees = fixture.root.join(".worktrees");
         fs::create_dir_all(&worktrees)?;
         let head = fixture.head()?.to_string();

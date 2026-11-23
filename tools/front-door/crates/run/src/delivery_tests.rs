@@ -286,6 +286,16 @@ impl PrepareFixture {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
     }
     fn prepare(&self) -> Result<HostDeliveryContext> {
+        self.prepare_with_forge(&crate::forge_for("origin", "", &[]))
+    }
+    /// Prepare with the owner's resolved forge context, as a launched command
+    /// does. Tests that assert protection must pass the context they resolved
+    /// rather than rely on a second discovery.
+    /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    fn prepare_with_forge(
+        &self,
+        forge: &provenant_config::ForgeContext,
+    ) -> Result<HostDeliveryContext> {
         // Production passes the state root explicitly, so a broken captured
         // HOME is reported by its own environment check.
         HostDeliveryContext::new(self.environment.clone())
@@ -299,6 +309,7 @@ impl PrepareFixture {
                 Some(true),
             )
             .with_host_state(&self.root.join("state"))
+            .with_forge(forge)
             .prepare(&self.writer, &self.request)
     }
     pub(crate) fn lane_git(
