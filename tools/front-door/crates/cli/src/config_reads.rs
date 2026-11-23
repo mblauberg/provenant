@@ -33,6 +33,9 @@ reads! {
     "fabric context" => ["fabric", "wait"],
     "install" => ["accounts", "fabric"], "upgrade" => ["accounts", "fabric"],
     "uninstall" => ["accounts", "fabric"],
+    // `init` resolves its port table and forge context directly; it reads no
+    // config.toml domain, so unrelated invalid domains cannot refuse it.
+    "init" => [],
     "route" => ["routing", "accounts", "quota", "policy", "fabric"],
     "route preferences" => ["routing"],
     "run" => ["fabric", "run", "routing", "accounts", "quota", "lanes", "policy", "wait"],

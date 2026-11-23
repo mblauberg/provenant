@@ -271,9 +271,12 @@ pub(crate) fn resolved_text(preview: &RoutePreview) -> String {
             }
         }
     }
+    // The knob travels as a `Sourced` value now, so print its layer with the
+    // one shared layer vocabulary instead of dumping the source struct.
     text.push_str(&format!(
-        "allow unknown partial headroom: {} (source: {:?})\n",
-        preview.allow_unknown_partial_headroom.value, preview.allow_unknown_partial_headroom.source
+        "allow unknown partial headroom: {} (source: {})\n",
+        preview.allow_unknown_partial_headroom.value,
+        preview.allow_unknown_partial_headroom.source.layer.as_str()
     ));
     if let Some(details) = preview.quota.as_ref().and_then(|q| q.details.as_ref())
         && let (Some(source), Some(coverage)) = (&details.source, &details.coverage)

@@ -47,7 +47,9 @@ fn schema_lists_bounds_defaults_values_and_layers() {
     assert!(field["min"].as_i64().unwrap() <= default.as_i64().unwrap());
     assert_eq!(field["default"], default);
     assert_eq!(field["value"], 80);
-    assert_eq!(field["source"], "user");
+    // The editable schema reports the shared layer vocabulary: config.toml is
+    // the host layer. Spec: docs/specs/state.md#every-setting-reports-its-layer
+    assert_eq!(field["source"], "host");
     assert_eq!(field["restart_required"], false);
 }
 

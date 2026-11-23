@@ -1665,6 +1665,19 @@ fn record_leaf_sources(
     prefix: &str,
     walk: &mut LeafWalk,
 ) {
+    // A declared formatter is one setting whether written as a scalar command
+    // or as a command object. Record the whole value at `verify.format` so its
+    // source names the declaring layer, not an inner field's; detection records
+    // the same leaf. Spec: docs/specs/state.md#every-setting-reports-its-layer
+    if prefix == "verify.format" {
+        walk.record(
+            prefix,
+            layer,
+            &format!("{origin_base}#{prefix}"),
+            value.clone(),
+        );
+        return;
+    }
     match value {
         serde_json::Value::Object(map) => {
             for (key, child) in map {
@@ -2260,6 +2273,11 @@ impl PortTable {
             }
         }
         let mut table: Self = serde_json::from_value(document).map_err(io::Error::other)?;
+        // The layer walk's derived state must be installed before the rebase
+        // check: that check reads the winning layer of the `verify.format`
+        // leaf, which lives in the leaf history. Spec: docs/specs/state.md#every-setting-reports-its-layer
+        table.provenance = walk.layers;
+        table.sourced_leaves = walk.candidates;
         // Detection declares project-root paths; commands run from the verify
         // workspace. Rebase a detected format command under the workspace that
         // won, so the carry starts where detection found the stack.
@@ -2292,8 +2310,6 @@ impl PortTable {
                 };
             }
         }
-        table.provenance = walk.layers;
-        table.sourced_leaves = walk.candidates;
         table.sync_sources_from_provenance();
         Ok(table)
     }
