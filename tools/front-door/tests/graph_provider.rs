@@ -5916,11 +5916,12 @@ fn graph_settlement_records_a_failed_advance_for_status() -> Result {
     let error = status["data"]["rows"][0]["reason"]
         .as_str()
         .ok_or("advance error")?;
-    // The bounded view clips a long reason (a missing worktree names its
-    // path); `--full` must show the whole of it.
-    let human = rig.command(&["status", "broken", "--full"])?;
+    // Human rows are bounded, and a missing worktree's reason goes on to name
+    // its path, so the view must carry the reason's leading clause (#3835).
+    let clause = error.split(';').next().unwrap_or(error);
+    let human = rig.command(&["status", "broken"])?;
     assert!(
-        String::from_utf8_lossy(&human.stdout.bytes).contains(error),
+        String::from_utf8_lossy(&human.stdout.bytes).contains(clause),
         "{}",
         String::from_utf8_lossy(&human.stdout.bytes)
     );
