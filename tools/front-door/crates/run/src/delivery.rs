@@ -84,6 +84,38 @@ pub fn resolve_forge(
         .map_err(|error| invalid(error.to_string()))
 }
 
+/// The one forge context for a command, resolved when a delivery check first
+/// needs it. A command that delivers nothing, such as a read-only graph, never
+/// asks for a remote, so a checkout without one is not refused.
+/// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+pub struct ForgeOnce<'a> {
+    state: PathBuf,
+    project: PathBuf,
+    ports: &'a provenant_config::PortTable,
+    context: std::cell::OnceCell<provenant_config::ForgeContext>,
+}
+
+impl<'a> ForgeOnce<'a> {
+    pub fn new(state: &Path, project: &Path, ports: &'a provenant_config::PortTable) -> Self {
+        Self {
+            state: state.to_path_buf(),
+            project: project.to_path_buf(),
+            ports,
+            context: std::cell::OnceCell::new(),
+        }
+    }
+
+    /// The resolved context; the first call resolves it and later calls
+    /// reuse it.
+    pub fn get(&self) -> Result<&provenant_config::ForgeContext> {
+        if let Some(context) = self.context.get() {
+            return Ok(context);
+        }
+        let context = resolve_forge(&self.state, &self.project, self.ports)?;
+        Ok(self.context.get_or_init(|| context))
+    }
+}
+
 /// Launch delivery fields a test compares across stop-publish preparation:
 /// git, gh, the launch binding digest, the stop binding digest and the
 /// environment.

@@ -64,7 +64,7 @@ pub use controls::{
     TemporaryReasonKind, UncertainReason, attempt_presence, attempt_presence_with_census,
     attempt_presence_with_unavailable_census, holder_absent, overdue_at,
 };
-pub use delivery::{FilteredLanePath, HostDeliveryContext, forge_for, resolve_forge};
+pub use delivery::{FilteredLanePath, ForgeOnce, HostDeliveryContext, forge_for, resolve_forge};
 pub use git_context::{
     GitContext, ReviewDiffContext, continuation_history, ensure_local_branch,
     ensure_recorded_local_branch, resolve_git_base, resolve_git_base_with_facts,

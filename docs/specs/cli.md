@@ -455,7 +455,8 @@ unreadable log is reported as unreadable evidence, never as zero failures.
 A `wait --pr` reading of a head with no reported checks names why before it
 suggests an action. The observer reads `mergeable` and `mergeStateStatus` from
 the PR resource first and rereads an UNKNOWN mergeability a bounded number of
-times (`MERGEABLE_UNKNOWN_RETRIES` in `src/pr/observer.rs`) before choosing:
+times (the sourced `ci.retry.mergeable_attempts` setting, default 3, in
+`src/pr/observer/retry.rs`) before choosing:
 
 - `merge_conflict`: GitHub reports the head as conflicting. It starts no
   `pull_request` workflows for a conflicting head, so the next step is to merge

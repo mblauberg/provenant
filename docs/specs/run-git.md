@@ -51,6 +51,10 @@ branch is the declared `git.default_branch`, else `refs/remotes/<remote>/HEAD`, 
 protected branches are declared, else the default branch plus forge-reported protection.
 - Why: a hidden guess can retire the wrong branch or push to the wrong repository.
 
+The owner resolves the context when a delivery or target check first needs it (`ForgeOnce`), so a
+command that delivers nothing, such as a read-only graph, runs in a checkout with no remote.
+- Why: an eager resolution refused read-only work for a remote it never used.
+
 ## Delivery
 
 Under `host` access, `HostDeliveryContext` accepts host-configured Git transport helpers and URL
