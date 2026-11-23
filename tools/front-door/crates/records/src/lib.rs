@@ -87,7 +87,7 @@ pub use install::{
     STATE_FORMAT_VERSION, VersionInfo,
 };
 
-mod command_result;
+pub mod command_result;
 pub mod wire;
 pub use command_result::{
     COMMAND_RESULT_MAX_BYTES, CommandError, CommandResult, HelpArgument, HelpCatalogue,

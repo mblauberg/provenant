@@ -9,13 +9,61 @@
 use crate::overflow;
 use provenant_cli::{OverflowPolicy, RenderError, RenderMode, Summary};
 use provenant_records::CommandResult;
+use provenant_records::command_result::NextStep;
 use provenant_records::warning::{self, Dedup, RESULT_TOO_LARGE, Sink, Warning};
+use provenant_workflow::session::{CommandDefaults, CommandPrefix};
 use serde::Serialize;
 use serde_json::{Value, json};
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
+
+/// What the environment resolves with no `--state-dir` or `--project` flag.
+/// The state root is the environment override or the home-relative default;
+/// the project is the directory the caller is running in.
+pub(crate) fn command_defaults(cwd: &Path) -> CommandDefaults {
+    let state_dir = std::env::var_os(provenant_core::STATE_DIRECTORY_ENV)
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os(provenant_core::consumer_env::HOME)
+                .map(|home| PathBuf::from(home).join(provenant_core::DEFAULT_STATE_SUFFIX))
+        });
+    CommandDefaults {
+        state_dir,
+        project: Some(std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_owned())),
+    }
+}
+
+/// The one formatter for suggested commands. Flags that equal the caller's
+/// environment defaults are omitted from every command it renders.
+pub(crate) fn command_prefix(globals: &provenant_cli::Globals, cwd: &Path) -> CommandPrefix {
+    CommandPrefix::with_defaults(
+        globals.state_dir.as_deref(),
+        globals.project.as_deref(),
+        cwd,
+        &command_defaults(cwd),
+    )
+}
+
+/// Render the envelope's next-step data as human lines. This is the only place
+/// a `next` argv becomes text; JSON carries the arrays instead.
+fn next_text(steps: &[NextStep], globals: &provenant_cli::Globals) -> String {
+    if steps.is_empty() || globals.json {
+        return String::new();
+    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let prefix = command_prefix(globals, &cwd);
+    let mut out = String::new();
+    for step in steps {
+        match prefix.render_argv(&step.argv) {
+            Some(command) => out.push_str(&format!("next: {command}\n")),
+            None => out.push_str("next: [this command cannot be shown safely]\n"),
+        }
+    }
+    out
+}
 
 /// The command's sink, installed once before any path can raise a warning.
 static COMMAND_SINK: RwLock<Option<Arc<CommandSink>>> = RwLock::new(None);
@@ -243,6 +291,12 @@ pub(crate) fn emit_with_writers<T: Serialize, Wout: Write, Werr: Write>(
     summary: Option<&Summary>,
 ) -> u8 {
     let warnings = take_warnings();
+    let next = next_text(&result.next, globals);
+    let human_text: Cow<str> = if next.is_empty() {
+        Cow::Borrowed(human)
+    } else {
+        Cow::Owned(format!("{human}{next}"))
+    };
     let explanation = if summary.is_none() && result.command == "land" {
         serde_json::to_value(&result.data)
             .ok()
@@ -253,12 +307,12 @@ pub(crate) fn emit_with_writers<T: Serialize, Wout: Write, Werr: Write>(
     let summary = summary.or(explanation.as_ref());
     let mode = if !globals.json && matches!(result.command.as_str(), "help" | "version") {
         RenderMode::Human {
-            text: human,
+            text: human_text.as_ref(),
             read_only,
             summary: None,
         }
     } else {
-        globals.render_mode(human, read_only, summary)
+        globals.render_mode(human_text.as_ref(), read_only, summary)
     };
     // JSON prints nothing to stderr: the sink held every warning, and this is
     // the only place they reach the consumer. Serialising `T` to a Value lets
@@ -272,6 +326,7 @@ pub(crate) fn emit_with_writers<T: Serialize, Wout: Write, Werr: Write>(
             data,
             error: result.error.clone(),
             warnings: warnings.clone(),
+            next: result.next.clone(),
         };
         provenant_cli::render_or_publish(
             &json_result,
@@ -350,19 +405,10 @@ pub(crate) fn land_explanation(data: &Value, globals: &provenant_cli::Globals) -
                 .map(|warning| format!("warning: {warning}")),
         );
     }
-    let mut detail = String::from("provenant");
-    for (flag, path) in [
-        ("--state-dir", globals.state_dir.as_ref()),
-        ("--project", globals.project.as_ref()),
-    ] {
-        if let Some(path) = path {
-            detail.push_str(&format!(
-                " {flag} '{}'",
-                path.to_string_lossy().replace('\'', "'\\''")
-            ));
-        }
-    }
-    detail.push_str(" land --explain --json");
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let detail = command_prefix(globals, &cwd)
+        .runnable("land --explain --json")
+        .unwrap_or_else(|| "provenant land --explain --json".to_owned());
     Some(Summary::new("Landing policy", rows, Some(detail)))
 }
 
@@ -403,6 +449,12 @@ fn emit_unpublished_with_writers<T: Serialize, Wout: Write, Werr: Write>(
     // Drain the held warnings first. They travel in the JSON envelope (or reach
     // stderr on the human path) before any per-change key is remembered.
     let warnings = take_warnings();
+    let next = next_text(&result.next, globals);
+    let human_text: Cow<str> = if next.is_empty() {
+        Cow::Borrowed(human)
+    } else {
+        Cow::Owned(format!("{human}{next}"))
+    };
     // Build the envelope once so the overflow measurement and the bounded
     // marker describe the bytes actually attempted, including these warnings.
     // Measuring the bare result instead reports 0 omitted bytes when the
@@ -416,6 +468,7 @@ fn emit_unpublished_with_writers<T: Serialize, Wout: Write, Werr: Write>(
             data,
             error: result.error.clone(),
             warnings: warnings.clone(),
+            next: result.next.clone(),
         })
     } else {
         None
@@ -424,7 +477,7 @@ fn emit_unpublished_with_writers<T: Serialize, Wout: Write, Werr: Write>(
         Some(envelope) => render_unpublished(
             envelope,
             globals,
-            human,
+            human_text.as_ref(),
             read_only,
             summary,
             provenant_cli::MAX_RESULT_BYTES,
@@ -434,7 +487,7 @@ fn emit_unpublished_with_writers<T: Serialize, Wout: Write, Werr: Write>(
         None => render_unpublished(
             result,
             globals,
-            human,
+            human_text.as_ref(),
             read_only,
             summary,
             provenant_cli::MAX_RESULT_BYTES,
@@ -480,6 +533,7 @@ fn emit_unpublished_with_writers<T: Serialize, Wout: Write, Werr: Write>(
                     .as_ref()
                     .map(|error| provenant_cli::bounded_error(error, 512)),
                 warnings,
+                next: result.next.clone(),
             };
             if !bounded
                 .warnings
@@ -711,6 +765,41 @@ mod tests {
         let envelope: Value = serde_json::from_slice(&out).expect("envelope");
         assert_eq!(envelope["warnings"][0]["code"], "TEST");
         assert_eq!(envelope["warnings"][0]["message"], "a typed warning");
+        assert!(err.is_empty(), "{}", String::from_utf8_lossy(&err));
+    }
+
+    #[test]
+    // Spec: docs/specs/cli.md#one-bounded-envelope-clipped-with-a-warning
+    fn json_mode_carries_next_steps_as_argv_arrays() {
+        let _lock = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _sink = install_command_sink(true);
+        let result =
+            CommandResult::new("fixture", Outcome::Ok, json!({"ok": true})).with_next(vec![
+                NextStep::new(
+                    vec![
+                        "provenant".into(),
+                        "pr".into(),
+                        "status".into(),
+                        "12".into(),
+                    ],
+                    "check CI",
+                ),
+            ]);
+        let globals = provenant_cli::Globals {
+            json: true,
+            ..Default::default()
+        };
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        emit_with_writers(&result, &globals, &mut out, &mut err, "", false, None);
+        let envelope: Value = serde_json::from_slice(&out).expect("envelope");
+        assert_eq!(
+            envelope["next"][0]["argv"],
+            json!(["provenant", "pr", "status", "12"])
+        );
+        assert_eq!(envelope["next"][0]["why"], "check CI");
         assert!(err.is_empty(), "{}", String::from_utf8_lossy(&err));
     }
 

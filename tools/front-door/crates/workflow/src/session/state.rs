@@ -3,7 +3,8 @@
 //! The saved state is derived data in a file only hooks write. It grants no
 //! authority, and no autosave ever opens the chair's checkpoint for writing.
 
-use provenant_os::shell::quote;
+use provenant_os::shell::{quote, quote_if_needed};
+use std::path::{Path, PathBuf};
 
 const AUTO_SAVED: &str = "Auto-saved: ";
 /// Most lines one section shows before it summarises the rest.
@@ -18,16 +19,42 @@ const NEXT_PAGE_LIMIT: usize = 512;
 /// Starts a note that is shown as plain text instead of as a command.
 const PLAIN_NOTE: &str = "page with: ";
 
-/// `provenant` plus the non-default state directory a hook ran against, so
-/// every command a hook shows reads or writes the store the hook used.
+/// What the caller's environment resolves when no `--state-dir` or `--project`
+/// flag is passed. A formatter drops a flag that names one of these defaults:
+/// a copied command then reaches the same store and project from any directory.
+/// Spec: docs/specs/cli.md#one-bounded-envelope-clipped-with-a-warning
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CommandDefaults {
+    /// Absolute state root the environment resolves with no flag.
+    pub state_dir: Option<PathBuf>,
+    /// Absolute project the environment resolves with no flag.
+    pub project: Option<PathBuf>,
+}
+
+/// A relative path is made absolute against the directory the caller ran in.
+fn absolute(path: &Path, cwd: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_owned()
+    } else {
+        cwd.join(path)
+    }
+}
+
+/// `provenant` plus the flags a hook must repeat so every command it shows
+/// reads or writes the store the hook used. Flags that equal the environment's
+/// defaults are omitted. This is the one formatter for suggested commands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandPrefix {
     text: String,
-    /// False when the directory cannot be quoted faithfully (not UTF-8, or
+    /// False when a directory cannot be quoted faithfully (not UTF-8, or
     /// holds control characters): no runnable command may then be shown.
     shown: bool,
-    /// The directory the hook ran in, quoted, for `--project`.
+    /// The project this command is for, quoted, for `--project`.
     checkout: Option<String>,
+    /// Whether `--project` belongs in the commands this prefix renders.
+    project: bool,
+    /// The defaults used to drop redundant flags from an argv.
+    defaults: CommandDefaults,
 }
 impl Default for CommandPrefix {
     fn default() -> Self {
@@ -35,23 +62,25 @@ impl Default for CommandPrefix {
             text: "provenant".into(),
             shown: true,
             checkout: None,
+            project: false,
+            defaults: CommandDefaults::default(),
         }
     }
 }
 impl CommandPrefix {
     /// A relative directory is made absolute against `cwd` (where the hook
-    /// ran) and quoted for a POSIX shell.
-    pub fn new(state_dir: Option<&std::path::Path>, cwd: &std::path::Path) -> Self {
+    /// ran) and quoted for a POSIX shell. The project flag names `cwd`.
+    pub fn new(state_dir: Option<&Path>, cwd: &Path) -> Self {
         let mut prefix = Self {
             checkout: cwd
                 .to_str()
                 .filter(|s| !s.chars().any(char::is_control))
                 .map(quote),
+            project: true,
             ..Self::default()
         };
         if let Some(state) = state_dir {
-            match cwd
-                .join(state)
+            match absolute(state, cwd)
                 .to_str()
                 .filter(|s| !s.chars().any(char::is_control))
             {
@@ -65,6 +94,53 @@ impl CommandPrefix {
         prefix
     }
 
+    /// Build a prefix for a command that will run in the caller's environment.
+    /// `state_dir` and `project` are the flags this command actually used; a
+    /// flag equal to the corresponding default is omitted from every command
+    /// this prefix renders. Spec: docs/specs/cli.md#one-bounded-envelope-clipped-with-a-warning
+    pub fn with_defaults(
+        state_dir: Option<&Path>,
+        project: Option<&Path>,
+        cwd: &Path,
+        defaults: &CommandDefaults,
+    ) -> Self {
+        let mut prefix = Self {
+            defaults: defaults.clone(),
+            ..Self::default()
+        };
+        if let Some(state) = state_dir {
+            let state = absolute(state, cwd);
+            let is_default = defaults
+                .state_dir
+                .as_deref()
+                .is_some_and(|default| absolute(default, cwd) == state);
+            if !is_default {
+                match state.to_str().filter(|s| !s.chars().any(char::is_control)) {
+                    Some(text) => {
+                        prefix.text.push_str(" --state-dir ");
+                        prefix.text.push_str(&quote(text));
+                    }
+                    None => prefix.shown = false,
+                }
+            }
+        }
+        if let Some(dir) = project {
+            let dir = absolute(dir, cwd);
+            let is_default = defaults
+                .project
+                .as_deref()
+                .is_some_and(|default| absolute(default, cwd) == dir);
+            if !is_default {
+                prefix.checkout = dir
+                    .to_str()
+                    .filter(|s| !s.chars().any(char::is_control))
+                    .map(quote);
+                prefix.project = prefix.checkout.is_some();
+            }
+        }
+        prefix
+    }
+
     /// `provenant [--state-dir DIR] {rest}` only when it would survive
     /// rendering byte for byte: `clean` rewrites <, > and backticks and
     /// truncates, which could point at another store. Otherwise `None`.
@@ -73,11 +149,11 @@ impl CommandPrefix {
         (self.shown && clean(&command, NEXT_PAGE_LIMIT) == command).then_some(command)
     }
 
-    /// ` --project DIR` naming the hook's checkout, so a save reaches this
-    /// project from any directory the agent is in. Empty when the path would
-    /// not survive rendering.
+    /// ` --project DIR` naming the selected checkout, so a save reaches this
+    /// project from any directory the agent is in. Empty when the flag equals
+    /// the environment default or the path would not survive rendering.
     pub fn project_flag(&self) -> String {
-        let Some(checkout) = &self.checkout else {
+        let Some(checkout) = self.checkout.as_ref().filter(|_| self.project) else {
             return String::new();
         };
         let flag = format!(" --project {checkout}");
@@ -98,6 +174,35 @@ impl CommandPrefix {
                 "{PLAIN_NOTE}{command} and the --state-dir this hook used (its path cannot be shown safely)"
             )
         }
+    }
+
+    /// Render one suggested command from its argv. Flags that name an
+    /// environment default are dropped, then every argument is shell-quoted.
+    /// `None` when the command cannot be shown safely or would be truncated.
+    pub fn render_argv(&self, argv: &[String]) -> Option<String> {
+        let mut parts = Vec::new();
+        let mut index = 0;
+        while index < argv.len() {
+            let arg = &argv[index];
+            let flag = match arg.as_str() {
+                "--state-dir" => Some(&self.defaults.state_dir),
+                "--project" => Some(&self.defaults.project),
+                _ => None,
+            };
+            if let Some(default) = flag
+                && index + 1 < argv.len()
+                && default
+                    .as_deref()
+                    .is_some_and(|path| Path::new(&argv[index + 1]) == path)
+            {
+                index += 2;
+                continue;
+            }
+            parts.push(quote_if_needed(arg));
+            index += 1;
+        }
+        let command = parts.join(" ");
+        (self.shown && clean(&command, NEXT_PAGE_LIMIT) == command).then_some(command)
     }
 }
 /// Strip what could forge a marker, a heading or terminal control output.
@@ -718,5 +823,65 @@ mod tests {
         let text = with(Some("/s/a>b")).digest(DIGEST_LIMIT);
         assert!(!text.contains("/s/a>b"), "{text}");
         assert!(text.contains("--state-dir"), "{text}");
+    }
+
+    #[test]
+    // Spec: docs/specs/cli.md#one-bounded-envelope-clipped-with-a-warning
+    fn default_flags_are_omitted_but_non_defaults_are_shown() {
+        let cwd = Path::new("/work/proj");
+        let defaults = CommandDefaults {
+            state_dir: Some(PathBuf::from("/home/agent/.agents/state")),
+            project: Some(PathBuf::from("/work/proj")),
+        };
+        let same = CommandPrefix::with_defaults(
+            Some(Path::new("/home/agent/.agents/state")),
+            Some(cwd),
+            cwd,
+            &defaults,
+        );
+        assert_eq!(same.runnable("status").as_deref(), Some("provenant status"));
+        assert_eq!(same.project_flag(), "");
+
+        let other = CommandPrefix::with_defaults(
+            Some(Path::new("/other/state")),
+            Some(Path::new("/other/proj")),
+            cwd,
+            &defaults,
+        );
+        assert_eq!(
+            other.runnable("status").as_deref(),
+            Some("provenant --state-dir '/other/state' status")
+        );
+        assert_eq!(other.project_flag(), " --project '/other/proj'");
+
+        // The argv form drops only the flags that name a default.
+        let same_argv: Vec<String> = [
+            "provenant",
+            "--state-dir",
+            "/home/agent/.agents/state",
+            "--project",
+            "/work/proj",
+            "status",
+        ]
+        .map(String::from)
+        .to_vec();
+        assert_eq!(
+            same.render_argv(&same_argv).as_deref(),
+            Some("provenant status")
+        );
+        let other_argv: Vec<String> = [
+            "provenant",
+            "--state-dir",
+            "/other/state",
+            "--project",
+            "/other/proj",
+            "status",
+        ]
+        .map(String::from)
+        .to_vec();
+        assert_eq!(
+            other.render_argv(&other_argv).as_deref(),
+            Some("provenant --state-dir /other/state --project /other/proj status")
+        );
     }
 }

@@ -92,6 +92,7 @@ pub fn envelope_schema(command: &str, data: Value) -> Value {
             ("data", json!({})),
             ("error", nullable(error_schema())),
             ("warnings", schema::array(warning_schema())),
+            ("next", schema::array(next_step_schema())),
         ],
         &[],
     );
@@ -119,6 +120,12 @@ pub fn warning_schema() -> Value {
             ("repair", string()),
         ],
     )
+}
+
+/// The typed next-step shape carried by the envelope's `next` array. The argv
+/// is a list of literal arguments; the binary edge owns their presentation.
+pub fn next_step_schema() -> Value {
+    object(&[("argv", array(string())), ("why", string())], &[])
 }
 
 /// The data schema for a command in [`COMMANDS`].
@@ -162,6 +169,7 @@ pub fn error_envelope_schema() -> Value {
             ("data", json!({})),
             ("error", error_schema()),
             ("warnings", array(warning_schema())),
+            ("next", array(next_step_schema())),
         ],
         &[],
     );

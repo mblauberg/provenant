@@ -447,7 +447,7 @@ fn answer_delivery_reply(
         let Some(target) = reader.target(&session, deadline)? else {
             return Ok(None);
         };
-        let commands = CommandPrefix::new(selected.state_dir.as_deref(), &cwd);
+        let commands = crate::output::command_prefix(&selected, &cwd);
         let at = SystemClock::new().wall_now()?;
         let mut oversized = Vec::new();
         let page = {
@@ -1071,7 +1071,7 @@ fn checkpoint(
         session::CHECKPOINT_MAX_AGE,
         session::Advice {
             digest: &digest,
-            commands: &session::CommandPrefix::new(globals.state_dir.as_deref(), cwd),
+            commands: &crate::output::command_prefix(globals, cwd),
             client,
             in_lane,
         },

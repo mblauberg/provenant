@@ -39,6 +39,7 @@ fn error_envelope(command: &str, code: &str, message: &str, repair: &str) -> Res
             code, message, None, repair,
         )),
         warnings: Vec::new(),
+        next: Vec::new(),
     };
     serde_json::to_value(result).map_err(|error| format!("error envelope: {error}"))
 }

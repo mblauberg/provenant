@@ -85,6 +85,26 @@ impl Outcome {
         }
     }
 }
+/// One suggested next command, carried as data rather than formatted text.
+/// `argv` holds the executable and its arguments; the binary edge turns it into
+/// one human line with the single command formatter.
+/// Spec: docs/specs/cli.md#one-bounded-envelope-clipped-with-a-warning
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NextStep {
+    /// The command as an argument vector, beginning with `provenant`.
+    pub argv: Vec<String>,
+    /// One sentence saying why this is the next step.
+    pub why: String,
+}
+impl NextStep {
+    pub fn new(argv: Vec<String>, why: impl Into<String>) -> Self {
+        Self {
+            argv,
+            why: why.into(),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CommandResult<T> {
     pub schema_version: u64,
@@ -96,6 +116,10 @@ pub struct CommandResult<T> {
     /// under `--json` nothing is printed to stderr, so this is the only place
     /// a consumer can see them. Spec: docs/specs/cli.md#warnings-are-typed-values
     pub warnings: Vec<Warning>,
+    /// Suggested next commands. Always on the wire, empty when the command
+    /// suggests nothing; rendered once by the binary edge.
+    /// Spec: docs/specs/cli.md#one-bounded-envelope-clipped-with-a-warning
+    pub next: Vec<NextStep>,
 }
 impl<T> CommandResult<T> {
     pub fn new(command: impl Into<String>, status: Outcome, data: T) -> Self {
@@ -106,7 +130,14 @@ impl<T> CommandResult<T> {
             data,
             error: None,
             warnings: Vec::new(),
+            next: Vec::new(),
         }
+    }
+
+    /// Attach suggested next commands to a result before it is emitted.
+    pub fn with_next(mut self, next: Vec<NextStep>) -> Self {
+        self.next = next;
+        self
     }
 }
 #[derive(Debug, Serialize)]

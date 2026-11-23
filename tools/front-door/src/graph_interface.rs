@@ -11,7 +11,7 @@ use provenant_records::{
 use provenant_routing::BareModelError;
 use serde_json::{Value, json};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 fn document(path: &Path) -> Result<Value, Box<provenant_records::diagnostic::Diagnostic>> {
     let text = std::fs::read_to_string(path).map_err(|_| file_input_error(path))?;
@@ -77,13 +77,10 @@ fn config_cause<'a>(
 }
 
 fn config_repair(globals: &Globals) -> String {
-    let mut command = String::from("provenant");
-    if let Some(state) = &globals.state_dir {
-        let path = state.to_string_lossy().replace('\'', "'\\''");
-        command.push_str(&format!(" --state-dir '{path}'"));
-    }
-    command.push_str(" check config --json");
-    command
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    crate::output::command_prefix(globals, &cwd)
+        .runnable("check config --json")
+        .unwrap_or_else(|| "provenant check config --json".to_owned())
 }
 
 fn config_projection(
@@ -219,11 +216,14 @@ fn refusal_lines(checkpoint: &Value) -> String {
 /// then the one next command. A refusal before admission adds its own line.
 fn run_human(data: &Value, input: &Value, announced: bool) -> String {
     let graph = data["checkpoint"]["graph_id"].as_str().unwrap_or_default();
-    let next = match data["status"].as_str() {
-        Some("complete" | "cancelled") => format!("provenant output {graph}"),
-        Some("paused") => format!("provenant status {graph}"),
-        _ => format!("provenant wait {graph}"),
+    let rest = match data["status"].as_str() {
+        Some("complete" | "cancelled") => format!("output {graph}"),
+        Some("paused") => format!("status {graph}"),
+        _ => format!("wait {graph}"),
     };
+    let next = provenant_workflow::session::CommandPrefix::default()
+        .runnable(&rest)
+        .unwrap_or_else(|| format!("provenant {rest}"));
     let status = data["status"].as_str().unwrap_or("pending");
     let document = input.get("document");
     // A changed input under a known name starts a suffixed graph. Say so in
