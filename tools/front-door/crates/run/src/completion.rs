@@ -14,7 +14,7 @@ use std::{
     ffi::OsStr,
     path::{Component, Path, PathBuf},
 };
-use toml_edit::{Item, TableLike};
+use toml_edit::Item;
 
 /// A handoff was accepted with an advisory parse notice.
 /// Spec: docs/specs/cli.md#warnings-are-typed-values
@@ -410,7 +410,7 @@ fn without_role_header(text: &str) -> &str {
         return text;
     };
     if first.trim().starts_with(ROLE_HEADER_OPEN) && first.trim().ends_with(ROLE_HEADER_CLOSE) {
-        text[first.len()..].trim_start_matches(|c| c == '\r' || c == '\n')
+        text[first.len()..].trim_start_matches(['\r', '\n'])
     } else {
         text
     }

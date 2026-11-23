@@ -653,6 +653,7 @@ name = "provenant-redact"
 version = "2.8.3"
 dependencies = [
  "provenant-os",
+ "provenant-records",
  "serde_json",
  "thiserror",
 ]
