@@ -1709,6 +1709,7 @@ fn usage_verbs_keep_their_persisted_spelling() {
         "inbox",
         "inbox acknowledge",
         "inbox close",
+        "init",
         "install",
         "internal event-listen",
         "internal lane-cleanup",

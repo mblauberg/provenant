@@ -90,6 +90,8 @@ pub enum Command {
     Upgrade(Upgrade),
     /// Remove installed harness integrations
     Uninstall(Uninstall),
+    /// Initialise a repository's port table from detected settings
+    Init,
     /// Inspect and edit model routing
     #[command(subcommand)]
     Route(crate::route::Route),

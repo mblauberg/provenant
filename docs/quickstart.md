@@ -29,7 +29,23 @@ provenant check install
 This compares the binary, assets, receipt and owned entries for every target and
 reports drift without repairing it. Fix what it reports before dispatching work.
 
-## 3. Register an account
+## 3. Initialise a repository
+
+From the repository you want Provenant to work in, write a minimal port table:
+
+```sh
+cd /path/to/your/repository
+provenant init
+```
+
+`init` detects the remote and default branch from Git and the toolchain from the
+repository, then writes `.provenant/ports.json` with only the choices a later
+read cannot re-derive. It prints each choice with its source. An existing ports
+file is never overwritten: `init` reports what it would add instead, so you can
+review the difference yourself. Commit the new file to share the port table
+with your lanes.
+
+## 4. Register an account
 
 Sign in with your provider's CLI first, then register that account directory.
 Claude accounts live in `~/.claude-LABEL`; Codex uses `CODEX_HOME`.
@@ -43,7 +59,7 @@ provenant quota tick
 `accounts register` grants the host access to that account; `quota tick`
 initialises quota state. Repeat per account and provider.
 
-## 4. Run a first read-only lane
+## 5. Run a first read-only lane
 
 ```sh
 provenant run explore --brief "List the commands that write install state and cite the file for each" --name map-install
@@ -57,7 +73,7 @@ invokes a real agent under the authority you give it, so start with work whose
 output you can review. Never poll: block on `provenant wait` in the background
 and carry on.
 
-## 5. Run a first writer
+## 6. Run a first writer
 
 A writer works in its own worktree on a branch you name.
 
