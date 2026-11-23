@@ -1,5 +1,6 @@
 use super::*;
 use crate::identity::agy_fingerprint;
+use provenant_records::warning::{ACCOUNT_SWITCH_RECONCILE_FAILED, Warning, warn};
 
 pub(crate) fn capture_source(
     live: &LiveQuota,
@@ -25,7 +26,6 @@ pub(super) fn agy_signed_in_account(
 }
 
 impl LiveQuota {
-    #[allow(clippy::print_stderr)]
     pub(super) fn agy(
         &self,
         account: &Account,
@@ -112,9 +112,15 @@ impl LiveQuota {
                     Ok(false) => {}
                     Err(error) => {
                         *self.last_reconcile_error.borrow_mut() = Some(error.to_string());
-                        eprintln!(
-                            "provenant: failed to reconcile {} account switch: {error}",
-                            provenant_records::Harness::Agy.spec().name
+                        warn(
+                            Warning::new(
+                                ACCOUNT_SWITCH_RECONCILE_FAILED,
+                                format!(
+                                    "failed to reconcile {} account switch: {error}",
+                                    provenant_records::Harness::Agy.spec().name
+                                ),
+                            )
+                            .subject(account.scope.account_key.clone()),
                         );
                     }
                 }

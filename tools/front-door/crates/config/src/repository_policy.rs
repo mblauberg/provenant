@@ -1,6 +1,7 @@
 //! Opt-in launch classification from the repository's project configuration.
 use crate::ConfigError;
 use provenant_os::fs::Directory;
+use provenant_records::warning::{CONFIG_KEY_IGNORED, Warning, warn};
 use serde::{Deserialize, Serialize};
 use std::{
     borrow::Cow,
@@ -111,13 +112,18 @@ fn collect_unknown_inline_toml_keys(
 }
 
 fn warn_project_config(warnings: &[provenant_records::InputWarning]) {
-    use std::io::Write;
     for warning in warnings {
-        let _ = writeln!(
-            std::io::stderr().lock(),
-            "warning: {}: {}: unknown configuration key; ignored",
-            warning.source,
-            warning.key
+        warn(
+            Warning::new(
+                CONFIG_KEY_IGNORED,
+                format!(
+                    "{}: {}: unknown configuration key; ignored",
+                    warning.source, warning.key
+                ),
+            )
+            .subject(format!("{}: {}", warning.source, warning.key))
+            .repair("remove the unknown key from the project configuration")
+            .once_per_change(),
         );
     }
 }

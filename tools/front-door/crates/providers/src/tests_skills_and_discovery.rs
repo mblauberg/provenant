@@ -1010,6 +1010,8 @@ fn staged_skills_native_probes() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(target_os = "macos")]
 #[test]
 #[ignore = "invoked by staged_skills_native_probes"]
+// The child probe writes a completion marker to stdout for the parent test.
+#[allow(clippy::disallowed_methods)]
 fn staged_skills_probe_child() {
     let stage = std::env::var_os("PROVENANT_PROBE_STAGE").expect("stage path");
     let secret = std::env::var_os("PROVENANT_PROBE_SECRET").expect("secret path");

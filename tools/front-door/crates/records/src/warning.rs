@@ -85,6 +85,32 @@ pub const TERMINAL_FAILURE_UNRETAINED: WarningCode = WarningCode("TERMINAL_FAILU
 /// Terminal settlement was incomplete, so the writer reservation is retained.
 pub const TERMINAL_PUBLICATION_INCOMPLETE: WarningCode =
     WarningCode("TERMINAL_PUBLICATION_INCOMPLETE");
+/// A non-boundary policy rule was violated; the caller warns and proceeds.
+pub const POLICY_WARNING: WarningCode = WarningCode("POLICY_WARNING");
+/// A configuration source could not be read, so compiled defaults applied.
+pub const CONFIG_UNAVAILABLE: WarningCode = WarningCode("CONFIG_UNAVAILABLE");
+/// An unrecognised entry in the project registry was ignored.
+pub const PROJECT_DIRECTORY_IGNORED: WarningCode = WarningCode("PROJECT_DIRECTORY_IGNORED");
+/// Free disk space fell below the configured floor; collection may proceed.
+pub const DISK_FLOOR_LOW: WarningCode = WarningCode("DISK_FLOOR_LOW");
+/// Native package cache settings could not be resolved safely and were kept.
+pub const PACKAGE_CACHE_SETTINGS_UNRESOLVED: WarningCode =
+    WarningCode("PACKAGE_CACHE_SETTINGS_UNRESOLVED");
+/// Project pnpm cache settings use a legacy spelling that versions read differently.
+pub const LEGACY_PNPM_CACHE_SETTINGS: WarningCode = WarningCode("LEGACY_PNPM_CACHE_SETTINGS");
+/// The effective pnpm cache selector family could not be identified safely.
+pub const PNPM_FAMILY_UNRESOLVED: WarningCode = WarningCode("PNPM_FAMILY_UNRESOLVED");
+/// The configured pnpm cache selectors disagree with the selected version.
+pub const PNPM_SELECTOR_CONFLICT: WarningCode = WarningCode("PNPM_SELECTOR_CONFLICT");
+/// Pre-11 pnpm cache binding uses environment selectors npm may report as unknown.
+pub const LEGACY_PNPM_ENV_SELECTOR: WarningCode = WarningCode("LEGACY_PNPM_ENV_SELECTOR");
+/// Reconciling a live quota provider's account switch failed.
+pub const ACCOUNT_SWITCH_RECONCILE_FAILED: WarningCode =
+    WarningCode("ACCOUNT_SWITCH_RECONCILE_FAILED");
+/// A post-commit change signal could not be published.
+pub const CHANGE_SIGNAL_UNPUBLISHED: WarningCode = WarningCode("CHANGE_SIGNAL_UNPUBLISHED");
+/// A detached worker's process-budget probe failed; the limit is unknown.
+pub const PROCESS_BUDGET_PROBE_FAILED: WarningCode = WarningCode("PROCESS_BUDGET_PROBE_FAILED");
 
 impl Warning {
     /// A warning with no subject, source or repair.
@@ -320,6 +346,18 @@ mod tests {
             super::ANSWER_DELIVERY_RETAINED,
             super::TERMINAL_FAILURE_UNRETAINED,
             super::TERMINAL_PUBLICATION_INCOMPLETE,
+            super::POLICY_WARNING,
+            super::CONFIG_UNAVAILABLE,
+            super::PROJECT_DIRECTORY_IGNORED,
+            super::DISK_FLOOR_LOW,
+            super::PACKAGE_CACHE_SETTINGS_UNRESOLVED,
+            super::LEGACY_PNPM_CACHE_SETTINGS,
+            super::PNPM_FAMILY_UNRESOLVED,
+            super::PNPM_SELECTOR_CONFLICT,
+            super::LEGACY_PNPM_ENV_SELECTOR,
+            super::ACCOUNT_SWITCH_RECONCILE_FAILED,
+            super::CHANGE_SIGNAL_UNPUBLISHED,
+            super::PROCESS_BUDGET_PROBE_FAILED,
         ] {
             let name = code.as_str();
             assert!(

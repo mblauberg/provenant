@@ -1,4 +1,5 @@
 //! One executable policy table, shared by enforcement and presentation.
+use crate::warning::{self, CONFIG_KEY_IGNORED, CONFIG_MALFORMED, POLICY_WARNING, Warning};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::OnceLock};
 
@@ -148,7 +149,7 @@ impl Facts {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Effect {
     Proceed,
-    Warn(String),
+    Warn(Warning),
     Refuse(Box<crate::diagnostic::Diagnostic>),
     Stop(Box<crate::diagnostic::Diagnostic>),
 }
@@ -159,7 +160,7 @@ impl Effect {
     pub fn message(&self) -> Option<&str> {
         match self {
             Self::Proceed => None,
-            Self::Warn(message) => Some(message),
+            Self::Warn(warning) => Some(&warning.message),
             Self::Refuse(diag) | Self::Stop(diag) => diag.detail.as_deref(),
         }
     }
@@ -196,15 +197,17 @@ impl Default for Policy {
 impl Policy {
     /// Apply layers in increasing precedence: host, project, then dispatch.
     /// Boundary rules have no knob, so these overlays cannot grant authority.
-    #[allow(clippy::print_stderr)]
     pub fn overlay(&mut self, values: &BTreeMap<String, Strength>, source: Source) {
-        use std::io::Write;
         for (code, strength) in values {
             let Some(effective) = self.rules.iter_mut().find(|value| value.rule.code == *code)
             else {
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "policy override {code} ignored: no such rule"
+                warning::warn(
+                    Warning::new(
+                        CONFIG_KEY_IGNORED,
+                        format!("policy override {code} ignored: no such rule"),
+                    )
+                    .subject(code.as_str())
+                    .repair("use a rule code from the compiled policy table"),
                 );
                 continue;
             };
@@ -212,9 +215,15 @@ impl Policy {
                 continue;
             }
             if effective.rule.knob.is_none() {
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "policy override {code} ignored: boundary and operation rules have no override"
+                warning::warn(
+                    Warning::new(
+                        CONFIG_KEY_IGNORED,
+                        format!(
+                            "policy override {code} ignored: boundary and operation rules have no override"
+                        ),
+                    )
+                    .subject(code.as_str())
+                    .repair("remove the override; boundary and operation rules have no knob"),
                 );
                 continue;
             }
@@ -226,12 +235,18 @@ impl Policy {
                     .map(strength_name)
                     .collect::<Vec<_>>()
                     .join(", ");
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "policy override {code}={}: unsupported; supported strengths: {supported}; retaining {} from {:?}",
-                    strength_name(*strength),
-                    strength_name(effective.rule.strength),
-                    effective.source
+                warning::warn(
+                    Warning::new(
+                        CONFIG_MALFORMED,
+                        format!(
+                            "policy override {code}={}: unsupported; supported strengths: {supported}; retaining {} from {:?}",
+                            strength_name(*strength),
+                            strength_name(effective.rule.strength),
+                            effective.source
+                        ),
+                    )
+                    .subject(code.as_str())
+                    .repair(format!("use one of: {supported}")),
                 );
                 continue;
             }
@@ -265,7 +280,9 @@ impl Policy {
         );
         match rule.strength {
             Strength::Off => Effect::Proceed,
-            Strength::Warn => Effect::Warn(message),
+            Strength::Warn => {
+                Effect::Warn(Warning::new(POLICY_WARNING, message).subject(code.to_owned()))
+            }
             Strength::Refuse if rule.boundary == Boundary::None => Effect::Stop(Box::new(
                 crate::diagnostic::Diagnostic::new(code).detail(message),
             )),
@@ -274,26 +291,25 @@ impl Policy {
             )),
         }
     }
-    /// Shared path for a non-boundary rule: a violated predicate warns on
-    /// stderr, naming the rule, setting source and knob, then proceeds; under
-    /// strict mode the caller's configured stop is returned. Boundary rules use
-    /// `boundary_error`, never this.
-    #[allow(clippy::print_stderr, clippy::panic)]
+    /// Shared path for a non-boundary rule: a violated predicate reports a
+    /// typed warning through `records::warning`, naming the rule, setting source
+    /// and knob, then proceeds; under strict mode the caller's configured stop
+    /// is returned. Boundary rules use `boundary_error`, never this.
+    #[allow(clippy::panic)]
     pub fn warn_or<E>(
         &self,
         code: &str,
         facts: Facts,
         refuse: impl FnOnce(crate::diagnostic::Diagnostic) -> E,
     ) -> Result<(), E> {
-        use std::io::Write;
         assert!(
             self.rule(code).rule.boundary == Boundary::None,
             "warn_or serves only non-boundary rules"
         );
         match self.check(code, facts) {
             Effect::Proceed => Ok(()),
-            Effect::Warn(message) => {
-                let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+            Effect::Warn(w) => {
+                warning::warn(w);
                 Ok(())
             }
             Effect::Stop(diagnostic) => Err(refuse(*diagnostic)),

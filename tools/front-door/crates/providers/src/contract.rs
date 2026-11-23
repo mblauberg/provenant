@@ -6,6 +6,7 @@ use provenant_records::diagnostic::{
     ContinuationField as F, ContinuationGuard, ContinuationIssue as I, ContinuationRule,
 };
 use provenant_records::policy::{Effect, Facts, Policy};
+use provenant_records::warning::warn;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error)]
@@ -287,9 +288,8 @@ impl Prompt {
         );
         match policy.check("ARGV_PROMPT", Facts::violation(detail)) {
             Effect::Proceed => Ok(()),
-            Effect::Warn(message) => {
-                use std::io::Write;
-                let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+            Effect::Warn(warning) => {
+                warn(warning);
                 Ok(())
             }
             Effect::Refuse(_) | Effect::Stop(_) => Err(error()),

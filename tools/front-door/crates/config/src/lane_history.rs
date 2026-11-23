@@ -8,6 +8,7 @@
 //! strict: an unknown value warns with the layer that supplied it and keeps the
 //! documented default, so a typo never silently chooses a policy.
 use crate::{KnobSource, KnobValue};
+use provenant_records::warning::{CONFIG_MALFORMED, Warning, warn};
 use provenant_records::{Layer, run::HarnessProfile};
 use serde_json::Value;
 use std::{collections::BTreeMap, fmt};
@@ -135,11 +136,14 @@ fn resolve_setting<T: HistoryValue>(
         Some(text) => match parse(text) {
             Some(value) => Setting { value, source },
             None => {
-                use std::io::Write as _;
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: {}",
-                    unknown_value(name, text, source, T::default().as_str())
+                warn(
+                    Warning::new(
+                        CONFIG_MALFORMED,
+                        unknown_value(name, text, source, T::default().as_str()),
+                    )
+                    .subject(name.to_owned())
+                    .repair(format!("set {name} to a declared value"))
+                    .once_per_change(),
                 );
                 Setting {
                     value: T::default(),

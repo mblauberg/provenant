@@ -9,6 +9,7 @@ pub mod watch;
 use crate::fs::{Directory, FsError, LockMode, LockRefusal};
 use crate::sys::fs as os;
 pub use provenant_core::changes::{FILE_NAME, Generations, Scope};
+use provenant_records::warning::{CHANGE_SIGNAL_UNPUBLISHED, Warning, warn};
 
 /// Bounded lock attempts before a bump is skipped. The signal is a hint, so a
 /// busy signal costs at most about 50 ms and the next commit bumps again.
@@ -56,16 +57,18 @@ pub fn bump(state_dir: &Path, scope: Scope) -> io::Result<()> {
 }
 
 /// Post-commit hint for an owner write that has already committed. A failed
-/// bump never fails that write. The first failure per process is reported on
-/// stderr; later failures are silent so a broken signal does not spam.
-#[allow(clippy::print_stderr)]
+/// bump never fails that write. The first failure per process is reported as a
+/// typed warning; later failures are silent so a broken signal does not spam.
 pub fn hint(state_dir: &Path, scopes: &[Scope]) {
     static REPORTED: std::sync::Once = std::sync::Once::new();
     if let Err(error) = bump_scopes(state_dir, scopes) {
         REPORTED.call_once(|| {
-            eprintln!(
-                "warning: change signal not published after a committed write; readers keep their last generation until a later write or a full re-read ({error})"
-            );
+            warn(Warning::new(
+                CHANGE_SIGNAL_UNPUBLISHED,
+                format!(
+                    "change signal not published after a committed write; readers keep their last generation until a later write or a full re-read ({error})"
+                ),
+            ));
         });
     }
 }
