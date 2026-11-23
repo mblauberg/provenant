@@ -987,6 +987,99 @@ fn protected_review_retains_candidate_and_paths_without_delivery() -> TestResult
     Ok(())
 }
 
+// A completed integrate delivery names the integrated tip, not the sealed
+// writer head (which can still be the pre-integration graph base). The status
+// view must re-derive that receipt so graph settlement sees the success.
+#[test]
+fn integrate_delivery_receipt_projects_when_head_differs_from_writer_head() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let mut input = input();
+    input.request.task.writer = Some(WriterRequest {
+        extra: Default::default(),
+        custody_project: Some(crate::tests::writer_project()),
+        project: temp.path().to_path_buf(),
+        worktree: temp.path().join("lane"),
+    });
+    input.request.task.deliver = Some(WriterDeliveryRequest {
+        extra: Default::default(),
+        mode: provenant_records::run::DeliveryMode::Integrate("batch/next".into()),
+        remote: String::new(),
+        branch: "batch/next".into(),
+        open_pr: false,
+        fast_forward_only: false,
+    });
+    store.create(&input, &call)?;
+    seal_exit_fixture(&store, &input)?;
+    let id = input.attempt_id;
+    let base = provenant_core::GitOid::parse(&"a".repeat(40))?;
+    let integrated = provenant_core::GitOid::parse(&"b".repeat(40))?;
+    let attempt = store.attempt_dir(id, false)?;
+    artifacts::seal(
+        &attempt,
+        "writer-terminal.json",
+        &db::bytes(&writer::WriterTerminal {
+            schema_version: 1,
+            head: base,
+            stop_work: None,
+        })?,
+        RECORD_LIMIT,
+    )?;
+    let mut publication = publication();
+    publication.outcome = Outcome::Succeeded;
+    let record = store.publish_terminal(id, 1, &publication, &exit(), &call)?;
+    assert_eq!(record.head, Some(base));
+    assert!(matches!(
+        record.delivery,
+        Some(WriterDeliveryReceipt {
+            state: WriterDeliveryState::NotAttempted { .. },
+            ..
+        })
+    ));
+    // The host integrated the lane head into batch/next and sealed the receipt.
+    artifacts::seal(
+        &attempt,
+        "delivery.json",
+        &db::bytes(&WriterDeliveryReceipt {
+            extra: Default::default(),
+            schema_version: 1,
+            remote: String::new(),
+            branch: "batch/next".into(),
+            head: Some(integrated),
+            review_acceptance: None,
+            state: WriterDeliveryState::Delivered {
+                extra: Default::default(),
+                pull_request: None,
+            },
+            integration: Some(provenant_records::run::WriterIntegration {
+                extra: Default::default(),
+                remote: String::new(),
+                push_url: None,
+                target: "refs/heads/batch/next".into(),
+                previous: Some(base),
+                integrated,
+            }),
+        })?,
+        RECORD_LIMIT,
+    )?;
+    let projected = store.record(id, &call)?;
+    let delivered = projected.delivery.expect("delivery.json must be projected");
+    assert!(matches!(
+        delivered.state,
+        WriterDeliveryState::Delivered { .. }
+    ));
+    assert_eq!(delivered.head, Some(integrated));
+    assert_eq!(
+        store.delivered(id, &call)?.map(|(_, receipt)| receipt),
+        Some(delivered)
+    );
+    Ok(())
+}
+
 // Spec: docs/specs/run-settlement.md#identity-mismatch-keeps-writer-work
 #[test]
 fn review_required_identity_mismatch_keeps_the_writers_head() -> TestResult {

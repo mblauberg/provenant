@@ -2226,13 +2226,27 @@ impl RunStore {
             let request = self.request(record.attempt_id, call)?;
             let task = request.task;
             if let (Some(writer), Some(delivery)) = (&task.writer, &task.deliver) {
-                if self
-                    .delivered(record.attempt_id, call)?
-                    .is_some_and(|(request, receipt)| {
-                        request == *delivery
-                            && receipt.head == record.head
+                // The delivery's own artifact is authoritative for completion.
+                // An integrate receipt names the head it published to the
+                // destination, which can differ from the sealed writer head
+                // (the graph base before integration), so head equality must not
+                // reject it. A pickup receipt still needs its sealed head.
+                let integrated = read_sealed(attempt, "delivery.json", RECORD_LIMIT)?
+                    .map(|raw| crate::db::decode::<WriterDeliveryReceipt>(&raw))
+                    .transpose()?
+                    .is_some_and(|receipt| {
+                        receipt.branch == delivery.branch
+                            && receipt.remote == delivery.remote
                             && matches!(receipt.state, WriterDeliveryState::Delivered { .. })
-                    })
+                    });
+                if integrated
+                    || self
+                        .delivered(record.attempt_id, call)?
+                        .is_some_and(|(request, receipt)| {
+                            request == *delivery
+                                && receipt.head == record.head
+                                && matches!(receipt.state, WriterDeliveryState::Delivered { .. })
+                        })
                 {
                     self.record_effect(
                         record.attempt_id,

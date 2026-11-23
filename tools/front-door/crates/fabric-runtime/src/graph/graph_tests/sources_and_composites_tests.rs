@@ -1267,6 +1267,69 @@ fn batch_after_ordering_sets_after_wait_reason_until_satisfied() {
 }
 
 #[test]
+fn batch_integrated_slice_starts_its_after_dependent() {
+    // A slice whose integrate delivery succeeded settles succeeded and releases
+    // the slice that waits on it (`after` in the batch template, `depends_on`
+    // here). The observation names the integration branch and the pre-integration
+    // writer head, as the run store now projects a completed integrate receipt.
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 1,
+        "graph_id": "batch-integrate-settlement",
+        "integration_branch": "batch/next",
+        "nodes": [{
+            "id": "slices",
+            "kind": "composite",
+            "access": "read_only",
+            "composite": {
+                "nodes": [
+                    {"id":"first","access":"worktree_write","worktree":".worktrees/first","prompt":"first","route":{"alias":"junior"},"write_scope":["src"],"delivery":"integrate:batch/next"},
+                    {"id":"second","access":"worktree_write","worktree":".worktrees/second","prompt":"second","route":{"alias":"junior"},"write_scope":["src"],"delivery":"integrate:batch/next","depends_on":["first"]}
+                ],
+                "exports": []
+            }
+        }]
+    }))
+    .unwrap();
+    let mut owner = FakeOwner {
+        observations: [
+            AttemptObservation::Pending { attempt_ref: None },
+            AttemptObservation::Pending { attempt_ref: None },
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    let node = |id: &str, checkpoint: &GraphCheckpoint| {
+        checkpoint
+            .nodes
+            .iter()
+            .find(|n| n.id == format!("slices--{id}"))
+            .unwrap()
+    };
+    assert_eq!(node("first", &run.checkpoint).state, NodeState::Running);
+    assert_eq!(node("second", &run.checkpoint).state, NodeState::Pending);
+    assert_eq!(
+        node("second", &run.checkpoint).wait_reason.as_deref(),
+        Some("after")
+    );
+
+    let mut integrated = terminal(AttemptOutcome::Succeeded);
+    if let AttemptObservation::Terminal { branch, commit, .. } = &mut integrated {
+        *branch = Some("batch/next".into());
+        *commit = Some("a".repeat(40));
+    }
+    let mut owner2 = FakeOwner {
+        observations: [integrated, AttemptObservation::Pending { attempt_ref: None }].into(),
+        ..Default::default()
+    };
+    let run2 = advance(&document, &mut owner2, &mut journal).unwrap();
+    assert_eq!(node("first", &run2.checkpoint).state, NodeState::Succeeded);
+    assert_eq!(node("second", &run2.checkpoint).state, NodeState::Running);
+    assert_eq!(node("second", &run2.checkpoint).wait_reason, None);
+}
+
+#[test]
 fn batch_merge_conflict_isolation_pauses_only_conflicted_slice() {
     let document: GraphDocument = serde_json::from_value(serde_json::json!({
         "schema_version": 1,

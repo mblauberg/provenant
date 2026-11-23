@@ -888,7 +888,16 @@ impl RunStore {
             }
         {
             let delivery: WriterDeliveryReceipt = crate::db::decode(&raw)?;
-            if delivery.head.is_some() && delivery.head == record.head {
+            // An integrate delivery publishes the lane head to the destination
+            // branch, so its receipt head is the integrated tip while the sealed
+            // writer head can still name the pre-integration base. The artifact
+            // lives in this attempt's directory and is bound to the requested
+            // destination by `deliver_once`; that is what proves this effect ran,
+            // not equality with the pre-integration head.
+            let same_destination = record.delivery.as_ref().is_none_or(|sealed| {
+                sealed.branch == delivery.branch && sealed.remote == delivery.remote
+            });
+            if delivery.head.is_some() && same_destination {
                 record.delivery = Some(delivery);
             }
         }
