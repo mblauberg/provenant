@@ -6420,10 +6420,9 @@ mod tests {
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
         let submit = |fetch_first: bool| -> Result<Value> {
-            let mut config = format!(
+            let config = format!(
                 "schema_version=1\n[gc]\nfree_floor='1B'\n[knobs]\nlanes.read_source='refs/remotes/origin/main'\nlanes.read_source_fetch_first={fetch_first}\n"
             );
-            config.push_str("\n");
             std::fs::write(rig.state.join("config.toml"), config)?;
             Ok(factory.graph_document(
                 json!({"op":"run","template":"task","brief":"Review the tree","explain":true}),
