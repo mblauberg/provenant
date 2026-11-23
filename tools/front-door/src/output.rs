@@ -247,7 +247,7 @@ pub(crate) fn emit_with_writers<T: Serialize, Wout: Write, Werr: Write>(
             status: result.status,
             data,
             error: result.error.clone(),
-            warnings,
+            warnings: warnings.clone(),
         };
         provenant_cli::render_or_publish(
             &json_result,
