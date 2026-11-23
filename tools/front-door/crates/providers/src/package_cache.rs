@@ -13,6 +13,10 @@
 //! pnpm versions, so they warn and remain under the package manager's own
 //! configuration handling.
 
+use provenant_records::warning::{
+    LEGACY_PNPM_CACHE_SETTINGS, LEGACY_PNPM_ENV_SELECTOR, PACKAGE_CACHE_SETTINGS_UNRESOLVED,
+    PNPM_FAMILY_UNRESOLVED, PNPM_SELECTOR_CONFLICT, Warning, warn,
+};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
@@ -1139,42 +1143,57 @@ fn yaml_has_key(contents: &str, key: &str) -> bool {
 }
 
 fn warn_unsupported() {
-    use std::io::Write;
-    let _ = writeln!(
-        std::io::stderr().lock(),
-        "warning: native package cache settings could not be resolved safely; configured paths were left unchanged. Set an absolute cache/store path or use supported host path variables"
+    warn(
+        Warning::new(
+            PACKAGE_CACHE_SETTINGS_UNRESOLVED,
+            "native package cache settings could not be resolved safely; configured paths were left unchanged",
+        )
+        .repair("set an absolute cache/store path or use supported host path variables")
+        .once_per_change(),
     );
 }
 
 fn warn_legacy_project_pnpm() {
-    use std::io::Write;
-    let _ = writeln!(
-        std::io::stderr().lock(),
-        "warning: project .npmrc contains legacy pnpm cache settings; shared cache binding was skipped because support varies by pnpm version. A version that ignores these keys may use private HOME/XDG caches. Use cacheDir/storeDir in pnpm-workspace.yaml or supported global config.yaml for portable shared paths"
+    warn(
+        Warning::new(
+            LEGACY_PNPM_CACHE_SETTINGS,
+            "project .npmrc contains legacy pnpm cache settings; shared cache binding was skipped because support varies by pnpm version; a version that ignores these keys may use private HOME/XDG caches",
+        )
+        .repair("use cacheDir/storeDir in pnpm-workspace.yaml or supported global config.yaml for portable shared paths")
+        .once_per_change(),
     );
 }
 
 fn warn_pnpm_family_unresolved() {
-    use std::io::Write;
-    let _ = writeln!(
-        std::io::stderr().lock(),
-        "warning: the effective pnpm selector family could not be identified safely because the selected version or project management policy is ambiguous; configured selectors were preserved and shared cache binding was skipped. Set the cache/store selector family supported by the effective pnpm version, or use cacheDir/storeDir in pnpm-workspace.yaml or supported global config.yaml"
+    warn(
+        Warning::new(
+            PNPM_FAMILY_UNRESOLVED,
+            "the effective pnpm selector family could not be identified safely because the selected version or project management policy is ambiguous; configured selectors were preserved and shared cache binding was skipped",
+        )
+        .repair("set the cache/store selector family supported by the effective pnpm version, or use cacheDir/storeDir in pnpm-workspace.yaml or supported global config.yaml")
+        .once_per_change(),
     );
 }
 
 fn warn_pnpm_selector_conflict() {
-    use std::io::Write;
-    let _ = writeln!(
-        std::io::stderr().lock(),
-        "warning: pnpm cache selectors disagree with the selected pnpm version; preserving configured values and skipping shared cache binding. Set the cache/store selector family supported by the selected pnpm version"
+    warn(
+        Warning::new(
+            PNPM_SELECTOR_CONFLICT,
+            "pnpm cache selectors disagree with the selected pnpm version; preserving configured values and skipping shared cache binding",
+        )
+        .repair("set the cache/store selector family supported by the selected pnpm version")
+        .once_per_change(),
     );
 }
 
 fn warn_legacy_pnpm_environment_selector() {
-    use std::io::Write;
-    let _ = writeln!(
-        std::io::stderr().lock(),
-        "warning: shared cache binding for pnpm before version 11 uses npm_config_cache_dir/npm_config_store_dir; npm invoked in the same provider session may report these as unknown settings. Set cacheDir/storeDir in pnpm-workspace.yaml or supported global config.yaml to avoid environment selectors"
+    warn(
+        Warning::new(
+            LEGACY_PNPM_ENV_SELECTOR,
+            "shared cache binding for pnpm before version 11 uses npm_config_cache_dir/npm_config_store_dir; npm invoked in the same provider session may report these as unknown settings",
+        )
+        .repair("use cacheDir/storeDir in pnpm-workspace.yaml or supported global config.yaml to avoid environment selectors")
+        .once_per_change(),
     );
 }
 

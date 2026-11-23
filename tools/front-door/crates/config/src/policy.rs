@@ -1,6 +1,7 @@
 //! Host/project policy overlays; the executable defaults belong to records.
 use crate::{DomainConfig, DomainSection, FieldMetadata};
 use provenant_records::policy::{Policy, Source, Strength};
+use provenant_records::warning::{CONFIG_UNAVAILABLE, Warning, warn};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::Path};
 
@@ -76,10 +77,14 @@ impl Settings {
 /// defaults, without changing the boundaries or operation errors.
 pub fn read(state: &Path, project: &str, dispatch: &BTreeMap<String, Strength>) -> Policy {
     read_reporting(state, project, dispatch, |error| {
-        use std::io::Write;
-        let _ = writeln!(
-            std::io::stderr().lock(),
-            "policy settings unavailable ({error}); using compiled defaults"
+        warn(
+            Warning::new(
+                CONFIG_UNAVAILABLE,
+                format!("policy settings unavailable ({error}); using compiled defaults"),
+            )
+            .subject("policy settings")
+            .repair("correct the host policy configuration")
+            .once_per_change(),
         );
     })
 }

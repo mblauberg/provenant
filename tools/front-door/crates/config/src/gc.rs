@@ -665,6 +665,7 @@ impl DiskGate {
     /// never this decision.
     pub fn decide(&self, free: u64) -> provenant_records::policy::Effect {
         use provenant_records::policy::{Effect, Facts, Policy};
+        use provenant_records::warning::{DISK_FLOOR_LOW, Warning};
         let level = self.limits.level(free);
         let detail = format!(
             "{}; next: run `provenant gc --free-floor {}B`",
@@ -673,7 +674,7 @@ impl DiskGate {
         );
         match level {
             DiskLevel::Ready => Effect::Proceed,
-            DiskLevel::Warning => Effect::Warn(detail),
+            DiskLevel::Warning => Effect::Warn(Warning::new(DISK_FLOOR_LOW, detail)),
             DiskLevel::Critical => {
                 let mut policy = Policy::default();
                 policy.overlay(

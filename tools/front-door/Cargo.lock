@@ -591,6 +591,7 @@ dependencies = [
  "jiff",
  "libc",
  "provenant-core",
+ "provenant-records",
  "provenant-test-support",
  "serde",
  "serde_json",

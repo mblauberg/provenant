@@ -4,6 +4,7 @@ use provenant_core::{Clock, ProjectId, Roots, WaitBudget};
 use provenant_os::fs::{
     Directory, DirectoryPosition, FileKind, LockMode, Metadata, PublishMode, effective_uid,
 };
+use provenant_records::warning::{PROJECT_DIRECTORY_IGNORED, Warning, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
@@ -918,11 +919,17 @@ fn project_directory_is_registered(registry: &Directory, entry: &OsStr) -> bool 
 /// One clear warning for an entry that cannot be a binding directory. The
 /// path is named so an operator can move or remove the stray entry.
 fn warn_unrecognised_project(path: &Path) {
-    use std::io::Write;
-    let _ = writeln!(
-        std::io::stderr().lock(),
-        "warning: ignoring unrecognised project directory at {}; it is not a project binding",
-        path.display()
+    warn(
+        Warning::new(
+            PROJECT_DIRECTORY_IGNORED,
+            format!(
+                "ignoring unrecognised project directory at {}; it is not a project binding",
+                path.display()
+            ),
+        )
+        .subject(path.display().to_string())
+        .repair("move or remove the stray entry from the projects registry")
+        .once_per_change(),
     );
 }
 

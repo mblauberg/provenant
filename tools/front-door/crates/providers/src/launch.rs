@@ -6,6 +6,7 @@ use provenant_confinement::permissions::{AccessMode, PathGrant, PathScope, Provi
 use provenant_records::{
     ResolvedRoute,
     policy::{Effect, Facts, Policy},
+    warning::{POLICY_WARNING, Warning, warn},
 };
 use serde::Deserialize;
 use std::ffi::{OsStr, OsString};
@@ -466,22 +467,21 @@ pub(crate) fn policy_warning(
     code: &'static str,
     detail: impl Into<String>,
 ) -> Result<(), ProviderError> {
-    let report = |message: &str| {
-        use std::io::Write;
-        let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
-    };
     match policy.check(code, Facts::violation(detail)) {
         Effect::Proceed => Ok(()),
-        Effect::Warn(message) => {
-            report(&message);
+        Effect::Warn(warning) => {
+            warn(warning);
             Ok(())
         }
         Effect::Refuse(diagnostic) | Effect::Stop(diagnostic) => {
-            report(
-                diagnostic
-                    .detail
-                    .as_deref()
-                    .unwrap_or("provider policy refused an operation"),
+            warn(
+                Warning::new(
+                    POLICY_WARNING,
+                    diagnostic
+                        .detail
+                        .unwrap_or_else(|| "provider policy refused an operation".to_owned()),
+                )
+                .subject(code),
             );
             Err(ProviderError::PolicyActionUnsupported { code })
         }

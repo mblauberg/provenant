@@ -2,6 +2,8 @@
 //! `scripts/generate-reference`. Not part of the shipped binary set.
 use std::io::Write;
 
+// The schema generator writes its JSON product to stdout; it is not a shipped binary.
+#[allow(clippy::print_stdout, clippy::disallowed_methods)]
 fn main() -> std::process::ExitCode {
     let mut files = serde_json::Map::new();
     for (name, schema) in provenant_records::wire::published() {
