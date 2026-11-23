@@ -352,23 +352,18 @@ pub(crate) struct StopWorkPolicy<'a> {
 }
 
 /// The remote a stopped writer's summary and stop-publication recovery must
-/// use. A checkout without a remote has no tracking branch, so an empty remote
-/// is an absence rather than a guess.
+/// use. A checkout without a remote has no tracking branch, so it yields
+/// `None` rather than an empty remote name.
 /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
-fn terminal_forge_remote(state: &Path, project: &Path) -> String {
-    let Ok(ports) = provenant_config::PortTable::read_for(Some(project), state) else {
-        return String::new();
-    };
+fn terminal_forge_remote(state: &Path, project: &Path) -> Option<String> {
+    let ports = provenant_config::PortTable::read_for(Some(project), state).ok()?;
     let policy = provenant_config::operation_policy(state, project, &ports);
     let config = provenant_config::ForgeConfig::new(&ports, (*policy).clone());
-    let Ok(git) = provenant_config::ForgeGit::new(project) else {
-        return String::new();
-    };
+    let git = provenant_config::ForgeGit::new(project).ok()?;
     provenant_config::ForgeContext::remote_if_any(&config, &git)
         .ok()
         .flatten()
         .map(|remote| remote.value)
-        .unwrap_or_default()
 }
 
 /// The result of comparing a retry's worktree head with its pinned commit.
@@ -673,7 +668,15 @@ impl WriterLaunch {
         status_paths(&output)
     }
 
-    fn ahead_of_remote(&self, git: &Path, head: GitOid, remote: &str) -> Result<Option<u64>> {
+    fn ahead_of_remote(
+        &self,
+        git: &Path,
+        head: GitOid,
+        remote: Option<&str>,
+    ) -> Result<Option<u64>> {
+        let Some(remote) = remote else {
+            return Ok(None);
+        };
         let branch = self
             .branch
             .as_str()
@@ -1994,9 +1997,7 @@ fn prepare_writer_git(
             kind: crate::ErrorKind::Invalid,
             message: error.to_string(),
         })?
-        .map(|remote| remote.value)
-        .unwrap_or_default();
-    let remote = remote.as_str();
+        .map(|remote| remote.value);
     let path = writer.worktree.path().to_path_buf();
     // Git replaces config atomically. Open a verified snapshot and reopen after
     // fetch so a sibling's completed config update is observed coherently.
@@ -2030,7 +2031,7 @@ fn prepare_writer_git(
     verify_writer_git_paths(
         writer.worktree.repo().common_git_dir(),
         &writer.branch,
-        remote,
+        remote.as_deref(),
     )?;
     if let Some((authority, credentials)) = authority {
         prepare_writer_directories(
@@ -2053,7 +2054,7 @@ fn prepare_writer_git(
             project: project.clone(),
             worktree: path.clone(),
         },
-        (repo.private_git_dir(), remote),
+        (repo.private_git_dir(), remote.as_deref()),
         state,
         cancel,
         &writer.facts,
@@ -2223,18 +2224,23 @@ fn prepare_writer_git(
 pub(super) fn verify_writer_git_paths(
     common: &Path,
     branch: &GitRefName,
-    remote: &str,
+    remote: Option<&str>,
 ) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
     let suffix = branch
         .as_str()
         .strip_prefix("refs/heads/")
         .ok_or(RunError::Validation("writer branch is not a local branch"))?;
-    let tracking = format!("refs/remotes/{remote}");
-    let tracking_log = format!("logs/refs/remotes/{remote}");
-    for prefix in ["refs/heads", "logs/refs/heads", &tracking, &tracking_log] {
+    // A checkout with no remote has no remote-tracking namespace to verify;
+    // `refs/remotes/` with an empty name would denote no ref at all.
+    let mut prefixes = vec!["refs/heads".to_owned(), "logs/refs/heads".to_owned()];
+    if let Some(remote) = remote {
+        prefixes.push(format!("refs/remotes/{remote}"));
+        prefixes.push(format!("logs/refs/remotes/{remote}"));
+    }
+    for prefix in prefixes {
         for name in [suffix.to_owned(), format!("{suffix}.lock")] {
-            let relative = Path::new(prefix).join(name);
+            let relative = Path::new(prefix.as_str()).join(name);
             let path = common.join(&relative);
             // lstat on the leaf still follows intermediate symlinks. A planted
             // parent could redirect Git's host-side fetch outside the repository.
@@ -2555,7 +2561,20 @@ mod cargo_setup_tests {
             .unwrap();
         assert_eq!(
             terminal_forge_remote(&fixture.state, &fixture.project),
-            "upstream"
+            Some("upstream".to_owned())
+        );
+    }
+
+    /// A checkout without a remote yields no name at all. Flattening that
+    /// absence to `""` is the defect class that crashed `git status` on Git
+    /// 2.53 and named `refs/remotes//`.
+    /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    #[test]
+    fn terminal_forge_remote_reports_an_absent_remote_as_none() {
+        let fixture = WriterFixture::new().unwrap();
+        assert_eq!(
+            terminal_forge_remote(&fixture.state, &fixture.project),
+            None
         );
     }
 
@@ -4441,11 +4460,14 @@ impl WriterLaunch {
             .as_ref()
             .and_then(|policy| policy.publish)
             .and_then(|host| {
+                // A local integration destination records no remote; that is an
+                // absence, not a name to pass to Git.
                 host.stop_publish_remote()
                     .or_else(|| host.delivery_remote())
+                    .filter(|remote| !remote.is_empty())
                     .map(str::to_owned)
             })
-            .unwrap_or_else(|| terminal_forge_remote(state, self.worktree.repo().root_path()));
+            .or_else(|| terminal_forge_remote(state, self.worktree.repo().root_path()));
         let stop_work = work.map(|policy| {
             use provenant_records::run::StopWorkPush;
             let dirty_paths = self
@@ -4453,54 +4475,55 @@ impl WriterLaunch {
                 .ok()
                 .and_then(|paths| u64::try_from(paths.len()).ok());
             let ahead = self
-                .ahead_of_remote(&git_executable, verified_tip, &stop_remote)
+                .ahead_of_remote(&git_executable, verified_tip, stop_remote.as_deref())
                 .ok()
                 .flatten();
-            let recovered = if policy.publish.is_none() && policy.publish_granted {
-                (|| -> Result<crate::HostDeliveryContext> {
-                    let branch = self
-                        .branch
-                        .as_str()
-                        .strip_prefix("refs/heads/")
-                        .ok_or(RunError::Validation("writer needs a local branch"))?;
-                    let request = crate::HostDeliveryContext::destination(
-                        crate::DeliveryMode::Push,
-                        branch,
-                        &crate::forge_for(&stop_remote, "", &[]),
-                    )?
-                    .ok_or(RunError::Validation("stop publication destination missing"))?;
-                    crate::HostDeliveryContext::capture()
-                        .with_lane_access(
-                            policy.route.and_then(|route| route.lane_access.clone()),
-                            policy
-                                .route
-                                .and_then(|route| route.sandbox.as_ref())
-                                .map(|sandbox| sandbox.effective),
-                        )
-                        .with_policy(enforcement.clone())
-                        .with_repo_facts(&self.facts)
-                        .with_host_state(state)
-                        .prepare_stop_publish_recovery(
-                            policy.writer,
-                            &request,
-                            attempt,
-                            custody.scope(),
-                            verified_tip,
-                            base,
-                        )
-                })()
-                .map_err(|error| {
-                    use provenant_records::warning::{WRITER_UNPUSHED_WORK, Warning, warn};
-                    // Spec: docs/specs/cli.md#warnings-are-typed-values
-                    warn(Warning::new(
-                        WRITER_UNPUSHED_WORK,
-                        format!("stopped work remains unpushed: {error}"),
-                    ));
-                    error
-                })
-                .ok()
-            } else {
-                None
+            let recovered = match stop_remote.as_deref() {
+                Some(remote) if policy.publish.is_none() && policy.publish_granted => {
+                    (|| -> Result<crate::HostDeliveryContext> {
+                        let branch = self
+                            .branch
+                            .as_str()
+                            .strip_prefix("refs/heads/")
+                            .ok_or(RunError::Validation("writer needs a local branch"))?;
+                        let request = crate::HostDeliveryContext::destination_for_remote(
+                            crate::DeliveryMode::Push,
+                            branch,
+                            remote,
+                        )?
+                        .ok_or(RunError::Validation("stop publication destination missing"))?;
+                        crate::HostDeliveryContext::capture()
+                            .with_lane_access(
+                                policy.route.and_then(|route| route.lane_access.clone()),
+                                policy
+                                    .route
+                                    .and_then(|route| route.sandbox.as_ref())
+                                    .map(|sandbox| sandbox.effective),
+                            )
+                            .with_policy(enforcement.clone())
+                            .with_repo_facts(&self.facts)
+                            .with_host_state(state)
+                            .prepare_stop_publish_recovery(
+                                policy.writer,
+                                &request,
+                                attempt,
+                                custody.scope(),
+                                verified_tip,
+                                base,
+                            )
+                    })()
+                    .map_err(|error| {
+                        use provenant_records::warning::{WRITER_UNPUSHED_WORK, Warning, warn};
+                        // Spec: docs/specs/cli.md#warnings-are-typed-values
+                        warn(Warning::new(
+                            WRITER_UNPUSHED_WORK,
+                            format!("stopped work remains unpushed: {error}"),
+                        ));
+                        error
+                    })
+                    .ok()
+                }
+                _ => None,
             };
             let host = policy.publish.or(recovered.as_ref());
             let push = if !policy.publish_granted {

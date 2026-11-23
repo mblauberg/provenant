@@ -819,7 +819,7 @@ fn automatic_integration_does_not_hold_application_locks_during_git()
                     &fixture.writer,
                     &fixture.request,
                     head,
-                    &crate::forge_for("origin", "main", &[]),
+                    Some(&crate::forge_for("origin", "main", &[])),
                 )
             });
             let pipe = provenant_test_support::wait_for(

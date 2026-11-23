@@ -144,7 +144,7 @@ fn inspect(
     src: &Source,
     workers: &dyn WorkerObserver,
     facts: &worktrees::RepoFacts,
-    forge: &provenant_config::ForgeContext,
+    remote: Option<&str>,
 ) -> Result<Vec<Tree>, Refusal> {
     crate::worktrees::with_context_using_facts(
         &src.roots,
@@ -153,7 +153,7 @@ fn inspect(
         GIT_TIMEOUT,
         workers,
         facts,
-        |context, cancel| inspect_context(context, facts, cancel, forge),
+        |context, cancel| inspect_context(context, facts, cancel, remote),
     )
     .map_err(|error| {
         if matches!(
@@ -173,7 +173,7 @@ fn inspect_context(
     context: &worktrees::WorktreeContext<'_>,
     facts: &worktrees::RepoFacts,
     cancel: &CancelToken,
-    forge: &provenant_config::ForgeContext,
+    remote_name: Option<&str>,
 ) -> Result<Vec<Tree>, crate::worktrees::Error> {
     let context = &worktrees::WorktreeContext { facts, ..*context };
     let observations = worktrees::list(context, cancel)?;
@@ -186,12 +186,10 @@ fn inspect_context(
         // only and correctly refuses the primary checkout.
         let primary = info.primary;
         let branch = info.branch.as_deref().map(short_branch);
-        let (upstream, pushed) = match branch.as_deref().filter(|_| !forge.remote.value.is_empty())
-        {
-            Some(branch) => {
+        let (upstream, pushed) = match (branch.as_deref(), remote_name) {
+            (Some(branch), Some(remote_name)) => {
                 let remote = provenant_confinement::repo::GitRefName::remote_tracking(format!(
-                    "{}/{branch}",
-                    forge.remote.value
+                    "{remote_name}/{branch}"
                 ))
                 .map_err(|_| worktrees::WorktreeError::InvalidRequest)?;
                 match facts.resolve_commit(context, remote, cancel) {
@@ -203,7 +201,7 @@ fn inspect_context(
                     Err(error) => return Err(error.into()),
                 }
             }
-            None => (None, false),
+            _ => (None, false),
         };
         let path = fs::canonicalize(&info.path).unwrap_or(info.path);
         let (live_writer, writer_unknown) = handoff_writer_state(&info.occupancy);
@@ -338,8 +336,16 @@ fn wip(
     workers: &dyn WorkerObserver,
     facts: &worktrees::RepoFacts,
     tree: &Tree,
-    forge: &provenant_config::ForgeContext,
+    remote: Option<&str>,
 ) -> Result<(), Refusal> {
+    // A WIP commit is published to the checkout's remote; without one there is
+    // nowhere to push and no name to pass to Git.
+    let Some(remote) = remote else {
+        return Err(Refusal::refused(
+            "WIP_REFUSED",
+            "a committed WIP hand-off needs a Git remote to push to",
+        ));
+    };
     with_wip_custody(
         &src.roots,
         &src.home,
@@ -361,7 +367,7 @@ fn wip(
                     ));
                 }
             }
-            wip_git(tree, &forge.remote.value)
+            wip_git(tree, remote)
         },
     )
 }
@@ -545,14 +551,16 @@ fn open_source(globals: &Globals) -> Result<Source, Refusal> {
     })
 }
 
-/// The one forge context for this command. Each owner calls this exactly once
-/// and passes the result down; no helper rediscovers the remote or default.
+/// The one remote for this command, when the checkout has one. Each owner calls
+/// this exactly once and passes the result down; no helper rediscovers it. A
+/// checkout with no remote has no name rather than an empty one; hand-off only
+/// pushes and fetches, so it never needs the default branch or protected set.
 /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
-fn resolve_forge(
+fn resolve_remote(
     state: &Path,
     project: &Path,
     ports: &provenant_config::PortTable,
-) -> Result<provenant_config::ForgeContext, Refusal> {
+) -> Result<Option<String>, Refusal> {
     let policy = provenant_config::operation_policy(state, project, ports);
     let config = provenant_config::ForgeConfig::new(ports, (*policy).clone());
     let git = provenant_config::ForgeGit::new(project).map_err(|error| {
@@ -562,17 +570,15 @@ fn resolve_forge(
             format!("cannot read the checkout's Git metadata: {error}"),
         )
     })?;
-    let remote = provenant_config::ForgeContext::remote_if_any(&config, &git)
+    provenant_config::ForgeContext::remote_if_any(&config, &git)
+        .map(|remote| remote.map(|remote| remote.value))
         .map_err(|error| {
             Refusal::new(
                 Outcome::Refused,
                 "FORGE_CONTEXT_UNRESOLVED",
                 error.to_string(),
             )
-        })?
-        .map(|remote| remote.value)
-        .unwrap_or_default();
-    Ok(provenant_run::forge_for(&remote, "", &[]))
+        })
 }
 
 // The writer advisory is part of the handoff hook's stderr protocol.
@@ -653,7 +659,7 @@ fn execute(
         .map(|(_, lanes)| lanes)
         .map_err(|fail| fail.message);
     let project = context.identity.project;
-    let forge = resolve_forge(src.roots.state.as_path(), &src.cwd, &context.port_table)?;
+    let remote = resolve_remote(src.roots.state.as_path(), &src.cwd, &context.port_table)?;
     let actor = context.identity.inbox.actor;
     let store = session.as_ref().filter(|_| !args.no_checkpoint).map(|id| {
         checkpoint_store(&src.roots, project, id.clone()).with_chair(context.identity.host, actor)
@@ -725,7 +731,7 @@ fn execute(
 
     // 2. Worktrees must be clean and pushed, unless the caller says otherwise.
     let facts = worktrees::RepoFacts::default();
-    let mut trees = inspect(&src, workers, &facts, &forge)?;
+    let mut trees = inspect(&src, workers, &facts, remote.as_deref())?;
     let mut input = request(&trees)?;
     for advisory in trees
         .iter()
@@ -776,7 +782,7 @@ fn execute(
             if !args.dry_run {
                 let mut pushed: Vec<String> = Vec::new();
                 for tree in &problems {
-                    if let Err(mut refusal) = wip(&src, workers, &facts, tree, &forge) {
+                    if let Err(mut refusal) = wip(&src, workers, &facts, tree, remote.as_deref()) {
                         if !pushed.is_empty() {
                             let _ = write!(
                                 refusal.message,
@@ -788,7 +794,7 @@ fn execute(
                     }
                     pushed.push(tree.branch.clone().unwrap_or_default());
                 }
-                trees = inspect(&src, workers, &facts, &forge)?;
+                trees = inspect(&src, workers, &facts, remote.as_deref())?;
                 let left: Vec<String> = trees
                     .iter()
                     .filter(|t| !t.problems().is_empty())
@@ -1149,8 +1155,23 @@ fn fetch_recreation_base<T, E>(
 fn recreate(
     target: &Target<'_>,
     branches: &[String],
-    forge: &provenant_config::ForgeContext,
+    remote: Option<&str>,
 ) -> Vec<HandoffWorktree> {
+    // Branch recreation starts from `<remote>/<branch>`; without a remote there
+    // is no base to fetch and no name to build that ref from.
+    let Some(remote) = remote else {
+        return branches
+            .iter()
+            .map(|branch| HandoffWorktree {
+                extra: Default::default(),
+                branch: branch.clone(),
+                path: None,
+                head: None,
+                created: false,
+                error: Some("a hand-off needs a Git remote to recreate branches".into()),
+            })
+            .collect();
+    };
     let remaining = || {
         let left =
             Duration::from_micros(target.budget.remaining(target.clock.mono_now()).as_micros());
@@ -1184,7 +1205,7 @@ fn recreate(
                     |context, cancel| {
                         Ok(crate::fabric::remote_base(
                             context,
-                            &format!("{}/{branch}", forge.remote.value),
+                            &format!("{remote}/{branch}"),
                             time / 2,
                             fetch,
                             cancel,
@@ -1197,7 +1218,7 @@ fn recreate(
             let base = match base {
                 Ok(base) => base,
                 Err(error) => {
-                    return failed(format!("{}/{branch}: {error}", forge.remote.value));
+                    return failed(format!("{remote}/{branch}: {error}"));
                 }
             };
             let made = crate::worktrees::with_context_using_facts(
@@ -1238,7 +1259,7 @@ fn recreate(
                     path: Some(info.path.to_string_lossy().into_owned()),
                     head: Some(info.head.to_string()),
                     created,
-                    error: worktree_warning(&info, &base, &forge.remote.value),
+                    error: worktree_warning(&info, &base, remote),
                 },
                 Err(error) => failed(error.to_string()),
             }
@@ -1336,12 +1357,12 @@ pub(crate) fn receive(
             Err(receipt) => return *receipt,
         };
     // Worktrees are recreated only once this operation owns its directory.
-    let forge = match resolve_forge(
+    let remote = match resolve_remote(
         context.roots.state.as_path(),
         target.cwd,
         &context.port_table,
     ) {
-        Ok(forge) => forge,
+        Ok(remote) => remote,
         Err(error) => {
             return HandoffReceipt::Refused {
                 extra: Default::default(),
@@ -1351,7 +1372,7 @@ pub(crate) fn receive(
             };
         }
     };
-    let worktrees = recreate(target, &input.branches, &forge);
+    let worktrees = recreate(target, &input.branches, remote.as_deref());
     let source_label = context
         .config
         .peers
@@ -1599,7 +1620,7 @@ mod tests {
             &project,
             GIT_TIMEOUT,
             &Free,
-            |context, cancel| inspect_context(context, &facts, cancel, &test_forge("origin")),
+            |context, cancel| inspect_context(context, &facts, cancel, Some("origin")),
         )?;
         let primary_path = std::fs::canonicalize(&project)?;
         let listed_paths: Vec<_> = inspected
@@ -1633,7 +1654,7 @@ mod tests {
             &project,
             GIT_TIMEOUT,
             &Bystander,
-            |context, cancel| inspect_context(context, &facts, cancel, &test_forge("origin")),
+            |context, cancel| inspect_context(context, &facts, cancel, Some("origin")),
         )?;
         let observed = observed
             .iter()
@@ -1652,7 +1673,7 @@ mod tests {
             &project,
             GIT_TIMEOUT,
             &Free,
-            |context, cancel| inspect_context(context, &limited, cancel, &test_forge("origin")),
+            |context, cancel| inspect_context(context, &limited, cancel, Some("origin")),
         );
         assert!(matches!(
             overflow,
@@ -1698,7 +1719,7 @@ mod tests {
             &project,
             GIT_TIMEOUT,
             &Free,
-            |context, cancel| inspect_context(context, &facts, cancel, &test_forge("origin")),
+            |context, cancel| inspect_context(context, &facts, cancel, Some("origin")),
         )?;
         let row = refreshed
             .iter()

@@ -800,6 +800,18 @@ mod tests {
         );
     }
 
+    /// A checkout with no remote at all is an absence, never an empty name.
+    /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    #[test]
+    fn an_absent_remote_is_none_and_never_an_empty_name() {
+        let fixture = Fixture::new("");
+        let config = Config::new(&PortTable::builtin(), Policy::default());
+        assert_eq!(
+            ForgeContext::remote_if_any(&config, &fixture.git()).expect("absence"),
+            None
+        );
+    }
+
     /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
     #[test]
     fn no_remote_is_a_refusal_that_lists_what_was_seen() {
