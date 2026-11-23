@@ -946,7 +946,7 @@ fn every_bundled_template_compiles_with_required_bindings() {
 
 #[test]
 // Spec: docs/specs/fabric.md#bundled-template-declarations — the bundled smoke
-// template declares the read, review, write, retry and steer nodes.
+// template declares the read, review, write, retry-route and steer-route nodes.
 fn smoke_template_compiles_the_read_review_write_retry_and_steer_nodes() {
     let library = library();
     let node = Compiler::new(&library)
@@ -962,13 +962,13 @@ fn smoke_template_compiles_the_read_review_write_retry_and_steer_nodes() {
             .iter()
             .map(|node| node.id.as_str())
             .collect::<Vec<_>>(),
-        ["read", "review", "write", "retry", "steer"]
+        ["read", "review", "write", "retry-route", "steer-route"]
     );
     assert_eq!(by_id("read").access, AccessMode::ReadOnly);
     assert_eq!(by_id("review").access, AccessMode::ReadOnly);
     assert_eq!(by_id("write").access, AccessMode::WorktreeWrite);
-    assert_eq!(by_id("retry").access, AccessMode::ReadOnly);
-    assert_eq!(by_id("steer").access, AccessMode::ReadOnly);
+    assert_eq!(by_id("retry-route").access, AccessMode::ReadOnly);
+    assert_eq!(by_id("steer-route").access, AccessMode::ReadOnly);
 
     let node = Compiler::new(&library)
         .compile(&json!({
@@ -977,6 +977,62 @@ fn smoke_template_compiles_the_read_review_write_retry_and_steer_nodes() {
         }))
         .unwrap();
     assert_eq!(node.composite.unwrap().exports[0].node, "write");
+}
+
+#[test]
+// Spec: docs/specs/fabric.md#bundled-template-declarations — every smoke node
+// routes on a tier that resolves to at least one free model, so verification
+// never depends on a paid account or an unavailable route.
+fn smoke_nodes_resolve_on_a_free_capable_tier() {
+    let library = library();
+    let compiled = Compiler::new(&library)
+        .compile(&json!({"id":"smoke", "use":"smoke"}))
+        .unwrap();
+    let catalogue = provenant_routing::Catalogue::bundled().unwrap();
+    let config = provenant_routing::RoutingConfig::default();
+    let context = provenant_routing::RoutingContext {
+        policy_account_hint: None,
+        selection_evidence: None,
+        choice_context: None,
+        catalogue: &catalogue,
+        config: &config,
+        registry: provenant_providers::REGISTRY,
+        availability: &[],
+        quota: &[],
+        capacity_cooldowns: &[],
+        accounts: &[],
+        quota_policies: &[],
+        readiness: None,
+        access: &[],
+        now: provenant_core::WallTime::from_unix_seconds(100).unwrap(),
+        host: "smoke-route-test",
+    };
+    for node in compiled.composite.unwrap().nodes {
+        // A template leaf's `tier` lowers to the node's route alias.
+        let tier = node
+            .route
+            .as_ref()
+            .and_then(|route| route.alias.as_deref())
+            .unwrap_or_else(|| panic!("smoke node {} declares no tier", node.id));
+        let listed = provenant_routing::list(
+            &provenant_routing::RouteListQuery {
+                valid: false,
+                adapter: None,
+                pool: Some(tier.to_owned()),
+            },
+            &context,
+        )
+        .unwrap_or_else(|error| panic!("smoke node {} tier {tier}: {error}", node.id));
+        let members = listed
+            .pools
+            .get(tier)
+            .unwrap_or_else(|| panic!("smoke node {} tier {tier} is not a pool", node.id));
+        assert!(
+            members.iter().any(|member| member.free),
+            "smoke node {} on tier {tier} has no free route: {members:?}",
+            node.id
+        );
+    }
 }
 
 #[test]
@@ -996,7 +1052,7 @@ fn smoke_template_pins_its_review_nodes_only_when_a_base_is_supplied() {
                 .iter()
                 .map(|node| node.id.as_str())
                 .collect::<Vec<_>>(),
-            ["read", "review", "write", "retry", "steer"]
+            ["read", "review", "write", "retry-route", "steer-route"]
         );
         composite
             .nodes

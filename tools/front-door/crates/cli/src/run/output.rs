@@ -24,16 +24,24 @@ pub fn render_output(command: Output, read: Result<(Value, String), Fail>) -> Re
     let mut out = reply(
         "output",
         read.and_then(|(mut data, mut text)| {
-            // A live attempt has only partial evidence. Keep the read
-            // successful, name the state in the envelope and say in the header
-            // that the bytes arrived before settlement.
+            // A live attempt has no decoded result artifact yet. When nothing
+            // is returned the caller labels the page as no-result-yet: an empty
+            // page is not evidence that the attempt produced nothing.
             if headed
                 && let Some(state) = data["state"].as_str()
                 && matches!(state, "queued" | "starting" | "running" | "settling")
             {
                 let state = state.to_owned();
                 data["status"] = json!(state);
-                text = format!("{state}\npartial result\n{text}");
+                if data["length"].as_u64().unwrap_or(0) == 0 {
+                    data["result"] = json!("pending");
+                    text = format!(
+                        "{state}\nno result yet: the result is not sealed while the attempt is {state}\n{text}"
+                    );
+                } else {
+                    data["result"] = json!("partial");
+                    text = format!("{state}\npartial result\n{text}");
+                }
             }
             if let Some(lines) = receipt_tail {
                 text =
@@ -1108,7 +1116,7 @@ mod tests {
 
     // Spec: docs/specs/cli.md#output-references-and-bounded-tails
     #[test]
-    fn a_running_result_envelope_is_ok_partial_and_headed_running() {
+    fn a_running_result_envelope_is_ok_and_labels_partial_or_pending() {
         let command = crate::Output {
             target: "repair/writer#2".parse().unwrap(),
             part: crate::Part::Result,
@@ -1118,7 +1126,9 @@ mod tests {
             tail: None,
             max_bytes: 65536,
         };
-        let data = json!({
+        // An unsealed result with no bytes is a typed pending page, never an
+        // empty partial result.
+        let pending = json!({
             "attempt_id": "22222222222222222222222222222222",
             "state": "running",
             "reason": null,
@@ -1128,10 +1138,34 @@ mod tests {
             "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
             "bytes": {"encoding": "utf8", "data": ""},
         });
-        let reply = super::render_output(command.clone(), Ok((data, "half a result".into())));
+        let reply = super::render_output(command.clone(), Ok((pending, String::new())));
         assert_eq!(reply.result.status, Status::Ok);
         assert_eq!(reply.result.data["status"], "running");
         assert_eq!(reply.result.data["state"], "running");
+        assert_eq!(reply.result.data["result"], "pending");
+        assert!(
+            reply
+                .human
+                .starts_with("running\nno result yet: the result is not sealed"),
+            "{}",
+            reply.human
+        );
+        assert!(!reply.human.contains("partial result"), "{}", reply.human);
+
+        // Bytes that did arrive before settlement are labelled partial.
+        let partial = json!({
+            "attempt_id": "22222222222222222222222222222222",
+            "state": "running",
+            "reason": null,
+            "part": "result",
+            "offset": 0, "next_offset": 13, "length": 13,
+            "eof": true, "clipped": false, "complete": false,
+            "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            "bytes": {"encoding": "utf8", "data": "half a result"},
+        });
+        let reply = super::render_output(command.clone(), Ok((partial, "half a result".into())));
+        assert_eq!(reply.result.status, Status::Ok);
+        assert_eq!(reply.result.data["result"], "partial");
         assert!(reply.human.starts_with("running\npartial result\n"));
         assert!(reply.human.contains("half a result"));
         let summary = reply
@@ -1150,7 +1184,9 @@ mod tests {
         });
         let reply = super::render_output(command, Ok((settled, "all of it".into())));
         assert!(reply.result.data.get("status").is_none());
+        assert!(reply.result.data.get("result").is_none());
         assert!(!reply.human.contains("partial result"));
+        assert!(!reply.human.contains("no result yet"));
     }
 
     #[test]

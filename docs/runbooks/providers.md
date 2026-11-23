@@ -92,6 +92,9 @@ worktree as their directory, so the lane's sandbox confines the client process, 
 those tools. Standalone, the sandbox applies to the tools. `lanes.access =
 "isolated"` uses a private per-attempt profile instead.
 
+Lane launches pass `--archived`, so a lane session does not appear in the owner's
+OpenCode session lists; the session ID stays addressable for a resumed lane.
+
 The Console's free models use the derived `zen` account, separate from the `go`
 subscription account and paced from their own quota observations; a
 `[domains.routing.pacing.accounts.opencode-go]` profile applies to Go lanes only.

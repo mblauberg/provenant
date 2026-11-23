@@ -1,7 +1,7 @@
 ## Fixes
 ### CLI and install
 
-- `provenant output ATTEMPT` on a running attempt now prints the partial result
-  under a `running` header and exits 0. The envelope carries `status: running`
-  and says the result is partial; a live attempt with no sealed result yet reads
-  as an empty, incomplete page instead of a `NONTERMINAL` refusal. (#3809)
+- `provenant output ATTEMPT` on a running attempt now exits 0, carries
+  `status: running` in the envelope and labels the page instead of refusing with
+  `NONTERMINAL`: `partial` when bytes arrived before settlement, and
+  `no result yet` when the result is not sealed. (#3809)

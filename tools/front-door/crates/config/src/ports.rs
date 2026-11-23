@@ -358,7 +358,12 @@ fn split_tier_command_words(command: &str) -> Option<Vec<String>> {
             word.push(ch);
             escaped = false;
         } else if let Some(delimiter) = quote {
-            if ch == delimiter {
+            if delimiter == '"' && ch == '\\' {
+                // Inside double quotes a backslash escapes the next character,
+                // as it does outside quotes; single quotes take it literally.
+                escaped = true;
+                started = true;
+            } else if ch == delimiter {
                 quote = None;
             } else {
                 word.push(ch);
@@ -2273,11 +2278,38 @@ mod tests {
 
     // Spec: docs/specs/state.md#one-sourced-port-table
     #[test]
+    fn tier_command_string_honours_quotes_and_escapes() {
+        let words = |text: &str| -> Vec<String> {
+            serde_json::from_value::<TierCommand>(serde_json::json!(text))
+                .unwrap()
+                .argv
+        };
+        // Double quotes honour a backslash before a quote or another backslash;
+        // single quotes keep a backslash literally.
+        assert_eq!(
+            words(r#"tool "say \"hi\"" "back\\slash" 'a\b' 'single "quote"'"#),
+            [
+                "tool",
+                "say \"hi\"",
+                "back\\slash",
+                "a\\b",
+                "single \"quote\""
+            ]
+        );
+        // A doubled backslash immediately before the closing quote is a literal
+        // backslash, not an escaped delimiter.
+        assert_eq!(words(r#"tool "ends\\""#), ["tool", "ends\\"]);
+        assert_eq!(words(r"tool back\\slash"), ["tool", "back\\slash"]);
+    }
+
+    // Spec: docs/specs/state.md#one-sourced-port-table
+    #[test]
     fn unterminated_tier_command_string_warns_and_falls_back() {
         for text in [
             "cargo fmt 'unbalanced",
             "cargo fmt \"unbalanced",
             "cargo fmt trailing\\",
+            "cargo fmt \"trailing\\",
         ] {
             assert!(
                 serde_json::from_value::<TierCommand>(serde_json::json!(text)).is_err(),

@@ -69,6 +69,19 @@ registered accounts, and `quota tick` initialises quota state.
 - `check install` compares binary, assets, receipt and owned entries for every
   target without repairing.
 
+## Migrating from 1.x
+
+Wind down every lane first. The installer validates the release and staged
+install before publishing, then installs into the fresh v2 root. It copies
+only `<state>/config.toml` and `host-id` from the default 1.x root and never writes that
+root, so reinstalling 1.x rolls back; run state and the old receipt are not
+migrated, and work started under 2.x stays in the v2 root (collect it with
+`provenant output` before rolling back). Install replaces its declared current
+artifact names. Select harnesses again by autodetection or `--harness`, then inspect
+the 1.x root and client configuration yourself: leftovers outside the declared
+names are yours to remove. A custom 1.x root is not copied; use a fresh custom root
+and configure it by hand.
+
 ## Account sync
 
 Every registered account directory holds the same managed skill links, managed
@@ -128,7 +141,10 @@ you to rerun the original install command with its original options (`--source`,
 
 `provenant upgrade --verify` then runs the bundled smoke graph (`--host PEER`
 places it on a peer; `--route` and repeatable `--set NAME=VALUE` override its
-routes and parameters), and adding `--dry-run` previews it without upgrading. The
+routes and parameters), and adding `--dry-run` previews it without upgrading.
+The preview runs the currently installed binary's own `run smoke --explain`, not
+the candidate, so it shows the graph shape and route resolution that binary
+would launch; the candidate's graph is exercised only after it installs. The
 scratch fixture commits a base and a fixture change, and both verification modes
 bind that commit as the review nodes' `diff_base`, so the review nodes have a
 non-empty range; its write node runs in a worktree the verification creates on a
@@ -140,19 +156,6 @@ becomes a registered project. `provenant run smoke` by hand, from any checkout,
 runs only the read-only
 nodes (the receipt names the skipped write node); add `--branch B --base REF` or
 `--worktree PATH` to run the write node too.
-
-### First 2.0 install after 1.x
-
-Wind down every lane first. The installer validates the release and staged
-install before publishing, then installs into the fresh v2 root. It copies
-only `<state>/config.toml` and `host-id` from the default 1.x root and never writes that
-root, so reinstalling 1.x rolls back; run state and the old receipt are not
-migrated, and work started under 2.x stays in the v2 root (collect it with
-`provenant output` before rolling back). Install replaces its declared current
-artifact names. Select harnesses again by autodetection or `--harness`, then inspect
-the 1.x root and client configuration yourself: leftovers outside the declared
-names are yours to remove. A custom 1.x root is not copied; use a fresh custom root
-and configure it by hand.
 
 ### Bundled macOS app
 

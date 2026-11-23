@@ -222,7 +222,12 @@ mismatched readiness evidence never reads as ready. Refusals are scoped to
 model and account unless provider evidence proves a wider pool. A plan usage
 limit holds the whole account until its reset, except that the exact model the
 owner pinned warns with the record's source and expiry and is attempted anyway;
-an automatic fallback or unpinned route still prefers an available route.
+an automatic fallback or unpinned route still prefers an available route. That
+advisory attempt covers a recorded exhaustion, pacing reserve or provider
+refusal (including the free pool), and a model-only pin may hold the route for
+one final attempt when its redraw to another account cannot serve the intent.
+A missing login, confinement refusal or other non-advisory exclusion is never
+answered with an advisory attempt.
 OpenCode retry-after values are rounded up to whole seconds, and `quota show`
 names the provider retry-after as the source of a displayed OpenCode refusal
 reset.

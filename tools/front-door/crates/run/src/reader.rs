@@ -1021,6 +1021,8 @@ impl RunStore {
         // A live attempt has no sealed result yet. What has arrived so far is
         // returned as an incomplete page, not a refusal: a caller may read
         // again after settlement. Only a settled attempt can lack an artifact.
+        // With nothing arrived the page is empty and the output renderer labels
+        // it no-result-yet; the reader never invents bytes or completeness.
         let partial = || {
             (
                 Vec::new(),
@@ -1679,7 +1681,7 @@ mod tests {
 
     // Spec: docs/specs/cli.md#output-references-and-bounded-tails
     #[test]
-    fn a_nonterminal_attempt_reads_as_a_partial_page() {
+    fn a_nonterminal_attempt_reads_as_an_unsealed_page() {
         use provenant_core::CancelToken;
 
         let result = (|| -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -1697,6 +1699,9 @@ mod tests {
                 AttemptState::Terminal { .. }
             ));
 
+            // A live attempt has no sealed result. The reader must not invent
+            // bytes, a length or completeness; the CLI labels the empty page as
+            // no-result-yet rather than a partial result.
             for part in [ArtifactPart::Result, ArtifactPart::Stderr] {
                 let chunk = store.read_output(id, part, ByteRange::default(), &context, &call)?;
                 assert!(chunk.bytes.is_empty(), "{part:?}");

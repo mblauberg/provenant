@@ -2565,7 +2565,7 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
         return match output {
             Ok(bytes) => {
                 let human = format!(
-                    "Smoke graph nodes (not launched):\n{}",
+                    "Smoke graph nodes from the running binary (not launched):\n{}",
                     String::from_utf8_lossy(&bytes)
                 );
                 super::emit(
@@ -3587,7 +3587,8 @@ mod tests {
     #[test]
     fn failed_smoke_node_is_reported_by_verify() -> Result<(), Box<dyn std::error::Error>> {
         // Spec: docs/specs/fabric.md#bundled-template-declarations — a failed
-        // smoke node is reported by its own node id, including retry and steer.
+        // smoke node is reported by its own node id, including the retry-route
+        // and steer-route probes.
         use super::*;
         use std::os::unix::fs::PermissionsExt;
 
@@ -3600,7 +3601,7 @@ mod tests {
         let launcher = tmp.path().join("provenant");
         std::fs::write(
             &launcher,
-            "#!/bin/sh\ncase \" $* \" in *\" run smoke \"*) printf '%s\\n' '{\"node\":\"smoke/write\",\"state\":\"failed\"}' '{\"node\":\"smoke/retry\",\"state\":\"failed\"}' '{\"node\":\"smoke/steer\",\"state\":\"failed\"}'; exit 1;; esac\nexit 0\n",
+            "#!/bin/sh\ncase \" $* \" in *\" run smoke \"*) printf '%s\\n' '{\"node\":\"smoke/write\",\"state\":\"failed\"}' '{\"node\":\"smoke/retry-route\",\"state\":\"failed\"}' '{\"node\":\"smoke/steer-route\",\"state\":\"failed\"}'; exit 1;; esac\nexit 0\n",
         )?;
         std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755))?;
         let runner = UpgradeRunner {
@@ -3633,8 +3634,8 @@ mod tests {
             }
         };
         assert!(error.contains("\"node\":\"smoke/write\""));
-        assert!(error.contains("\"node\":\"smoke/retry\""), "{error}");
-        assert!(error.contains("\"node\":\"smoke/steer\""), "{error}");
+        assert!(error.contains("\"node\":\"smoke/retry-route\""), "{error}");
+        assert!(error.contains("\"node\":\"smoke/steer-route\""), "{error}");
         assert!(error.contains("failed"));
         Ok(())
     }
@@ -3657,7 +3658,7 @@ mod tests {
         std::fs::write(
             &launcher,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n[ \"$1\" = --project ] || exit 78\n[ \"$2\" != \"$PWD\" ] || exit 79\n[ -f \"$2/fixture.txt\" ] || exit 80\ngit -C \"$2\" rev-parse --verify HEAD >/dev/null || exit 81\ncase \"$*\" in *'run smoke --explain'*) printf '%s\\n' '{{\"nodes\":[{{\"id\":\"read\"}},{{\"id\":\"review\"}},{{\"id\":\"write\"}},{{\"id\":\"retry\"}},{{\"id\":\"steer\"}}]}}';; *) exit 77;; esac\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n[ \"$1\" = --project ] || exit 78\n[ \"$2\" != \"$PWD\" ] || exit 79\n[ -f \"$2/fixture.txt\" ] || exit 80\ngit -C \"$2\" rev-parse --verify HEAD >/dev/null || exit 81\ncase \"$*\" in *'run smoke --explain'*) printf '%s\\n' '{{\"nodes\":[{{\"id\":\"read\"}},{{\"id\":\"review\"}},{{\"id\":\"write\"}},{{\"id\":\"retry-route\"}},{{\"id\":\"steer-route\"}}]}}';; *) exit 77;; esac\n",
                 calls.display()
             ),
         )?;
@@ -3687,8 +3688,8 @@ mod tests {
         assert!(output.contains("\"read\""));
         assert!(output.contains("\"review\""));
         assert!(output.contains("\"write\""));
-        assert!(output.contains("\"id\":\"retry\""), "{output}");
-        assert!(output.contains("\"id\":\"steer\""), "{output}");
+        assert!(output.contains("\"id\":\"retry-route\""), "{output}");
+        assert!(output.contains("\"id\":\"steer-route\""), "{output}");
         let calls = std::fs::read_to_string(calls)?;
         assert_eq!(calls.lines().count(), 1, "{calls}");
         assert!(calls.contains("run smoke --explain"), "{calls}");

@@ -286,6 +286,20 @@ fn has_alternative_account(
     })
 }
 
+/// The recorded refusals a pin may answer with an advisory attempt. Every other
+/// cause excluded the route for a reason an attempt cannot outvote, such as a
+/// missing login or a confinement refusal (issue #3764).
+fn pinned_advisory_reason(reason: &provenant_records::RouteExclusionReason) -> bool {
+    use provenant_records::RouteExclusionReason;
+    matches!(
+        reason,
+        RouteExclusionReason::Exhausted
+            | RouteExclusionReason::PacingReserve
+            | RouteExclusionReason::ProviderRefused
+            | RouteExclusionReason::FreeTierRefused
+    )
+}
+
 /// Compose the warning for a recorded quota or pacing refusal on a model the
 /// owner named exactly (issue #3551). The source and expiry come from the
 /// record behind the refusal, never from a fabricated default; with no such
@@ -404,14 +418,19 @@ struct DeferredPinnedAttempt {
 /// account that offers the model. That account can still be unable to serve the
 /// intent, for example under an account-scoped read-only model policy, so hold
 /// the refused pinned route and attempt it once when the redraw drains
-/// (issue #3764).
+/// (issue #3764). Only an advisory recorded refusal qualifies: another cause
+/// excluded the route on evidence a retry cannot supersede.
 fn deferred_pinned_attempt(
     choice: &provenant_routing::RouteChoice,
     route: &ResolvedRoute,
     selected: Option<&str>,
     alternative_account: bool,
+    cause: &provenant_records::RouteExclusionReason,
     warning: Option<String>,
 ) -> Option<DeferredPinnedAttempt> {
+    if !pinned_advisory_reason(cause) {
+        return None;
+    }
     if pinned_advisory_candidate(choice, route, selected, alternative_account) {
         return None;
     }
@@ -3991,13 +4010,7 @@ pub(super) fn prepare_candidates_inner(
         let mut pinned_refusal_reason = None;
         if pinned_candidate(&task_request.choice, &route)
             && let provenant_records::RouteReadiness::Unavailable { reason, .. } = &route.readiness
-            && matches!(
-                reason,
-                provenant_records::RouteExclusionReason::Exhausted
-                    | provenant_records::RouteExclusionReason::PacingReserve
-                    | provenant_records::RouteExclusionReason::ProviderRefused
-                    | provenant_records::RouteExclusionReason::FreeTierRefused
-            )
+            && pinned_advisory_reason(reason)
         {
             pinned_refusal_reason = Some(reason.clone());
             if let Some((warning, expiry)) = pinned_refusal_warning(
@@ -4212,22 +4225,24 @@ pub(super) fn prepare_candidates_inner(
                 alternative_account,
             );
             let refusal_cause = redraw_exclusion_reason(&error, pinned_refusal_reason.as_ref());
-            let deferred_warning =
-                if pinned_candidate(&task_request.choice, &route) && !pinned_advisory_route {
-                    pinned_advisory.clone().or_else(|| {
-                        pinned_refusal_warning(
-                            &route,
-                            &availability,
-                            &diagnostic_records,
-                            &refusal_cause,
-                            clock.unix_seconds(),
-                            &freshness,
-                        )
-                        .map(|(warning, _)| warning)
-                    })
-                } else {
-                    None
-                };
+            let deferred_warning = if pinned_candidate(&task_request.choice, &route)
+                && !pinned_advisory_route
+                && pinned_advisory_reason(&refusal_cause)
+            {
+                pinned_advisory.clone().or_else(|| {
+                    pinned_refusal_warning(
+                        &route,
+                        &availability,
+                        &diagnostic_records,
+                        &refusal_cause,
+                        clock.unix_seconds(),
+                        &freshness,
+                    )
+                    .map(|(warning, _)| warning)
+                })
+            } else {
+                None
+            };
             let advisory = if let Some(warning) = forced_advisory {
                 Some(warning)
             } else if pinned_advisory_route {
@@ -4259,6 +4274,7 @@ pub(super) fn prepare_candidates_inner(
                     &route,
                     selected,
                     alternative_account,
+                    &refusal_cause,
                     deferred_warning,
                 )
             {
@@ -6933,6 +6949,7 @@ mod candidate_walk_regressions {
     // Spec: docs/specs/routing.md#unknown-never-means-ready
     #[test]
     fn advisory_redraw_defers_the_pinned_route_for_one_final_attempt() {
+        use provenant_records::RouteExclusionReason;
         let pinned = route("legacy", "spent");
         let choice = provenant_routing::RouteChoice::Model(
             provenant_routing::ModelId::parse("cursor/legacy").expect("model"),
@@ -6942,10 +6959,35 @@ mod candidate_walk_regressions {
             &pinned,
             None,
             true,
+            &RouteExclusionReason::Exhausted,
             Some("recorded exhaustion".into()),
         )
         .expect("a model-only pin with another account defers");
         assert_eq!(deferred.route.account_key.as_deref(), Some("spent"));
+        // A non-advisory cause is never deferred: a missing login or a policy
+        // refusal is not evidence that an attempt would succeed.
+        assert!(
+            deferred_pinned_attempt(
+                &choice,
+                &pinned,
+                None,
+                true,
+                &RouteExclusionReason::AuthRequired,
+                Some("warning".into())
+            )
+            .is_none()
+        );
+        assert!(
+            deferred_pinned_attempt(
+                &choice,
+                &pinned,
+                None,
+                true,
+                &RouteExclusionReason::ConfinementUnavailable,
+                Some("warning".into())
+            )
+            .is_none()
+        );
         // An exact account pin, a pin with no other account, and a pin with no
         // recorded source are attempted directly or cannot warn truthfully.
         assert!(
@@ -6954,15 +6996,33 @@ mod candidate_walk_regressions {
                 &pinned,
                 Some("spent"),
                 true,
+                &RouteExclusionReason::Exhausted,
                 Some("warning".into())
             )
             .is_none()
         );
         assert!(
-            deferred_pinned_attempt(&choice, &pinned, None, false, Some("warning".into()))
-                .is_none()
+            deferred_pinned_attempt(
+                &choice,
+                &pinned,
+                None,
+                false,
+                &RouteExclusionReason::Exhausted,
+                Some("warning".into())
+            )
+            .is_none()
         );
-        assert!(deferred_pinned_attempt(&choice, &pinned, None, true, None).is_none());
+        assert!(
+            deferred_pinned_attempt(
+                &choice,
+                &pinned,
+                None,
+                true,
+                &RouteExclusionReason::Exhausted,
+                None
+            )
+            .is_none()
+        );
 
         // A drained redraw re-queues exactly the refused pinned route with its
         // warning and makes its model tryable again.
