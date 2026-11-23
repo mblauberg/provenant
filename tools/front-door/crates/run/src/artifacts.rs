@@ -334,10 +334,14 @@ pub(crate) fn artifact_path(attempt: provenant_core::AttemptId, name: &str) -> R
 /// Opens of a sealed name that concurrent replacements may retire in a row.
 const REPLACED_OPENS: usize = 4;
 /// Rendered private-mode repair warnings, for tests that cannot read the
-/// process-wide stderr stream without racing other tests.
+/// process-wide stderr stream without racing other tests. Thread-local so each
+/// test collects only its own repairs and no `static` needs `Sync` for the
+/// non-`Sync` `RefCell` it holds; the production warning still goes to stderr.
 #[cfg(test)]
-pub(crate) static PRIVATE_MODE_REPAIRS: std::cell::RefCell<Vec<String>> =
-    const { std::cell::RefCell::new(Vec::new()) };
+thread_local! {
+    pub(crate) static PRIVATE_MODE_REPAIRS: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
 
 /// Judge a sealed regular file through its open descriptor. A too-broad mode
 /// on a file a lane left in Provenant's private attempt directory is repaired
