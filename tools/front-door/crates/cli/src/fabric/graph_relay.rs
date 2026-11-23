@@ -533,25 +533,66 @@ fn serve_authorised(
         let requested = input["id"]
             .as_str()
             .filter(|id| !id.is_empty())
-            .unwrap_or(&graph_id);
+            .unwrap_or(&graph_id)
+            .to_owned();
+        let local = requested
+            .strip_prefix(&format!("{graph_id}/"))
+            .unwrap_or(&requested);
+        let node = local.split_once('#').map_or(local, |(node, _)| node);
         // Inside a lane a target names the calling graph's own nodes, as
         // `NAME[/NODE[#N]]` or a bare `NODE[#N]` (cli.md "Targets"). Attempt
         // IDs are not targets, so they resolve to nothing here.
-        let selected = if requested == graph_id {
-            graph_id.clone()
-        } else {
-            let local = requested
-                .strip_prefix(&format!("{graph_id}/"))
-                .unwrap_or(requested);
-            let node = local.split_once('#').map_or(local, |(node, _)| node);
-            checkpoint
-                .nodes
-                .iter()
-                .find(|row| row.id == node)
-                .ok_or_else(|| refused("not_found", "the target is outside the calling lane's graph; use NAME/NODE from its launch receipt"))?;
-            format!("{graph_id}/{local}")
+        if requested == graph_id || checkpoint.nodes.iter().any(|row| row.id == node) {
+            let selected = if requested == graph_id {
+                graph_id.clone()
+            } else {
+                format!("{graph_id}/{local}")
+            };
+            input["id"] = selected.into();
+            return read(input);
+        }
+        // A lane may also read any other graph launched by its own chair
+        // session. The submitting chair is sealed on the graph's custody
+        // record at submission; compare it with the calling graph's chair.
+        // Project scope is implicit: the chair index is read in this project.
+        let target_graph = requested
+            .split_once('/')
+            .map_or(requested.as_str(), |(graph, _)| graph);
+        let outside = || {
+            refused(
+                "not_found",
+                "the target graph is outside the calling lane's chair session",
+            )
         };
-        input["id"] = selected.into();
+        if target_graph.is_empty() || target_graph == graph_id {
+            return Err(outside());
+        }
+        let chair_call = provenant_fabric_runtime::chairs::Request { clock, cancel };
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_micros(budget.remaining(clock.mono_now()).as_micros());
+        let index = provenant_fabric_runtime::chairs::ChairIndex::open_read_only(
+            &context.roots.state,
+            deadline,
+        )
+        .ok()
+        .flatten()
+        .ok_or_else(outside)?;
+        let session_of = |graph: &str| {
+            index
+                .read(project, graph, &chair_call)
+                .ok()
+                .flatten()
+                .and_then(|record| record.holder.chair().cloned())
+                .and_then(|chair| chair.session)
+                .filter(|session| !session.is_empty())
+        };
+        let own_session = session_of(&graph_id);
+        if own_session.is_none() || own_session != session_of(target_graph) {
+            return Err(outside());
+        }
+        // Reads stay read-only; the host reader resolves the full target in
+        // the sibling graph. Steer, stop and retry still resolve only inside
+        // the calling graph in the branches below.
         return read(input);
     }
     let mut journal = match FileJournal::open(state, project, &graph_id, budget, cancel, clock) {

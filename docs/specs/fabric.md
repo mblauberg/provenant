@@ -99,6 +99,19 @@ graphs inherit their parent's chair; an unknown parent stays unbound.
   identity mapping.
 - Owner: `crates/fabric-store/src/chairs.rs`, `crates/fabric-runtime/src/chairs.rs`
 
+### Lane graph read scope
+
+A lane reads `status`, `output` and `trace` from its own graph and from any
+other graph in the same project whose chair session equals its own. The chair
+session is sealed on each graph's custody record at submission; the lane read
+path compares those records, with no launch flag or per-graph grant. Steer,
+stop and retry remain confined to the calling graph. A graph from another
+chair session or another project is `not_found`.
+- Why: a repair lane needs the chair's full review output, but an unrelated
+  session must stay invisible and no write may cross a graph boundary.
+- Owner: `crates/cli/src/fabric/graph_relay.rs`,
+  `crates/fabric-runtime/src/coordination/facade.rs`
+
 ## Human requests
 
 One service for the CLI owns requests and immutable answers, binding project,
