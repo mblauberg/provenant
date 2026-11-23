@@ -654,7 +654,7 @@ pub(crate) fn graph_status_next(
     let lines: Vec<_> = if nodes.is_empty() {
         rows.iter().filter(|row| row["kind"] == "attempt").collect()
     } else {
-        nodes.iter().copied().collect()
+        nodes
     };
     let command = graphs
         .iter()
