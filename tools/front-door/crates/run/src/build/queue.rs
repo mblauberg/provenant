@@ -309,7 +309,6 @@ fn check_cancel(
 }
 
 /// Admit immediately if possible, otherwise join the host-wide priority queue.
-#[allow(clippy::disallowed_methods)]
 #[allow(
     clippy::disallowed_methods,
     reason = "slot wait progress belongs to the build command output seam"

@@ -3553,7 +3553,7 @@ mod tests {
         let codes: Vec<_> = catalog
             .error_codes
             .iter()
-            .map(|c| c.code.as_str())
+            .map(|c| c.code.as_ref())
             .collect();
         assert_eq!(codes.len(), provenant_run::ErrorKind::ALL.len());
         let unique: std::collections::BTreeSet<_> = codes.iter().collect();

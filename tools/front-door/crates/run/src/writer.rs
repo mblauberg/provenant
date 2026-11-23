@@ -1744,13 +1744,10 @@ fn launch_resource_limits(
                     defaults.grant_limit, defaults.profile_limit_bytes
                 )),
             ) {
-                use provenant_records::warning::{
-                    RUN_SETTINGS_UNAVAILABLE, Warning, warn,
-                };
+                use provenant_records::warning::warn;
                 // Spec: docs/specs/cli.md#warnings-are-typed-values
                 warn(
-                    Warning::new(RUN_SETTINGS_UNAVAILABLE, message)
-                        .subject("WRITER_LAUNCH_RESOURCE_LIMITS_NONE")
+                    message
                         .once_per_change(),
                 );
             }
@@ -3861,10 +3858,9 @@ impl WriterLaunch {
                     ),
                 },
             );
-            if let Some(message) = effect.message() {
-                use provenant_records::warning::{POLICY_ADVISORY, Warning, warn};
+            if let provenant_records::policy::Effect::Warn(warning) = &effect {
                 // Spec: docs/specs/cli.md#warnings-are-typed-values
-                warn(Warning::new(POLICY_ADVISORY, message).subject("WRITE_SCOPE"));
+                provenant_records::warning::warn(warning.clone());
             }
             if effect.blocks() {
                 return Err(RunError::Validation("WRITE_SCOPE: strict scope policy"));
@@ -3916,10 +3912,9 @@ impl WriterLaunch {
             })?,
             provenant_records::run::TERMINAL_RECORD_LIMIT,
         )?;
-        if let Some(message) = effect.message() {
-            use provenant_records::warning::{POLICY_ADVISORY, Warning, warn};
+        if let provenant_records::policy::Effect::Warn(warning) = &effect {
             // Spec: docs/specs/cli.md#warnings-are-typed-values
-            warn(Warning::new(POLICY_ADVISORY, message).subject("WRITE_SCOPE"));
+            provenant_records::warning::warn(warning.clone());
         }
         if effect.blocks() {
             return Err(RunError::Validation("WRITE_SCOPE: strict scope policy"));
@@ -4145,10 +4140,9 @@ impl WriterLaunch {
             if effect.blocks() {
                 return Err(error);
             }
-            if let Some(message) = effect.message() {
-                use provenant_records::warning::{POLICY_ADVISORY, Warning, warn};
+            if let provenant_records::policy::Effect::Warn(warning) = &effect {
                 // Spec: docs/specs/cli.md#warnings-are-typed-values
-                warn(Warning::new(POLICY_ADVISORY, message).subject("SCOPE_REPORT"));
+                provenant_records::warning::warn(warning.clone());
             }
         }
         self.report_tool_state_paths(work_base, verified_tip, source.as_ref(), enforcement)?;

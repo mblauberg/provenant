@@ -1,7 +1,7 @@
 //! Repository post-create hook under the new worktree's custody.
 use super::WorktreeContext;
 use provenant_core::{CancelToken, WaitBudget};
-use std::{ffi::OsString, io::Write, path::Path, time::Duration};
+use std::{ffi::OsString, path::Path, time::Duration};
 
 pub(super) fn branch_name(
     context: &WorktreeContext<'_>,

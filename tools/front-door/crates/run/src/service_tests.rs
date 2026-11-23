@@ -507,7 +507,7 @@ fn command_write_is_refused_before_preparing_a_worktree() -> TestResult {
         saved
             .refusal
             .as_ref()
-            .map(|diagnostic| diagnostic.code.as_str()),
+            .map(|diagnostic| diagnostic.code.as_ref()),
         Some(ErrorKind::Unsupported.code())
     );
     assert!(!store.has_runs(&call)?);
@@ -648,7 +648,7 @@ fn preflight_refusal_replays_and_rejects_changed_inputs() -> TestResult {
             .unwrap_err();
         fn code(error: &RunError) -> Option<&str> {
             match error {
-                RunError::RecordedRefusal(diagnostic) => Some(diagnostic.code.as_str()),
+                RunError::RecordedRefusal(diagnostic) => Some(diagnostic.code.as_ref()),
                 _ => None,
             }
         }

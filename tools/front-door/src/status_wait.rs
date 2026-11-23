@@ -2026,13 +2026,10 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                 let mut event_reader = match setup {
                     Ok(journal) => Some(journal),
                     Err(error) => {
-                        provenant_records::warning::warn(
-                            provenant_records::warning::Warning::new(
-                                provenant_records::warning::CONFIG_MALFORMED,
-                                format!("PR journal unavailable; reconciling after gaps: {error}"),
-                            )
-                            .subject(repository.clone()),
-                        );
+                        provenant_records::warning::warn(provenant_records::warning::Warning::new(
+                            provenant_records::warning::CONFIG_MALFORMED,
+                            format!("PR journal unavailable; reconciling after gaps: {error}"),
+                        ));
                         None
                     }
                 };

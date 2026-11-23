@@ -261,7 +261,7 @@ fn codes(events: &[GraphEvent], kind: GraphEventKind) -> Vec<&str> {
     events
         .iter()
         .filter(|event| event.kind == kind)
-        .map(|event| event.code.as_str())
+        .map(|event| event.code.as_ref())
         .collect()
 }
 

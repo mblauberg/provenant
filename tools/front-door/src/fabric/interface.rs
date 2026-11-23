@@ -935,18 +935,16 @@ impl Factory {
         reason = "warn operator when policy is unavailable and defaults are used"
     )]
     pub(super) fn graph_input_warnings(&self, value: &Value) -> Result<Vec<String>, FacadeError> {
-        let policy = match provenant_cli::config_reads::read_for(
-            &self.context.roots,
-            "run admission",
-        ) {
-            Ok(config) => config.domains.policy.resolve_with_knobs(
-                &self.context.identity.project.to_string(),
-                &config.knobs,
-                &Default::default(),
-            ),
-            Err(error) => {
-                let error = provenant_records::diagnostic::safe_text(&error.to_string());
-                provenant_records::warning::warn(
+        let policy =
+            match provenant_cli::config_reads::read_for(&self.context.roots, "run admission") {
+                Ok(config) => config.domains.policy.resolve_with_knobs(
+                    &self.context.identity.project.to_string(),
+                    &config.knobs,
+                    &Default::default(),
+                ),
+                Err(error) => {
+                    let error = provenant_records::diagnostic::safe_text(&error.to_string());
+                    provenant_records::warning::warn(
                     provenant_records::warning::Warning::new(
                         provenant_records::warning::CONFIG_MALFORMED,
                         format!(
@@ -955,13 +953,13 @@ impl Factory {
                     )
                     .subject(self.context.identity.project.to_string()),
                 );
-                provenant_config::policy::read(
-                    self.context.roots.state.as_path(),
-                    &self.context.identity.project.to_string(),
-                    &Default::default(),
-                )
-            }
-        };
+                    provenant_config::policy::read(
+                        self.context.roots.state.as_path(),
+                        &self.context.identity.project.to_string(),
+                        &Default::default(),
+                    )
+                }
+            };
         Ok(provenant_fabric_runtime::graph::refusal::input_warnings(
             value, &policy,
         ))

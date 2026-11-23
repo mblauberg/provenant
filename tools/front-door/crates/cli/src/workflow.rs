@@ -1502,7 +1502,7 @@ mod tests {
         });
         assert_eq!(warnings.len(), 1);
         assert_eq!(
-            warnings[0].code.as_str(),
+            warnings[0].code.as_ref(),
             provenant_records::warning::CONFIG_MALFORMED.as_str()
         );
     }

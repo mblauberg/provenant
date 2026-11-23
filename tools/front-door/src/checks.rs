@@ -15,7 +15,7 @@ use provenant_records::{
 };
 use std::{
     ffi::OsString,
-    io::{self, Write},
+    io,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -509,7 +509,7 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
                 &targets.home,
                 install_roots.state.as_path(),
             );
-            let mut result = provenant_cli::check::install_page(
+            let result = provenant_cli::check::install_page(
                 inspection,
                 &context,
                 &targets.accounts,

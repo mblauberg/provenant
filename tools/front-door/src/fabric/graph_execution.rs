@@ -151,7 +151,7 @@ fn preflight_writer_worktrees(
                         attached.join(", ")
                     ),
                 )
-                .subject(path.display().to_string()),
+                .subject(path.to_owned()),
             );
             outcomes.insert(path.to_owned(), (None, None));
             continue;
@@ -185,7 +185,7 @@ fn preflight_writer_worktrees(
                         provenant_records::warning::CONFIG_MALFORMED,
                         warning.clone(),
                     )
-                    .subject(path.display().to_string()),
+                    .subject(path.to_owned()),
                 );
                 outcomes.insert(path.to_owned(), (None, Some(warning)));
             }

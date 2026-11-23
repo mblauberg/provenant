@@ -164,8 +164,8 @@ fn apply_provider_identity(
             Effect::Proceed => {}
             Effect::Warn(warning) => {
                 decoded.reason = Some(match decoded.reason.take() {
-                    Some(reason) => format!("{reason}; {warning}"),
-                    None => warning,
+                    Some(reason) => format!("{reason}; {}", warning.message),
+                    None => warning.message,
                 });
             }
             // Live identity checks run before retained-tail truncation. If a

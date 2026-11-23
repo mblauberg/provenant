@@ -683,7 +683,7 @@ mod tests {
                 assert_eq!(page.outcome(), Outcome::Ok);
                 assert!(page.findings.is_empty());
                 assert_eq!(warnings.len(), 1);
-                assert_eq!(warnings[0].code.as_str(), CONFIG_MALFORMED.as_str());
+                assert_eq!(warnings[0].code.as_ref(), CONFIG_MALFORMED.as_str());
                 assert_eq!(warnings[0].message, detail);
             }
         }

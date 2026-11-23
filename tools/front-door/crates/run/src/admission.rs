@@ -829,8 +829,7 @@ impl RunStore {
             &request.task,
         );
         use provenant_records::warning::{
-            MEMORY_FLOOR_LOW, POLICY_ADVISORY, RESOURCE_PROBE_FAILED, RUN_SETTINGS_UNAVAILABLE,
-            Warning, warn,
+            MEMORY_FLOOR_LOW, RESOURCE_PROBE_FAILED, RUN_SETTINGS_UNAVAILABLE, Warning, warn,
         };
         let settings = provenant_config::LaneBuildSettings::read(&self.writer_registry)
             .inspect_err(|error| {
@@ -942,7 +941,7 @@ impl RunStore {
                 Effect::Proceed => {}
                 Effect::Warn(message) => {
                     // Spec: docs/specs/cli.md#warnings-are-typed-values
-                    warn(Warning::new(POLICY_ADVISORY, message).subject("DISK_GATE"));
+                    warn(message);
                 }
                 Effect::Refuse(_) | Effect::Stop(_) => {
                     return Err(RunError::Admission(AdmissionError::Disk {
@@ -1000,7 +999,7 @@ impl RunStore {
                 Effect::Proceed => {}
                 Effect::Warn(message) => {
                     // Spec: docs/specs/cli.md#warnings-are-typed-values
-                    warn(Warning::new(POLICY_ADVISORY, message).subject(code.to_owned()));
+                    warn(message);
                 }
                 Effect::Refuse(_) | Effect::Stop(_) => return Err(error),
             }

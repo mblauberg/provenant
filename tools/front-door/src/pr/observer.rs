@@ -24,7 +24,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::{
     ffi::{OsStr, OsString},
-    io::Write,
     path::{Path, PathBuf},
     time::Duration,
 };

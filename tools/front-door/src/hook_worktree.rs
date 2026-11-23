@@ -269,7 +269,6 @@ fn forget(state: &Path, canonical: &Path) {
 }
 
 // Hook I/O is bounded by real monotonic deadlines.
-#[allow(clippy::disallowed_methods)]
 // The hook's ownership-mark failure notice is part of its stderr protocol.
 #[allow(clippy::disallowed_methods)]
 pub fn create(globals: &Globals) -> u8 {

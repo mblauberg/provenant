@@ -3170,7 +3170,7 @@ fn shape_and_exact_retry_credential_warnings_allow_retry() -> Result {
         }),
         "{reply}"
     );
-    assert!(!warnings.to_string().contains(credential));
+    assert!(!reply["warnings"].to_string().contains(credential));
     let after_credential = snapshot()?;
     assert_ne!(after_credential, after_shape);
 

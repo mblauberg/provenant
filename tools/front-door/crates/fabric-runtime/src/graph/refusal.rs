@@ -177,8 +177,8 @@ pub fn input_warnings(
         let fact = Facts::violation(format!("{path} looks like a credential"));
         match policy.check("SECRET_SHAPED_INPUT", fact) {
             Effect::Proceed => {}
-            Effect::Warn(message) => {
-                warnings.push(message);
+            Effect::Warn(warning) => {
+                warnings.push(warning.message);
             }
             // Keep the input scanner advisory even if a caller constructs a
             // stale or otherwise unsupported strict policy directly. Exact

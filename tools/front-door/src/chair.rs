@@ -1055,7 +1055,6 @@ fn record_start(context: &Context, input: &Input) {
     );
 }
 // The hook protocol imposes real wall-time input and execution caps.
-#[allow(clippy::disallowed_methods)]
 // The hook's switch outcome is reported on stderr for the caller that keys on its exit code.
 #[allow(clippy::disallowed_methods)]
 pub fn hook(start: bool, globals: &Globals) -> u8 {

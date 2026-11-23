@@ -1113,6 +1113,8 @@ fn normalise_api_call(args: &[String]) -> Result<String> {
     Ok(operation.join(" "))
 }
 
+// The fake gh executable's stdout and stderr are its wire protocol.
+#[allow(clippy::disallowed_methods)]
 fn fake_gh(args: &[String]) -> Result<u8> {
     let call = args.join(" ");
     // Real gh rejects JSON fields it does not have; so does this fake.
@@ -1578,6 +1580,8 @@ fn fake_gh(args: &[String]) -> Result<u8> {
     Ok(0)
 }
 
+// A harness=false target: main reports fixture and test failures on stderr.
+#[allow(clippy::disallowed_methods)]
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.first().is_some_and(|arg| arg == "--forge-port") {

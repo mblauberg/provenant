@@ -152,7 +152,7 @@ pub(crate) fn lease_with_policy(
                 Facts::violation(format!("active={}, limit={}", hit.active, hit.limit)),
             ) {
                 Effect::Proceed => {}
-                Effect::Warn(message) => warnings.push(message),
+                Effect::Warn(warning) => warnings.push(warning.message),
                 Effect::Refuse(_) | Effect::Stop(_) => {
                     return Err(RunError::Admission(AdmissionError::LaneCap {
                         active: hit.active,

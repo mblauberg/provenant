@@ -1,4 +1,6 @@
 //! One harness=false target: current_exe is the exact fake-provider executable.
+// The fake provider's stdout and stderr are its wire protocol.
+#![allow(clippy::disallowed_methods)]
 mod support;
 use std::{
     io::{self, Read, Write},

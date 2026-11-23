@@ -148,7 +148,7 @@ impl PushContext<'_> {
                                         DEFAULT_BRANCH_REWRITTEN,
                                         format!("pre-push: rewriting the default branch {branch}; {setting}"),
                                     )
-                                    .subject(branch.as_str().to_owned())
+                                    .subject(branch.to_string())
                                     .once_per_change(),
                                 );
                             }
@@ -194,7 +194,7 @@ impl PushContext<'_> {
                                         "pre-push: conflict markers in pushed commits; {setting}"
                                     ),
                                 )
-                                .subject(branch.as_str().to_owned())
+                                .subject(branch.to_string())
                                 .once_per_change(),
                             );
                         }

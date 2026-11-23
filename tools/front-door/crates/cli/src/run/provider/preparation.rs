@@ -5133,7 +5133,7 @@ pub(super) fn prepare_candidates_inner(
                     FORGE_CONTEXT_UNRESOLVED,
                     "GitHub publishing credentials withheld by the access policy",
                 )
-                .subject(label),
+                .subject(label.as_str()),
             );
             gh_selection = super::gh_auth::Selection::new(
                 if sandbox.effective {

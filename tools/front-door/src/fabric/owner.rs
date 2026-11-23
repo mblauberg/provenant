@@ -1620,7 +1620,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 );
                 warn(
                     Warning::new(BRANCH_BEHIND_BASE, warning.clone())
-                        .subject(branch.clone())
+                        .subject(branch.to_string())
                         .repair(format!("use --base {tip}")),
                 );
                 self.launch_warnings.push(warning);
@@ -3701,14 +3701,26 @@ impl BoundGraphOwner<'_> {
                 if name == "postgres" {
                     true
                 } else {
-                    provenant_cli::run::warn_ignored_capability("node or project ", name);
+                    provenant_records::warning::warn(
+                        provenant_records::warning::Warning::new(
+                            provenant_records::warning::CONFIG_KEY_IGNORED,
+                            format!("ignored unknown node or project capability {name}"),
+                        )
+                        .subject(name.clone()),
+                    );
                     false
                 }
             });
             if access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite {
                 for capability in &self.capability_overrides.0 {
                     if capability != "postgres" {
-                        provenant_cli::run::warn_ignored_capability("flag ", capability);
+                        provenant_records::warning::warn(
+                            provenant_records::warning::Warning::new(
+                                provenant_records::warning::CONFIG_KEY_IGNORED,
+                                format!("ignored unknown flag capability {capability}"),
+                            )
+                            .subject(capability.clone()),
+                        );
                         continue;
                     }
                     if !capabilities.contains(capability) {

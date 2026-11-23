@@ -233,11 +233,8 @@ fn check_disk_and_trim(
             let free = provenant_os::fs::available_bytes_at(root).map_err(|e| e.to_string())?;
             match gate.decide(free) {
                 provenant_records::policy::Effect::Proceed => {}
-                provenant_records::policy::Effect::Warn(message) => {
-                    warn(Warning::new(
-                        CONFIG_MALFORMED,
-                        format!("{message}; proceeding"),
-                    ));
+                provenant_records::policy::Effect::Warn(warning) => {
+                    warn(warning);
                 }
                 provenant_records::policy::Effect::Refuse(diagnostic)
                 | provenant_records::policy::Effect::Stop(diagnostic) => {

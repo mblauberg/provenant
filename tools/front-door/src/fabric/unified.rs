@@ -5966,7 +5966,7 @@ mod tests {
 
         assert_eq!(reply.result.status, provenant_records::Outcome::Invalid);
         assert_eq!(
-            reply.result.error.as_ref().map(|error| error.code.as_str()),
+            reply.result.error.as_ref().map(|error| error.code.as_ref()),
             Some("NOT_FOUND")
         );
         assert_eq!(provenant_cli::exit_status(&reply.result.status), 2);

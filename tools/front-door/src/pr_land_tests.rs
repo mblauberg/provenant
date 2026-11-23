@@ -363,7 +363,7 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
         "{}",
         String::from_utf8_lossy(&output.stdout.bytes)
     );
-    assert!(warnings(&output)?.iter().any(|warning| {
+    assert!(self::warnings(&output)?.iter().any(|warning| {
         warning["code"] == "CONFIG_MALFORMED"
             && warning["message"]
                 .as_str()
@@ -658,7 +658,7 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
     // A failed gh sweep warns and retains the previous sharing behaviour.
     let fallback = bind_cli("1675")?;
     assert_eq!(code(&fallback), 0);
-    assert!(warnings(&fallback)?.iter().any(|warning| {
+    assert!(self::warnings(&fallback)?.iter().any(|warning| {
         warning["code"] == "CONFIG_MALFORMED"
             && warning["message"]
                 .as_str()

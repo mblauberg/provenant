@@ -85,6 +85,22 @@ fn removal_warning(outcome: &ArtefactOutcome) -> Warning {
     .subject(outcome.name.clone())
 }
 
+fn warn(outcome: &ArtefactOutcome) {
+    if outcome.outcome == ArtefactState::Failed {
+        provenant_records::warning::warn(
+            provenant_records::warning::Warning::new(
+                provenant_records::warning::CACHE_REMOVAL_FAILED,
+                format!(
+                    "could not remove {}: {}; it is retained",
+                    outcome.name,
+                    outcome.reason.as_deref().unwrap_or("unknown error")
+                ),
+            )
+            .subject(outcome.name.to_string()),
+        );
+    }
+}
+
 /// Reuse the durable owner for this exact RefLedger generation, or write its
 /// pre-removal intent before the first mutation.
 fn retirement_for_ref(

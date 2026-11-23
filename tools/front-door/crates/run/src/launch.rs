@@ -269,10 +269,9 @@ fn applied_write_grants(
             },
         ));
     }
-    if let Some(message) = effect.message() {
-        use provenant_records::warning::{POLICY_ADVISORY, Warning, warn};
+    if let provenant_records::policy::Effect::Warn(warning) = &effect {
         // Spec: docs/specs/cli.md#warnings-are-typed-values
-        warn(Warning::new(POLICY_ADVISORY, message).subject("WRITE_GRANT"));
+        provenant_records::warning::warn(warning.clone());
     }
     let git_grants_digest = match &permissions.mode {
         provenant_confinement::permissions::AccessMode::ReadOnly => None,
@@ -558,9 +557,9 @@ fn check_launch_policy(
     match policy.check(code, Facts::violation(&refusal.message)) {
         Effect::Proceed => Ok(()),
         Effect::Warn(message) => {
-            use provenant_records::warning::{POLICY_ADVISORY, Warning, warn};
+            use provenant_records::warning::warn;
             // Spec: docs/specs/cli.md#warnings-are-typed-values
-            warn(Warning::new(POLICY_ADVISORY, message).subject(code.to_owned()));
+            warn(message);
             Ok(())
         }
         Effect::Refuse(_) | Effect::Stop(_) => Err(refusal),
@@ -780,12 +779,9 @@ impl WriteGrantLimit {
                     self.origin.description()
                 )),
             ) {
-                use provenant_records::warning::{POLICY_ADVISORY, Warning, warn};
+                use provenant_records::warning::warn;
                 // Spec: docs/specs/cli.md#warnings-are-typed-values
-                warn(
-                    Warning::new(POLICY_ADVISORY, message)
-                        .subject("WRITE_GRANT_LIMIT_INVALID_NONE"),
-                );
+                warn(message);
             }
             Self::default()
         }
@@ -2757,13 +2753,9 @@ fn process_tree_interval(
                     "domains.run settings unavailable ({error}); no process-tree sampling"
                 )),
             ) {
-                use provenant_records::warning::{RUN_SETTINGS_UNAVAILABLE, Warning, warn};
+                use provenant_records::warning::warn;
                 // Spec: docs/specs/cli.md#warnings-are-typed-values
-                warn(
-                    Warning::new(RUN_SETTINGS_UNAVAILABLE, message)
-                        .subject("LAUNCH_PROCESS_TREE_INTERVAL_OR_WARN_NONE")
-                        .once_per_change(),
-                );
+                warn(message.once_per_change());
             }
             return None;
         }
@@ -2792,13 +2784,10 @@ fn retained_custody_ms(state: &std::path::Path, policy: &provenant_records::poli
                     "domains.run settings unavailable ({error}); retained custody keeps the shipped {seconds} s limit"
                 )),
             ) {
-                use provenant_records::warning::{
-                    RUN_SETTINGS_UNAVAILABLE, Warning, warn,
-                };
+                use provenant_records::warning::warn;
                 // Spec: docs/specs/cli.md#warnings-are-typed-values
                 warn(
-                    Warning::new(RUN_SETTINGS_UNAVAILABLE, message)
-                        .subject("LAUNCH_RETAINED_CUSTODY_LIMIT_OR_WARN_DEFAULT")
+                    message
                         .once_per_change(),
                 );
             }
@@ -2822,13 +2811,9 @@ fn lane_port_plan_or_warn(
                 )),
             );
             if let provenant_records::policy::Effect::Warn(message) = effect {
-                use provenant_records::warning::{RUN_SETTINGS_UNAVAILABLE, Warning, warn};
+                use provenant_records::warning::warn;
                 // Spec: docs/specs/cli.md#warnings-are-typed-values
-                warn(
-                    Warning::new(RUN_SETTINGS_UNAVAILABLE, message)
-                        .subject("LAUNCH_LANE_PORT_PLAN_OR_WARN_NONE")
-                        .once_per_change(),
-                );
+                warn(message.once_per_change());
             }
             None
         }

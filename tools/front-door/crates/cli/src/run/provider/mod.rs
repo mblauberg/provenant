@@ -11,7 +11,6 @@ use provenant_records::{ADAPTER_SPECS, AdapterSpec};
 use provenant_records::{ResolvedRoute, RouteAlternative};
 use provenant_run as run;
 use run::{RouteRecord, SkipKind, SkippedRoute};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 pub(super) type ExecutableLocator<'a> = dyn Fn(&str) -> Result<PathBuf, String> + 'a;

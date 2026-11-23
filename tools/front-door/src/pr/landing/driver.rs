@@ -3180,7 +3180,7 @@ pub(super) mod tests {
         let response = super::super::batch_response(*report, Some(*cause));
         assert_eq!(response.status, provenant_records::Outcome::Refused);
         assert_eq!(
-            response.error.as_ref().map(|error| error.code.as_str()),
+            response.error.as_ref().map(|error| error.code.as_ref()),
             Some("LAND_REFUSED")
         );
         assert_eq!(response.data["outcomes"]["1"], "landed");

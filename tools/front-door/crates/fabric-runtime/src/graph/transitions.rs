@@ -1129,7 +1129,7 @@ pub(super) fn admit_attempt(
         match effect {
             Effect::Proceed => {}
             Effect::Warn(message) => {
-                checkpoint.nodes[node_index].concurrency_warning = Some(message);
+                checkpoint.nodes[node_index].concurrency_warning = Some(message.message);
             }
             Effect::Refuse(diagnostic) | Effect::Stop(diagnostic) => {
                 return Admission::PolicyRefused {
