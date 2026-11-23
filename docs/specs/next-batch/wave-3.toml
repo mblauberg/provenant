@@ -1,0 +1,35 @@
+# Next batch, wave 3: dependents.
+# Design: docs/specs/next-batch.md#build-plan. Launch from the root of the checkout
+# holding this file (brief_file paths resolve against the working directory):
+#   provenant run --file docs/specs/next-batch/wave-3.toml --explain
+# with.worktree is the clean review-repair checkout; create it first with
+#   provenant worktree create batch/next-repair --base main
+# Waves 2 and 3: set review_base to the previous wave's integrated tip before launch.
+use = "batch"
+integration_branch = "batch/next"
+review_base = "origin/main"
+
+[with]
+worktree = "/Users/user/Repos/provenant/.worktrees/batch-next-repair"
+integration_branch = "batch/next"
+max_parallel = 6
+items = [
+  { id = "w3-next-steps", brief_file = "docs/specs/next-batch/briefs/w3-next-steps.md", model = "opencode/opencode/hy4-flash-free", write_scope = ["tools/front-door/crates/records/src/command_result.rs", "tools/front-door/crates/workflow/src/session/state.rs", "tools/front-door/src/output.rs", "tools/front-door/src/hook_state.rs"] },
+  { id = "w3-names-targets", brief_file = "docs/specs/next-batch/briefs/w3-names-targets.md", model = "opencode/opencode/hy4-flash-free", write_scope = ["tools/front-door/crates/cli/src/target.rs", "tools/front-door/crates/fabric-runtime/src/graph/template.rs", "tools/front-door/crates/run/src/reader.rs", "tools/front-door/crates/cli/src/lib.rs", "tools/front-door/src/fabric/peer.rs", "tools/front-door/crates/routing/src/"] },
+  { id = "w3-accounts", brief_file = "docs/specs/next-batch/briefs/w3-accounts.md", model = "opencode/opencode/hy4-flash-free", write_scope = ["tools/front-door/crates/providers/src/accounts.rs", "tools/front-door/crates/cli/src/route/resolution.rs", "tools/front-door/crates/cli/src/run/provider/preparation.rs", "tools/front-door/crates/cli/src/accounts.rs"] },
+  { id = "w3-worktree", brief_file = "docs/specs/next-batch/briefs/w3-worktree.md", model = "opencode/opencode/hy4-flash-free", write_scope = ["tools/front-door/crates/confinement/src/worktrees.rs", "tools/front-door/crates/confinement/src/worktrees/", "tools/front-door/src/worktrees.rs", "tools/front-door/crates/cli/src/grammar.rs", "tools/front-door/src/commands/worktree.rs", "tools/front-door/crates/cli/src/run/status.rs"] },
+  { id = "w3-ci-observer", brief_file = "docs/specs/next-batch/briefs/w3-ci-observer.md", model = "opencode/opencode/hy4-flash-free", write_scope = ["tools/front-door/src/pr/observer.rs", "tools/front-door/src/pr/observer/", "tools/front-door/src/pr/landing/gate.rs", "tools/front-door/src/status_wait.rs", "tools/front-door/src/ci.rs", "tools/front-door/src/fabric/review_subject.rs"] },
+  { id = "w3-implement-pr", brief_file = "docs/specs/next-batch/briefs/w3-implement-pr.md", model = "opencode/opencode/hy4-flash-free", write_scope = ["tools/front-door/src/fabric/interface.rs", "tools/front-door/crates/confinement/src/worktrees/lifecycle.rs", "tools/front-door/crates/confinement/src/worktrees.rs", "tools/front-door/crates/run/src/lib.rs", "tools/front-door/src/handoff.rs", "tools/front-door/crates/cli/src/grammar.rs"], after = ["w3-ci-observer"] },
+  { id = "w3-writer-dirty", brief_file = "docs/specs/next-batch/briefs/w3-writer-dirty.md", model = "opencode/opencode/hy4-flash-free", write_scope = ["tools/front-door/crates/run/src/writer_dirty.rs", "tools/front-door/src/fabric/graph_execution.rs", "config/harness-knobs.json"] },
+  { id = "w3-land", brief_file = "docs/specs/next-batch/briefs/w3-land.md", model = "opencode/opencode/hy4-flash-free", write_scope = ["tools/front-door/src/pr/landing/", "tools/front-door/crates/fabric-runtime/src/config.rs", "docs/runbooks/github-workflow.md"], after = ["w3-ci-observer"] },
+  { id = "w3-approval-carry", brief_file = "docs/specs/next-batch/briefs/w3-approval-carry.md", model = "opencode/opencode/hy4-flash-free", write_scope = ["tools/front-door/src/pr/landing/", "tools/front-door/crates/config/src/ports.rs"], after = ["w3-land"] },
+  { id = "w3-opencode-stream", brief_file = "docs/specs/next-batch/briefs/w3-opencode-stream.md", model = "opencode/opencode/hy4-flash-free", write_scope = ["tools/front-door/crates/providers/src/opencode.rs"] },
+  { id = "w3-opencode-variants", brief_file = "docs/specs/next-batch/briefs/w3-opencode-variants.md", model = "opencode/opencode/hy4-flash-free", write_scope = ["tools/front-door/crates/providers/src/opencode.rs", "tools/front-door/crates/routing/src/resolve.rs", "tools/front-door/crates/routing/src/catalog.rs"], after = ["w3-opencode-stream"] },
+  { id = "w3-result-projection", brief_file = "docs/specs/next-batch/briefs/w3-result-projection.md", model = "opencode/opencode/hy4-flash-free", write_scope = ["tools/front-door/crates/records/src/lane_contract.rs", "tools/front-door/crates/cli/src/run/output.rs", "tools/front-door/crates/run/src/reader.rs", "tools/front-door/crates/cli/src/run/status.rs"] },
+  { id = "w3-init", brief_file = "docs/specs/next-batch/briefs/w3-init.md", model = "opencode/opencode/hy4-flash-free", write_scope = ["tools/front-door/src/commands/init.rs", "tools/front-door/src/commands/mod.rs", "tools/front-door/crates/cli/src/grammar.rs", "tools/front-door/crates/config/src/ports.rs", "docs/runbooks/install.md"] },
+  { id = "w3-preamble", brief_file = "docs/specs/next-batch/briefs/w3-preamble.md", model = "opencode/opencode/hy4-flash-free", write_scope = ["tools/front-door/crates/run/src/completion.rs", "config/harness-knobs.json", "tools/front-door/crates/config/src/knobs.rs", "skills/orchestrate/references/lanes.md"] },
+  { id = "w3-read-source", brief_file = "docs/specs/next-batch/briefs/w3-read-source.md", model = "opencode/opencode/hy4-flash-free", write_scope = ["tools/front-door/crates/cli/src/run/provider/confinement.rs", "tools/front-door/crates/cli/src/run.rs", "tools/front-door/src/fabric/interface.rs", "tools/front-door/crates/fabric-runtime/assets/templates/plan.toml", "config/harness-knobs.json"], after = ["w3-implement-pr"] },
+  { id = "w3-steer-settled", brief_file = "docs/specs/next-batch/briefs/w3-steer-settled.md", model = "opencode/opencode/hy4-flash-free", write_scope = ["tools/front-door/src/fabric/unified.rs", "config/harness-knobs.json"] },
+  { id = "w3-worktree-roots", brief_file = "docs/specs/next-batch/briefs/w3-worktree-roots.md", model = "opencode/opencode/hy4-flash-free", write_scope = ["tools/front-door/crates/config/src/ports.rs", "tools/front-door/crates/confinement/src/worktrees/"], after = ["w3-worktree"] },
+  { id = "w3-config-show", brief_file = "docs/specs/next-batch/briefs/w3-config-show.md", model = "opencode/opencode/hy4-flash-free", write_scope = ["tools/front-door/src/lib.rs", "tools/front-door/crates/config/src/ports.rs", "tools/front-door/crates/cli/src/config_reads.rs"] },
+]
