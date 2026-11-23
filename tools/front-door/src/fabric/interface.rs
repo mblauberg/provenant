@@ -2555,7 +2555,7 @@ impl Factory {
                 catalogue.as_ref(),
             )
             .into_iter()
-            .map(|warning| warning.to_string()),
+            .map(|warning| warning.message),
         );
         document.set_replay_digest(&digest);
         // Explain is read-only and still shows the compiled submission. For a

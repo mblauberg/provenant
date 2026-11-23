@@ -3166,8 +3166,8 @@ mod tests {
                 super::canonical_route_model(adapter, &once, Some(&catalogue));
             assert_eq!(twice, once, "f(f({model})) rewrote a stored id");
             assert_eq!(
-                second_warning.as_ref().map(|warning| warning.code),
-                first_warning.as_ref().map(|warning| warning.code),
+                second_warning.as_ref().map(|warning| warning.code.clone()),
+                first_warning.as_ref().map(|warning| warning.code.clone()),
                 "warning code changed on the second pass for {model}"
             );
         }

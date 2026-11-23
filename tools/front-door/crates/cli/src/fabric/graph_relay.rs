@@ -2694,7 +2694,7 @@ mod tests {
         assert_eq!(warnings.len(), 1);
         assert_eq!(
             warnings[0].code,
-            provenant_records::warning::ROUTE_MODEL_NOT_CATALOGUED
+            provenant_records::warning::ROUTE_MODEL_NOT_CATALOGUED.as_str()
         );
         assert!(provenant_routing::ModelId::parse(route["model"].as_str().unwrap()).is_ok());
 

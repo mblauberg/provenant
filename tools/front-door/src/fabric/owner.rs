@@ -1399,7 +1399,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 )
                 .map_err(|_| "repair review route is invalid; correct reviewer tier settings")?;
                 for warning in warnings {
-                    let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+                    provenant_records::warning::warn(warning);
                 }
                 if let Some(family) = slot
                     .satisfied_family
