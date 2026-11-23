@@ -104,7 +104,7 @@ fn stop_publish_preparation_leaves_the_launch_pr_delivery_untouched()
 #[test]
 fn launch_and_stop_publication_share_one_remote_refresh()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
-    let fixture = PrepareFixture::new()?;
+    let mut fixture = PrepareFixture::new()?;
     let git = provenant_os::git::git_executable().ok_or("git")?;
     let wrapper = fixture.root.join("git-wrapper");
     let refreshes = fixture.root.join("remote-refreshes");
