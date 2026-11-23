@@ -186,7 +186,7 @@ mod tests {
     }
 
     #[test]
-    // Spec: docs/specs/cli.md#one-bounded-envelope
+    // Spec: docs/specs/cli.md#one-bounded-envelope-clipped-with-a-warning
     fn version_identity_check_accepts_the_real_serialised_envelope() {
         let bytes = serialised_identity();
         let envelope: SmokeEnvelope<SmokeVersion> =
@@ -196,7 +196,7 @@ mod tests {
     }
 
     #[test]
-    // Spec: docs/specs/cli.md#one-bounded-envelope
+    // Spec: docs/specs/cli.md#one-bounded-envelope-clipped-with-a-warning
     fn version_identity_check_still_rejects_a_foreign_envelope_version() {
         let bytes = serialised_identity();
         let mut value: serde_json::Value =

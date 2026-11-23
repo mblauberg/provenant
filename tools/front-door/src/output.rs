@@ -796,7 +796,7 @@ mod tests {
     }
 
     #[test]
-    // Spec: docs/specs/cli.md#one-bounded-envelope
+    // Spec: docs/specs/cli.md#one-bounded-envelope-clipped-with-a-warning
     fn an_oversized_json_result_carries_warnings_on_the_bounded_marker() {
         let _lock = TEST_LOCK
             .lock()
@@ -831,7 +831,7 @@ mod tests {
     }
 
     #[test]
-    // Spec: docs/specs/cli.md#one-bounded-envelope
+    // Spec: docs/specs/cli.md#one-bounded-envelope-clipped-with-a-warning
     fn omitted_bytes_measure_the_envelope_not_the_bare_result() {
         let _lock = TEST_LOCK
             .lock()
