@@ -164,6 +164,7 @@ impl Retry {
 }
 
 #[cfg(test)]
+#[allow(dead_code)] // The worktree driver includes the library without a test harness.
 mod tests {
     use super::*;
 

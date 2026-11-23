@@ -2058,7 +2058,7 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
             let shared = Shared::new();
             let mut observer = shared.observer(dir.path());
             let request = Request::within(Duration::from_secs(60));
-            let reads = Cell::new(0_usize);
+            let reads = std::cell::Cell::new(0_usize);
             let pauses: std::cell::RefCell<Vec<Duration>> = std::cell::RefCell::new(Vec::new());
             let outcome = super::await_ci(
                 || {

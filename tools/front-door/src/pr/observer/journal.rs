@@ -29,6 +29,17 @@ impl PrJournal {
         self.0.register_pr(repository, number, head)
     }
 
+    /// Whether the host poller's last read of this pull request is recent
+    /// enough that a waiter need not read the forge itself.
+    pub(crate) fn source_current(
+        &self,
+        repository: &str,
+        number: u64,
+        head: Option<&str>,
+    ) -> Result<bool> {
+        self.0.source_current(repository, number, head)
+    }
+
     /// The next current observation for the pull request, waiting up to
     /// `maximum` for the host poller. A webhook hint carries identifiers only;
     /// the source store stays authoritative.

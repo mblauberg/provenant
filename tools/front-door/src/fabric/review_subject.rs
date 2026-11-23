@@ -14,7 +14,7 @@ fn observed_pull(
     number: u64,
     request: &provenant_config::ports::Request,
 ) -> Result<PullSubject, FacadeError> {
-    let repository = Observer::repository_for_project(state, project, request)
+    let repository = crate::pr::observer::repository_for_project(state, project, request)
         .map_err(|error| graph_subject_error(error.to_string()))?;
     let mut observer = Observer::open(state, project, &repository, request)
         .map_err(|error| graph_subject_error(error.to_string()))?;

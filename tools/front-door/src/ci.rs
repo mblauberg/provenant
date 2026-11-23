@@ -262,12 +262,11 @@ fn resolve_pr_rest(
     struct View {
         #[serde(rename = "headRefOid")]
         head: String,
-        url: String,
     }
     // The head and repository come from the one observer, never a direct gh
     // read: it selects the forge port and honours the shared rate-limit hold-off.
     let resolved: Result<(String, View), String> =
-        match Observer::repository_for_project(state, project, request) {
+        match crate::pr::observer::repository_for_project(state, project, request) {
             Ok(repository) => match Observer::open(state, project, &repository, request).and_then(
                 |mut observer| {
                     observer.resource(
@@ -279,7 +278,6 @@ fn resolve_pr_rest(
             ) {
                 Ok(resource) => serde_json::from_value::<View>(serde_json::json!({
                     "headRefOid": resource["head"]["sha"],
-                    "url": resource["html_url"],
                 }))
                 .map(|view| (repository, view))
                 .map_err(|error| error.to_string()),
@@ -1153,8 +1151,8 @@ fn cached_text(
     name: &str,
     fetch: impl FnOnce() -> Result<String, String>,
 ) -> Result<String, String> {
-    let ttl = crate::pr::observer::fast_interval(state, project)
-        .unwrap_or_else(|| crate::pr::observer::POLL);
+    let ttl =
+        crate::pr::observer::fast_interval(state, project).unwrap_or(crate::pr::observer::POLL);
     let now = clock();
     #[derive(Serialize, Deserialize)]
     struct Cached {
