@@ -658,6 +658,7 @@ pub(crate) fn graph_status_next(
     };
     let command = graphs
         .iter()
+        .copied()
         .chain(lines.iter().copied())
         .min_by_key(|row| priority(row))
         .map(|row| plain(&row["next"]))
@@ -1671,7 +1672,10 @@ pub(crate) fn unified_graph_command(
         GraphCommand::Stop { .. } => "stop",
         GraphCommand::Retry { .. } => "retry",
     };
-    let result = (|| -> Result<(Value, String, Option<String>), Box<dyn std::error::Error>> {
+    let result = (|| -> Result<
+        (Value, String, Vec<provenant_records::command_result::NextStep>, Option<provenant_records::command_result::NextStep>),
+        Box<dyn std::error::Error>,
+    > {
         // A lane reads through the host, which holds the configuration.
         let lane_read = matches!(command, GraphCommand::Status) && provenant_cli::fabric::in_lane();
         let factory = if lane_read {
@@ -1829,10 +1833,10 @@ pub(crate) fn unified_graph_command(
             Ok([only]) => only,
             Err(documents) => json!({"targets":documents}),
         };
-        Ok((data, human, superseded_next))
+        Ok((data, human, next_steps, superseded_next))
     })();
     match result {
-        Ok((data, human, superseded_next)) => {
+        Ok((data, human, next_steps, superseded_next)) => {
             let summary = if matches!(command, GraphCommand::Status) {
                 let rows: Vec<Value> =
                     if let Some(targets) = data.get("targets").and_then(Value::as_array) {

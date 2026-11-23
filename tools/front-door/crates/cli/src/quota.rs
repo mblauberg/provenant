@@ -4276,7 +4276,7 @@ mod tests {
             !human.contains("unknown [opencode]: EXHAUSTED until"),
             "{human}"
         );
-        let compact = quota_summary_at(&today, zone.clone());
+        let (compact, _) = quota_summary_at(&today, zone.clone());
         assert!(
             compact.lines.iter().any(|line| line
                 == "zen [opencode]: exhausted until 10:11 (source: provider retry-after)")
@@ -4326,7 +4326,7 @@ mod tests {
                 .contains("recorded refusal for opencode/beam-pro in pool opencode-go until 10:11 (source: provider retry-after)"),
             "{human}"
         );
-        let compact = quota_summary_at(&scoped, zone.clone());
+        let (compact, _) = quota_summary_at(&scoped, zone.clone());
         assert!(compact.lines.iter().any(|line| {
             line == "unknown [opencode]: available (recorded refusal for opencode/beam-pro in pool opencode-go until 10:11 (source: provider retry-after))"
         }));

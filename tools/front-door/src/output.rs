@@ -326,12 +326,14 @@ pub(crate) fn emit_with_writers<T: Serialize, Wout: Write, Werr: Write>(
     // The land explanation's suggested command is a typed step on the envelope,
     // never a formatted line inside a summary. An owner-supplied array wins.
     let steps: Cow<'_, [NextStep]> = if result.next.is_empty() {
-        explanation
-            .as_ref()
-            .map(|(_, step)| Cow::Owned(vec![step.clone()]))
-            .unwrap_or_else(|| Cow::Borrowed(&[]))
+        Cow::Owned(
+            explanation
+                .as_ref()
+                .map(|(_, step)| vec![step.clone()])
+                .unwrap_or_default(),
+        )
     } else {
-        Cow::Borrowed(&result.next)
+        Cow::Borrowed(result.next.as_slice())
     };
     let next = next_text(&steps, globals);
     let human_text: Cow<str> = if next.is_empty() {

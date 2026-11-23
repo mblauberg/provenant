@@ -156,9 +156,9 @@ pub fn render_output(command: Output, read: Result<(Value, String), Fail>) -> Re
     if out.result.error.is_none() {
         let full = std::env::args_os().any(|arg| arg == "--full");
         out.summary = Some(if full {
-            output_summary(&out.result.data, &out.human, headed, Some(&command.target))
+            output_summary(&out.result.data, &out.human, headed)
         } else {
-            output_summary_default(&out.result.data, &out.human, headed, Some(&command.target))
+            output_summary_default(&out.result.data, &out.human, headed)
         });
         out.result.next = output_next_step(&out.result.data, Some(&command.target))
             .into_iter()
@@ -206,34 +206,18 @@ pub fn output_from_host(
 /// What an agent needs from a read: how the attempt settled, what it changed,
 /// and the whole final text up to a generous bound, then its head and tail.
 /// Missing changed-file evidence stays null; it must never read as an empty diff.
-pub(super) fn output_summary(
-    data: &Value,
-    text: &str,
-    headed: bool,
-    target: Option<&crate::Target>,
-) -> crate::Summary {
-    summary(data, text, headed, true, target)
+pub(super) fn output_summary(data: &Value, text: &str, headed: bool) -> crate::Summary {
+    summary(data, text, headed, true)
 }
 
 /// The compact default view: verdict, findings and verify first, with the
 /// host-fact narration and lane prose available through `--full`.
 /// Spec: docs/specs/lane-contracts.md#result-projection
-pub(super) fn output_summary_default(
-    data: &Value,
-    text: &str,
-    headed: bool,
-    target: Option<&crate::Target>,
-) -> crate::Summary {
-    summary(data, text, headed, false, target)
+pub(super) fn output_summary_default(data: &Value, text: &str, headed: bool) -> crate::Summary {
+    summary(data, text, headed, false)
 }
 
-fn summary(
-    data: &Value,
-    text: &str,
-    headed: bool,
-    full: bool,
-    target: Option<&crate::Target>,
-) -> crate::Summary {
+fn summary(data: &Value, text: &str, headed: bool, full: bool) -> crate::Summary {
     let mut lines = Vec::new();
     if headed && let Some(verdict) = data["selected"]["verdict"].as_str() {
         lines.push(format!(
@@ -1344,7 +1328,7 @@ mod tests {
             "state":"cancelled",
             "stop_work":{"head":"abcdef0123456789","ahead":2,"dirty_paths":3,"push":"not_granted"}
         });
-        let summary = output_summary(&unpushed, "", true, None);
+        let summary = output_summary(&unpushed, "", true);
         assert!(
             summary.lines.iter().any(|line| line
                 == "2 commits unpushed at abcdef0123456789; 3 dirty paths left uncommitted")
@@ -1353,7 +1337,7 @@ mod tests {
             "state":"cancelled",
             "stop_work":{"head":"abcdef0123456789","ahead":2,"dirty_paths":null,"push":"pushed"}
         });
-        let summary = output_summary(&pushed, "", true, None);
+        let summary = output_summary(&pushed, "", true);
         assert!(
             summary
                 .lines
@@ -1370,7 +1354,7 @@ mod tests {
             "writer_base":null, "writer_head":null, "publication":null,
             "residual_tree":null, "changed_files":null
         });
-        let summary = output_summary(&null_headers, "answer", true, None);
+        let summary = output_summary(&null_headers, "answer", true);
         for key in [
             "base",
             "committed head",
@@ -1392,7 +1376,7 @@ mod tests {
             "residual_tree":"clean (current observation)",
             "changed_files":["src/main.rs"], "changed_files_total":1
         });
-        let summary = output_summary(&real_headers, "", true, None);
+        let summary = output_summary(&real_headers, "", true);
         for (label, value) in [
             ("base", "aaaa"),
             ("committed head", "bbbb"),
@@ -1419,7 +1403,7 @@ mod tests {
         let error =
             provenant_records::handoff::HandoffError::new("spec_concerns[0]", "expected concern");
         let data = json!({"state":"review_required", "cause":"handoff_malformed", "handoff":{"Err":error}});
-        let summary = output_summary(&data, "captured answer", true, None);
+        let summary = output_summary(&data, "captured answer", true);
         assert!(
             summary
                 .lines
@@ -1446,7 +1430,7 @@ mod tests {
                 ]
             }
         });
-        let summary = output_summary(&data, "answer", true, None);
+        let summary = output_summary(&data, "answer", true);
         assert_eq!(
             summary
                 .lines
@@ -1474,7 +1458,7 @@ mod tests {
             "state":"succeeded",
             "planner_fallback":{"stage":"static", "reason":"planner route failed"}
         });
-        let summary = output_summary(&data, "fallback completed", true, None);
+        let summary = output_summary(&data, "fallback completed", true);
         let text = summary.lines.join("\n");
         assert!(text.contains("planner fallback: static (reason: planner route failed)"));
     }
@@ -1484,7 +1468,7 @@ mod tests {
         let data = json!({
             "planner_fallback":{"stage":"static", "reason":"fragment \u{1b}[31minvalid"}
         });
-        let summary = output_summary(&data, "fallback completed", true, None);
+        let summary = output_summary(&data, "fallback completed", true);
         let text = summary.lines.join("\n");
         assert!(text.contains("planner fallback: static (reason: fragment [31minvalid)"));
         assert!(!text.contains('\u{1b}'));
@@ -1632,7 +1616,7 @@ mod tests {
                 "remaining": [], "decisions": [], "verify": ["ran tests"]
             }}
         });
-        let summary = output_summary_default(&data, "narration", true, None);
+        let summary = output_summary_default(&data, "narration", true);
         let lines = &summary.lines;
         let verdict = lines
             .iter()
