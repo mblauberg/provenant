@@ -759,7 +759,10 @@ printf 'custom interpreter ran; credentials and writes denied\n'
         lane["applied_route"]["sandbox"]["effective"], true,
         "{lane}"
     );
-    assert_eq!(lane["applied_route"]["sandbox"]["source"], "knob", "{lane}");
+    // Spec: docs/specs/state.md#every-setting-reports-its-layer — a sandbox
+    // knob records its actual layer; this knob is set in the host state
+    // config, so the applied route reports `host`, not the retired `knob`.
+    assert_eq!(lane["applied_route"]["sandbox"]["source"], "host", "{lane}");
     // Network is on unless the task turns it off.
     assert_eq!(lane["network"], "open", "{submitted}");
     let result = fs::read_to_string(attempt_dir(&rig, id)?.join("result.md"))?;
