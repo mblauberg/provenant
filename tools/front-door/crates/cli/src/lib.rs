@@ -209,32 +209,18 @@ fn parse_with_models(
         };
     }
     if let Command::Help { command, all } = &invocation.command {
-        let scope = format!("provenant {}", command.join(" "));
-        let mut expanded = if *all || (!command.is_empty() && !is_core_scope(&model, &scope)) {
+        let requested = format!("provenant {}", command.join(" "));
+        let mut expanded = if *all || (!command.is_empty() && !is_core_scope(&model, &requested)) {
             models(false, true)
         } else {
             models(false, false)
         };
-        let mut selected = &mut expanded;
-        let mut scope = String::from("provenant");
-        // Walk as far as the path resolves. An unmatched component stops at the
-        // deepest matched command, whose rendered help lists its valid children.
-        for component in command {
-            selected = match selected.find_subcommand_mut(component) {
-                Some(child) if !child.is_hide_set() || scope == "provenant quota" => {
-                    *child = child.clone().hide(false);
-                    scope = format!("{scope} {}", child.get_name());
-                    child
-                }
-                _ => break,
-            };
-        }
-        let text = if command.is_empty() && !all {
-            core_help(&model)
+        let (text, scope) = if command.is_empty() && !all {
+            (core_help(&model), String::from("provenant"))
         } else if command.is_empty() && *all {
-            all_command_help(selected)
+            (all_command_help(&expanded), String::from("provenant"))
         } else {
-            selected.render_long_help().to_string()
+            resolved_help_text(command, &mut expanded)
         };
         let text = if !command.is_empty() && !all && is_core_scope(&model, &scope) {
             append_child_index(text, &scope)
@@ -907,6 +893,26 @@ fn expanded_scoped_help(scope: &str, mut model: clap::Command) -> (String, HelpC
     let text = selected.render_long_help().to_string();
     let catalogue = scoped(catalog(&model), scope);
     (text, catalogue)
+}
+/// Render the long help of the command `path` names against `model`, with the
+/// scope the walk resolved. An unmatched component stops at the deepest matched
+/// command, whose rendered help lists its valid children. Explicit quota
+/// maintenance stays addressable even though the compact listing hides it.
+fn resolved_help_text(path: &[String], model: &mut clap::Command) -> (String, String) {
+    let mut scope = String::from("provenant");
+    let mut selected = model;
+    for component in path {
+        let Some(child) = selected.find_subcommand_mut(component) else {
+            break;
+        };
+        if child.is_hide_set() && scope != "provenant quota" {
+            break;
+        }
+        *child = child.clone().hide(false);
+        scope = format!("{scope} {}", child.get_name());
+        selected = child;
+    }
+    (selected.render_long_help().to_string(), scope)
 }
 // Explicit help can address quota maintenance without advertising it in the
 // default catalogue. Only the validated scope is revealed, never its siblings.
