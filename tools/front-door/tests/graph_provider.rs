@@ -6267,10 +6267,20 @@ fn discovered_exact_model_launch_has_no_catalogue_warning() -> Result {
         "{:?}",
         discovered.launch_value
     );
-    let stderr = String::from_utf8_lossy(&discovered.launch.stderr.bytes);
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    let catalogued = |value: &Value| {
+        value["warnings"].as_array().is_some_and(|warnings| {
+            warnings.iter().any(|warning| {
+                warning["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("not in the catalogue"))
+            })
+        })
+    };
     assert!(
-        !stderr.contains("not in the catalogue"),
-        "discovered exact model warned: {stderr}"
+        !catalogued(&discovered.launch_value),
+        "discovered exact model warned: {}",
+        discovered.launch_value
     );
 
     let unknown = run_one("unknown-exact", "opencode/opencode/uncatalogued-3531")?;
@@ -6280,10 +6290,10 @@ fn discovered_exact_model_launch_has_no_catalogue_warning() -> Result {
         "{:?}",
         unknown.launch_value
     );
-    let stderr = String::from_utf8_lossy(&unknown.launch.stderr.bytes);
     assert!(
-        stderr.contains("not in the catalogue"),
-        "unknown model did not warn: {stderr}"
+        catalogued(&unknown.launch_value),
+        "unknown model did not warn: {}",
+        unknown.launch_value
     );
 
     cleanup.disarm();

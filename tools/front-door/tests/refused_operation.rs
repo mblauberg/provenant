@@ -391,11 +391,19 @@ fn wip_preflight_does_not_change_head_under_writer_custody() -> Result {
     let output = rig.command(&["run", "--file", graph.to_str().ok_or("graph")?, "--json"])?;
     // A held lease no longer refuses the run: the worktree is shared. What
     // must hold is that the preflight leaves another lane's edits alone and
-    // says why it skipped the dirty check.
-    let stderr = String::from_utf8_lossy(&output.stderr.bytes);
+    // says why it skipped the dirty check. The typed warning travels in the
+    // JSON envelope, not on stderr.
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    let result: Value = serde_json::from_slice(&output.stdout.bytes)?;
     assert!(
-        stderr.contains("skipping the dirty-worktree preflight"),
-        "{stderr}"
+        result["warnings"].as_array().is_some_and(|warnings| {
+            warnings.iter().any(|warning| {
+                warning["message"].as_str().is_some_and(|message| {
+                    message.contains("skipping the dirty-worktree preflight")
+                })
+            })
+        }),
+        "the envelope must explain the skipped preflight: {result}"
     );
     assert_eq!(head()?, before);
     assert_eq!(fs::read_to_string(writer.join("tracked"))?, "draft");

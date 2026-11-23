@@ -562,6 +562,7 @@ pub(crate) fn render_unpublished<T: Serialize>(
 mod dedup {
     use super::*;
     use provenant_sqlite::{Schema, ensure_schema, open_connection};
+    use std::ffi::OsStr;
 
     pub(super) const WARNINGS_SCHEMA: Schema = Schema {
         sql: "CREATE TABLE seen (key TEXT PRIMARY KEY, code TEXT NOT NULL, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, count INTEGER NOT NULL) STRICT; PRAGMA user_version=5;",
@@ -570,11 +571,30 @@ mod dedup {
         migrations: &[],
     };
 
+    /// Open the dedup store. `open_connection` never creates a file (it opens
+    /// with `SQLITE_OPEN_READ_WRITE`, not `CREATE`), so a write path must create
+    /// the file first or every key fails open and nothing is ever remembered.
+    /// Creation goes through the confined directory so a symlink cannot
+    /// redirect the store outside the state root.
+    fn open(state_root: &Path, write: bool) -> Option<rusqlite::Connection> {
+        if write {
+            let root = provenant_os::fs::Directory::open_anchor(state_root).ok()?;
+            match root.create_new(OsStr::new("warnings.sqlite3")) {
+                Ok(file) => {
+                    let _ = file.sync();
+                }
+                Err(error) if error.is_exists() => {}
+                Err(_) => return None,
+            }
+        }
+        open_connection(&state_root.join("warnings.sqlite3"), !write).ok()
+    }
+
     /// Whether `key` has already been shown. A read-only check: it does not
     /// mark the key, so a warning can be held for the envelope before it is
     /// remembered at display time.
     pub(super) fn was_seen(state_root: &Path, key: &str) -> bool {
-        let Ok(db) = open_connection(&state_root.join("warnings.sqlite3"), false) else {
+        let Some(db) = open(state_root, false) else {
             return false;
         };
         if ensure_schema(&db, WARNINGS_SCHEMA).is_err() {
@@ -598,7 +618,7 @@ mod dedup {
     /// only an existing row advances its count and last-seen time. Stale rows
     /// are pruned on every write.
     pub(super) fn remember(state_root: &Path, key: &str, code: &str) -> bool {
-        let Ok(mut db) = open_connection(&state_root.join("warnings.sqlite3"), false) else {
+        let Some(mut db) = open(state_root, true) else {
             return true;
         };
         if ensure_schema(&db, WARNINGS_SCHEMA).is_err() {
