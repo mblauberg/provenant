@@ -76,6 +76,15 @@ pub const FORGE_CONTEXT_UNRESOLVED: WarningCode = WarningCode("FORGE_CONTEXT_UNR
 pub const RESULT_TOO_LARGE: WarningCode = WarningCode("RESULT_TOO_LARGE");
 /// A lane's unfinished Git operation is retained while its committed tip settles.
 pub const GIT_OPERATION_RETAINED: WarningCode = WarningCode("GIT_OPERATION_RETAINED");
+/// An invalid stored answer was skipped during local delivery.
+pub const ANSWER_DELIVERY_SKIPPED: WarningCode = WarningCode("ANSWER_DELIVERY_SKIPPED");
+/// An oversized stored answer was retained for Fabric mail during local delivery.
+pub const ANSWER_DELIVERY_RETAINED: WarningCode = WarningCode("ANSWER_DELIVERY_RETAINED");
+/// A holder's terminal failure could not be retained in the settlement journal.
+pub const TERMINAL_FAILURE_UNRETAINED: WarningCode = WarningCode("TERMINAL_FAILURE_UNRETAINED");
+/// Terminal settlement was incomplete, so the writer reservation is retained.
+pub const TERMINAL_PUBLICATION_INCOMPLETE: WarningCode =
+    WarningCode("TERMINAL_PUBLICATION_INCOMPLETE");
 
 impl Warning {
     /// A warning with no subject, source or repair.
@@ -307,6 +316,10 @@ mod tests {
             super::RESULT_TOO_LARGE,
             super::FORGE_CONTEXT_UNRESOLVED,
             super::GIT_OPERATION_RETAINED,
+            super::ANSWER_DELIVERY_SKIPPED,
+            super::ANSWER_DELIVERY_RETAINED,
+            super::TERMINAL_FAILURE_UNRETAINED,
+            super::TERMINAL_PUBLICATION_INCOMPLETE,
         ] {
             let name = code.as_str();
             assert!(

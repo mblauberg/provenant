@@ -12,10 +12,13 @@ use crate::machine::{
 use provenant_core::{CancelToken, Clock, WallTime};
 use provenant_os::fs::{Directory, Publication, PublishMode};
 use provenant_records::custody::Scope;
+use provenant_records::warning::{
+    TERMINAL_FAILURE_UNRETAINED, TERMINAL_PUBLICATION_INCOMPLETE, Warning,
+};
 use provenant_records::{Limits, decode_v1};
 use serde::{Deserialize, Serialize};
 use std::ffi::{OsStr, OsString};
-use std::io::{self, Write};
+use std::io;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -2631,9 +2634,16 @@ impl Driver<'_> {
                     self.reservation.scope,
                     &error.to_string(),
                 ) {
-                    let _ = writeln!(
-                        io::stderr(),
-                        "cannot retain terminal failure: {persist_error}"
+                    provenant_records::warning::warn(
+                        Warning::new(
+                            TERMINAL_FAILURE_UNRETAINED,
+                            format!("cannot retain terminal failure: {persist_error}"),
+                        )
+                        .subject(format!("attempt {}", self.reservation.scope.attempt))
+                        .repair(format!(
+                            "Run `provenant reconcile {}` to record the failure by hand.",
+                            self.reservation.scope.attempt
+                        )),
                     );
                 }
                 return false;
@@ -2655,9 +2665,16 @@ impl Driver<'_> {
         if settled {
             let _ = recovery.clear_settled_reservation();
         } else {
-            let _ = writeln!(
-                io::stderr(),
-                "terminal publication incomplete; retaining reservation for reconciliation"
+            provenant_records::warning::warn(
+                Warning::new(
+                    TERMINAL_PUBLICATION_INCOMPLETE,
+                    "terminal publication incomplete; retaining reservation for reconciliation",
+                )
+                .subject(format!("attempt {}", self.reservation.scope.attempt))
+                .repair(format!(
+                    "Run `provenant reconcile {}` to settle the retained reservation.",
+                    self.reservation.scope.attempt
+                )),
             );
         }
         Ok(())
