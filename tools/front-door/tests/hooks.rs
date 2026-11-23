@@ -10,20 +10,20 @@ fn recording(name: &str) -> Result<Vec<u8>> {
     )?)
 }
 #[test]
-fn config_advisories_are_silent_in_pre_tool_hooks() -> Result {
+fn config_advisories_are_silent_in_answer_delivery_hooks() -> Result {
     let rig = TestRig::new()?;
     fs::create_dir_all(&rig.state)?;
     fs::write(
         rig.state.join("config.toml"),
         "schema_version=1\n[domains.routing]\npacing_overrides=[{provider='codex',policy='pace',expires_unix_seconds=9}]\n[domains.routing.model_policy.defaults.result]\nfallback='codex/not-catalogued'\n",
     )?;
-    let mut input: serde_json::Value = serde_json::from_slice(&recording("pre-tool-use.json")?)?;
+    let mut input: serde_json::Value = serde_json::from_slice(&recording("post-tool-use.json")?)?;
     input["cwd"] = rig.project.to_str().ok_or("project path")?.into();
     let state = rig.state.to_str().ok_or("state path")?;
     for _ in 0..2 {
         let output = rig.execute(
             Path::new(env!("CARGO_BIN_EXE_provenant")),
-            &["--state-dir", state, "hook", "claude", "pre-tool-use"],
+            &["--state-dir", state, "hook", "claude", "post-tool-use"],
             Some(&serde_json::to_vec(&input)?),
         )?;
         assert_eq!(code(&output), 0);
@@ -45,8 +45,8 @@ fn recorded_claude_lane_events_use_native_protocol_and_stay_quiet() -> Result {
     publish_checkpoint(&rig)?;
     let fixtures = [
         (
-            provenant_records::HookAction::PreToolUse,
-            "pre-tool-use.json",
+            provenant_records::HookAction::PostToolUse,
+            "post-tool-use.json",
         ),
         (
             provenant_records::HookAction::PreCompact,
@@ -80,7 +80,7 @@ fn recorded_claude_lane_events_use_native_protocol_and_stay_quiet() -> Result {
         )?;
         assert_eq!(code(&output), 0, "{command}: {:?}", output.stderr.bytes);
         match action {
-            provenant_records::HookAction::PreToolUse => assert!(output.stdout.bytes.is_empty()),
+            provenant_records::HookAction::PostToolUse => assert!(output.stdout.bytes.is_empty()),
             provenant_records::HookAction::PreCompact | provenant_records::HookAction::Compact => {
                 assert!(
                     output.stdout.bytes.is_empty(),
@@ -196,16 +196,16 @@ fn session_start_reports_linked_worktree_in_native_context() -> Result {
     assert!(context.contains("hook-lane"), "{context}");
     Ok(())
 }
-/// The guard carries no tool policy, so neither a command nor input it cannot
-/// use (another harness's event shape, malformed or oversized bodies) abstains.
+/// Answer delivery carries no tool policy, so neither a command nor input it
+/// cannot use (another harness's event shape, malformed or oversized bodies) abstains.
 #[test]
-fn bash_guard_abstains_on_unusable_input_and_allows_process_control() -> Result {
+fn answer_delivery_abstains_on_unusable_input_and_leaves_policy_to_confinement() -> Result {
     let rig = TestRig::new()?;
-    let mut input: serde_json::Value = serde_json::from_slice(&recording("pre-tool-use.json")?)?;
+    let mut input: serde_json::Value = serde_json::from_slice(&recording("post-tool-use.json")?)?;
     input["tool_input"]["command"] = "pkill -f claude; sleep 30; $CMD".into();
     let output = rig.execute(
         Path::new(env!("CARGO_BIN_EXE_provenant")),
-        &["hook", "claude", "pre-tool-use"],
+        &["hook", "claude", "post-tool-use"],
         Some(&serde_json::to_vec(&input)?),
     )?;
     assert_eq!(code(&output), 0);
@@ -220,7 +220,7 @@ fn bash_guard_abstains_on_unusable_input_and_allows_process_control() -> Result 
     ] {
         let output = rig.execute(
             Path::new(env!("CARGO_BIN_EXE_provenant")),
-            &["hook", "claude", "pre-tool-use"],
+            &["hook", "claude", "post-tool-use"],
             Some(&bytes),
         )?;
         assert_eq!(code(&output), 0);
@@ -232,7 +232,7 @@ fn bash_guard_abstains_on_unusable_input_and_allows_process_control() -> Result 
 #[test]
 fn shell_commands_are_left_to_confinement_even_with_unreadable_config() -> Result {
     let rig = TestRig::new()?;
-    let mut input: serde_json::Value = serde_json::from_slice(&recording("pre-tool-use.json")?)?;
+    let mut input: serde_json::Value = serde_json::from_slice(&recording("post-tool-use.json")?)?;
     input["cwd"] = rig.project.to_str().ok_or("project path")?.into();
     fs::create_dir_all(&rig.state)?;
     // No shell rule policy is loaded, including when host config cannot be read.
@@ -251,7 +251,7 @@ fn shell_commands_are_left_to_confinement_even_with_unreadable_config() -> Resul
         input["tool_input"]["command"] = command.into();
         let output = rig.execute(
             Path::new(env!("CARGO_BIN_EXE_provenant")),
-            &["hook", "claude", "pre-tool-use"],
+            &["hook", "claude", "post-tool-use"],
             Some(&serde_json::to_vec(&input)?),
         )?;
         assert_eq!(code(&output), 0, "{command}");
@@ -259,7 +259,7 @@ fn shell_commands_are_left_to_confinement_even_with_unreadable_config() -> Resul
     }
     Ok(())
 }
-/// Medium: the production PreToolUse protocol permits the exact command that
+/// Medium: the production PostToolUse protocol permits the exact command that
 /// a real shell then executes. Each disposable root has the same role in the
 /// hook's context as in the shell; no host HOME, state or checkout is touched.
 #[test]
@@ -282,13 +282,13 @@ fn removed_shell_rules_allow_real_commands_on_disposable_roots() -> Result {
             target.to_str().ok_or("target")?.replace('\'', "'\\''")
         );
         let event = serde_json::json!({
-            "hook_event_name":"PreToolUse", "tool_name":"Bash",
+            "hook_event_name":"PostToolUse", "tool_name":"Bash",
             "tool_input":{"command":command}, "session_id":"shell-evidence",
             "cwd":rig.project,
         });
         let allowed = rig.execute(
             Path::new(env!("CARGO_BIN_EXE_provenant")),
-            &["hook", "claude", "pre-tool-use"],
+            &["hook", "claude", "post-tool-use"],
             Some(&serde_json::to_vec(&event)?),
         )?;
         assert_eq!(code(&allowed), 0, "{root}: {allowed:?}");
@@ -661,7 +661,7 @@ fn check_push_policy(rig: &TestRig) -> Result {
 }
 
 #[test]
-fn unreadable_and_stalled_input_cannot_allow_bash() -> Result {
+fn unreadable_and_stalled_input_records_a_failure_without_a_decision() -> Result {
     let rig = TestRig::new()?;
     let fifo = rig.root.join("hook-input");
     let made = rig.execute(
@@ -671,8 +671,8 @@ fn unreadable_and_stalled_input_cannot_allow_bash() -> Result {
     )?;
     assert_eq!(code(&made), 0);
     for script in [
-        "exec \"$1\" hook claude pre-tool-use <&-",
-        "exec 3<>\"$2\"; exec \"$1\" hook claude pre-tool-use <\"$2\"",
+        "exec \"$1\" hook claude post-tool-use <&-",
+        "exec 3<>\"$2\"; exec \"$1\" hook claude post-tool-use <\"$2\"",
     ] {
         let output = rig.execute(
             Path::new("/bin/sh"),
@@ -685,12 +685,59 @@ fn unreadable_and_stalled_input_cannot_allow_bash() -> Result {
             ],
             None,
         )?;
-        // The answer guard only offers answers: input it cannot use abstains
-        // with a diagnostic, and must never grant a permission decision.
+        // Answer delivery only offers answers: input it cannot use records a
+        // failure and must never grant a permission decision.
         assert_eq!(code(&output), 0);
         assert!(output.stdout.bytes.is_empty(), "{output:?}");
         assert!(!output.stderr.bytes.is_empty(), "{output:?}");
     }
+    Ok(())
+}
+
+/// A hook that fails inside Provenant still exits 0, but the cause and elapsed
+/// time survive under the state dir for the operator.
+#[test]
+fn internal_hook_failure_leaves_a_record_and_a_normal_hook_does_not() -> Result {
+    let rig = TestRig::new()?;
+    let state = rig.state.to_str().ok_or("state path")?;
+    let output = rig.execute(
+        Path::new(env!("CARGO_BIN_EXE_provenant")),
+        &["--state-dir", state, "hook", "claude", "post-tool-use"],
+        Some(b"{"),
+    )?;
+    assert_eq!(code(&output), 0);
+    let bytes = fs::read(rig.state.join("hooks/diagnostics/failures.jsonl"))?;
+    let record: serde_json::Value = serde_json::from_slice(&bytes)?;
+    assert_eq!(record["action"], "post-tool-use");
+    assert_eq!(record["event"], "PostToolUse");
+    assert_eq!(
+        record["cause"],
+        "answer delivery skipped: hook event not recognised"
+    );
+    assert!(record["duration_ms"].is_u64());
+    assert!(record["at"].is_string());
+
+    let clean = TestRig::new()?;
+    let event = serde_json::json!({
+        "hook_event_name":"PostToolUse", "tool_name":"Bash",
+        "tool_input":{"command":"git status"}, "session_id":"chair", "cwd":clean.project,
+    });
+    let output = clean.execute(
+        Path::new(env!("CARGO_BIN_EXE_provenant")),
+        &[
+            "--state-dir",
+            clean.state.to_str().ok_or("state path")?,
+            "hook",
+            "claude",
+            "post-tool-use",
+        ],
+        Some(&serde_json::to_vec(&event)?),
+    )?;
+    assert_eq!(code(&output), 0, "{output:?}");
+    assert!(
+        fs::metadata(clean.state.join("hooks/diagnostics/failures.jsonl")).is_err(),
+        "a hook with no answers is not a failure"
+    );
     Ok(())
 }
 
@@ -768,10 +815,10 @@ fn hook_recovers_committed_offers_and_advances_past_an_oversized_head_page() -> 
                 rig.state.to_str().ok_or("state")?,
                 "hook",
                 "claude",
-                "pre-tool-use",
+                "post-tool-use",
             ],
             Some(&serde_json::to_vec(
-                &json!({"hook_event_name":"PreToolUse", "tool_name":"Bash",
+                &json!({"hook_event_name":"PostToolUse", "tool_name":"Bash",
                 "tool_input":{"command":command}, "session_id":"chair", "cwd":rig.project}),
             )?),
         )
@@ -814,9 +861,9 @@ fn hook_recovers_committed_offers_and_advances_past_an_oversized_head_page() -> 
     // than denying: shell command policy is owned by confinement.
     let denied = rig.execute(
         Path::new(env!("CARGO_BIN_EXE_provenant")),
-        &["hook", "claude", "pre-tool-use"],
+        &["hook", "claude", "post-tool-use"],
         Some(&serde_json::to_vec(&json!({
-            "hook_event_name":"PreToolUse", "tool_name":"Bash",
+            "hook_event_name":"PostToolUse", "tool_name":"Bash",
             "tool_input":{"command":null}, "session_id":"chair", "cwd":rig.project,
         }))?),
     )?;
@@ -851,7 +898,7 @@ fn hook_recovers_committed_offers_and_advances_past_an_oversized_head_page() -> 
         };
         #[allow(clippy::disallowed_methods)] // Exercise a real unwritable hook stdout fd.
         let mut child = Command::new(env!("CARGO_BIN_EXE_provenant"))
-            .args(["hook", "claude", "pre-tool-use"])
+            .args(["hook", "claude", "post-tool-use"])
             .current_dir(&rig.project)
             .env_clear()
             .envs(rig.env.iter().cloned())
@@ -864,7 +911,7 @@ fn hook_recovers_committed_offers_and_advances_past_an_oversized_head_page() -> 
             .take()
             .ok_or("stdin")?
             .write_all(&serde_json::to_vec(
-                &json!({"hook_event_name":"PreToolUse", "tool_name":"Bash",
+                &json!({"hook_event_name":"PostToolUse", "tool_name":"Bash",
             "tool_input":{"command":"git status"}, "session_id":"chair", "cwd":rig.project}),
             )?)?;
         let output = child.wait_with_output()?;

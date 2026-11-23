@@ -6,6 +6,9 @@ enum Main {
     static func main() {
         let arguments = Array(CommandLine.arguments.dropFirst())
         if arguments.first == "--render" { exit(MainActor.assumeIsolated { Render.run(Array(arguments.dropFirst())) }) }
+        // A concurrent launch that overwrote our marker already owns the menu
+        // bar; yield instead of opening a second instance.
+        guard SingleInstance.takeOver() else { exit(0) }
         MainActor.assumeIsolated {
             let app = NSApplication.shared, delegate = AppDelegate()
             app.delegate = delegate

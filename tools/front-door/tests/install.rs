@@ -14,10 +14,10 @@ use std::{
 };
 use support::{Result, TestRig, code};
 
-/// Executables of the bundled app: the console, and the menu helper nested as a login-item app.
+/// Executables of the bundled app: the console and the menu helper, both launched from `Contents/MacOS`.
 const APP_EXECUTABLES: [&str; 2] = ["Contents/MacOS/provenant-console", MENU_EXECUTABLE];
-const MENU_EXECUTABLE: &str =
-    "Contents/Library/LoginItems/Provenant Menu.app/Contents/MacOS/quota-menubar";
+const MENU_EXECUTABLE: &str = "Contents/MacOS/quota-menubar";
+const STALE_LOGIN_ITEM: &str = "Contents/Library/LoginItems/Provenant Menu.app";
 
 // Emulate the helper protocol for installer failure injection; the native
 // RENAME_SWAP implementation is exercised by the Swift Menu tests.
@@ -649,7 +649,7 @@ fn hook_ownership_survives_upgrade_without_flags_and_explicit_off_removes_it() -
                     .as_str()
                     .is_some_and(|selector| selector.starts_with("hook:")))
         );
-        assert!(fs::read_to_string(&settings)?.contains("'hook' 'claude' 'pre-tool-use'"));
+        assert!(fs::read_to_string(&settings)?.contains("'hook' 'claude' 'post-tool-use'"));
         if explicit_off {
             let moved = rig.root.join("new-bin");
             let output = rig.command(&[
@@ -675,7 +675,7 @@ fn hook_ownership_survives_upgrade_without_flags_and_explicit_off_removes_it() -
             if modified {
                 let mut document: serde_json::Value =
                     serde_json::from_slice(&fs::read(&settings)?)?;
-                document["hooks"]["PreToolUse"][0]["hooks"][0]["timeout"] = serde_json::json!(123);
+                document["hooks"]["PostToolUse"][0]["hooks"][0]["timeout"] = serde_json::json!(123);
                 fs::write(&settings, serde_json::to_vec(&document)?)?;
             }
             let output = rig.command(&[
@@ -720,7 +720,7 @@ fn hook_ownership_survives_upgrade_without_flags_and_explicit_off_removes_it() -
         }
         let retained = fs::read_to_string(&settings)?;
         if modified {
-            assert!(retained.contains("'hook' 'claude' 'pre-tool-use'"));
+            assert!(retained.contains("'hook' 'claude' 'post-tool-use'"));
             assert!(retained.contains("123"));
             assert!(!retained.contains("'hook' 'claude' 'pre-compact'"));
         } else {
@@ -729,6 +729,43 @@ fn hook_ownership_survives_upgrade_without_flags_and_explicit_off_removes_it() -
         rig.assert_v1_root_untouched()?;
     }
     Ok(())
+}
+
+#[test]
+fn check_install_confirms_claude_answer_delivery_runs_after_the_tool() -> Result {
+    let rig = TestRig::new()?;
+    let stage = staged(&rig)?;
+    let installed = rig.command(&[
+        "install",
+        "--source",
+        stage.to_str().ok_or("stage")?,
+        "--harness",
+        "claude",
+        "--hooks",
+        "on",
+        "--json",
+    ])?;
+    assert_eq!(
+        code(&installed),
+        0,
+        "{}",
+        String::from_utf8_lossy(&installed.stdout.bytes)
+    );
+    let checked = rig.command(&["check", "install", "--json"])?;
+    let report: serde_json::Value = serde_json::from_slice(&checked.stdout.bytes)?;
+    assert_eq!(code(&checked), 0, "{report}");
+
+    let hooks = managed_hooks(&rig.root.join("claude/settings.json"))?;
+    assert!(hooks.get("PreToolUse").is_none(), "{hooks}");
+    assert!(hooks["PostToolUse"].is_array(), "{hooks}");
+    let command = hooks["PostToolUse"][0]["hooks"][0]["command"]
+        .as_str()
+        .ok_or("hook command")?;
+    assert!(
+        command.contains("'hook' 'claude' 'post-tool-use'"),
+        "{command}"
+    );
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -1376,11 +1413,8 @@ fn installer_app_recovery_preserves_the_existing_app_and_agent() -> Result {
         "#!/bin/sh\ncase \"$1:$2\" in -replace:ProgramArguments) : > \"$4\" ;; -insert:ProgramArguments.0) printf '%s' \"$4\" > \"$5\" ;; -extract:ProgramArguments.0) cat \"$6\" ;; *) exit 1 ;; esac\n",
     )?;
     fs::write(&launchctl, "#!/bin/sh\nexit 0\n")?;
-    // A retained legacy bundle must not look like an active wrapper stage.
-    for binary in [
-        "Contents/MacOS/provenant-console",
-        "Contents/MacOS/quota-menubar",
-    ] {
+    // The retained app still carries both executables after the rollback.
+    for binary in APP_EXECUTABLES {
         let path = installed_app.join(binary);
         fs::create_dir_all(path.parent().ok_or("legacy executable parent")?)?;
         fs::write(&path, APP_FIXTURE)?;
@@ -1424,7 +1458,7 @@ fn installer_app_recovery_preserves_the_existing_app_and_agent() -> Result {
         Some(b"n\ny\nn\nn\nn\nn\nappend\n"),
     )?;
     assert_eq!(code(&next_upgrade), 0, "{next_upgrade:?}");
-    assert!(fs::read_to_string(&agent)?.contains("Contents/Library/LoginItems/Provenant Menu.app"));
+    assert!(fs::read_to_string(&agent)?.contains(MENU_EXECUTABLE));
     fs::remove_dir_all(retained)?;
     fs::remove_file(&recorded)?;
     // A failed install whose swap-back and plist quarantine both fail must still
@@ -1754,7 +1788,7 @@ impl UpgradeRig {
         fs::write(
             &launchctl,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{0}'\nif [ \"$1\" = bootstrap ] && [ -n \"${{PROVENANT_TEST_BOOTSTRAP_FAIL:-}}\" ]; then exit 5; fi\nif [ \"$1\" = bootstrap ] && [ ! -f '{0}.bootstrapped' ]; then touch '{0}.bootstrapped'; exit 5; fi\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{0}'\nif [ \"$1\" = bootstrap ] && [ -n \"${{PROVENANT_TEST_BOOTSTRAP_FAIL:-}}\" ]; then exit 5; fi\nif [ \"$1\" = bootstrap ] && [ ! -f '{0}.bootstrapped' ]; then touch '{0}.bootstrapped'; exit 5; fi\nif [ \"$1\" = print ] && [ -n \"${{PROVENANT_TEST_MENU_LOGIN_ITEM:-}}\" ]; then printf 'application.dev.provenant.menu.1234 = {{\\n'; fi\n",
                 launch_log.display(),
             ),
         )?;
@@ -2116,6 +2150,109 @@ fn upgrade_to_a_release_without_an_app_archive_keeps_the_migrated_app_and_agent(
 }
 
 #[test]
+fn upgrade_unregisters_the_old_menu_login_item_and_keeps_one_launch_path() -> Result {
+    let mut rig = UpgradeRig::new()?;
+    let stale = rig.installed_app.join(STALE_LOGIN_ITEM);
+    fs::create_dir_all(&stale)?;
+    rig.set_env("PROVENANT_TEST_MENU_LOGIN_ITEM", "1");
+    let (_, value) = rig.upgrade(&[])?;
+    assert_eq!(value["data"][0]["host"], "local", "{value}");
+    assert_eq!(value["data"][0]["success"], true, "{value}");
+    assert!(!stale.exists());
+    assert!(rig.installed_app.join(MENU_EXECUTABLE).is_file());
+    let launches = fs::read_to_string(&rig.launch_log)?;
+    assert!(
+        launches.lines().any(|line| {
+            line.starts_with("bootout gui/") && line.contains("application.dev.provenant.menu.")
+        }),
+        "{launches}"
+    );
+    if cfg!(target_os = "macos") {
+        let arguments = rig.rig.execute_os(
+            Path::new("/usr/bin/plutil"),
+            &[
+                "-extract".into(),
+                "ProgramArguments".into(),
+                "json".into(),
+                "-o".into(),
+                "-".into(),
+                rig.agent.clone().into_os_string(),
+            ],
+            None,
+        )?;
+        assert_eq!(code(&arguments), 0);
+        let arguments: Vec<String> = serde_json::from_slice(&arguments.stdout.bytes)?;
+        assert_eq!(
+            arguments,
+            vec![
+                rig.installed_app
+                    .join(MENU_EXECUTABLE)
+                    .to_str()
+                    .ok_or("helper path")?
+            ]
+        );
+    }
+    // With no refreshed app, install still removes a leftover bundle from a kept
+    // app that already runs the helper: its agent no longer points into it.
+    rig.set_env("PROVENANT_TEST_MISSING_APPS", "1");
+    fs::create_dir_all(&stale)?;
+    let (_, older_value) = rig.upgrade(&[])?;
+    assert_eq!(older_value["data"][0]["success"], true, "{older_value}");
+    assert!(!stale.exists());
+    Ok(())
+}
+
+#[test]
+fn upgrade_without_a_refreshed_app_keeps_the_login_item_when_the_app_has_no_helper() -> Result {
+    let mut rig = UpgradeRig::new()?;
+    // No new app asset and an app that predates Contents/MacOS: its LaunchAgent
+    // may still point into the nested bundle, so that bundle must stay launchable.
+    rig.set_env("PROVENANT_TEST_MISSING_APPS", "1");
+    rig.set_env("PROVENANT_TEST_MENU_LOGIN_ITEM", "1");
+    let stale = rig.installed_app.join(STALE_LOGIN_ITEM);
+    fs::create_dir_all(&stale)?;
+    let (_, value) = rig.upgrade(&[])?;
+    assert_eq!(value["data"][0]["host"], "local", "{value}");
+    assert_eq!(value["data"][0]["success"], true, "{value}");
+    assert!(stale.exists());
+    assert!(!rig.installed_app.join(MENU_EXECUTABLE).exists());
+    // Neither the bundle nor its launchd registration may be touched.
+    assert!(!rig.launch_log.exists());
+    Ok(())
+}
+
+#[test]
+fn check_install_warns_on_a_leftover_menu_login_item() -> Result {
+    let executable = std::env::current_exe()?;
+    let rig = TestRig::in_directory(executable.parent().ok_or("test executable parent")?)?;
+    let stage = staged(&rig)?;
+    let installed = rig.command(&[
+        "install",
+        "--source",
+        stage.to_str().ok_or("stage")?,
+        "--harness",
+        "codex",
+        "--json",
+    ])?;
+    assert_eq!(code(&installed), 0, "{installed:?}");
+    let stale = rig
+        .home
+        .join("Applications/Provenant Console.app")
+        .join(STALE_LOGIN_ITEM);
+    fs::create_dir_all(&stale)?;
+    let (status, checked) = run_json(&rig, &["check", "install"])?;
+    assert_eq!(status, 0, "{checked}");
+    let warnings = checked["data"]["warnings"].as_array().ok_or("warnings")?;
+    assert!(
+        warnings.iter().any(|warning| warning
+            .as_str()
+            .is_some_and(|text| text.contains("login item"))),
+        "{warnings:?}"
+    );
+    Ok(())
+}
+
+#[test]
 fn source_upgrade_builds_tracked_files_on_each_host() -> Result {
     let mut rig = TestRig::new()?;
     let peer = TestRig::new()?;
@@ -2401,7 +2538,7 @@ fn install_and_upgrade_leave_every_registered_account_identical() -> Result {
     assert_eq!(code(&installed), 0, "{installed:?}");
     let identical = |release: &Path| -> Result {
         let reference = managed_hooks(&claude[0].join("settings.json"))?;
-        assert!(reference["PreToolUse"].is_array(), "{reference}");
+        assert!(reference["PostToolUse"].is_array(), "{reference}");
         for directory in &claude {
             let link = fs::read_link(directory.join("skills/example"))?;
             assert!(link.starts_with(release), "{directory:?}: {link:?}");
@@ -2539,7 +2676,7 @@ fn check_install_reports_drift_per_account_and_accounts_sync_repairs_it() -> Res
     assert_eq!(status, 0, "{synced}");
     assert!(fs::symlink_metadata(work.join("skills/example")).is_ok());
     // Removing every managed hook is the account's own choice and sticks.
-    assert!(hooks["PreToolUse"].is_array());
+    assert!(hooks["PostToolUse"].is_array());
     assert!(managed_hooks(&settings)?.is_null());
     let repaired: serde_json::Value = serde_json::from_slice(&fs::read(&settings)?)?;
     assert_eq!(repaired["model"], "opus");

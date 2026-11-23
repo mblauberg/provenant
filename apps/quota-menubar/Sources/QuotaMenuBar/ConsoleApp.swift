@@ -1,8 +1,8 @@
 import AppKit
 
-/// Opens the Provenant Console. The menu agent lives inside the console app, at
-/// `Provenant Console.app/Contents/Library/LoginItems/<agent>.app`, so the console is the nearest enclosing `.app`.
-/// A bundle identifier lookup is the fallback for an agent run from elsewhere, such as a development build.
+/// Opens the Provenant Console. The menu helper lives in the console app's
+/// `Contents/MacOS`, so the console is the nearest enclosing `.app`; a bundle
+/// identifier lookup covers a development build run from elsewhere.
 enum ConsoleApp {
     static let bundleIdentifier = "dev.provenant.console"
 

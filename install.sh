@@ -17,6 +17,31 @@ app_unavailable() {
 app_version() {
     /usr/bin/plutil -extract CFBundleShortVersionString raw -o - "$1/Contents/Info.plist" 2>/dev/null || printf 'unknown'
 }
+# Earlier bundles nested a login-item app, which macOS registered separately from
+# the LaunchAgent. Remove that bundle and any surviving registration: the agent
+# is the only launch path now. Every step is best effort and warns on failure.
+clean_menu_login_item() {
+    stale="$apps_dir/$app/Contents/Library/LoginItems/Provenant Menu.app"
+    removed=false
+    if [ -e "$stale" ] || [ -L "$stale" ]; then
+        rm -rf "$stale" || printf '%s\n' "Warning: could not remove the old menu login item at $stale" >&2
+        removed=true
+    fi
+    labels=$(launchctl print "gui/$(id -u)" 2>/dev/null | awk '/dev\.provenant\.menu\./ {
+        for (i = 1; i <= NF; i++) {
+            label = $i; gsub(/["=]/, "", label)
+            if (label ~ /^application\.dev\.provenant\.menu\./) { print label; break }
+        }
+    }') || labels=
+    for label in $labels; do
+        removed=true
+        launchctl bootout "gui/$(id -u)/$label" </dev/null >/dev/null 2>&1 ||
+            printf '%s\n' "Warning: could not unregister the old menu login item $label; remove it from Login Items" >&2
+    done
+    if "$removed"; then
+        printf '%s\n' "Warning: removed the old Provenant menu login item; the LaunchAgent is now the only launch path" >&2
+    fi
+}
 ask() {
     printf '%s [%s] ' "$1" "$2" >&2
     if [ "${PROVENANT_INSTALL_TTY:-}" = 1 ]; then
@@ -99,13 +124,12 @@ app='Provenant Console.app'
 app_backup=
 old_app_inode=
 agent_temp=
-app=
 agent=
 service=
 app_agent_stopped=false
 app_upgrade_committed=false
 swap_helper=
-helper_executable='Contents/Library/LoginItems/Provenant Menu.app/Contents/MacOS/quota-menubar'
+helper_executable='Contents/MacOS/quota-menubar'
 agent_backup=
 instruction_count=0
 instructions_committed=false
@@ -457,6 +481,7 @@ if [ -n "$app_stage" ]; then
     fi
     # The new app and migrated agent are now committed; cleanup must not roll them back.
     app_upgrade_committed=true
+    clean_menu_login_item
     [ "$quiet_app" = true ] || printf '%s\n' "app: $apps_dir/$app ($(app_version "$apps_dir/$app"))"
     if [ -n "$app_backup" ] && ! rm -rf "$app_backup"; then
         printf '%s\n' "Warning: could not remove the previous Provenant app backup; staging remains at $app_stage" >&2
@@ -471,6 +496,14 @@ if [ -n "$app_stage" ]; then
         app_stage=
     fi
 elif [ -e "$apps_dir/$app" ]; then
+    # A kept app is cleaned only when it already runs the helper from
+    # Contents/MacOS: the agent is rewritten to that path together with such an
+    # app, so the nested login item is no longer the only launch path. An older
+    # app may still be launched through the nested bundle; leave it in place and
+    # let `provenant check install` warn instead of orphaning the menu bar.
+    if [ -x "$apps_dir/$app/$helper_executable" ]; then
+        clean_menu_login_item
+    fi
     [ "$quiet_app" = true ] || printf '%s\n' "app: $apps_dir/$app ($(app_version "$apps_dir/$app")); not refreshed"
 fi
 if "$guided"; then

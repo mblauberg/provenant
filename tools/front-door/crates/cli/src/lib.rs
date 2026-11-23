@@ -3288,7 +3288,7 @@ mod tests {
                 ..
             }
         ));
-        invalid(&["hook", "claude", "pre-tool-use", "--json"]);
+        invalid(&["hook", "claude", "post-tool-use", "--json"]);
         invalid(&["internal", "supervise", "--json"]);
         invalid(&["-h"]);
         invalid(&["status", "--lim", "1"]);

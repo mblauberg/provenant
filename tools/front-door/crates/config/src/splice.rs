@@ -29,7 +29,9 @@ pub(crate) fn get_with_limits(
 ///
 /// Object path components are literal keys. When the current value is an array,
 /// a component containing a decimal `usize` selects an element; the index equal
-/// to the array length appends on a set. Removing a missing selector is a no-op.
+/// to the array length appends on a set. A missing container is created as an
+/// object, so an index component requires an array the document already holds.
+/// Removing a missing selector is a no-op.
 pub(crate) fn set(
     source: &[u8],
     path: &[&str],
@@ -736,6 +738,15 @@ fn nested_value(path: &[&str], replacement: &Value) -> Result<Value, InstallErro
     }
     let mut value = replacement.clone();
     for component in path.iter().rev() {
+        // A missing container has no type to inherit. Treating a decimal
+        // component as an object key would silently write an index-keyed
+        // object where the caller meant an array, so an index may only select
+        // an array the document already holds.
+        if parse_index(component).is_ok() {
+            return Err(invalid(
+                "JSONC selector needs an existing array for an index component",
+            ));
+        }
         let mut object = Map::new();
         object.insert((*component).to_string(), value);
         value = Value::Object(object);
@@ -1144,6 +1155,29 @@ mod tests {
             set(b"{\"a\": [1]}", &["a", "3"], Some(&json!(3))),
             Err(InstallError::InvalidConfig(_))
         ));
+    }
+
+    #[test]
+    fn refuses_to_build_an_index_keyed_object_for_a_missing_path() {
+        assert!(matches!(
+            set(
+                b"{}",
+                &["hooks", "PostToolUse", "0", "hooks", "1"],
+                Some(&json!({"type": "command"}))
+            ),
+            Err(InstallError::InvalidConfig(_))
+        ));
+        // An existing array still accepts an append through an object parent.
+        let appended = set(
+            b"{\"hooks\": []}",
+            &["hooks", "0"],
+            Some(&json!({"hooks": []})),
+        )
+        .expect("an existing array appends");
+        assert_eq!(
+            get(&appended, &["hooks", "0"]).expect("valid document"),
+            Some(json!({"hooks": []}))
+        );
     }
 
     #[test]
