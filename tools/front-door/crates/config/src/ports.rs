@@ -1522,7 +1522,7 @@ pub fn port_declaration_warnings(project: Option<&Path>, host_state: &Path) -> V
                 keys.join(", ")
             };
             warnings.push(format!(
-                "{}: {declared} (target-seed key {key}): host-project ports layers use the binding directory {}; move this file to {} (config path --project prints it)",
+                "{}: {declared} (target-seed key {key}): host-project ports layers use the binding directory {}; move this file to {} (config path prints it)",
                 misplaced.display(),
                 dir.display(),
                 dir.join("ports.json").display(),

@@ -82,9 +82,11 @@ are exhausted. Answer `stop`, `extend` (one round) or `accept`, or reply
 
 ## Delivery service
 
-Every adapter receives answers through Fabric mail. Native pre-tool hook
-injection is available only where the adapter's declared response contract can
-carry context without denying the tool. Offering an answer never acknowledges it.
+Every adapter receives answers through Fabric mail. Native hook injection is
+available only where the adapter's declared response contract can carry context
+without denying the action. Claude offers answers on `PostToolUse`, after the
+tool has run; Codex keeps its declared `PreToolUse` mapping. Offering an answer
+never acknowledges it.
 `HarnessInstall.answer_delivery` owns this capability, its reason and source, and
 `delivery_capabilities()` derives library and live delivery from it.
 `provenant check install` reports native integration limits as informational

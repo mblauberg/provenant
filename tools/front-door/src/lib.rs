@@ -31,6 +31,7 @@ mod events;
 mod gc_support;
 mod gc_sweep;
 mod handoff;
+mod hook_diagnostics;
 mod hook_state;
 mod hook_worktree;
 mod hooks;
@@ -795,7 +796,9 @@ enum ConfigAction<'a> {
     Show,
     Ports,
     Detect,
-    Path,
+    Path {
+        dir: Option<&'a std::path::Path>,
+    },
     Schema {
         all: bool,
     },
@@ -999,8 +1002,9 @@ fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::
                 })
             }
             ConfigAction::Detect => serde_json::to_value(config::detect::detect(&context.project))?,
-            ConfigAction::Path => {
-                let path = config::host_project_dir(roots.state.as_path(), &context.project)
+            ConfigAction::Path { dir } => {
+                let project = dir.unwrap_or(&context.project);
+                let path = config::host_project_dir(roots.state.as_path(), project)
                     .ok_or("cannot determine host project directory")?
                     .join("ports.json");
                 serde_json::json!({"exists": path.is_file(), "path": path})
@@ -1707,9 +1711,13 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::Config(provenant_cli::Config::Detect) => {
             config_command("config detect", ConfigAction::Detect, globals)
         }
-        Command::Config(provenant_cli::Config::Path { project_layer: _ }) => {
-            config_command("config path", ConfigAction::Path, globals)
-        }
+        Command::Config(provenant_cli::Config::Path { dir }) => config_command(
+            "config path",
+            ConfigAction::Path {
+                dir: dir.as_deref(),
+            },
+            globals,
+        ),
         Command::Config(provenant_cli::Config::Check(page)) => checks::config(page, globals),
         Command::Config(provenant_cli::Config::Show) => {
             config_command("config show", ConfigAction::Show, globals)

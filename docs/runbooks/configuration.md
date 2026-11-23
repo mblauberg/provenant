@@ -21,7 +21,7 @@ Layers apply lowest to highest: `builtin` < `detected` < `host` (`<state>/ports.
 (`.provenant/ports.json`). Builtins are in
 [`ports.json`](../../tools/front-door/crates/config/assets/ports.json). The
 host-project directory is the ProjectId binding directory that
-`provenant config path --project` prints, so a repository can be configured from
+`provenant config path` prints, so a repository can be configured from
 host state with no files in its tree. A missing layer is skipped silently. The
 binding record can be forgotten when its common directory is gone; the
 host-project directory and its `ports.json` stay for a later bind of the same

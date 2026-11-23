@@ -913,8 +913,7 @@ pub(crate) fn capability_findings(
                         provenant_records::HookAction::ChairPrompt
                             | provenant_records::HookAction::ChairStart
                             | provenant_records::HookAction::ChairStop
-                            | provenant_records::HookAction::PreToolUse
-                    ) =>
+                    ) && !action.is_answer_delivery() =>
                     {
                         Some(format!(
                             "{}: {} (source: {})",

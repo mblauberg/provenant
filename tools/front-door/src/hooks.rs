@@ -1,4 +1,5 @@
 //! Native hook transports. No ordinary envelope, runtime stdin persistence or provider launch.
+use crate::hook_diagnostics::{Failure, diagnostic};
 use provenant_cli::{GitHook, Globals, Hook, hooks::Handler};
 use provenant_confinement::{
     UtilityBudget, UtilityRuntime,
@@ -7,11 +8,10 @@ use provenant_confinement::{
 use provenant_core::{CancelToken, Clock, GitOid, WaitBudget};
 use provenant_fabric_store::{Page, Store};
 use provenant_os::{clock::SystemClock, exec::SystemExecutor, sys::hook_io};
-use provenant_records::{Harness, HookProtocol, inbox::*};
+use provenant_records::{Harness, HookAction, HookProtocol, inbox::*};
 use provenant_workflow::session::{CommandPrefix, HookEvent, HostSessionId};
 use serde::Deserialize;
 use std::{
-    io::{self, Write},
     path::{Path, PathBuf},
     sync::mpsc,
     time::{Duration, Instant},
@@ -43,7 +43,7 @@ pub(crate) fn session_collection_deadline(deadline: Instant) -> Instant {
 type Error = Box<dyn std::error::Error>;
 
 #[derive(Deserialize)]
-struct GuardInput {
+struct AnswerDeliveryInput {
     hook_event_name: String,
     tool_name: String,
     tool_input: serde_json::Value,
@@ -68,21 +68,28 @@ struct AdvisoryInput {
 pub fn run(hook: Hook, globals: &Globals) -> u8 {
     let started = Instant::now();
     let Some(spec) = hook.spec() else {
-        diagnostic("hook skipped: adapter or handler was not recognised");
+        Failure::new(globals.state_dir.as_deref(), "unknown", None, started)
+            .note("hook skipped: adapter or handler was not recognised");
         return 0;
     };
+    let failure = Failure::new(
+        globals.state_dir.as_deref(),
+        spec.action.map_or("unknown", HookAction::command),
+        Some(spec.event),
+        started,
+    );
     // These hooks report or mutate the chair's interactive session. A Fabric
     // worker has its own task prompt and reports through lane state, so do not
     // ask it to save or restore the chair's checkpoint. Resolve once here so
-    // every provider gets the same boundary. The answer guard is deliberately
+    // every provider gets the same boundary. Answer delivery is deliberately
     // excluded: inside lanes it routes answers through Fabric mail.
     if provenant_cli::fabric::in_lane() && is_chair_session_handler(spec.handler) {
         return 0;
     }
-    // Test delivery budgets must also fit inside the enclosing guard budget.
+    // Test delivery budgets must also fit inside the enclosing delivery budget.
     // Release builds retain the normal local deadline.
     let deadline = started
-        + if matches!(spec.handler, Handler::Guard) {
+        + if matches!(spec.handler, Handler::AnswerDelivery) {
             LOCAL_BUDGET.max(answer_budget())
         } else {
             LOCAL_BUDGET
@@ -102,11 +109,19 @@ pub fn run(hook: Hook, globals: &Globals) -> u8 {
             crate::usage::ingest_after_chair_hook(globals);
             0
         }
-        Handler::Guard => guard(globals, deadline, client, spec.event, spec.protocol),
+        Handler::AnswerDelivery => answer_delivery(
+            globals,
+            deadline,
+            &failure,
+            client,
+            spec.event,
+            spec.protocol,
+        ),
         Handler::PreCompact => advisory(
             Moment::PreCompact,
             globals,
             started,
+            &failure,
             client,
             spec.event,
             spec.protocol,
@@ -115,6 +130,7 @@ pub fn run(hook: Hook, globals: &Globals) -> u8 {
             Moment::Compact,
             globals,
             started,
+            &failure,
             client,
             spec.event,
             spec.protocol,
@@ -123,6 +139,7 @@ pub fn run(hook: Hook, globals: &Globals) -> u8 {
             Moment::Restart,
             globals,
             started,
+            &failure,
             client,
             spec.event,
             spec.protocol,
@@ -131,6 +148,7 @@ pub fn run(hook: Hook, globals: &Globals) -> u8 {
             Moment::Stop,
             globals,
             started,
+            &failure,
             client,
             spec.event,
             spec.protocol,
@@ -164,73 +182,70 @@ fn is_chair_session_handler(handler: Handler) -> bool {
             | Handler::Stop
     )
 }
-fn diagnostic(message: &str) {
-    let _ = writeln!(
-        io::stderr().lock(),
-        "{}",
-        message.chars().take(5000).collect::<String>()
-    );
-}
-// The guard only offers queued human answers; shell and file policy belong to
-// confinement. Input it cannot use (another harness's event shape, a timeout or a
-// malformed body) therefore abstains with a diagnostic and never denies a tool.
-fn abstain(reason: &str) -> u8 {
-    diagnostic(&format!("answer delivery skipped: {reason}"));
-    0
-}
-fn guard(
+// Answer delivery only offers queued human answers; shell and file policy
+// belong to confinement. Input it cannot use (another harness's event shape, a
+// timeout or a malformed body) records the failure and abstains with exit 0.
+fn answer_delivery(
     globals: &Globals,
     deadline: Instant,
+    failure: &Failure<'_>,
     client: Option<Harness>,
     event_name: &str,
     protocol: Option<HookProtocol>,
 ) -> u8 {
     let Ok(input) = hook_io::read_stdin(INPUT_CAP, deadline) else {
-        return guard_abstain(
+        return answer_delivery_abstain(
             "hook input unreadable, oversized or timed out",
+            failure,
             protocol,
             deadline,
         );
     };
-    let parsed = normalise_guard_input(&input, event_name, protocol);
+    let parsed = normalise_answer_delivery_input(&input, event_name, protocol);
     let Some(event) = parsed else {
-        return guard_abstain("hook event not recognised", protocol, deadline);
+        return answer_delivery_abstain("hook event not recognised", failure, protocol, deadline);
     };
-    match guard_reply(
+    match answer_delivery_reply(
         globals,
         event,
         deadline,
         provenant_cli::fabric::in_lane(),
         client,
+        failure,
     ) {
-        Err(reason) => guard_abstain(reason, protocol, deadline),
+        Err(reason) => answer_delivery_abstain(reason, failure, protocol, deadline),
         Ok(Some(bytes)) => {
             if hook_io::write_stdout(&bytes, deadline).is_err() {
-                diagnostic(
+                failure.note(
                     "answer delivery unavailable: response write failed; answer remains retryable by this session or Fabric mail",
                 );
             }
             0
         }
         Ok(None) => {
-            write_provider_allow(protocol, deadline);
+            write_provider_allow(protocol, deadline, failure);
             0
         }
     }
 }
 
-fn guard_abstain(reason: &str, protocol: Option<HookProtocol>, deadline: Instant) -> u8 {
-    let status = abstain(reason);
-    write_provider_allow(protocol, deadline);
+fn answer_delivery_abstain(
+    reason: &str,
+    failure: &Failure<'_>,
+    protocol: Option<HookProtocol>,
+    deadline: Instant,
+) -> u8 {
+    let status = failure.note(&format!("answer delivery skipped: {reason}"));
+    write_provider_allow(protocol, deadline, failure);
     status
 }
 
-fn write_provider_allow(protocol: Option<HookProtocol>, deadline: Instant) {
+fn write_provider_allow(protocol: Option<HookProtocol>, deadline: Instant, failure: &Failure<'_>) {
     let output = provider_allow_response(protocol);
     if let Some(output) = output
         && hook_io::write_stdout(output, deadline).is_err()
     {
-        diagnostic("hook abstention response could not be written; the provider default applies");
+        failure.note("hook abstention response could not be written; the provider default applies");
     }
 }
 
@@ -244,11 +259,11 @@ fn provider_allow_response(protocol: Option<HookProtocol>) -> Option<&'static [u
     }
 }
 
-fn normalise_guard_input(
+fn normalise_answer_delivery_input(
     bytes: &[u8],
     event_name: &str,
     protocol: Option<HookProtocol>,
-) -> Option<GuardInput> {
+) -> Option<AnswerDeliveryInput> {
     if matches!(protocol, Some(HookProtocol::NamedGroups { .. })) {
         let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
         if value
@@ -276,10 +291,10 @@ fn normalise_guard_input(
             None => single_workspace_path(&value, "workspacePaths")?,
         };
         let session_id = value.get("conversationId")?.clone();
-        return Some(GuardInput {
+        return Some(AnswerDeliveryInput {
             // The event is supplied by the resolved declaration: Antigravity's
             // documented payload does not include a hook_event_name field.
-            hook_event_name: "PreToolUse".into(),
+            hook_event_name: event_name.into(),
             tool_name,
             tool_input,
             cwd: cwd.into(),
@@ -308,8 +323,8 @@ fn normalise_guard_input(
             .get("session_id")
             .or_else(|| value.get("conversation_id"))?
             .clone();
-        return Some(GuardInput {
-            hook_event_name: "PreToolUse".into(),
+        return Some(AnswerDeliveryInput {
+            hook_event_name: event_name.into(),
             tool_name,
             tool_input,
             cwd: cwd.into(),
@@ -317,13 +332,13 @@ fn normalise_guard_input(
         });
     }
 
-    let mut input: GuardInput = serde_json::from_slice(bytes).ok()?;
+    let mut input: AnswerDeliveryInput = serde_json::from_slice(bytes).ok()?;
     if input.hook_event_name != event_name {
         return None;
     }
-    // The downstream inbox and response use the common semantic event, while
-    // the declaration above validates this provider's native event name.
-    input.hook_event_name = "PreToolUse".into();
+    // The declaration validates this provider's native event name; the same
+    // name belongs in the hook response the harness reads back.
+    input.hook_event_name = event_name.into();
     Some(input)
 }
 
@@ -343,12 +358,13 @@ fn optional_input_string(value: &serde_json::Value, key: &str) -> Option<Option<
 }
 
 #[allow(clippy::disallowed_methods)]
-fn guard_reply(
+fn answer_delivery_reply(
     globals: &Globals,
-    event: GuardInput,
+    event: AnswerDeliveryInput,
     deadline: Instant,
     in_lane: bool,
     client: Option<Harness>,
+    failure: &Failure<'_>,
 ) -> Result<Option<Vec<u8>>, &'static str> {
     let event_name = event.hook_event_name.clone();
     let cwd = match event.cwd {
@@ -406,7 +422,7 @@ fn guard_reply(
         ..Default::default()
     };
     let deadline = deadline.min(Instant::now() + answer_budget());
-    Ok(delivery_before(deadline, move || {
+    Ok(delivery_before(deadline, failure, move || {
         let resolved = crate::roots::resolve(
             &selected,
             crate::roots::Workspace::At(&cwd),
@@ -464,6 +480,7 @@ fn guard_reply(
 #[allow(clippy::disallowed_methods)]
 fn delivery_before(
     deadline: Instant,
+    failure: &Failure<'_>,
     work: impl FnOnce() -> Result<Option<Vec<u8>>, Error> + Send + 'static,
 ) -> Option<Vec<u8>> {
     let (tx, rx) = mpsc::sync_channel(1);
@@ -474,19 +491,19 @@ fn delivery_before(
         })
         .is_err()
     {
-        diagnostic("answer delivery unavailable: worker failed; use Fabric mail");
+        failure.note("answer delivery unavailable: worker failed; use Fabric mail");
         return None;
     }
     match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
         Ok(Ok(bytes)) => bytes,
         Ok(Err(error)) => {
-            diagnostic(&format!(
+            failure.note(&format!(
                 "answer delivery unavailable: {error}; use Fabric mail"
             ));
             None
         }
         _ => {
-            diagnostic("answer delivery unavailable: deadline exceeded; use Fabric mail");
+            failure.note("answer delivery unavailable: deadline exceeded; use Fabric mail");
             None
         }
     }
@@ -651,6 +668,7 @@ fn advisory(
     moment: Moment,
     globals: &Globals,
     started: Instant,
+    failure: &Failure<'_>,
     client: Option<provenant_records::Harness>,
     event_name: &str,
     protocol: Option<HookProtocol>,
@@ -661,13 +679,13 @@ fn advisory(
     let input = match hook_io::read_stdin(INPUT_CAP, deadline) {
         Ok(bytes) => bytes,
         Err(_) => {
-            diagnostic("checkpoint unavailable: bounded-input error");
+            failure.note("checkpoint unavailable: bounded-input error");
             return 0;
         }
     };
     let parsed = normalise_advisory_input(&input, moment, event_name, protocol);
     let Some(host) = parsed else {
-        diagnostic("checkpoint unavailable: invalid hook input");
+        failure.note("checkpoint unavailable: invalid hook input");
         return 0;
     };
     let selected = Globals {
@@ -696,7 +714,7 @@ fn advisory(
             let _ = tx.send(result);
         });
     if spawned.is_err() {
-        diagnostic("checkpoint unavailable: local reader unavailable");
+        failure.note("checkpoint unavailable: local reader unavailable");
         return 0;
     }
     let remaining = deadline.saturating_duration_since(Instant::now());
@@ -716,7 +734,9 @@ fn advisory(
                 None => diagnostic("checkpoint response could not be normalized for this provider"),
             }
         }
-        _ => diagnostic("checkpoint unavailable: state unavailable or local deadline exceeded"),
+        _ => {
+            failure.note("checkpoint unavailable: state unavailable or local deadline exceeded");
+        }
     }
     0
 }
@@ -1497,6 +1517,16 @@ mod answer_delivery_tests {
     #[allow(unused_imports)]
     use serde_json::json;
 
+    #[allow(dead_code)] // Unused when the worktree driver drops the #[test] items.
+    fn quiet_failure() -> Failure<'static> {
+        Failure::new(
+            None,
+            HookAction::PostToolUse.command(),
+            Some("PostToolUse"),
+            Instant::now(),
+        )
+    }
+
     // Spec: docs/specs/cli.md#pre-push-refuses-data-loss
     #[test]
     fn push_policy_uses_registered_project_override() -> Result<(), Box<dyn std::error::Error>> {
@@ -1676,15 +1706,16 @@ mod answer_delivery_tests {
                 .all(|warning| { !warning.message.contains("schedule.expires") })
         );
         let event = serde_json::from_value(
-            json!({"hook_event_name":"PreToolUse", "tool_name":"Bash", "tool_input":{"command":"git status"}, "cwd":temp.path(), "session_id":"chair"}),
+            json!({"hook_event_name":"PostToolUse", "tool_name":"Bash", "tool_input":{"command":"git status"}, "cwd":temp.path(), "session_id":"chair"}),
         )?;
         assert_eq!(
-            guard_reply(
+            answer_delivery_reply(
                 &globals,
                 event,
                 Instant::now() + LOCAL_BUDGET,
                 false,
-                Some(Harness::Claude)
+                Some(Harness::Claude),
+                &quiet_failure(),
             ),
             Ok(None)
         );
@@ -1727,8 +1758,8 @@ mod answer_delivery_tests {
                     items: vec![item.clone()],
                     truncated: false,
                 };
-                answer_output(&page, "PreToolUse", &short).unwrap().len() <= MAX_OFFER_BYTES
-                    && answer_output(&page, "PreToolUse", &long).unwrap().len() > MAX_OFFER_BYTES
+                answer_output(&page, "PostToolUse", &short).unwrap().len() <= MAX_OFFER_BYTES
+                    && answer_output(&page, "PostToolUse", &long).unwrap().len() > MAX_OFFER_BYTES
             })
             .ok_or("could not construct prefix-sensitive answer")?;
         assert!(!answer_exceeds_any_hook_envelope(&item)?);
@@ -1753,10 +1784,10 @@ mod answer_delivery_tests {
                     items: vec![large, small.clone()],
                     truncated: false,
                 },
-                "PreToolUse",
+                "PostToolUse",
                 &CommandPrefix::default(),
             ),
-            "PreToolUse",
+            "PostToolUse",
             &CommandPrefix::default(),
         )
         .unwrap();
@@ -1784,7 +1815,7 @@ mod answer_delivery_tests {
                     items: vec![],
                     truncated: false
                 },
-                "PreToolUse",
+                "PostToolUse",
                 &CommandPrefix::default(),
             )
             .is_none()
@@ -1799,7 +1830,7 @@ mod answer_delivery_tests {
         };
         let render = |state: Option<&Path>| {
             let commands = CommandPrefix::new(state, Path::new("/workspace"));
-            let bytes = answer_output(&page, "PreToolUse", &commands).unwrap();
+            let bytes = answer_output(&page, "PostToolUse", &commands).unwrap();
             assert!(bytes.len() <= MAX_OFFER_BYTES);
             let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
             value["hookSpecificOutput"]["additionalContext"]
@@ -1839,8 +1870,8 @@ mod answer_delivery_tests {
     }
 
     #[test]
-    fn malformed_guard_input_abstains_and_valid_session_metadata_is_advisory() -> Result<(), Error>
-    {
+    fn malformed_delivery_input_abstains_and_valid_session_metadata_is_advisory()
+    -> Result<(), Error> {
         let temp = tempfile::tempdir()?;
         let globals = Globals {
             state_dir: Some(temp.path().join("state")),
@@ -1860,17 +1891,18 @@ mod answer_delivery_tests {
             for field in ["session_id", "cwd"] {
                 for command in ["git status", "rm -rf /"] {
                     let mut input = json!({
-                        "hook_event_name":"PreToolUse", "tool_name":"Bash",
+                        "hook_event_name":"PostToolUse", "tool_name":"Bash",
                         "tool_input":{"command":command}, "cwd":temp.path(), "session_id":"chair"
                     });
                     input[field] = value.clone();
-                    let event: GuardInput = serde_json::from_value(input)?;
-                    let result = guard_reply(
+                    let event: AnswerDeliveryInput = serde_json::from_value(input)?;
+                    let result = answer_delivery_reply(
                         &globals,
                         event,
                         Instant::now() + LOCAL_BUDGET,
                         false,
                         Some(Harness::Claude),
+                        &quiet_failure(),
                     );
                     if (field == "session_id" && value.as_str() == Some("relative"))
                         || (field == "cwd" && matches!(value.as_str(), Some("/tmp/.." | "/tmp/.")))
@@ -1882,8 +1914,8 @@ mod answer_delivery_tests {
                 }
             }
         }
-        assert!(serde_json::from_value::<GuardInput>(json!({
-            "hook_event_name":"PreToolUse", "tool_name":"Bash", "tool_input":{"command":"git status"}
+        assert!(serde_json::from_value::<AnswerDeliveryInput>(json!({
+            "hook_event_name":"PostToolUse", "tool_name":"Bash", "tool_input":{"command":"git status"}
         })).is_err());
         Ok(())
     }
@@ -1903,9 +1935,12 @@ mod answer_delivery_tests {
             "conversationId": session,
             "workspacePaths": [temp.path()]
         });
-        let guard =
-            normalise_guard_input(&serde_json::to_vec(&tool_input)?, "PreToolUse", protocol)
-                .ok_or("Antigravity PreToolUse did not normalize")?;
+        let guard = normalise_answer_delivery_input(
+            &serde_json::to_vec(&tool_input)?,
+            "PreToolUse",
+            protocol,
+        )
+        .ok_or("Antigravity PreToolUse did not normalize")?;
         assert_eq!(guard.hook_event_name, "PreToolUse");
         assert_eq!(guard.tool_name, "Bash");
         assert_eq!(guard.tool_input["command"], "git status");
@@ -1913,10 +1948,14 @@ mod answer_delivery_tests {
         assert_eq!(guard.session_id, Some(json!(session)));
 
         let mut wrong_event = tool_input.clone();
-        wrong_event["hook_event_name"] = "PostToolUse".into();
+        wrong_event["hook_event_name"] = "Stop".into();
         assert!(
-            normalise_guard_input(&serde_json::to_vec(&wrong_event)?, "PreToolUse", protocol,)
-                .is_none()
+            normalise_answer_delivery_input(
+                &serde_json::to_vec(&wrong_event)?,
+                "PreToolUse",
+                protocol,
+            )
+            .is_none()
         );
 
         let lifecycle = json!({
@@ -1973,10 +2012,13 @@ mod answer_delivery_tests {
             "conversation_id": "cursor-conversation",
             "workspace_roots": [temp.path()]
         });
-        let guard =
-            normalise_guard_input(&serde_json::to_vec(&guard_input)?, "preToolUse", protocol)
-                .ok_or("Cursor preToolUse did not normalize")?;
-        assert_eq!(guard.hook_event_name, "PreToolUse");
+        let guard = normalise_answer_delivery_input(
+            &serde_json::to_vec(&guard_input)?,
+            "preToolUse",
+            protocol,
+        )
+        .ok_or("Cursor preToolUse did not normalize")?;
+        assert_eq!(guard.hook_event_name, "preToolUse");
         assert_eq!(guard.tool_name, "Bash");
         assert_eq!(guard.cwd, json!(temp.path()));
         assert_eq!(guard.session_id, Some(json!("cursor-conversation")));
@@ -2125,7 +2167,7 @@ mod answer_delivery_tests {
     }
 
     #[test]
-    fn guard_leaves_shell_policy_to_confinement_for_every_harness() -> Result<(), Error> {
+    fn answer_delivery_leaves_shell_policy_to_confinement_for_every_harness() -> Result<(), Error> {
         let temp = tempfile::tempdir()?;
         let globals = Globals {
             state_dir: Some(temp.path().join("state")),
@@ -2138,11 +2180,17 @@ mod answer_delivery_tests {
         {
             for command in ["git status", "rm -rf /"] {
                 let event = serde_json::from_value(json!({
-                    "hook_event_name":"PreToolUse", "tool_name":"Bash",
+                    "hook_event_name":"PostToolUse", "tool_name":"Bash",
                     "tool_input":{"command":command}, "cwd":temp.path(), "session_id":"chair"
                 }))?;
-                let result =
-                    guard_reply(&globals, event, Instant::now() + LOCAL_BUDGET, true, client);
+                let result = answer_delivery_reply(
+                    &globals,
+                    event,
+                    Instant::now() + LOCAL_BUDGET,
+                    true,
+                    client,
+                    &quiet_failure(),
+                );
                 assert_eq!(result, Ok(None));
             }
         }
@@ -2232,7 +2280,7 @@ mod answer_delivery_tests {
             &store,
             &target,
             clock.wall_now()?,
-            "PreToolUse",
+            "PostToolUse",
             &CommandPrefix::default(),
             deadline,
             &mut pending_marks,
@@ -2252,7 +2300,7 @@ mod answer_delivery_tests {
             &store,
             &target,
             clock.wall_now()?,
-            "PreToolUse",
+            "PostToolUse",
             &CommandPrefix::default(),
             Instant::now() + LOCAL_BUDGET,
             &mut pending_marks,
@@ -2376,7 +2424,7 @@ mod answer_delivery_tests {
             &reader,
             &target,
             clock.wall_now()?,
-            "PreToolUse",
+            "PostToolUse",
             &CommandPrefix::default(),
             deadline,
             &mut pending_marks,
@@ -2407,7 +2455,7 @@ mod answer_delivery_tests {
             &reader,
             &target,
             clock.wall_now()?,
-            "PreToolUse",
+            "PostToolUse",
             &CommandPrefix::default(),
             deadline,
             &mut pending_marks,
@@ -2431,7 +2479,7 @@ mod answer_delivery_tests {
                     truncated: false,
                 };
                 let fits = |commands: &CommandPrefix| {
-                    prepare_answers(singleton.clone(), at, "PreToolUse", commands)
+                    prepare_answers(singleton.clone(), at, "PostToolUse", commands)
                         .is_ok_and(|page| !page.items.is_empty())
                 };
                 fits(&CommandPrefix::default()) && !fits(&long)
@@ -2468,7 +2516,7 @@ mod answer_delivery_tests {
                 &reader,
                 &target,
                 at,
-                "PreToolUse",
+                "PostToolUse",
                 &long,
                 deadline,
                 &mut pending_marks
@@ -2482,7 +2530,7 @@ mod answer_delivery_tests {
             &reader,
             &target,
             at,
-            "PreToolUse",
+            "PostToolUse",
             &CommandPrefix::default(),
             deadline,
             &mut pending_marks,
@@ -2558,28 +2606,32 @@ mod answer_delivery_tests {
         let worker_target = target.clone();
         let at = clock.wall_now()?;
         assert!(
-            delivery_before(Instant::now() + ANSWER_BUDGET, move || {
-                let offered = Store::offer_human_answers_once(
-                    &worker_root,
-                    &worker_target,
-                    Page {
-                        extra: Default::default(),
-                        items: vec![item],
-                        truncated: false,
-                    },
-                    at,
-                    Instant::now() + std::time::Duration::from_secs(30),
-                )?;
-                // Hold the response after commit until the receiver has timed out.
-                committed.send(())?;
-                stalled.recv_timeout(std::time::Duration::from_secs(30))?;
-                let _ = done.send(());
-                Ok(answer_output(
-                    &offered,
-                    "PreToolUse",
-                    &CommandPrefix::default(),
-                ))
-            })
+            delivery_before(
+                Instant::now() + ANSWER_BUDGET,
+                &quiet_failure(),
+                move || {
+                    let offered = Store::offer_human_answers_once(
+                        &worker_root,
+                        &worker_target,
+                        Page {
+                            extra: Default::default(),
+                            items: vec![item],
+                            truncated: false,
+                        },
+                        at,
+                        Instant::now() + std::time::Duration::from_secs(30),
+                    )?;
+                    // Hold the response after commit until the receiver has timed out.
+                    committed.send(())?;
+                    stalled.recv_timeout(std::time::Duration::from_secs(30))?;
+                    let _ = done.send(());
+                    Ok(answer_output(
+                        &offered,
+                        "PostToolUse",
+                        &CommandPrefix::default(),
+                    ))
+                }
+            )
             .is_none()
         );
         // A slow commit must finish before the response is released. A failed
@@ -2604,7 +2656,7 @@ mod answer_delivery_tests {
         let (finished, completion) = mpsc::channel();
         let started = Instant::now();
         assert!(
-            delivery_before(started + ANSWER_BUDGET, move || {
+            delivery_before(started + ANSWER_BUDGET, &quiet_failure(), move || {
                 stalled.recv()?;
                 let _ = finished.send(());
                 Ok(Some(b"late context".to_vec()))
