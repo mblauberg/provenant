@@ -867,11 +867,11 @@ mod tests {
         let config = Config::new(&ports, policy);
         let result = ForgeContext::resolve(&config, &fixture.git()).expect("resolve");
         assert_eq!(result.policy.source.layer, Layer::Project);
-        assert_eq!(
-            result.policy.value.rules[0].rule.code,
-            "PORT_COMMAND_EVIDENCE"
-        );
-        assert_eq!(result.policy.value.rules[0].rule.strength, Strength::Refuse);
+        // The compiled policy table owns the rule order; find the configured
+        // rule by code rather than pinning its position in that table.
+        let effective = result.policy.value.rule("PORT_COMMAND_EVIDENCE");
+        assert_eq!(effective.source, provenant_records::policy::Source::Project);
+        assert_eq!(effective.rule.strength, Strength::Refuse);
     }
 
     #[test]

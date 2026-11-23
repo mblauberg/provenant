@@ -371,13 +371,28 @@ fn config_show_names_verify_port_layers_and_survives_a_malformed_project_layer()
     let value: serde_json::Value = serde_json::from_slice(&shown.stdout.bytes)?;
     let ports = &value["data"]["ports"];
     assert_eq!(ports["verify.remote"]["value"], "origin");
-    assert_eq!(ports["verify.remote"]["source"], "default");
-    assert!(
-        ports["verify.base"]["source"]
-            .as_str()
-            .is_some_and(|source| source.starts_with("inferred from") || source == "unresolved"),
-        "{ports}"
-    );
+    // Each port leaf reports its winning layer with the shared vocabulary.
+    // Spec: docs/specs/state.md#every-setting-reports-its-layer
+    assert_eq!(ports["verify.remote"]["layer"], "default");
+    // An unset base is a detected leaf: inferred from the remote HEAD with its
+    // origin, or unresolved with a repair. Spec: docs/specs/state.md#one-sourced-port-table
+    assert_eq!(ports["verify.base"]["layer"], "detected");
+    let base = &ports["verify.base"];
+    if base["origin"].is_null() {
+        assert!(
+            base["remedy"]
+                .as_str()
+                .is_some_and(|remedy| remedy.contains("verify.base")),
+            "{ports}"
+        );
+    } else {
+        assert!(
+            base["origin"]
+                .as_str()
+                .is_some_and(|origin| origin.contains("HEAD")),
+            "{ports}"
+        );
+    }
 
     // A partial project overlay sets only verify.base and keeps its source.
     std::fs::create_dir_all(rig.project.join(".provenant"))?;
@@ -392,7 +407,7 @@ fn config_show_names_verify_port_layers_and_survives_a_malformed_project_layer()
         value["data"]["ports"]["verify.base"]["value"],
         "origin/master"
     );
-    assert_eq!(value["data"]["ports"]["verify.base"]["source"], "project");
+    assert_eq!(value["data"]["ports"]["verify.base"]["layer"], "project");
 
     // A malformed project layer is warned and skipped: config show needs no
     // verify port and still runs, with the file and key in the warning.
@@ -519,7 +534,11 @@ fn config_show_reads_typed_defaults_warns_on_unknown_keys_and_restricts_authorit
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&rig.state, std::fs::Permissions::from_mode(0o700))?;
     }
+    // Under --json a warning rides in the envelope, never bare stderr. A
+    // per-change key is remembered, so the typo names once across both reads.
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
     let mut stderr = String::new();
+    let mut shown = 0;
     for args in [&["config", "show", "--json"][..], &["status", "--json"][..]] {
         let output = rig.command(args)?;
         assert_eq!(
@@ -528,13 +547,22 @@ fn config_show_reads_typed_defaults_warns_on_unknown_keys_and_restricts_authorit
             "{args:?} {}",
             String::from_utf8_lossy(&output.stdout.bytes)
         );
+        let envelope: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+        shown += envelope["warnings"]
+            .as_array()
+            .ok_or("warnings")?
+            .iter()
+            .filter(|warning| {
+                warning["code"] == "CONFIG_KEY_IGNORED"
+                    && warning["message"]
+                        .as_str()
+                        .is_some_and(|message| message.contains("lanes.max_concurency"))
+            })
+            .count();
         stderr.push_str(&String::from_utf8_lossy(&output.stderr.bytes));
     }
-    assert_eq!(
-        stderr.matches("lanes.max_concurency").count(),
-        1,
-        "{stderr}"
-    );
+    assert_eq!(shown, 1, "{stderr}");
+    assert!(!stderr.contains("warning:"), "{stderr}");
     assert!(!stderr.contains("PathWire"), "{stderr}");
     rig.assert_v1_root_untouched()
 }
