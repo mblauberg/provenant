@@ -108,15 +108,19 @@ canonical model and effort.
 
 `provenant run review-panel --pr N` (or a review leaf) pins the PR's base and
 head on the host, independent of the launching checkout; supplying both
-`subject` and `review_base` pins an explicit range instead. Diff evidence and
-selection use base...head, including branches that merged main. Because the
-forge can report the previous head seconds after a push, `--pr N --head SHA`
-pins the expected head: the host rereads the forge within a bounded wait and
-refuses, naming both SHAs, if the mismatch persists. Without `--head`, a local
-remote-tracking ref ahead of the forge warns and names both commits. Every
-pinned launch receipt reports the base and head it selected, and nested review
-launches keep the same pins. Without a subject the host warns which
-checkout-derived range it chose and why.
+`subject` and `review_base` pins an explicit range instead. A repair re-check
+adds `--set review_base=SHA` to `--pr N`: the head and PR binding still come
+from the forge, while the diff narrows to `review_base...head`, matching the
+three-dot range the host writes into its review context. `subject` stays
+exclusive with `--pr`, since replacing the head would lose the PR link in
+status. Diff evidence and selection use base...head, including branches that
+merged main. Because the forge can report the previous head seconds after a
+push, `--pr N --head SHA` pins the expected head: the host rereads the forge
+within a bounded wait and refuses, naming both SHAs, if the mismatch persists.
+Without `--head`, a local remote-tracking ref ahead of the forge warns and
+names both commits. Every pinned launch receipt reports the base and head it
+selected, and nested review launches keep the same pins. Without a subject the
+host warns which checkout-derived range it chose and why.
 
 A retry whose canonical raw-request identity matches a stored child receipt
 replays that receipt and its admitted pins before host preparation, active

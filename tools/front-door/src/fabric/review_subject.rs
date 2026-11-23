@@ -162,9 +162,14 @@ impl Factory {
             provenant_run::resolve_git_base(&git, &self.cwd, reference).map_err(run_error)
         };
         let (base, head, warning) = if let Some(pr) = pr {
-            if subject.is_some() || base.is_some() {
+            // Issue #3878: a repair range may narrow a pinned PR review with
+            // `--set review_base=SHA`. The head and PR binding still come from
+            // the forge; only the base is taken from the explicit pin. Supplying
+            // `subject` would replace the PR head and break that binding, so it
+            // stays exclusive with `--pr`.
+            if subject.is_some() {
                 return Err(graph_subject_error(
-                    "select --pr or subject plus review_base",
+                    "select --pr (optionally with review_base) or subject plus review_base",
                 ));
             }
             let number = pr
@@ -215,7 +220,12 @@ impl Factory {
                 )
                 .map_err(run_error)
             };
-            let base = materialise(base_ref.as_str(), pull_subject.base_ref_oid)?;
+            let base = match base {
+                // The explicit pin resolves locally; the PR head still comes
+                // from the forge, so the diff is review_base...PR head.
+                Some(base) => resolve(base)?,
+                None => materialise(base_ref.as_str(), pull_subject.base_ref_oid)?,
+            };
             let head = materialise(&head_ref, pull_subject.head_ref_oid)?;
             // Without an expected head, a fresh push can leave the local
             // remote-tracking ref ahead of what the forge still reports. Warn
@@ -489,6 +499,21 @@ mod tests {
                 .ok_or("no subject")?;
             assert_eq!(result.head, fx.forge_new);
             assert_eq!(result.base, fx.base);
+            assert!(result.warning.is_none());
+        }
+
+        // Issue #3878: --pr with review_base keeps the PR binding and narrows
+        // the diff to review_base...PR head, re-checking just the repair commits.
+        {
+            let fx = fixture()?;
+            let factory = factory(&fx.rig)?;
+            let input = serde_json::json!({
+                "pr":7, "head":fx.forge_new, "set":{"review_base":fx.forge_old}
+            });
+            let result = run_with(&factory, &input, |_| Ok(subject(&fx, &fx.forge_new, None)))?
+                .ok_or("no subject")?;
+            assert_eq!(result.head, fx.forge_new, "PR head must stay bound");
+            assert_eq!(result.base, fx.forge_old, "range must start at review_base");
             assert!(result.warning.is_none());
         }
 
