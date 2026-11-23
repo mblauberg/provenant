@@ -679,6 +679,27 @@ pub enum RunError {
         conflicting_files: Vec<String>,
         setting: String,
     },
+    /// The lane tip and the host branch share no commit, so a host merge would
+    /// have to invent a common ancestor. The lane's commits stay retained.
+    #[error(
+        "lane history shares no commit with the host branch, so a host merge would invent a common ancestor; its commits are retained in the attempt's private Git for host recovery; push the branch the lane was rebased onto, or set it to refuse to retain the lane's private history without attempting a merge; {setting}"
+    )]
+    PublicationUnrelated { setting: String },
+    /// The host repository configures a merge driver, which a host merge would
+    /// run under the lane's attributes.
+    #[error(
+        "the host repository configures Git merge drivers, which a host merge would run under the lane's attributes; its commits are retained in the attempt's private Git for host recovery; remove the merge.*.driver configuration to publish, or set it to refuse the merge instead; {setting}"
+    )]
+    PublicationMergeDriver { setting: String },
+    /// The host branch was rewound behind the pinned launch base while the lane
+    /// tip still descends that base.
+    #[error(
+        "the host branch was rewound to {branch_tip}, behind its pinned launch base {base}, while the lane tip descends that base; publishing would reinstate the history the host removed, so its commits are retained in the attempt's private Git for host recovery; move the branch forward to {base} to publish the lane"
+    )]
+    PublicationRewound {
+        branch_tip: provenant_core::GitOid,
+        base: provenant_core::GitOid,
+    },
     #[error(
         "lane tip {} descends from none of: its launch base {}, the origin default branch, {}, any pushed remote-tracking branch, or the host lane branch; {}; set it to warn or off to publish, or push the branch it was rebased onto",
         .0.tip,
@@ -823,25 +844,26 @@ impl RunError {
     }
 
     /// A refusal whose inputs do not change on retry. Settlement seals it as a
-    /// failed, non-retryable import instead of looping on it.
+    /// failed, non-retryable import instead of looping on it. Every publication
+    /// refusal is final in this sense: only explicit host recovery changes the
+    /// branch state it judged, so a retry would only keep the worktree fenced.
     pub(crate) fn import_refusal_is_final(&self) -> bool {
-        matches!(
-            self,
-            Self::ObjectImportLimit(_)
-                | Self::LaneTipUnrooted(..)
-                | Self::PublicationDiverged { .. }
-                | Self::PublicationConflict { .. }
-        )
+        self.is_publication_refusal() || matches!(self, Self::ObjectImportLimit(_))
     }
 
-    /// A publication the host refuses on the lane's own history. Retrying the
-    /// same tip cannot change it, and waiting only fences the worktree.
+    /// A publication the host refuses on the lane's own history and the host
+    /// branch it observed. Retrying the same tip and branch cannot change it
+    /// without explicit host recovery, so settlement retains the attempt's
+    /// private Git and releases custody instead of retrying.
     pub(crate) fn is_publication_refusal(&self) -> bool {
         matches!(
             self,
             Self::LaneTipUnrooted(..)
                 | Self::PublicationDiverged { .. }
                 | Self::PublicationConflict { .. }
+                | Self::PublicationUnrelated { .. }
+                | Self::PublicationMergeDriver { .. }
+                | Self::PublicationRewound { .. }
         )
     }
 

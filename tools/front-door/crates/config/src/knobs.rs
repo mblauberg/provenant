@@ -707,6 +707,10 @@ mod ceiling_tests {
             assert!(registry.knobs.contains_key(name), "{name}");
             let spec = &registry.knobs[name];
             assert_eq!(spec.default, default, "{name}");
+            // Flexible defaults that warn: an unknown value keeps the
+            // documented default and `lane_history` reports it with its source.
+            // A typo must not refuse the file, and the family is never strict.
+            assert!(!spec.strict, "{name}");
             assert_eq!(
                 spec.values,
                 values

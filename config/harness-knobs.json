@@ -980,7 +980,7 @@
       "default": "allow",
       "status": "wired",
       "reader": "tools/front-door/crates/run/src/objects.rs",
-      "effect": "Whether a lane may rebase or merge its own branch. allow (default) publishes a lane tip that diverged from the host branch by first merging the host branch into it; only a real merge conflict stays retained, naming the conflicting files and this setting. refuse retains the diverged commits in the attempt's private Git and refuses with the divergence cause, naming this setting. The effective value and its source appear in every divergence warning and refusal. Set per run with --knob lanes.history.rebase=refuse or under [knobs].",
+      "effect": "Whether a lane may rebase or merge its own branch. allow (default) publishes a lane tip that diverged from the host branch by first merging the host branch into it; a real merge conflict retains the lane's commits and names the conflicting files and this setting, and unrelated histories, a configured merge.*.driver or a branch rewound behind its launch base retain them with their own typed cause. refuse retains the diverged commits in the attempt's private Git and refuses with the divergence cause, naming this setting. The effective value and its source appear in every divergence warning and refusal, and an unrecognised value warns with its layer and keeps this default. Set per run with --knob lanes.history.rebase=refuse or under [knobs].",
       "trade_off": "allow keeps a rebased or force-pushed lane's work and adds one host merge commit when the branch moved; refuse preserves the old history unchanged but needs the chair to reconcile the branch."
     },
     "lanes.history.unrooted_tip": {
@@ -989,7 +989,7 @@
       "default": "warn",
       "status": "wired",
       "reader": "tools/front-door/crates/run/src/objects.rs",
-      "effect": "What publication does when a lane tip descends from none of its launch base, the origin default, the launch ref, a pushed remote-tracking branch or the host lane branch. warn (default) publishes the lane's own branch and names the tip and bases with this setting and its source. off publishes silently. refuse keeps the branch unchanged and refuses with LANE_TIP_UNROOTED, naming this setting. Set per run with --knob lanes.history.unrooted_tip=refuse or under [knobs].",
+      "effect": "What publication does when a lane tip descends from none of its launch base, the origin default, the launch ref, a pushed remote-tracking branch or the host lane branch the tip already contains. The head is judged before any host merge, so a merge cannot supply ancestry it lacks. warn (default) publishes the lane's own branch and names the tip and bases with this setting and its source. off publishes silently. refuse keeps the branch unchanged and refuses with LANE_TIP_UNROOTED, naming this setting. An unrecognised value warns with its layer and keeps this default. Set per run with --knob lanes.history.unrooted_tip=refuse or under [knobs].",
       "trade_off": "warn loses no work; off is quiet for histories the host already accepts; refuse is a configured stop for a history the owner wants to inspect first."
     },
     "lanes.history.conflict_markers": {

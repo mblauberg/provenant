@@ -420,8 +420,11 @@ Git's own inventory is the worktree registry, and occupancy is a shared lease:
 any number of lanes may hold one worktree, path claims are advisory, and a live
 conflicting writer is not excluded by Provenant. Attempts own separate Git refs,
 indexes and object stores, so a commit cannot take a sibling's staged snapshot.
-Host publication uses expected-old-tip compare-and-swap after verification and
-retains divergent private commits. Each attempt holds its own holder lease;
+Host publication uses expected-old-tip compare-and-swap after verification. A
+diverged lane tip is merged and published when the merge is clean; a conflict,
+unrelated histories, a configured merge driver or
+`lanes.history.rebase = "refuse"` retains the lane's private commits and names
+the cause. Each attempt holds its own holder lease;
 proof that a sibling settled never releases another attempt's custody. An
 unscoped budget commit needs durable proof that no sibling shared the worktree;
 shared attempts report typed leftover paths instead.

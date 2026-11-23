@@ -4,7 +4,9 @@
 //! Every value is read from the normal layered configuration and carries the
 //! layer that set it. The decisions warn and proceed by default except for the
 //! default-branch owner gate. A refusal names the setting that would change
-//! it, and the setting's source appears beside its value.
+//! it, and the setting's source appears beside its value. No setting here is
+//! strict: an unknown value warns with the layer that supplied it and keeps the
+//! documented default, so a typo never silently chooses a policy.
 use crate::{KnobSource, KnobValue};
 use provenant_records::{LimitSource, run::HarnessProfile};
 use serde_json::Value;
@@ -108,6 +110,50 @@ fn rewrite(text: &str) -> Option<DefaultBranchRewrite> {
     }
 }
 
+/// The warning for an explicit value outside a setting's values. It names the
+/// setting, the value and the layer that supplied it, so a typo is repairable,
+/// and the documented default that stands in for it.
+fn unknown_value(name: &str, text: &str, source: LimitSource, default: &str) -> String {
+    format!(
+        "{name} = {text} (source: {}) is not a value of this setting; using {default} (source: default)",
+        source.as_str()
+    )
+}
+
+/// One effective value: its parsed text, the layer that supplied it, and the
+/// documented default when an explicit value is unknown. A setting is never
+/// strict: an unknown value warns with its source and keeps the default, so a
+/// typo neither refuses the file nor silently chooses the permissive reading
+/// under the setting's own name.
+fn resolve_setting<T: HistoryValue>(
+    name: &str,
+    text: Option<&str>,
+    source: LimitSource,
+    parse: impl Fn(&str) -> Option<T>,
+) -> Setting<T> {
+    match text {
+        Some(text) => match parse(text) {
+            Some(value) => Setting { value, source },
+            None => {
+                use std::io::Write as _;
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: {}",
+                    unknown_value(name, text, source, T::default().as_str())
+                );
+                Setting {
+                    value: T::default(),
+                    source: LimitSource::Default,
+                }
+            }
+        },
+        None => Setting {
+            value: T::default(),
+            source,
+        },
+    }
+}
+
 /// One effective value and the layer that supplied it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Setting<T> {
@@ -160,34 +206,35 @@ fn knob_limit_source(source: KnobSource) -> LimitSource {
 }
 
 impl LaneHistory {
-    /// Resolve from a sealed launch profile. A missing or unknown value is the
-    /// registry default and its source is still reported.
+    /// Resolve from a sealed launch profile. A missing value is the registry
+    /// default; an explicit value outside the setting warns with its source and
+    /// keeps the default.
     pub fn resolve(profile: &HarnessProfile) -> Self {
         Self {
-            rebase: Setting {
-                value: profile_text(profile, REBASE)
-                    .and_then(rebase)
-                    .unwrap_or_default(),
-                source: crate::knob_source(profile, REBASE),
-            },
-            unrooted_tip: Setting {
-                value: profile_text(profile, UNROOTED_TIP)
-                    .and_then(effect)
-                    .unwrap_or_default(),
-                source: crate::knob_source(profile, UNROOTED_TIP),
-            },
-            conflict_markers: Setting {
-                value: profile_text(profile, CONFLICT_MARKERS)
-                    .and_then(effect)
-                    .unwrap_or_default(),
-                source: crate::knob_source(profile, CONFLICT_MARKERS),
-            },
-            default_branch_rewrite: Setting {
-                value: profile_text(profile, DEFAULT_BRANCH_REWRITE)
-                    .and_then(rewrite)
-                    .unwrap_or_default(),
-                source: crate::knob_source(profile, DEFAULT_BRANCH_REWRITE),
-            },
+            rebase: resolve_setting(
+                REBASE,
+                profile_text(profile, REBASE),
+                crate::knob_source(profile, REBASE),
+                rebase,
+            ),
+            unrooted_tip: resolve_setting(
+                UNROOTED_TIP,
+                profile_text(profile, UNROOTED_TIP),
+                crate::knob_source(profile, UNROOTED_TIP),
+                effect,
+            ),
+            conflict_markers: resolve_setting(
+                CONFLICT_MARKERS,
+                profile_text(profile, CONFLICT_MARKERS),
+                crate::knob_source(profile, CONFLICT_MARKERS),
+                effect,
+            ),
+            default_branch_rewrite: resolve_setting(
+                DEFAULT_BRANCH_REWRITE,
+                profile_text(profile, DEFAULT_BRANCH_REWRITE),
+                crate::knob_source(profile, DEFAULT_BRANCH_REWRITE),
+                rewrite,
+            ),
         }
     }
 
@@ -200,30 +247,25 @@ impl LaneHistory {
                 .map_or(LimitSource::Default, |knob| knob_limit_source(knob.source))
         };
         Self {
-            rebase: Setting {
-                value: knob_text(knobs, REBASE)
-                    .and_then(rebase)
-                    .unwrap_or_default(),
-                source: source(REBASE),
-            },
-            unrooted_tip: Setting {
-                value: knob_text(knobs, UNROOTED_TIP)
-                    .and_then(effect)
-                    .unwrap_or_default(),
-                source: source(UNROOTED_TIP),
-            },
-            conflict_markers: Setting {
-                value: knob_text(knobs, CONFLICT_MARKERS)
-                    .and_then(effect)
-                    .unwrap_or_default(),
-                source: source(CONFLICT_MARKERS),
-            },
-            default_branch_rewrite: Setting {
-                value: knob_text(knobs, DEFAULT_BRANCH_REWRITE)
-                    .and_then(rewrite)
-                    .unwrap_or_default(),
-                source: source(DEFAULT_BRANCH_REWRITE),
-            },
+            rebase: resolve_setting(REBASE, knob_text(knobs, REBASE), source(REBASE), rebase),
+            unrooted_tip: resolve_setting(
+                UNROOTED_TIP,
+                knob_text(knobs, UNROOTED_TIP),
+                source(UNROOTED_TIP),
+                effect,
+            ),
+            conflict_markers: resolve_setting(
+                CONFLICT_MARKERS,
+                knob_text(knobs, CONFLICT_MARKERS),
+                source(CONFLICT_MARKERS),
+                effect,
+            ),
+            default_branch_rewrite: resolve_setting(
+                DEFAULT_BRANCH_REWRITE,
+                knob_text(knobs, DEFAULT_BRANCH_REWRITE),
+                source(DEFAULT_BRANCH_REWRITE),
+                rewrite,
+            ),
         }
     }
 }
@@ -315,14 +357,47 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_value_takes_the_default_not_a_permissive_reading() {
+    fn an_unknown_value_warns_with_its_source_and_takes_the_documented_default() {
+        // A typo must not silently choose a policy. `allow` publishes a host
+        // merge, so an unknown value falls back to the documented default and
+        // says which layer supplied the text and that the default now stands.
+        let mut profile = HarnessProfile::default();
+        profile.knobs.insert(REBASE.into(), Value::from("alow"));
+        profile
+            .knob_sources
+            .insert(REBASE.into(), LimitSource::Host);
+        let history = LaneHistory::resolve(&profile);
+        assert_eq!(history.rebase.value, Rebase::Allow);
+        assert_eq!(history.rebase.source, LimitSource::Default);
+        assert_eq!(
+            unknown_value(REBASE, "alow", LimitSource::Host, Rebase::Allow.as_str()),
+            "lanes.history.rebase = alow (source: host) is not a value of this setting; using allow (source: default)"
+        );
+
+        // The restrictive default is no proof of safe fallback: the same text
+        // on the owner gate takes its documented refusal and names the layer.
         let mut profile = HarnessProfile::default();
         profile
             .knobs
             .insert(DEFAULT_BRANCH_REWRITE.into(), Value::from("perhaps"));
+        let history = LaneHistory::resolve(&profile);
         assert_eq!(
-            LaneHistory::resolve(&profile).default_branch_rewrite.value,
+            history.default_branch_rewrite.value,
             DefaultBranchRewrite::Refuse
         );
+        assert_eq!(history.default_branch_rewrite.source, LimitSource::Default);
+
+        // Host configuration reads resolve the same way: an unknown value
+        // reports the default layer, never the layer that typed it.
+        let knobs = BTreeMap::from([(
+            REBASE.to_owned(),
+            KnobValue {
+                value: Value::from("alloww"),
+                source: KnobSource::Override,
+            },
+        )]);
+        let history = LaneHistory::from_knobs(&knobs);
+        assert_eq!(history.rebase.value, Rebase::Allow);
+        assert_eq!(history.rebase.source, LimitSource::Default);
     }
 }

@@ -134,14 +134,16 @@ the setting and its source.
 
 - `lanes.history.rebase` (`allow` default, `refuse`): `allow` publishes a lane
   whose history diverged from the host lane branch by first merging the host
-  branch into the lane tip. Only a real merge conflict stays retained, with the
-  files named. `refuse` retains the lane's private commits and refuses with the
-  divergence cause.
+  branch into the lane tip. A real conflict stays retained with the files named;
+  unrelated histories, a configured `merge.*.driver` and a branch rewound behind
+  its launch base are retained with their own typed cause. `refuse` retains the
+  lane's private commits and refuses with the divergence cause.
 - `lanes.history.unrooted_tip` (`warn` default, `off`, `refuse`): a lane tip that
   descends from none of its launch base, the origin default, the launch ref, a
-  pushed remote-tracking branch or the host lane branch. `warn` publishes and
-  names the tip and its launch base; `off` is silent; `refuse` stops with
-  `LANE_TIP_UNROOTED`.
+  pushed remote-tracking branch or the host lane branch. The head is judged
+  before any host merge, so a merge cannot supply the ancestry it lacks. `warn`
+  publishes and names the tip and its launch base; `off` is silent; `refuse`
+  stops with `LANE_TIP_UNROOTED`.
 - `lanes.history.conflict_markers` (`warn` default, `off`, `refuse`): added
   lines in a pre-push check that begin with a literal conflict marker. It
   replaces the former `domains.run.push_conflict_markers` boolean.
@@ -154,6 +156,9 @@ Set a value with `provenant config set lanes.history.rebase refuse` (or under
 `[knobs]`). A dispatch may set `rebase` and `unrooted_tip` for one lane.
 `conflict_markers` and `default_branch_rewrite` are read by the host pre-push
 hook from the host configuration and are refused in a dispatch override.
+No value in this family is strict: an unrecognised value warns with the layer
+that supplied it and keeps the documented default, so a typo neither refuses the
+configuration nor silently chooses a policy.
 
 ## Git pre-push hook and local gate
 

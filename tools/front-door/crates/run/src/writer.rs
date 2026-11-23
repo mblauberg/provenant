@@ -4153,19 +4153,22 @@ impl WriterLaunch {
                     )
                     .and_then(|publication| publication.require_durable());
             }
-            let at_tip = match &source {
+            // The files, index and branch converge on the published tip: when
+            // publication merged a diverged history the branch ends at the
+            // merge commit, not at the verified head.
+            let at_published_tip = match &source {
                 Some(source) => {
                     crate::objects::private_tip(source, self.branch.as_str())? == verified_tip
                         && crate::objects::resolve_ref(
                             &git_executable,
                             self.worktree.repo(),
                             self.branch.as_str(),
-                        )? == verified_tip
+                        )? == published.tip
                 }
                 None => false,
             };
-            if at_tip {
-                self.advance_files(attempt, verified_tip)?;
+            if at_published_tip {
+                self.advance_files(attempt, published.tip)?;
             }
             if source.is_some() {
                 // Every settlement and resume runs this: it advances from the
@@ -4178,7 +4181,7 @@ impl WriterLaunch {
                 };
                 self.sync_native_index(attempt, custody.scope(), fallback);
             }
-            if at_tip {
+            if at_published_tip {
                 crate::objects::clear_import_refs(
                     &git_executable,
                     self.worktree.repo(),

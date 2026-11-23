@@ -1914,6 +1914,9 @@ fn safe_cause(error: &run::RunError) -> Option<String> {
             | E::ObjectImportLimit(_)
             | E::PublicationDiverged { .. }
             | E::PublicationConflict { .. }
+            | E::PublicationUnrelated { .. }
+            | E::PublicationMergeDriver { .. }
+            | E::PublicationRewound { .. }
             | E::Version(_)
             | E::OperationConflict
             | E::NotFound

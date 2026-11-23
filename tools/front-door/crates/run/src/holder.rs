@@ -1601,8 +1601,9 @@ impl RunStore {
                         call,
                     )?;
                 }
-                // A diverged or unrooted lane tip cannot publish on retry, and the
-                // retry cycles would leave the worktree fenced meanwhile.
+                // A publication refusal is final: retrying re-reads the branch
+                // but only host recovery can change the answer, and the retry
+                // cycles would leave the worktree fenced meanwhile.
                 Err(error) if error.is_publication_refusal() => {
                     let reason = format!(
                         "publication refused; private Git retained for host recovery: {error}"
