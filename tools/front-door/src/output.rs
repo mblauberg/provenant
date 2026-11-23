@@ -250,6 +250,14 @@ fn remember_warnings(warnings: &[Warning]) {
     }
 }
 
+/// The drain the CLI crate's shared emitter seam uses. The binary edge owns
+/// the sink; a library command surface only carries the warnings as data onto
+/// the envelope it renders, so none is printed bare under `--json`.
+/// Spec: docs/specs/cli.md#warnings-are-typed-values
+pub(crate) fn command_warning_seam() -> (fn() -> Vec<Warning>, fn(&[Warning]), fn(Vec<Warning>)) {
+    (take_warnings, remember_warnings, return_warnings)
+}
+
 /// Return warnings to the sink when no envelope reached the reader, so the
 /// guard shows them on exit (and remembers them then) instead of swallowing
 /// them or remembering an undelivered warning here.

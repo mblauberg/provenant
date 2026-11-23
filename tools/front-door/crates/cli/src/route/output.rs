@@ -332,7 +332,7 @@ pub fn run(
     };
     let now = SystemClock::new().wall_now();
     let at = now.as_ref().ok().copied();
-    let result = match now
+    let mut result = match now
         .map_err(EdgeError::from)
         .and_then(|now| execute(&command, roots, now))
     {
@@ -660,13 +660,8 @@ pub fn run(
         listing || matches!(command, Route::List(_) | Route::Resolve(_)),
         summary.as_ref(),
     );
-    let outcome = crate::render_or_publish(
-        &result,
-        mode,
-        &mut io::stdout().lock(),
-        &mut io::stderr().lock(),
-        publish,
-        crate::OverflowPolicy::Refuse,
-    );
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    let outcome =
+        crate::render_command_result(&mut result, mode, publish, crate::OverflowPolicy::Refuse);
     outcome.map_or(3, |outcome| crate::exit_status(&outcome))
 }

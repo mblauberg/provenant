@@ -1,6 +1,7 @@
 //! Process edge for local catalogue reads.
 use provenant_cli::{Globals, RenderError, RenderMode, console::Console};
 use provenant_core::CancelToken;
+use provenant_records::warning::{self, RESULT_TOO_LARGE, Warning};
 use provenant_records::{CommandError, CommandResult, Outcome};
 use std::io;
 
@@ -548,7 +549,7 @@ fn render(
         let (text, omitted) =
             provenant_cli::clip_for_output(human, provenant_cli::MAX_RESULT_BYTES);
         clipped = text;
-        warn_capped(&result.command, source, repair, omitted, stderr);
+        warning::warn(capped_warning(&result.command, source, repair, omitted));
         globals.render_mode(&clipped, true, None)
     } else {
         globals.render_mode(human, true, None)
@@ -562,9 +563,11 @@ fn render(
         Ok(()) => provenant_cli::exit_status(&result.status),
         Err(RenderError::TooLarge) => {
             // JSON cannot be clipped mid-object: page a bounded marker that
-            // names the cap and the omitted size instead of the refusal.
+            // names the cap and the omitted size instead of the refusal. The
+            // cap notice is a typed warning carried on the bounded envelope,
+            // never a bare line on stderr under `--json`.
+            // Spec: docs/specs/cli.md#one-bounded-envelope-clipped-with-a-warning
             let omitted = full_bytes.saturating_sub(provenant_cli::MAX_RESULT_BYTES);
-            warn_capped(&result.command, source, repair, omitted, stderr);
             let marker = serde_json::json!({
                 "truncated": true,
                 "omitted_bytes": omitted,
@@ -576,6 +579,8 @@ fn render(
                 .error
                 .as_ref()
                 .map(|error| provenant_cli::bounded_error(error, 512));
+            bounded.warnings =
+                take_cap_warning(capped_warning(&result.command, source, repair, omitted));
             let _ = provenant_cli::render(&bounded, RenderMode::Json, stdout);
             provenant_cli::exit_status(&result.status)
         }
@@ -607,17 +612,32 @@ fn render(
 
 /// The one warning for a capped console view: names the rule, the source that
 /// set the cap, the omitted size and the way to see more.
-fn warn_capped(
-    command: &str,
-    source: &str,
-    repair: &str,
-    omitted: usize,
-    stderr: &mut impl io::Write,
-) {
-    let _ = writeln!(
-        stderr,
-        "warning: [RESULT_TOO_LARGE] {command} exceeds 1 MiB (source: {source}); showing a bounded view with {omitted} bytes omitted; {repair}"
-    );
+/// Spec: docs/specs/cli.md#one-bounded-envelope-clipped-with-a-warning
+fn capped_warning(command: &str, source: &str, repair: &str, omitted: usize) -> Warning {
+    Warning::new(
+        RESULT_TOO_LARGE,
+        format!("[RESULT_TOO_LARGE] {command} exceeds 1 MiB (source: {source}); showing a bounded view with {omitted} bytes omitted"),
+    )
+    .repair(repair)
+}
+
+/// Raise the cap notice through the one typed warning seam, then take it back
+/// for the bounded envelope. Under `--json` the binary edge holds it, so it
+/// travels in `envelope[warnings]` and stderr stays clean; in human mode the
+/// sink prints it as it arrives. A direct caller without a sink still gets the
+/// typed value on its envelope rather than a bare line.
+/// Spec: docs/specs/cli.md#warnings-are-typed-values
+fn take_cap_warning(notice: Warning) -> Vec<Warning> {
+    warning::warn(notice.clone());
+    let (take, _remember, _give_back) = crate::output::command_warning_seam();
+    let mut held = take();
+    if !held
+        .iter()
+        .any(|warning| warning.code.as_ref() == RESULT_TOO_LARGE.as_str())
+    {
+        held.push(notice);
+    }
+    held
 }
 
 #[cfg(test)]
@@ -797,6 +817,7 @@ mod tests {
     }
 
     #[test]
+    // Spec: docs/specs/cli.md#one-bounded-envelope-clipped-with-a-warning
     fn oversized_single_board_row_warns_and_pages_a_bounded_marker() {
         let value =
             serde_json::json!({"lanes":[{"metadata":"x".repeat(provenant_cli::MAX_RESULT_BYTES)}]});
@@ -829,12 +850,20 @@ mod tests {
         assert!(repair.contains("--limit 1 still fails"));
         assert!(repair.contains("provenant output ATTEMPT"));
         assert!(paged["error"].is_null());
-        let warning = String::from_utf8(stderr).unwrap();
-        assert!(warning.contains("warning: [RESULT_TOO_LARGE]"), "{warning}");
-        assert!(warning.contains("bytes omitted"), "{warning}");
+        // Spec: docs/specs/cli.md#warnings-are-typed-values
+        assert!(
+            paged["warnings"]
+                .as_array()
+                .expect("warnings")
+                .iter()
+                .any(|warning| warning["code"] == "RESULT_TOO_LARGE"),
+            "{paged}"
+        );
+        assert!(stderr.is_empty(), "{}", String::from_utf8_lossy(&stderr));
     }
 
     #[test]
+    // Spec: docs/specs/cli.md#one-bounded-envelope-clipped-with-a-warning
     fn oversized_human_catalogue_warns_and_bounds_without_publishing() {
         let row = serde_json::json!({"project_id":"x".repeat(32), "common_dir":{"encoding":"utf8","path":"a".repeat(180)}});
         let value = serde_json::json!({"projects":vec![row; 6500], "coverage":{"scope":"local"}});
@@ -846,7 +875,7 @@ mod tests {
             Some(value),
         );
         let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
-        assert_eq!(
+        let (status, warnings) = provenant_records::warning::capture(|| {
             super::render(
                 &result,
                 &provenant_cli::Globals {
@@ -856,16 +885,20 @@ mod tests {
                 },
                 &human,
                 &mut stdout,
-                &mut stderr
-            ),
-            0
-        );
+                &mut stderr,
+            )
+        });
+        assert_eq!(status, 0);
         assert!(!stdout.is_empty());
         assert!(stdout.len() <= provenant_cli::MAX_RESULT_BYTES);
         let text = String::from_utf8(stdout).unwrap();
         assert!(text.contains("bytes omitted"), "{text}");
-        let warning = String::from_utf8(stderr).unwrap();
-        assert!(warning.contains("warning: [RESULT_TOO_LARGE]"), "{warning}");
-        assert!(warning.contains("COMMAND_RESULT_MAX_BYTES"), "{warning}");
+        // Spec: docs/specs/cli.md#warnings-are-typed-values
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.code.as_ref() == "RESULT_TOO_LARGE"),
+            "{warnings:?}"
+        );
     }
 }

@@ -1322,11 +1322,10 @@ pub fn run(
         String::new()
     };
     let mode = globals.render_mode(&human, read_only, None);
-    match crate::render_or_publish(
-        &out,
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    match crate::render_command_result(
+        &mut out,
         mode,
-        &mut io::stdout().lock(),
-        &mut io::stderr().lock(),
         |_| Err(io::Error::other("result too large")),
         crate::OverflowPolicy::Refuse,
     ) {
