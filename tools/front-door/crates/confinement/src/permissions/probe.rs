@@ -327,8 +327,9 @@ pub(super) fn denied_probe(outcome: &ExecOutcome) -> bool {
 
 #[cfg(any(target_os = "macos", test, feature = "snapshot"))]
 pub(super) fn report_policy_message(message: String) {
-    use std::io::Write;
-    let _ = writeln!(std::io::stderr().lock(), "{message}");
+    use provenant_records::warning::{POLICY_ADVISORY, Warning, warn};
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    warn(Warning::new(POLICY_ADVISORY, message));
 }
 
 /// Apply one advisory launch threshold. The table controls whether an

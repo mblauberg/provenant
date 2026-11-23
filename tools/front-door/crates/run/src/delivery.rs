@@ -20,6 +20,13 @@ use std::{
     time::Duration,
 };
 
+/// An advisory that keeps delivery usable rather than refusing it.
+/// Spec: docs/specs/cli.md#warnings-are-typed-values
+fn delivery_advisory(message: impl Into<String>) {
+    use provenant_records::warning::{DELIVERY_REFRESH_ADVISORY, Warning, warn};
+    warn(Warning::new(DELIVERY_REFRESH_ADVISORY, message.into()));
+}
+
 /// Launch delivery fields a test compares across stop-publish preparation:
 /// git, gh, the launch binding digest, the stop binding digest and the
 /// environment.
@@ -1209,7 +1216,6 @@ impl HostDeliveryContext {
             .is_some_and(|receipt| receipt.access.is_isolated())
     }
     fn transport_warning(&self, detail: &str) {
-        use std::io::Write as _;
         let source = self
             .lane_access
             .as_ref()
@@ -1222,7 +1228,12 @@ impl HostDeliveryContext {
             .check("DELIVERY_HOST_TRANSPORT_NONE", facts)
             .message()
         {
-            let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+            use provenant_records::warning::{DELIVERY_TRANSPORT_ADVISORY, Warning, warn};
+            // Spec: docs/specs/cli.md#warnings-are-typed-values
+            warn(
+                Warning::new(DELIVERY_TRANSPORT_ADVISORY, message)
+                    .subject("DELIVERY_HOST_TRANSPORT_NONE"),
+            );
         }
     }
     /// Preserve normal host credential/config discovery without Git's ambient
@@ -1594,11 +1605,9 @@ impl HostDeliveryContext {
                 return Err(RunError::OriginDefaultCollision);
             }
             if collides || GitRefName::branch(name).is_err() {
-                use std::io::Write;
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: not refreshing {remote} branch {name:?}; its name collides or is unsupported, and an existing tracking ref may be stale"
-                );
+                delivery_advisory(format!(
+                    "not refreshing {remote} branch {name:?}; its name collides or is unsupported, and an existing tracking ref may be stale"
+                ));
                 continue;
             }
             refspecs.push(format!("+refs/heads/{name}:{tracking}{name}"));
@@ -3355,10 +3364,8 @@ pub(super) fn coalesced_origin_refresh_with_budget(
     ) {
         Ok(lock) => lock,
         Err(FsError::LockTimeout { .. }) => {
-            use std::io::Write;
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: origin refresh is still busy; launching with existing tracking refs"
+            delivery_advisory(
+                "origin refresh is still busy; launching with existing tracking refs",
             );
             return Ok(());
         }
@@ -3870,12 +3877,10 @@ impl crate::RunStore {
         let operation_id = match self.attempt_operation(record.attempt_id, call) {
             Ok(operation) => Some(operation.operation_id),
             Err(error) => {
-                use std::io::Write;
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: could not record ownership of delivered ref {}: {error}; it is retained as unobserved",
+                delivery_advisory(format!(
+                    "could not record ownership of delivered ref {}: {error}; it is retained as unobserved",
                     integration.target
-                );
+                ));
                 return;
             }
         };
@@ -3909,12 +3914,10 @@ impl crate::RunStore {
             Ok(())
         })();
         if let Err(error) = result {
-            use std::io::Write;
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: could not record ownership of delivered ref {}: {error}; it is retained as unobserved",
+            delivery_advisory(format!(
+                "could not record ownership of delivered ref {}: {error}; it is retained as unobserved",
                 integration.target
-            );
+            ));
         }
     }
     pub fn delivered(

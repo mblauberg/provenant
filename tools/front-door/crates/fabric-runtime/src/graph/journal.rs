@@ -2015,11 +2015,12 @@ impl GraphJournal for FileJournal {
                 &self.directory,
                 &validated,
             ) {
-                use std::io::Write;
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: graph observation indexing deferred: {error}"
-                );
+                use provenant_records::warning::{GRAPH_OBSERVATION_DEFERRED, Warning, warn};
+                // Spec: docs/specs/cli.md#warnings-are-typed-values
+                warn(Warning::new(
+                    GRAPH_OBSERVATION_DEFERRED,
+                    format!("graph observation indexing deferred: {error}"),
+                ));
             }
             Ok(())
         })()

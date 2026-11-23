@@ -340,10 +340,15 @@ pub fn scan_for_secrets(text: &str) -> Result<(), String> {
 /// bytes are never included in a warning or used as an admission predicate.
 pub fn warn_for_secrets(field: &str, text: &str) {
     if provenant_confinement::disclosure::scan_snapshot(text.as_bytes(), &[]).is_err() {
-        use std::io::Write;
-        let _ = writeln!(
-            std::io::stderr().lock(),
-            "provenant: warning: field={field} rule=known_secret_shape"
+        use provenant_records::warning::{SECRET_SHAPE_IN_FIELD, Warning, warn};
+        // Spec: docs/specs/cli.md#warnings-are-typed-values
+        warn(
+            Warning::new(
+                SECRET_SHAPE_IN_FIELD,
+                format!("provenant: field={field} rule=known_secret_shape"),
+            )
+            .subject(field.to_owned())
+            .once_per_change(),
         );
     }
 }

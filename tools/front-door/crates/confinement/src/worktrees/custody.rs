@@ -1075,8 +1075,9 @@ fn lock_worktree_impl(
         match effect {
             Effect::Proceed => {}
             Effect::Warn(message) => {
-                use std::io::Write;
-                let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+                use provenant_records::warning::{POLICY_ADVISORY, Warning, warn};
+                // Spec: docs/specs/cli.md#warnings-are-typed-values
+                warn(Warning::new(POLICY_ADVISORY, message).subject("WRITER_CENSUS"));
             }
             Effect::Refuse(_) | Effect::Stop(_) => {
                 return Err(live_refusal(context.workers, &canonical));

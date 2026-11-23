@@ -1,5 +1,4 @@
 use super::*;
-use std::io::Write;
 
 #[cfg(test)]
 thread_local! {
@@ -419,10 +418,12 @@ impl RunStore {
             match prepared {
                 Ok(context) => holder_context = context,
                 Err(error) => {
-                    let _ = writeln!(
-                        std::io::stderr().lock(),
-                        "warning: stop publication is unavailable: {error}"
-                    );
+                    use provenant_records::warning::{STOP_PUBLICATION_UNAVAILABLE, Warning, warn};
+                    // Spec: docs/specs/cli.md#warnings-are-typed-values
+                    warn(Warning::new(
+                        STOP_PUBLICATION_UNAVAILABLE,
+                        format!("stop publication is unavailable: {error}"),
+                    ));
                 }
             }
         }

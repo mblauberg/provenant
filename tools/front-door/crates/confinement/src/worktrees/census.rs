@@ -126,20 +126,28 @@ fn warn_unreadable_processes(boot: &str, pids: &BTreeSet<i64>) {
     if fresh.is_empty() {
         return;
     }
-    use std::io::Write as _;
-    let mut stderr = std::io::stderr().lock();
+    use provenant_records::warning::{UNREADABLE_PROCESS_CENSUS, Warning, warn};
     if UNREADABLE_DETAIL.load(std::sync::atomic::Ordering::Relaxed) {
         for pid in fresh {
-            let _ = writeln!(
-                stderr,
-                "warning: process {pid} could not be inspected (EPERM); custody is unknown for this process (no observed cwd or descriptor under candidate worktrees)"
+            // Spec: docs/specs/cli.md#warnings-are-typed-values
+            warn(
+                Warning::new(
+                    UNREADABLE_PROCESS_CENSUS,
+                    "process could not be inspected (EPERM); custody is unknown for this process (no observed cwd or descriptor under candidate worktrees)",
+                )
+                .subject(format!("process {pid}")),
             );
         }
     } else {
-        let _ = writeln!(
-            stderr,
-            "warning: {} process(es) could not be inspected (EPERM); custody is unknown for those processes (no observed cwd or descriptor under candidate worktrees)",
-            fresh.len()
+        warn(
+            Warning::new(
+                UNREADABLE_PROCESS_CENSUS,
+                format!(
+                    "{} process(es) could not be inspected (EPERM); custody is unknown for those processes (no observed cwd or descriptor under candidate worktrees)",
+                    fresh.len()
+                ),
+            )
+            .subject(format!("{} unreadable processes", fresh.len())),
         );
     }
 }

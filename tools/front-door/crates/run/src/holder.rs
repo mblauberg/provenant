@@ -869,21 +869,23 @@ fn seal_import_refusal(
 
 /// The stray-work check is advice: when it cannot run, the lane still settles.
 fn warn_stray_check(error: &dyn std::fmt::Display) {
-    use std::io::Write as _;
-    let _ = writeln!(
-        std::io::stderr().lock(),
-        "warning: could not check the primary checkout for stray lane work: {error}"
-    );
+    use provenant_records::warning::{STRAY_WORK_CHECK_FAILED, Warning, warn};
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    warn(Warning::new(
+        STRAY_WORK_CHECK_FAILED,
+        format!("could not check the primary checkout for stray lane work: {error}"),
+    ));
 }
 
 /// A refused import keeps its private Git whole, so a step that only guards
 /// removal of that Git is reported, not fatal.
 fn warn_retained_private_git(what: &str, error: &dyn std::fmt::Display) {
-    use std::io::Write as _;
-    let _ = writeln!(
-        std::io::stderr().lock(),
-        "warning: {what}; retaining the private Git: {error}"
-    );
+    use provenant_records::warning::{PRIVATE_GIT_RETAINED, Warning, warn};
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    warn(Warning::new(
+        PRIVATE_GIT_RETAINED,
+        format!("{what}; retaining the private Git: {error}"),
+    ));
 }
 
 pub(crate) fn object_import_refused(
@@ -1431,11 +1433,12 @@ impl RunStore {
                 match writer.private_staged_paths(attempt) {
                     Ok(paths) => paths,
                     Err(error) => {
-                        use std::io::Write as _;
-                        let _ = writeln!(
-                            std::io::stderr().lock(),
-                            "warning: private Git staged paths unreadable; retaining it: {error}"
-                        );
+                        use provenant_records::warning::{PRIVATE_GIT_RETAINED, Warning, warn};
+                        // Spec: docs/specs/cli.md#warnings-are-typed-values
+                        warn(Warning::new(
+                            PRIVATE_GIT_RETAINED,
+                            format!("private Git staged paths unreadable; retaining it: {error}"),
+                        ));
                         unreadable = true;
                         Vec::new()
                     }
@@ -3264,8 +3267,9 @@ impl RunStore {
                             }
                         };
                         if let Some(finding) = finding {
-                            use std::io::Write as _;
-                            let _ = writeln!(std::io::stderr().lock(), "warning: {finding}");
+                            use provenant_records::warning::{STRAY_LANE_WORK, Warning, warn};
+                            // Spec: docs/specs/cli.md#warnings-are-typed-values
+                            warn(Warning::new(STRAY_LANE_WORK, finding.clone()));
                             decoded.reason = Some(match decoded.reason.take() {
                                 Some(reason) => format!("{reason}; {finding}"),
                                 None => finding,

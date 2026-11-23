@@ -490,9 +490,16 @@ fn prune(tx: &Connection, time: &dyn Clock, resources: &dyn Resources) -> Result
     }
     Ok(())
 }
-#[allow(clippy::print_stderr)]
 fn malformed_row(rowid: i64) {
-    eprintln!("admission: malformed lease row {rowid}");
+    use provenant_records::warning::{ADMISSION_RECORD_MALFORMED, Warning, warn};
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    warn(
+        Warning::new(
+            ADMISSION_RECORD_MALFORMED,
+            format!("admission: malformed lease row {rowid}"),
+        )
+        .subject(format!("row {rowid}")),
+    );
 }
 #[allow(clippy::print_stderr)]
 fn released(

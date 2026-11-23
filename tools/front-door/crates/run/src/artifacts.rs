@@ -386,8 +386,12 @@ fn private_metadata(
             );
             #[cfg(test)]
             PRIVATE_MODE_REPAIRS.with(|warnings| warnings.borrow_mut().push(rendered.clone()));
-            use std::io::Write as _;
-            let _ = writeln!(std::io::stderr().lock(), "{rendered}");
+            use provenant_records::warning::{RUN_STORE_MODE_TIGHTENED, Warning, warn};
+            // Spec: docs/specs/cli.md#warnings-are-typed-values
+            warn(
+                Warning::new(RUN_STORE_MODE_TIGHTENED, rendered.clone())
+                    .subject(dir.anchored_path().join(name).display().to_string()),
+            );
         }
         return Ok(after);
     }

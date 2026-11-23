@@ -436,8 +436,10 @@ pub fn stage(job: &Job, context: &RunContext, index: u64) -> Result<PreparedSlot
         }
     };
     let _ = record.write(&paths.record);
+    use provenant_records::warning::{BUILD_PORT_UNAVAILABLE, Warning, warn};
     for warning in &warnings {
-        let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+        // Spec: docs/specs/cli.md#warnings-are-typed-values
+        warn(Warning::new(BUILD_PORT_UNAVAILABLE, warning.clone()));
     }
     Ok(PreparedSlot {
         site: super::ExecSite {
@@ -485,6 +487,10 @@ fn canary_slot_effect(
 }
 
 /// Execute an already staged job after the caller has run its optional prelude.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "build slot progress belongs to the build command output seam"
+)]
 pub fn execute_staged(
     job: &Job,
     context: &RunContext,
@@ -544,10 +550,12 @@ pub fn execute_staged(
     // Custody is published before the child exists. The inherited lease below
     // keeps the slot occupied even if this process dies before `on_spawn`.
     mark_intent(&staged.paths.job, &owned_job.owner).map_err(|error| {
-        let _ = writeln!(
-            std::io::stderr().lock(),
-            "warning: cannot publish slot custody before spawn: {error}"
-        );
+        use provenant_records::warning::{BUILD_SLOT_SETUP_WARNING, Warning, warn};
+        // Spec: docs/specs/cli.md#warnings-are-typed-values
+        warn(Warning::new(
+            BUILD_SLOT_SETUP_WARNING,
+            format!("cannot publish slot custody before spawn: {error}"),
+        ));
         Exception::PoolUnavailable
     })?;
     let peak_rss = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -724,7 +732,9 @@ pub fn execute(job: &Job, context: &RunContext, index: u64) -> Result<SlotExecut
                 "build slot unavailable; building locally: {}",
                 stage_failure.detail
             );
-            let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+            use provenant_records::warning::{BUILD_SLOT_UNAVAILABLE, Warning, warn};
+            // Spec: docs/specs/cli.md#warnings-are-typed-values
+            warn(Warning::new(BUILD_SLOT_UNAVAILABLE, warning.clone()));
             outcome.warnings.push(warning);
             let result =
                 super::local::execute(&mut local_job, context, outcome, ExecPlace::Local, None, 0);
