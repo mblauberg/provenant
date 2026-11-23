@@ -460,6 +460,24 @@ fn named_adapter_routes_preserve_configuration_name_without_a_model() -> TestRes
 }
 
 #[test]
+fn invalid_route_input_names_the_field_and_reason_in_its_diagnostic() {
+    let error = Service::route(RequestedRoute::Model {
+        required_family: None,
+        extra: Default::default(),
+        provider: "opencode".into(),
+        model: "opencode-go/hy4-flash-free".into(),
+        effort: None,
+    })
+    .unwrap_err();
+    assert_eq!(ErrorKind::from(&error), ErrorKind::Invalid);
+    let diagnostic = error.diagnostic(provenant_records::diagnostic::Destination::Local);
+    assert_eq!(
+        diagnostic.detail.as_deref(),
+        Some("route.model: model provider `opencode-go` does not match route provider `opencode`")
+    );
+}
+
+#[test]
 fn command_write_is_refused_before_preparing_a_worktree() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
