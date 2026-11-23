@@ -744,7 +744,6 @@ const LAUNCH_CONTROLS: [&str; 5] = ["access", "worktree", "branch", "base", "wri
 fn bind_launch_controls(
     input: &Value,
     node: &mut Value,
-    cwd: &Path,
     project_root: &Path,
     ports: &provenant_config::PortTable,
 ) -> Result<(), FacadeError> {
@@ -806,7 +805,7 @@ fn bind_launch_controls(
         node["worktree"] = json!(if path.is_absolute() {
             path.to_owned()
         } else {
-            cwd.join(path)
+            project_root.join(path)
         });
     }
     if let Some(scope) = input.get("write_scope").filter(|value| !value.is_null()) {
@@ -1417,7 +1416,6 @@ impl Factory {
         bind_launch_controls(
             input,
             &mut node,
-            &self.cwd,
             &self.context.project_root,
             &self.context.port_table,
         )?;
@@ -2057,7 +2055,6 @@ impl Factory {
                 } else {
                     &mut node
                 },
-                &self.cwd,
                 &self.context.project_root,
                 &self.context.port_table,
             )?;
@@ -2368,6 +2365,14 @@ impl Factory {
                     disk: None,
                     reason: error.to_string(),
                 })?;
+            // Explain runs the launch's pre-attempt admission checks, so an
+            // explanation that passes means the same input admits a launch.
+            super::graph_execution::validate_new_submission(
+                self,
+                &document,
+                &expanded,
+                &provenant_confinement::worktrees::RepoFacts::default(),
+            )?;
             let mut writer_budgets = Vec::new();
             for node in &expanded.nodes {
                 if node.access != provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
@@ -2492,11 +2497,22 @@ impl Factory {
                     self.cwd.join(path)
                 }
             };
+            // Managed writer worktrees live under the project's primary root,
+            // even when the launch runs from a linked checkout.
+            let writer_root = self.context.project_root.as_path();
+            let resolve_worktree = |path: &str| {
+                let path = Path::new(path);
+                if path.is_absolute() {
+                    path.to_owned()
+                } else {
+                    writer_root.join(path)
+                }
+            };
             let access = provenant_cli::Access {
                 mode: None,
                 worktree: (node.access
                     == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite)
-                    .then(|| node.worktree.as_deref().map(resolve))
+                    .then(|| node.worktree.as_deref().map(resolve_worktree))
                     .flatten(),
                 read_root: node.read_roots.iter().map(|path| resolve(path)).collect(),
                 write_root: node
@@ -2528,6 +2544,10 @@ impl Factory {
                     let path = Path::new(path);
                     if path.is_absolute() {
                         path.to_owned()
+                    } else if node.access
+                        == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
+                    {
+                        writer_root.join(path)
                     } else {
                         self.cwd.join(path)
                     }
@@ -4337,7 +4357,6 @@ mod tests {
             &json!({"branch":"feature/topic"}),
             &mut node,
             project.path(),
-            project.path(),
             &ports,
         )?;
         assert_eq!(
@@ -4357,7 +4376,6 @@ mod tests {
         bind_launch_controls(
             &json!({"branch":"topic"}),
             &mut node,
-            Path::new("/repo/src"),
             Path::new("/repo"),
             &provenant_config::PortTable::builtin(),
         )?;
@@ -4372,7 +4390,6 @@ mod tests {
             &json!({"branch":"topic", "base":"refs/remotes/origin/HEAD"}),
             &mut explicit,
             Path::new("/repo"),
-            Path::new("/repo"),
             &provenant_config::PortTable::builtin(),
         )?;
         assert!(
@@ -4384,7 +4401,6 @@ mod tests {
             bind_launch_controls(
                 &json!({"base":"HEAD"}),
                 &mut node,
-                Path::new("/repo"),
                 Path::new("/repo"),
                 &provenant_config::PortTable::builtin()
             )
@@ -5835,13 +5851,12 @@ mod tests {
 
     #[test]
     fn writer_controls_preserve_new_branch_and_refuse_conflicting_access() -> Result {
-        let cwd = Path::new("/fixture/project");
+        let root = Path::new("/fixture/project");
         let mut node = json!({"id":"task","use":"task"});
         bind_launch_controls(
             &json!({"branch":"fix/parser","base":"origin/main"}),
             &mut node,
-            cwd,
-            cwd,
+            root,
             &provenant_config::PortTable::builtin(),
         )?;
         assert_eq!(node["worktree"], "/fixture/project/.worktrees/fix-parser");
@@ -5849,7 +5864,6 @@ mod tests {
         bind_launch_controls(
             &json!({"worktree":".worktrees/fix-parser"}),
             &mut explicit,
-            Path::new("/fixture/project"),
             Path::new("/fixture/project"),
             &provenant_config::PortTable::builtin(),
         )?;
@@ -5861,11 +5875,11 @@ mod tests {
         bind_launch_controls(
             &json!({"worktree":"writer"}),
             &mut relative,
-            Path::new("/fixture/project/src"),
-            Path::new("/fixture/project"),
+            root,
             &provenant_config::PortTable::builtin(),
         )?;
-        assert_eq!(relative["worktree"], "/fixture/project/src/writer");
+        // A relative writer path is project-root-relative from every checkout.
+        assert_eq!(relative["worktree"], "/fixture/project/writer");
         assert_eq!(
             node["attempt"]["new_worktree"],
             json!({"branch":"fix/parser","base":"origin/main"})
@@ -5882,8 +5896,7 @@ mod tests {
                 bind_launch_controls(
                     &input,
                     &mut json!({"use":"task"}),
-                    cwd,
-                    cwd,
+                    root,
                     &provenant_config::PortTable::builtin()
                 )
                 .is_err()

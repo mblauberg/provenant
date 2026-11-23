@@ -1907,6 +1907,7 @@ fn safe_cause(error: &run::RunError) -> Option<String> {
             | E::GitUnavailable
             | E::AttemptReservationRetained
             | E::Validation(_)
+            | E::InvalidTaskTitle(_)
             | E::WriterLineage(_)
             | E::WriterHeadNotLaneBranch
             | E::WriterSourceMismatch { .. }
@@ -1922,6 +1923,7 @@ fn safe_cause(error: &run::RunError) -> Option<String> {
             | E::GenerationConflict { .. }
             | E::TooLarge { .. }
             | E::PromptTooLarge { .. }
+            | E::Input { .. }
             | E::TerminalRecoveryRequired
             | E::Refused
             | E::DepthExceeded { .. }
@@ -1944,6 +1946,10 @@ fn safe_cause(error: &run::RunError) -> Option<String> {
         E::Filesystem(FsError::ReadIo { source, .. }) => {
             format!("filesystem read file failed ({:?})", source.kind())
         }
+        E::WorktreeMissing(path) => format!(
+            "local worktree {} does not exist; create it with `provenant worktree create`",
+            path.display()
+        ),
         _ => return None,
     };
     Some(provenant_core::bounded_line(&cause, 512))

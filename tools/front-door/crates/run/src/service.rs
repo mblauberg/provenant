@@ -119,7 +119,10 @@ impl<'a> Service<'a> {
                 .as_ref()
                 .is_some_and(|context| !context.valid())
             {
-                return Err(input_error(ErrorKind::Invalid, "invalid work context"));
+                return Err(input_error(
+                    ErrorKind::Invalid,
+                    "context: invalid work context",
+                ));
             }
             task.route = Self::route(task.route)?;
             if let Some(title) = &task.title {
@@ -143,7 +146,7 @@ impl<'a> Service<'a> {
             if task.deliver.is_some() && task.worktree.is_none() {
                 return Err(input_error(
                     ErrorKind::Invalid,
-                    "delivery requires a writer worktree",
+                    "deliver: delivery requires a writer worktree",
                 ));
             }
             let mut writer = task
@@ -226,7 +229,7 @@ impl<'a> Service<'a> {
                     provenant_core::GitOid::parse(sha).map_err(|_| {
                         input_error(
                             ErrorKind::Invalid,
-                            format!("{label} must be a full Git SHA"),
+                            format!("{label}: must be a full Git SHA"),
                         )
                     })?;
                     let git =
@@ -241,13 +244,13 @@ impl<'a> Service<'a> {
                     .map_err(|_| {
                         input_error(
                             ErrorKind::Invalid,
-                            format!("invalid Git {label}: expected a resolvable commit SHA"),
+                            format!("{label}: invalid Git commit SHA"),
                         )
                     })?;
                     if resolved != sha {
                         return Err(input_error(
                             ErrorKind::Invalid,
-                            format!("{label} SHA must name a commit"),
+                            format!("{label}: SHA must name a commit"),
                         ));
                     }
                     Ok(())
@@ -462,7 +465,7 @@ impl<'a> Service<'a> {
         {
             return Err(input_error(
                 ErrorKind::Invalid,
-                "required_family must name a provider family",
+                "route.required_family: must name a provider family",
             ));
         }
         match route {
@@ -492,14 +495,19 @@ impl<'a> Service<'a> {
                 required_family,
             } => {
                 if provider.is_empty() || model.is_empty() || provider.contains('/') {
-                    return Err(input_error(ErrorKind::Invalid, "invalid model route"));
+                    return Err(input_error(
+                        ErrorKind::Invalid,
+                        "route.model: invalid model route",
+                    ));
                 }
                 let model = match model.split_once('/') {
                     Some((prefix, id)) if prefix == provider && !id.is_empty() => model,
-                    Some(_) => {
+                    Some((prefix, _)) => {
                         return Err(input_error(
                             ErrorKind::Invalid,
-                            "model provider does not match route provider",
+                            format!(
+                                "route.model: model provider `{prefix}` does not match route provider `{provider}`"
+                            ),
                         ));
                     }
                     None => format!("{provider}/{model}"),
@@ -544,7 +552,7 @@ impl<'a> Service<'a> {
             }),
             _ => Err(input_error(
                 ErrorKind::Invalid,
-                "named route requires a name",
+                "route.name: named route requires a name",
             )),
         }
     }

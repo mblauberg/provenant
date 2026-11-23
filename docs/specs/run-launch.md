@@ -111,10 +111,21 @@ superseded and print the newer handle as the next step; they never redirect sile
 the invoking checkout. The launch owner resolves and checkpoints `REF` before any Git effect,
 creates the worktree from that commit and binds it by source identity and head, identically from
 a primary checkout, a linked worktree, a separate Git directory or a bare linked checkout. An
-existing clean worktree at the exact checkpointed head is rebound; a different branch, head or
-unclean tree is refused with the named cause.
+existing clean worktree at the exact checkpointed head, including one a chair pre-created with
+`provenant worktree create`, is rebound; a different branch, head or unclean tree is refused with
+the named cause. Relative `--worktree` and graph writer paths resolve from the project's primary
+root, so a launch from a linked worktree of the same repository selects the same managed
+checkouts as the primary checkout. A host-planned writer (`provision_worktree` with no attempt
+`new_worktree`) is skipped by the pre-attempt integration-target check: it has no branch until
+provisioning, and provisioning verifies the exact branch and head.
 - Why: an owned writer must land in one project-owned location wherever the launch ran, and a
   failed bind must not leave a half-made worktree.
+
+`run --explain` runs the same pre-attempt admission checks as a launch, including graph
+exclusions, the submission snapshot, host writer preflight detection and delivery-target
+validation. An explanation that passes therefore admits the same input; the remaining launch
+work is writer provisioning and provider preparation.
+- Why: an explanation must not pass where the launch's own admission would refuse it.
 
 Every writer lane's prompt opens its host preamble with one `Lane location` paragraph built once
 by `lane_preamble_with`: the absolute bound worktree path, branch and base commit, and that the

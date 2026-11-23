@@ -1039,6 +1039,237 @@ fn every_bundled_template_is_listed_and_compiles_with_its_declared_parameters() 
 }
 
 #[test]
+fn batch_launch_provisions_planned_slice_worktrees_and_explains_same_admission() -> Result {
+    let rig = GraphProject::new()?;
+    let document = rig.document(&json!({
+        "schema_version": support::GRAPH_DOCUMENT_SCHEMA_VERSION,
+        "graph_id": "batch-provision",
+        "integration_branch": "batch/integration",
+        "nodes": [
+            {
+                "id": "task--slices--alpha",
+                "prompt": "implement alpha",
+                "access": "worktree_write",
+                "worktree": ".worktrees/batch-provision-task--slices--alpha",
+                "write_scope": ["."],
+                "delivery": "integrate:batch/integration",
+                "provision_worktree": true,
+                "route": {"adapter": "fixture", "model": "fixture/model"},
+            },
+            {
+                "id": "task--slices--beta",
+                "prompt": "implement beta",
+                "access": "worktree_write",
+                "worktree": ".worktrees/batch-provision-task--slices--beta",
+                "write_scope": ["."],
+                "delivery": "integrate:batch/integration",
+                "provision_worktree": true,
+                "route": {"adapter": "fixture", "model": "fixture/model"},
+            },
+        ],
+    }))?;
+    let document = document.to_str().ok_or("document path")?;
+    let (explained_output, explained) = rig.run(&["run", "--file", document, "--explain"])?;
+    assert!(explained_output.status.success(), "{explained}");
+    let managed = rig.project.join(".worktrees");
+    assert!(
+        !managed.exists() || std::fs::read_dir(&managed)?.next().is_none(),
+        "explain must not create managed worktrees: {explained}"
+    );
+
+    let (launch, launched) = rig.run(&["run", "--file", document])?;
+    let graph = launched["data"]["checkpoint"]["graph_id"]
+        .as_str()
+        .ok_or_else(|| {
+            format!("launch must admit the graph explain admitted: {launch:?}; {launched}")
+        })?
+        .to_owned();
+    if let Some(code) = launched["error"]["code"].as_str() {
+        assert!(
+            !matches!(code, "worktree_missing" | "invalid_input"),
+            "launch was refused after explain admitted it: {launched}"
+        );
+    }
+    let _ = rig
+        .command()
+        .args(["wait", &graph, "--timeout", "15s"])
+        .output()?;
+    let checkpoint_path = graph_records(&rig.state())?
+        .into_iter()
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| *name == *format!("graph-{graph}.json"))
+        })
+        .ok_or("checkpoint file")?;
+    let stored: Value = serde_json::from_slice(&std::fs::read(checkpoint_path)?)?;
+    let slices: Vec<_> = stored["checkpoint"]["nodes"]
+        .as_array()
+        .ok_or("checkpoint nodes")?
+        .iter()
+        .filter(|node| {
+            node["id"]
+                .as_str()
+                .is_some_and(|id| id.contains("task--slices--"))
+        })
+        .collect();
+    assert_eq!(slices.len(), 2, "both batch slices must start: {stored}");
+    let mut provisioned = std::collections::BTreeSet::new();
+    for slice in slices {
+        let binding = slice["writer_binding"]
+            .as_object()
+            .ok_or_else(|| format!("slice was not bound: {slice}"))?;
+        let path = binding["worktree"].as_str().ok_or("bound worktree")?;
+        assert!(
+            Path::new(path).is_dir(),
+            "host did not provision planned slice worktree {path}: {slice}"
+        );
+        provisioned.insert(path.to_owned());
+    }
+    assert_eq!(provisioned.len(), 2, "each slice owns a distinct worktree");
+    Ok(())
+}
+
+#[test]
+fn explain_refuses_a_writer_on_the_integration_branch_like_launch() -> Result {
+    let rig = GraphProject::new()?;
+    let writer = rig.project.join(".worktrees/integration-writer");
+    let output = provenant_os::fixture::git_command()
+        .current_dir(&rig.project)
+        .args([
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "batch/integration",
+            writer.to_str().ok_or("writer path")?,
+        ])
+        .output()?;
+    assert!(output.status.success(), "{output:?}");
+    let document = rig.document(&json!({
+        "schema_version": support::GRAPH_DOCUMENT_SCHEMA_VERSION,
+        "graph_id": "explain-integration-parity",
+        "integration_branch": "batch/integration",
+        "nodes": [{
+            "id": "writer",
+            "prompt": "write the change",
+            "access": "worktree_write",
+            "worktree": ".worktrees/integration-writer",
+            "write_scope": ["."],
+            "delivery": "integrate:batch/integration",
+            "route": {"adapter": "fixture", "model": "fixture/model"},
+        }],
+    }))?;
+    let document = document.to_str().ok_or("document path")?;
+    let (explained_output, explained) = rig.run(&["run", "--file", document, "--explain"])?;
+    assert!(!explained_output.status.success(), "{explained}");
+    let explained_cause = explained["error"]["message"]
+        .as_str()
+        .or_else(|| explained["error"]["cause"].as_str())
+        .unwrap_or_default();
+    assert!(
+        explained_cause.contains("on the integration branch batch/integration"),
+        "{explained}"
+    );
+    let (launch_output, launched) = rig.run(&["run", "--file", document])?;
+    assert!(!launch_output.status.success(), "{launched}");
+    let launch_cause = launched["error"]["message"]
+        .as_str()
+        .or_else(|| launched["error"]["cause"].as_str())
+        .unwrap_or_default();
+    assert!(
+        launch_cause.contains("on the integration branch batch/integration"),
+        "{launched}"
+    );
+    Ok(())
+}
+
+#[test]
+fn missing_writer_checkout_error_names_its_path_and_node() -> Result {
+    let rig = GraphProject::new()?;
+    let document = rig.document(&json!({
+        "schema_version": support::GRAPH_DOCUMENT_SCHEMA_VERSION,
+        "graph_id": "missing-writer",
+        "nodes": [{
+            "id": "slice",
+            "prompt": "write the change",
+            "access": "worktree_write",
+            "worktree": ".worktrees/missing-slice",
+            "write_scope": ["."],
+            "delivery": "push",
+            "route": {"adapter": "fixture", "model": "fixture/model"},
+        }],
+    }))?;
+    let (output, reply) = rig.run(&["run", "--file", document.to_str().ok_or("path")?])?;
+    assert!(!output.status.success(), "{reply}");
+    let rendered = reply.to_string();
+    assert!(rendered.contains(".worktrees/missing-slice"), "{reply}");
+    assert!(rendered.contains("node slice"), "{reply}");
+    assert_eq!(reply["error"]["code"], "worktree_missing", "{reply}");
+    Ok(())
+}
+
+#[test]
+fn relative_worktree_path_from_a_linked_checkout_uses_the_project_root() -> Result {
+    let rig = GraphProject::new()?;
+    let tracked_path = rig.project.join(".worktrees/writer");
+    let invoker = rig.project.join(".worktrees/invoker");
+    for (branch, path) in [("writer-branch", &tracked_path), ("invoker", &invoker)] {
+        let output = provenant_os::fixture::git_command()
+            .current_dir(&rig.project)
+            .args([
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                branch,
+                path.to_str().ok_or("worktree path")?,
+            ])
+            .output()?;
+        assert!(output.status.success(), "{output:?}");
+    }
+    let tracked = std::fs::canonicalize(&tracked_path)?;
+    let output = rig
+        .command()
+        .current_dir(&invoker)
+        .args([
+            "run",
+            "task",
+            "fixture writer",
+            "--mode",
+            "worktree-write",
+            "--worktree",
+            ".worktrees/writer",
+            "--model",
+            "fixture/model",
+        ])
+        .output()?;
+    let launched: Value =
+        serde_json::from_slice(&output.stdout).map_err(|error| format!("{error}: {output:?}"))?;
+    let graph = launched["data"]["checkpoint"]["graph_id"]
+        .as_str()
+        .ok_or_else(|| format!("graph id: {launched}"))?;
+    let checkpoint_path = graph_records(&rig.state())?
+        .into_iter()
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| *name == *format!("graph-{graph}.json"))
+        })
+        .ok_or("checkpoint file")?;
+    let stored: Value = serde_json::from_slice(&std::fs::read(checkpoint_path)?)?;
+    let binding = stored["checkpoint"]["nodes"]
+        .as_array()
+        .and_then(|nodes| nodes.first())
+        .and_then(|node| node["writer_binding"]["worktree"].as_str())
+        .ok_or_else(|| format!("writer binding: {stored}"))?;
+    assert_eq!(binding, tracked.to_str().ok_or("tracked path")?);
+    assert!(
+        !invoker.join(".worktrees/writer").exists(),
+        "relative writer path was nested under the linked checkout"
+    );
+    Ok(())
+}
+
+#[test]
 fn explain_shows_the_resolved_review_lens_tier() -> Result {
     fn lenses<'a>(value: &'a Value, found: &mut Vec<&'a Value>) {
         match value {
