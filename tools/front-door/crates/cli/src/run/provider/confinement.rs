@@ -191,14 +191,14 @@ pub(super) fn confinement_request(
         InventoryContext::Launch(_, _, receipt) => (*receipt).clone(),
         InventoryContext::Preflight => provenant_records::LaneAccessReceipt {
             access: provenant_records::LaneAccess::Host,
-            source: provenant_records::LaneAccessSource::Default,
+            source: provenant_records::Layer::Default,
             key: "lanes.access".into(),
             extra: Default::default(),
         },
         #[cfg(any(test, feature = "fixture"))]
         InventoryContext::Sandboxed => provenant_records::LaneAccessReceipt {
             access: provenant_records::LaneAccess::Isolated,
-            source: provenant_records::LaneAccessSource::Default,
+            source: provenant_records::Layer::Default,
             key: "lanes.access".into(),
             extra: Default::default(),
         },
@@ -455,7 +455,7 @@ fn sandbox_mode_for_access(
             .knob_sources
             .get("lanes.sandbox_floor")
             .copied()
-            .map(provenant_records::LimitSource::as_str)
+            .map(provenant_records::Layer::as_str)
             .unwrap_or("default");
         let warning = format!(
             "sandbox admission floor lowered; lanes.sandbox_floor=warn (source: {source}, boundary: none)"
@@ -529,7 +529,7 @@ fn admission_policy_is_independent_of_primary_or_fallback_adapter()
                 admission.boundary,
                 provenant_records::diagnostic::BoundaryClass::None
             );
-            assert_eq!(admission.source, provenant_records::LimitSource::Default);
+            assert_eq!(admission.source, provenant_records::Layer::Default);
         }
     }
     Ok(())
@@ -566,24 +566,39 @@ pub(super) fn apply_sandbox_mode(
             .knob_sources
             .get("lanes.sandbox_floor")
             .copied()
-            .unwrap_or(provenant_records::LimitSource::Default),
+            .unwrap_or(provenant_records::Layer::Default),
         extra: Default::default(),
     });
     environment.retain(|(name, _)| name != SANDBOX);
     environment.push((SANDBOX.into(), mode.env_value().into()));
     use provenant_confinement::run_config::SandboxSource;
-    use run::SandboxSourceReceipt as ReceiptSource;
+    use provenant_records::run::SandboxConstraint;
+    let (source, constraint) = match mode.source {
+        SandboxSource::Parent => (provenant_records::Layer::Parent, None),
+        SandboxSource::Route => (provenant_records::Layer::Route, None),
+        SandboxSource::Restriction => (
+            provenant_records::Layer::Host,
+            Some(SandboxConstraint::Restriction),
+        ),
+        SandboxSource::Platform => (
+            provenant_records::Layer::Host,
+            Some(SandboxConstraint::Platform),
+        ),
+        SandboxSource::Knob => (
+            task.profile
+                .knob_sources
+                .get("lanes.sandbox")
+                .copied()
+                .unwrap_or(provenant_records::Layer::Default),
+            None,
+        ),
+        SandboxSource::Default => (provenant_records::Layer::Default, None),
+    };
     route.sandbox = Some(run::SandboxModeReceipt {
         requested: mode.requested,
         effective: mode.effective,
-        source: match mode.source {
-            SandboxSource::Parent => ReceiptSource::Parent,
-            SandboxSource::Route => ReceiptSource::Route,
-            SandboxSource::Restriction => ReceiptSource::Restriction,
-            SandboxSource::Platform => ReceiptSource::Platform,
-            SandboxSource::Knob => ReceiptSource::Knob,
-            SandboxSource::Default => ReceiptSource::Default,
-        },
+        source,
+        constraint,
         warning: mode.warning,
         extra: Default::default(),
     });

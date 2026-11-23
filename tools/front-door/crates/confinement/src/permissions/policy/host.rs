@@ -8,7 +8,7 @@ use provenant_core::{
     Roots,
 };
 use provenant_os::fs::Directory;
-use provenant_records::{LaneAccess, LaneAccessReceipt, LaneAccessSource};
+use provenant_records::{LaneAccess, LaneAccessReceipt, Layer};
 use std::{
     ffi::{OsStr, OsString},
     io::Write,
@@ -18,7 +18,7 @@ use std::{
 fn isolated_lane_access_receipt() -> LaneAccessReceipt {
     LaneAccessReceipt {
         access: LaneAccess::Isolated,
-        source: LaneAccessSource::Default,
+        source: Layer::Default,
         key: "lanes.access".into(),
         extra: Default::default(),
     }
@@ -850,7 +850,7 @@ mod tests {
             true,
             LaneAccessReceipt {
                 access: LaneAccess::Host,
-                source: LaneAccessSource::Default,
+                source: Layer::Default,
                 key: "lanes.access".into(),
                 extra: Default::default(),
             },

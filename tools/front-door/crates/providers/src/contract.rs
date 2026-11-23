@@ -13,7 +13,7 @@ pub enum ProviderError {
     #[error("argv prompt exceeds domains.run.argv_prompt_limit_bytes ({limit} bytes; source: {})", .origin.description())]
     PromptTooLarge {
         limit: usize,
-        origin: provenant_records::diagnostic::SettingSource,
+        origin: provenant_records::diagnostic::Layer,
     },
     #[error("provider protocol is malformed")]
     Malformed,
@@ -168,7 +168,7 @@ fn provider_failure_boundary_depends_on_typed_cause() {
     assert_eq!(
         ProviderError::PromptTooLarge {
             limit: 1,
-            origin: provenant_records::diagnostic::SettingSource::ShippedDefault
+            origin: provenant_records::diagnostic::Layer::Default
         }
         .boundary_class(),
         B::None
@@ -229,7 +229,7 @@ pub struct Prompt {
     text: String,
     file: Option<std::path::PathBuf>,
     argv_limit: usize,
-    argv_origin: provenant_records::diagnostic::SettingSource,
+    argv_origin: provenant_records::diagnostic::Layer,
 }
 impl Prompt {
     pub fn new(text: String) -> Self {
@@ -237,7 +237,7 @@ impl Prompt {
             text,
             file: None,
             argv_limit: provenant_confinement::run_config::DEFAULT_ARGV_PROMPT_LIMIT_BYTES,
-            argv_origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
+            argv_origin: provenant_records::diagnostic::Layer::Default,
         }
     }
     pub fn from_file(path: std::path::PathBuf) -> Self {
@@ -248,14 +248,14 @@ impl Prompt {
             ),
             file: Some(path),
             argv_limit: provenant_confinement::run_config::DEFAULT_ARGV_PROMPT_LIMIT_BYTES,
-            argv_origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
+            argv_origin: provenant_records::diagnostic::Layer::Default,
         }
     }
     /// Override the compiled argv prompt threshold for this launch.
     pub fn with_argv_limit(
         mut self,
         limit: usize,
-        origin: provenant_records::diagnostic::SettingSource,
+        origin: provenant_records::diagnostic::Layer,
     ) -> Self {
         self.argv_limit = limit;
         self.argv_origin = origin;

@@ -820,7 +820,7 @@ fn opencode_profile_follows_lane_access() -> Result<(), Box<dyn std::error::Erro
     let prompt = Prompt::new("fixture prompt".into());
     let base = fixture_access_plan(Access::ReadOnly, Some("login"), false);
     let plan_for = |access: provenant_records::LaneAccess| {
-        use provenant_records::{LaneAccessReceipt, LaneAccessSource};
+        use provenant_records::{LaneAccessReceipt, Layer};
         let mut permissions = base.permissions().clone();
         let mut policy = provenant_confinement::run_config::RunConfig::default().policy_for_launch(
             &state,
@@ -832,7 +832,7 @@ fn opencode_profile_follows_lane_access() -> Result<(), Box<dyn std::error::Erro
         );
         policy.mandatory_mut().set_lane_access(LaneAccessReceipt {
             access,
-            source: LaneAccessSource::Default,
+            source: Layer::Default,
             key: "lanes.access".into(),
             extra: Default::default(),
         });
@@ -1706,7 +1706,7 @@ fn unbounded_reader_git_config_follows_lane_access() -> Result<(), Box<dyn std::
 fn opencode_config_overlapping_a_credential_root_follows_lane_access()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_core::{CredentialKind, CredentialScope};
-    use provenant_records::{LaneAccess, LaneAccessReceipt, LaneAccessSource};
+    use provenant_records::{LaneAccess, LaneAccessReceipt, Layer};
     let temp = tempfile::tempdir()?;
     let home = temp.path().canonicalize()?;
     let config = home.join(".config/opencode");
@@ -1733,7 +1733,7 @@ fn opencode_config_overlapping_a_credential_root_follows_lane_access()
         );
         policy.mandatory_mut().set_lane_access(LaneAccessReceipt {
             access,
-            source: LaneAccessSource::Default,
+            source: Layer::Default,
             key: "lanes.access".into(),
             extra: Default::default(),
         });

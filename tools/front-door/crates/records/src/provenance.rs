@@ -34,7 +34,26 @@ pub enum Layer {
     Launch,
 }
 
+impl Default for Layer {
+    /// The compiled default is the natural floor for every family that uses a
+    /// shared layer, so records with a `#[derive(Default)]` keep their shape.
+    fn default() -> Self {
+        Self::Default
+    }
+}
+
 impl Layer {
+    /// The person-readable name of this layer. The two layers a shipped
+    /// default and a host setting collapse to keep their established prose in
+    /// diagnostics; every other layer uses its wire spelling.
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::Default => "shipped default",
+            Self::Host => "host configuration",
+            other => other.as_str(),
+        }
+    }
+
     /// The wire spelling of this layer.
     pub const fn as_str(self) -> &'static str {
         match self {

@@ -3,10 +3,11 @@ use crate::{emit, fail, roots};
 use provenant_cli::Globals;
 use provenant_config::{
     CommandExitCodes, ExitDisposition, PortCommand, PortCommandDisposition, PortCommandExecution,
-    PortSource, PortTable,
+    PortTable,
 };
 use provenant_core::CancelToken;
 use provenant_os::exec::{CapturedStream, ExecOutcome, Termination};
+use provenant_records::Layer;
 use provenant_records::{CanonicalV1, CommandError, CommandResult, Outcome};
 use provenant_run::build::{self, Job, JobKind, Origin, Output, Priority, SnapshotSource, Step};
 use serde::Serialize;
@@ -26,7 +27,7 @@ use provenant_core::consumer_env::{
 struct Report {
     tier: String,
     backend: &'static str,
-    source: PortSource,
+    source: Layer,
     /// Set when verification was skipped rather than run; names the reason.
     skipped: Option<String>,
     disposition: Option<PortCommandDisposition>,
@@ -732,7 +733,7 @@ fn substitute_tier(command: &PortCommand, tier: &str) -> PortCommand {
 fn report(
     tier: &str,
     backend: &'static str,
-    source: PortSource,
+    source: Layer,
     execution: &PortCommandExecution,
     build_outcome: Option<&build::JobOutcome>,
 ) -> Report {

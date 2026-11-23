@@ -1,7 +1,7 @@
 //! What CI a writer lane runs or waits for (`lanes.ci_scope`). Advisory: the
 //! preamble states it and the receipt and status record its value and
 //! source; it grants no CI dispatch authority and removes none.
-use provenant_records::{LimitSource, run::HarnessProfile};
+use provenant_records::{Layer, run::HarnessProfile};
 use serde::{Deserialize, Serialize};
 
 /// The registry knob.
@@ -56,7 +56,7 @@ impl CiScope {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedCiScope {
     pub value: CiScope,
-    pub source: LimitSource,
+    pub source: Layer,
 }
 
 impl ResolvedCiScope {
@@ -102,19 +102,13 @@ mod tests {
     fn the_scope_and_its_source_come_from_the_sealed_profile() {
         let mut profile = HarnessProfile::default();
         let unset = ResolvedCiScope::resolve(&profile);
-        assert_eq!(
-            (unset.value, unset.source),
-            (CiScope::None, LimitSource::Default)
-        );
+        assert_eq!((unset.value, unset.source), (CiScope::None, Layer::Default));
         profile.knobs.insert(KNOB.into(), "full".into());
         profile
             .knob_sources
-            .insert(KNOB.into(), provenant_records::LimitSource::Launch);
+            .insert(KNOB.into(), provenant_records::Layer::Launch);
         let set = ResolvedCiScope::resolve(&profile);
-        assert_eq!(
-            (set.value, set.source),
-            (CiScope::Full, LimitSource::Launch)
-        );
+        assert_eq!((set.value, set.source), (CiScope::Full, Layer::Launch));
         assert_eq!(set.receipt()["value"], "full");
         assert_eq!(set.receipt()["source"], "launch");
     }

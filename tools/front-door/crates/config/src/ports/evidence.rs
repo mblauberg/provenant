@@ -1,5 +1,5 @@
 //! Durable, content-free evidence for declared command ports.
-use super::{PortCommandDisposition, PortCommandExecution, PortSource, PortTable};
+use super::{Layer, PortCommandDisposition, PortCommandExecution, PortTable};
 use provenant_core::SweepControl;
 use provenant_os::{
     exec::{ExecOutcome, Termination},
@@ -135,7 +135,7 @@ impl PortCommandExecution {
 pub fn record_port_command(
     state: &Path,
     owner: &str,
-    source: PortSource,
+    source: Layer,
     phase: &str,
     key: &str,
     execution: &PortCommandExecution,
@@ -199,7 +199,7 @@ pub struct PortCommandReceiptProof {
 pub fn port_command_receipt_proof(
     state: &Path,
     owner: &str,
-    source: PortSource,
+    source: Layer,
     phase: &str,
     key: &str,
     command_digest: FileDigest,
@@ -805,7 +805,7 @@ fn decode_receipt(raw: &[u8]) -> Result<PortCommandReceipt, provenant_records::D
 
 fn receipt(
     owner: &str,
-    source: PortSource,
+    source: Layer,
     phase: &str,
     request_key_digest: FileDigest,
     execution: &PortCommandExecution,
@@ -905,7 +905,7 @@ mod tests {
         let complete = execution(b"private stdout payload", false);
         let value = serde_json::to_value(receipt(
             "tracker",
-            PortSource::Project,
+            Layer::Project,
             "issue",
             CanonicalV1::file_digest(b"issue number 12"),
             &complete,
@@ -932,7 +932,7 @@ mod tests {
         assert!(!truncated.capture_complete());
         let value = serde_json::to_value(receipt(
             "tracker",
-            PortSource::Project,
+            Layer::Project,
             "issue",
             CanonicalV1::file_digest(b"issue number 12"),
             &truncated,
@@ -951,7 +951,7 @@ mod tests {
         record_port_command(
             state.path(),
             "admission",
-            PortSource::Project,
+            Layer::Project,
             "release",
             "attempt:epoch-1",
             &partial,
@@ -963,7 +963,7 @@ mod tests {
             port_command_receipt_proof(
                 state.path(),
                 "admission",
-                PortSource::Project,
+                Layer::Project,
                 "release",
                 "attempt:epoch-1",
                 partial.command_digest,
@@ -976,7 +976,7 @@ mod tests {
             port_command_receipt_proof(
                 state.path(),
                 "admission",
-                PortSource::Host,
+                Layer::Host,
                 "release",
                 "attempt:epoch-1",
                 partial.command_digest,
@@ -996,7 +996,7 @@ mod tests {
             record_port_command(
                 state.path(),
                 "admission",
-                PortSource::Project,
+                Layer::Project,
                 "release",
                 key,
                 &interrupted,
@@ -1007,7 +1007,7 @@ mod tests {
                 port_command_receipt_proof(
                     state.path(),
                     "admission",
-                    PortSource::Project,
+                    Layer::Project,
                     "release",
                     key,
                     interrupted.command_digest,
@@ -1025,7 +1025,7 @@ mod tests {
         record_port_command(
             state.path(),
             "tracker",
-            PortSource::Project,
+            Layer::Project,
             "issue",
             "issue:1",
             &execution(b"initial", false),
@@ -1041,7 +1041,7 @@ mod tests {
         record_port_command(
             state.path(),
             "tracker",
-            PortSource::Project,
+            Layer::Project,
             "issue",
             "issue:1",
             &execution(b"refreshed", false),
@@ -1058,7 +1058,7 @@ mod tests {
             record_port_command(
                 state.path(),
                 "tracker",
-                PortSource::Project,
+                Layer::Project,
                 "issue",
                 "issue:1",
                 &execution(b"concurrent", false),
@@ -1085,7 +1085,7 @@ mod tests {
             record_port_command(
                 state.path(),
                 "tracker",
-                PortSource::Project,
+                Layer::Project,
                 "issue",
                 key,
                 &execution(b"evidence", false),
@@ -1135,7 +1135,7 @@ mod tests {
             record_port_command(
                 state.path(),
                 "tracker",
-                PortSource::Project,
+                Layer::Project,
                 "issue",
                 key,
                 &execution(b"evidence", false),
@@ -1162,7 +1162,7 @@ mod tests {
         record_port_command(
             state.path(),
             "tracker",
-            PortSource::Project,
+            Layer::Project,
             "issue",
             "issue:3",
             &execution(b"evidence", false),

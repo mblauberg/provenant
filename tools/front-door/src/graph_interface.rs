@@ -1398,7 +1398,7 @@ mod tests {
     #[test]
     fn compact_run_reports_resolved_lane_access() {
         let data = json!({"status":"pending", "checkpoint":{"graph_id":"work", "nodes":[]},
-            "lane_accesses":[{"access":"isolated","source":"route_policy","key":"rules.policy.lane.access"}]});
+            "lane_accesses":[{"access":"isolated","source":"route","key":"rules.policy.lane.access"}]});
         let human = run_human(&data, &json!({}), true);
         assert!(human.contains("access: isolated (rules.policy.lane.access route_policy)\n"));
     }

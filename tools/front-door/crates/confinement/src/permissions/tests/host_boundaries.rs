@@ -5,7 +5,7 @@ use super::*;
 fn isolated_access() -> provenant_records::LaneAccessReceipt {
     provenant_records::LaneAccessReceipt {
         access: provenant_records::LaneAccess::Isolated,
-        source: provenant_records::LaneAccessSource::Default,
+        source: provenant_records::Layer::Default,
         key: "lanes.access".into(),
         extra: Default::default(),
     }

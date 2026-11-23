@@ -1060,7 +1060,7 @@ printf 'private-output\n'
         receipt.backend,
         provenant_records::PortCommandBackend::RepositoryCommand
     );
-    assert_eq!(receipt.source, provenant_records::PortSource::Project);
+    assert_eq!(receipt.source, provenant_records::Layer::Project);
     assert_eq!(
         receipt.outcome,
         provenant_records::PortCommandDisposition::Succeeded

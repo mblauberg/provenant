@@ -1873,11 +1873,7 @@ mod tests {
             directory: Some(root.join("checkout").to_string_lossy().into_owned()),
             host: Some("workshop".into()),
             confidential: true,
-            budget_sources: [(
-                "token_budget".into(),
-                provenant_records::LimitSource::Launch,
-            )]
-            .into(),
+            budget_sources: [("token_budget".into(), provenant_records::Layer::Launch)].into(),
             token_budget: Some(500),
             extra,
             write_scope: vec!["src".into()],

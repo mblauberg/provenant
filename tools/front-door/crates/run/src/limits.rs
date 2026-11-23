@@ -2,7 +2,7 @@
 //! `status` all read the record this builds, so they cannot disagree.
 use provenant_confinement::run_config::RunConfig;
 use provenant_records::{
-    BudgetAction, BudgetGrace, BudgetPolicy, LaneLimits, Limit, LimitSource, LimitStrength,
+    BudgetAction, BudgetGrace, BudgetPolicy, LaneLimits, Layer, Limit, LimitStrength,
     run::{HarnessProfile, RequestedRoute, TaskRequest, WorkContext},
 };
 use std::path::Path;
@@ -56,14 +56,8 @@ pub fn lane_limits(
     });
     let timeout = task.provider_timeout_seconds;
     let deadline_seconds = match caps.runtime_seconds {
-        Some(cap) if cap < timeout => {
-            Some(Limit::new(cap, LimitSource::Host, LimitStrength::Ceiling))
-        }
-        _ => nonzero(Limit::new(
-            timeout,
-            LimitSource::Launch,
-            LimitStrength::Default,
-        )),
+        Some(cap) if cap < timeout => Some(Limit::new(cap, Layer::Host, LimitStrength::Ceiling)),
+        _ => nonzero(Limit::new(timeout, Layer::Launch, LimitStrength::Default)),
     };
     let mut limits = LaneLimits {
         extra: Default::default(),
@@ -103,28 +97,28 @@ pub fn writer_budget_limits(
     let mut graces = vec![(grace_source, grace)];
     if let Some(tier) = tier.and_then(|tier| config.writer_budget_tier_for(tier)) {
         if let Some(value) = tier.token_budget {
-            budgets.push((LimitSource::Tier, value));
+            budgets.push((Layer::Tier, value));
         }
         if let Some(value) = tier.on_budget {
-            actions.push((LimitSource::Tier, value));
+            actions.push((Layer::Tier, value));
         }
         if let Some(value) = tier.budget_grace {
-            graces.push((LimitSource::Tier, value));
+            graces.push((Layer::Tier, value));
         }
     }
-    let source = |field: &str, knob: &str| -> LimitSource {
+    let source = |field: &str, knob: &str| -> Layer {
         context
             .and_then(|context| context.budget_sources.get(field).copied())
             .unwrap_or_else(|| provenant_config::knob_source(profile, knob))
     };
     let source_budget = source("token_budget", "lanes.token_budget");
-    if source_budget != LimitSource::Default
+    if source_budget != Layer::Default
         && let Some(value) = profile.knob_u64("lanes.token_budget")
     {
         budgets.push((source_budget, value));
     }
     let source_action = source("on_budget", "lanes.budget_action");
-    if source_action != LimitSource::Default
+    if source_action != Layer::Default
         && let Some(value) = profile
             .knobs
             .get("lanes.budget_action")
@@ -134,7 +128,7 @@ pub fn writer_budget_limits(
         actions.push((source_action, value));
     }
     let source_grace = source("budget_grace", "lanes.budget_grace");
-    if source_grace != LimitSource::Default
+    if source_grace != Layer::Default
         && let Some(value) = profile
             .knobs
             .get("lanes.budget_grace")
@@ -146,11 +140,11 @@ pub fn writer_budget_limits(
     let mut budget = Limit::resolve(budgets, LimitStrength::Default);
     let mut policy = BudgetPolicy::resolve(actions, graces);
     if let Some(remaining) = profile.budget_wrap_up.as_ref().map(|wrap| wrap.remaining) {
-        let mut allowance = Limit::new(remaining, LimitSource::Launch, LimitStrength::Default);
+        let mut allowance = Limit::new(remaining, Layer::Launch, LimitStrength::Default);
         allowance.wrap_up_target = budget.map(Box::new);
         budget = Some(allowance);
         policy.action = BudgetAction::Stop;
-        policy.action_source = LimitSource::Launch;
+        policy.action_source = Layer::Launch;
     }
     (budget.filter(|budget| budget.value > 0), policy)
 }
@@ -174,7 +168,7 @@ pub fn gh_budget(profile: &HarnessProfile) -> Option<Limit> {
 pub(crate) fn deadline_only(seconds: u64) -> LaneLimits {
     LaneLimits {
         deadline_seconds: (seconds > 0)
-            .then(|| Limit::new(seconds, LimitSource::Launch, LimitStrength::Default)),
+            .then(|| Limit::new(seconds, Layer::Launch, LimitStrength::Default)),
         ..LaneLimits::default()
     }
 }
@@ -204,7 +198,7 @@ mod tests {
         dir
     }
 
-    fn found(limit: &Option<Limit>) -> Option<(u64, LimitSource)> {
+    fn found(limit: &Option<Limit>) -> Option<(u64, Layer)> {
         limit.as_ref().map(|l| (l.value, l.source))
     }
 
@@ -221,32 +215,20 @@ mod tests {
         // The sealed profile names the layer that set the knob.
         task.profile
             .knob_sources
-            .insert("lanes.context_handoff_tokens".into(), LimitSource::Host);
+            .insert("lanes.context_handoff_tokens".into(), Layer::Host);
         task.provider_timeout_seconds = 3600;
         let caps = HostCaps {
             runtime_seconds: Some(600),
         };
         let limits = lane_limits(&task, state.path(), "p", "claude", caps);
-        assert_eq!(
-            found(&limits.token_budget),
-            Some((900, LimitSource::Project))
-        );
-        assert_eq!(
-            found(&limits.context_handoff),
-            Some((200_000, LimitSource::Host))
-        );
-        assert_eq!(
-            found(&limits.deadline_seconds),
-            Some((600, LimitSource::Host))
-        );
+        assert_eq!(found(&limits.token_budget), Some((900, Layer::Project)));
+        assert_eq!(found(&limits.context_handoff), Some((200_000, Layer::Host)));
+        assert_eq!(found(&limits.deadline_seconds), Some((600, Layer::Host)));
         let host_only = lane_limits(&task, state.path(), "other", "claude", HostCaps::default());
-        assert_eq!(
-            found(&host_only.token_budget),
-            Some((700, LimitSource::Host))
-        );
+        assert_eq!(found(&host_only.token_budget), Some((700, Layer::Host)));
         assert_eq!(
             found(&host_only.deadline_seconds),
-            Some((3600, LimitSource::Launch))
+            Some((3600, Layer::Launch))
         );
         let bare = tempfile::tempdir().unwrap();
         let bare = lane_limits(&task, bare.path(), "p", "claude", HostCaps::default());
@@ -254,7 +236,7 @@ mod tests {
             found(&bare.token_budget),
             Some((
                 provenant_confinement::run_config::DEFAULT_WRITER_TOKEN_BUDGET,
-                LimitSource::Default
+                Layer::Default
             ))
         );
     }
@@ -318,14 +300,8 @@ mod tests {
             runtime_seconds: Some(600),
         };
         let limits = lane_limits(&task, state.path(), "p", "claude", caps);
-        assert_eq!(
-            found(&limits.token_budget),
-            Some((5000, LimitSource::Launch))
-        );
-        assert_eq!(
-            found(&limits.deadline_seconds),
-            Some((600, LimitSource::Host))
-        );
+        assert_eq!(found(&limits.token_budget), Some((5000, Layer::Launch)));
+        assert_eq!(found(&limits.deadline_seconds), Some((600, Layer::Host)));
         assert_eq!(
             crate::launch::capture_plan(&task, &limits).token_budget,
             limits.token_budget.as_ref().unwrap().value
@@ -359,12 +335,12 @@ budget_grace = 0.03
         let mut context = WorkContext::default();
         let (budget, policy) =
             writer_budget_limits(&config, "p", &profile, Some(&context), Some("junior"));
-        assert_eq!(budget.unwrap().source, LimitSource::Tier);
+        assert_eq!(budget.unwrap().source, Layer::Tier);
         assert_eq!(
             (policy.action_source, policy.grace_source),
-            (LimitSource::Tier, LimitSource::Tier)
+            (Layer::Tier, Layer::Tier)
         );
-        for source in [LimitSource::Template, LimitSource::Launch] {
+        for source in [Layer::Template, Layer::Launch] {
             context.budget_sources = ["token_budget", "on_budget", "budget_grace"]
                 .into_iter()
                 .map(|field| (field.into(), source))

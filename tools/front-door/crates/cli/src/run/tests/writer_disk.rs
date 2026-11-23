@@ -2,14 +2,14 @@ use super::*;
 
 #[test]
 fn disk_policy_refusal_uses_resource_projection() {
-    use provenant_records::diagnostic::{ResourceFact, SettingSource};
+    use provenant_records::diagnostic::{Layer, ResourceFact};
     let refusal = crate::run::disk_policy_refusal(crate::run::DiskCheck::Low {
         path: "/tmp/example".into(),
         available: 1,
         floor: 2,
         reclaimed: 0,
         gc_scheduled: false,
-        origin: SettingSource::Configuration,
+        origin: Layer::Host,
     });
     let fact = refusal.resource.expect("disk fact");
     let kind = run::RefusalKind::PolicyResource(fact);
@@ -45,7 +45,7 @@ fn disk_policy_refusal_uses_resource_projection() {
                 kind: run::RefusalKind::PolicyResource(ResourceFact::Disk {
                     free: 1,
                     floor: 2,
-                    origin: SettingSource::Configuration,
+                    origin: Layer::Host,
                 }),
                 reason: "low disk".into(),
             },
@@ -273,7 +273,7 @@ fn writer_requires_critical_space_on_every_output_volume() -> Result<(), String>
             .err()
             .ok_or_else(|| format!("writer accepted low volume {}", low.display()))?;
         assert!(
-            matches!(error, DiskCheck::Low { ref path, available: 99, floor: 100, origin: provenant_records::diagnostic::SettingSource::Configuration, .. } if path == low)
+            matches!(error, DiskCheck::Low { ref path, available: 99, floor: 100, origin: provenant_records::diagnostic::Layer::Host, .. } if path == low)
         );
         assert!(observed.contains(&low.to_path_buf()));
     }
@@ -303,7 +303,7 @@ fn writer_disk_default_floor_names_its_source() -> Result<(), String> {
     assert!(matches!(
         error,
         DiskCheck::Low {
-            origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
+            origin: provenant_records::diagnostic::Layer::Default,
             ..
         }
     ));
@@ -440,7 +440,7 @@ fn writer_disk_policy_refusal_keeps_disk_facts_and_safe_recovery() -> Result<(),
         Some(provenant_records::diagnostic::ResourceFact::Disk {
             free: 99,
             floor: 100,
-            origin: provenant_records::diagnostic::SettingSource::Configuration,
+            origin: provenant_records::diagnostic::Layer::Host,
         })
     );
     assert!(
@@ -474,9 +474,7 @@ fn writer_disk_policy_refusal_keeps_disk_facts_and_safe_recovery() -> Result<(),
 
 #[test]
 fn preparation_and_handoff_resources_reach_launch_policy_projection() {
-    use provenant_records::diagnostic::{
-        PressureLevel, PressureThreshold, ResourceFact, SettingSource,
-    };
+    use provenant_records::diagnostic::{Layer, PressureLevel, PressureThreshold, ResourceFact};
     for kind in [
         run::RefusalKind::PreparationResource(ResourceFact::DependencyPreparation {
             configured: true,
@@ -484,7 +482,7 @@ fn preparation_and_handoff_resources_reach_launch_policy_projection() {
         run::RefusalKind::HandoffResource(ResourceFact::MemoryPressure {
             level: PressureLevel::Critical,
             threshold: PressureThreshold::Warning,
-            origin: SettingSource::Configuration,
+            origin: Layer::Host,
         }),
     ] {
         let expected = kind.diagnostic().unwrap();

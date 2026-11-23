@@ -88,7 +88,7 @@ fn lane_command_with_launch(
     );
     options.inherited_profile = confined
         .as_ref()
-        .map(|c| &c.profile as &dyn provenant_os::sys::profile::LimitSource);
+        .map(|c| &c.profile as &dyn provenant_os::sys::profile::Layer);
     options.env = Some(&environment);
     let output = SystemExecutor::new(1)?.execute(options)?;
     assert_eq!(

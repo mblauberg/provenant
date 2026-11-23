@@ -22,19 +22,22 @@ fn sandbox_mode_receipt(
     mode: &provenant_confinement::run_config::SandboxMode,
 ) -> provenant_records::run::SandboxModeReceipt {
     use provenant_confinement::run_config::SandboxSource;
-    use provenant_records::run::SandboxSourceReceipt as ReceiptSource;
-    let source = match mode.source {
-        SandboxSource::Parent => ReceiptSource::Parent,
-        SandboxSource::Route => ReceiptSource::Route,
-        SandboxSource::Restriction => ReceiptSource::Restriction,
-        SandboxSource::Platform => ReceiptSource::Platform,
-        SandboxSource::Knob => ReceiptSource::Knob,
-        SandboxSource::Default => ReceiptSource::Default,
+    use provenant_records::{Layer, run::SandboxConstraint};
+    let (source, constraint) = match mode.source {
+        SandboxSource::Parent => (Layer::Parent, None),
+        SandboxSource::Route => (Layer::Route, None),
+        SandboxSource::Restriction => (Layer::Host, Some(SandboxConstraint::Restriction)),
+        SandboxSource::Platform => (Layer::Host, Some(SandboxConstraint::Platform)),
+        // The preparation edge records the knob's actual layer on the sibling
+        // admission receipt; the supervisor rebind keeps the host-layer default.
+        SandboxSource::Knob => (Layer::Host, None),
+        SandboxSource::Default => (Layer::Default, None),
     };
     provenant_records::run::SandboxModeReceipt {
         requested: mode.requested,
         effective: mode.effective,
         source,
+        constraint,
         warning: mode.warning.clone(),
         extra: Default::default(),
     }
@@ -394,7 +397,7 @@ fn pacing_refusal_retains_the_selected_reserve_fact() {
     let fact = ResourceFact::PacingReserve {
         percent: 15,
         setting: PacingReserveSetting::AdapterFiveHour,
-        origin: PacingSettingSource::ShippedDefault,
+        origin: PacingLayer::Default,
         hold: Box::new(provenant_records::diagnostic::PacingHold {
             account: "codex/opaque-account".into(),
             window: "five_hour".into(),
@@ -746,13 +749,13 @@ impl RunStore {
 #[derive(Clone, Copy, Debug)]
 pub struct WriteGrantLimit {
     pub bytes: u64,
-    pub origin: provenant_records::diagnostic::SettingSource,
+    pub origin: provenant_records::diagnostic::Layer,
 }
 impl Default for WriteGrantLimit {
     fn default() -> Self {
         Self {
             bytes: provenant_records::run::MAX_WRITE_GRANT_BYTES,
-            origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
+            origin: provenant_records::diagnostic::Layer::Default,
         }
     }
 }
@@ -781,12 +784,12 @@ impl WriteGrantLimit {
             key: "domains.run.write_grant_limit_bytes".into(),
             value: self.bytes,
             origin: match self.origin {
-                provenant_records::diagnostic::SettingSource::Configuration => {
-                    WriteGrantLimitOrigin::Configuration
-                }
-                provenant_records::diagnostic::SettingSource::ShippedDefault => {
+                provenant_records::diagnostic::Layer::Host => WriteGrantLimitOrigin::Configuration,
+                provenant_records::diagnostic::Layer::Default => {
                     WriteGrantLimitOrigin::CompiledDefault
                 }
+                // Only shipped-default and configured values reach this receipt.
+                _ => WriteGrantLimitOrigin::Configuration,
             },
             extra: Default::default(),
         }
@@ -2974,7 +2977,8 @@ mod policy_reporting_tests {
             applied.sandbox = Some(provenant_records::run::SandboxModeReceipt {
                 requested: true,
                 effective: true,
-                source: provenant_records::run::SandboxSourceReceipt::Knob,
+                source: provenant_records::Layer::Host,
+                constraint: None,
                 warning: None,
                 extra: Default::default(),
             });
@@ -3201,7 +3205,7 @@ mod resource_status_tests {
     use crate::tests::{call, clock, context, input};
     use provenant_core::CancelToken;
     use provenant_records::diagnostic::{
-        LaneLimit, PressureLevel, PressureThreshold, ResourceFact, SettingSource,
+        LaneLimit, Layer, PressureLevel, PressureThreshold, ResourceFact,
     };
     use provenant_records::wire::LaneRow;
 
@@ -3258,13 +3262,13 @@ mod resource_status_tests {
                             active: 2,
                             limit: 2,
                             kind: LaneLimit::HostTotal,
-                            origin: SettingSource::Configuration,
+                            origin: Layer::Host,
                         }
                     } else {
                         AdmissionError::MemoryPressure {
                             level: PressureLevel::Critical,
                             threshold: PressureThreshold::Warning,
-                            origin: SettingSource::Configuration,
+                            origin: Layer::Host,
                         }
                     }))
                 },
@@ -3406,7 +3410,7 @@ mod admission_port_lifecycle_tests {
         std::fs::write(&project_ports, declaration("repo-gate-old", "project"))?;
         std::fs::write(
             context.state_root.as_path().join("ports.json"),
-            r#"{"schema_version":2}"#,
+            r#"{"schema_version":3}"#,
         )?;
 
         let mut prepared = input();
@@ -3426,7 +3430,7 @@ mod admission_port_lifecycle_tests {
             .map_err(|error| std::io::Error::other(error.to_owned()))?;
         let binding = binding
             .ok_or_else(|| std::io::Error::other("project admission command was not bound"))?;
-        assert_eq!(binding.source, provenant_records::PortSource::Project);
+        assert_eq!(binding.source, provenant_records::Layer::Project);
         assert_eq!(binding.phase, RepositoryAdmissionPhase::AcquirePending);
         assert!(record.repository_admission_binding.is_some());
 
@@ -3453,17 +3457,14 @@ mod admission_port_lifecycle_tests {
 
         // The release retry and the next acquisition still use the bound project
         // command after the effective source rotates to the host declaration.
-        std::fs::write(&project_ports, r#"{"schema_version":2}"#)?;
+        std::fs::write(&project_ports, r#"{"schema_version":3}"#)?;
         std::fs::write(
             context.state_root.as_path().join("ports.json"),
             declaration("repo-gate-new", "host"),
         )?;
         let effective =
             provenant_config::PortTable::read_for(Some(&project), context.state_root.as_path())?;
-        assert_eq!(
-            effective.admission.source,
-            provenant_records::PortSource::Host
-        );
+        assert_eq!(effective.admission.source, provenant_records::Layer::Host);
         let rotated_program = match effective.admission.backend {
             provenant_config::PortBackend::Command { command } => command.argv[0].clone(),
             _ => return Err(std::io::Error::other("host admission command was not active").into()),
@@ -3591,7 +3592,7 @@ mod admission_port_lifecycle_tests {
         std::fs::write(&project_ports, declaration("repo-gate-bound", "project"))?;
         std::fs::write(
             context.state_root.as_path().join("ports.json"),
-            r#"{"schema_version":2}"#,
+            r#"{"schema_version":3}"#,
         )?;
 
         let mut input = input();
@@ -3621,7 +3622,7 @@ mod admission_port_lifecycle_tests {
 
         // A configuration rotation after the owner claim cannot replace the
         // declaration already bound to this attempt.
-        std::fs::write(&project_ports, r#"{"schema_version":2}"#)?;
+        std::fs::write(&project_ports, r#"{"schema_version":3}"#)?;
         std::fs::write(
             context.state_root.as_path().join("ports.json"),
             declaration("repo-gate-rotated", "host"),
@@ -3772,8 +3773,7 @@ mod admission_port_lifecycle_tests {
                 other: provenant_records::ExitDisposition::Refused,
             },
         };
-        let binding =
-            RepositoryAdmissionBinding::new(provenant_records::PortSource::Project, &command);
+        let binding = RepositoryAdmissionBinding::new(provenant_records::Layer::Project, &command);
         store.record_admission_binding(&queued, binding, &call)?;
         let terminal = store
             .withdraw(

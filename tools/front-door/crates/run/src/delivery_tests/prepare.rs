@@ -174,7 +174,7 @@ fn transport_protects_sandboxed_lane_configuration()
         // so opt into isolation here rather than relying on the old default.
         let access = sandboxed.then(|| provenant_records::LaneAccessReceipt {
             access: provenant_records::LaneAccess::Isolated,
-            source: provenant_records::LaneAccessSource::Launch,
+            source: provenant_records::Layer::Launch,
             key: "lanes.access".into(),
             extra: Default::default(),
         });
@@ -196,7 +196,7 @@ fn host_transport_trusts_its_own_checkout_but_not_another_lanes_worktree()
             .with_lane_access(
                 Some(provenant_records::LaneAccessReceipt {
                     access: provenant_records::LaneAccess::Host,
-                    source: provenant_records::LaneAccessSource::Launch,
+                    source: provenant_records::Layer::Launch,
                     key: "lanes.access".into(),
                     extra: Default::default(),
                 }),

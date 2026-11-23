@@ -75,9 +75,9 @@ mod tests {
     fn session_threshold_and_distinct_volumes() -> Result<(), Box<dyn std::error::Error>> {
         let limits = provenant_config::DiskLimits {
             free_floor: 100,
-            free_floor_source: provenant_records::diagnostic::SettingSource::Configuration,
+            free_floor_source: provenant_records::diagnostic::Layer::Host,
             critical_free: 50,
-            critical_free_source: provenant_records::diagnostic::SettingSource::ShippedDefault,
+            critical_free_source: provenant_records::diagnostic::Layer::Default,
         };
         let state = Sample {
             name: "state",

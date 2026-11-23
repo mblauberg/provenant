@@ -371,7 +371,7 @@ fn config_show_names_verify_port_layers_and_survives_a_malformed_project_layer()
     let value: serde_json::Value = serde_json::from_slice(&shown.stdout.bytes)?;
     let ports = &value["data"]["ports"];
     assert_eq!(ports["verify.remote"]["value"], "origin");
-    assert_eq!(ports["verify.remote"]["source"], "builtin");
+    assert_eq!(ports["verify.remote"]["source"], "default");
     assert!(
         ports["verify.base"]["source"]
             .as_str()

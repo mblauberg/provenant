@@ -333,7 +333,7 @@ fn never_spawned_exit_is_a_refusal_with_its_reason() -> TestResult {
     observed.warnings = vec!["admission refused".into()];
     observed.launch_refusal = Some(provenant_records::diagnostic::ResourceFact::LanePorts {
         blocks: 1,
-        origin: provenant_records::diagnostic::PortSettingSource::Configuration,
+        origin: provenant_records::diagnostic::PortLayer::Host,
     });
     observed.settlement_evidence = provenant_supervisor::custody::SettlementEvidence::NeverSpawned;
     seal_exit(&store, &observed)?;

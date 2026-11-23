@@ -311,7 +311,7 @@ pub(super) enum DiskCheck {
         floor: u64,
         reclaimed: u64,
         gc_scheduled: bool,
-        origin: provenant_records::diagnostic::SettingSource,
+        origin: provenant_records::diagnostic::Layer,
     },
 }
 
@@ -636,7 +636,7 @@ fn submit_with_launcher(
                         .budget_sources
                         .get("lane_access")
                         .copied()
-                        .unwrap_or(provenant_records::LimitSource::Template),
+                        .unwrap_or(provenant_records::Layer::Template),
                 );
             }
             task_profile.policy_project = Some(session.context.project_id);

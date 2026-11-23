@@ -289,7 +289,7 @@ impl PrepareFixture {
             .with_lane_access(
                 Some(provenant_records::LaneAccessReceipt {
                     access: provenant_records::LaneAccess::Isolated,
-                    source: provenant_records::LaneAccessSource::Launch,
+                    source: provenant_records::Layer::Launch,
                     key: "lanes.access".into(),
                     extra: Default::default(),
                 }),

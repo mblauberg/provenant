@@ -91,11 +91,11 @@ pub enum PermissionError {
         setting_key = GRANT_LIMIT_SETTING_KEY
     )]
     GrantLimitExceeded { family: &'static str, limit: usize },
-    #[error("{source} (source: {})", match origin { provenant_records::diagnostic::SettingSource::Configuration => "host configuration", provenant_records::diagnostic::SettingSource::ShippedDefault => "compiled default" })]
+    #[error("{source} (source: {})", match origin { provenant_records::diagnostic::Layer::Host => "host configuration", provenant_records::diagnostic::Layer::Default => "compiled default", other => other.as_str() })]
     ConfigOrigin {
         #[source]
         source: Box<PermissionError>,
-        origin: provenant_records::diagnostic::SettingSource,
+        origin: provenant_records::diagnostic::Layer,
     },
     #[error("Git control directory entry count exceeds its bound of {limit}: {path:?}")]
     GitControlEntriesExceeded { limit: usize, path: PathBuf },
@@ -242,7 +242,7 @@ mod repository_error_tests {
             (
                 PermissionError::ConfigOrigin {
                     source: Box::new(PermissionError::CredentialRoot),
-                    origin: provenant_records::diagnostic::SettingSource::Configuration,
+                    origin: provenant_records::diagnostic::Layer::Host,
                 },
                 B::Credentials,
             ),

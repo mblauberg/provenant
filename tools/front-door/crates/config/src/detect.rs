@@ -268,7 +268,7 @@ mod tests {
         assert_eq!(table.verify.default_tier, "1");
         assert_eq!(
             table.provenance()["verify.default_tier"],
-            crate::PortSource::Detected
+            crate::Layer::Detected
         );
         write(
             state.path(),
@@ -280,7 +280,7 @@ mod tests {
         assert_eq!(table.verify.tiers["1"].commands[0].argv, ["custom"]);
         assert_eq!(
             table.provenance()["verify.default_tier"],
-            crate::PortSource::Host
+            crate::Layer::Host
         );
     }
 

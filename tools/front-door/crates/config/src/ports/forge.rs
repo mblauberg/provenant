@@ -1,7 +1,7 @@
 //! Shared repository port and forge operations. Intended for `ports/forge.rs`.
 use super::{
-    CommandExitCodes, ExitDisposition, LandBackend, LandPort, Port, PortBackend, PortCommand,
-    PortCommandDisposition, PortEvidenceError, PortSource,
+    CommandExitCodes, ExitDisposition, LandBackend, LandPort, Layer, Port, PortBackend,
+    PortCommand, PortCommandDisposition, PortEvidenceError,
 };
 use provenant_os::exec::{
     ExecOptions, ExecOutcome, Executor, StreamPolicy, SystemExecutor, Termination,
@@ -22,7 +22,7 @@ pub enum PortError {
     #[error("port {owner} is disabled (source: {port_source:?})")]
     Disabled {
         owner: &'static str,
-        port_source: PortSource,
+        port_source: Layer,
     },
     #[error("cannot start port executor: {0}")]
     Executor(#[source] io::Error),
@@ -111,7 +111,7 @@ pub struct Adapter {
     /// Effective policy for the entire port execution.
     pub policy: std::sync::Arc<provenant_records::policy::Policy>,
     owner: &'static str,
-    port_source: PortSource,
+    port_source: Layer,
     backend: PortBackend,
     project: PathBuf,
     state: PathBuf,
@@ -1211,7 +1211,7 @@ esac
 
     fn port(backend: PortBackend) -> Port {
         Port {
-            source: PortSource::Project,
+            source: Layer::Project,
             backend,
         }
     }

@@ -765,10 +765,7 @@ mod graph_writer_admission_tests {
     #[test]
     fn invalid_fake_launch_reaches_human_and_machine_graph_status() {
         use provenant_fabric_runtime::coordination::facade::InvalidInputDetail;
-        use provenant_fabric_runtime::graph::{
-            AccessMode, AttemptKey, AttemptObservation, AttemptOwner, GraphDocument, GraphRoute,
-            NodeInput, Replay,
-        };
+        use provenant_fabric_runtime::graph::{AccessMode, AttemptKey, AttemptObservation, AttemptOwner, GraphDocument, GraphRoute, NodeInput, Replay, };
         struct Refuse(FacadeError);
         impl AttemptOwner for Refuse {
             type Error = FacadeError;
@@ -838,9 +835,7 @@ mod graph_writer_admission_tests {
             }
         }
         use provenant_fabric_runtime::coordination::facade::DispatchRefusalFact;
-        use provenant_records::diagnostic::{
-            PressureLevel, PressureThreshold, ResourceFact, SettingSource,
-        };
+        use provenant_records::diagnostic::{PressureLevel, PressureThreshold, ResourceFact, Layer, };
         for cause in [
             FacadeError::DispatchRefused {
                 fact: Some(DispatchRefusalFact::DirtyWriter),
@@ -851,7 +846,7 @@ mod graph_writer_admission_tests {
                 resource: Some(ResourceFact::MemoryPressure {
                     level: PressureLevel::Critical,
                     threshold: PressureThreshold::Critical,
-                    origin: SettingSource::Configuration,
+                    origin: Layer::Host,
                 }),
             },
             FacadeError::LaunchUnknown {
@@ -1225,9 +1220,7 @@ mod graph_review_tests {
     #[test]
     fn review_identity_requires_read_only_and_recognises_behaviour()
     -> Result<(), Box<dyn std::error::Error>> {
-        use provenant_fabric_runtime::graph::{
-            GraphNode, is_review_node, template::ReviewBehaviour,
-        };
+        use provenant_fabric_runtime::graph::{GraphNode, is_review_node, template::ReviewBehaviour, };
         for (role, reviews) in [
             (None, false),
             (Some("lens"), true),
@@ -1305,9 +1298,7 @@ mod graph_ask_inbox_tests {
         graph::{AskFiling, AskLink, AskScope, LoopDecision, loop_ask},
         inbox::{InboxFilter, InboxInput, InboxResult, InboxService},
     };
-    use provenant_records::inbox::{
-        AnswerAction, AnswerDeliveryState, InteractionChannel, RequestState,
-    };
+    use provenant_records::inbox::{AnswerAction, AnswerDeliveryState, InteractionChannel, RequestState, };
 
     #[test]
     fn graph_owner_notification_is_non_blocking_and_replays_one_receipt()
@@ -1747,9 +1738,7 @@ mod graph_ask_inbox_tests {
     #[test]
     fn graph_ask_is_one_open_request_and_a_chat_answer_resumes_the_node()
     -> Result<(), Box<dyn std::error::Error>> {
-        use provenant_fabric_runtime::graph::{
-            GraphDocument, GraphStatus, NodeState, advance_with_budget,
-        };
+        use provenant_fabric_runtime::graph::{GraphDocument, GraphStatus, NodeState, advance_with_budget, };
         let temp = tempfile::tempdir()?;
         let base = temp.path().canonicalize()?;
         let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("assets"));
@@ -1840,9 +1829,7 @@ mod graph_ask_inbox_tests {
     #[test]
     fn graph_decide_asks_stay_fresh_across_repeated_cancel_and_resume()
     -> Result<(), Box<dyn std::error::Error>> {
-        use provenant_fabric_runtime::graph::{
-            GraphDocument, GraphStatus, NodeState, advance_with_budget, resume_with_budget,
-        };
+        use provenant_fabric_runtime::graph::{GraphDocument, GraphStatus, NodeState, advance_with_budget, resume_with_budget, };
         let temp = tempfile::tempdir()?;
         let base = temp.path().canonicalize()?;
         let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("assets"));
@@ -2584,9 +2571,7 @@ mod result_tests {
             return Ok(());
         }
         use super::*;
-        use provenant_fabric_runtime::graph::{
-            FileJournal, GraphDocument, GraphExecution, GraphJournal,
-        };
+        use provenant_fabric_runtime::graph::{FileJournal, GraphDocument, GraphExecution, GraphJournal, };
         struct FreeWorkers;
         impl WorkerObserver for FreeWorkers {
             fn observe_roots(
@@ -4046,9 +4031,7 @@ mod provisioned_writer_submission_tests {
             provenant_core::WallTime::from_micros(record.queued_at.as_micros() + 1_500_000)?;
         let finished = provenant_core::WallTime::from_micros(started.as_micros() + 3_000_000)?;
         use provenant_records::custody::Scope;
-        use provenant_supervisor::custody::{
-            ExitObservation, PublicationState, SettlementEvidence,
-        };
+        use provenant_supervisor::custody::{ExitObservation, PublicationState, SettlementEvidence, };
         let exit = ExitObservation {
             launch_refusal: None,
             publication: PublicationState::Durable,

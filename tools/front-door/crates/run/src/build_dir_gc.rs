@@ -1152,7 +1152,7 @@ pub fn collect(
         &provenant_config::CargoCacheBudget {
             bytes: limits.max_bytes,
             setting: "unspecified".into(),
-            source: provenant_records::LimitSource::Default,
+            source: provenant_records::Layer::Default,
         },
         &TargetProtection::default(),
     )
@@ -3682,7 +3682,7 @@ mod tests {
         let budget = provenant_config::CargoCacheBudget {
             bytes: 0,
             setting: "0".into(),
-            source: provenant_records::LimitSource::Default,
+            source: provenant_records::Layer::Default,
         };
         let mut stop = || false;
         let mut refresh = TargetProtection::default;
@@ -3959,7 +3959,7 @@ mod tests {
         let budget = provenant_config::CargoCacheBudget {
             bytes: 1024,
             setting: "1K".into(),
-            source: provenant_records::LimitSource::Default,
+            source: provenant_records::Layer::Default,
         };
         let report = collect_with_protection(
             fixture.home.path(),
@@ -4023,7 +4023,7 @@ mod tests {
         let budget = provenant_config::CargoCacheBudget {
             bytes: u64::MAX,
             setting: "100%".into(),
-            source: provenant_records::LimitSource::Default,
+            source: provenant_records::Layer::Default,
         };
         let mut calls = 0;
         let mut stop = || {
@@ -4185,7 +4185,7 @@ mod tests {
         let budget = provenant_config::CargoCacheBudget {
             bytes: 0,
             setting: "0".into(),
-            source: provenant_records::LimitSource::Default,
+            source: provenant_records::Layer::Default,
         };
         let mut calls = 0;
         let mut stop = || {
@@ -4223,7 +4223,7 @@ mod tests {
         let budget = provenant_config::CargoCacheBudget {
             bytes: 0,
             setting: "0".into(),
-            source: provenant_records::LimitSource::Default,
+            source: provenant_records::Layer::Default,
         };
         let mut stop = || false;
         let mut refresh = || TargetProtection {
@@ -4286,7 +4286,7 @@ mod tests {
         let budget = provenant_config::CargoCacheBudget {
             bytes: 0,
             setting: "0".into(),
-            source: provenant_records::LimitSource::Default,
+            source: provenant_records::Layer::Default,
         };
         let report = collect_with_protection(
             &state,
@@ -4359,7 +4359,7 @@ mod tests {
         let budget = provenant_config::CargoCacheBudget {
             bytes: 0,
             setting: "0".into(),
-            source: provenant_records::LimitSource::Default,
+            source: provenant_records::Layer::Default,
         };
         let report = collect_with_protection(
             roots.state.as_path(),
@@ -4501,7 +4501,7 @@ mod tests {
         let budget = provenant_config::CargoCacheBudget {
             bytes: 0,
             setting: "0".into(),
-            source: provenant_records::LimitSource::Default,
+            source: provenant_records::Layer::Default,
         };
         let report = collect_with_protection(
             roots.state.as_path(),
@@ -4557,7 +4557,7 @@ mod tests {
         let budget = provenant_config::CargoCacheBudget {
             bytes: budget_bytes,
             setting: budget_bytes.to_string(),
-            source: provenant_records::LimitSource::Default,
+            source: provenant_records::Layer::Default,
         };
         collect_with_progress(
             state,
@@ -5004,7 +5004,7 @@ mod tests {
         let budget = provenant_config::CargoCacheBudget {
             bytes: u64::MAX,
             setting: "100%".into(),
-            source: provenant_records::LimitSource::Default,
+            source: provenant_records::Layer::Default,
         };
         let mut detail = None;
         for epoch in 1..=16_u64 {
@@ -5057,7 +5057,7 @@ mod tests {
         let budget = provenant_config::CargoCacheBudget {
             bytes: u64::MAX,
             setting: "100%".into(),
-            source: provenant_records::LimitSource::Default,
+            source: provenant_records::Layer::Default,
         };
         let mut continue_scan = || false;
         let mut refresh = TargetProtection::default;
@@ -5129,7 +5129,7 @@ mod tests {
         let budget = provenant_config::CargoCacheBudget {
             bytes: 0,
             setting: "0".into(),
-            source: provenant_records::LimitSource::Default,
+            source: provenant_records::Layer::Default,
         };
         let mut continue_scan = || false;
         let mut refresh_called = false;
@@ -5246,7 +5246,7 @@ mod tests {
         let budget = provenant_config::CargoCacheBudget {
             bytes: 0,
             setting: "0".into(),
-            source: provenant_records::LimitSource::Default,
+            source: provenant_records::Layer::Default,
         };
         let mut began_deletion = false;
         let mut stop_at_tombstone = || {
@@ -5313,7 +5313,7 @@ mod tests {
         let budget = provenant_config::CargoCacheBudget {
             bytes: 0,
             setting: "0".into(),
-            source: provenant_records::LimitSource::Default,
+            source: provenant_records::Layer::Default,
         };
         let mut locked_steps = 0;
         let mut stop_during_recheck = || {

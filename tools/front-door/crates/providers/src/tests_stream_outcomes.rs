@@ -555,9 +555,7 @@ fn continuation_preserves_session_and_rejects_changed_identity_and_grants()
         direct.session().ok_or(ProviderError::UnknownIdentity)?
     );
     continuation.validate(&route, "grants")?;
-    use provenant_records::diagnostic::{
-        ContinuationField as F, ContinuationGuard, ContinuationIssue as I, ContinuationRule as R,
-    };
+    use provenant_records::diagnostic::{ContinuationField as F, ContinuationGuard, ContinuationIssue as I, ContinuationRule as R, };
     for field in [
         F::Provider,
         F::Account,
@@ -1075,7 +1073,7 @@ fn argv_prompt_limit_counts_utf8_bytes() {
         Prompt::new("a".repeat(65_537))
             .with_argv_limit(
                 131_072,
-                provenant_records::diagnostic::SettingSource::Configuration
+                provenant_records::diagnostic::Layer::Host
             )
             .check_argv(default)
             .is_ok()
@@ -1096,7 +1094,7 @@ fn argv_prompt_limit_counts_utf8_bytes() {
         Prompt::new("abcd".into())
             .with_argv_limit(
                 3,
-                provenant_records::diagnostic::SettingSource::Configuration,
+                provenant_records::diagnostic::Layer::Host,
             )
             .check_argv(&strict),
         Err(ProviderError::PromptTooLarge { .. })
@@ -1117,9 +1115,7 @@ pub(super) fn read_only_plan_protecting(
     authentication: Option<&str>,
     protected: &[&str],
 ) -> provenant_confinement::ConfinedPlan {
-    use provenant_confinement::permissions::{
-        AccessMode, NetworkAccess, PathGrant, PathScope, PlanPermissions,
-    };
+    use provenant_confinement::permissions::{AccessMode, NetworkAccess, PathGrant, PathScope, PlanPermissions, };
     use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
     use provenant_core::{ProjectId, WorkScope};
     let grant = |path: &str| PathGrant {

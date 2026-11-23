@@ -20,7 +20,7 @@ use support::{Result, TestRig, code};
 fn isolated_writer_access_receipt() -> provenant_records::LaneAccessReceipt {
     provenant_records::LaneAccessReceipt {
         access: provenant_records::LaneAccess::Isolated,
-        source: provenant_records::LaneAccessSource::Default,
+        source: provenant_records::Layer::Default,
         key: "lanes.access".into(),
         extra: Default::default(),
     }
@@ -1055,7 +1055,7 @@ impl provenant_run::Providers for WriterProvider {
                 limits: provenant_records::LaneLimits {
                     deadline_seconds: Some(provenant_records::Limit::new(
                         task.provider_timeout_seconds,
-                        provenant_records::LimitSource::Launch,
+                        provenant_records::Layer::Launch,
                         provenant_records::LimitStrength::Default,
                     )),
                     ..Default::default()

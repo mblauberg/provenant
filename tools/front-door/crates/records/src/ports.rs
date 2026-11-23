@@ -1,17 +1,27 @@
 //! Typed declarations for commands invoked through repository integration ports.
-use crate::{CanonicalV1, FileDigest};
+pub use crate::Layer;
+use crate::{CanonicalV1, FileDigest, Precedence};
 use serde::{Deserialize, Serialize};
 
-/// The layer that declared a port leaf. Variant order is the precedence order
-/// (lowest to highest) and is enforced by the derived [`Ord`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PortSource {
-    Builtin,
-    Detected,
-    Host,
-    HostProject,
-    Project,
+/// The layers a port declaration accepts, lowest first. One declaration drives
+/// the merge and every explanation (Spec: docs/specs/state.md#every-setting-reports-its-layer).
+pub const PORT_PRECEDENCE: Precedence = Precedence(&[
+    Layer::Default,
+    Layer::Detected,
+    Layer::Host,
+    Layer::HostProject,
+    Layer::Project,
+]);
+
+/// The rank of a port layer in [`PORT_PRECEDENCE`]. Port provenance is kept in
+/// `BTreeMap<String, Layer>` keyed by dotted leaf, so this is the one place the
+/// layer order is read for the per-leaf fold.
+pub fn port_layer_rank(layer: Layer) -> usize {
+    PORT_PRECEDENCE
+        .0
+        .iter()
+        .position(|candidate| *candidate == layer)
+        .unwrap_or(0)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,30 +77,70 @@ impl PortCommand {
 mod tests {
     use super::*;
 
+    /// Spec: docs/specs/state.md#every-setting-reports-its-layer
     #[test]
-    fn port_source_round_trips_and_rejects_unknown_values() {
-        for source in [
-            PortSource::Builtin,
-            PortSource::Detected,
-            PortSource::Host,
-            PortSource::HostProject,
-            PortSource::Project,
-        ] {
-            let encoded = serde_json::to_value(source).expect("source serialises");
+    fn port_layer_wire_spellings_and_precedence_are_the_documented_contract() {
+        let layers = [
+            (Layer::Default, "default"),
+            (Layer::Detected, "detected"),
+            (Layer::Host, "host"),
+            (Layer::HostProject, "host_project"),
+            (Layer::Project, "project"),
+        ];
+        for (layer, spelling) in layers {
+            let encoded = serde_json::to_value(layer).expect("layer serialises");
+            assert_eq!(encoded, serde_json::json!(spelling));
             assert_eq!(
-                serde_json::from_value::<PortSource>(encoded).expect("source decodes"),
-                source
+                serde_json::from_value::<Layer>(encoded).expect("layer decodes"),
+                layer
             );
         }
-        assert!(serde_json::from_value::<PortSource>(serde_json::json!("unknown")).is_err());
+        assert_eq!(
+            PORT_PRECEDENCE.0,
+            &[
+                Layer::Default,
+                Layer::Detected,
+                Layer::Host,
+                Layer::HostProject,
+                Layer::Project,
+            ]
+        );
+        assert!(serde_json::from_value::<Layer>(serde_json::json!("builtin")).is_err());
     }
 
+    /// Spec: docs/specs/state.md#every-setting-reports-its-layer
     #[test]
-    fn port_source_order_is_the_documented_precedence() {
-        assert!(PortSource::Builtin < PortSource::Detected);
-        assert!(PortSource::Detected < PortSource::Host);
-        assert!(PortSource::Host < PortSource::HostProject);
-        assert!(PortSource::HostProject < PortSource::Project);
+    fn port_merge_keeps_the_same_winner_and_shadowed_layers() {
+        use crate::{Source, Sourced};
+        fn sourced(layer: Layer, value: &'static str) -> Sourced<&'static str> {
+            Sourced {
+                value,
+                source: Source {
+                    layer,
+                    origin: None,
+                },
+            }
+        }
+        let merge = PORT_PRECEDENCE.merge([
+            sourced(Layer::Default, "builtin"),
+            sourced(Layer::Project, "project"),
+            sourced(Layer::Host, "host"),
+            sourced(Layer::Detected, "detected"),
+            sourced(Layer::HostProject, "host_project"),
+        ]);
+        assert_eq!(
+            merge.winner.as_ref().map(|candidate| candidate.value),
+            Some("project")
+        );
+        assert_eq!(
+            merge
+                .shadowed
+                .iter()
+                .map(|candidate| candidate.value)
+                .collect::<Vec<_>>(),
+            ["builtin", "host", "detected", "host_project"]
+        );
+        assert!(port_layer_rank(Layer::Project) > port_layer_rank(Layer::Default));
     }
 
     #[test]

@@ -751,7 +751,7 @@ pub(super) fn check_launch_prompt(
     paths: &run::LaunchPaths,
     adapter: Option<&str>,
     argv_limit: usize,
-    argv_origin: provenant_records::diagnostic::SettingSource,
+    argv_origin: provenant_records::diagnostic::Layer,
     policy: &provenant_records::policy::Policy,
 ) -> Result<(), LaunchPromptError> {
     if paths.lane_depth > 1
@@ -772,7 +772,7 @@ pub(super) fn launch_prompt(
     state_root: &Path,
     adapter: &str,
     argv_limit: usize,
-    argv_origin: provenant_records::diagnostic::SettingSource,
+    argv_origin: provenant_records::diagnostic::Layer,
     policy: &provenant_records::policy::Policy,
 ) -> Result<Prompt, LaunchPromptError> {
     if text.len() as u64 > super::PROMPT_LIMIT {

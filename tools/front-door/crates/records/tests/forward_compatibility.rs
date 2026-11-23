@@ -571,10 +571,10 @@ fn stored_records_decode_with_a_future_field() -> TestResult {
 
 #[test]
 fn lane_access_receipt_round_trips_and_old_route_defaults_to_host() {
-    use provenant_records::{LaneAccess, LaneAccessReceipt, LaneAccessSource, ResolvedRoute};
+    use provenant_records::{LaneAccess, LaneAccessReceipt, Layer, ResolvedRoute};
     let receipt = LaneAccessReceipt {
         access: LaneAccess::Isolated,
-        source: LaneAccessSource::RoutePolicy,
+        source: Layer::Route,
         key: "defaults.lane.access".into(),
         extra: Default::default(),
     };

@@ -679,7 +679,7 @@ pub struct DiskPressure {
     pub available: u64,
     pub floor: u64,
     pub reclaimed: u64,
-    pub origin: provenant_records::diagnostic::SettingSource,
+    pub origin: provenant_records::diagnostic::Layer,
 }
 
 fn dispatch_message(reason: &str, disk: Option<&DiskPressure>) -> String {
@@ -2008,7 +2008,7 @@ mod diagnostic_tests {
                 available: 42,
                 floor: 100,
                 reclaimed: 3,
-                origin: provenant_records::diagnostic::SettingSource::Configuration,
+                origin: provenant_records::diagnostic::Layer::Host,
             }),
         };
         let wire = serde_json::to_string(&error).unwrap();
@@ -2036,13 +2036,13 @@ mod diagnostic_tests {
     #[test]
     fn memory_pressure_refusal_preserves_typed_source_over_transport() {
         use provenant_records::diagnostic::{
-            PressureLevel, PressureThreshold, ResourceFact, SettingSource,
+            Layer, PressureLevel, PressureThreshold, ResourceFact,
         };
         let error = FacadeError::ConfinementRefused {
             resource: Some(ResourceFact::MemoryPressure {
                 level: PressureLevel::Critical,
                 threshold: PressureThreshold::Warning,
-                origin: SettingSource::Configuration,
+                origin: Layer::Host,
             }),
         };
         let received: FacadeError =

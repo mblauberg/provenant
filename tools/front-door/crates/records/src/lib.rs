@@ -67,7 +67,7 @@ pub use port_receipt::{
     DEFAULT_PORT_COMMAND_RECEIPT_AGE_DAYS, PORT_COMMAND_RECEIPT_SCHEMA_VERSION, PortCommandBackend,
     PortCommandDisposition, PortCommandReceipt, PortReceiptLifetime,
 };
-pub use ports::{CommandExitCodes, ExitDisposition, PortCommand, PortSource};
+pub use ports::{CommandExitCodes, ExitDisposition, PORT_PRECEDENCE, PortCommand, port_layer_rank};
 pub use provenance::{Layer, Merge, Precedence, Source, Sourced};
 pub use source::{SourceDigest, SourceDigestError, SourceInput, source_digest};
 pub use trace::Trace;
@@ -115,7 +115,7 @@ pub mod stop;
 pub mod work_key;
 pub use finding_decision::{FindingDecision, FindingDisposition};
 pub use limit::{
-    BudgetAction, BudgetGrace, BudgetPolicy, CeilingError, LaneLimits, Limit, LimitSource,
+    BudgetAction, BudgetGrace, BudgetPolicy, CeilingError, LIMIT_PRECEDENCE, LaneLimits, Limit,
     LimitStrength, TokenBudgetUsage,
 };
 pub use pause::{Pause, PauseCause};
@@ -123,7 +123,10 @@ pub use stop::{Continuation, NextStep, OnStop, STOP_TABLE, Stop, StopCause, Stop
 pub use work_key::WorkKey;
 #[cfg(test)]
 mod format2_tests;
-pub use run::{LaneAccess, LaneAccessReceipt, LaneAccessSource, UserSkillsMode};
+pub use run::{
+    LANE_ACCESS_PRECEDENCE, LaneAccess, LaneAccessReceipt, SANDBOX_PRECEDENCE, SandboxConstraint,
+    UserSkillsMode,
+};
 
 /// Fields from newer writers, retained in canonical record bytes.
 pub type ExtraFields = std::collections::BTreeMap<String, serde_json::Value>;

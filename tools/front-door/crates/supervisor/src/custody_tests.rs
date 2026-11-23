@@ -2418,7 +2418,7 @@ fn never_spawned_resource_fact_survives_exit_storage() -> TestResult {
     use provenant_records::diagnostic::{PortSettingSource, ResourceFact};
     let fact = ResourceFact::LanePorts {
         blocks: 2,
-        origin: PortSettingSource::Configuration,
+        origin: PortLayer::Host,
     };
     let mut exit = ProcessExit::never_spawned(scope(), None, vec![]);
     exit.launch_refusal = Some(fact.clone());

@@ -1,4 +1,6 @@
 //! Safe, bounded diagnostic facts shared by command, graph and transport edges.
+pub use crate::Layer;
+use crate::Precedence;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -217,22 +219,10 @@ impl ContinuationGuard {
     }
 }
 
-/// Where a configurable admission threshold came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SettingSource {
-    Configuration,
-    ShippedDefault,
-}
-
-impl SettingSource {
-    pub fn description(self) -> &'static str {
-        match self {
-            Self::Configuration => "host configuration",
-            Self::ShippedDefault => "shipped default",
-        }
-    }
-}
+/// The layers an admission threshold accepts, lowest first. A shipped default
+/// is beaten by a value the host configured.
+/// Spec: docs/specs/state.md#every-setting-reports-its-layer
+pub const SETTING_PRECEDENCE: Precedence = Precedence(&[Layer::Default, Layer::Host]);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -378,30 +368,30 @@ pub enum ResourceFact {
     Disk {
         free: u64,
         floor: u64,
-        origin: SettingSource,
+        origin: Layer,
     },
     ArgvPromptLimit {
         limit: u64,
-        origin: SettingSource,
+        origin: Layer,
     },
     ContinuationCopy {
         limit: u64,
         setting: ContinuationCopyLimit,
-        origin: SettingSource,
+        origin: Layer,
         available_bytes: Option<u64>,
     },
     WriteGrantLimit {
         limit: u64,
-        origin: SettingSource,
+        origin: Layer,
     },
     GrantLimit {
         limit: u64,
-        origin: SettingSource,
+        origin: Layer,
     },
     ProfileLimit {
         bytes: u64,
         limit: u64,
-        origin: SettingSource,
+        origin: Layer,
     },
     DependencyPreparation {
         configured: bool,
@@ -420,13 +410,13 @@ pub enum ResourceFact {
     MemoryPressure {
         level: PressureLevel,
         threshold: PressureThreshold,
-        origin: SettingSource,
+        origin: Layer,
     },
     LaneCap {
         active: u64,
         limit: u64,
         lane_limit: LaneLimit,
-        origin: SettingSource,
+        origin: Layer,
     },
     Processes {
         used: u64,
@@ -592,7 +582,7 @@ pub enum DiagnosticFact {
         available: u64,
         floor: u64,
         reclaimed: u64,
-        origin: SettingSource,
+        origin: Layer,
     },
     DiskUnobserved,
     PromptLimit {
@@ -800,6 +790,28 @@ pub fn shell_path(path: &Path, destination: Destination) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Spec: docs/specs/state.md#every-setting-reports-its-layer
+    #[test]
+    fn setting_layers_preserve_the_shipped_default_then_host_order() {
+        use crate::{Source, Sourced};
+        fn candidate(layer: Layer) -> Sourced<&'static str> {
+            Sourced {
+                value: layer.as_str(),
+                source: Source {
+                    layer,
+                    origin: None,
+                },
+            }
+        }
+        let merge = SETTING_PRECEDENCE.merge([candidate(Layer::Default), candidate(Layer::Host)]);
+        assert_eq!(
+            merge.winner.as_ref().map(|winner| winner.value),
+            Some("host")
+        );
+        assert_eq!(merge.shadowed.len(), 1);
+        assert_eq!(merge.shadowed[0].value, "default");
+    }
 
     fn every_route_exclusion_is_covered(cause: &crate::RouteExclusionReason) {
         use crate::RouteExclusionReason as Cause;

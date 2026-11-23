@@ -1649,8 +1649,8 @@ pub struct BoundSandboxBackend {
 
 struct ResolvedLaunchLimits {
     limits: ProfileLimits,
-    grant_origin: provenant_records::diagnostic::SettingSource,
-    profile_origin: provenant_records::diagnostic::SettingSource,
+    grant_origin: provenant_records::diagnostic::Layer,
+    profile_origin: provenant_records::diagnostic::Layer,
 }
 
 impl ResolvedLaunchLimits {
@@ -1679,9 +1679,9 @@ fn launch_resource_limits(
         Ok((config, keys)) => {
             let origin = |key: &str| {
                 if keys.contains(key) {
-                    provenant_records::diagnostic::SettingSource::Configuration
+                    provenant_records::diagnostic::Layer::Host
                 } else {
-                    provenant_records::diagnostic::SettingSource::ShippedDefault
+                    provenant_records::diagnostic::Layer::Default
                 }
             };
             ResolvedLaunchLimits {
@@ -1708,8 +1708,8 @@ fn launch_resource_limits(
             }
             ResolvedLaunchLimits {
                 limits: defaults,
-                grant_origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
-                profile_origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
+                grant_origin: provenant_records::diagnostic::Layer::Default,
+                profile_origin: provenant_records::diagnostic::Layer::Default,
             }
         }
     }
@@ -1881,7 +1881,7 @@ impl LaunchConfinement {
 fn isolated_lane_access_receipt() -> provenant_records::LaneAccessReceipt {
     provenant_records::LaneAccessReceipt {
         access: provenant_records::LaneAccess::Isolated,
-        source: provenant_records::LaneAccessSource::Default,
+        source: provenant_records::Layer::Default,
         key: "lanes.access".into(),
         extra: Default::default(),
     }
@@ -5065,7 +5065,7 @@ mod launch_resource_limit_tests {
         assert_eq!(limits.limits.grant_limit, defaults.grant_limit);
         assert_eq!(
             limits.grant_origin,
-            provenant_records::diagnostic::SettingSource::ShippedDefault
+            provenant_records::diagnostic::Layer::Default
         );
         assert_eq!(
             limits.limits.profile_limit_bytes,
@@ -5073,7 +5073,7 @@ mod launch_resource_limit_tests {
         );
         assert_eq!(
             limits.profile_origin,
-            provenant_records::diagnostic::SettingSource::ShippedDefault
+            provenant_records::diagnostic::Layer::Default
         );
         std::fs::write(
             state.path().join("config.toml"),
@@ -5082,11 +5082,11 @@ mod launch_resource_limit_tests {
         let explicit_default = launch_resource_limits(state.path(), &policy);
         assert_eq!(
             explicit_default.grant_origin,
-            provenant_records::diagnostic::SettingSource::Configuration
+            provenant_records::diagnostic::Layer::Host
         );
         assert_eq!(
             explicit_default.profile_origin,
-            provenant_records::diagnostic::SettingSource::ShippedDefault
+            provenant_records::diagnostic::Layer::Default
         );
         std::fs::write(
             state.path().join("config.toml"),
@@ -5096,12 +5096,12 @@ mod launch_resource_limit_tests {
         assert_eq!(configured.limits.grant_limit, 256);
         assert_eq!(
             configured.grant_origin,
-            provenant_records::diagnostic::SettingSource::Configuration
+            provenant_records::diagnostic::Layer::Host
         );
         assert_eq!(configured.limits.profile_limit_bytes, 1048576);
         assert_eq!(
             configured.profile_origin,
-            provenant_records::diagnostic::SettingSource::Configuration
+            provenant_records::diagnostic::Layer::Host
         );
         let unrelated = configured
             .annotate(provenant_confinement::permissions::PermissionError::ProtectedOverlap);

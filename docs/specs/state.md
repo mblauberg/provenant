@@ -184,6 +184,22 @@ because the overlapping layer names are the same spelling.
   act on, and a family cannot rank the same setting two ways.
 - Owner: `crates/records/src/provenance.rs`, each family's precedence constant
 
+Each family declares its precedence once, lowest first, beside the type it owns:
+
+- Limits use `LIMIT_PRECEDENCE`: default, host, project, tier, template, launch.
+  The shared layer spellings match the old `LimitSource` bytes, so digest-sealed
+  run requests keep their exact wire form and need no rewrite.
+- Ports use `PORT_PRECEDENCE`: default (formerly `builtin`), detected, host,
+  host-project, project. Stored receipts and port tables rewrite `builtin` to
+  `default` once at install.
+- Admission settings use `SETTING_PRECEDENCE`: default (formerly
+  `shipped_default`), host (formerly `configuration`).
+- Lane access uses `LANE_ACCESS_PRECEDENCE`: default, host, project, tier,
+  template, route (formerly `route_policy`), launch.
+- Sandbox mode uses `SANDBOX_PRECEDENCE`: default, host, route, parent. A knob
+  records its actual layer; a platform or restriction is a `constraint` beside
+  the layer, not a source of the value.
+
 ### One sourced port table
 
 One table declares forge operations, verify, land, CI observation, worktree
