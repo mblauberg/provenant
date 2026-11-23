@@ -154,8 +154,8 @@ impl Migration for PortConfigSourceSpellings {
                         if name == "schema_version" {
                             continue;
                         }
-                        if let Some(object) = declaration.as_object_mut()
-                            && rename_source(object, OLD_PORTS_VERSION, NEW_PORTS_VERSION)
+                        if declaration.is_object()
+                            && rename_source(declaration, OLD_PORTS_VERSION, NEW_PORTS_VERSION)
                         {
                             changed = true;
                         }

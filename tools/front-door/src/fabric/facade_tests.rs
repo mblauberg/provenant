@@ -756,7 +756,7 @@ fn pacing_dispatch_refusal_keeps_the_route_and_monthly_window_note() {
     let fact = ResourceFact::PacingReserve {
         percent: 10,
         setting: PacingReserveSetting::Account,
-        origin: PacingLayer::Host,
+        origin: PacingSettingSource::Configuration,
         hold: Box::new(provenant_records::diagnostic::PacingHold {
             account: "codex/opaque-account".into(),
             window: "five_hour".into(),

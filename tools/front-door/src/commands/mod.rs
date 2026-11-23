@@ -63,7 +63,7 @@ mod wait;
 mod workflow;
 mod worktree;
 
-pub use provenant_cli::{Domain, Invocation, Verb};
+pub use provenant_cli::{Call, Domain, Verb};
 
 use provenant_records::{CommandError, Outcome};
 

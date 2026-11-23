@@ -207,9 +207,9 @@ fn resolve_pacing_source(
         origins.get(&key),
         Some(provenant_config::Origin::User { .. })
     ) {
-        PacingLayer::Host
+        PacingSettingSource::Configuration
     } else {
-        PacingLayer::Default
+        PacingSettingSource::ShippedDefault
     };
     fact
 }

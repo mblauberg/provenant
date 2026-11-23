@@ -564,8 +564,8 @@ mod tests {
         let root = temp.path().canonicalize()?;
         let home = root.join("home");
         let checkout = root.join("checkout");
-        fs::create_dir_all(&home)?;
-        fs::create_dir_all(&checkout)?;
+        std::fs::create_dir_all(&home)?;
+        std::fs::create_dir_all(&checkout)?;
         let mut inputs = provenant_core::RootInputs::new(home, checkout.clone());
         inputs.state_dir = Some(checkout.join(".claude").join("state"));
         let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;

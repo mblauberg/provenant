@@ -397,7 +397,7 @@ fn pacing_refusal_retains_the_selected_reserve_fact() {
     let fact = ResourceFact::PacingReserve {
         percent: 15,
         setting: PacingReserveSetting::AdapterFiveHour,
-        origin: PacingLayer::Default,
+        origin: PacingSettingSource::ShippedDefault,
         hold: Box::new(provenant_records::diagnostic::PacingHold {
             account: "codex/opaque-account".into(),
             window: "five_hour".into(),

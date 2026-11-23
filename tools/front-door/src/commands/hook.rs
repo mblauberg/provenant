@@ -3,7 +3,7 @@
 //! `hook` dispatches before the registry because a provider hook is clap's
 //! external subcommand: its name (`hook claude`) is not a grammar leaf. The
 //! static `hook git pre-push` leaf is still registered below.
-use crate::commands::{Domain, Invocation, Verb};
+use crate::commands::{Call, Domain, Verb};
 use provenant_cli::Command;
 use provenant_core::consumer_env::Stability;
 use provenant_records::{CommandError, Outcome};
@@ -17,7 +17,7 @@ pub static DOMAIN: Domain = Domain {
     }],
 };
 
-fn run(inv: &Invocation) -> Result<Outcome, CommandError> {
+fn run(inv: &Call) -> Result<Outcome, CommandError> {
     let globals = inv.globals;
     let command = inv.command.clone();
     let status = match command {

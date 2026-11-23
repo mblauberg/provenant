@@ -1142,7 +1142,7 @@ fn peer_pacing_refusal_is_definite_and_preserves_its_fact_on_receipt_replay() ->
     let fact = ResourceFact::PacingReserve {
         percent: 23,
         setting: PacingReserveSetting::AdapterFiveHour,
-        origin: PacingLayer::Host,
+        origin: PacingSettingSource::Configuration,
         hold: Box::new(provenant_records::diagnostic::PacingHold {
             account: "codex/opaque-account".into(),
             window: "five_hour".into(),

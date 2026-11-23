@@ -99,7 +99,7 @@ fn take_warnings() -> Vec<Warning> {
     .unwrap_or_default()
 }
 
-fn emit<T: Serialize>(
+pub(crate) fn emit<T: Serialize>(
     result: &CommandResult<T>,
     globals: &provenant_cli::Globals,
     human: &str,
@@ -390,7 +390,7 @@ mod dedup {
     use super::*;
     use provenant_sqlite::{Schema, ensure_schema, open_connection};
 
-    const WARNINGS_SCHEMA: Schema = Schema {
+    pub(super) const WARNINGS_SCHEMA: Schema = Schema {
         sql: "CREATE TABLE seen (key TEXT PRIMARY KEY, code TEXT NOT NULL, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, count INTEGER NOT NULL) STRICT; PRAGMA user_version=5;",
         version: 5,
         steps: &[],
@@ -400,16 +400,18 @@ mod dedup {
     /// Record `key` and report whether it is new. Existing rows have their
     /// count and last-seen time advanced; stale rows are pruned on every write.
     pub(super) fn remember(state_root: &Path, key: &str, code: &str) -> bool {
-        let Ok(db) = open_connection(&state_root.join("warnings.sqlite3"), false) else {
+        let Ok(mut db) = open_connection(&state_root.join("warnings.sqlite3"), false) else {
             return true;
         };
         if ensure_schema(&db, WARNINGS_SCHEMA).is_err() {
             return true;
         }
         use provenant_core::Clock as _;
-        let now = u64::try_from(provenant_os::clock::SystemClock.unix_seconds()).unwrap_or(0);
+        // SQLite stores signed integers; seconds before the epoch clamp to zero.
+        let now = provenant_os::clock::SystemClock.unix_seconds().max(0);
         let retention = super::host_settings::dedup_retention_days(state_root);
-        let cutoff = now.saturating_sub(retention.saturating_mul(86_400));
+        let window = i64::try_from(retention.saturating_mul(86_400)).unwrap_or(i64::MAX);
+        let cutoff = now.saturating_sub(window);
         let tx = match db.transaction() {
             Ok(tx) => tx,
             Err(_) => return true,
@@ -515,7 +517,7 @@ mod tests {
             };
             assert!(ensure_schema(&db, dedup::WARNINGS_SCHEMA).is_ok());
             use provenant_core::Clock as _;
-            let now = u64::try_from(provenant_os::clock::SystemClock.unix_seconds()).unwrap_or(0);
+            let now = provenant_os::clock::SystemClock.unix_seconds();
             let stale = now.saturating_sub(400 * 86_400);
             assert!(db
                 .execute(

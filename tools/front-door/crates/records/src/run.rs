@@ -3213,6 +3213,7 @@ mod tests {
                 }
             }
         }
+        assert!(!floors(Layer::Default, false, false));
         // A platform or restriction cap is not a source and never floors children.
         for constraint in [SandboxConstraint::Platform, SandboxConstraint::Restriction] {
             record.applied_route = Some(RouteRecord {
@@ -3228,7 +3229,6 @@ mod tests {
             });
             assert!(!record.floors_children());
         }
-        assert!(!floors(Layer::Default, false, false));
         Ok(())
     }
 

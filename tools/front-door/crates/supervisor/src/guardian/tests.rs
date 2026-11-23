@@ -2104,7 +2104,7 @@ fn unavailable_port_allocation_warns_and_does_not_claim_a_block()
         error.fact(),
         provenant_records::diagnostic::ResourceFact::LanePorts {
             blocks: 1,
-            origin: provenant_records::diagnostic::PortLayer::Host
+            origin: provenant_records::diagnostic::PortSettingSource::Configuration
         }
     );
     // The automatic port range is a convenience, never an implicit writer cap.

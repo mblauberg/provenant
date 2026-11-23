@@ -1237,12 +1237,12 @@ pub struct Verb {
     pub path: &'static [&'static str],
     /// What `external_contract` declares for the command.
     pub stability: provenant_core::consumer_env::Stability,
-    pub run: fn(&Invocation) -> Result<Outcome, CommandError>,
+    pub run: fn(&Call) -> Result<Outcome, CommandError>,
 }
 
 /// What a verb receives: the parsed command, the globals it was parsed with,
 /// its resolved path and the process seams selected at the edge.
-pub struct Invocation<'a> {
+pub struct Call<'a> {
     pub command: &'a Command,
     pub globals: &'a Globals,
     /// Space-joined command path, such as `quota tick`.
@@ -1280,7 +1280,7 @@ pub(crate) fn install_test_domains() {
     static FIXTURE: std::sync::OnceLock<&'static [&'static Domain]> = std::sync::OnceLock::new();
     let fixture = FIXTURE.get_or_init(|| {
         #[allow(clippy::result_large_err)]
-        fn unused(_: &Invocation) -> Result<Outcome, CommandError> {
+        fn unused(_: &Call) -> Result<Outcome, CommandError> {
             Ok(Outcome::Ok)
         }
         let verbs: Vec<Verb> = command_verbs()

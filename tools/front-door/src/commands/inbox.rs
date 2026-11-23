@@ -1,5 +1,5 @@
 //! `ask`, `answer` and `inbox` — human decisions, assumptions and questions.
-use crate::commands::{Domain, Invocation, Verb};
+use crate::commands::{Call, Domain, Verb};
 use provenant_cli::Command;
 use provenant_core::consumer_env::Stability;
 use provenant_records::{CommandError, Outcome};
@@ -35,7 +35,7 @@ pub static DOMAIN: Domain = Domain {
     ],
 };
 
-fn run(inv: &Invocation) -> Result<Outcome, CommandError> {
+fn run(inv: &Call) -> Result<Outcome, CommandError> {
     let globals = inv.globals;
     let command = inv.command.clone();
     let status = match command {

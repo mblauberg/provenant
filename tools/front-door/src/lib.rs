@@ -78,7 +78,7 @@ pub(crate) use output::{
 };
 
 /// Process-wide seams the entry point selects once. The trait lives in the CLI
-/// crate because a registry `Invocation` carries it; the binary re-exports it
+/// crate because a registry `Call` carries it; the binary re-exports it
 /// so `provenant::Process` stays the name the entry point and fixtures use.
 pub use provenant_cli::Process;
 /// The installed binary's seams.
@@ -1201,7 +1201,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             globals,
         );
     };
-    let invocation = provenant_cli::Invocation {
+    let invocation = provenant_cli::Call {
         command,
         globals,
         leaf: inv.leaf.as_str(),
