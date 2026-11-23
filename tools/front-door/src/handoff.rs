@@ -1801,6 +1801,7 @@ mod tests {
             lane: None,
             attempt: None,
             base: None,
+            reused: false,
         };
         assert_eq!(worktree_warning(&info, &base, "origin"), None);
         info.head = provenant_core::GitOid::parse(&"b".repeat(40)).unwrap();

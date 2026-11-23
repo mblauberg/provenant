@@ -612,6 +612,7 @@ pub fn prune_owned(
                 dirty: WorktreeCondition::Clean,
                 owner: Ok(Some(owner.clone())),
                 primary: false,
+                reused: false,
                 occupancy: Occupancy::Available,
                 lane: None,
                 attempt: None,

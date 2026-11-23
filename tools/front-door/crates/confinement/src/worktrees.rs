@@ -198,6 +198,12 @@ pub enum WorktreeError {
     PortConfiguration(#[source] io::Error),
     #[error("worktree request is invalid")]
     InvalidRequest,
+    #[error("worktree for branch {branch} already exists at {}", .path.display())]
+    WorktreeExists {
+        path: PathBuf,
+        branch: String,
+        reason: String,
+    },
     #[error(
         "registered Git project has no verified primary checkout; run `provenant worktree list` from its primary checkout to refresh the layout, then retry"
     )]
@@ -445,6 +451,9 @@ impl WorktreeError {
     pub fn repair(&self) -> Option<&'static str> {
         Some(match self {
             Self::StaleRegistration => "run `git worktree prune`, then retry",
+            Self::WorktreeExists { .. } => {
+                "run `provenant worktree list` to inspect the existing checkout, then remove it with `provenant worktree remove NAME` or retry with a matching clean tree; for a base conflict, omit --base or pick a matching base"
+            }
             Self::GitEntryHeld { locked: true } => "run `git worktree unlock <path>`, then retry",
             Self::GitEntryHeld { locked: false } => {
                 "run `git worktree prune` to clear the missing checkout, or restore its directory, then retry"
@@ -843,6 +852,8 @@ pub struct WorktreeInfo {
     pub attempt: Option<AttemptId>,
     /// Base commit pinned when the checkout was created, from the owner record.
     pub base: Option<String>,
+    /// Creation adopted an existing checkout for the branch instead of adding one.
+    pub reused: bool,
 }
 
 /// Project the chair-facing identity carried by `provenant-owner.json`. Absent
@@ -902,7 +913,8 @@ impl Serialize for WorktreeInfo {
             + usize::from(!self.warnings.is_empty())
             + usize::from(self.lane.is_some())
             + usize::from(self.attempt.is_some())
-            + usize::from(self.base.is_some());
+            + usize::from(self.base.is_some())
+            + usize::from(self.reused);
         let mut state = serializer.serialize_struct("WorktreeInfo", fields)?;
         if !self.warnings.is_empty() {
             state.serialize_field("warnings", &self.warnings)?;
@@ -921,6 +933,9 @@ impl Serialize for WorktreeInfo {
         }
         if let Some(base) = &self.base {
             state.serialize_field("base", base)?;
+        }
+        if self.reused {
+            state.serialize_field("reused", &true)?;
         }
         if self.is_unowned() {
             state.serialize_field("next", "No Provenant lane currently owns this checkout. Inspect its custody, then select it explicitly with --worktree <path>.")?;
@@ -1304,6 +1319,7 @@ mod tests {
             occupancy: Occupancy::Available,
             owner: Ok(Some(owner.clone())),
             primary: false,
+            reused: false,
             lane: None,
             attempt: None,
             base: None,

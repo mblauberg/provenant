@@ -270,6 +270,7 @@ pub fn worktrees(
             lane: None,
             attempt: None,
             base: None,
+            reused: false,
         };
         let first = report.entries.len();
         if let Some(index) = report.measure("worktree", &info.path) {
