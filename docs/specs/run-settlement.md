@@ -26,17 +26,21 @@ status reason, and a stalled custody-path refusal names the remedy (replace a sy
 path inside the attempt directory).
 - Why: a retained writer must not contend with itself or retry an unchanged failure forever.
 
-A result a lane leaves group- or other-readable in Provenant's private attempt directory is a
-recoverable condition, not a settlement refusal. Settlement's own read of `result.md` tightens that
-regular, single-link, owned file through its open descriptor, warns with the path and the old mode,
-and continues. That repair is scoped to this one settlement read: every other sealed name, and every
-later read of `result.md`, still refuses an over-broad mode so a regression stays visible. A
-symlink, a foreign owner or a path outside the attempt directory still refuses: a stalled reason
-for either names the remedy.
+A result or handoff a lane leaves group- or other-readable in Provenant's private attempt
+directory is a recoverable condition, not a settlement refusal. Settlement's read of a
+provider-written settlement input — `result.md`, the `handoff.json` snapshot, and the progress
+handoff under `provider-state` — tightens that regular, single-link, owned file through its open
+descriptor, warns with the path and the old mode, and continues. The class lives on
+`AttemptFile` (`PROVIDER_SETTLEMENT_INPUTS`), so a new provider-written input is covered by
+declaring it there rather than by naming it at the repair. Host-written private records still
+refuse an over-broad mode, and every other read of a repaired name still refuses it, so a store
+defect stays visible. A symlink, a foreign owner or a path outside the attempt directory still
+refuses: a stalled reason for either names the remedy.
 - Why: custody protects the private store and the lane's finished work, so an over-broad mode
-  should be repaired rather than strand a completed writer, while a repair on an unrelated read
-  would hide the defect and widen what a reader accepts.
-- Owner: `crates/run/src/artifacts.rs`, `crates/os/src/fs.rs`
+  on the lane's own evidence should be repaired rather than strand a completed writer, while a
+  repair on an unrelated or host-written record would hide the defect and widen what a reader
+  accepts.
+- Owner: `crates/run/src/artifacts.rs`, `crates/records/src/attempt_file.rs`, `crates/os/src/fs.rs`
 
 Only the detached worker's acquisition of an exited attempt's writer lock waits, within the
 store's lock budget (the SQLite busy timeout), and it wakes as soon as the

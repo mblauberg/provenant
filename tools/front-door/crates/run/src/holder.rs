@@ -1,6 +1,10 @@
 //! The attempt holder: Run's admission and terminal transaction, composed into
 //! the same-binary guardian. It runs while the guardian still holds custody.
-use crate::{artifacts::read_sealed, launch::Providers, *};
+use crate::{
+    artifacts::{read_sealed, read_settled},
+    launch::Providers,
+    *,
+};
 use provenant_core::{ActorId, AttemptId, CancelToken, Clock, OperationId, ProjectId, RootInputs};
 use provenant_os::{clock::SystemClock, exec::Termination, fs::Directory};
 use provenant_supervisor::{
@@ -3618,7 +3622,12 @@ impl RunStore {
             });
         }
         // External delivery runs only from the committed decision below.
-        let result_orphan = read_sealed(attempt, "result.md", RESULT_LIMIT)?.is_some();
+        let result_orphan = read_settled(
+            attempt,
+            provenant_records::AttemptFile::Result,
+            RESULT_LIMIT,
+        )?
+        .is_some();
         let delivery_applicable = succeeded_before_stop
             && !cancelled
             && exit.stop_reason.is_none()
