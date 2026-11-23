@@ -2589,14 +2589,176 @@ impl UpgradeRunner {
     }
 }
 
+/// What a host report attests to. Drives the status verb in the human view;
+/// a typed signal keeps the renderer from matching on the host's name or prose.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HostPhase {
+    Upgrade,
+    Verify,
+}
+
 #[derive(Serialize)]
 struct HostUpgrade {
     host: String,
     success: bool,
     output: String,
+    #[serde(skip)]
+    phase: HostPhase,
     /// Installed app version, reported for the local host.
     #[serde(skip_serializing_if = "Option::is_none")]
     app: Option<apps::Status>,
+}
+
+/// The first meaningful output line: the compact reason a host failed.
+fn first_error_line(output: &str) -> String {
+    let line = output
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("no error detail");
+    cli::bounded_text(line, 200)
+}
+
+/// Refusal detail: name every failing host with its first error line, then the
+/// same one-line-per-host view used on success. A failed result's error message
+/// is the only text the human renderer prints, so the view travels with it.
+fn failed_hosts_message(hosts: &[HostUpgrade], host_view: &str) -> String {
+    let failed = hosts.iter().filter(|host| !host.success).count();
+    let mut message = format!("{failed} host(s) failed:\n{host_view}");
+    for host in hosts.iter().filter(|host| !host.success) {
+        let line = format!("{}: {}", host.host, first_error_line(&host.output));
+        if !message.contains(&line) {
+            message.push_str(&format!("\n{line}"));
+        }
+    }
+    message
+}
+
+/// Whether a captured line is a `--json` command envelope, not human text.
+fn is_envelope(line: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(line)
+        .is_ok_and(|value| value.get("schema_version").is_some() && value.get("command").is_some())
+}
+
+/// Collect `VERDICT:` values from a smoke envelope's data at any depth, once.
+fn collect_verdicts(value: &serde_json::Value, verdicts: &mut Vec<String>) {
+    match value {
+        serde_json::Value::String(text) => {
+            if text.starts_with("VERDICT:") && !verdicts.iter().any(|seen| seen == text) {
+                verdicts.push(text.clone());
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_verdicts(item, verdicts);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (key, child) in map {
+                if key == "verdict" {
+                    if let Some(text) = child.as_str()
+                        && !verdicts.iter().any(|seen| seen == text)
+                    {
+                        verdicts.push(text.to_owned());
+                    }
+                } else {
+                    collect_verdicts(child, verdicts);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Reduce a smoke child's JSON envelopes to one verdict line. Raw envelopes
+/// are kept only under `--full`.
+fn smoke_verdict(output: &str) -> String {
+    let mut statuses: Vec<String> = Vec::new();
+    let mut verdicts: Vec<String> = Vec::new();
+    for line in output.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if value.get("schema_version").is_none() || value.get("command").is_none() {
+            continue;
+        }
+        if let Some(status) = value["status"].as_str()
+            && !statuses.iter().any(|seen| seen == status)
+        {
+            statuses.push(status.to_owned());
+        }
+        collect_verdicts(&value["data"], &mut verdicts);
+    }
+    if statuses.is_empty() && verdicts.is_empty() {
+        return String::new();
+    }
+    let mut summary = String::from("  smoke graph:");
+    if let Some(status) = statuses.last() {
+        summary.push_str(&format!(" {status}"));
+    }
+    if !verdicts.is_empty() {
+        summary.push_str(&format!(" ({})", verdicts.join(", ")));
+    }
+    summary.push('\n');
+    summary
+}
+
+/// Compact detail for one host: capability notices become a count, smoke
+/// envelopes become a verdict, and no other line is a raw JSON envelope.
+fn compact_host_detail(host: &HostUpgrade) -> String {
+    if host.phase == HostPhase::Verify {
+        return smoke_verdict(&host.output);
+    }
+    let mut notices = 0usize;
+    let mut detail = String::new();
+    for line in host.output.lines() {
+        if line.contains(provenant_config::NATIVE_CAPABILITY_UNAVAILABLE) {
+            notices += 1;
+        } else if !is_envelope(line) {
+            detail.push_str(line);
+            detail.push('\n');
+        }
+    }
+    if notices > 0 {
+        detail.push_str(&format!(
+            "  {notices} native capability notice{}; use --full for detail\n",
+            if notices == 1 { "" } else { "s" }
+        ));
+    }
+    detail
+}
+
+/// One leading status line per host, followed by compact detail. `--full`
+/// keeps every captured line instead.
+fn render_upgrade_hosts(hosts: &[HostUpgrade], full: bool) -> String {
+    let mut human = String::new();
+    for host in hosts {
+        let status = match (host.success, host.phase) {
+            (true, HostPhase::Verify) => "verified".to_owned(),
+            (true, HostPhase::Upgrade) => "upgraded".to_owned(),
+            (false, _) => format!("failed - {}", first_error_line(&host.output)),
+        };
+        human.push_str(&format!("{}: {}\n", host.host, status));
+        if full {
+            human.push_str(&host.output);
+            if !host.output.ends_with('\n') {
+                human.push('\n');
+            }
+        } else {
+            human.push_str(&compact_host_detail(host));
+        }
+        if let Some(app) = &host.app {
+            human.push_str(&format!(
+                "  app: {} ({})\n",
+                app.path,
+                app.version.as_deref().unwrap_or("version unknown")
+            ));
+            if app.warning.is_some() {
+                human.push_str(&format!("  {}\n", apps::advisory(app)));
+            }
+        }
+    }
+    human
 }
 
 pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
@@ -2801,12 +2963,14 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
                 host,
                 success: true,
                 output: String::from_utf8_lossy(&bytes).into_owned(),
+                phase: HostPhase::Upgrade,
                 app: None,
             },
             Err(output) => HostUpgrade {
                 host,
                 success: false,
                 output,
+                phase: HostPhase::Upgrade,
                 app: None,
             },
         };
@@ -2900,12 +3064,14 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
                         host: "smoke".into(),
                         success: true,
                         output,
+                        phase: HostPhase::Verify,
                         app: None,
                     }),
                     Err(output) => hosts.push(HostUpgrade {
                         host: "smoke".into(),
                         success: false,
                         output,
+                        phase: HostPhase::Verify,
                         app: None,
                     }),
                 }
@@ -2924,42 +3090,22 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
                 local.app = app_status;
             }
             let success = hosts.iter().all(|host| host.success);
-            let mut human: String = hosts
-                .iter()
-                .map(|host| {
-                    let mut line = format!(
-                        "{}: {}\n{}\n",
-                        host.host,
-                        if host.success { "upgraded" } else { "failed" },
-                        host.output
-                    );
-                    if let Some(app) = &host.app {
-                        line.push_str(&format!(
-                            "  app: {} ({})\n",
-                            app.path,
-                            app.version.as_deref().unwrap_or("version unknown")
-                        ));
-                        if app.warning.is_some() {
-                            line.push_str(&format!("  {}\n", apps::advisory(app)));
-                        }
-                    }
-                    line
-                })
-                .collect();
+            let mut human = render_upgrade_hosts(&hosts, globals.full);
             if let Some(warning) = &version_warning {
                 human.push_str(&format!("  Warning: {warning}\n"));
             }
+            let failure_message = (!success).then(|| failed_hosts_message(&hosts, &human));
             let mut result = CommandResult::new(
                 "upgrade",
                 if success { Outcome::Ok } else { Outcome::Error },
                 hosts,
             );
-            if !success {
+            if let Some(message) = failure_message {
                 result.error = Some(CommandError::new(
                     "UPGRADE_FAILED",
-                    "Some hosts failed to upgrade; inspect host results and rerun upgrade",
+                    message,
                     None,
-                    "inspect the failing host's output above, resolve it, then rerun `provenant upgrade`",
+                    "inspect the failing host's detail with `provenant upgrade --full`, resolve it, then rerun `provenant upgrade`",
                 ));
             }
             super::emit(&result, globals, &human, false)
@@ -3982,5 +4128,99 @@ mod tests {
         );
         assert_eq!(stops, 2);
         Ok(())
+    }
+
+    fn fixture_upgrade_host(host: &str, success: bool, output: &str) -> super::HostUpgrade {
+        super::HostUpgrade {
+            host: host.into(),
+            success,
+            output: output.into(),
+            phase: super::HostPhase::Upgrade,
+            app: None,
+        }
+    }
+
+    fn fixture_smoke_host(success: bool, output: &str) -> super::HostUpgrade {
+        super::HostUpgrade {
+            host: "smoke".into(),
+            success,
+            output: output.into(),
+            phase: super::HostPhase::Verify,
+            app: None,
+        }
+    }
+
+    #[test]
+    fn upgrade_refusal_names_each_failing_host_and_first_error_line() {
+        let hosts = vec![
+            fixture_upgrade_host("local", true, "install created 3 changes\n"),
+            fixture_upgrade_host(
+                "worker",
+                false,
+                "Command failed (Exit(17)): ssh: connection refused\nmore detail\n",
+            ),
+        ];
+        let view = super::render_upgrade_hosts(&hosts, false);
+        let message = super::failed_hosts_message(&hosts, &view);
+        assert!(message.contains("1 host(s) failed:"), "{message}");
+        assert!(message.contains("worker"), "{message}");
+        assert!(
+            message.contains("Command failed (Exit(17)): ssh: connection refused"),
+            "{message}"
+        );
+        assert!(!message.contains("Some hosts failed"), "{message}");
+    }
+
+    #[test]
+    fn upgrade_compact_human_leads_with_one_line_per_host_and_no_raw_json() {
+        let notice =
+            "  native_capability_unavailable: /cfg/a (instructions: unsupported (source: host))\n";
+        let local = format!("{notice}{notice}{notice}install created 3 changes\n");
+        let smoke = concat!(
+            "{\"schema_version\":2,\"command\":\"run\",\"status\":\"waiting\",\"data\":{}}\n",
+            "{\"schema_version\":2,\"command\":\"wait\",\"status\":\"complete\",\"data\":{}}\n",
+            "{\"schema_version\":2,\"command\":\"status\",\"status\":\"ok\",\"data\":{\"selected\":[{\"id\":\"review\",\"verdict\":\"VERDICT: PASS\"}]}}\n"
+        );
+        let hosts = vec![
+            fixture_upgrade_host("local", true, &local),
+            fixture_upgrade_host(
+                "worker",
+                false,
+                "Command failed (Exit(17)): ssh: connection refused\n",
+            ),
+            fixture_smoke_host(true, smoke),
+        ];
+        let text = super::render_upgrade_hosts(&hosts, false);
+        assert!(text.contains("local: upgraded\n"), "{text}");
+        assert!(
+            text.contains("worker: failed - Command failed (Exit(17)): ssh: connection refused\n"),
+            "{text}"
+        );
+        assert!(text.contains("smoke: verified\n"), "{text}");
+        assert!(text.contains("3 native capability notices"), "{text}");
+        assert!(!text.contains("native_capability_unavailable:"), "{text}");
+        assert!(!text.contains("\"schema_version\""), "{text}");
+        assert!(text.contains("VERDICT: PASS"), "{text}");
+    }
+
+    #[test]
+    fn upgrade_full_human_keeps_capability_notices_and_smoke_envelopes() {
+        let local = concat!(
+            "  native_capability_unavailable: /cfg/a (instructions: unsupported)\n",
+            "  native_capability_unavailable: /cfg/a (hooks: unsupported)\n"
+        );
+        let smoke = "{\"schema_version\":2,\"command\":\"status\",\"status\":\"ok\",\"data\":{\"verdict\":\"VERDICT: PASS\"}}\n";
+        let hosts = vec![
+            fixture_upgrade_host("local", true, local),
+            fixture_smoke_host(true, smoke),
+        ];
+        let text = super::render_upgrade_hosts(&hosts, true);
+        assert_eq!(
+            text.matches("native_capability_unavailable:").count(),
+            2,
+            "{text}"
+        );
+        assert!(text.contains("\"schema_version\""), "{text}");
+        assert!(!text.contains("use --full for detail"), "{text}");
     }
 }
