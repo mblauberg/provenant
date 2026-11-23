@@ -160,14 +160,19 @@ remains a Git boundary.
 ### One model spelling per route
 
 A route carries one spelling of its model: the full catalogue id
-`ADAPTER/ID`, such as `opencode/opencode/deepseek-v4.1-flash-free`. The shared
-admission compiler decides it once from the adapter, the declared model and the
-host catalogue — a catalogued full id stays, a short form with one namespaced
-candidate resolves to that full id, and otherwise the adapter is prefixed; an
-uncatalogued result keeps `ADAPTER/MODEL` with one warning naming close
-catalogue matches. Submit, patch admission (run edit, planner fragments and
-review/repair panels), plan fallbacks and tier tables all pass through that one
-canonicaliser; exact-model tiers and batch items emit the full id at production.
+`ADAPTER/ID`, such as `opencode/opencode/deepseek-v4.1-flash-free`. The host
+entry point that holds the effective catalogue decides that spelling once:
+submit, run edit/patch (in patch preparation, before a candidate is built) and
+tier lowering from configuration. The canonicaliser is pure and idempotent — a
+declared id that already names the route adapter is returned byte-for-byte
+(warning with `ROUTE_MODEL_NOT_CATALOGUED` when the effective catalogue does not
+know it), never prefixed again; only a bare or short `NAMESPACE/NAME` is
+resolved by catalogue match, a single unique namespaced candidate, or an
+adapter-prefixed spelling with that warning. Applying it to a stored id again
+changes nothing. Plan fallbacks and patch-added or replaced nodes are
+canonicalised on that same pass; exact-model tiers and batch items emit the
+full id at production. Admission reads the stored ids verbatim and never
+rewrites them, so launch, retry, advance and relay leave the spelling alone.
 Nothing downstream splits, prefixes or re-derives the stored id: preparation,
 successor deduplication and prior-model exclusions parse it directly. This is
 what lets a batch route match `run implement --model` and a declared route
@@ -176,8 +181,8 @@ equal to a ladder hand-off appear once among successors.
   changes which model runs.
 - Owner: `crates/routing/src/catalog.rs`,
   `crates/fabric-runtime/src/graph/canonical.rs`,
-  `crates/fabric-runtime/src/graph/candidate.rs`,
-  `crates/cli/src/fabric/graph_relay.rs`,
+  `crates/fabric-runtime/src/graph/patch.rs`,
+  `crates/cli/src/fabric/graph_relay.rs`, `src/fabric/interface.rs`,
   `crates/fabric-runtime/src/graph/next_step.rs`
 
 ### Bundled template declarations

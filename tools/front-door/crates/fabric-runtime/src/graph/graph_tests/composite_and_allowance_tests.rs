@@ -351,6 +351,7 @@ fn public_patch_skip_survives_unrelated_edits_and_retry_supersedes_it() {
         None,
         &edit,
         &context,
+        None,
     )
     .unwrap();
     assert_eq!(state(&checkpoint, "skipped"), Some(NodeState::Skipped));

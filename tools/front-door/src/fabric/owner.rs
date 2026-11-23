@@ -1386,14 +1386,24 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             .iter()
             .map(|slot| (slot.lens.clone(), panel.lens_advice(&slot.lens, true)))
             .collect();
+        // Lower repair-panel tiers with the host's effective catalogue and
+        // surface every warning; no bundled fallback in product code.
+        let catalogue = provenant_cli::route::effective_catalogue(&self.factory.context.roots).ok();
         let slots = panel
             .slots
             .into_iter()
             .map(|slot| {
-                let (key, mut route) = crate::graph_support::tier_route(
-                    &slot.lens, &slot.tier, None, true,
+                let (key, mut route, warnings) = crate::graph_support::tier_route(
+                    &slot.lens,
+                    &slot.tier,
+                    None,
+                    true,
+                    catalogue.as_ref(),
                 )
                 .map_err(|_| "repair review route is invalid; correct reviewer tier settings")?;
+                for warning in warnings {
+                    let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+                }
                 if let Some(family) = slot
                     .satisfied_family
                     .as_ref()

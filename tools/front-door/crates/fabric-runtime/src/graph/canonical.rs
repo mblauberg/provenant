@@ -1,25 +1,26 @@
-//! One spelling of every route model, decided once at graph admission.
+//! One spelling of every route model, decided once at the host entry point.
 //! Spec: docs/specs/fabric.md#one-model-spelling-per-route
 use super::{GraphDocument, GraphNode, GraphRoute};
+use provenant_records::warning::Warning;
 
-/// Canonicalise every route model in a document in place and return warnings
-/// for uncatalogued ids. The shared admission compiler calls this so submit,
-/// patch admission and tier lowering all see one full `ADAPTER/ID` spelling.
+/// Canonicalise every route model in a document in place and return typed
+/// warnings for uncatalogued ids. Host entry points call this with the
+/// effective catalogue before a candidate is built; admission never rewrites.
 pub fn canonicalise_route_models(
     document: &mut GraphDocument,
     catalogue: Option<&provenant_routing::Catalogue>,
-) -> Vec<String> {
+) -> Vec<Warning> {
     let mut warnings = Vec::new();
     canonicalise_route_nodes(&mut document.nodes, catalogue, &mut warnings);
     warnings
 }
 
-/// Canonicalise a node slice, used by patch admission for the nodes it stores
-/// in an expansion as well as by the document-level admission compiler.
+/// Canonicalise a node slice, used for the nodes a patch adds to an expansion
+/// as well as for a submitted document.
 pub fn canonicalise_route_nodes(
     nodes: &mut [GraphNode],
     catalogue: Option<&provenant_routing::Catalogue>,
-    warnings: &mut Vec<String>,
+    warnings: &mut Vec<Warning>,
 ) {
     walk(nodes, catalogue, warnings);
 }
@@ -27,7 +28,7 @@ pub fn canonicalise_route_nodes(
 fn walk(
     nodes: &mut [GraphNode],
     catalogue: Option<&provenant_routing::Catalogue>,
-    warnings: &mut Vec<String>,
+    warnings: &mut Vec<Warning>,
 ) {
     for node in nodes {
         for route in node
@@ -58,7 +59,7 @@ fn walk(
 fn route_model(
     route: &mut GraphRoute,
     catalogue: Option<&provenant_routing::Catalogue>,
-) -> Option<String> {
+) -> Option<Warning> {
     let (Some(adapter), Some(model)) = (route.adapter.as_deref(), route.model.as_deref()) else {
         return None;
     };
@@ -165,6 +166,7 @@ mod tests {
             limits: &limits,
             worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
         };
+        let catalogue = catalogue();
         super::super::patch::admit_patch(
             &mut super::super::patch::LiveGraph {
                 document: &document,
@@ -173,6 +175,7 @@ mod tests {
             None,
             &patch,
             &context,
+            Some(&catalogue),
         )
         .expect("patch admits");
         let added = checkpoint
@@ -186,6 +189,77 @@ mod tests {
                 .as_ref()
                 .and_then(|route| route.model.as_deref()),
             Some("opencode/opencode/hy4-flash-free")
+        );
+    }
+
+    // Spec: docs/specs/fabric.md#one-model-spelling-per-route
+    #[test]
+    fn effective_catalogue_model_is_canonicalised_at_the_entry_point() {
+        let layer = provenant_config::OverlayLayer {
+            source: provenant_config::OverlaySource::Host,
+            text: "[[catalogue.models]]\nmodel = 'opencode/opencode/overlay-only-model'\nevidence_ref = 'owner fact'\n"
+                .to_owned(),
+        };
+        let effective = catalogue().with_overlays(&[layer], Vec::new());
+        assert!(effective.overlay_warnings().is_empty());
+        let mut document: GraphDocument = serde_json::from_value(json!({
+            "schema_version": 1,
+            "graph_id": "overlay-model",
+            "nodes": [{
+                "id": "reader",
+                "access": "read_only",
+                "prompt": "read",
+                "route": {"adapter":"opencode","model":"opencode/overlay-only-model"}
+            }]
+        }))
+        .expect("valid document");
+        let warnings = canonicalise_route_models(&mut document, Some(&effective));
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(
+            document.nodes[0]
+                .route
+                .as_ref()
+                .and_then(|route| route.model.as_deref()),
+            Some("opencode/opencode/overlay-only-model"),
+            "a model only in the effective catalogue resolves at the entry point"
+        );
+    }
+
+    // Spec: docs/specs/fabric.md#one-model-spelling-per-route
+    #[test]
+    fn an_uncatalogued_full_id_is_kept_exactly_once_with_one_warning() {
+        let mut document: GraphDocument = serde_json::from_value(json!({
+            "schema_version": 1,
+            "graph_id": "uncatalogued-model",
+            "nodes": [{
+                "id": "reader",
+                "access": "read_only",
+                "prompt": "read",
+                "route": {"adapter":"opencode","model":"opencode/opencode/uncatalogued-fixture-model"}
+            }]
+        }))
+        .expect("valid document");
+        let warnings = canonicalise_route_models(&mut document, Some(&catalogue()));
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(
+            warnings[0].code,
+            provenant_records::warning::ROUTE_MODEL_NOT_CATALOGUED
+        );
+        let model = document.nodes[0]
+            .route
+            .as_ref()
+            .and_then(|route| route.model.as_deref());
+        assert_eq!(model, Some("opencode/opencode/uncatalogued-fixture-model"));
+        // A second pass changes neither the id nor its warning.
+        let again = canonicalise_route_models(&mut document, Some(&catalogue()));
+        assert_eq!(again.len(), warnings.len());
+        assert_eq!(again[0].code, warnings[0].code);
+        assert_eq!(
+            document.nodes[0]
+                .route
+                .as_ref()
+                .and_then(|route| route.model.as_deref()),
+            model
         );
     }
 }

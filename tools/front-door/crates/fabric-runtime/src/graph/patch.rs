@@ -375,8 +375,9 @@ pub fn admit_patch(
     parent: Option<&str>,
     patch: &Patch,
     context: &PatchContext<'_>,
+    catalogue: Option<&provenant_routing::Catalogue>,
 ) -> Result<Admitted, PatchError> {
-    admit_patch_for_retry(graph, parent, patch, context, None)
+    admit_patch_for_retry(graph, parent, patch, context, catalogue, None)
 }
 
 fn admit_patch_for_retry(
@@ -384,6 +385,7 @@ fn admit_patch_for_retry(
     parent: Option<&str>,
     patch: &Patch,
     context: &PatchContext<'_>,
+    catalogue: Option<&provenant_routing::Catalogue>,
     retry: Option<&str>,
 ) -> Result<Admitted, PatchError> {
     // Initial nodes live in the immutable source, rather than being copied
@@ -523,6 +525,7 @@ fn admit_patch_for_retry(
         parent,
         patch,
         context,
+        catalogue,
         Preparation::Live { retry },
     )? {
         Prepared::Replayed(revision) => Ok(Admitted {
@@ -537,17 +540,9 @@ fn admit_patch_for_retry(
                 plan,
                 ..
             } = *admission;
-            // The nodes an admitted patch stores must carry the same one model
-            // spelling as the compiled preview, whichever path admitted them.
-            // Warnings already surfaced from the shared compiler in `prepare`.
+            // Patch nodes were canonicalised once in `prepare` with the host's
+            // effective catalogue; admission stores that spelling unchanged.
             // Spec: docs/specs/fabric.md#one-model-spelling-per-route
-            let mut warnings = Vec::new();
-            let catalogue = provenant_routing::Catalogue::bundled().ok();
-            super::canonicalise_route_nodes(
-                &mut expansion.nodes,
-                catalogue.as_ref(),
-                &mut warnings,
-            );
             if let Some(parent) = parent {
                 for node in &mut expansion.nodes {
                     node.parent_node = Some(parent.id.clone());
@@ -913,6 +908,7 @@ fn retry_node_scope(
         None,
         &patch,
         context,
+        None,
         Some(id),
     )?;
     if let Some((_, Some(restart))) = reason
@@ -1256,7 +1252,6 @@ fn admit_submission(
         context.limits,
         &Default::default(),
         None,
-        None,
     )
     .map_err(|error| {
         let mut refusal = PatchError::invalid(error.to_string());
@@ -1434,6 +1429,7 @@ pub(super) enum Preparation<'a> {
     FinalFragment,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn prepare(
     source: &GraphDocument,
     expanded: &GraphDocument,
@@ -1441,6 +1437,7 @@ pub(super) fn prepare(
     parent: Option<&PlannedNode>,
     patch: &Patch,
     context: &PatchContext<'_>,
+    catalogue: Option<&provenant_routing::Catalogue>,
     mode: Preparation<'_>,
 ) -> Result<Prepared, PatchError> {
     let retry = match mode {
@@ -1738,6 +1735,18 @@ pub(super) fn prepare(
         }
         replaced.push(node);
     }
+    // One spelling of each model a patch adds or replaces is decided here,
+    // before the candidate is built, with the host's effective catalogue.
+    // Admission only reads the stored ids.
+    // Spec: docs/specs/fabric.md#one-model-spelling-per-route
+    let mut model_warnings = Vec::new();
+    super::canonicalise_route_nodes(&mut nodes, catalogue, &mut model_warnings);
+    super::canonicalise_route_nodes(&mut replaced, catalogue, &mut model_warnings);
+    warnings.extend(
+        model_warnings
+            .into_iter()
+            .map(|warning| warning.to_string()),
+    );
     // Every node a lane or planner adds or replaces names it, whatever the
     // author wrote, so the graph owner can apply that lane's sandbox floor.
     if let Some(parent) = parent {
@@ -1821,7 +1830,6 @@ pub(super) fn prepare(
         context.limits,
         &Default::default(),
         None,
-        None,
     )
     .map_err(|error| {
         let mut refusal = PatchError::invalid(error.to_string());
@@ -1835,11 +1843,6 @@ pub(super) fn prepare(
         refusal.candidate = Some(Box::new(error));
         refusal
     })?;
-    // Model canonicalisation warnings from the shared compiler belong on the
-    // admitted expansion, just like the patch's own advisory warnings.
-    expansion
-        .floor_warnings
-        .extend(admitted.warnings.iter().cloned());
     let preview = admitted.expanded;
     let plan = admitted.plan;
     Ok(Prepared::Ready(Box::new(Admission {
@@ -2010,6 +2013,7 @@ mod advisory_write_scope_tests {
                 limits: &limits,
                 worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
             },
+            None,
         )
         .expect("overlapping advisory claims remain admissible");
 
@@ -2102,6 +2106,7 @@ mod advisory_write_scope_tests {
                 limits: &limits,
                 worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
             },
+            None,
         )
         .expect("initial static admission succeeds");
 

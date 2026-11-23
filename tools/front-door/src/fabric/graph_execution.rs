@@ -1092,7 +1092,6 @@ impl Factory {
                                 &self.context.config.graph.limits,
                                 &self.context.config.graph.budget,
                                 None,
-                                None,
                             )
                         }
                         None => provenant_fabric_runtime::graph::admit_candidate(
@@ -1101,7 +1100,6 @@ impl Factory {
                             extensions,
                             &self.context.config.graph.limits,
                             &self.context.config.graph.budget,
-                            None,
                             None,
                         ),
                     }
@@ -1458,7 +1456,6 @@ impl Factory {
                     &self.context.config.graph.limits,
                     &self.context.config.graph.budget,
                     Some(&requester_path),
-                    None,
                 ),
                 None => provenant_fabric_runtime::graph::admit_candidate(
                     document,
@@ -1467,7 +1464,6 @@ impl Factory {
                     &self.context.config.graph.limits,
                     &self.context.config.graph.budget,
                     Some(&requester_path),
-                    None,
                 ),
             }
             .map_err(FacadeError::graph_candidate)?;

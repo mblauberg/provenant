@@ -1411,6 +1411,7 @@ fn a_replaced_gate_accepting_rejection_never_lands() {
 
             worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
         },
+        None,
     )
     .unwrap();
     journal.0 = Some(checkpoint);

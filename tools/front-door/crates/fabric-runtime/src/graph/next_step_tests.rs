@@ -641,7 +641,7 @@ fn a_declared_relative_route_equal_to_the_handoff_target_appears_once() {
         .unwrap()
         .0;
     let mut node = plan.nodes[0].clone();
-    // Admission has already fixed the spelling of the node's declared routes.
+    // The host entry point already fixed the spelling of the node's routes.
     // The second route was declared provider-relative and carries a different
     // account, so whole-route comparison would still offer it beside the
     // ladder's hand-off to the same model.

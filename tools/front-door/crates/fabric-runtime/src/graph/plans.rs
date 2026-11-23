@@ -1227,6 +1227,7 @@ fn fragment(
         Some(node),
         &patch,
         &context,
+        None,
         super::patch::Preparation::FinalFragment,
     )
     .map_err(|error| {

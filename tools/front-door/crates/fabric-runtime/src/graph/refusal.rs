@@ -456,7 +456,6 @@ mod tests {
             &Default::default(),
             &Default::default(),
             None,
-            None,
         )
         .err()
         .expect("cycle must still refuse");

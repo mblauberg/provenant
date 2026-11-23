@@ -418,10 +418,9 @@ fn cloud_placement_is_refused_at_admission_but_a_persisted_graph_still_replays()
             graph.admit(&limits),
             Err(AdmissionError::CloudPlacementRemoved)
         ));
-        let candidate =
-            admit_candidate(&graph, None, &[], &limits, &Default::default(), None, None)
-                .err()
-                .expect("cloud placement must be refused");
+        let candidate = admit_candidate(&graph, None, &[], &limits, &Default::default(), None)
+            .err()
+            .expect("cloud placement must be refused");
         assert!(matches!(candidate, CandidateError::CloudPlacementRemoved));
         for refusal in [
             crate::coordination::facade::FacadeError::graph_admission(

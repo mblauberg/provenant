@@ -153,7 +153,7 @@
         assert_eq!(super::resolve_review_family(&roots, &serde_json::json!("test"), Some("openai"), &[])?, "openai");
         assert_eq!(super::resolve_review_family(&roots, &serde_json::json!("test"), Some("anthropic"), &[])?, "anthropic");
         // A review tier table built from an adapter and a relative model must
-        // resolve: the shared canonicaliser supplies the full id first.
+        // resolve: tier lowering with the effective catalogue supplies the full id first.
         // Spec: docs/specs/fabric.md#one-model-spelling-per-route
         let table = serde_json::json!({"adapter":"claude", "model":"claude-haiku-5-5"});
         assert_eq!(super::resolve_review_family(&roots, &table, Some("anthropic"), &[])?, "anthropic");

@@ -2957,6 +2957,7 @@ fn admit_with(
         parent,
         &host_patch(patch),
         &context,
+        None,
     )
 }
 
@@ -3249,6 +3250,7 @@ fn admit_patch_journals_before_commit_and_tags_its_nodes_with_the_parent() {
         Some("a"),
         &patch,
         &context,
+        None,
     )
     .unwrap();
     // The sink saw the record before commit, unmarked, with the parent named.
@@ -3280,6 +3282,7 @@ fn admit_patch_journals_before_commit_and_tags_its_nodes_with_the_parent() {
         None,
         &patch,
         &context,
+        None,
     )
     .unwrap_err();
     assert_eq!(error.code, "journal");
@@ -4169,6 +4172,7 @@ fn planner_admits_bundled_batch_and_deliver_through_the_patch_path() {
             Some("plan"),
             &patch,
             &context,
+            None,
         )
         .unwrap_or_else(|error| panic!("{name}: {error}"));
         assert!(admitted.added.contains(&"plan--delivery".to_owned()));

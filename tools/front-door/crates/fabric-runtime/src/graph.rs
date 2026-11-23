@@ -1601,6 +1601,7 @@ fn advance_gate<R: AttemptOwner, J: GraphJournal>(
                         Some(&parent),
                         &change,
                         &context,
+                        None,
                     )
                     .map_err(|error| error.message)?;
                     let preview = plans::expand(
@@ -3750,10 +3751,10 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             candidate
         }
         None => match stored.as_ref() {
-            Some(checkpoint) => admit_running_candidate(
-                document, checkpoint, extensions, limits, budget, None, None,
-            ),
-            None => admit_candidate(document, None, extensions, limits, budget, None, None),
+            Some(checkpoint) => {
+                admit_running_candidate(document, checkpoint, extensions, limits, budget, None)
+            }
+            None => admit_candidate(document, None, extensions, limits, budget, None),
         }
         .map_err(|error| match error {
             CandidateError::CheckpointTopology { node, invariant } => GraphError::BadCheckpoint {
@@ -3839,6 +3840,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         limits,
                         worktree_layout: worktree_layout.clone(),
                     },
+                    None,
                 )
                 .map_err(|error| GraphError::Invalid(error.to_string()))?;
             }

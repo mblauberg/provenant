@@ -2296,14 +2296,21 @@ impl Factory {
                 bind_review_warning(node, warning);
             }
         }
-        // Fix the document's own spelling before it is sealed or replayed so
-        // explain shows the same ids the shared admission compiler will store.
+        // Fix the document's own spelling here, before it is sealed or replayed,
+        // so explain shows exactly the ids admission will read verbatim.
         // Spec: docs/specs/fabric.md#one-model-spelling-per-route
         let catalogue = provenant_cli::route::effective_catalogue(&self.context.roots).ok();
-        input_warnings.extend(provenant_fabric_runtime::graph::canonicalise_route_models(
-            &mut document,
-            catalogue.as_ref(),
-        ));
+        // The host owns the effective catalogue and decides every model
+        // spelling here, once. Admission reads the stored ids verbatim.
+        // Spec: docs/specs/fabric.md#one-model-spelling-per-route
+        input_warnings.extend(
+            provenant_fabric_runtime::graph::canonicalise_route_models(
+                &mut document,
+                catalogue.as_ref(),
+            )
+            .into_iter()
+            .map(|warning| warning.to_string()),
+        );
         document.set_replay_digest(&digest);
         // Explain is read-only and still shows the compiled submission. For a
         // launch, the host performs writer preflight before sealing the patch.
@@ -2338,7 +2345,6 @@ impl Factory {
             &self.context.config.graph.limits,
             &self.context.config.graph.budget,
             Some(&self.requester_lane_path()?),
-            catalogue.as_ref(),
         )
         .map_err(FacadeError::graph_candidate)?;
         if let Some(warning) = review_subject.and_then(|subject| subject.warning) {
@@ -2716,6 +2722,7 @@ impl Factory {
             .ok_or(FacadeError::NotFound)?;
         let library = self.template_library(None)?;
         let resolver = self.launch_resolvers(Some(&encode(&execution.document)?))?;
+        let catalogue = provenant_cli::route::effective_catalogue(&self.context.roots).ok();
         let admitted = patch::admit_patch(
             &mut LiveGraph {
                 document: &execution.document,
@@ -2731,6 +2738,7 @@ impl Factory {
                 limits: &self.context.config.graph.limits,
                 worktree_layout: self.context.port_table.worktree_layout.clone(),
             },
+            catalogue.as_ref(),
         )
         .map_err(graph_patch_error)?;
         for expansion in &mut checkpoint.expansions {
@@ -2742,7 +2750,6 @@ impl Factory {
                 bind_read_roots(node, &value)?;
             }
         }
-        let catalogue = provenant_cli::route::effective_catalogue(&self.context.roots).ok();
         provenant_fabric_runtime::graph::admit_candidate(
             &execution.document,
             Some(&checkpoint),
@@ -2750,7 +2757,6 @@ impl Factory {
             &self.context.config.graph.limits,
             &self.context.config.graph.budget,
             execution.requester_path.as_deref(),
-            catalogue.as_ref(),
         )
         .map_err(FacadeError::graph_candidate)?;
         // save writes patch events before publishing the checkpoint, under this lock.
@@ -4226,7 +4232,6 @@ mod tests {
             &[],
             &factory.context.config.graph.limits,
             &factory.context.config.graph.budget,
-            None,
             None,
         )?;
         factory.context.config.graph.limits.node_prompt_bytes = 1;

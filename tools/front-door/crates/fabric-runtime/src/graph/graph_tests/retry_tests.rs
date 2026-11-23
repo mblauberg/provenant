@@ -1796,6 +1796,7 @@ fn public_retry_preserves_live_spawn_only_children() {
             ..Default::default()
         },
         &context,
+        None,
     )
     .unwrap();
     let mut owner = FakeOwner {

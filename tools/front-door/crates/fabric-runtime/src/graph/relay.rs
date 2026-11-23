@@ -556,7 +556,7 @@ pub fn admit_child_bound(
     };
     let Admitted {
         revision, replayed, ..
-    } = super::patch::admit_patch(graph, Some(parent), &patch, &admission_context)?;
+    } = super::patch::admit_patch(graph, Some(parent), &patch, &admission_context, None)?;
     let record = graph
         .checkpoint
         .expansions

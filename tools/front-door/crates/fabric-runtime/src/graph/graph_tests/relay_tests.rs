@@ -676,6 +676,7 @@ fn detached_children_do_not_gate_their_parents_dependants() {
             ..Default::default()
         },
         &context,
+        None,
     )
     .unwrap();
     let expanded = plans::expand(
@@ -1379,6 +1380,7 @@ fn successful_final_patch_producer_leaves_its_planned_work_pending() {
             ..Default::default()
         },
         &context,
+        None,
     )
     .unwrap();
     for id in ["a", "a--producer"] {
