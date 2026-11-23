@@ -71,7 +71,7 @@ pub fn resolve_forge(
     state: &Path,
     project: &Path,
     ports: &provenant_config::PortTable,
-) -> Result<provenant_config::ForgeContext, RunError> {
+) -> Result<provenant_config::ForgeContext> {
     let invalid = |error: String| RunError::Input {
         kind: crate::ErrorKind::Invalid,
         message: error,
@@ -1403,7 +1403,9 @@ impl HostDeliveryContext {
         self.tools = Some(HostTools { git, gh });
         let common_git_dir = self.trusted_common_git_dir(writer, stage)?;
         self.set_host_project(&common_git_dir);
-        self.refuse_protected_target(writer, &request.branch, stage)?;
+        // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+        let forge = forge_for(&request.remote, "", &[]);
+        self.refuse_protected_target(writer, &request.branch, stage, &forge)?;
         if matches!(request.mode, crate::DeliveryMode::Integrate(_)) && request.remote.is_empty() {
             let branch = self.command(
                 &writer.worktree,
@@ -1524,16 +1526,17 @@ impl HostDeliveryContext {
     }
     /// Refresh the forge remote under writer custody with delivery's host
     /// credential and executable checks, constraining the refspec and helpers.
+    /// `target` is the private Git directory and the one remote to refresh.
     pub(crate) fn refresh_origin(
         writer: &WriterRequest,
-        git_dir: &Path,
+        target: (&Path, &str),
         host_state: &Path,
         cancel: &provenant_core::CancelToken,
         facts: &provenant_confinement::worktrees::RepoFacts,
         access: (Option<&provenant_records::LaneAccessReceipt>, Option<bool>),
         policy: &provenant_records::policy::Policy,
-        remote: &str,
     ) -> Result<()> {
+        let (git_dir, remote) = target;
         let mut host = Self::capture()
             .with_lane_access(access.0.cloned(), access.1)
             .with_policy(policy.clone())

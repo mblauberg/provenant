@@ -658,7 +658,7 @@ fn execute(
         .map(|(_, lanes)| lanes)
         .map_err(|fail| fail.message);
     let project = context.identity.project;
-    let forge = resolve_forge(src.roots.state.as_path(), project, &context.port_table)?;
+    let forge = resolve_forge(src.roots.state.as_path(), &src.cwd, &context.port_table)?;
     let actor = context.identity.inbox.actor;
     let store = session.as_ref().filter(|_| !args.no_checkpoint).map(|id| {
         checkpoint_store(&src.roots, project, id.clone()).with_chair(context.identity.host, actor)
@@ -1947,15 +1947,6 @@ mod tests {
         );
         assert!(session_id(Some("Not Valid")).is_err());
     }
-}
-
-#[cfg(test)]
-mod upstream_handoff_tests {
-    use super::*;
-
-    fn test_forge(remote: &str) -> provenant_config::ForgeContext {
-        provenant_run::forge_for(remote, "trunk", &[])
-    }
 
     /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
     #[test]
@@ -1984,7 +1975,7 @@ mod upstream_handoff_tests {
         let tree = Tree {
             path: project.clone(),
             branch: Some("lane".into()),
-            head: head.trim().to_owned(),
+            head: String::from_utf8_lossy(&head).trim().to_owned(),
             primary: false,
             dirty: false,
             unknown: false,
@@ -1997,9 +1988,9 @@ mod upstream_handoff_tests {
         };
         let forge = test_forge("upstream");
         assert!(forge.is_protected("trunk"));
-        wip_git(&tree, &forge.remote.value)?;
+        wip_git(&tree, &forge.remote.value).map_err(|refusal| format!("{refusal:?}"))?;
         let pushed = provenant_os::fixture::run_git(&bare, &["rev-parse", "refs/heads/lane"])?;
-        assert_eq!(pushed.trim(), head.trim());
+        assert_eq!(pushed.trim_ascii(), head.trim_ascii());
         assert!(!forge.is_protected("lane"));
         Ok(())
     }

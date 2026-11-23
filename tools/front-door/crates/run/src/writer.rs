@@ -1957,12 +1957,18 @@ fn prepare_writer_git(
     // passed to every Git path check and refresh below. No checkout is assumed
     // to call it `origin`; a checkout with no remote simply has none to fetch.
     // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
-    let ports = provenant_config::PortTable::read_for(Some(project.as_path()), state)
-        .map_err(|error| RunError::Validation(error.to_string()))?;
-    let policy = provenant_config::operation_policy(state, &project, &ports);
+    let ports =
+        provenant_config::PortTable::read_for(Some(project.as_path()), state).map_err(|error| {
+            RunError::Input {
+                kind: crate::ErrorKind::Invalid,
+                message: error.to_string(),
+            }
+        })?;
     let config = provenant_config::ForgeConfig::new(&ports, (*policy).clone());
-    let git = provenant_config::ForgeGit::new(&project)
-        .map_err(|error| RunError::Validation(error.to_string()))?;
+    let git = provenant_config::ForgeGit::new(&project).map_err(|error| RunError::Input {
+        kind: crate::ErrorKind::Invalid,
+        message: error.to_string(),
+    })?;
     let remote = match provenant_config::ForgeContext::remote(&config, &git) {
         Ok(remote) => remote.value,
         Err(provenant_config::ForgeContextError::NoRemote { remotes, .. })
@@ -1970,7 +1976,12 @@ fn prepare_writer_git(
         {
             String::new()
         }
-        Err(error) => return Err(RunError::Validation(error.to_string())),
+        Err(error) => {
+            return Err(RunError::Input {
+                kind: crate::ErrorKind::Invalid,
+                message: error.to_string(),
+            });
+        }
     };
     let remote = remote.as_str();
     let path = writer.worktree.path().to_path_buf();
@@ -2029,13 +2040,12 @@ fn prepare_writer_git(
             project: project.clone(),
             worktree: path.clone(),
         },
-        repo.private_git_dir(),
+        (repo.private_git_dir(), remote),
         state,
         cancel,
         &writer.facts,
         access,
         policy,
-        remote,
     )?;
     // Fetch may race with sibling config writes. Reopen after it and let Git's
     // config.lock serialize the independent upstream updates.

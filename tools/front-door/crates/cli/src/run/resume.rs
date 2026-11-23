@@ -60,7 +60,10 @@ pub fn lane(command: crate::Lane, edge: &Edge<'_>) -> Reply {
             // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
             let state = edge.roots.state.as_path();
             let ports =
-                provenant_config::PortTable::read_for(Some(writer.project.as_path()), state)?;
+                provenant_config::PortTable::read_for(Some(writer.project.as_path()), state)
+                    .map_err(|error| {
+                        Fail::new(Status::Error, ErrorKind::Config, error.to_string())
+                    })?;
             let forge = run::resolve_forge(state, &writer.project, &ports)?;
             let destination = match deliver {
                 Some(mode) => override_destination(mode, branch, task.deliver.as_ref(), &forge)?,

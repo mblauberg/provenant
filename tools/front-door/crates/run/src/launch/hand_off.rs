@@ -397,7 +397,10 @@ impl RunStore {
                     Some(writer_request.project.as_path()),
                     state,
                 )
-                .map_err(|error| RunError::Validation(error.to_string()))?;
+                .map_err(|error| RunError::Input {
+                    kind: crate::ErrorKind::Invalid,
+                    message: error.to_string(),
+                })?;
                 let forge = crate::resolve_forge(state, &writer_request.project, &ports)?;
                 let request = crate::HostDeliveryContext::destination(
                     crate::DeliveryMode::Push,
