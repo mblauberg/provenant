@@ -27,7 +27,7 @@ pub struct Globals {
     pub state_dir: Option<PathBuf>,
     pub project: Option<PathBuf>,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub(crate) struct RawGlobals {
     /// Print machine-readable JSON output
     #[arg(long, global = true, action = clap::ArgAction::Append, num_args = 0, default_missing_value = "true")]
@@ -42,7 +42,7 @@ pub(crate) struct RawGlobals {
     #[arg(long, global = true)]
     pub project: Vec<PathBuf>,
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Command {
     /// Show help for a command
     Help {
@@ -265,7 +265,7 @@ pub enum Command {
     Internal(Internal),
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Build {
     /// Show build slot status
     Status,
@@ -300,7 +300,7 @@ fn landing_strategy_parser()
                 .ok_or_else(|| format!("undeclared landing strategy: {name}"))
         })
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Tracker {
     /// Advise on issue specifications without blocking work
     Lint {
@@ -315,7 +315,7 @@ pub enum Tracker {
         kind: String,
     },
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Preset {
     /// List available presets
     List,
@@ -351,7 +351,7 @@ pub enum Preset {
         underspecified: bool,
     },
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct Review {
     /// Git commit to review
     pub target: String,
@@ -390,7 +390,7 @@ pub struct Review {
     #[arg(long, default_value = "3600", catalog_duration())]
     pub wait: u64,
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Pr {
     /// Merge each pull request's base into its branch and push the result
     Sync {
@@ -417,7 +417,7 @@ pub enum Pr {
         numbers: Vec<u64>,
     },
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct PrOpen {
     /// The writer attempt that made the change, as NAME[/NODE[#N]]
     #[arg(long, value_name = "TARGET", catalog_graph_target())]
@@ -445,7 +445,7 @@ pub struct PrOpen {
     #[arg(long)]
     pub dry_run: bool,
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Chair {
     /// Read and update a chair session's structured summary.
     #[command(subcommand)]
@@ -468,7 +468,7 @@ pub enum Chair {
         session_id: Option<String>,
     },
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum ChairSummary {
     /// Show the current structured summary.
     Show {
@@ -502,7 +502,7 @@ pub enum ChairSummary {
         operation_id: Option<OperationId>,
     },
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum ChairLog {
     /// Append an update from a markdown or JSON file, or standard input with `-`.
     Append {
@@ -532,7 +532,7 @@ pub enum ChairLog {
         limit: u64,
     },
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Hosts {
     /// Probe sign-in without inference or credential access.
     Doctor {
@@ -553,7 +553,7 @@ fn host_alias(value: &str) -> Result<String, &'static str> {
     }
     Ok(value.into())
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Config {
     /// Show the effective repository integration ports and their sources.
     Ports,
@@ -627,7 +627,7 @@ pub enum Switch {
     On,
     Off,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct Access {
     /// Access mode: read-only or worktree-write [default: read-only]
     #[arg(long, value_enum)]
@@ -660,7 +660,7 @@ impl Access {
         self.mode.unwrap_or(Mode::ReadOnly)
     }
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct GraphRunArgs {
     /// Template to run (see `provenant templates`)
     #[arg(catalog_required_unless = "file", conflicts_with = "file")]
@@ -811,7 +811,7 @@ pub struct Output {
     #[arg(long, default_value = "65536", catalog_u64_range = 1..=65536)]
     pub max_bytes: u64,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct Cancel {
     /// Graph, node or attempt to stop, as NAME[/NODE[#N]]
     #[arg(value_name = "TARGET", catalog_graph_target())]
@@ -820,7 +820,7 @@ pub struct Cancel {
     #[arg(long, value_parser = reason, catalog_bounds = (0, 256))]
     pub reason: Option<String>,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct Resume {
     /// Graph, node or attempt to retry, as NAME[/NODE[#N]]
     #[arg(value_name = "TARGET", catalog_graph_target())]
@@ -835,7 +835,7 @@ pub struct Resume {
     #[arg(long, value_name = "KEY=VALUE")]
     pub extend: Vec<String>,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct Reconcile {
     /// Reconcile only these graphs, nodes or attempts (NAME[/NODE[#N]])
     #[arg(
@@ -857,7 +857,7 @@ pub struct Reconcile {
     #[arg(long, catalog_requires = "abandon", catalog_bounds = (0, 256))]
     pub reason: Option<String>,
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Lane {
     /// Re-run host delivery, requiring the settled receipt's clean, exact head
     Deliver {
@@ -872,7 +872,7 @@ pub enum Lane {
         accept_review: bool,
     },
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Native {
     /// Begin tracking a native tool call; do not pass its prompt
     Start {
@@ -907,7 +907,7 @@ pub enum NativeSettlement {
     Cancelled,
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Telemetry {
     /// Summarise local attempts and usage
     Stats(Stats),
@@ -930,19 +930,19 @@ pub enum Telemetry {
     #[command(subcommand)]
     Experiments(Experiments),
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Experiments {
     /// Show one experiment's stratified arm comparison
     Show(ExperimentShow),
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct ExperimentShow {
     /// Historical experiment name recorded in offline outcomes
     pub id: String,
     #[command(flatten)]
     pub pipeline: PipelineOptions,
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Prices {
     /// Fetch market prices and write a proposed diff; never edits the sheet
     Refresh(PricesRefresh),
@@ -952,7 +952,7 @@ pub enum PriceSource {
     Openrouter,
     Litellm,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct PricesRefresh {
     /// Primary source; the other is the cross-check (default openrouter)
     #[arg(long, value_enum, default_value = "openrouter")]
@@ -967,7 +967,7 @@ pub struct PricesRefresh {
     #[arg(long, default_value = "telemetry-prices.proposed.json")]
     pub out: PathBuf,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct Ingest {
     /// Ingest only this provider's sessions (only `claude` writes native transcripts)
     #[arg(long)]
@@ -976,7 +976,7 @@ pub struct Ingest {
     #[arg(long, value_parser = since)]
     pub since: Option<jiff::Timestamp>,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct Mileage {
     /// Account label or key
     #[arg(long)]
@@ -1000,7 +1000,7 @@ pub struct Mileage {
     #[arg(long, default_value_t = 7, catalog_u32_range = 1..=90)]
     pub recent_days: u32,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct Trace {
     /// Output file (default `provenant-trace.json`)
     #[arg(long, default_value = "provenant-trace.json")]
@@ -1015,7 +1015,7 @@ pub struct Trace {
     #[arg(long)]
     pub peers: bool,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct Stats {
     /// Include offline post-merge outcomes and stratified ranking
     #[arg(long, conflicts_with = "usage")]
@@ -1036,7 +1036,7 @@ pub struct Stats {
     pub until: Option<jiff::Timestamp>,
 }
 
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct PipelineOptions {
     /// Local main-line ref to analyse; no fetch is performed
     #[arg(long, default_value = "main")]
@@ -1054,7 +1054,7 @@ pub struct PipelineOptions {
     #[arg(long, default_value_t = 14, catalog_u32_range = 1..=3650)]
     pub expiry_days: u32,
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Worktree {
     /// Create a worktree on a new branch
     Create {
@@ -1077,12 +1077,12 @@ pub enum Worktree {
     /// Remove a worktree or merged ones, allowing declared ignored output
     Remove(Remove),
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Disk {
     /// Report disk use and reclaim classifications without changing files
     Report,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct Gc {
     /// Run for registered projects from the scheduled per-user agent
     #[arg(long, hide = true)]
@@ -1106,7 +1106,7 @@ pub struct Gc {
     #[arg(long, catalog_gc_idle())]
     pub idle: Option<u64>,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct Remove {
     /// Worktree to remove
     #[arg(catalog_required_unless = "merged", conflicts_with_all = ["merged", "branch", "since"])]
@@ -1129,7 +1129,7 @@ pub struct Remove {
     #[arg(long, catalog_requires = "merged")]
     pub since: Option<GitOid>,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct Page {
     /// Maximum results per page (1 to 100)
     #[arg(long, default_value = "50", catalog_u64_range = 1..=100)]
@@ -1146,7 +1146,7 @@ pub enum Rules {
 }
 pub use crate::check::Check;
 pub use crate::ci::Ci;
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Hook {
     /// Handle git hook events
     #[command(subcommand)]
@@ -1155,7 +1155,7 @@ pub enum Hook {
     #[command(external_subcommand)]
     Provider(Vec<OsString>),
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum GitHook {
     /// Check a push before it happens
     #[command(name = crate::hooks::PRE_PUSH)]
@@ -1166,7 +1166,7 @@ pub enum GitHook {
         location: String,
     },
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Internal {
     /// Resume preparation of an admitted local attempt in a separate process.
     Launch {
@@ -1419,7 +1419,7 @@ pub struct Wait {
     pub timeout: Option<u64>,
 }
 /// `trace`: a graph's revisions and attempt timeline.
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct GraphTrace {
     /// Graph, node or attempt, as NAME[/NODE[#N]]
     #[arg(value_name = "TARGET", catalog_graph_target())]
@@ -1446,7 +1446,7 @@ pub(crate) fn branch_name(value: &str) -> Result<String, String> {
         .map_err(|error| error.to_string())
 }
 
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct Edit {
     /// Graph name
     #[arg(value_name = "NAME", value_parser = edit_graph_name, catalog_graph_name())]
@@ -1455,7 +1455,7 @@ pub struct Edit {
     #[arg(long)]
     pub file: PathBuf,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct Templates {
     #[command(subcommand)]
     pub command: Option<TemplatesCommand>,
@@ -1463,7 +1463,7 @@ pub struct Templates {
     #[arg(long, global = true)]
     pub file: Option<PathBuf>,
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum TemplatesCommand {
     /// Show one effective template
     Show { name: String },

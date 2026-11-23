@@ -1,0 +1,24 @@
+//! `tick` — advance due graphs and run scheduled host tasks.
+use crate::commands::{Domain, Invocation, Verb};
+use provenant_cli::Command;
+use provenant_core::consumer_env::Stability;
+use provenant_records::{CommandError, Outcome};
+
+pub static DOMAIN: Domain = Domain {
+    name: "tick",
+    verbs: &[Verb {
+        path: &["tick"],
+        stability: Stability::Evolving,
+        run,
+    }],
+};
+
+fn run(inv: &Invocation) -> Result<Outcome, CommandError> {
+    let globals = inv.globals;
+    let process = inv.process;
+    let status = match inv.command {
+        Command::Tick => crate::tick::run(globals, process.workers()),
+        _ => return crate::commands::mismatched(),
+    };
+    crate::commands::rendered(status)
+}

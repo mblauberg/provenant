@@ -59,7 +59,7 @@ pub fn provider_check_routes(
     .map_err(|error| error.to_string())
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Route {
     /// Show the catalogue, pools, configured weights and pacing policy.
     List(RouteListRequest),
@@ -79,12 +79,12 @@ pub enum Route {
     /// Manage persistent exact-model exclusions from pools.
     Exclude(RouteExclude),
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct RouteExclude {
     #[command(subcommand)]
     pub command: RouteExcludeCommand,
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum RouteExcludeCommand {
     /// Exclude a model until removed or expired.
     Add(ExcludeAdd),
@@ -93,7 +93,7 @@ pub enum RouteExcludeCommand {
     /// List exact-model exclusions.
     List,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct ExcludeAdd {
     /// Exact model in ADAPTER/ID form.
     pub model: Model,
@@ -101,17 +101,17 @@ pub struct ExcludeAdd {
     #[arg(long)]
     pub until: Option<String>,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct ExcludeRemove {
     /// Exact model in ADAPTER/ID form.
     pub model: Model,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct RouteOverride {
     #[command(subcommand)]
     pub command: RouteOverrideCommand,
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum RouteOverrideCommand {
     /// Record a pacing override for one scope and echo the recorded rule.
     Set(OverrideSet),
@@ -120,13 +120,13 @@ pub enum RouteOverrideCommand {
     /// Remove pacing overrides: one scope's, or every one without a selector.
     Clear(OverrideClear),
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct OverrideList {
     /// Include expired overrides.
     #[arg(long)]
     pub all: bool,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 #[command(group(clap::ArgGroup::new("scope").args(["account", "provider", "all"])))]
 pub struct OverrideSet {
     /// Apply the override to this account (label, entry or adapter/key).
@@ -163,7 +163,7 @@ pub struct OverrideSet {
     #[arg(long)]
     pub tz: Option<String>,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct OverrideClear {
     /// Clear only this account's override.
     #[arg(long, conflicts_with = "provider")]
@@ -177,7 +177,7 @@ pub struct OverrideClear {
     #[arg(long, catalog_requires = "risk_tier", conflicts_with_all = ["account", "provider"])]
     pub task_kind: Option<String>,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct RouteListRequest {
     /// List catalogued model/effort pairs accepted by the resolver (no live probe).
     #[arg(long)]
@@ -189,7 +189,7 @@ pub struct RouteListRequest {
     #[arg(long)]
     pub pool: Option<String>,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct RouteSet {
     /// Pool name to update or create.
     pub pool: String,
@@ -205,14 +205,14 @@ pub struct RouteSet {
     #[arg(long, value_delimiter = ',', action = clap::ArgAction::Set)]
     pub efforts: Vec<String>,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct RouteRemove {
     /// Pool name to update.
     pub pool: String,
     /// Exact catalogue model to remove.
     pub model: Model,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct RouteReset {
     /// Bundled pool whose user override should be cleared.
     pub pool: String,
@@ -234,14 +234,14 @@ impl From<PacingChoice> for PacingPolicy {
         }
     }
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct RoutePacing {
     /// Registered provider ID.
     pub provider: String,
     /// Default pacing policy for the provider.
     pub policy: PacingChoice,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct RouteResolve {
     /// Preview a route that needs write access.
     #[arg(long)]

@@ -20,7 +20,7 @@ use thiserror::Error;
 #[cfg(test)]
 mod dates;
 mod release;
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Check {
     /// Check every configured provider route without launching a lane
     Providers(Providers),
@@ -59,7 +59,7 @@ pub enum Check {
 }
 
 /// Provider smoke checks use ordinary read-only lanes and consume provider quota.
-#[derive(Debug, clap::Args)]
+#[derive(Clone, Debug, clap::Args)]
 pub struct Providers {
     /// Launch one tiny read-only lane per route; consumes quota like any lane
     #[arg(long)]

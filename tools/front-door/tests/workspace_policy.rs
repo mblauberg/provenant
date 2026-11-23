@@ -1582,3 +1582,326 @@ fn owned_helpers_have_one_definition() -> Result<(), Box<dyn Error>> {
     );
     Ok(())
 }
+
+// Spec: docs/specs/rust-workspace.md#one-owner-per-command-domain
+#[test]
+fn every_grammar_leaf_has_exactly_one_registry_verb() -> Result<(), Box<dyn Error>> {
+    provenant::commands::install();
+    let grammar: std::collections::BTreeSet<String> =
+        provenant_cli::command_verbs().into_iter().collect();
+    let mut registered = Vec::new();
+    let mut domain_names = std::collections::BTreeSet::new();
+    for domain in provenant::commands::DOMAINS {
+        assert!(
+            domain_names.insert(domain.name),
+            "domain `{}` is declared twice",
+            domain.name
+        );
+        for verb in domain.verbs {
+            assert!(!verb.path.is_empty(), "a verb has an empty path");
+            assert!(
+                verb.path
+                    .iter()
+                    .all(|part| !part.is_empty() && !part.contains(' ')),
+                "a verb path segment must be one grammar word: {:?}",
+                verb.path
+            );
+            registered.push(verb.path.join(" "));
+        }
+    }
+    let unique: std::collections::BTreeSet<String> = registered.iter().cloned().collect();
+    assert_eq!(
+        unique.len(),
+        registered.len(),
+        "two registry entries share a path: {registered:?}"
+    );
+    assert_eq!(
+        unique, grammar,
+        "every grammar leaf needs exactly one registry verb and every verb a grammar leaf"
+    );
+    Ok(())
+}
+
+// Spec: docs/specs/rust-workspace.md#one-owner-per-command-domain
+// The usage verb strings are persisted telemetry units, so their set is a
+// contract and may not change without a migration.
+#[test]
+fn usage_verbs_keep_their_persisted_spelling() {
+    provenant::commands::install();
+    let expected: std::collections::BTreeSet<&str> = [
+        "accounts list",
+        "accounts register",
+        "accounts set",
+        "accounts sync",
+        "admit",
+        "adopt",
+        "answer",
+        "ask",
+        "build maintain",
+        "build report",
+        "build reset",
+        "build status",
+        "chair log append",
+        "chair log list",
+        "chair message",
+        "chair summary diff",
+        "chair summary show",
+        "chair summary update",
+        "chair switch",
+        "check config",
+        "check install",
+        "check providers",
+        "check release",
+        "check writing",
+        "ci failures",
+        "ci failures pr",
+        "ci failures run",
+        "cloud collect",
+        "cloud launch",
+        "config apply",
+        "config check",
+        "config detect",
+        "config history",
+        "config path",
+        "config ports",
+        "config schema",
+        "config set",
+        "config show",
+        "config unset",
+        "console board",
+        "console changes",
+        "console detail",
+        "console open",
+        "console overview",
+        "console projects",
+        "console search",
+        "console sessions",
+        "console tree",
+        "disk report",
+        "edit",
+        "events",
+        "fabric claim acquire",
+        "fabric claim list",
+        "fabric claim release",
+        "fabric claim renew",
+        "fabric claim verify",
+        "fabric events note",
+        "fabric events read",
+        "fabric identity",
+        "fabric mail mark-read",
+        "fabric mail read",
+        "fabric mail send",
+        "fabric peer",
+        "fabric peer-agent",
+        "gc",
+        "help",
+        "hook git pre-push",
+        "hosts",
+        "hosts doctor",
+        "inbox",
+        "inbox acknowledge",
+        "inbox close",
+        "install",
+        "internal event-listen",
+        "internal lane-cleanup",
+        "internal launch",
+        "internal provider-updates",
+        "internal settle",
+        "internal supervise",
+        "internal tick-gc",
+        "land",
+        "lane deliver",
+        "native end",
+        "native start",
+        "notes add",
+        "notes read",
+        "output",
+        "parse",
+        "pr contributions",
+        "pr open",
+        "pr status",
+        "pr sync",
+        "process-tree",
+        "quota",
+        "quota clear",
+        "quota display",
+        "quota history",
+        "quota show",
+        "quota tick",
+        "reconcile",
+        "release",
+        "result",
+        "retry",
+        "root",
+        "route exclude add",
+        "route exclude list",
+        "route exclude remove",
+        "route list",
+        "route override clear",
+        "route override list",
+        "route override set",
+        "route pacing",
+        "route remove",
+        "route reset",
+        "route resolve",
+        "route set",
+        "run",
+        "status",
+        "steer",
+        "stop",
+        "telemetry cost",
+        "telemetry experiments show",
+        "telemetry ingest",
+        "telemetry mileage",
+        "telemetry prices refresh",
+        "telemetry stats",
+        "telemetry trace",
+        "telemetry value",
+        "templates",
+        "templates show",
+        "tick",
+        "trace",
+        "tracker lint",
+        "uninstall",
+        "upgrade",
+        "verify",
+        "version",
+        "wait",
+        "workflow receipt save",
+        "workflow receipt show",
+        "workflow review",
+        "workflow session diff",
+        "workflow session handoff",
+        "workflow session save",
+        "workflow session show",
+        "worktree create",
+        "worktree doctor",
+        "worktree list",
+        "worktree remove",
+        "worktree session-list",
+    ]
+    .into_iter()
+    .collect();
+    let actual: std::collections::BTreeSet<String> =
+        provenant_cli::usage_verbs().into_iter().collect();
+    let expected: std::collections::BTreeSet<String> =
+        expected.into_iter().map(str::to_owned).collect();
+    let added: Vec<_> = actual.difference(&expected).cloned().collect();
+    let removed: Vec<_> = expected.difference(&actual).cloned().collect();
+    assert!(
+        added.is_empty() && removed.is_empty(),
+        "persisted usage verbs changed; added {added:?}, removed {removed:?}. The unit strings are a \
+         persisted contract: keep the spelling, or migrate recorded usage in the same PR"
+    );
+}
+
+// Spec: docs/specs/rust-workspace.md#one-owner-per-command-domain
+// A ceiling is an overridable default: raise a file's entry in the same PR that
+// makes the growth deliberate, and split rather than raise where a module has
+// become an owner of unrelated mechanisms.
+#[test]
+fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Error>> {
+    const DEFAULT_CEILING: usize = 2_000;
+    const CEILINGS: &[(&str, usize)] = &[
+        ("crates/cli/src/fabric/graph_relay.rs", 4935),
+        ("crates/cli/src/lib.rs", 3748),
+        ("crates/cli/src/quota.rs", 6914),
+        ("crates/cli/src/run.rs", 2426),
+        ("crates/cli/src/run/provider/confinement.rs", 2560),
+        ("crates/cli/src/run/provider/preparation.rs", 7670),
+        ("crates/config/src/loader.rs", 2796),
+        ("crates/config/src/managed.rs", 3113),
+        ("crates/config/src/ports.rs", 3068),
+        ("crates/config/src/project_binding.rs", 2229),
+        ("crates/confinement/src/cache.rs", 3962),
+        ("crates/confinement/src/repo.rs", 2027),
+        ("crates/confinement/src/utility.rs", 6495),
+        ("crates/confinement/src/worktrees/census.rs", 2334),
+        ("crates/confinement/src/worktrees/gc.rs", 3068),
+        ("crates/confinement/src/worktrees/lifecycle.rs", 2490),
+        ("crates/fabric-runtime/src/coordination/facade.rs", 2356),
+        ("crates/fabric-runtime/src/graph.rs", 4181),
+        ("crates/fabric-runtime/src/graph/journal.rs", 2517),
+        ("crates/fabric-runtime/src/graph/model.rs", 2648),
+        ("crates/fabric-runtime/src/graph/outputs.rs", 2352),
+        ("crates/fabric-runtime/src/graph/patch.rs", 2168),
+        ("crates/fabric-runtime/src/graph/plans.rs", 2165),
+        ("crates/fabric-runtime/src/graph/template.rs", 3118),
+        ("crates/fabric-runtime/src/graph/transitions.rs", 2462),
+        ("crates/fabric-runtime/src/hosts.rs", 3673),
+        ("crates/os/src/sys/pid.rs", 2562),
+        ("crates/providers/src/lane.rs", 3529),
+        ("crates/providers/src/launch.rs", 2670),
+        ("crates/providers/src/opencode.rs", 2584),
+        ("crates/providers/src/package_cache.rs", 2276),
+        ("crates/quota/src/admission.rs", 2341),
+        ("crates/quota/src/schedule.rs", 2812),
+        ("crates/records/src/adapters.rs", 2261),
+        ("crates/records/src/run.rs", 3991),
+        ("crates/redact/src/lib.rs", 2264),
+        ("crates/routing/src/catalog.rs", 2962),
+        ("crates/routing/src/resolve.rs", 4132),
+        ("crates/routing/src/review.rs", 2671),
+        ("crates/run/src/build_dir_gc.rs", 6032),
+        ("crates/run/src/controls.rs", 8896),
+        ("crates/run/src/delivery.rs", 4705),
+        ("crates/run/src/git_context.rs", 2837),
+        ("crates/run/src/holder.rs", 9243),
+        ("crates/run/src/launch.rs", 3843),
+        ("crates/run/src/retention.rs", 4638),
+        ("crates/run/src/settlement.rs", 4161),
+        ("crates/run/src/store.rs", 2503),
+        ("crates/run/src/writer.rs", 5045),
+        ("crates/supervisor/src/custody.rs", 3845),
+        ("crates/supervisor/src/guardian.rs", 2966),
+        ("crates/workflow/src/session.rs", 3252),
+        ("src/ci.rs", 2226),
+        ("src/fabric/graph_execution.rs", 2199),
+        ("src/fabric/interface.rs", 7645),
+        ("src/fabric/owner.rs", 5419),
+        ("src/fabric/peer.rs", 2594),
+        ("src/fabric/run_owner.rs", 2746),
+        ("src/fabric/unified.rs", 6302),
+        ("src/hooks.rs", 2612),
+        ("src/install.rs", 3923),
+        ("src/lane_cleanup.rs", 2947),
+        ("src/pr/landing/adapters.rs", 2938),
+        ("src/pr/landing/driver.rs", 3922),
+        ("src/pr/observer.rs", 2300),
+        ("src/status_wait.rs", 3265),
+        ("src/worktrees.rs", 5131),
+    ];
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut sources = Vec::new();
+    for path in source_roots() {
+        rust_sources(&path, &mut sources)?;
+    }
+    let mut violations = Vec::new();
+    for path in sources {
+        let relative = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if is_test_source(&relative) {
+            continue;
+        }
+        let lines = fs::read_to_string(&path)?.lines().count();
+        let ceiling = CEILINGS
+            .iter()
+            .find(|(file, _)| *file == relative.as_str())
+            .map_or(DEFAULT_CEILING, |(_, ceiling)| *ceiling);
+        if lines > ceiling {
+            violations.push(format!(
+                "{relative} is {lines} lines, over its ceiling of {ceiling}; split the file, or raise \
+                 its ceiling in this test in the same PR that justifies the growth"
+            ));
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "production files grew past their line ceilings:\n{}",
+        violations.join("\n")
+    );
+    Ok(())
+}

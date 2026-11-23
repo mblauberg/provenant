@@ -1,7 +1,6 @@
 //! Machine-readable owners for scripts/generate-reference; not an installed binary.
-use std::io::Write;
-
 fn main() -> std::process::ExitCode {
+    provenant::commands::install();
     let policy: Vec<_> = provenant_records::policy::table()
         .iter()
         .filter_map(|rule| {

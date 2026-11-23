@@ -30,7 +30,7 @@ const WAIT_SECONDS: u64 = 30;
 /// under a tight project budget.
 const CHECKPOINT_WARN_BYTES: u64 = 8 * 1024;
 
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Workflow {
     /// Check bound reviews against the receipt's risk tier.
     Review(Input),
@@ -41,13 +41,13 @@ pub enum Workflow {
     #[command(subcommand)]
     Session(Session),
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct Input {
     /// Request JSON file, or `-` for standard input.
     #[arg(long)]
     pub request: String,
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Receipt {
     /// Show a delivery receipt
     Show {
@@ -65,7 +65,7 @@ pub enum Receipt {
         input: Input,
     },
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Session {
     /// Save a session checkpoint (up to 256 KiB); requires a checkout or --project
     Save {
@@ -119,7 +119,7 @@ Terminal did not open, the command fails with LAUNCH_FAILED, keeps the lease her
 launch script to run on the peer.";
 /// `workflow session handoff`. The binary composes it: it needs worktree and
 /// peer owners that this crate does not hold.
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct Handoff {
     /// Peer host, by label or host ID
     #[arg(long)]

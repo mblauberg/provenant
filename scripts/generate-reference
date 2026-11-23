@@ -155,7 +155,7 @@ def cli_reference(data, all_commands=False):
 
 def reference_data(root):
     """Read the declarations from their Rust owners, never by parsing Rust source."""
-    output = cargo(root, "run", "--locked", "--quiet", "-p", "provenant-cli",
+    output = cargo(root, "run", "--locked", "--quiet", "-p", "provenant",
                    "--bin", "print-reference-data")
     data = json.loads(output)
     if (not isinstance(data.get("external_contract"), dict) or not isinstance(data.get("policy"), list)
@@ -383,7 +383,7 @@ def generate(root, binary=None):
             policy = declarations["policy"]
             enums = declarations["enums"]
         except (ValueError, KeyError, TypeError, AttributeError, subprocess.CalledProcessError):
-            gap("external-contract.md", "provenant-cli print-reference-data is unavailable")
+            gap("external-contract.md", "provenant print-reference-data is unavailable")
         for name, all_commands in [("cli.md", False), ("cli-all.md", True)]:
             try:
                 data = catalogue(root, binary, all_commands)

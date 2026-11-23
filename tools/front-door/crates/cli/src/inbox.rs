@@ -244,7 +244,7 @@ pub fn resolve_work(
     })
 }
 
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct Ask {
     /// JSON request content, including work links, replacement and deadline; ownership comes from Fabric
     #[arg(long)]
@@ -255,7 +255,7 @@ pub struct Ask {
     #[arg(long)]
     pub operation_id: Option<OperationId>,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct Answer {
     #[arg(long)]
     pub all_projects: bool,
@@ -284,7 +284,7 @@ pub struct Answer {
     #[arg(long)]
     pub project_key: Option<String>,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct Steer {
     /// Attempt to steer, as NAME[/NODE[#N]]; a node steers its live attempt
     #[arg(value_name = "TARGET", catalog_graph_target())]
@@ -303,7 +303,7 @@ pub struct Steer {
     #[arg(long)]
     pub operation_id: Option<OperationId>,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct ChairMessage {
     /// Registered chair session ID
     pub session: String,
@@ -315,7 +315,7 @@ pub struct ChairMessage {
     #[arg(long)]
     pub operation_id: Option<OperationId>,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 #[command(args_conflicts_with_subcommands = true)]
 pub struct Inbox {
     #[arg(long)]
@@ -343,7 +343,7 @@ pub struct Inbox {
     #[arg(long)]
     pub project_key: Option<String>,
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum InboxCommand {
     /// Close without treating silence as approval
     Close {

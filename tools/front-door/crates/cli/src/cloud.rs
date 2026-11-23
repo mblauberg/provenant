@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Cloud {
     /// Submit a brief to a provider cloud session and print its link
     Launch(Launch),
@@ -23,7 +23,7 @@ pub enum Provider {
     Codex,
 }
 
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct Launch {
     /// Brief file to send as the session's prompt
     #[arg(long)]
@@ -48,7 +48,7 @@ pub struct Launch {
     pub base: Option<String>,
 }
 
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct Collect {
     /// Launch key that `cloud launch` printed
     pub id: String,
