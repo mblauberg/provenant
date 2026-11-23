@@ -143,6 +143,7 @@ impl Row {
                 cache_write_1h: Some(self.cache_write_1h),
                 output: Some(self.output),
                 reasoning: self.reasoning_tokens,
+                extra: Default::default(),
             },
             source: self.usage_source,
             ..UsageRecord::default()
@@ -754,6 +755,7 @@ fn row(session: String, message: String, pending: Pending) -> Row {
         cache_write_1h: Some(one_hour),
         output: raw.output_tokens,
         reasoning: raw.reasoning_tokens,
+        extra: Default::default(),
     }));
     let (tokens, _) = accumulator.total();
     Row {

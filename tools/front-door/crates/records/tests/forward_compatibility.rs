@@ -342,15 +342,11 @@ fn attempt_record_preserves_digest() -> TestResult {
     assert_preserved::<run::AttemptRecord>("run-attempt", value)
 }
 
+// Spec: docs/specs/state.md#strict-bounded-records
 #[test]
 fn usage_record_preserves_digest() -> TestResult {
     let mut value = normalise::<run::UsageRecord>(json!({}))?;
-    // Tokens is a closed value struct (six Option buckets, Copy per the seam
-    // contract). Unlike record payloads it deliberately discards unknown
-    // fields; the record's `extra` map keeps the forward fields that survive.
-    let tokens = value["tokens"].clone();
     add_future_fields(&mut value);
-    value["tokens"] = tokens;
     assert_preserved::<run::UsageRecord>("usage_record_preserves_digest", value)
 }
 

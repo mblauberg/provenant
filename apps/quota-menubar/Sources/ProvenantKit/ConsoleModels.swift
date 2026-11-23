@@ -139,18 +139,24 @@ public struct Timings: Decodable, Equatable, Sendable {
     public let providerMs: UInt64?
 }
 
-public struct Usage: Decodable, Equatable, Sendable {
-    public let uncachedInput: UInt64?
+/// The token buckets of the current usage record. An unstated bucket is nil, never zero.
+public struct Tokens: Decodable, Equatable, Sendable {
+    public let input: UInt64?
+    public let output: UInt64?
     public let cacheRead: UInt64?
     public let cacheWrite: UInt64?
-    public let outputExcludingReasoning: UInt64?
+    public let cacheWrite1h: UInt64?
     public let reasoning: UInt64?
+}
+
+public struct Usage: Decodable, Equatable, Sendable {
+    public let tokens: Tokens
     public let contextBasisPoints: UInt64?
 
     /// Each reported count with its label, in reading order. A count the CLI did not report is left out, not zero.
     public var counts: [(label: String, value: UInt64)] {
-        let all: [(String, UInt64?)] = [("Input", uncachedInput), ("Cache read", cacheRead), ("Cache write", cacheWrite),
-                                        ("Output", outputExcludingReasoning), ("Reasoning", reasoning)]
+        let all: [(String, UInt64?)] = [("Input", tokens.input), ("Cache read", tokens.cacheRead), ("Cache write", tokens.cacheWrite),
+                                        ("Output", tokens.output), ("Reasoning", tokens.reasoning)]
         return all.compactMap { pair in pair.1.map { (label: pair.0, value: $0) } }
     }
 }

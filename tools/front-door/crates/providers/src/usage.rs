@@ -140,12 +140,12 @@ impl UsageAccumulator {
     /// the adapter declared it includes them, and the last stated cost.
     pub fn total(&self) -> (Tokens, Option<Cost>) {
         if let Some(report) = self.cumulative.as_ref() {
-            return (report.tokens, report.cost.clone());
+            return (report.tokens.clone(), report.cost.clone());
         }
         let mut tokens = Tokens::default();
         let mut cost = None;
         for report in self.keyed.values().chain(self.keyless.iter()) {
-            add(&mut tokens, report.tokens);
+            add(&mut tokens, report.tokens.clone());
             if report.cost.is_some() {
                 // Costs are stated once per report in a single currency; the
                 // last one is the adapter's authoritative figure.
