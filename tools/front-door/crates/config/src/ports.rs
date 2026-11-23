@@ -2035,7 +2035,7 @@ impl PortTable {
     /// The format command for approval carry, with the exact source that
     /// declared it. An absent leaf resolves to the built-in `none`, so a caller
     /// can tell an explicit refusal from a command it may run.
-    /// Spec: docs/specs/next-batch.md#seam-2-one-sourced-settings-vocabulary
+    /// Spec: docs/specs/state.md#every-setting-reports-its-layer
     pub fn verify_format(&self) -> Sourced<VerifyFormat> {
         let value = self.verify.format.clone().unwrap_or(VerifyFormat::None);
         let source = self
@@ -2476,7 +2476,7 @@ mod tests {
         table.worktree_layout.default = PathBuf::from("trees/<branch>/checkout");
         assert!(table.validate().is_err());
 
-        // Spec: docs/specs/next-batch.md#seam-5-the-worktree-and-landing-loop-a-chair-actually-uses
+        // Spec: docs/specs/state.md#one-sourced-port-table
         // A parent-relative root places worktrees beside the checkout; an
         // absolute root places them anywhere. Both are declared roots and are
         // treated exactly like the default one.
@@ -2994,7 +2994,7 @@ mod tests {
 
     #[test]
     fn verify_format_is_detected_then_configured_then_off() {
-        // Spec: docs/specs/next-batch.md#seam-2-one-sourced-settings-vocabulary
+        // Spec: docs/specs/state.md#every-setting-reports-its-layer
         let root = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("Cargo.toml"), "[workspace]\n").unwrap();
@@ -3502,7 +3502,7 @@ mod tests {
         assert!(table.sourced_leaf("absent.leaf").is_empty());
     }
 
-    // Spec: docs/specs/next-batch.md#seam-2-one-sourced-settings-vocabulary
+    // Spec: docs/specs/state.md#every-setting-reports-its-layer
     #[test]
     fn outside_worktree_roots_report_their_layer_and_origin() {
         let temp = tempfile::tempdir().unwrap();

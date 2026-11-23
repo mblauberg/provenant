@@ -2690,7 +2690,7 @@ fn wip_commit_launches_direct_writer_graph() -> Result {
     dirty_writer_mode_launches_direct_graph("wip_commit")
 }
 
-// Spec: docs/specs/next-batch.md#seam-5-the-worktree-and-landing-loop-a-chair-actually-uses
+// Spec: docs/specs/run.md#writer-pin-and-re-pin
 fn unheld_dirty_tree_adoption_warns_with_commit() -> Result {
     if !graph_fixture_available()? {
         return Ok(());

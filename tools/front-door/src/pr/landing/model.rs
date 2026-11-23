@@ -124,7 +124,7 @@ pub struct PublishDecision {
 
 /// The admin-publication mode and the layer that granted it. Only `Host` may
 /// grant admin authority; every other layer is warned and ignored.
-/// Spec: docs/specs/next-batch.md#seam-5-the-worktree-and-landing-loop-a-chair-actually-uses
+/// Spec: docs/specs/cli.md#landing-adds-no-merge-authority
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublicationGrant {
     pub mode: provenant_cli::domains::AdminPublication,

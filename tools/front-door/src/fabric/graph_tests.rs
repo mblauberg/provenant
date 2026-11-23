@@ -3232,7 +3232,7 @@ mod result_tests {
 
         use serde_json::json;
         let prices = usage_prices();
-        // Spec: docs/specs/next-batch.md#seam-6-adapter-usage-accounting
+        // Spec: docs/specs/telemetry.md#usage-merges-by-declared-semantics
         // UsageRecord holds a typed `tokens` bucket; the old flat spellings are
         // forward-compatible extras and carry no usage semantics.
         let full = json!({"tokens":{"input":1_000_000, "cache_read":1_000_000,

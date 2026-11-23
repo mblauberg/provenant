@@ -4549,7 +4549,7 @@ mod human_tests {
         })
     }
 
-    // Spec: docs/specs/next-batch.md#seam-5-the-worktree-and-landing-loop-a-chair-actually-uses
+    // Spec: docs/specs/supervisor.md#shared-occupancy-removal-never-forces
     #[test]
     fn removal_record_persists_schema_branch_tip_path_and_time() {
         let temp = tempfile::tempdir().expect("tempdir");

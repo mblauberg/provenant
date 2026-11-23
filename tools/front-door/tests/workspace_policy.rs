@@ -31,7 +31,7 @@ const LAYERS: &[(&str, &[&str])] = &[
     ("records", &["core"]),
     ("config", &["core", "records", "os", "redact"]),
     // The typed warning facade lives in records::warning; every library routes
-    // warnings through it (docs/specs/next-batch.md Seam 1). The edge is acyclic
+    // warnings through it (Spec: docs/specs/cli.md#warnings-are-typed-values). The edge is acyclic
     // because records depends only on core.
     ("os", &["core", "records"]),
     // Per-byte redaction, built optimised in dev and test profiles.
@@ -68,7 +68,7 @@ const LAYERS: &[(&str, &[&str])] = &[
     ("quota", &["core", "records", "config"]),
     // Price overlays read host and project layers through config. The ingest
     // store merges usage through the accumulator owned by providers
-    // (docs/specs/next-batch.md Seam 6); providers does not depend on telemetry.
+    // (Spec: docs/specs/telemetry.md#usage-merges-by-declared-semantics); providers does not depend on telemetry.
     (
         "telemetry",
         &["core", "records", "config", "routing", "os", "providers"],

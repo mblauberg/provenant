@@ -339,7 +339,7 @@ fn batch_response(
 
 /// Parse `--head` values into per-member reviewed head pins. A bare object name
 /// keeps the single-pull-request form; `N=SHA` pins member N of a batch.
-/// Spec: docs/specs/next-batch.md#seam-5-the-worktree-and-landing-loop-a-chair-actually-uses
+/// Spec: docs/specs/cli.md#landing-adds-no-merge-authority
 fn parse_head_pins(
     values: &[String],
     numbers: &[u64],
@@ -455,7 +455,7 @@ pub(crate) fn prepare(
 /// shared by the most members wins; members on another base remain in the
 /// request and the candidate selector excludes them, naming both bases in the
 /// exclusion reason. The target's source records that it was detected.
-/// Spec: docs/specs/next-batch.md#seam-5-the-worktree-and-landing-loop-a-chair-actually-uses
+/// Spec: docs/specs/cli.md#landing-adds-no-merge-authority
 fn derive_target_from_members(
     forge: &mut dyn ports::Forge,
     members: &[u64],
@@ -1059,7 +1059,7 @@ mod response_tests {
         assert_eq!(refused.error.unwrap().code, "LAND_REFUSED");
     }
 
-    // Spec: docs/specs/next-batch.md#seam-5-the-worktree-and-landing-loop-a-chair-actually-uses
+    // Spec: docs/specs/cli.md#landing-adds-no-merge-authority
     #[test]
     fn head_pins_accept_single_and_per_member_forms() -> Result<(), Box<dyn std::error::Error>> {
         use std::collections::BTreeMap;
@@ -1077,7 +1077,7 @@ mod response_tests {
         Ok(())
     }
 
-    // Spec: docs/specs/next-batch.md#seam-5-the-worktree-and-landing-loop-a-chair-actually-uses
+    // Spec: docs/specs/cli.md#landing-adds-no-merge-authority
     #[test]
     fn batch_target_derives_from_the_consensus_member_base()
     -> Result<(), Box<dyn std::error::Error>> {

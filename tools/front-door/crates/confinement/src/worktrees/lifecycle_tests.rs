@@ -1212,7 +1212,7 @@ fn creation_uses_a_nested_project_worktree_layout() -> Result<(), Box<dyn Error>
     Ok(())
 }
 
-// Spec: docs/specs/next-batch.md#seam-5-the-worktree-and-landing-loop-a-chair-actually-uses
+// Spec: docs/specs/state.md#one-sourced-port-table
 #[test]
 fn sibling_directory_root_is_used_by_create_list_and_gc_preview() -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;

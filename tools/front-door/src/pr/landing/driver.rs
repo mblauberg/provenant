@@ -1516,7 +1516,7 @@ pub(super) mod tests {
         );
         Ok(())
     }
-    // Spec: docs/specs/next-batch.md#seam-5-the-worktree-and-landing-loop-a-chair-actually-uses
+    // Spec: docs/specs/cli.md#landing-adds-no-merge-authority
     #[test]
     fn a_red_gate_never_uses_a_host_admin_grant() -> Result<(), Box<dyn std::error::Error>> {
         use provenant_cli::domains::AdminPublication;

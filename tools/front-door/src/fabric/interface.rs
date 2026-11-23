@@ -1024,7 +1024,7 @@ impl Factory {
     /// Resolve `run implement --pr N` from the one observer: the PR's head
     /// branch and base become launch controls, and the failing checks (names
     /// and bounded log tails) are appended to the brief. Review templates keep
-    /// their own subject path. Spec: docs/specs/next-batch.md#seam-5-the-worktree-and-landing-loop-a-chair-actually-uses
+    /// their own subject path. Spec: docs/specs/cli.md#ci-observations
     fn apply_pr_repair(&self, input: Value) -> Result<Value, FacadeError> {
         if input.get("pr").is_none_or(|value| value.is_null()) {
             return Ok(input);
@@ -1075,7 +1075,7 @@ impl Factory {
     }
 
     /// Read the pull and its failing checks through the one CI observer, never
-    /// a caller-owned `gh` process. Spec: docs/specs/next-batch.md#seam-5-the-worktree-and-landing-loop-a-chair-actually-uses
+    /// a caller-owned `gh` process. Spec: docs/specs/cli.md#ci-observations
     fn observe_pr_repair(&self, number: u64) -> Result<PrRepairFact, FacadeError> {
         use std::time::Duration;
         let invalid = |reason: String| FacadeError::invalid(InvalidInputDetail::Field(reason));
@@ -4133,7 +4133,7 @@ mod tests {
         })
     }
 
-    /// Spec: docs/specs/next-batch.md#seam-5-the-worktree-and-landing-loop-a-chair-actually-uses -- a fake forge PR
+    /// Spec: docs/specs/cli.md#ci-observations -- a fake forge PR
     /// with a failing check binds the head branch and base and carries the
     /// failure into the launch brief.
     #[test]

@@ -392,7 +392,7 @@ fn held_writer_preflight_refuses_without_changing_head() -> Result {
     // Boundary 2: a tree another lane holds is never adopted, even when
     // wip_commit is requested explicitly. The refusal names the holding lane
     // and leaves its edits and head untouched.
-    // Spec: docs/specs/next-batch.md#seam-5-the-worktree-and-landing-loop-a-chair-actually-uses
+    // Spec: docs/specs/run.md#writer-pin-and-re-pin
     let result: Value = serde_json::from_slice(&output.stdout.bytes)?;
     assert_ne!(code(&output), 0, "{result}");
     let text = result.to_string();

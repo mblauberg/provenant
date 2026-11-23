@@ -82,7 +82,7 @@ pub struct Sourced<T> {
 /// it: other layers are reported with [`provenant_records::warning::SETTING_LAYER_IGNORED`]
 /// and fall back to `never`. The shared `Precedence` merge reports the ignored
 /// candidate with its source so the warning never invents a second vocabulary.
-/// Spec: docs/specs/next-batch.md#seam-5-the-worktree-and-landing-loop-a-chair-actually-uses
+/// Spec: docs/specs/cli.md#landing-adds-no-merge-authority
 fn admin_candidate(
     field: &Sourced<Value>,
 ) -> Result<provenant_records::Sourced<AdminPublication>, serde_json::Error> {
@@ -933,7 +933,7 @@ mod tests {
         Ok(())
     }
 
-    // Spec: docs/specs/next-batch.md#seam-5-the-worktree-and-landing-loop-a-chair-actually-uses
+    // Spec: docs/specs/cli.md#landing-adds-no-merge-authority
     #[test]
     fn admin_publication_is_honoured_only_from_the_host_layer()
     -> Result<(), Box<dyn std::error::Error>> {

@@ -143,7 +143,7 @@ pub fn held_refusal(lanes: &[String], path: &str) -> String {
 mod tests {
     use super::*;
 
-    // Spec: docs/specs/next-batch.md#seam-5-the-worktree-and-landing-loop-a-chair-actually-uses
+    // Spec: docs/specs/run.md#writer-pin-and-re-pin
     #[test]
     fn an_unheld_dirty_worktree_is_wip_committed_by_default() {
         let resolved = ResolvedWriterDirty::resolve(None, "default");
@@ -155,7 +155,7 @@ mod tests {
         assert!(resolved.setting().contains("source: default"));
     }
 
-    // Spec: docs/specs/next-batch.md#seam-5-the-worktree-and-landing-loop-a-chair-actually-uses
+    // Spec: docs/specs/run.md#writer-pin-and-re-pin
     #[test]
     fn an_explicit_refuse_setting_still_refuses_and_names_paths_and_setting() {
         let resolved = ResolvedWriterDirty::resolve(Some("refuse"), "host");
@@ -172,7 +172,7 @@ mod tests {
         }
     }
 
-    // Spec: docs/specs/next-batch.md#seam-5-the-worktree-and-landing-loop-a-chair-actually-uses
+    // Spec: docs/specs/run.md#writer-pin-and-re-pin
     #[test]
     fn a_held_worktree_is_never_adopted() {
         let lanes = vec!["w3/other (attempt 4)".to_owned()];

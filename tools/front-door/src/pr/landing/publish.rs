@@ -765,7 +765,7 @@ mod tests {
         Ok(())
     }
 
-    // Spec: docs/specs/next-batch.md#seam-5-the-worktree-and-landing-loop-a-chair-actually-uses
+    // Spec: docs/specs/cli.md#landing-adds-no-merge-authority
     #[test]
     fn review_requirement_405_retries_with_admin_after_the_gate_with_a_host_grant()
     -> Result<(), LandingError> {
@@ -784,7 +784,7 @@ mod tests {
         Ok(())
     }
 
-    // Spec: docs/specs/next-batch.md#seam-5-the-worktree-and-landing-loop-a-chair-actually-uses
+    // Spec: docs/specs/cli.md#landing-adds-no-merge-authority
     #[test]
     fn admin_retry_never_bypasses_missing_grant_other_layers_or_missing_review() {
         use provenant_cli::domains::AdminPublication;

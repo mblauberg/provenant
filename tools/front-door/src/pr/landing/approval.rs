@@ -1292,7 +1292,7 @@ mod tests {
                 .any(|warning| warning.contains("format approval carry unavailable"))
         );
         // An explicit `"none"` declaration turns the carry off, whatever the
-        // detected default would have picked. Spec: docs/specs/next-batch.md#seam-2-one-sourced-settings-vocabulary
+        // detected default would have picked. Spec: docs/specs/state.md#every-setting-reports-its-layer
         ports.verify.format = Some(provenant_config::VerifyFormat::None);
         std::fs::write(
             ports_dir.join("ports.json"),
@@ -1329,7 +1329,7 @@ mod tests {
 
     #[test]
     fn unrecognised_format_command_runs_exactly_as_declared() -> Result<(), LandingError> {
-        // Spec: docs/specs/next-batch.md#seam-2-one-sourced-settings-vocabulary
+        // Spec: docs/specs/state.md#every-setting-reports-its-layer
         let root = tempfile::tempdir().map_err(|error| LandingError::Failed(error.to_string()))?;
         let project = root.path().join("project");
         let state = root.path().join("state");
@@ -1468,7 +1468,7 @@ mod tests {
 
     #[test]
     fn detected_format_carry_names_detected_source_on_the_receipt() -> Result<(), LandingError> {
-        // Spec: docs/specs/next-batch.md#seam-2-one-sourced-settings-vocabulary
+        // Spec: docs/specs/state.md#every-setting-reports-its-layer
         let root = tempfile::tempdir().map_err(|error| LandingError::Failed(error.to_string()))?;
         let project = root.path().join("project");
         let state = root.path().join("state");

@@ -128,7 +128,7 @@ mod fixtures {
             "verified_owner": "02020202020202020202020202020202",
             "read_only_writable": [],
             "protected_paths": [],
-            // Spec: docs/specs/next-batch.md#seam-6-adapter-usage-accounting
+            // Spec: docs/specs/telemetry.md#usage-merges-by-declared-semantics
             // UsageRecord carries typed token buckets and a non-optional source.
             "usage": {"tokens":{"input": null, "cache_read": null, "cache_write": null,
                 "cache_write_1h": null, "output": null, "reasoning": null}},
