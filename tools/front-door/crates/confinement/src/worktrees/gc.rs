@@ -1730,12 +1730,6 @@ fn collect_impl(
                 row.detail = Some("excluded by gc.projects.keep_paths".into());
                 return Ok(());
             }
-            // Fail closed when the one forge context could not be resolved:
-            // no linked worktree may be retired without a known default set.
-            if retirement_scope.unresolved() {
-                row.detail = Some("forge context unavailable".into());
-                return Ok(());
-            }
             // A linked worktree checked out on a protected branch is never
             // retired, even when the primary checkout sits elsewhere.
             if let Some(branch) = lane
@@ -1851,6 +1845,22 @@ fn collect_impl(
             }
             if policy.mode == CollectionMode::Outputs {
                 row.detail = Some("output retention only".into());
+                return Ok(());
+            }
+            // Fail closed only where retirement starts: an unresolved context
+            // must not retire a branch on a guessed default set. Output-only
+            // collection returned above, and self-describing landing evidence
+            // names its own reference, so neither needs the forge context.
+            if retirement_scope.unresolved()
+                && !matches!(
+                    policy.proof.map(|proof| &proof.source),
+                    Some(
+                        LandingSource::IntegrationTarget { .. }
+                            | LandingSource::TreeEquivalent { .. }
+                    )
+                )
+            {
+                row.detail = Some("forge context unavailable".into());
                 return Ok(());
             }
             let branch = lane

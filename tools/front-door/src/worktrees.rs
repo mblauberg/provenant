@@ -1745,6 +1745,25 @@ pub(crate) struct LandWorktree {
     pub kept: Option<String>,
 }
 
+/// The remote reference the branch-scratch spawn should record. Self-describing
+/// landing evidence names its own reference, so the forge is asked only for the
+/// fallback; an unresolved context yields no source and the spawn is skipped.
+fn retention_scratch_source(
+    evidence: &LandedEvidence,
+    forge: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    match &evidence.source {
+        LandingSource::IntegrationTarget { reference, .. }
+        | LandingSource::TreeEquivalent { reference, .. } => Some(
+            reference
+                .strip_prefix("refs/remotes/")
+                .unwrap_or(reference)
+                .to_owned(),
+        ),
+        _ => forge(),
+    }
+}
+
 /// Remove the registered worktree of a merged branch through the same removal
 /// as `worktree remove`, after deleting the build output GC already treats as
 /// regenerable (`gc.projects.<id>.regenerable` plus `target`). Output pruning
@@ -1844,9 +1863,13 @@ pub(crate) fn retention_event(
                 context.clock,
                 cancel,
             )?;
-            let forge = worktrees::forge_context(context)
-                .map_err(|_| Error::GcObservation("cannot resolve forge context"))?;
-            let default_source = format!("{}/{}", forge.remote.value, forge.default_branch.value);
+            // Self-describing evidence names its own reference; an unresolved
+            // fallback context simply skips the scratch spawn.
+            let scratch_source = retention_scratch_source(evidence, || {
+                worktrees::forge_context(context)
+                    .ok()
+                    .map(|forge| format!("{}/{}", forge.remote.value, forge.default_branch.value))
+            });
             let policy = worktrees::WorktreeGcPolicy {
                 mode: worktrees::CollectionMode::LandingCleanup,
                 proof: Some(evidence),
@@ -1882,6 +1905,7 @@ pub(crate) fn retention_event(
                             .as_deref()
                             .and_then(|branch| branch.strip_prefix("refs/heads/"))
                             && let Some(Some(ids)) = attempts.get(&lane.path)
+                            && let Some(source) = scratch_source.as_deref()
                         {
                             let _ = crate::provider_retention::spawn_branch_scratch(
                                 &resolved.roots,
@@ -1889,13 +1913,7 @@ pub(crate) fn retention_event(
                                 &resolved.project,
                                 branch,
                                 lane.head,
-                                match &evidence.source {
-                                    LandingSource::IntegrationTarget { reference, .. }
-                                    | LandingSource::TreeEquivalent { reference, .. } => {
-                                        reference.strip_prefix("refs/remotes/").unwrap_or(reference)
-                                    }
-                                    _ => default_source.as_str(),
-                                },
+                                source,
                                 ids,
                             );
                         }
@@ -5134,5 +5152,39 @@ mod gc_subpass_removal_tests {
         };
         append_gc_subpass_removals(&mut preview, vec![record]);
         assert!(preview.removals.is_empty());
+    }
+
+    #[test]
+    fn retention_scratch_source_is_lazy_and_skips_an_unresolved_forge() {
+        let self_describing = LandedEvidence {
+            predicate: LandingPredicate::Landed,
+            source: LandingSource::IntegrationTarget {
+                reference: "refs/remotes/origin/main".into(),
+                commit: GitOid::parse(&"b2".repeat(20)).unwrap(),
+            },
+        };
+        let source = retention_scratch_source(&self_describing, || {
+            panic!("self-describing evidence must not resolve the forge")
+        });
+        assert_eq!(source.as_deref(), Some("origin/main"));
+
+        let fallback = LandedEvidence {
+            predicate: LandingPredicate::Landed,
+            source: LandingSource::ForgeMerged {
+                pr: "42".into(),
+                head: GitOid::parse(&"a1".repeat(20)).unwrap(),
+                merge_commit: None,
+            },
+        };
+        let calls = std::cell::Cell::new(0);
+        let source = retention_scratch_source(&fallback, || {
+            calls.set(calls.get() + 1);
+            Some("origin/trunk".into())
+        });
+        assert_eq!(source.as_deref(), Some("origin/trunk"));
+        assert_eq!(calls.get(), 1);
+
+        let unresolved = retention_scratch_source(&fallback, || None);
+        assert_eq!(unresolved, None);
     }
 }

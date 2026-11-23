@@ -85,6 +85,16 @@ fn default_branch(state: &Path, project: &Path) -> Result<String> {
     let ports = provenant_config::PortTable::read_for(Some(project), state)?;
     let policy = provenant_config::operation_policy(state, project, &ports);
     let config = provenant_config::ForgeConfig::new(&ports, (*policy).clone());
+    let probe = RepositoryForge { state, project };
+    // Ask the forge first: it is authoritative for the default branch and
+    // ignores the remote, so an ambiguous local remote must not stop the one
+    // answer Git metadata cannot give. A renamed default branch also makes the
+    // local symref stale, but the forge names the branch the PR must target.
+    if let Some(branch) = provenant_config::ForgeProbe::default_branch(&probe, "") {
+        return Ok(branch);
+    }
+    // The forge did not answer. The local symref is the only source left, so
+    // resolve the remote it belongs to only now.
     let git = provenant_config::ForgeGit::new(project).map_err(|error| {
         format!("cannot read the checkout's Git metadata for the default branch: {error}")
     })?;
@@ -93,14 +103,6 @@ fn default_branch(state: &Path, project: &Path) -> Result<String> {
             format!("cannot resolve the forge remote for the default branch: {error}")
         })?
         .value;
-    let probe = RepositoryForge { state, project };
-    // Ask the forge first: a renamed default branch makes the local symref
-    // stale, but the forge names the branch the pull request must target.
-    if let Some(branch) = provenant_config::ForgeProbe::default_branch(&probe, &remote) {
-        return Ok(branch);
-    }
-    // The forge did not answer. The local symref is the only source left; it is
-    // reported as such rather than as an unrelated Git metadata failure.
     if let Some(branch) = git.remote_head(&remote) {
         provenant_records::warning::warn(
             provenant_records::Warning::new(
@@ -385,6 +387,52 @@ mod tests {
                 .contains("cannot read the checkout's Git metadata"),
             "{error}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn default_branch_asks_the_forge_before_an_ambiguous_remote_is_resolved() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let state = temp.path().join("state");
+        std::fs::create_dir_all(&state)?;
+        provenant_os::fixture::private_state_dir(&state)?;
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&project)?;
+        provenant_os::fixture::run_git(&project, &["init", "-q"])?;
+        // Two remotes with no declared git.remote make local resolution
+        // ambiguous; the forge must still be able to name the default branch.
+        for remote in ["alpha", "beta"] {
+            provenant_os::fixture::run_git(
+                &project,
+                &[
+                    "remote",
+                    "add",
+                    remote,
+                    &format!("https://example.invalid/{remote}.git"),
+                ],
+            )?;
+        }
+        let script = temp.path().join("gh.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nprintf '%s\\n' '{\"defaultBranchRef\":{\"name\":\"trunk\"}}'\n",
+        )?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))?;
+        let command = serde_json::json!({
+            "argv": [script.to_string_lossy()],
+            "exit_codes": {"success": [0], "unknown": [75], "other": "refused"}
+        });
+        let port = serde_json::json!({
+            "source": "host",
+            "backend": {"kind": "command", "command": command}
+        });
+        let document = serde_json::json!({
+            "schema_version": provenant_config::PORTS_SCHEMA_VERSION,
+            "forge": port
+        });
+        std::fs::write(state.join("ports.json"), serde_json::to_vec(&document)?)?;
+        assert_eq!(default_branch(&state, &project)?, "trunk");
         Ok(())
     }
 

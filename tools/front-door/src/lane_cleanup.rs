@@ -899,8 +899,10 @@ fn remote_outcomes(
     // `target` names the fetched default branch and covers the normal apply
     // path. The scope adds the default branch from the one resolved forge
     // context, so it is still protected in dry-run and when `remote_default`
-    // failed. Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
-    if scope.is_some_and(|scope| !scope.permits(&reference)) {
+    // failed. A missing scope means inventory could not be read, so fail
+    // closed and exclude every remote record rather than retiring an
+    // unprotected default. Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    if scope.is_none_or(|scope| !scope.permits(&reference)) {
         return vec![out(ArtefactState::Retained).with_reason(EXCLUDED_REASON)];
     }
     if target.is_some_and(|target| target.reference.as_ref() == Some(&reference)) {
@@ -2279,6 +2281,64 @@ mod tests {
                 &EmptyRetirementLookup,
                 None,
                 Some(&scope),
+                None,
+                cancel,
+            );
+            let retained = outcomes
+                .iter()
+                .find(|outcome| outcome.artefact == Artefact::RemoteBranch)
+                .ok_or(worktrees::WorktreeError::InvalidRequest)?;
+            assert_eq!(retained.outcome, ArtefactState::Retained, "{outcomes:?}");
+            assert_eq!(retained.reason.as_deref(), Some(EXCLUDED_REASON));
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    #[test]
+    // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    fn a_missing_scope_retains_every_remote_record() -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_os::fixture::run_git;
+
+        let fixture = CleanupFixture::new()?;
+        run_git(
+            &fixture.project,
+            &[
+                "update-ref",
+                "refs/remotes/bound/main",
+                &fixture.landed.to_string(),
+            ],
+        )?;
+        run_git(
+            &fixture.project,
+            &[
+                "symbolic-ref",
+                "refs/remotes/bound/HEAD",
+                "refs/remotes/bound/main",
+            ],
+        )?;
+        fixture.with_context(|context, cancel| {
+            let ledger = RefLedger::for_context(context)?;
+            let record = record_old_ref(
+                context,
+                &ledger,
+                fixture.endpoint(),
+                "main",
+                fixture.landed,
+                cancel,
+            )?;
+            // Inventory could not be read, so no scope reached this record.
+            // A remote record naming the default branch must still be kept.
+            let outcomes = remote_outcomes(
+                context,
+                &ledger,
+                &record,
+                None,
+                &[],
+                &remote_fixture_sweep(),
+                &EmptyRetirementLookup,
+                None,
+                None,
                 None,
                 cancel,
             );

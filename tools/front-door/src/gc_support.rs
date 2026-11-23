@@ -211,20 +211,42 @@ fn host_git_with_tail(
     Ok(output)
 }
 
+/// The one forge remote for this checkout, when one can be named. Only the
+/// remote is needed to fetch: the branch comes from the remote's own HEAD, so
+/// resolving a full context would demand a default branch that is not used.
+/// A checkout with no remote at all is normal for local-only GC and yields
+/// `None`; an ambiguous remote, malformed port table or unreadable metadata is
+/// a real resolution failure and stays an error.
+fn forge_remote(context: &WorktreeContext<'_>) -> Result<Option<String>, Error> {
+    let invalid = || Error::GcObservation("cannot resolve forge context");
+    let project = context.layout.project().ok_or_else(invalid)?;
+    let state = context.host_state().map_err(|_| invalid())?;
+    let ports =
+        provenant_config::PortTable::read_for(Some(project), &state).map_err(|_| invalid())?;
+    let policy = provenant_config::operation_policy(&state, project, &ports);
+    let config = provenant_config::ForgeConfig::new(&ports, (*policy).clone());
+    let git = provenant_config::ForgeGit::new(project).map_err(|_| invalid())?;
+    match provenant_config::ForgeContext::remote(&config, &git) {
+        Ok(remote) => Ok(Some(remote.value)),
+        Err(provenant_config::ForgeContextError::NoRemote { remotes, .. })
+            if remotes.is_empty() =>
+        {
+            Ok(None)
+        }
+        Err(_) => Err(invalid()),
+    }
+}
+
 /// Refresh only the writer's tracking ref. An absent remote branch is normal.
 pub(crate) fn refresh_writer_tracking_ref(
     context: &WorktreeContext<'_>,
     branch: &str,
 ) -> Result<(), Error> {
-    let forge = provenant_confinement::worktrees::forge_context(context)
-        .map_err(|_| Error::GcObservation("cannot resolve forge context"))?;
-    refresh_branch(
-        context.repo.root_path(),
-        context.executor,
-        &forge.remote.value,
-        branch,
-    )
-    .map_err(|_| Error::GcObservation("cannot refresh writer tracking ref"))
+    let Some(remote) = forge_remote(context)? else {
+        return Ok(());
+    };
+    refresh_branch(context.repo.root_path(), context.executor, &remote, branch)
+        .map_err(|_| Error::GcObservation("cannot refresh writer tracking ref"))
 }
 
 fn refresh_branch(
@@ -299,10 +321,12 @@ pub(crate) fn fetch_default(
         )
     };
     // The remote comes from the one resolved forge context, never a hard-coded
-    // `origin`; only the branch is advertised by the remote itself.
-    let forge = provenant_confinement::worktrees::forge_context(context)
-        .map_err(|_| Error::GcObservation("cannot resolve forge context"))?;
-    let remote = forge.remote.value.as_str();
+    // `origin`; only the branch is advertised by the remote itself. A checkout
+    // with no remote has nothing to fetch and reports no upstream.
+    let Some(remote) = forge_remote(context)? else {
+        return Ok(None);
+    };
+    let remote = remote.as_str();
     let advertised = run(
         &["ls-remote", "--symref", remote, "HEAD"],
         Duration::from_secs(60),
@@ -1008,6 +1032,87 @@ mod tests {
             result.1,
             GitOid::parse(std::str::from_utf8(&actual)?.trim())?
         );
+        Ok(())
+    }
+
+    #[test]
+    fn no_remote_is_a_clean_absence_for_fetch_and_refresh() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().join("home");
+        let state = temp.path().join("state");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&home)?;
+        std::fs::create_dir_all(&state)?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::create_dir_all(&repo)?;
+        provenant_os::fixture::run_git(&repo, &["init", "-q"])?;
+        provenant_os::fixture::run_git(&repo, &["commit", "--allow-empty", "-qm", "base"])?;
+        let mut inputs = provenant_core::RootInputs::new(home.clone(), repo.clone());
+        inputs.state_dir = Some(state);
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let fetched = provenant_confinement::worktrees::with_context(
+            &roots,
+            &home,
+            &repo,
+            &clock,
+            &cancel,
+            |context| Ok(fetch_default(context, &cancel)),
+        )??;
+        assert!(fetched.is_none(), "{fetched:?}");
+        provenant_confinement::worktrees::with_context(
+            &roots,
+            &home,
+            &repo,
+            &clock,
+            &cancel,
+            |context| Ok(refresh_writer_tracking_ref(context, "lane/test")),
+        )??;
+        Ok(())
+    }
+
+    #[test]
+    fn ambiguous_remotes_stay_a_real_resolution_failure() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().join("home");
+        let state = temp.path().join("state");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&home)?;
+        std::fs::create_dir_all(&state)?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::create_dir_all(&repo)?;
+        provenant_os::fixture::run_git(&repo, &["init", "-q"])?;
+        provenant_os::fixture::run_git(&repo, &["commit", "--allow-empty", "-qm", "base"])?;
+        for remote in ["alpha", "beta"] {
+            provenant_os::fixture::run_git(
+                &repo,
+                &[
+                    "remote",
+                    "add",
+                    remote,
+                    &format!("https://example.invalid/{remote}.git"),
+                ],
+            )?;
+        }
+        let mut inputs = provenant_core::RootInputs::new(home.clone(), repo.clone());
+        inputs.state_dir = Some(state);
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let fetched = provenant_confinement::worktrees::with_context(
+            &roots,
+            &home,
+            &repo,
+            &clock,
+            &cancel,
+            |context| Ok(fetch_default(context, &cancel)),
+        )?;
+        assert!(fetched.is_err(), "{fetched:?}");
         Ok(())
     }
 
