@@ -1256,6 +1256,10 @@ mod dispatch_tests;
 #[cfg(test)]
 mod launch_refusal_tests;
 #[cfg(test)]
+mod remoteless_delivery_tests;
+#[cfg(test)]
+mod remoteless_writer_tests;
+#[cfg(test)]
 mod tests;
 
 #[cfg(test)]

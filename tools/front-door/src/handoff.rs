@@ -50,10 +50,10 @@ const GIT_TIMEOUT: Duration = Duration::from_secs(60);
 const RESERVE: Duration = Duration::from_secs(4);
 
 #[derive(Debug)]
-struct Refusal {
+pub(crate) struct Refusal {
     status: Outcome,
     code: String,
-    message: String,
+    pub(crate) message: String,
     /// Result data and human text kept with the failure.
     data: Option<(Value, String)>,
 }
@@ -70,7 +70,7 @@ impl Refusal {
         self.data = Some((data, human));
         self
     }
-    fn code(&self) -> &str {
+    pub(crate) fn code(&self) -> &str {
         &self.code
     }
     fn invalid(message: impl Into<String>) -> Self {
@@ -331,7 +331,7 @@ fn with_wip_custody(
 }
 
 /// Commit a dirty tree as WIP and push its branch. Hooks run as usual.
-fn wip(
+pub(crate) fn wip(
     src: &Source,
     workers: &dyn WorkerObserver,
     facts: &worktrees::RepoFacts,
@@ -527,12 +527,12 @@ fn session_id(explicit: Option<&str>) -> Result<Option<HostSessionId>, Refusal> 
         .transpose()
 }
 
-struct Source {
-    roots: provenant_core::Roots,
-    home: PathBuf,
-    assets: PathBuf,
-    cwd: PathBuf,
-    context: Context,
+pub(crate) struct Source {
+    pub(crate) roots: provenant_core::Roots,
+    pub(crate) home: PathBuf,
+    pub(crate) assets: PathBuf,
+    pub(crate) cwd: PathBuf,
+    pub(crate) context: Context,
 }
 
 fn open_source(globals: &Globals) -> Result<Source, Refusal> {
@@ -556,7 +556,7 @@ fn open_source(globals: &Globals) -> Result<Source, Refusal> {
 /// checkout with no remote has no name rather than an empty one; hand-off only
 /// pushes and fetches, so it never needs the default branch or protected set.
 /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
-fn resolve_remote(
+pub(crate) fn resolve_remote(
     state: &Path,
     project: &Path,
     ports: &provenant_config::PortTable,
@@ -1152,7 +1152,7 @@ fn fetch_recreation_base<T, E>(
 /// Recreate each branch's worktree with this host's own worktree owner, from
 /// `<remote>/<branch>`. A worktree already on the branch is kept. Failures are
 /// reported per branch; the hand-off still lands.
-fn recreate(
+pub(crate) fn recreate(
     target: &Target<'_>,
     branches: &[String],
     remote: Option<&str>,

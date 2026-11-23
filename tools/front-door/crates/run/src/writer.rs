@@ -668,7 +668,7 @@ impl WriterLaunch {
         status_paths(&output)
     }
 
-    fn ahead_of_remote(
+    pub(super) fn ahead_of_remote(
         &self,
         git: &Path,
         head: GitOid,
