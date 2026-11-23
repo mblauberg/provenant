@@ -1003,10 +1003,12 @@ pub fn peer(
                     let source_path = source.display().to_string();
                     let source_refusal = |rule: &'static str| FacadeError::ConfinementRefused {
                         resource: Some(
-                            provenant_records::diagnostic::ResourceFact::ConfinementRule {
-                                rule: rule.to_owned(),
-                                path: source_path.clone(),
-                            },
+                            provenant_records::diagnostic::ResourceFact::ConfinementRule(Box::new(
+                                provenant_records::diagnostic::ConfinementRule {
+                                    rule: rule.to_owned(),
+                                    path: source_path.clone(),
+                                },
+                            )),
                         ),
                     };
                     let directory = provenant_os::fs::Directory::open_anchor(&source)

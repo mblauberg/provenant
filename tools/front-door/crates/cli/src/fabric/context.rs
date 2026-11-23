@@ -966,10 +966,12 @@ impl Context {
                 .unwrap_or_else(|_| "unavailable".to_owned());
             PeerFailure::from(FacadeError::ConfinementRefused {
                 resource: Some(
-                    provenant_records::diagnostic::ResourceFact::ConfinementRule {
-                        rule: rule.to_owned(),
-                        path,
-                    },
+                    provenant_records::diagnostic::ResourceFact::ConfinementRule(Box::new(
+                        provenant_records::diagnostic::ConfinementRule {
+                            rule: rule.to_owned(),
+                            path,
+                        },
+                    )),
                 ),
             })
         })?;

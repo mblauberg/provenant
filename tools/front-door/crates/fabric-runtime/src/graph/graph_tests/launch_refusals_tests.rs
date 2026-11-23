@@ -136,12 +136,12 @@ fn memory_pressure_launch_refusal_names_source_and_action() {
 #[test]
 fn confinement_refusal_carries_rule_and_path_into_the_node_result() {
     use crate::coordination::facade::FacadeError;
-    use provenant_records::diagnostic::ResourceFact;
+    use provenant_records::diagnostic::{ConfinementRule, ResourceFact};
     let error = FacadeError::ConfinementRefused {
-        resource: Some(ResourceFact::ConfinementRule {
+        resource: Some(ResourceFact::ConfinementRule(Box::new(ConfinementRule {
             rule: "peer_project_outside_home".into(),
             path: "/fixture/scratch/project/.git".into(),
-        }),
+        }))),
     };
     let mut owner = ErrorLauncher {
         now: Some(at(0)),
