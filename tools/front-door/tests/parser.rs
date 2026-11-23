@@ -776,8 +776,14 @@ fn config_check_and_doctor_report_pool_effort_warnings_as_advice() -> Result {
     let checked: serde_json::Value = serde_json::from_slice(&checked.stdout.bytes)?;
     assert_eq!(checked["status"], "ok");
     assert_eq!(checked["data"]["count"], 0);
-    let warning = checked["data"]["warnings"][0].as_str().ok_or("warning")?;
-    assert!(warning.contains("pool trial"), "{warning}");
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    let warning = checked["warnings"]
+        .as_array()
+        .ok_or("envelope warnings")?
+        .iter()
+        .filter_map(|warning| warning["message"].as_str())
+        .find(|message| message.contains("pool trial"))
+        .ok_or("pool effort warning")?;
     assert!(warning.contains("effort retired"), "{warning}");
     assert!(warning.contains("codex/gpt-6-luna"), "{warning}");
     assert!(warning.contains("pool source: config.toml"), "{warning}");

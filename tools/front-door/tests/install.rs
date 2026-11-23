@@ -2242,9 +2242,10 @@ fn check_install_warns_on_a_leftover_menu_login_item() -> Result {
     fs::create_dir_all(&stale)?;
     let (status, checked) = run_json(&rig, &["check", "install"])?;
     assert_eq!(status, 0, "{checked}");
-    let warnings = checked["data"]["warnings"].as_array().ok_or("warnings")?;
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    let warnings = checked["warnings"].as_array().ok_or("envelope warnings")?;
     assert!(
-        warnings.iter().any(|warning| warning
+        warnings.iter().any(|warning| warning["message"]
             .as_str()
             .is_some_and(|text| text.contains("login item"))),
         "{warnings:?}"

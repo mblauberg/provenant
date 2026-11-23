@@ -1171,8 +1171,22 @@ printf 'executed\n' > verify-call.txt
             .contains("verify port is disabled")
     );
     assert!(result["error"].is_null());
+    // Under --json the warning travels in the envelope, never on stderr.
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
     assert!(
-        String::from_utf8_lossy(&output.stderr.bytes).contains("warning: [VERIFY_UNAVAILABLE]")
+        result["warnings"].as_array().is_some_and(|warnings| {
+            warnings.iter().any(|warning| {
+                warning["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("VERIFY_UNAVAILABLE"))
+            })
+        }),
+        "the envelope must carry the verify-unavailable warning: {result}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr.bytes);
+    assert!(
+        !stderr.contains("warning:"),
+        "bare warning leaked: {stderr}"
     );
     assert!(!marker.exists());
     let inventory = provenant_config::port_command_receipts(

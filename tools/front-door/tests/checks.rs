@@ -157,19 +157,24 @@ fn install_staged_release(rig: &TestRig) -> Result<provenant_records::SourceDige
     let marker = rig.root.join("smoke-home.txt");
     let mut version_data = serde_json::to_value(&version)?;
     version_data["package_version"] = env!("CARGO_PKG_VERSION").into();
+    // The staged binary must answer in the envelope the real smoke check
+    // decodes: v2, with the always-present warnings array. A v1 fixture fails
+    // `check install` at the identity gate before its findings can be read.
     let version_json = serde_json::to_string(&serde_json::json!({
-        "schema_version": 1,
+        "schema_version": provenant_records::wire::ENVELOPE_VERSION,
         "command": "version",
         "status": "ok",
         "data": version_data,
         "error": null,
+        "warnings": [],
     }))?;
     let help_json = serde_json::to_string(&serde_json::json!({
-        "schema_version": 1,
+        "schema_version": provenant_records::wire::ENVELOPE_VERSION,
         "command": "help",
         "status": "ok",
         "data": {"commands": []},
         "error": null,
+        "warnings": [],
     }))?;
     let executable = source.join("bin/provenant");
     fs::write(
