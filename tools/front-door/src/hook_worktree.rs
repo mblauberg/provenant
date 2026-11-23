@@ -75,6 +75,22 @@ fn warn_adopt(hook: &str, reason: &dyn std::fmt::Display) {
     );
 }
 
+/// The notice `worktree create` puts in its data when it reused an occupied
+/// managed path instead of making a new checkout. It is the typed reuse outcome
+/// of the create command: a fresh creation carries no such notice, so only a
+/// reused tree can be an adoption at the hook boundary.
+const REUSE_NOTICE: &str = "reusing the existing worktree for branch ";
+
+fn create_reused(data: &serde_json::Value) -> bool {
+    data["warnings"].as_array().is_some_and(|warnings| {
+        warnings.iter().any(|warning| {
+            warning
+                .as_str()
+                .is_some_and(|text| text.starts_with(REUSE_NOTICE))
+        })
+    })
+}
+
 /// Claude's suggested slug becomes the branch `claude/<slug>`. The name reaches
 /// a branch and a directory, so anything outside a plain slug (1-64 letters,
 /// digits, '.', '_' or '-') is rewritten to one, never refused. A plain slug is
@@ -289,6 +305,16 @@ pub fn create(globals: &Globals) -> u8 {
             Ok(data) => {
                 let path = entry_path(&data).ok_or("worktree create returned no path")?;
                 let head = data["head"].as_str().unwrap_or_default();
+                // An occupied managed path is now reused rather than refused. A
+                // reused tree this hook did not create, or whose record no longer
+                // describes it, is adopted: warn before re-marking it. A fresh
+                // creation has no record by definition and is not an adoption.
+                if create_reused(&data) && !hook_owned(&state, &path, &branch, head) {
+                    warn_adopt(
+                        "worktree-create",
+                        &format!("{path:?} carries no ownership record from this hook"),
+                    );
+                }
                 if let Err(error) = mark_owned(&state, &path, &branch, head) {
                     // Without the mark a later call cannot reuse this tree.
                     let _ = writeln!(io::stderr().lock(), "worktree-create: not marked: {error}");
