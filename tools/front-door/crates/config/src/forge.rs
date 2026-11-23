@@ -463,22 +463,34 @@ impl Git {
     /// The remotes visible in the checkout: those declared in Git config plus
     /// those with a remote-tracking ref. A GC fixture or a recovered checkout
     /// can keep tracking refs without a config section; both are remotes seen.
+    /// The configured remotes, as `git remote` lists them. A tracking-ref
+    /// directory under `refs/remotes` is not a remote: a stray fetch such as
+    /// `refs/remotes/review/N` must not make the sole remote ambiguous. Only a
+    /// store with no configured remote at all (a bare store fed by explicit
+    /// fetches) names its remotes by the tracking directories that hold a ref.
     pub fn remotes(&self) -> Vec<String> {
-        let mut seen = BTreeSet::new();
-        if let Some(text) = self.config_text() {
-            for (name, _) in section_entries(&text, "remote") {
-                seen.insert(name);
-            }
+        let configured: BTreeSet<String> = self
+            .config_text()
+            .map(|text| {
+                section_entries(&text, "remote")
+                    .into_iter()
+                    .map(|(name, _)| name)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !configured.is_empty() {
+            return configured.into_iter().collect();
         }
+        let mut seen = BTreeSet::new();
         for base in [&self.common_dir, &self.git_dir] {
             let root = base.join("refs/remotes");
             let Ok(entries) = std::fs::read_dir(root) else {
                 continue;
             };
             for entry in entries.flatten() {
-                if entry.path().is_dir()
-                    && let Some(name) = entry.file_name().to_str()
-                {
+                let holds_a_ref =
+                    std::fs::read_dir(entry.path()).is_ok_and(|mut refs| refs.next().is_some());
+                if holds_a_ref && let Some(name) = entry.file_name().to_str() {
                     seen.insert(name.to_owned());
                 }
             }
@@ -706,6 +718,27 @@ mod tests {
         assert_eq!(context.default_branch.value, "main");
         let empty = tempfile::tempdir().expect("temp dir");
         assert!(Git::bare(empty.path()).is_err());
+    }
+
+    /// A stray tracking ref is not a remote: the sole configured remote still
+    /// resolves, so a fresh branch with no upstream launches.
+    /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    #[test]
+    fn a_stray_tracking_ref_does_not_make_the_sole_remote_ambiguous() {
+        let fixture = Fixture::new("[remote \"origin\"]\n");
+        let git_dir = fixture.root.path().join(".git");
+        std::fs::create_dir_all(git_dir.join("refs/remotes/review")).expect("stray dir");
+        std::fs::write(
+            git_dir.join("refs/remotes/review/3511"),
+            "36b605b323659dfc741d67b91ccff2784814f852\n",
+        )
+        .expect("stray ref");
+        assert_eq!(fixture.git().remotes(), vec!["origin".to_owned()]);
+        let ports = PortTable::builtin();
+        let config = Config::new(&ports, Policy::default());
+        let remote = ForgeContext::remote(&config, &fixture.git()).expect("sole remote");
+        assert_eq!(remote.value, "origin");
+        assert_eq!(remote.source.origin.as_deref(), Some("the sole Git remote"));
     }
 
     /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
