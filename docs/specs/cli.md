@@ -38,6 +38,12 @@ flag relationships and child commands from the parser and declares each
 command's configuration domains; every catalogued command resolves to scoped
 help carrying that metadata. Clap parse errors never echo a fence token.
 
+`provenant help A B …` walks the command path. Words after a command that
+takes positional arguments are its arguments, so `help run implement` shows
+`run`'s help. Any other unknown or hidden component is refused, and the error
+lists the visible commands at that level; explicit quota maintenance stays
+addressable.
+
 - Why: inspection must be safe outside a checkout and paths must not change in
   transit.
 
