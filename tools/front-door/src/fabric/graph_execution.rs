@@ -307,7 +307,8 @@ pub(crate) fn validate_new_submission(
 
 /// The read-only form of the same checks for `run --explain`. It must not
 /// allocate product state or a writer Git home, so it reads the checkout
-/// branch directly and checks a protected target with project-only ports.
+/// branch directly and checks a protected target with the command's one
+/// resolved port table.
 pub(crate) fn validate_explain_submission(
     factory: &super::Factory,
     document: &provenant_fabric_runtime::graph::GraphDocument,
@@ -315,12 +316,14 @@ pub(crate) fn validate_explain_submission(
 ) -> Result<(), FacadeError> {
     validate_static_submission(factory, document)?;
     // One context for this read-only validation, resolved when a target check
-    // first needs it and shared by the rest.
+    // first needs it and shared by the rest. Use the command's one resolved
+    // port table so a host-layer declaration is visible here just as it is to
+    // launch; a project-only table would make explain refuse a graph launch
+    // admits.
     // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
-    let ports = provenant_config::PortTable::read_project_only(&factory.cwd)
-        .map_err(|error| FacadeError::io(error.to_string()))?;
+    let ports = &factory.context.port_table;
     let forge =
-        provenant_run::ForgeOnce::new(factory.context.roots.state.as_path(), &factory.cwd, &ports);
+        provenant_run::ForgeOnce::new(factory.context.roots.state.as_path(), &factory.cwd, ports);
     if let Some(branch) = &document.integration_branch {
         provenant_run::HostDeliveryContext::validate_integration_target_read_only(
             &factory.cwd,
