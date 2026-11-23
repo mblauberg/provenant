@@ -1088,8 +1088,16 @@ fn many_linked_worktrees_do_not_block_protection_checks()
     let listing = SystemExecutor::new(1)?.execute(options)?;
     assert_eq!(listing.termination, Termination::Exit(0));
     assert!(listing.stdout.bytes.len() > host_output_limit(HostOutputClass::Ordinary));
-    HostDeliveryContext::validate_integration_target(project, "feature/unprotected")?;
-    HostDeliveryContext::check_delivery_branch(project, "feature/unprotected")?;
+    HostDeliveryContext::validate_integration_target(
+        project,
+        "feature/unprotected",
+        &crate::forge_for("origin", "main", &[]),
+    )?;
+    HostDeliveryContext::check_delivery_branch(
+        project,
+        "feature/unprotected",
+        &crate::forge_for("origin", "main", &[]),
+    )?;
     Ok(())
 }
 
@@ -1161,8 +1169,16 @@ fn delivery_preflights_reuse_the_command_worktree_listing_with_many_worktrees()
     let host = HostDeliveryContext::new(fixture.environment.clone()).with_repo_facts(&facts);
 
     // The CLI's owned-worktree and task preflights share these command facts.
-    host.check_delivery_branch_with_facts(&fixture.writer.project, "unprotected")?;
-    host.check_delivery_branch_with_facts(&fixture.writer.project, "unprotected")?;
+    host.check_delivery_branch_with_facts(
+        &fixture.writer.project,
+        "unprotected",
+        &crate::forge_for("origin", "main", &[]),
+    )?;
+    host.check_delivery_branch_with_facts(
+        &fixture.writer.project,
+        "unprotected",
+        &crate::forge_for("origin", "main", &[]),
+    )?;
 
     assert_eq!(
         std::fs::read(&count)?.len(),

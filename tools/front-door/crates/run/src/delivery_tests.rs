@@ -201,8 +201,11 @@ impl OriginFixture {
             project: self.project.clone(),
             worktree: self.project.clone(),
         };
-        HostDeliveryContext::new(environment)
-            .refresh_origin_with(&writer, &self.project.join(".git"))?;
+        HostDeliveryContext::new(environment).refresh_origin_with(
+            &writer,
+            &self.project.join(".git"),
+            "origin",
+        )?;
         Ok(())
     }
 }

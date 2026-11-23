@@ -451,17 +451,21 @@ pub fn fetch_remote_branch_tip(
     context: &WorktreeContext<'_>,
     name: &str,
     cancel: &CancelToken,
+    remote: Option<&str>,
 ) -> Result<Option<GitOid>, WorktreeError> {
     let branch = GitRefName::branch(name).map_err(|_| WorktreeError::InvalidRequest)?;
     if read_branch_tips(context, cancel)?.contains_key(&branch) {
         return Ok(None);
     }
+    let Some(remote) = remote else {
+        return Ok(None);
+    };
     let remote = crate::utility::fetch_missing_remote_branch(
         context.executor,
         context.repo,
         context.utility,
         context.home,
-        &format!("origin/{name}"),
+        &format!("{remote}/{name}"),
         context.mutation_budget,
         cancel,
     )
@@ -644,7 +648,11 @@ fn create_with_default(
         // Network discovery does not need to hold this worktree's custody.
         // The recursive call reacquires it before repeating every collision check.
         drop(_writer);
-        let default = default_creation_base(context, facts, cancel)?;
+        // The one remote for this creation, resolved here and passed down. An
+        // absent remote is an absence, not an `origin` guess.
+        // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+        let forge_remote = super::forge_remote(context)?;
+        let default = default_creation_base(context, facts, cancel, forge_remote.as_deref())?;
         return create_with_default(context, request, cancel, Some(default), naming_warnings);
     }
 
@@ -774,28 +782,31 @@ pub fn default_creation_base(
     context: &WorktreeContext<'_>,
     facts: &RepoFacts,
     cancel: &CancelToken,
+    remote: Option<&str>,
 ) -> Result<(GitOid, Vec<String>), WorktreeError> {
-    match crate::utility::fetch_missing_remote_branch(
-        context.executor,
-        context.repo,
-        context.utility,
-        context.home,
-        "origin/HEAD",
-        context.mutation_budget,
-        cancel,
-    ) {
-        Ok(crate::utility::RemoteBase::Found(oid)) => {
-            let revision =
-                GitRevision::new(oid.to_string()).map_err(|_| WorktreeError::InvalidOutput)?;
-            if let Ok(pinned) = facts.resolve_revision(context, revision, cancel) {
-                return Ok((pinned, Vec::new()));
+    if let Some(remote) = remote {
+        match crate::utility::fetch_missing_remote_branch(
+            context.executor,
+            context.repo,
+            context.utility,
+            context.home,
+            &format!("{remote}/HEAD"),
+            context.mutation_budget,
+            cancel,
+        ) {
+            Ok(crate::utility::RemoteBase::Found(oid)) => {
+                let revision =
+                    GitRevision::new(oid.to_string()).map_err(|_| WorktreeError::InvalidOutput)?;
+                if let Ok(pinned) = facts.resolve_revision(context, revision, cancel) {
+                    return Ok((pinned, Vec::new()));
+                }
             }
+            Err(crate::utility::UtilityError::Cancelled)
+            | Err(crate::utility::UtilityError::Execution(
+                provenant_os::exec::ExecError::Cancelled,
+            )) => return Err(crate::utility::UtilityError::Cancelled.into()),
+            _ => {}
         }
-        Err(crate::utility::UtilityError::Cancelled)
-        | Err(crate::utility::UtilityError::Execution(provenant_os::exec::ExecError::Cancelled)) => {
-            return Err(crate::utility::UtilityError::Cancelled.into());
-        }
-        _ => {}
     }
     let head = GitRevision::new("HEAD").map_err(|_| WorktreeError::InvalidRequest)?;
     let oid = facts
@@ -807,7 +818,7 @@ pub fn default_creation_base(
                 error
             }
         })?;
-    let warning = default_base_warning(oid);
+    let warning = default_base_warning(oid, remote);
     use provenant_records::warning::{DEFAULT_BASE_FALLBACK, Warning, warn};
     // Spec: docs/specs/cli.md#warnings-are-typed-values
     warn(
@@ -818,8 +829,13 @@ pub fn default_creation_base(
     Ok((oid, vec![warning]))
 }
 
-fn default_base_warning(oid: GitOid) -> String {
-    format!("could not fetch origin's default branch; using local HEAD {oid}")
+fn default_base_warning(oid: GitOid, remote: Option<&str>) -> String {
+    match remote {
+        Some(remote) => {
+            format!("could not fetch {remote}'s default branch; using local HEAD {oid}")
+        }
+        None => format!("this checkout has no remote; using local HEAD {oid}"),
+    }
 }
 
 /// Report whether a failed `worktree add` left no observable artifacts.

@@ -1590,6 +1590,25 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         reference: &str,
         default_base: bool,
     ) -> Result<Option<String>, Self::Error> {
+        // The one forge context for this command, resolved here and passed to
+        // both creation paths; neither rediscovers the remote.
+        // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+        let state = self.factory.context.roots.state.as_path();
+        let project = self.factory.cwd.as_path();
+        let ports = &self.factory.context.port_table;
+        let policy = provenant_config::operation_policy(state, project, ports);
+        let config = provenant_config::ForgeConfig::new(ports, (*policy).clone());
+        let git = provenant_config::ForgeGit::new(project)
+            .map_err(|_| FacadeError::io("forge context Git metadata"))?;
+        let forge_remote = match provenant_config::ForgeContext::remote(&config, &git) {
+            Ok(remote) => Some(remote.value),
+            Err(provenant_config::ForgeContextError::NoRemote { remotes, .. })
+                if remotes.is_empty() =>
+            {
+                None
+            }
+            Err(_) => return Err(FacadeError::io("forge context resolution")),
+        };
         // Only a new top-level writer may prefer a remote-only branch. Child
         // provisioning and recovery always use their checkpointed source.
         let remote_tip = provenant_confinement::worktrees::with_context_using_facts(
@@ -1604,6 +1623,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     context,
                     branch,
                     self.cancel,
+                    forge_remote.as_deref(),
                 )
             },
         )
@@ -1635,6 +1655,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                         context,
                         &self.repo_facts,
                         self.cancel,
+                        forge_remote.as_deref(),
                     )
                 },
             )
@@ -2080,8 +2101,17 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     disk: None,
                     reason: "an integration source requires graph.integration_branch".into(),
                 })?;
-        let reference = match branch.strip_prefix("origin/") {
-            Some(branch) => format!("refs/remotes/origin/{branch}"),
+        let state = self.factory.context.roots.state.as_path();
+        let ports = &self.factory.context.port_table;
+        let policy = provenant_config::operation_policy(state, self.factory.cwd.as_path(), ports);
+        let config = provenant_config::ForgeConfig::new(ports, (*policy).clone());
+        let git = provenant_config::ForgeGit::new(self.factory.cwd.as_path())
+            .map_err(|_| FacadeError::io("forge context Git metadata"))?;
+        let forge_remote = provenant_config::ForgeContext::remote(&config, &git)
+            .map_err(|_| FacadeError::io("forge context resolution"))?
+            .value;
+        let reference = match branch.strip_prefix(&format!("{forge_remote}/")) {
+            Some(branch) => format!("refs/remotes/{forge_remote}/{branch}"),
             None => format!("refs/heads/{branch}"),
         };
         self.factory
@@ -2099,11 +2129,19 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         document: &provenant_fabric_runtime::graph::GraphDocument,
         _checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
     ) -> Result<(), Self::Error> {
+        let ports = &self.factory.context.port_table;
+        let forge = provenant_run::resolve_forge(
+            self.factory.context.roots.state.as_path(),
+            self.factory.cwd.as_path(),
+            ports,
+        )
+        .map_err(run_error)?;
         for node in &document.nodes {
             if let Some(provenant_records::run::DeliveryMode::Integrate(target)) = &node.delivery {
                 provenant_run::HostDeliveryContext::validate_integration_target(
                     &self.factory.cwd,
                     target,
+                    &forge,
                 )
                 .map_err(run_error)?;
             }
@@ -2300,6 +2338,12 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             }
         }
         body.push_str(&provenant_cli::pr_body::independent_review_rows(&reviews));
+        let forge = provenant_run::resolve_forge(
+            self.factory.context.roots.state.as_path(),
+            self.factory.cwd.as_path(),
+            &self.factory.context.port_table,
+        )
+        .map_err(run_error)?;
         let url = provenant_run::HostDeliveryContext::capture()
             .with_repo_facts(&self.repo_facts)
             .deliver_graph_pr(
@@ -2309,6 +2353,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     .and_then(|bases| bases.integration)
                     .ok_or(FacadeError::Conflict)?,
                 &body,
+                &forge,
             )
             .map_err(run_error)?;
         Ok(Some(url))
@@ -3293,7 +3338,11 @@ impl BoundGraphOwner<'_> {
                     ),
                 });
             }
-            provenant_run::HostDeliveryContext::destination(mode.clone(), &branch)
+            let state = self.factory.context.roots.state.as_path();
+            let ports = &self.factory.context.port_table;
+            let forge = provenant_run::resolve_forge(state, self.factory.cwd.as_path(), ports)
+                .map_err(run_error)?;
+            provenant_run::HostDeliveryContext::destination(mode.clone(), &branch, &forge)
                 .map_err(run_error)?
                 .map(|mut request| {
                     request.fast_forward_only = replay.fast_forward_only;

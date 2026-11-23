@@ -300,10 +300,19 @@ pub(crate) fn validate_explain_submission(
     expanded: &provenant_fabric_runtime::graph::GraphDocument,
 ) -> Result<(), FacadeError> {
     validate_static_submission(factory, document)?;
+    // One context for this read-only validation, resolved here and shared by
+    // every target check below.
+    // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    let ports = provenant_config::PortTable::read_project_only(&factory.cwd)
+        .map_err(|error| FacadeError::io(error.to_string()))?;
+    let forge =
+        provenant_run::resolve_forge(factory.context.roots.state.as_path(), &factory.cwd, &ports)
+            .map_err(run_error)?;
     if let Some(branch) = &document.integration_branch {
         provenant_run::HostDeliveryContext::validate_integration_target_read_only(
             &factory.cwd,
             branch,
+            &forge,
         )
         .map_err(run_error)?;
     }
@@ -315,6 +324,7 @@ pub(crate) fn validate_explain_submission(
             provenant_run::HostDeliveryContext::validate_integration_target_read_only(
                 &factory.cwd,
                 target,
+                &forge,
             )
             .map_err(run_error)?;
         }
@@ -329,11 +339,12 @@ pub(crate) fn validate_explain_submission(
             provenant_run::HostDeliveryContext::validate_integration_target_read_only(
                 &factory.cwd,
                 &read_only_worktree_branch(factory, node, path)?,
+                &forge,
             )
             .map_err(run_error)?;
         }
         if let Some(provenant_records::run::DeliveryMode::Integrate(target)) = &node.delivery
-            && !target.starts_with("origin/")
+            && !target.starts_with(&format!("{}/", forge.remote.value))
             && let Some(path) = node.worktree.as_deref()
             && read_only_worktree_branch(factory, node, path)? == *target
         {
@@ -417,6 +428,16 @@ pub(crate) fn validate_delivery_targets(
     admitted: bool,
 ) -> Result<(), FacadeError> {
     use provenant_fabric_runtime::graph::GraphNode;
+    // One context for all delivery-target checks in this validation.
+    // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    let ports = provenant_config::PortTable::read_for(
+        Some(factory.cwd.as_path()),
+        factory.context.roots.state.as_path(),
+    )
+    .map_err(|error| FacadeError::io(error.to_string()))?;
+    let forge =
+        provenant_run::resolve_forge(factory.context.roots.state.as_path(), &factory.cwd, &ports)
+            .map_err(run_error)?;
     let writer_branch = |node: &GraphNode, path: &str| -> Result<String, FacadeError> {
         if let Some(new) = node
             .attempt
@@ -451,8 +472,12 @@ pub(crate) fn validate_delivery_targets(
             continue;
         }
         if let Some(provenant_records::run::DeliveryMode::Integrate(target)) = &node.delivery {
-            provenant_run::HostDeliveryContext::validate_integration_target(&factory.cwd, target)
-                .map_err(run_error)?;
+            provenant_run::HostDeliveryContext::validate_integration_target(
+                &factory.cwd,
+                target,
+                &forge,
+            )
+            .map_err(run_error)?;
         }
         // A planned writer cannot be on either branch until the host creates
         // its checkout; provisioning verifies the actual branch and head.
@@ -467,6 +492,7 @@ pub(crate) fn validate_delivery_targets(
             provenant_run::HostDeliveryContext::check_delivery_branch(
                 &factory.cwd,
                 &writer_branch(node, path)?,
+                &forge,
             )
             .map_err(|_| FacadeError::ConfinementRefused { resource: None })?;
         }
@@ -474,7 +500,7 @@ pub(crate) fn validate_delivery_targets(
         // advanced by compare-and-swap, so refuse the graph before any attempt
         // rather than at delivery.
         if let Some(provenant_records::run::DeliveryMode::Integrate(target)) = &node.delivery
-            && !target.starts_with("origin/")
+            && !target.starts_with(&format!("{}/", forge.remote.value))
             && let Some(path) = node.worktree.as_deref()
             && writer_branch(node, path)? == *target
         {
@@ -1034,6 +1060,16 @@ impl Factory {
                 )
             })?;
         let resume = matches!(&input, GraphInput::Resume { .. });
+        // The one context for this graph launch, resolved once by the owner.
+        // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+        let ports = provenant_config::PortTable::read_for(
+            Some(self.cwd.as_path()),
+            self.context.roots.state.as_path(),
+        )
+        .map_err(|error| FacadeError::io(error.to_string()))?;
+        let forge =
+            provenant_run::resolve_forge(self.context.roots.state.as_path(), &self.cwd, &ports)
+                .map_err(run_error)?;
         let mut scratch_source = None;
         let mut submission_refusals = Vec::new();
         let document = match &input {
@@ -1069,7 +1105,7 @@ impl Factory {
                 };
                 if let Some(branch) = &document.integration_branch {
                     provenant_run::HostDeliveryContext::validate_integration_target(
-                        &self.cwd, branch,
+                        &self.cwd, branch, &forge,
                     )
                     .map_err(run_error)?;
                 }
@@ -1478,8 +1514,8 @@ impl Factory {
                     .and_then(|checkpoint| checkpoint.bases)
                     .and_then(|bases| bases.integration)
             } else if let Some(branch) = &document.integration_branch {
-                let reference = match branch.strip_prefix("origin/") {
-                    Some(branch) => format!("refs/remotes/origin/{branch}"),
+                let reference = match branch.strip_prefix(&format!("{}/", forge.remote.value)) {
+                    Some(branch) => format!("refs/remotes/{}/{branch}", forge.remote.value),
                     None => format!("refs/heads/{branch}"),
                 };
                 let git = provenant_os::git::git_executable()
@@ -1488,7 +1524,7 @@ impl Factory {
                 // measured from, rather than refusing the graph.
                 // The shared ref ledger records whether this graph made the
                 // branch or found it, so cleanup never claims a human's ref.
-                if !branch.starts_with("origin/") {
+                if !branch.starts_with(&format!("{}/", forge.remote.value)) {
                     let start = document
                         .review_base
                         .as_deref()

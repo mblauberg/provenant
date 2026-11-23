@@ -58,8 +58,16 @@ pub fn run(command: Cloud, globals: &Globals) -> u8 {
                     roots::Product::Required,
                 )?;
                 let layout = roots::project_layout(&resolved.roots, &project)?;
-                let result =
-                    collect_result(&project, &layout, resolved.roots.state.as_path(), &collect)?;
+                // The one forge remote for this command, resolved by the owner
+                // and passed down; no consumer rediscovers it.
+                // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+                let state = resolved.roots.state.as_path();
+                let ports = provenant_config::PortTable::read_for(Some(project.as_path()), state)?;
+                let policy = provenant_config::operation_policy(state, &project, &ports);
+                let config = provenant_config::ForgeConfig::new(&ports, (*policy).clone());
+                let git = provenant_config::ForgeGit::new(&project)?;
+                let remote = provenant_config::ForgeContext::remote(&config, &git)?.value;
+                let result = collect_result(&project, &layout, state, &collect, &remote)?;
                 let capture = || -> Result<(), Error> {
                     let resolved = roots::resolve(
                         globals,
@@ -256,6 +264,7 @@ fn collect_result(
     layout: &provenant_confinement::worktrees::ProjectLayout,
     host_state: &Path,
     collect: &cloud::Collect,
+    forge_remote: &str,
 ) -> Result<(Value, String), Error> {
     let key = cloud::record_key(&collect.id);
     let path = record_path(project, &key)?;
@@ -280,9 +289,10 @@ fn collect_result(
     let target = worktree.display().to_string();
     match record.provider {
         Provider::Claude => {
-            let (remote, oid) = find_branch(project, &branch, &record.nonce)?.ok_or_else(|| {
-                format!("no pushed branch found for this session yet; open {link}")
-            })?;
+            let (remote, oid) = find_branch(project, &branch, &record.nonce, forge_remote)?
+                .ok_or_else(|| {
+                    format!("no pushed branch found for this session yet; open {link}")
+                })?;
             git(
                 project,
                 &[
@@ -290,7 +300,7 @@ fn collect_result(
                     "fetch.fsckObjects=true",
                     "fetch",
                     "--no-tags",
-                    "origin",
+                    forge_remote,
                     &remote,
                 ],
                 None,
@@ -333,17 +343,18 @@ fn collect_result(
     }
 }
 
-/// The named branch on `origin`, else a `claude/*` branch whose head carries
-/// this launch's trailer. Returns the remote ref and its head.
+/// The named branch on the forge remote, else a `claude/*` branch whose head
+/// carries this launch's trailer. Returns the remote ref and its head.
 fn find_branch(
     project: &Path,
     branch: &str,
     nonce: &str,
+    forge_remote: &str,
 ) -> Result<Option<(String, String)>, Error> {
     let named = format!("refs/heads/{branch}");
     let listed = git(
         project,
-        &["ls-remote", "origin", &named, "refs/heads/claude/*"],
+        &["ls-remote", forge_remote, &named, "refs/heads/claude/*"],
         None,
     )?;
     let refs: Vec<(String, String)> = listed
@@ -363,7 +374,7 @@ fn find_branch(
                 "fetch.fsckObjects=true",
                 "fetch",
                 "--no-tags",
-                "origin",
+                forge_remote,
                 &name,
             ],
             None,

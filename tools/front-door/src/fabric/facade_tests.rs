@@ -7,12 +7,39 @@
 fn graph_input_refusals_name_their_field() {
     let bare = ["InvalidInput { ", "detail: None }"].concat();
     for (path, source) in [
-        ("src/fabric.rs", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/fabric.rs"))),
-        ("src/fabric/graph_execution.rs", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/fabric/graph_execution.rs"))),
-        ("src/fabric/graph_inputs.rs", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/fabric/graph_inputs.rs"))),
-        ("src/fabric/owner.rs", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/fabric/owner.rs"))),
-        ("src/fabric/peer.rs", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/fabric/peer.rs"))),
-        ("src/fabric/unified.rs", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/fabric/unified.rs"))),
+        (
+            "src/fabric.rs",
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/fabric.rs")),
+        ),
+        (
+            "src/fabric/graph_execution.rs",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/fabric/graph_execution.rs"
+            )),
+        ),
+        (
+            "src/fabric/graph_inputs.rs",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/fabric/graph_inputs.rs"
+            )),
+        ),
+        (
+            "src/fabric/owner.rs",
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/fabric/owner.rs")),
+        ),
+        (
+            "src/fabric/peer.rs",
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/fabric/peer.rs")),
+        ),
+        (
+            "src/fabric/unified.rs",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/fabric/unified.rs"
+            )),
+        ),
     ] {
         let unnamed: Vec<usize> = source
             .lines()
@@ -20,7 +47,10 @@ fn graph_input_refusals_name_their_field() {
             .filter(|(_, line)| line.contains(&bare))
             .map(|(index, _)| index + 1)
             .collect();
-        assert!(unnamed.is_empty(), "{path} has an unnamed refusal at lines {unnamed:?}");
+        assert!(
+            unnamed.is_empty(),
+            "{path} has an unnamed refusal at lines {unnamed:?}"
+        );
     }
 }
 
@@ -50,10 +80,7 @@ fn peer_remote_base_pins_a_commit_reachable_from_the_remote()
     }
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
-    provenant_os::fixture::run_git(
-        &remote,
-        &["init", "--bare", "-q", "--initial-branch=main"],
-    )?;
+    provenant_os::fixture::run_git(&remote, &["init", "--bare", "-q", "--initial-branch=main"])?;
     provenant_os::fixture::run_git(&project, &["init", "-q", "--initial-branch=main"])?;
     provenant_os::fixture::run_git(&project, &["commit", "--allow-empty", "-qm", "base"])?;
     provenant_os::fixture::run_git(
@@ -329,14 +356,16 @@ fn peer_base_resolution_fetches_a_commit_missing_from_a_stale_clone()
     // Name the branch in the bare repo itself: a clone checks out the branch
     // Git advertises as HEAD, and a clone on an unborn default branch would
     // root its commit and then be rejected as non-fast-forward.
-    provenant_os::fixture::run_git(
-        &origin,
-        &["init", "--bare", "-q", "--initial-branch=main"],
-    )?;
+    provenant_os::fixture::run_git(&origin, &["init", "--bare", "-q", "--initial-branch=main"])?;
     // Seed the peer clone's origin at the commit the peer already has.
     provenant_os::fixture::run_git(
         &rig.project,
-        &["remote", "add", "origin", origin.to_str().ok_or("origin path")?],
+        &[
+            "remote",
+            "add",
+            "origin",
+            origin.to_str().ok_or("origin path")?,
+        ],
     )?;
     provenant_os::fixture::run_git(&rig.project, &["push", "origin", "HEAD:refs/heads/main"])?;
     let base = String::from_utf8(provenant_os::fixture::run_git(
@@ -358,7 +387,10 @@ fn peer_base_resolution_fetches_a_commit_missing_from_a_stale_clone()
         ],
     )?;
     provenant_os::fixture::run_git(&upstream, &["config", "user.name", "Fixture"])?;
-    provenant_os::fixture::run_git(&upstream, &["config", "user.email", "fixture@example.invalid"])?;
+    provenant_os::fixture::run_git(
+        &upstream,
+        &["config", "user.email", "fixture@example.invalid"],
+    )?;
     provenant_os::fixture::run_git(&upstream, &["commit", "--allow-empty", "-qm", "ahead"])?;
     let merge_base = String::from_utf8(provenant_os::fixture::run_git(
         &upstream,
@@ -370,7 +402,10 @@ fn peer_base_resolution_fetches_a_commit_missing_from_a_stale_clone()
         "the advanced origin must descend from the peer's base"
     );
     provenant_os::fixture::run_git(&upstream, &["push", "origin", "HEAD:refs/heads/main"])?;
-    let ahead = String::from_utf8(provenant_os::fixture::run_git(&upstream, &["rev-parse", "HEAD"])?)?;
+    let ahead = String::from_utf8(provenant_os::fixture::run_git(
+        &upstream,
+        &["rev-parse", "HEAD"],
+    )?)?;
     let ahead = ahead.trim().to_owned();
     assert_ne!(ahead, base);
     assert!(
@@ -682,7 +717,7 @@ fn dirty_writer_refusal_keeps_safe_cause_and_action_on_the_wire() {
 
 #[test]
 fn memory_pressure_refusal_keeps_source_and_resource_action() {
-    use provenant_records::diagnostic::{PressureLevel, PressureThreshold, Layer};
+    use provenant_records::diagnostic::{Layer, PressureLevel, PressureThreshold};
     let error = run_error(provenant_run::RunError::Admission(
         provenant_run::AdmissionError::MemoryPressure {
             level: PressureLevel::Critical,
@@ -752,7 +787,9 @@ fn lane_cap_refusal_retains_the_setting_through_both_adapters() {
 
 #[test]
 fn pacing_dispatch_refusal_keeps_the_route_and_monthly_window_note() {
-    use provenant_records::diagnostic::{Diagnostic, DiagnosticFact, PacingReserveSetting, PacingSettingSource, ResourceFact, };
+    use provenant_records::diagnostic::{
+        Diagnostic, DiagnosticFact, PacingReserveSetting, PacingSettingSource, ResourceFact,
+    };
     let fact = ResourceFact::PacingReserve {
         percent: 10,
         setting: PacingReserveSetting::Account,
@@ -760,7 +797,8 @@ fn pacing_dispatch_refusal_keeps_the_route_and_monthly_window_note() {
         hold: Box::new(provenant_records::diagnostic::PacingHold {
             account: "codex/opaque-account".into(),
             window: "five_hour".into(),
-            setting_path: "domains.routing.pacing.accounts.codex/opaque-account.reserve.five_hour".into(),
+            setting_path: "domains.routing.pacing.accounts.codex/opaque-account.reserve.five_hour"
+                .into(),
         }),
     };
     let projection = fact
@@ -780,11 +818,17 @@ fn pacing_dispatch_refusal_keeps_the_route_and_monthly_window_note() {
     assert!(encoded.contains("domains.routing.pacing.monthly"));
     let diagnostic = error.diagnostic();
     let detail = diagnostic.detail.expect("refusal detail");
-    assert!(detail.contains("selected account is held by a 10% pacing reserve"), "{detail}");
+    assert!(
+        detail.contains("selected account is held by a 10% pacing reserve"),
+        "{detail}"
+    );
     assert!(detail.contains("opencode/gpt-go"), "{detail}");
     assert!(detail.contains("OpenCode Go"), "{detail}");
     assert!(detail.contains("window=thirty_day"), "{detail}");
-    assert!(detail.contains("domains.routing.pacing.monthly"), "{detail}");
+    assert!(
+        detail.contains("domains.routing.pacing.monthly"),
+        "{detail}"
+    );
     assert!(detail.contains("source: host configuration"), "{detail}");
 }
 
@@ -869,7 +913,9 @@ pub(crate) mod peer_tests {
     #[test]
     fn exact_host_dispatch_rejects_zero_matches() {
         assert_one_test_ran("case", b"running 1 test\n");
-        assert!(std::panic::catch_unwind(|| assert_one_test_ran("case", b"running 0 tests\n")).is_err());
+        assert!(
+            std::panic::catch_unwind(|| assert_one_test_ran("case", b"running 0 tests\n")).is_err()
+        );
     }
 
     const HOST_TEST_CEILING: std::time::Duration = std::time::Duration::from_secs(120);
@@ -1052,7 +1098,9 @@ pub(crate) mod peer_tests {
             .join(record.attempt_id.to_string());
         let directory = provenant_os::fs::Directory::open_anchor(&attempt)?;
         use provenant_records::custody::Scope;
-        use provenant_supervisor::custody::{ExitObservation, PublicationState, SettlementEvidence, };
+        use provenant_supervisor::custody::{
+            ExitObservation, PublicationState, SettlementEvidence,
+        };
         let exit = ExitObservation {
             publication: PublicationState::Durable,
             scope: Scope {
@@ -1156,6 +1204,7 @@ pub(crate) mod peer_tests {
             let delivery = provenant_run::HostDeliveryContext::destination(
                 provenant_run::DeliveryMode::Integrate("origin/trunk".into()),
                 "resumed-lane",
+                &provenant_run::forge_for("origin", "main", &[]),
             )?
             .ok_or("integration delivery")?;
             Self::build("settlement-resume", None, "lane", true, Some(delivery))
@@ -1248,7 +1297,9 @@ pub(crate) mod peer_tests {
             lane_commit: bool,
             delivery: Option<provenant_run::WriterDeliveryRequest>,
         ) -> Result<Self, Box<dyn std::error::Error>> {
-            use provenant_confinement::worktrees::{self, WorktreeCreate, WorktreeOrigin, WorktreeOwner, };
+            use provenant_confinement::worktrees::{
+                self, WorktreeCreate, WorktreeOrigin, WorktreeOwner,
+            };
             let rig = crate::worktree_tests::support::TestRig::new()?;
             let git = provenant_os::git::git_executable().ok_or("git")?;
             for args in [
@@ -1903,7 +1954,10 @@ fn confinement_refusal_keeps_actual_cause_through_cli_and_dispatch() {
         },
     ));
     assert!(fail.message.contains("setup anchor changed"));
-    assert!(fail.message.contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"));
+    assert!(
+        fail.message
+            .contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789")
+    );
     let error = dispatch_refused(fail);
     let decoded: FacadeError =
         serde_json::from_slice(&serde_json::to_vec(&error).unwrap()).unwrap();
@@ -1938,7 +1992,9 @@ fn managed_writer_path_mismatch_names_the_layout_and_repair() {
 #[test]
 fn failed_worktree_add_retains_safe_operation_and_lock_facts_through_relay()
 -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_confinement::worktrees::{self, GitMutationOperation, Occupancy, WorkerObserver, WorktreeCreate, };
+    use provenant_confinement::worktrees::{
+        self, GitMutationOperation, Occupancy, WorkerObserver, WorktreeCreate,
+    };
     use std::collections::BTreeMap;
     struct Free;
     impl WorkerObserver for Free {
@@ -2019,7 +2075,13 @@ fn failed_worktree_add_retains_safe_operation_and_lock_facts_through_relay()
     });
     let untyped_wire = serde_json::to_string(&untyped)?;
     assert!(untyped_wire.contains("credential-sentinel"));
-    assert!(untyped.diagnostic().detail.as_deref().is_some_and(|detail| detail.contains("credential-sentinel")));
+    assert!(
+        untyped
+            .diagnostic()
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("credential-sentinel"))
+    );
     assert!(
         !diagnostic
             .detail
