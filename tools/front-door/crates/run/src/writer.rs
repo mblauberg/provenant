@@ -1134,34 +1134,48 @@ fn budget_commit_message(paths: &[String]) -> String {
 /// Name an unfinished operation in one lane Git directory without touching it.
 /// The warning names the commit HEAD denotes, symbolic or detached, and the
 /// directory that retains the operation, so a person can resume it there.
+/// Building a warning never fails settlement: an unborn or unreadable HEAD, a
+/// non-UTF-8 HEAD or a ref that cannot be resolved all degrade to "unknown".
 fn lane_git_operation_warning(
     directory: &Directory,
     path: &Path,
     resolve: impl FnOnce(&str) -> Result<GitOid>,
-) -> Result<Option<String>> {
-    let Some(operation) = worktrees::incomplete_git_operation(directory, None)? else {
-        return Ok(None);
+) -> Option<String> {
+    let operation = match worktrees::incomplete_git_operation(directory, None) {
+        Ok(Some(operation)) => operation,
+        _ => return None,
     };
-    let raw = directory.read_stable(OsStr::new("HEAD"), 1024)?;
-    let head = std::str::from_utf8(&raw)
-        .map_err(|_| RunError::Validation("lane Git HEAD is not UTF-8"))?
-        .trim();
-    let commit = match head.strip_prefix("ref: ") {
-        Some(reference) => resolve(reference)?,
-        None => GitOid::parse(head)
-            .map_err(|_| RunError::Validation("lane Git HEAD is not a commit"))?,
-    };
-    Ok(Some(format!(
-        "writer left an unfinished {} at commit {commit}; the in-progress state is retained in {} and is not reset or cleaned; the lane's committed tip is published",
+    let commit = (|| {
+        let raw = directory.read_stable(OsStr::new("HEAD"), 1024).ok()?;
+        let head = std::str::from_utf8(&raw).ok()?.trim();
+        match head.strip_prefix("ref: ") {
+            Some(reference) => resolve(reference).ok(),
+            None => GitOid::parse(head).ok(),
+        }
+    })()
+    .map(|oid| oid.to_string())
+    .unwrap_or_else(|| "unknown".to_owned());
+    Some(format!(
+        "writer left an unfinished {} at commit {commit}; the in-progress state is retained in {} and is not reset or cleaned by settlement; the lane's committed tip is published",
         operation.label,
         path.display()
-    )))
+    ))
+}
+
+/// Record a settlement warning once: a resume whose sealed terminal record
+/// already holds it must not emit or append it again.
+fn record_git_operation_warning(warnings: &mut Vec<String>, message: String) {
+    if !warnings.contains(&message) {
+        warnings.push(message.clone());
+        emit_git_operation_warning(message);
+    }
 }
 
 fn emit_git_operation_warning(message: String) {
     #[cfg(test)]
     GIT_OPERATION_WARNINGS.with(|warnings| warnings.borrow_mut().push(message.clone()));
-    let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+    use provenant_records::warning::{GIT_OPERATION_RETAINED, Warning, warn};
+    warn(Warning::new(GIT_OPERATION_RETAINED, message).subject("lane Git operation retained"));
 }
 
 /// Whether a terminal check stopped only because an operation is unfinished.
@@ -3962,39 +3976,88 @@ impl WriterLaunch {
         let source = crate::objects::bound_source(attempt)?;
         let git_executable = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
         // Decide before import and publication, and again on a resume whose
-        // phase is already Publish or Record. Only an operation in the host
-        // checkout refuses; the lane's own operation, in its private Git or
-        // its candidate common directory, is named and left intact while its
-        // committed tip is published.
+        // phase is already Publish or Record. Only a host operation that touches
+        // a ref settlement moves (or settlement writing that very checkout)
+        // refuses; every other operation, including the lane's own in its
+        // private Git or candidate common directory, is named and left intact
+        // while the committed tip is published.
         let repo = self.worktree.repo();
-        worktrees::check_host_checkout_terminal(repo)?;
-        let mut native_operation = false;
+        let delivery_destination =
+            crate::artifacts::read_sealed(attempt, "request.json", crate::RECORD_LIMIT)
+                .ok()
+                .flatten()
+                .and_then(|raw| crate::db::decode::<crate::CanonicalRequest>(&raw).ok())
+                .and_then(|request| request.task.deliver.map(|deliver| deliver.branch))
+                .map(|branch| {
+                    if branch.starts_with("refs/") {
+                        branch
+                    } else {
+                        format!("refs/heads/{branch}")
+                    }
+                });
+        let mut moved_refs = vec![self.branch.as_str()];
+        if let Some(destination) = delivery_destination.as_deref() {
+            moved_refs.push(destination);
+        }
+        let mut warning_messages = Vec::new();
+        match worktrees::check_host_checkout_terminal(repo, &moved_refs)? {
+            Some(operation) if operation.blocks => {
+                return Err(worktrees::WorktreeError::GitOperationInProgress.into());
+            }
+            Some(operation) => {
+                let path = if repo.is_primary_checkout() {
+                    repo.private_git_dir().to_path_buf()
+                } else {
+                    repo.common_dir().current_path()?
+                };
+                warning_messages.push(format!(
+                    "host checkout retains an unfinished {} on {}; settlement publishes the lane and leaves the state intact in {}",
+                    operation.marker.label,
+                    operation.reference.as_deref().unwrap_or("an unknown ref"),
+                    path.display()
+                ));
+            }
+            None => {}
+        }
         let mut lane_operation = false;
         if let Some(warning) =
             lane_git_operation_warning(repo.private_dir(), repo.private_git_dir(), |reference| {
                 crate::objects::resolve_ref(&git_executable, repo, reference)
-            })?
+            })
         {
-            native_operation = true;
             lane_operation = true;
-            emit_git_operation_warning(warning);
+            warning_messages.push(warning);
         }
         if let Some(source) = &source
             && let Some(warning) = lane_git_operation_warning(
                 &source.refs,
                 &source.refs.current_path()?,
                 |reference| crate::objects::private_tip(source, reference),
-            )?
+            )
         {
             lane_operation = true;
-            emit_git_operation_warning(warning);
+            warning_messages.push(warning);
         }
         let head = repo.private_dir().read_stable(OsStr::new("HEAD"), 1024)?;
-        if !native_operation
-            && std::str::from_utf8(&head).map(str::trim).ok()
-                != Some(format!("ref: {}", self.branch.as_str()).as_str())
-        {
+        let head = std::str::from_utf8(&head).map(str::trim).unwrap_or("");
+        let on_lane_branch = head == format!("ref: {}", self.branch.as_str()).as_str();
+        // A rebase detaches HEAD while it replays commits. Allow that only when
+        // the rebase's head-name is this lane's branch; any other HEAD (a
+        // conflicted merge on main, a random detach, an unborn HEAD) still has
+        // to name the lane branch.
+        let detached_under_lane_rebase = GitOid::parse(head).is_ok()
+            && worktrees::rebase_operation_ref(repo.private_dir()).as_deref()
+                == Some(self.branch.as_str());
+        if !on_lane_branch && !detached_under_lane_rebase {
             return Err(RunError::WriterHeadNotLaneBranch);
+        }
+        let mut warnings: Vec<String> =
+            crate::artifacts::read_sealed(attempt, "writer-terminal.json", crate::RECORD_LIMIT)?
+                .and_then(|raw| crate::db::decode::<WriterTerminal>(&raw).ok())
+                .map(|saved| saved.warnings)
+                .unwrap_or_default();
+        for warning in warning_messages {
+            record_git_operation_warning(&mut warnings, warning);
         }
         if budget_stop
             && settlement.head().is_none()
@@ -4368,6 +4431,7 @@ impl WriterLaunch {
                 // Attribute only the head pinned for this attempt's settlement.
                 head: verified_tip,
                 stop_work,
+                warnings,
             })?,
             crate::RECORD_LIMIT,
         )?;
@@ -4744,6 +4808,9 @@ pub(crate) struct WriterTerminal {
     pub head: GitOid,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_work: Option<provenant_records::run::StopWorkSummary>,
+    /// Settlement warnings recorded once, so a resume does not re-emit them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 #[derive(serde::Serialize)]
 struct WriterManifest {
@@ -5110,5 +5177,60 @@ mod launch_resource_limit_tests {
             provenant_confinement::permissions::PermissionError::ProtectedOverlap
         ));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod git_operation_warning_tests {
+    use super::*;
+
+    fn directory_with(head: &[u8]) -> tempfile::TempDir {
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            temp.path().join("MERGE_HEAD"),
+            format!("{}\n", "a".repeat(40)),
+        )
+        .expect("merge marker");
+        std::fs::write(temp.path().join("HEAD"), head).expect("HEAD");
+        temp
+    }
+
+    #[test]
+    fn non_utf8_head_degrades_to_unknown_commit() {
+        let temp = directory_with(&[0xff, 0xfe, 0x80]);
+        let directory = Directory::open_anchor(temp.path()).expect("directory");
+        let warning = lane_git_operation_warning(&directory, Path::new("git-common"), |_| {
+            Err(RunError::Validation("unresolvable"))
+        })
+        .expect("a warning is still produced");
+        assert!(warning.contains("commit unknown"), "{warning}");
+        assert!(warning.contains("merge"), "{warning}");
+    }
+
+    #[test]
+    fn unresolvable_symbolic_ref_degrades_to_unknown_commit() {
+        let temp = directory_with(b"ref: refs/heads/lane\n");
+        let directory = Directory::open_anchor(temp.path()).expect("directory");
+        let warning = lane_git_operation_warning(&directory, Path::new("git-common"), |_| {
+            Err(RunError::Validation("unborn branch"))
+        })
+        .expect("a warning is still produced");
+        assert!(warning.contains("commit unknown"), "{warning}");
+    }
+
+    #[test]
+    fn warning_is_recorded_once_and_uses_the_catalogued_code() {
+        GIT_OPERATION_WARNINGS.with(|warnings| warnings.borrow_mut().clear());
+        let ((), captured) = provenant_records::warning::capture(|| {
+            let mut warnings = Vec::new();
+            let message = "a retained operation".to_owned();
+            record_git_operation_warning(&mut warnings, message.clone());
+            record_git_operation_warning(&mut warnings, message.clone());
+            assert_eq!(warnings, vec![message]);
+        });
+        assert_eq!(captured.len(), 1, "{captured:?}");
+        assert_eq!(captured[0].code.as_str(), "GIT_OPERATION_RETAINED");
+        let emitted = GIT_OPERATION_WARNINGS.with(|warnings| warnings.borrow().clone());
+        assert_eq!(emitted.len(), 1, "{emitted:?}");
     }
 }

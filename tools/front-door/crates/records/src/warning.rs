@@ -74,6 +74,8 @@ pub const STATE_ROOT_OVERLAP: WarningCode = WarningCode("STATE_ROOT_OVERLAP");
 pub const FORGE_CONTEXT_UNRESOLVED: WarningCode = WarningCode("FORGE_CONTEXT_UNRESOLVED");
 /// A result exceeded the output cap and was bounded with a marker.
 pub const RESULT_TOO_LARGE: WarningCode = WarningCode("RESULT_TOO_LARGE");
+/// A lane's unfinished Git operation is retained while its committed tip settles.
+pub const GIT_OPERATION_RETAINED: WarningCode = WarningCode("GIT_OPERATION_RETAINED");
 
 impl Warning {
     /// A warning with no subject, source or repair.
@@ -304,6 +306,7 @@ mod tests {
             super::STATE_ROOT_OVERLAP,
             super::RESULT_TOO_LARGE,
             super::FORGE_CONTEXT_UNRESOLVED,
+            super::GIT_OPERATION_RETAINED,
         ] {
             let name = code.as_str();
             assert!(

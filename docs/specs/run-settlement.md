@@ -31,6 +31,23 @@ bytes unchanged; a refusal never converges the checkout over an unfinished opera
   and a person's state to resume, while publishing over the host checkout's operation would move
   the branch underneath it.
 
+The **host checkout** is the checkout whose Git directory settlement shares with the owner's
+working tree: for a linked lane worktree it is the primary checkout, whose operation markers live
+in the common Git directory; when the lane's worktree is itself the primary checkout, it is that
+checkout's private Git directory. A bare common directory has no host checkout. Settlement reads
+the host checkout but never writes its files or index, so a host operation refuses settlement
+*only* when it acts on a ref settlement moves — the lane branch or the delivery destination, read
+from a rebase's `head-name` or the checkout's `HEAD` — or when settlement would write that very
+checkout (the lane's worktree is the primary checkout). Every other host operation, such as an
+owner mid-rebase on an unrelated branch, is retained intact and reported with a single
+`GIT_OPERATION_RETAINED` warning through the warning system, then publication proceeds. A warning
+that cannot resolve `HEAD` names the commit `unknown` and never refuses settlement. Warnings are
+recorded once in the writer terminal record, so a resume does not repeat them and `status` can
+show them.
+- Why: an unrelated owner operation must not strand every linked lane, while an operation on a ref
+  settlement moves, or on a checkout settlement writes, must still refuse before import with the
+  checkout's bytes unchanged.
+
 The guardian transfers its writer exclusion to recovery, and import and cleanup reuse that guard
 for the same scope. Failed steps before import share a durable budget of three failures. A resumed
 worker honours `retry_after_ms` before its first pass and paces every later pass. Exhausted
