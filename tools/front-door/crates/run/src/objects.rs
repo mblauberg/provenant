@@ -873,8 +873,10 @@ pub(crate) fn publish_branch(
     } = publication;
     let current = resolve_ref(git, repo, branch)?;
     // A head the branch already contains publishes nothing, so it asks no
-    // history question and cannot be refused for one.
-    let contains_head = is_ancestor(git, repo, head, current);
+    // history question and cannot be refused for one. A branch still at its
+    // launch base has not moved since launch, so a head behind it is the
+    // lane's own rewind and publishes like any lane tip.
+    let contains_head = current != base && is_ancestor(git, repo, head, current);
     // A branch rewound behind its launch base is judged before any history
     // question: a fast-forward would reinstate the history the host removed,
     // and a warning about the tip would only precede that refusal.
