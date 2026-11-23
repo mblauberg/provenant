@@ -381,14 +381,13 @@ pub enum AccessMode {
     WorktreeWrite(Box<WorktreeWriteAuthority>),
 }
 
-/// A digest binds the plan to Git grants, persistent shared Git state and its
-/// one host-derived build cache. Paths are derived by the host from a verified
-/// worktree, never accepted from a provider request.
+/// A digest binds the plan to Git grants and persistent shared Git state.
+/// Paths are derived by the host from a verified worktree, never accepted from
+/// a provider request.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorktreeWriteAuthority {
     pub git_grants_digest: [u8; 32],
-    pub(super) cargo_cache: PathGrant,
     pub(super) publishing: bool,
     /// Common Git directory from the verified repository binding.
     pub(super) common_git_dir: PathBuf,
@@ -413,11 +412,6 @@ impl WorktreeWriteAuthority {
         self.publishing = enabled;
     }
 
-    /// Exact lane-only cache already bound into this writer authority.
-    pub fn cargo_cache(&self) -> &PathGrant {
-        &self.cargo_cache
-    }
-
     pub fn for_worktree(
         worktree: &VerifiedWorktree,
         selected_ref: &GitRefName,
@@ -435,11 +429,9 @@ impl WorktreeWriteAuthority {
         };
         let grants = WorktreeWriteGrants::derive(worktree, selected_ref);
         grants.validate(credentials)?;
-        let cargo_cache = worktree_cargo_cache(home, worktree, credentials)?;
         let git_state = worktree_git_state(home, worktree, selected_ref, credentials)?;
         Ok(Self {
-            git_grants_digest: grants.digest(&cargo_cache, &git_state),
-            cargo_cache,
+            git_grants_digest: grants.digest(&git_state),
             publishing: true,
             common_git_dir: worktree.repo().common_git_dir().to_path_buf(),
             git_state,
@@ -533,11 +525,6 @@ pub fn write_grants(plan: &PlanPermissions, profile: &ProviderProfile) -> Vec<Wr
         }
     }
     if let AccessMode::WorktreeWrite(authority) = &plan.mode {
-        push(
-            WriteSource::LaneCache,
-            &authority.cargo_cache,
-            PathScope::Subtree,
-        );
         for grant in super::grants::worktree_git_state_writes(&authority.git_state) {
             push(WriteSource::GitState, &grant, grant.scope);
         }

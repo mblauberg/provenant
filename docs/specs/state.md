@@ -82,11 +82,12 @@ unverified lifecycle fields to classify a corrupt record as settled.
 
 ## SQLite stores
 
-### A format major permits additive evolution
+### A format major permits additive evolution and one-shot migrations
 
-Each SQLite store has a fixed `user_version` base within its state-root format
-major, and binaries of the same major read and write it whatever their release
-minor. Each owner declares one ordered list of additive steps tagged with the
+Each SQLite store names its `user_version` base. Releases normally keep the
+base fixed within its state-root format major, so binaries of the same major
+read and write it whatever their release minor. Each owner declares one ordered
+list of additive steps tagged with the
 release minor that added them: tables and indexes with `IF NOT EXISTS`, and
 columns that are nullable or have a non-NULL constant default. Steps never
 rewrite, drop or rename, and every insert names its columns, so an older writer
@@ -94,10 +95,22 @@ ignores newer columns. A writable open creates the base and any missing steps
 atomically, re-checking under the same immediate transaction; a current store
 opens without a write. A reader ignores unknown objects but refuses a missing
 known base table or declared step, and a different root major is refused without
-changing the store. A non-additive stored change needs a new root format major
-and a fresh root.
-- Why: additive changes within one major must preserve stored state and let
-  different minors share the format.
+changing the store.
+
+A change to stored values that a rename or a removed type makes unavoidable is
+declared once as a migration from the old base to the new one. A writable open
+runs every declared migration in order inside the same immediate transaction,
+then records the new base; a second open does not run it again. A read-only open
+of an older base refuses and names the writable open that migrates it. A binary
+that predates the new base refuses the store, so the migration is the one
+crossing and there is no compatibility path afterwards. Owners keep the SQL
+narrow: rewrite only the rows and fields the new types cannot read, and make
+every walk total for any valid JSON. A row whose stored bytes are not valid JSON
+is skipped by the rewrite and fails only its own decode, because one damaged row
+must not block every writable open.
+- Why: additive changes preserve stored state, while a single declared rewrite
+  lets a vocabulary change reach existing rows without a permanent decoder
+  shim.
 - Owner: `crates/sqlite/src/schema.rs`, each store's schema declaration
 
 ## Records

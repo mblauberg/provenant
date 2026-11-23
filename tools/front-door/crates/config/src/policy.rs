@@ -71,8 +71,9 @@ impl Settings {
         policy
     }
 }
-/// Resolve one immutable launch snapshot. Invalid optional policy settings warn
-/// and retain compiled defaults, without changing the boundaries or operation errors.
+/// Resolve current host and project policy overlaid with the request's sealed
+/// dispatch overrides. Invalid optional policy settings warn and retain compiled
+/// defaults, without changing the boundaries or operation errors.
 pub fn read(state: &Path, project: &str, dispatch: &BTreeMap<String, Strength>) -> Policy {
     read_reporting(state, project, dispatch, |error| {
         use std::io::Write;
@@ -131,28 +132,6 @@ pub fn dispatch(profile: &provenant_records::run::HarnessProfile) -> BTreeMap<St
     values
 }
 pub fn for_task(state: &Path, project: &str, task: &provenant_records::run::TaskRequest) -> Policy {
-    if let Some(snapshot) = &task.profile.launch_policy {
-        // Only configurable strengths can be restored. Persisted data cannot
-        // replace table-owned boundaries, codes, knobs or justifications.
-        let mut policy = Policy::default();
-        for row in snapshot.rules.iter().cloned() {
-            let Some(table_rule) = policy
-                .rules
-                .iter()
-                .find(|effective| effective.rule.code == row.rule.code)
-            else {
-                continue;
-            };
-            if table_rule.rule.knob.is_none() {
-                continue;
-            }
-            policy.overlay(
-                &BTreeMap::from([(row.rule.code, row.rule.strength)]),
-                row.source,
-            );
-        }
-        return policy;
-    }
     let values = dispatch(&task.profile);
     let project_id = task
         .profile

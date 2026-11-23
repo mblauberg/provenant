@@ -211,7 +211,6 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
         ]
         .into(),
     };
-    let cache = authority.cargo_cache.path.clone();
     let mut mandatory = MandatoryRoots::new(&home, &state, linked.path())?;
     let unselected = root.join("unselected-account");
     std::fs::create_dir(&unselected)?;
@@ -309,7 +308,6 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
         shared_locks.clone(),
         configured_tools.clone(),
         scratch.clone(),
-        cache.clone(),
         provider_state.clone(),
         protected.clone(),
         nested_git.clone(),
@@ -1100,12 +1098,6 @@ semop($sem, pack("s!3", 0, 1, 0)) or die "semop: $!\n";
         &executables[0],
         &[&provider_state.join("transcript")]
     )));
-    let cache_outcome = run(&executables[0], &[&cache.join("artifact")]);
-    assert!(
-        successful_probe(&cache_outcome),
-        "writer cache: {:?}",
-        cache_outcome.termination
-    );
     let inside_outcome = run(&executables[0], &[&inside]);
     assert!(
         successful_probe(&inside_outcome),
@@ -1335,11 +1327,6 @@ semop($sem, pack("s!3", 0, 1, 0)) or die "semop: $!\n";
             "cargo bin write",
             executables[0].as_path(),
             vec![cargo.join("bin/cargo")],
-        ),
-        (
-            "ambient sibling cache",
-            executables[0].as_path(),
-            vec![cache.with_file_name("other-lane")],
         ),
     ] {
         let args = args.iter().map(|arg| arg.as_path()).collect::<Vec<_>>();

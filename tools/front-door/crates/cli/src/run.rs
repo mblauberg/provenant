@@ -824,8 +824,15 @@ fn settlement_policy(
             let (state, _) = context.disk_roots();
             provenant_config::policy::for_task(state, &context.project_id.to_string(), task)
         }
-        (None, Some(task)) if task.profile.launch_policy.is_some() => {
-            provenant_config::policy::for_task(Path::new(""), "", task)
+        // Without host roots only the compiled table and the request's sealed
+        // dispatch layer apply; the host and project layers need host context.
+        (None, Some(task)) => {
+            let mut policy = provenant_records::policy::Policy::default();
+            policy.overlay(
+                &provenant_config::policy::dispatch(&task.profile),
+                provenant_records::policy::Source::Dispatch,
+            );
+            policy
         }
         // TODO(#3371 seam): run owner supplies task policy for legacy decode callers.
         _ => provenant_records::policy::Policy::default(),

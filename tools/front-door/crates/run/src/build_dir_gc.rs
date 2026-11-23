@@ -1,8 +1,10 @@
-//! Bounded retention for managed private and shared Cargo target directories.
+//! Bounded retention for managed shared Cargo targets and legacy private lane
+//! caches left before #3802 removed lane builds.
 //!
-//! Targets live in per-worktree lane caches and per-project shared caches. A
-//! target directory is idle when a non-blocking exclusive flock succeeds on all of Cargo's
-//! `.cargo-lock`, `.cargo-build-lock` and `.cargo-artifact-lock`. The cap counts
+//! Targets live in per-project shared caches and, where an older release left
+//! them, per-worktree lane caches. A target directory is idle when a
+//! non-blocking exclusive flock succeeds on all of Cargo's `.cargo-lock`,
+//! `.cargo-build-lock` and `.cargo-artifact-lock`. The cap counts
 //! every managed target directory, idle and busy. Idle targets are removed least
 //! recently used first until the cap and the free-space floor both hold; when
 //! busy directories alone exceed the cap, every eligible idle directory goes and
@@ -15,7 +17,7 @@
 //!
 //! A GC pass also removes, whatever the budget allows, a target nothing wrote
 //! within `gc.cargo_target_idle` (30 days by default) and any tombstone an
-//! interrupted removal left. Launch admission removes by budget and floor
+//! interrupted removal left. A budget-only pass removes by budget and floor
 //! alone. Each removal names its path, owning worktree and reason. The census
 //! stops only at the caller's deadline, a preview included, and resumes from
 //! its saved cursor.
@@ -29,7 +31,7 @@
 //! where targets share blocks. The report names which figure it carries, and
 //! never reports zero when private size is unavailable. Both target roots are
 //! counted, including payload outside a recognised profile, so partial targets
-//! and first builds cannot escape the budget. Explicit GC and launch admission
+//! and first builds cannot escape the budget. Explicit GC and disk-pressure
 //! share the same collector.
 use provenant_confinement::cache::{
     CACHE_ACTIVITY_MARKER, CARGO_TARGET_NAMES, CargoLockProbe, LastUseRecheck, OwnerStatus,
@@ -82,7 +84,7 @@ pub struct Limits {
     pub grace_seconds: u64,
     pub idle_seconds: u64,
     /// Collect a target nothing wrote for this long, whatever the budget
-    /// allows. GC passes `gc.cargo_target_idle`; launch admission passes
+    /// allows. GC passes `gc.cargo_target_idle`; a budget-only pass passes
     /// `None` and removes only what the budget and floor require.
     pub target_idle_seconds: Option<u64>,
 }
@@ -1072,8 +1074,8 @@ pub fn mark_managed_target_use(home: &Path, target: &Path) -> io::Result<bool> {
     Ok(stamped)
 }
 
-/// Stamp every target under a private lane cache as used now: `target` and,
-/// when present, `target-lint`, which shares the cache and its owner.
+/// Stamp every target under a legacy private lane cache. No launch creates one
+/// after #3802; GC fixtures and retirement checks still use this helper.
 pub fn mark_cache_targets_used(home: &Path, cache: &Path) -> io::Result<usize> {
     let mut stamped = 0;
     for target in TARGETS {
@@ -1179,29 +1181,7 @@ pub fn collect_with_protection(
     )
 }
 
-/// Like `collect_with_protection`, but refresh live custody after acquiring
-/// lane admission and immediately before the pruning boundary.
-pub(crate) fn collect_with_protection_refresh(
-    host: &Path,
-    home: &Path,
-    limits: Limits,
-    dry_run: bool,
-    budget: &provenant_config::CargoCacheBudget,
-    protection: &TargetProtection,
-    refresh_protection: &mut dyn FnMut() -> TargetProtection,
-) -> Result<Report, Box<dyn std::error::Error>> {
-    collect_targets(
-        host,
-        home,
-        limits,
-        dry_run,
-        budget,
-        protection,
-        refresh_protection,
-    )
-}
-
-/// The collect workhorse shared by explicit GC and launch admission.
+/// The collect workhorse behind explicit GC and disk-pressure collection.
 fn collect_targets(
     host: &Path,
     home: &Path,
@@ -3162,7 +3142,7 @@ fn advance_prune_cursor(snapshot: Option<&mut SurveySnapshot>, candidate: &Candi
 }
 
 /// Why a GC pass removes this candidate whatever the budget allows, if it does.
-/// Launch admission passes no idle age and removes by budget alone.
+/// A budget-only pass has no idle age and removes by budget alone.
 fn unconditional_reason(
     candidate: &Candidate,
     limits: Limits,
@@ -4651,7 +4631,7 @@ mod tests {
         let home = fixture.home.path();
         let open = TargetProtection::default();
 
-        // Launch admission collects by budget alone: within budget, nothing goes.
+        // A budget-only pass collects by budget alone: within budget, nothing goes.
         let admission = collect_once(
             state.path(),
             home,

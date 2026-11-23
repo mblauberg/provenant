@@ -3171,14 +3171,7 @@ pub(super) fn prepare_candidates_inner(
     let eligible = |name: &str| provider_leases.contains_key(name);
     let settings = config.domains.accounts.unique_accounts();
     let credential_settings = settings.clone();
-    let cargo_cache = writer
-        .as_ref()
-        .map(|writer| {
-            provenant_confinement::permissions::worktree_cargo_cache_path(&home, &writer.worktree)
-        })
-        .transpose()?;
-    let mut lane_roots = vec![source.as_path(), cwd.as_path(), paths.scratch.as_path()];
-    lane_roots.extend(cargo_cache.as_deref());
+    let lane_roots = [source.as_path(), cwd.as_path(), paths.scratch.as_path()];
     let credential_roots = credential_roots(
         registry,
         &home,
@@ -4489,19 +4482,6 @@ pub(super) fn prepare_candidates_inner(
             Some(&source),
             provenant_config::project_key_for(&source).as_deref(),
         );
-        let (cargo_cache_budget, cargo_cache_budget_warning) =
-            match provenant_config::cargo_cache_budget(
-                &task.profile,
-                &run::build_dir_gc::shared_cache_root(&home),
-            ) {
-                Ok(budget) => (Some(budget), None),
-                Err(error) => (
-                    None,
-                    Some(format!(
-                        "Cargo cache budget could not be resolved ({error}); launch continues without eviction"
-                    )),
-                ),
-            };
         let model_id =
             provenant_routing::ModelId::parse(&label).map_err(|error| error.to_string())?;
         let exact_model = resolved_launch_model(&catalogue, &model_id);
@@ -4534,7 +4514,6 @@ pub(super) fn prepare_candidates_inner(
                 prompt_text,
             )),
             build_cap: Some(run::BuildCap::from(&build_class)),
-            cargo_cache_budget: cargo_cache_budget.clone(),
         };
         let text = format!(
             "{}\n{text}",
@@ -4770,16 +4749,10 @@ pub(super) fn prepare_candidates_inner(
             .map(|path| path.to_path_buf())
             .transpose()
             .map_err(|error| error.to_string())?;
-        let common_git_dir = match &plan.permissions().mode {
-            AccessMode::WorktreeWrite(authority) => Some(authority.common_git_dir().to_path_buf()),
-            AccessMode::ReadOnly => common_git_path.clone(),
-        };
-        let private_cache = match &plan.permissions().mode {
-            AccessMode::WorktreeWrite(authority) => &authority.cargo_cache().path,
-            AccessMode::ReadOnly => &plan.permissions().scratch.path,
-        };
-        let cargo_target_dir = private_cache.join("target");
-        let cargo_target_lint = private_cache.join("target-lint");
+        // A read-only lane builds in its disposable scratch. A writer lane
+        // builds nowhere by default, so it gets no target selector at all.
+        let read_only = matches!(plan.permissions().mode, AccessMode::ReadOnly);
+        let cargo_target_dir = plan.permissions().scratch.path.join("target");
         let prepare = |provider_route: &provenant_records::ResolvedRoute| {
             adapter.prepare(PrepareInput {
                 credential_roots: credential_roots.clone(),
@@ -4801,9 +4774,7 @@ pub(super) fn prepare_candidates_inner(
                     } else if key == "PATH" {
                         Some(lane_path.path().to_os_string())
                     } else if key == "CARGO_TARGET_DIR" || key == "CARGO_BUILD_BUILD_DIR" {
-                        Some(cargo_target_dir.as_os_str().to_os_string())
-                    } else if key == provenant_core::consumer_env::LANE_CARGO_LINT_TARGET {
-                        Some(cargo_target_lint.as_os_str().to_os_string())
+                        read_only.then(|| cargo_target_dir.as_os_str().to_os_string())
                     } else {
                         lane_provider_var(registry, key, lane_access.access)
                     }
@@ -5232,11 +5203,9 @@ pub(super) fn prepare_candidates_inner(
         if let Some(warning) = image_input_warning(&route.adapter, &task.access.attachments) {
             push_launch_warning(&mut route, warning);
         }
-        if let Some(warning) = &cargo_cache_budget_warning {
-            push_launch_warning(&mut route, warning.clone());
-        }
-        // A read-only lane builds in its scratch by design; a writer's target
-        // lies in its lane cache or a configured path, never in attempt tmp.
+        // A read-only lane builds in its scratch by design. No writer launch
+        // exports a target; warn if an adapter still points one into attempt tmp,
+        // where nothing preserves or reuses the output.
         if let Some((_, target_val)) = spec
             .env
             .iter()
@@ -5248,7 +5217,7 @@ pub(super) fn prepare_candidates_inner(
                 push_launch_warning(
                     &mut route,
                     format!(
-                        "CARGO_TARGET_DIR is set under the attempt's tmp directory ({}); build output bypasses the lane's warm target",
+                        "CARGO_TARGET_DIR is set under the attempt's tmp directory ({}); writer lanes have no Cargo target and this output is discarded with the attempt",
                         target_path.display()
                     ),
                 );
@@ -5564,18 +5533,6 @@ pub(super) fn prepare_candidates_inner(
             reasons.push(setup_skip(&label, error));
             continue;
         }
-        // Only a writer's launch enforces the cache budget (a read-only lane
-        // returns before reading this snapshot), and the snapshot costs a
-        // registered-project and process census, so a read-only launch skips it.
-        let cargo_target_protection = if writer.is_some() {
-            run::build_dir_gc::target_protection_for_launch(
-                roots,
-                writer.as_ref().map(|writer| writer.worktree.path()),
-                common_git_dir.as_deref(),
-            )
-        } else {
-            Default::default()
-        };
         return Ok(run::PreparedLaunch {
             limits,
             continuation_expectation,
@@ -5595,11 +5552,8 @@ pub(super) fn prepare_candidates_inner(
                 home: home.clone(),
                 cargo_home,
                 state_root: roots.state.as_path().to_path_buf(),
-                roots: Some(roots.clone()),
                 sandbox,
                 backend: None,
-                cargo_cache_budget,
-                cargo_target_protection,
             }),
         });
     }
@@ -6288,8 +6242,7 @@ mod user_skills_tests {
                         serde_json::json!({
                             "git_grants_digest": vec![0; 32], "publishing": false,
                             "common_git_dir": root.join("repo/.git"),
-                            "git_state": {"path": root.join("git-state"), "scope": "subtree"},
-                            "cargo_cache": {"path": root.join("cache"), "scope": "subtree"}
+                            "git_state": {"path": root.join("git-state"), "scope": "subtree"}
                         }),
                     )?));
                 }

@@ -66,7 +66,7 @@ pub struct BudgetWrapUp {
     pub remaining: u64,
 }
 
-/// Effective dispatch policy, sealed with the request and copied to each attempt.
+/// Effective dispatch inputs, sealed with the request and copied to each attempt.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HarnessProfile {
     #[serde(flatten)]
@@ -84,9 +84,6 @@ pub struct HarnessProfile {
     pub knob_sources: std::collections::BTreeMap<String, LimitSource>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget_wrap_up: Option<BudgetWrapUp>,
-    /// Resolved policy strengths for this run, sealed by the dispatch owner.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub launch_policy: Option<crate::policy::Policy>,
     /// Dispatch-level policy overrides after typed validation.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub policy_overrides: std::collections::BTreeMap<String, crate::policy::Strength>,
@@ -2016,7 +2013,6 @@ pub enum WriteSource {
     Scratch,
     PrivateState,
     ReadOnlyException,
-    LaneCache,
     GitState,
 }
 
@@ -3559,7 +3555,6 @@ mod tests {
             admitted_by: Some("parent".into()),
             knob_sources: [("lanes.ci_scope".into(), LimitSource::Launch)].into(),
             budget_wrap_up: Some(BudgetWrapUp { remaining: 17 }),
-            launch_policy: Some(crate::policy::Policy::default()),
             policy_overrides: [("WRITE_SCOPE".into(), crate::policy::Strength::Warn)].into(),
             policy_project: Some(ProjectId::from_bytes([7; 16])),
             repository_policy: Some(LaunchPolicy {
@@ -3584,7 +3579,6 @@ mod tests {
                 serde_json::json!({"lanes.ci_scope":"unowned"}),
             ),
             ("budget_wrap_up", serde_json::json!({"remaining":"17"})),
-            ("launch_policy", serde_json::json!({"rules":"not-a-list"})),
             (
                 "policy_overrides",
                 serde_json::json!({"WRITE_SCOPE":"refuse-me"}),

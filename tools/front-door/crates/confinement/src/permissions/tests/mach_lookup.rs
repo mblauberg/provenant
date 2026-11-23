@@ -73,10 +73,6 @@ fn native_attempt_mach_lookups_preserve_custody_membership()
                             .into(),
                     scope: PathScope::Subtree,
                 },
-                cargo_cache: PathGrant {
-                    path: "/fixture/cache".into(),
-                    scope: PathScope::Subtree,
-                },
             }));
         }
         let grants = GrantSet::build(

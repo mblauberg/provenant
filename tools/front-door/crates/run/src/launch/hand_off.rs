@@ -453,12 +453,11 @@ impl RunStore {
                 )));
             }
             // Git setup has finished; the lane takes the host's Cargo home and
-            // source policy, then reclaims cache targets over budget.
+            // source policy.
             confinement.prepare_cargo_environment(&mut plan.environment);
             if setup_cancel.is_cancelled() || local_or_withdraw!(cancel_requested()) {
                 local_or_withdraw!(Err::<(), _>(local("launch", &CANCELLED_BEFORE_LAUNCH)));
             }
-            confinement.enforce_cargo_cache_budget();
             let writer_attempt = local_or_withdraw!(directory());
             if let Some(writer) = &confinement.writer {
                 local_or_withdraw!(

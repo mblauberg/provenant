@@ -291,7 +291,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "lane_prepare_isolates_nested_writer_state",
             "lane_prepare_isolates_nested_publishing_state",
             "read_only_dispatch_applies_bound_git_and_project_writes",
-            "writer_dispatch_uses_lane_cache_and_narrow_provider_state",
+            "writer_dispatch_creates_no_lane_cache_and_narrow_provider_state",
             "writer_graph_output_preserves_lens_diff_base",
             "writer_dispatch_edits_a_linked_worktree",
             "shared_holders_both_launch_and_removal_refused_while_holder_is_live",
@@ -388,8 +388,8 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 "read_only_dispatch_applies_bound_git_and_project_writes" => {
                     crate::compose_tests::read_only_dispatch_applies_bound_git_and_project_writes()
                 }
-                "writer_dispatch_uses_lane_cache_and_narrow_provider_state" => {
-                    crate::compose_tests::writer_dispatch_uses_lane_cache_and_narrow_provider_state(
+                "writer_dispatch_creates_no_lane_cache_and_narrow_provider_state" => {
+                    crate::compose_tests::writer_dispatch_creates_no_lane_cache_and_narrow_provider_state(
                     )
                 }
                 "writer_graph_output_preserves_lens_diff_base" => {
@@ -1079,7 +1079,6 @@ impl provenant_run::Providers for WriterProvider {
                     )
                     .unwrap(),
                     state_root: self.state.clone(),
-                    roots: None,
                     sandbox: provenant_confinement::run_config::SandboxMode::required(
                         true,
                         true,
@@ -1087,8 +1086,6 @@ impl provenant_run::Providers for WriterProvider {
                         None,
                     ),
                     backend: None,
-                    cargo_cache_budget: None,
-                    cargo_target_protection: Default::default(),
                 }),
                 observed_head: None,
                 repository: None,
@@ -1381,13 +1378,15 @@ pub(super) fn ok(rig: &TestRig, args: &[&str]) -> Result<Value> {
     Ok(value)
 }
 
-fn prepare_lane_cache(rig: &TestRig, path: &Path, branch: &str) -> Result<PathBuf> {
+/// Create the lane cache a release before #3802 left behind. GC tests use it
+/// to prove those directories still retire; no launch creates one now.
+fn prepare_lane_cache(rig: &TestRig, path: &Path, _branch: &str) -> Result<PathBuf> {
     use provenant_confinement::{
-        permissions::{WorktreeWriteAuthority, prepare_writer_directories},
-        repo::{GitRefName, verify_worktree},
+        repo::verify_worktree,
         utility::{UtilityBudget, UtilityRuntime},
     };
     use provenant_os::exec::SystemExecutor;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     let runtime = UtilityRuntime::new(
         fs::canonicalize(provenant_os::git::git_executable().ok_or("Git executable unavailable")?)?,
@@ -1402,31 +1401,22 @@ fn prepare_lane_cache(rig: &TestRig, path: &Path, branch: &str) -> Result<PathBu
         &provenant_core::CancelToken::new(),
     )?;
     let worktree = verify_worktree(&repo, path)?;
-    let branch = GitRefName::new(format!("refs/heads/{branch}"))?;
-    let credentials = provenant_core::CredentialRoots::for_home(&rig.home);
     provenant_confinement::worktrees::acquire_worktree_subject(worktree.repo())?;
-    let authority = WorktreeWriteAuthority::for_worktree(
-        &worktree,
-        &branch,
-        &rig.home,
-        &credentials,
-        &provenant_records::LaneAccessReceipt {
-            access: provenant_records::LaneAccess::Isolated,
-            source: provenant_records::LaneAccessSource::Default,
-            key: "lanes.access".into(),
-            extra: Default::default(),
-        },
+    let cache =
+        provenant_confinement::permissions::worktree_cargo_cache_path(&rig.home, &worktree)?;
+    fs::create_dir_all(&cache)?;
+    fs::set_permissions(&cache, fs::Permissions::from_mode(0o700))?;
+    let metadata = fs::metadata(path)?;
+    let mut marker = b"provenant-lane-cargo-owner-v2\n".to_vec();
+    marker.extend_from_slice(&metadata.dev().to_le_bytes());
+    marker.extend_from_slice(&metadata.ino().to_le_bytes());
+    marker.extend_from_slice(path.as_os_str().as_encoded_bytes());
+    fs::write(cache.join(".provenant-worktree-owner"), marker)?;
+    fs::write(
+        cache.join(provenant_confinement::cache::CACHE_DIRECTORY_TAG),
+        provenant_confinement::cache::CACHE_DIRECTORY_TAG_CONTENT,
     )?;
-    prepare_writer_directories(
-        &worktree,
-        &branch,
-        &authority,
-        &rig.home,
-        &credentials,
-        &isolated_writer_access_receipt(),
-    )?;
-    let cache = authority.cargo_cache().path.clone();
-    fs::write(cache.join("artifact"), b"lane build output")?;
+    fs::write(cache.join("artifact"), b"legacy lane build output")?;
     Ok(cache)
 }
 

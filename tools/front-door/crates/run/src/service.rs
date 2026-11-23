@@ -36,7 +36,6 @@ impl Service<'_> {
                 WriteSource::WriteRoot
                     | WriteSource::ToolWrite
                     | WriteSource::ReadOnlyException
-                    | WriteSource::LaneCache
                     | WriteSource::GitState
             )
         });
@@ -328,12 +327,6 @@ impl<'a> Service<'a> {
             };
             let project_id = self.store.context.project_id;
             request.profile.policy_project = Some(project_id);
-            let policy = crate::launch_policy(
-                self.store.writer_registry(),
-                &project_id.to_string(),
-                &request,
-            );
-            request.profile.launch_policy = Some(policy);
             (request, task.prompt)
         };
         let prepared = PreparedRun {

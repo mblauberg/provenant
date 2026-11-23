@@ -105,7 +105,7 @@ pub struct ContinuationDecodeContext<'a> {
     pub context: Option<&'a HolderContext>,
     /// The retained session that the child must prove it continued.
     pub expectation: Option<&'a ContinuationExpectation>,
-    /// The attempt request containing its sealed launch policy.
+    /// The attempt request whose dispatch overrides refine settlement policy.
     pub task: Option<&'a TaskRequest>,
 }
 
@@ -3124,11 +3124,8 @@ mod policy_reporting_tests {
                 )
                 .unwrap(),
                 state_root: "/fixture/state".into(),
-                roots: None,
                 sandbox: inherited_sandbox,
                 backend: None,
-                cargo_cache_budget: None,
-                cargo_target_protection: Default::default(),
             }),
         };
         prepared.bind_sandbox_backend(&cancel, &Default::default())?;

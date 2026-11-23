@@ -1,6 +1,6 @@
 use crate::{
-    Schema, Step, StepKind, VersionError, check_version, ensure_schema, schema_matches,
-    stored_version, validate_steps,
+    Migration, Schema, Step, StepKind, VersionError, check_format, check_version, ensure_schema,
+    schema_matches, stored_version, validate_steps,
 };
 use rusqlite::Connection;
 
@@ -8,6 +8,7 @@ const BASE: Schema = Schema {
     sql: "CREATE TABLE item (id INTEGER PRIMARY KEY, value TEXT NOT NULL) STRICT; PRAGMA user_version=3;",
     version: 3,
     steps: &[],
+    migrations: &[],
 };
 const NEWER: Schema = Schema {
     steps: &[
@@ -92,6 +93,46 @@ fn same_major_additions_are_bidirectionally_compatible_and_idempotent()
     // Exactness still catches undeclared changes to the base.
     fresh.execute("DROP INDEX item_note", [])?;
     assert!(!schema_matches(&fresh, NEWER)?);
+    Ok(())
+}
+
+const MIGRATED: Schema = Schema {
+    sql: "CREATE TABLE item (id INTEGER PRIMARY KEY, value TEXT NOT NULL) STRICT; PRAGMA user_version=4;",
+    version: 4,
+    steps: &[],
+    migrations: &[Migration {
+        from: 3,
+        to: 4,
+        sql: "UPDATE item SET value = value || '-migrated' WHERE value = 'legacy'",
+    }],
+};
+
+#[test]
+fn a_declared_migration_rewrites_rows_once_and_bumps_the_base()
+-> Result<(), Box<dyn std::error::Error>> {
+    let db = Connection::open_in_memory()?;
+    ensure_schema(&db, BASE)?;
+    db.execute("INSERT INTO item (id, value) VALUES (1, 'legacy')", [])?;
+    // Only a writable open may migrate.
+    assert!(matches!(
+        check_version(&db, MIGRATED),
+        Err(VersionError::MigrationRequired {
+            found: 3,
+            expected: 4
+        })
+    ));
+    check_format(&db, MIGRATED)?;
+    ensure_schema(&db, MIGRATED)?;
+    assert_eq!(stored_version(&db)?, 4);
+    let value: String =
+        db.query_row("SELECT value FROM item WHERE id = 1", [], |row| row.get(0))?;
+    assert_eq!(value, "legacy-migrated");
+    // A second writable open sees the current base and runs nothing again.
+    ensure_schema(&db, MIGRATED)?;
+    let value: String =
+        db.query_row("SELECT value FROM item WHERE id = 1", [], |row| row.get(0))?;
+    assert_eq!(value, "legacy-migrated");
+    check_version(&db, MIGRATED)?;
     Ok(())
 }
 

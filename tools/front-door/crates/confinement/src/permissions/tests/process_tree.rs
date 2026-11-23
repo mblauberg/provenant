@@ -317,10 +317,6 @@ fn lane_process_tree_sample_is_private_under_production_profiles()
                             .into(),
                     scope: PathScope::Subtree,
                 },
-                cargo_cache: PathGrant {
-                    path: root.join("cache"),
-                    scope: PathScope::Subtree,
-                },
             }))
         } else {
             AccessMode::ReadOnly

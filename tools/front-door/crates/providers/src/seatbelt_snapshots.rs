@@ -473,21 +473,6 @@ fn cargo_permissions_follow_the_declared_access_for_each_profile_case()
                 case.name
             );
         }
-        if let provenant_confinement::permissions::AccessMode::WorktreeWrite(authority) =
-            &case.plan.mode
-        {
-            let cache = authority.cargo_cache().path.display();
-            assert!(
-                rendered.contains(&format!("(allow file-read* (subpath \"{cache}\"))")),
-                "{}: private Cargo cache read: {cache}",
-                case.name
-            );
-            assert!(
-                rendered.contains(&format!("(allow file-write* (subpath \"{cache}\"))")),
-                "{}: private Cargo cache write: {cache}",
-                case.name
-            );
-        }
     }
     Ok(())
 }

@@ -354,9 +354,6 @@ pub fn required_anchors(
     if let Some(derived) = &derived {
         grants.extend(derived.iter());
     }
-    if let AccessMode::WorktreeWrite(authority) = &plan.mode {
-        grants.push(&authority.cargo_cache);
-    }
     let mut required = grants
         .into_iter()
         .filter_map(|grant| match grant.scope {
