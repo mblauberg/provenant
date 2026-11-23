@@ -1003,6 +1003,7 @@ impl RefusalKind {
             ResourceFact::MemoryPressure { .. } => ErrorKind::MemoryPressure,
             ResourceFact::Processes { .. } => ErrorKind::Processes,
             ResourceFact::LaneCap { .. } => ErrorKind::LaneCap,
+            ResourceFact::ConfinementRule { .. } => ErrorKind::Confinement,
         };
         Some(
             fact.project(Diagnostic::new(kind.code()).category(kind.category()))

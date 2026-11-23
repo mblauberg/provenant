@@ -134,6 +134,39 @@ fn memory_pressure_launch_refusal_names_source_and_action() {
 }
 
 #[test]
+fn confinement_refusal_carries_rule_and_path_into_the_node_result() {
+    use crate::coordination::facade::FacadeError;
+    use provenant_records::diagnostic::ResourceFact;
+    let error = FacadeError::ConfinementRefused {
+        resource: Some(ResourceFact::ConfinementRule {
+            rule: "peer_project_outside_home".into(),
+            path: "/fixture/scratch/project/.git".into(),
+        }),
+    };
+    let mut owner = ErrorLauncher {
+        now: Some(at(0)),
+        errors: [(1, error)].into(),
+        ..Default::default()
+    };
+    let run = advance(
+        &graph(vec![node("one", route("first"))]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    let node = &run.checkpoint.nodes[0];
+    assert_eq!(node.state, NodeState::Blocked);
+    assert_eq!(
+        node.advance_owner_code.as_deref(),
+        Some("confinement_refused")
+    );
+    let reason = node.advance_error.as_deref().unwrap();
+    assert!(reason.contains("confinement rule"), "{reason}");
+    assert!(reason.contains("peer_project_outside_home"), "{reason}");
+    assert!(reason.contains("/fixture/scratch/project/.git"), "{reason}");
+}
+
+#[test]
 fn process_limit_launch_projection_keeps_io_and_resource_reason() {
     let error = crate::coordination::facade::FacadeError::Io {
         operation: "TOKEN_SENTINEL".into(),

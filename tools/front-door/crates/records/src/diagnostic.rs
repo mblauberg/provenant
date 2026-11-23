@@ -433,6 +433,12 @@ pub enum ResourceFact {
         limit: u64,
         reserved: u64,
     },
+    /// A confinement boundary that named the rule and path it refused. The
+    /// rule is a stable identifier; the path is display-sanitised by `project`.
+    ConfinementRule {
+        rule: String,
+        path: String,
+    },
 }
 
 impl ResourceFact {
@@ -482,6 +488,13 @@ impl ResourceFact {
             Self::Processes { used, limit, reserved } => diagnostic
                 .detail(format!("host user process count is {used} of the operating system RLIMIT_NPROC soft limit {limit}; shipped reserved headroom is {reserved}"))
                 .next("reduce host process use or raise the per-user process limit before retrying"),
+            Self::ConfinementRule { rule, path } => diagnostic
+                .detail(format!(
+                    "confinement rule {} refused {}",
+                    safe_text(rule),
+                    safe_text(path)
+                ))
+                .next("inspect the named confinement rule and path before retrying"),
         }
     }
 }

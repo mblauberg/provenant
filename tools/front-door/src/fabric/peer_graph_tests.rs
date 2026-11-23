@@ -335,6 +335,63 @@ fn graph_output_claim_requires_the_retained_launch_and_origin() -> TestResult {
 }
 
 #[test]
+fn peer_placed_reader_binds_its_own_source_like_a_local_reader() -> TestResult {
+    if host_test(
+        "fabric::peer_tests::peer_graph_tests::peer_placed_reader_binds_its_own_source_like_a_local_reader",
+    )? {
+        return Ok(());
+    }
+    let (rig, factory) = receiver()?;
+    let cancel = CancelToken::new();
+    let head = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+    let input = serde_json::from_value(json!({
+        "op":"submit", "operation_id":"peer-reader-confinement",
+        "origin_work_key":origin_key(),
+        "task":{"prompt":"read the fixture", "access":"read_only", "head":head,
+            "route":{"kind":"model","provider":"fixture","model":"fixture/model"},
+            "timeout_seconds":30,
+            "context":{"graph_id":"origin-graph", "node_id":"parent", "attempt":1, "graph_template_launch":true}}
+    }))?;
+    let receipt = provenant_cli::run::with_deferred_provider_launch(|| {
+        super::super::peer::peer_submit_graph(
+            &factory,
+            input,
+            factory.context.identity.inbox.actor,
+            Default::default(),
+            None,
+            None,
+            WaitBudget::cli(factory.clock.mono_now(), 30).unwrap(),
+            &cancel,
+        )
+    })?;
+    let attempt = receipt.targets[0].attempt;
+    let owner = BinaryRunOwner {
+        factory: &factory,
+        allow_remote: false,
+        actor: None,
+        chair: None,
+    };
+    let store = owner.store(&cancel)?;
+    let call = owner.call(&cancel);
+    let record = store.record(attempt, &call)?;
+    let request = store.request(record.attempt_id, &call)?;
+    let access = &request.task.access;
+    // The receiver binds its own project checkout for a pinned reader, exactly
+    // as a local read-only graph node does. No sender-local path or grant is
+    // admitted on this boundary.
+    assert_eq!(
+        access.source_root.as_deref(),
+        Some(factory.context.selected_project()),
+        "peer bound the wrong source checkout: {access:?}"
+    );
+    assert!(access.source_identity.is_some(), "{access:?}");
+    assert!(!access.source_live, "{access:?}");
+    assert!(access.read_roots.is_empty(), "{access:?}");
+    assert!(access.write_roots.is_empty(), "{access:?}");
+    Ok(())
+}
+
+#[test]
 fn peer_hosted_lane_launches_a_local_child_and_collects_its_result() -> TestResult {
     if host_test(
         "fabric::peer_tests::peer_graph_tests::peer_hosted_lane_launches_a_local_child_and_collects_its_result",

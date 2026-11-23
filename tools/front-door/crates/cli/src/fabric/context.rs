@@ -948,8 +948,31 @@ impl Context {
             .ok_or_else(|| {
                 PeerFailure::new(FacadeError::HomeUnavailable, "peer host is not configured")
             })?;
-        let project = ProjectLocator::new(&self.identity, &self.home)
-            .map_err(|_| PeerFailure::from(FacadeError::ConfinementRefused { resource: None }))?;
+        let project = ProjectLocator::new(&self.identity, &self.home).map_err(|error| {
+            // A peer call needs a home-relative project identity. A scratch
+            // project (for example the upgrade verify fixture) has none; name
+            // the rule and the path that could not be projected instead of
+            // collapsing every locator failure into a bare confinement refusal.
+            let rule = if matches!(error, PeerError::Project) {
+                "peer_project_outside_home"
+            } else {
+                "peer_project_locator"
+            };
+            let path = self
+                .identity
+                .common_dir
+                .to_path_buf()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|_| "unavailable".to_owned());
+            PeerFailure::from(FacadeError::ConfinementRefused {
+                resource: Some(
+                    provenant_records::diagnostic::ResourceFact::ConfinementRule {
+                        rule: rule.to_owned(),
+                        path,
+                    },
+                ),
+            })
+        })?;
         // Graph operation replay is scoped to the actor that first launched
         // the attempt, even when another agent later resumes its graph.
         // Keep that namespace under the authenticated sending host rather

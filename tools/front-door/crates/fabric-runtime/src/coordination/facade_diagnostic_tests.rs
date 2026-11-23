@@ -491,6 +491,30 @@ fn memory_pressure_refusal_preserves_typed_source_over_transport() {
 }
 
 #[test]
+fn confinement_rule_refusal_preserves_rule_and_path_over_transport() {
+    use provenant_records::diagnostic::{ConfinementRule, ResourceFact};
+    let error = FacadeError::ConfinementRefused {
+        resource: Some(ResourceFact::ConfinementRule(Box::new(ConfinementRule {
+            rule: "peer_project_outside_home".into(),
+            path: "/fixture/scratch/project/.git".into(),
+        }))),
+    };
+    let received: FacadeError =
+        serde_json::from_value(serde_json::to_value(error).unwrap()).unwrap();
+    let diagnostic = received.diagnostic();
+    assert_eq!(diagnostic.code, "confinement_refused");
+    let detail = diagnostic.detail.unwrap();
+    assert!(detail.contains("peer_project_outside_home"), "{detail}");
+    assert!(detail.contains("/fixture/scratch/project/.git"), "{detail}");
+    assert!(
+        diagnostic
+            .next
+            .unwrap()
+            .contains("named confinement rule and path")
+    );
+}
+
+#[test]
 fn a_named_field_refusal_discloses_the_field_it_names() {
     for field in [
         "action",
