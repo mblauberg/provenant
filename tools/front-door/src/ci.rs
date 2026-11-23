@@ -264,26 +264,35 @@ fn resolve_pr_rest(
         head: String,
         url: String,
     }
-    let resolved = match successful(forge_execute(
-        state,
-        project,
-        &[
-            "gh",
-            "pr",
-            "view",
-            &number.to_string(),
-            "--json",
-            "headRefOid,url",
-        ],
-        request,
-        false,
-        None,
-    )?) {
-        Ok(bytes) => match serde_json::from_slice::<View>(&bytes) {
-            Ok(view) => Ok(view),
+    // The head and repository come from the one observer, never a direct gh
+    // read: it selects the forge port and honours the shared rate-limit hold-off.
+    let resolved: Result<(String, View), String> =
+        match Observer::repository_for_project(state, project, request) {
+            Ok(repository) => match Observer::open(state, project, &repository, request).and_then(
+                |mut observer| {
+                    observer.resource(
+                        &format!("pulls/{number}"),
+                        std::time::Duration::ZERO,
+                        request,
+                    )
+                },
+            ) {
+                Ok(resource) => serde_json::from_value::<View>(serde_json::json!({
+                    "headRefOid": resource["head"]["sha"],
+                    "url": resource["html_url"],
+                }))
+                .map(|view| (repository, view))
+                .map_err(|error| error.to_string()),
+                Err(ObserveError::RateLimited { reset }) => {
+                    Err(format!("GitHub rate limit; reset {reset}"))
+                }
+                Err(error) => Err(error.to_string()),
+            },
             Err(error) => Err(error.to_string()),
-        },
-        Err(error) if try_graphql && rate_limited(error.as_ref()) => {
+        };
+    let (repository, view) = match resolved {
+        Ok(value) => value,
+        Err(error) if try_graphql && rate_limited(&error) => {
             match batch::single(state, project, number) {
                 batch::Batch::Entries(entries) if !entries.is_empty() && !entries[0].truncated => {
                     return Ok((
@@ -292,15 +301,14 @@ fn resolve_pr_rest(
                         entries[0].checks.clone(),
                     ));
                 }
-                _ => Err(format!(
+                _ => return Err(format!(
                     "pull request {number} is rate limited and the batched read could not answer"
-                )),
+                )
+                .into()),
             }
         }
-        Err(error) => Err(error.to_string()),
+        Err(error) => return Err(error.into()),
     };
-    let view = resolved.map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
-    let repository = repository_of(&view.url).ok_or("pull request URL names no repository")?;
     let checks = match Observer::open(state, project, &repository, request)
         .and_then(|mut observer| observer.checks(&view.head, std::time::Duration::ZERO, request))
     {
@@ -332,11 +340,8 @@ fn resolve_pr_rest(
 
 /// A rate-limited read names the limit in its message, whatever transport
 /// produced it.
-fn rate_limited(error: &dyn std::error::Error) -> bool {
-    error
-        .to_string()
-        .to_ascii_lowercase()
-        .contains("rate limit")
+fn rate_limited(error: &str) -> bool {
+    error.to_ascii_lowercase().contains("rate limit")
 }
 
 /// The base repository a pull request URL names, whose CI the checks ran on.
@@ -1149,7 +1154,7 @@ fn cached_text(
     fetch: impl FnOnce() -> Result<String, String>,
 ) -> Result<String, String> {
     let ttl = crate::pr::observer::fast_interval(state, project)
-        .unwrap_or(std::time::Duration::from_secs(5));
+        .unwrap_or_else(|| crate::pr::observer::POLL);
     let now = clock();
     #[derive(Serialize, Deserialize)]
     struct Cached {

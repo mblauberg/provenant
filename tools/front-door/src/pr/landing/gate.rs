@@ -1,5 +1,6 @@
 //! Gate evidence: validation, command execution and pull-request CI waiting.
 use super::{LandingError, model::*, ports::Forge};
+use crate::pr::observer::{self, AwaitOutcome, Observation};
 use crate::pr::status::{CiCheck, CiCompletion, Required, ci_completion};
 use provenant_cli::domains::{GateKind, PrCiMode, PrCiSettings};
 use std::time::{Duration, Instant};
@@ -573,54 +574,53 @@ pub fn await_pr_ci(
     )
 }
 
-#[allow(
-    clippy::disallowed_methods,
-    reason = "CI probe output writes to stderr at the gate boundary"
-)]
 fn await_pr_ci_with(
     forge: &mut dyn Forge,
     prs: &[EligiblePr],
     policy: &PrCiSettings,
     required_names: &[String],
     (poll_seconds, patience_seconds): (u64, u64),
-    sleep: &dyn Fn(Duration),
+    pause: &dyn Fn(Duration),
     progress: &dyn Fn(u64) -> ProgressReporter,
 ) -> Result<(), LandingError> {
     let poll = Duration::from_secs(poll_seconds);
     let patience = Duration::from_secs(patience_seconds);
-    let mut waited = Duration::ZERO;
     for pr in prs {
         if policy.mode == PrCiMode::None {
             break;
         }
         let _progress = progress(pr.number);
-        loop {
-            match ci_outstanding(forge, pr, policy, required_names) {
-                Ok(false) => break,
-                Ok(true) => {}
-                Err(LandingError::RateLimited(message)) => {
-                    provenant_records::warning::warn(
-                        provenant_records::warning::Warning::new(
-                            provenant_records::warning::GH_RATE_LIMITED,
-                            format!("pull request #{} CI read skipped: {message}", pr.number),
-                        )
-                        .subject(format!("#{}", pr.number))
-                        .once_per_change(),
-                    );
+        // The observer owns the cadence and the bound; this gate only decides
+        // when a PR's required CI is outstanding and how a timeout is reported.
+        let outcome = observer::await_ci(
+            || {
+                let interval = forge.observation_interval().unwrap_or(poll);
+                match ci_outstanding(forge, pr, policy, required_names) {
+                    Ok(true) => Ok(Observation::Pending(interval)),
+                    Ok(false) => Ok(Observation::Settled),
+                    Err(LandingError::RateLimited(message)) => {
+                        provenant_records::warning::warn(
+                            provenant_records::warning::Warning::new(
+                                provenant_records::warning::GH_RATE_LIMITED,
+                                format!("pull request #{} CI read skipped: {message}", pr.number),
+                            )
+                            .subject(format!("#{}", pr.number))
+                            .once_per_change(),
+                        );
+                        Ok(Observation::Skipped(interval))
+                    }
+                    Err(error) => Err(error),
                 }
-                Err(error) => return Err(error),
-            }
-            let remaining = patience.saturating_sub(waited);
-            if remaining.is_zero() {
-                return Err(LandingError::Pending(format!(
-                    "warning: pull request #{} CI is still running after {}s; resubmit to resume",
-                    pr.number,
-                    waited.as_secs()
-                )));
-            }
-            let pause = forge.observation_interval().unwrap_or(poll).min(remaining);
-            sleep(pause);
-            waited += pause;
+            },
+            patience,
+            pause,
+        )?;
+        if let AwaitOutcome::TimedOut(waited) = outcome {
+            return Err(LandingError::Pending(format!(
+                "warning: pull request #{} CI is still running after {}s; resubmit to resume",
+                pr.number,
+                waited.as_secs()
+            )));
         }
     }
     Ok(())
