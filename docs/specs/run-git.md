@@ -46,7 +46,8 @@ policy, each with the layer and key that produced the value.
   policy resolved by the owner was replaced by a compiled default at the forge port.
 
 The remote is the declared `git.remote`, else the current branch's upstream remote, else the sole
-remote. A refusal lists the remotes seen with close matches, never an assumed `origin`. The default
+configured remote; a tracking-ref directory under `refs/remotes` is not a remote unless no remote is
+configured at all, as in a bare store fed by explicit fetches. A refusal lists the remotes seen with close matches, never an assumed `origin`. The default
 branch is the declared `git.default_branch`, else `refs/remotes/<remote>/HEAD`, else the forge API;
 protected branches are declared, else the default branch plus forge-reported protection.
 - Why: a hidden guess can retire the wrong branch or push to the wrong repository.
