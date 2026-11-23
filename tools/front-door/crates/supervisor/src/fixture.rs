@@ -254,6 +254,8 @@ impl Drop for ChildGuard {
 }
 
 /// Minimal libtest command protocol for `harness = false` executables.
+// This fixture process's stdout is the wire protocol its test parent reads.
+#[allow(clippy::disallowed_methods)]
 pub fn run_libtest(
     args: &[OsString],
     test_names: &[&str],

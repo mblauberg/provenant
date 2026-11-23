@@ -262,20 +262,30 @@ impl Store {
 }
 
 pub(crate) fn invalid_answer(id: &str) {
-    use std::io::Write;
+    use provenant_records::warning::{ANSWER_DELIVERY_SKIPPED, Warning, warn};
     // IDs are opaque stored input; escape controls and bound the diagnostic.
     let id: String = id.chars().take(64).flat_map(char::escape_default).collect();
-    let _ = writeln!(
-        std::io::stderr().lock(),
-        "answer delivery: skipping invalid answer {id}"
+    warn(
+        Warning::new(
+            ANSWER_DELIVERY_SKIPPED,
+            format!("answer delivery: skipping invalid answer {id}"),
+        )
+        .subject(format!("answer {id}"))
+        .repair("Correct or remove the invalid answer from the Fabric outbox."),
     );
 }
 
 fn oversized_answer(id: &str) {
-    use std::io::Write;
+    use provenant_records::warning::{ANSWER_DELIVERY_RETAINED, Warning, warn};
     let id: String = id.chars().take(64).flat_map(char::escape_default).collect();
-    let _ = writeln!(
-        std::io::stderr().lock(),
-        "answer delivery: answer {id} exceeds internal page limit; retained for Fabric mail"
+    warn(
+        Warning::new(
+            ANSWER_DELIVERY_RETAINED,
+            format!(
+                "answer delivery: answer {id} exceeds internal page limit; retained for Fabric mail"
+            ),
+        )
+        .subject(format!("answer {id}"))
+        .repair("Shorten the answer or route it through Fabric mail so it fits an internal page."),
     );
 }
