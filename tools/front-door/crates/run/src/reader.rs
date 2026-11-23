@@ -889,7 +889,33 @@ impl RunStore {
             }
         {
             let delivery: WriterDeliveryReceipt = crate::db::decode(&raw)?;
-            if delivery.head.is_some() && delivery.head == record.head {
+            // Only an integrate receipt may name a head other than the sealed
+            // writer head: integration publishes the lane to its destination and
+            // the receipt can carry the integrated tip. That exception holds only
+            // for the planned destination, so a stray receipt for another branch
+            // or remote never settles this attempt. Push and pr receipts keep
+            // head equality, so a receipt delivered for H1 cannot settle a sealed
+            // H2 that was never delivered.
+            let planned = self
+                .request_observed(id, call)
+                .ok()
+                .and_then(|request| request.task.deliver);
+            // With no sealed or planned destination there is nothing to bind;
+            // only head equality can then admit the receipt.
+            let same_destination = record.delivery.is_none() && planned.is_none()
+                || record.delivery.as_ref().is_some_and(|sealed| {
+                    sealed.branch == delivery.branch && sealed.remote == delivery.remote
+                })
+                || planned.as_ref().is_some_and(|deliver| {
+                    deliver.branch == delivery.branch && deliver.remote == delivery.remote
+                });
+            let integrate = planned
+                .as_ref()
+                .is_some_and(|deliver| matches!(deliver.mode, DeliveryMode::Integrate(_)));
+            if delivery.head.is_some()
+                && same_destination
+                && (delivery.head == record.head || integrate)
+            {
                 record.delivery = Some(delivery);
             }
         }
@@ -1378,9 +1404,17 @@ pub(crate) fn validate_attempt(r: &AttemptRecord) -> Result<()> {
     if r.context.as_ref().is_some_and(|context| !context.valid()) {
         return Err(RunError::Validation("work context"));
     }
-    if let Some(delivery) = &r.delivery
-        && (delivery.schema_version != 1
-            || delivery.head != r.head
+    if let Some(delivery) = &r.delivery {
+        // An integrate receipt names the tip it published to the destination
+        // ref, which can differ from the sealed writer head while the deferred
+        // Git import settles. The read projection that presents such a receipt
+        // is gated on the requested `DeliveryMode::Integrate` (see record_row),
+        // so a push or pr receipt with a mismatched head is never admitted.
+        let head_agrees = delivery.head == r.head
+            || (delivery.integration.is_some()
+                && matches!(delivery.state, WriterDeliveryState::Delivered { .. }));
+        if delivery.schema_version != 1
+            || !head_agrees
             || !matches!(
                 r.state,
                 AttemptState::Terminal {
@@ -1389,9 +1423,10 @@ pub(crate) fn validate_attempt(r: &AttemptRecord) -> Result<()> {
                 }
             )
             || matches!(delivery.state, WriterDeliveryState::Delivered { .. })
-                && delivery.head.is_none())
-    {
-        return Err(RunError::Validation("delivery receipt"));
+                && delivery.head.is_none()
+        {
+            return Err(RunError::Validation("delivery receipt"));
+        }
     }
     if !valid_read_only_writable(&r.read_only_writable) {
         return Err(RunError::Validation("invalid read-only writable paths"));
