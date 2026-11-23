@@ -27,6 +27,11 @@ pub struct Journal {
     pub attempts: u32,
     pub head: Option<GitOid>,
     pub base: Option<GitOid>,
+    /// The OID publication planned for the branch before its compare-and-swap.
+    /// Recorded durably before the ref moves, so a resumed settlement can tell
+    /// the merge this attempt produced from a tip another writer moved to.
+    #[serde(default)]
+    pub publication_tip: Option<GitOid>,
     pub owner: Option<ProcessIdentity>,
     #[serde(default)]
     pub owner_since_ms: u64,
@@ -85,6 +90,7 @@ impl Journal {
             attempts: 0,
             head: None,
             base: None,
+            publication_tip: None,
             owner: None,
             owner_since_ms: 0,
             retry_after_ms: 0,

@@ -8326,6 +8326,7 @@ mod writer_recovery_tests {
                                 &run.request.task.profile,
                             ),
                         },
+                        |_| Ok(()),
                     )
                     .is_err()
                 );

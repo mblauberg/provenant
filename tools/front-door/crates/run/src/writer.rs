@@ -4040,6 +4040,7 @@ impl WriterLaunch {
                 &crate::artifacts::read_sealed(attempt, "request.json", crate::RECORD_LIMIT)?
                     .ok_or(RunError::NotFound)?,
             )?;
+            let recorded_tip = settlement.publication_tip();
             let published = crate::objects::publish_branch(
                 &git_executable,
                 self.worktree.repo(),
@@ -4051,11 +4052,17 @@ impl WriterLaunch {
                     attempt: custody.scope().attempt,
                     history,
                 },
+                |tip| settlement.set_publication_tip(tip),
             )?;
             let ancestor = &published.ancestor;
             if let Some(warning) = ancestor.warning(self.branch.as_str(), base, published.tip) {
-                // Best effort: the ancestor is also in the branch reflog.
-                let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+                // Publication already wrote the unrooted warning to stderr with
+                // the setting that decided it. Only a known ancestor's warning
+                // is raised here; both are recorded with the same text so the
+                // record agrees with what the operator was told.
+                if !matches!(ancestor, crate::objects::Ancestor::Unrooted) {
+                    let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+                }
                 let _ = attempt
                     .atomic_write(
                         OsStr::new("publication-ancestor.json"),
@@ -4078,7 +4085,7 @@ impl WriterLaunch {
             // else advanced; this worktree must not move to it.
             let at_published_tip = match &source {
                 Some(source) => {
-                    published.ends_at_head(&git_executable, self.worktree.repo(), verified_tip)?
+                    published.ends_at_head(verified_tip, recorded_tip)
                         && crate::objects::private_tip(source, self.branch.as_str())?
                             == verified_tip
                         && crate::objects::resolve_ref(

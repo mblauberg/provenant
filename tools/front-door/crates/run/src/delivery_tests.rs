@@ -14,6 +14,9 @@ struct TerminalFixtureOptions {
     // Publish a host merge, then crash before the worktree advance so the
     // resumed settlement must recognise its own merge.
     merge_after_publish: bool,
+    // Crash after a fast-forward, then move the branch to a foreign two-parent
+    // merge of the verified head. `Some(true)` puts the head first.
+    foreign_merge_after_publish: Option<bool>,
 }
 
 pub(super) struct PrepareFixture {
@@ -349,6 +352,22 @@ impl PrepareFixture {
             },
         )
     }
+    fn terminal_via_foreign_merge_resume(
+        &self,
+        head_first: bool,
+        write: impl FnOnce() -> std::result::Result<(), Box<dyn std::error::Error>>,
+    ) -> std::result::Result<bool, Box<dyn std::error::Error>> {
+        self.terminal_via_with(
+            "origin",
+            None,
+            TerminalFixtureOptions {
+                resume_after_publish: true,
+                foreign_merge_after_publish: Some(head_first),
+                ..TerminalFixtureOptions::default()
+            },
+            write,
+        )
+    }
     fn terminal_via_inner(
         &self,
         remote: &str,
@@ -366,6 +385,7 @@ impl PrepareFixture {
                 advance_after_publish,
                 budget_stop,
                 merge_after_publish: false,
+                foreign_merge_after_publish: None,
             },
             || {
                 write()?;
@@ -385,6 +405,7 @@ impl PrepareFixture {
             advance_after_publish,
             budget_stop,
             merge_after_publish,
+            foreign_merge_after_publish,
         } = options;
         use provenant_confinement::{GitRead, UtilityBudget, UtilityRuntime};
         use provenant_core::{CancelToken, Clock, WaitBudget};
@@ -515,24 +536,24 @@ impl PrepareFixture {
                 tip,
             )?;
             settlement.advance(crate::settlement::Phase::Publish)?;
+            let capture =
+                |args: &[&str]| -> std::result::Result<String, Box<dyn std::error::Error>> {
+                    let outcome = provenant_os::fixture::git_command_at(&git_executable)
+                        .env_clear()
+                        .envs(self.environment.iter().map(|(key, value)| (key, value)))
+                        .current_dir(&self.writer.project)
+                        .args(args)
+                        .output()?;
+                    assert!(
+                        outcome.status.success(),
+                        "{}",
+                        String::from_utf8_lossy(&outcome.stderr)
+                    );
+                    Ok(String::from_utf8(outcome.stdout)?.trim().to_owned())
+                };
             if merge_after_publish {
                 // Move the shared lane branch onto a competing commit off the
                 // launch base so this publication merges it into the lane head.
-                let capture =
-                    |args: &[&str]| -> std::result::Result<String, Box<dyn std::error::Error>> {
-                        let outcome = provenant_os::fixture::git_command_at(&git_executable)
-                            .env_clear()
-                            .envs(self.environment.iter().map(|(key, value)| (key, value)))
-                            .current_dir(&self.writer.project)
-                            .args(args)
-                            .output()?;
-                        assert!(
-                            outcome.status.success(),
-                            "{}",
-                            String::from_utf8_lossy(&outcome.stderr)
-                        );
-                        Ok(String::from_utf8(outcome.stdout)?.trim().to_owned())
-                    };
                 let tree = capture(&["rev-parse", &format!("{base}^{{tree}}")])?;
                 let divergent = capture(&[
                     "commit-tree",
@@ -543,6 +564,39 @@ impl PrepareFixture {
                     "host diverged",
                 ])?;
                 self.git(&["update-ref", launch.branch.as_str(), &divergent])?;
+            }
+            if let Some(head_first) = foreign_merge_after_publish {
+                // A manual merge someone else made from the verified head: the
+                // old parent-shape gate could not tell it from the lane's own.
+                // Its tree predates the head's worktree file, so a wrongly
+                // accepted tip would remove that file on resume.
+                let tree = capture(&["rev-parse", &format!("{base}^{{tree}}")])?;
+                let other = capture(&[
+                    "commit-tree",
+                    &tree,
+                    "-p",
+                    &base.to_string(),
+                    "-m",
+                    "sibling history",
+                ])?;
+                let parents = if head_first {
+                    [tip.to_string(), other]
+                } else {
+                    [other, tip.to_string()]
+                };
+                let foreign = capture(&[
+                    "commit-tree",
+                    &tree,
+                    "-p",
+                    &parents[0],
+                    "-p",
+                    &parents[1],
+                    "-m",
+                    "foreign merge of the verified head",
+                ])?;
+                self.git(&["update-ref", launch.branch.as_str(), &foreign])?;
+            }
+            if merge_after_publish || foreign_merge_after_publish.is_some() {
                 // A crash before the phase checkpoint leaves the attempt's
                 // extra pins behind, just as a real interrupted settlement would.
                 let extra_pin = format!("refs/provenant/import-extra/{}/extra", scope.attempt);
@@ -559,6 +613,9 @@ impl PrepareFixture {
                     attempt: scope.attempt,
                     history: provenant_config::LaneHistory::default(),
                 },
+                // Record the planned tip before the branch CAS, as the writer
+                // does, so the crash leaves a durable witness of this merge.
+                |tip| settlement.set_publication_tip(tip),
             )?;
             if advance_after_publish {
                 std::fs::write(self.writer.worktree.join("AGENTS.md"), "later writer\n")?;
