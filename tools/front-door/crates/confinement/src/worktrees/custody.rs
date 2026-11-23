@@ -215,10 +215,15 @@ pub struct HostCheckoutOperation {
 /// on a ref settlement moves (the lane branch or the delivery destination) can
 /// therefore conflict and refuse before import. Every other host operation is
 /// retained and reported for a warning. When the lane's own worktree *is* the
-/// primary checkout, settlement writes that checkout, so any unfinished
-/// operation there blocks.
+/// primary checkout, the checked directory is the lane's own Git: an
+/// unfinished operation there is the lane's committed work, so settlement
+/// warns and publishes the committed tip with the state intact. Only an
+/// operation on a moved ref other than the lane's own branch (the delivery
+/// destination) refuses, because publication would move it underneath the
+/// operation.
 pub fn check_host_checkout_terminal(
     repo: &VerifiedRepo,
+    lane_branch: &str,
     moved_refs: &[&str],
 ) -> Result<Option<HostCheckoutOperation>, WorktreeError> {
     if repo.is_bare() {
@@ -234,7 +239,7 @@ pub fn check_host_checkout_terminal(
         return Ok(None);
     };
     let reference = operation_ref(directory, marker);
-    let blocks = host_operation_blocks(primary, reference.as_deref(), moved_refs);
+    let blocks = host_operation_blocks(primary, reference.as_deref(), lane_branch, moved_refs);
     Ok(Some(HostCheckoutOperation {
         marker,
         reference,
@@ -244,24 +249,48 @@ pub fn check_host_checkout_terminal(
 
 /// The decision made by [`check_host_checkout_terminal`] from the facts it
 /// observed. Kept pure so every branch can be pinned without building a repo.
-fn host_operation_blocks(primary: bool, reference: Option<&str>, moved_refs: &[&str]) -> bool {
-    primary || reference.is_some_and(|reference| moved_refs.contains(&reference))
+///
+/// A linked lane's host checkout never holds the lane's own rebase, so any
+/// operation there on a moved ref refuses. When the lane's worktree is the
+/// primary checkout the checked directory is the lane's own Git: the owner
+/// rule warns and proceeds with the committed tip, including for the lane's
+/// own rebase or merge of its branch. An operation on a moved ref other than
+/// that branch (the delivery destination) is the sole refusal there.
+fn host_operation_blocks(
+    primary: bool,
+    reference: Option<&str>,
+    lane_branch: &str,
+    moved_refs: &[&str],
+) -> bool {
+    let on_moved_ref = reference.is_some_and(|reference| moved_refs.contains(&reference));
+    if primary {
+        return on_moved_ref && reference != Some(lane_branch);
+    }
+    on_moved_ref
 }
 
 #[cfg(test)]
 mod host_checkout_tests {
     use super::*;
 
+    const MOVED: &[&str] = &["refs/heads/lane", "refs/heads/published/lane"];
+
     #[test]
     fn unrelated_host_operation_does_not_block_a_linked_lane() {
         assert!(!host_operation_blocks(
             false,
             Some("refs/heads/side"),
-            &["refs/heads/lane", "refs/heads/published/lane"]
+            "refs/heads/lane",
+            MOVED
         ));
         // An unknown ref (detached HEAD, unreadable head-name) is not a moved
         // ref, so it cannot refuse settlement on its own.
-        assert!(!host_operation_blocks(false, None, &["refs/heads/lane"]));
+        assert!(!host_operation_blocks(
+            false,
+            None,
+            "refs/heads/lane",
+            MOVED
+        ));
     }
 
     #[test]
@@ -269,23 +298,47 @@ mod host_checkout_tests {
         assert!(host_operation_blocks(
             false,
             Some("refs/heads/lane"),
-            &["refs/heads/lane", "refs/heads/published/lane"]
+            "refs/heads/lane",
+            MOVED
         ));
         assert!(host_operation_blocks(
             false,
             Some("refs/heads/published/lane"),
-            &["refs/heads/lane", "refs/heads/published/lane"]
+            "refs/heads/lane",
+            MOVED
         ));
     }
 
     #[test]
-    fn primary_checkout_operation_blocks_even_on_an_unrelated_ref() {
-        assert!(host_operation_blocks(
+    fn primary_checkout_keeps_the_lanes_own_operation_without_refusing() {
+        // The lane's worktree is the primary checkout, so this is its own Git:
+        // a stopped rebase or merge of its branch warns and proceeds with the
+        // committed tip rather than refusing and hiding lane_git_operation_warning.
+        assert!(!host_operation_blocks(
+            true,
+            Some("refs/heads/lane"),
+            "refs/heads/lane",
+            MOVED
+        ));
+        assert!(!host_operation_blocks(
             true,
             Some("refs/heads/side"),
-            &["refs/heads/lane"]
+            "refs/heads/lane",
+            MOVED
         ));
-        assert!(host_operation_blocks(true, None, &["refs/heads/lane"]));
+        assert!(!host_operation_blocks(true, None, "refs/heads/lane", MOVED));
+    }
+
+    #[test]
+    fn primary_checkout_operation_on_the_delivery_destination_blocks() {
+        // The one ref settlement moves that is not the lane's own in-progress
+        // operation: publication would move it underneath that operation.
+        assert!(host_operation_blocks(
+            true,
+            Some("refs/heads/published/lane"),
+            "refs/heads/lane",
+            MOVED
+        ));
     }
 }
 
