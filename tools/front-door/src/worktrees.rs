@@ -4383,6 +4383,7 @@ mod human_tests {
             occupancy: worktrees::Occupancy::Observed { process: None },
             owner: Err("worktree registration was not observed".into()),
             primary: false,
+            reused: false,
         })
     }
 
@@ -4866,6 +4867,7 @@ mod gc_preview_tests {
             occupancy: worktrees::Occupancy::Available,
             owner: Ok(None),
             primary: false,
+            reused: false,
         };
         let mut report = worktrees::WorktreeGcReport::default();
         report.worktrees.pruned_refs.push("topic".into());

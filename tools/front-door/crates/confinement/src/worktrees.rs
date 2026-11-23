@@ -841,6 +841,8 @@ pub struct WorktreeInfo {
     /// The existing owner record, or the evidence that it could not be read.
     pub owner: Result<Option<WorktreeOwner>, String>,
     pub primary: bool,
+    /// Creation adopted an existing checkout for the branch instead of adding one.
+    pub reused: bool,
 }
 
 impl WorktreeInfo {
@@ -867,7 +869,10 @@ impl Serialize for WorktreeInfo {
         S: Serializer,
     {
         let path = StructuredPathWire::from_path(&self.path).map_err(serde::ser::Error::custom)?;
-        let fields = 6 + usize::from(self.is_unowned()) + usize::from(!self.warnings.is_empty());
+        let fields = 6
+            + usize::from(self.is_unowned())
+            + usize::from(!self.warnings.is_empty())
+            + usize::from(self.reused);
         let mut state = serializer.serialize_struct("WorktreeInfo", fields)?;
         if !self.warnings.is_empty() {
             state.serialize_field("warnings", &self.warnings)?;
@@ -878,6 +883,9 @@ impl Serialize for WorktreeInfo {
         state.serialize_field("dirty", &self.dirty)?;
         state.serialize_field("writer", self.occupancy.label())?;
         state.serialize_field("owner", self.owner_label())?;
+        if self.reused {
+            state.serialize_field("reused", &true)?;
+        }
         if self.is_unowned() {
             state.serialize_field("next", "No Provenant lane currently owns this checkout. Inspect its custody, then select it explicitly with --worktree <path>.")?;
         }

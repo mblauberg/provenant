@@ -419,6 +419,7 @@ fn list_impl(
             occupancy,
             owner,
             primary: is_primary,
+            reused: false,
         };
         report(total, Some(&info));
         result.push(info);
@@ -588,6 +589,7 @@ fn reuse_existing_worktree(
         dirty,
         owner,
         primary: false,
+        reused: true,
         occupancy,
     })
 }
@@ -858,6 +860,7 @@ fn create_with_default(
         dirty,
         owner: Ok(None),
         primary: false,
+        reused: false,
         occupancy: combine_occupancy(&target, Occupancy::Available, writer),
     })
 }
@@ -1431,6 +1434,7 @@ pub(super) fn remove_tree_when_before_delete_locked(
         dirty: WorktreeCondition::Clean,
         owner: Err("worktree registration was not observed".into()),
         primary: false,
+        reused: false,
         occupancy: Occupancy::Available,
     };
     let writer = locked.writer.take().ok_or(WorktreeError::UnknownWriter)?;
@@ -1890,6 +1894,7 @@ pub(super) fn remove_merged_candidate(
                             dirty: WorktreeCondition::Clean,
                             owner: Ok(owner),
                             primary: false,
+                            reused: false,
                             occupancy: Occupancy::Available,
                         };
                         record_started = Some(super::gc::begin_worktree_retirement(
@@ -2313,6 +2318,7 @@ fn remove_with_owner(
                                     dirty: WorktreeCondition::Clean,
                                     owner: Ok(owner),
                                     primary: false,
+                                    reused: false,
                                     occupancy: Occupancy::Available,
                                 };
                                 retirement_record = Some(super::gc::begin_worktree_retirement(

@@ -75,20 +75,11 @@ fn warn_adopt(hook: &str, reason: &dyn std::fmt::Display) {
     );
 }
 
-/// The notice `worktree create` puts in its data when it reused an occupied
-/// managed path instead of making a new checkout. It is the typed reuse outcome
-/// of the create command: a fresh creation carries no such notice, so only a
-/// reused tree can be an adoption at the hook boundary.
-const REUSE_NOTICE: &str = "reusing the existing worktree for branch ";
-
+/// `worktree create` sets `reused` when it adopted the existing checkout for
+/// the branch instead of adding one. A fresh creation omits it, so only a reused
+/// tree can be an adoption at the hook boundary.
 fn create_reused(data: &serde_json::Value) -> bool {
-    data["warnings"].as_array().is_some_and(|warnings| {
-        warnings.iter().any(|warning| {
-            warning
-                .as_str()
-                .is_some_and(|text| text.starts_with(REUSE_NOTICE))
-        })
-    })
+    data["reused"].as_bool() == Some(true)
 }
 
 /// Claude's suggested slug becomes the branch `claude/<slug>`. The name reaches

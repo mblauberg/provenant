@@ -563,6 +563,7 @@ pub fn prune_owned(
                 dirty: WorktreeCondition::Clean,
                 owner: Ok(Some(owner.clone())),
                 primary: false,
+                reused: false,
                 occupancy: Occupancy::Available,
             };
             let record = super::gc::begin_worktree_retirement(
