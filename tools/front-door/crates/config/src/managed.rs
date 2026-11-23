@@ -424,6 +424,141 @@ impl Targets {
         }
         Ok(())
     }
+    /// The check replacement for [`Targets::new`]: its roots come from the
+    /// recorded install receipt, never from the caller's HOME. `None` means
+    /// nothing is installed at this state root.
+    pub fn for_receipt(
+        roots: Roots,
+        policy: std::sync::Arc<provenant_records::policy::Policy>,
+    ) -> Result<Option<Self>, InstallError> {
+        let path = roots.state.as_path().join("install/receipt.json");
+        let Some(snapshot) = snapshot_scoped(&path, roots.state.as_path())? else {
+            return Ok(None);
+        };
+        let Value::File { bytes, mode: 0o600 } = &snapshot.value else {
+            return Err(InstallError::Conflict(path));
+        };
+        let receipt = decode_recorded_receipt(bytes, roots.state.as_path())?;
+        Self::from_receipt(roots, &receipt, policy).map(Some)
+    }
+    fn from_receipt(
+        roots: Roots,
+        receipt: &InstallReceipt,
+        policy: std::sync::Arc<provenant_records::policy::Policy>,
+    ) -> Result<Self, InstallError> {
+        let home = recorded_home(receipt, roots.state.as_path())?;
+        let shared_instruction = receipt
+            .entries
+            .iter()
+            .find(|entry| entry.selector == "shared-instruction")
+            .map(|entry| entry.path.to_path_buf())
+            .transpose()?
+            .unwrap_or_else(|| home.join(".agents/AGENTS.md"));
+        let harnesses = receipt
+            .harness_targets
+            .iter()
+            .map(|target| {
+                Ok(HarnessTarget {
+                    harness: target.harness,
+                    skills_dir: target.skills_dir.to_path_buf()?,
+                    config_file: target.config_file.to_path_buf()?,
+                    hook_file: target
+                        .hook_file
+                        .as_ref()
+                        .map(AbsolutePath::to_path_buf)
+                        .transpose()?,
+                    instruction: target
+                        .instruction
+                        .as_ref()
+                        .map(AbsolutePath::to_path_buf)
+                        .transpose()?,
+                })
+            })
+            .collect::<Result<Vec<_>, InstallError>>()?;
+        Ok(Self {
+            policy,
+            roots,
+            bin_dir: receipt.bin_dir.to_path_buf()?,
+            home,
+            shared_instruction,
+            harnesses,
+            adopt_existing: false,
+            hooks: false,
+            remove_hooks: false,
+            peer_agent: None,
+            tick_agent: None,
+            tick_service: None,
+            hook_specs: crate::hooks::registrations(&receipt.harnesses),
+            accounts: Vec::new(),
+            shared_settings: None,
+            force_settings: false,
+            protected_roots: Vec::new(),
+            configured_homes: BTreeSet::new(),
+            configured_configs: BTreeSet::new(),
+            environment_homes: BTreeSet::new(),
+        })
+    }
+}
+/// The home whose recorded roots the receipt names, recovered from the receipt
+/// and its state root. The caller's HOME is never consulted.
+fn recorded_home(receipt: &InstallReceipt, state_root: &Path) -> Result<PathBuf, InstallError> {
+    let bin_dir = receipt.bin_dir.to_path_buf()?;
+    let mut paths = vec![bin_dir.clone()];
+    let mut candidates = Vec::new();
+    if let Some(home) = default_state_home(state_root) {
+        candidates.push(home.to_path_buf());
+    }
+    if let Some(shared) = receipt
+        .entries
+        .iter()
+        .find(|entry| entry.selector == "shared-instruction")
+    {
+        let shared = shared.path.to_path_buf()?;
+        paths.push(shared.clone());
+        if let Some(home) = shared.parent().and_then(Path::parent) {
+            candidates.push(home.to_path_buf());
+        }
+    }
+    for target in &receipt.harness_targets {
+        let recorded = [
+            Some(&target.skills_dir),
+            Some(&target.config_file),
+            target.hook_file.as_ref(),
+            target.instruction.as_ref(),
+        ];
+        for path in recorded.into_iter().flatten() {
+            paths.push(path.to_path_buf()?);
+        }
+        let base = target
+            .harness
+            .spec()
+            .install
+            .map_or(0, |install| Path::new(install.home).components().count());
+        if let Some(home) = target.skills_dir.to_path_buf()?.ancestors().nth(base + 1) {
+            candidates.push(home.to_path_buf());
+        }
+    }
+    if bin_dir.ends_with(Path::new(".local/bin"))
+        && let Some(home) = bin_dir.ancestors().nth(2)
+    {
+        candidates.push(home.to_path_buf());
+    }
+    let covers = |candidate: &Path| {
+        paths
+            .iter()
+            .filter(|path| path.starts_with(candidate))
+            .count()
+    };
+    let home = candidates
+        .into_iter()
+        .filter(|candidate| {
+            candidate.is_absolute()
+                && candidate.parent().is_some()
+                && candidate.as_path() != Path::new("/")
+        })
+        .max_by_key(|candidate| (covers(candidate), candidate.components().count()))
+        .unwrap_or(bin_dir);
+    Ok(home)
 }
 #[derive(Debug, Clone)]
 pub(crate) struct Desired {
@@ -1957,13 +2092,14 @@ impl Decoded {
         Ok(findings)
     }
 }
-fn decode_receipt(bytes: &[u8], targets: &Targets) -> Result<Decoded, InstallError> {
-    let mut receipt: InstallReceipt =
+/// The receipt's shape and recorded release root, without comparing them with
+/// any caller-supplied home.
+fn decode_receipt_shape(bytes: &[u8]) -> Result<(InstallReceipt, PathBuf), InstallError> {
+    let receipt: InstallReceipt =
         provenant_records::decode(bytes, Limits::CONFIG).map_err(InstallError::ReceiptDecode)?;
     if receipt.schema_version != provenant_records::INSTALL_RECEIPT_SCHEMA_VERSION {
         return Err(InstallError::Manifest("unsupported receipt schema version"));
     }
-    let state_root = targets.roots.state.as_path();
     normal_absolute(&receipt.bin_dir.to_path_buf()?)?;
     let mut harnesses = BTreeSet::new();
     for harness in &receipt.harnesses {
@@ -2026,6 +2162,41 @@ fn decode_receipt(bytes: &[u8], targets: &Targets) -> Result<Decoded, InstallErr
             ));
         }
     };
+    Ok((receipt, old_state))
+}
+
+/// Validate a receipt against its own recorded roots. Checks use this before
+/// they can build targets, so no caller home decides which entries are current.
+fn decode_recorded_receipt(
+    bytes: &[u8],
+    state_root: &Path,
+) -> Result<InstallReceipt, InstallError> {
+    let (receipt, _) = decode_receipt_shape(bytes)?;
+    let shared = receipt
+        .entries
+        .iter()
+        .find(|entry| entry.selector == "shared-instruction")
+        .map(|entry| entry.path.to_path_buf())
+        .transpose()?
+        .unwrap_or_else(|| state_root.join("instructions"));
+    let mut paths = BTreeSet::new();
+    for entry in &receipt.entries {
+        let path = entry.path.to_path_buf()?;
+        if !paths.insert((path, entry.selector.clone())) {
+            return Err(InstallError::Manifest("duplicate receipt path"));
+        }
+        if !permitted_entry(entry, &receipt, state_root, &shared)? {
+            return Err(InstallError::Manifest(
+                "receipt entry outside resolved targets",
+            ));
+        }
+    }
+    Ok(receipt)
+}
+
+fn decode_receipt(bytes: &[u8], targets: &Targets) -> Result<Decoded, InstallError> {
+    let state_root = targets.roots.state.as_path();
+    let (mut receipt, old_state) = decode_receipt_shape(bytes)?;
     let moved = (old_state != state_root).then_some(old_state);
     let home =
         provenant_os::fs::canonicalize(&targets.home).unwrap_or_else(|_| targets.home.clone());
