@@ -2,6 +2,7 @@ use super::*;
 use provenant_records::diagnostic::{
     ContinuationField as F, ContinuationGuard, ContinuationIssue as I, ContinuationRule as R,
 };
+use provenant_records::warning::warn;
 
 #[derive(serde::Deserialize, serde::Serialize)]
 struct NativeSessionLocation {
@@ -777,14 +778,13 @@ pub(super) fn launch_prompt(
 ) -> Result<Prompt, LaunchPromptError> {
     if text.len() as u64 > super::PROMPT_LIMIT {
         // Admission bounds the caller's raw prompt, not host additions.
-        if let provenant_records::policy::Effect::Warn(message) = policy.check(
+        if let provenant_records::policy::Effect::Warn(warning) = policy.check(
             "OBSERVATION_LAUNCH_PROMPT_NONE",
             provenant_records::policy::Facts::violation(
                 "host-added launch prompt text exceeds 1 MiB",
             ),
         ) {
-            use std::io::Write;
-            let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+            warn(warning);
         }
     }
     check_launch_prompt(text, paths, Some(adapter), argv_limit, argv_origin, policy)?;

@@ -8,7 +8,10 @@ use provenant_core::{AttemptId, CancelToken, Clock, DeliveryId, OperationId, Roo
 use provenant_fabric_runtime::hosts::plain_text;
 use provenant_os::clock::SystemClock;
 use provenant_providers::{OutcomeStatus, ProviderEvent, REGISTRY};
-use provenant_records::{CommandError, CommandResult, Outcome as Status, UsageSource};
+use provenant_records::{
+    CommandError, CommandResult, Outcome as Status, UsageSource,
+    warning::{CONFIG_MALFORMED, Warning, warn},
+};
 use provenant_routing::{Fallback, ModelId, RouteChoice, RouteName};
 use provenant_run as run;
 use provenant_supervisor::custody::ExitObservation;
@@ -535,14 +538,13 @@ fn writer_gc_settings(
     policy: &provenant_records::policy::Policy,
 ) -> provenant_config::GcSettings {
     provenant_config::GcSettings::read(state).unwrap_or_else(|error| {
-        if let provenant_records::policy::Effect::Warn(message) = policy.check(
+        if let provenant_records::policy::Effect::Warn(warning) = policy.check(
             "RUN_WRITER_GC_SETTINGS_NONE",
             provenant_records::policy::Facts::violation(format!(
                 "gc.free_floor configuration unavailable ({error}); using compiled GC defaults"
             )),
         ) {
-            use std::io::Write;
-            let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+            warn(warning);
         }
         provenant_config::GcSettings::default()
     })
@@ -602,14 +604,13 @@ impl run::Providers for Registry<'_> {
                 }
             }
             Err(error) => {
-                if let provenant_records::policy::Effect::Warn(message) = policy.check(
+                if let provenant_records::policy::Effect::Warn(warning) = policy.check(
                     "WRITE_GRANT_LIMIT_READ_NONE",
                     provenant_records::policy::Facts::violation(format!(
                         "domains.run.write_grant_limit_bytes unavailable ({error}); using compiled default"
                     )),
                 ) {
-                    use std::io::Write;
-                    let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+                    warn(warning);
                 }
                 run::WriteGrantLimit::default()
             }
@@ -644,14 +645,13 @@ impl run::Providers for Registry<'_> {
                 run::launch_policy(roots.state.as_path(), &project, task)
             });
         let (Some(roots), Some(home)) = (self.roots, self.home) else {
-            if let provenant_records::policy::Effect::Warn(message) = policy.check(
+            if let provenant_records::policy::Effect::Warn(warning) = policy.check(
                 "RUN_WRITER_GC_SETTINGS_NONE",
                 provenant_records::policy::Facts::violation(
                     "writer disk policy context unavailable; continuing without a disk check",
                 ),
             ) {
-                use std::io::Write;
-                let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+                warn(warning);
             }
             return Ok(());
         };
@@ -1278,11 +1278,7 @@ impl Registry<'_> {
         // warning even when Codex prints the key twice.
         let scan_stderr = provenant_records::AdapterSpec::get(adapter.id())
             .is_some_and(|spec| spec.stderr_config_notices);
-        if let Some(route) = decoded.observed_route.as_mut() {
-            route
-                .launch_warnings
-                .extend(config_notice_warnings(&events, stderr, scan_stderr));
-        }
+        report_config_notices(&events, stderr, scan_stderr);
         if provenant_records::AdapterSpec::get(adapter.id())
             .is_some_and(|spec| spec.deduplicate_result)
         {
@@ -2396,23 +2392,25 @@ pub fn chair_snapshot(edge: &Edge<'_>) -> Result<(provenant_core::ProjectId, Vec
 /// One warning per distinct provider config-deprecation notice. The notice
 /// can arrive as a decoded event and again on stderr with a different prefix
 /// and source, so both are keyed by the notice text alone.
-fn config_notice_warnings(
-    events: &[ProviderEvent],
-    stderr: &[u8],
-    scan_stderr: bool,
-) -> Vec<String> {
+fn report_config_notices(events: &[ProviderEvent], stderr: &[u8], scan_stderr: bool) {
     use provenant_providers::codex::{
         config_deprecation_notice, config_notice_key, config_notice_source,
     };
     let mut seen = std::collections::BTreeSet::new();
-    let mut warnings = Vec::new();
     let mut note = |message: &str, source: String| {
         let key = config_notice_key(message);
         if seen.insert(key.clone()) {
-            warnings.push(format!(
-                "warning: provider config deprecation ({source}): {}; fix the key or use providers.codex.clean_config",
-                crate::bounded_text(&key, 512)
-            ));
+            warn(
+                Warning::new(
+                    CONFIG_MALFORMED,
+                    format!(
+                        "provider config deprecation ({source}): {}",
+                        crate::bounded_text(&key, 512)
+                    ),
+                )
+                .subject(source)
+                .repair("Fix the key or use providers.codex.clean_config."),
+            );
         }
     };
     for event in events {
@@ -2431,7 +2429,6 @@ fn config_notice_warnings(
             }
         }
     }
-    warnings
 }
 
 #[cfg(test)]

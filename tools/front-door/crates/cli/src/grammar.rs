@@ -3,6 +3,7 @@ use crate::metadata::CatalogueArg;
 use clap::{Args, Parser, Subcommand, ValueEnum, builder::TypedValueParser};
 use provenant_core::{AttemptId, GitOid, OperationId};
 pub use provenant_records::Harness;
+use provenant_records::warning::{CONFIG_MALFORMED, Warning, warn};
 use std::{ffi::OsString, path::PathBuf};
 
 #[derive(Debug, Parser)]
@@ -1344,10 +1345,12 @@ pub(crate) fn duration_seconds(value: &str) -> Result<u64, &'static str> {
     let seconds = positive_span_seconds(value)?;
     let maximum = provenant_core::MAX_LANE_RUNTIME_SECONDS;
     if seconds > maximum {
-        use std::io::Write;
-        let _ = writeln!(
-            std::io::stderr().lock(),
-            "warning: wait budget clamped to maximum {maximum}s (source: provenant_core::MAX_LANE_RUNTIME_SECONDS)"
+        warn(
+            Warning::new(
+                CONFIG_MALFORMED,
+                format!("wait budget clamped to maximum {maximum}s"),
+            )
+            .repair("Request a smaller wait budget."),
         );
     }
     Ok(seconds.min(maximum))

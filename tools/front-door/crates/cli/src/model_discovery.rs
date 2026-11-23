@@ -1,7 +1,10 @@
 //! Explicit provider refresh and read-only access to the last successful listing.
 use provenant_core::Roots;
 use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
-use provenant_records::{AdapterSpec, ModelListingFormat};
+use provenant_records::{
+    AdapterSpec, ModelListingFormat,
+    warning::{CONFIG_MALFORMED, Warning, warn},
+};
 use provenant_routing::{Catalogue, DiscoverySnapshot, RoutingError};
 use std::{ffi::OsString, time::Duration};
 
@@ -58,10 +61,6 @@ pub(crate) fn discovered_canonical_models(roots: &Roots, adapter: &str) -> Vec<S
         .unwrap_or_default()
 }
 
-#[allow(
-    clippy::print_stderr,
-    reason = "warn that the discovery cache is unusable"
-)]
 pub(crate) fn effective(roots: &Roots) -> Result<Catalogue, RoutingError> {
     let snapshots: Vec<_> = discovery_providers()
         .filter_map(|(spec, _)| read(roots, spec.name))
@@ -73,7 +72,10 @@ pub(crate) fn effective(roots: &Roots) -> Result<Catalogue, RoutingError> {
     match bundled.clone().with_discovery(&snapshots) {
         Ok(catalogue) => Ok(catalogue.with_overlays(&layers, warnings)),
         Err(_) => {
-            eprintln!("warning: invalid provider model discovery cache; using bundled catalogue");
+            warn(Warning::new(
+                CONFIG_MALFORMED,
+                "invalid provider model discovery cache; using bundled catalogue",
+            ));
             Ok(bundled.with_overlays(&layers, warnings))
         }
     }

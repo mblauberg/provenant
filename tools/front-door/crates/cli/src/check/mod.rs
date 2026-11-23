@@ -9,7 +9,10 @@ use provenant_os::{
     exec::{ExecOutcome, Executor, Termination},
     fs::{FileKind, FsError, Metadata},
 };
-use provenant_records::{CanonicalV1, FileDigest, Finding, Outcome, PathWire};
+use provenant_records::{
+    CanonicalV1, FileDigest, Finding, Outcome, PathWire,
+    warning::{CONFIG_MALFORMED, Warning, warn},
+};
 use serde::{Deserialize, Serialize};
 use std::{
     io::Read,
@@ -134,8 +137,6 @@ fn wire(path: &Path) -> Result<PathWire, CheckError> {
 #[derive(Debug, Serialize)]
 pub struct CheckPage<T = Finding> {
     pub findings: Vec<T>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub warnings: Vec<String>,
     pub count: u64,
     pub offset: u64,
     pub next_cursor: Option<String>,
@@ -153,10 +154,6 @@ impl<T> CheckPage<T> {
 impl CheckPage {
     pub fn human(&self) -> Result<String, serde_json::Error> {
         let mut text = String::new();
-        for warning in &self.warnings {
-            text.push_str(warning);
-            text.push('\n');
-        }
         for finding in &self.findings {
             text.push_str(&format!(
                 "{}:{}: {}: {}\n",
@@ -219,7 +216,6 @@ pub fn findings_page<T: Serialize>(
     }
     let mut result = CheckPage {
         findings: Vec::new(),
-        warnings: Vec::new(),
         count,
         offset,
         next_cursor: None,
@@ -466,7 +462,6 @@ pub(super) fn index_records(bytes: &[u8]) -> Result<Vec<IndexRecord<'_>>, CheckE
 /// Library owners supply config/install inspections. CLI retains only a page.
 pub fn config_page(
     inspection: provenant_config::ConfigInspection,
-    warnings: Vec<String>,
     selector: impl Serialize,
     page: &Page,
 ) -> Result<CheckPage, CheckError> {
@@ -506,9 +501,7 @@ pub fn config_page(
         };
         scan.finding(rule, Path::new("config.toml"), line, &message)?;
     }
-    let mut result = paginate(scan, selector, page)?;
-    result.warnings = warnings;
-    Ok(result)
+    paginate(scan, selector, page)
 }
 /// Roots supplied by the caller for rendering install findings. Inspection
 /// targets come from the receipt's recorded roots, never from this home.
@@ -535,7 +528,7 @@ pub fn install_page(
     page: &Page,
 ) -> Result<CheckPage, CheckError> {
     let mut scan = Scan::default();
-    let mut warnings = Vec::new();
+    let mut reported = std::collections::BTreeSet::new();
     scan.evidence
         .push(("install".into(), inspection.input_digest));
     if inspection.error.is_some() {
@@ -550,8 +543,8 @@ pub fn install_page(
         if finding.is_advisory()
             && let Some(detail) = &finding.detail
         {
-            if !warnings.contains(detail) {
-                warnings.push(detail.clone());
+            if reported.insert(detail.clone()) {
+                warn(Warning::new(CONFIG_MALFORMED, detail.clone()));
             }
             continue;
         }
@@ -617,9 +610,7 @@ pub fn install_page(
             &message,
         )?;
     }
-    let mut result = paginate(scan, selector, page)?;
-    result.warnings = warnings;
-    Ok(result)
+    paginate(scan, selector, page)
 }
 /// Resolve a user-given revision to the commit it names.
 pub fn resolve_revision(git: &GitContext<'_>, revision: &str) -> Result<GitOid, CheckError> {
@@ -649,6 +640,7 @@ pub fn release_page(
 mod tests {
     use super::*;
 
+    /// Spec: docs/specs/cli.md#warnings-are-typed-values
     #[test]
     fn declared_native_limits_are_provenance_warnings_not_install_drift()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -675,19 +667,24 @@ mod tests {
                     }],
                     input_digest: CanonicalV1::file_digest(detail.as_bytes()),
                 };
-                let page = install_page(
-                    inspection,
-                    &CheckContext::new(Path::new("/fixture"), Path::new("/fixture/state")),
-                    &[],
-                    "native-capabilities",
-                    &Page {
-                        limit: 100,
-                        cursor: None,
-                    },
-                )?;
+                let (result, warnings) = provenant_records::warning::capture(|| {
+                    install_page(
+                        inspection,
+                        &CheckContext::new(Path::new("/fixture"), Path::new("/fixture/state")),
+                        &[],
+                        "native-capabilities",
+                        &Page {
+                            limit: 100,
+                            cursor: None,
+                        },
+                    )
+                });
+                let page = result?;
                 assert_eq!(page.outcome(), Outcome::Ok);
                 assert!(page.findings.is_empty());
-                assert!(page.warnings.contains(&detail));
+                assert_eq!(warnings.len(), 1);
+                assert_eq!(warnings[0].code.as_str(), CONFIG_MALFORMED.as_str());
+                assert_eq!(warnings[0].message, detail);
             }
         }
         Ok(())
@@ -724,7 +721,6 @@ mod tests {
         };
         let page = config_page(
             inspection,
-            Vec::new(),
             "config check",
             &Page {
                 limit: 10,

@@ -537,6 +537,10 @@ fn execute(
     Ok((value, false))
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the binary edge's output seam writes the command result to stdout and diagnostics to stderr"
+)]
 pub fn run(
     cmd: Fabric,
     globals: &Globals,

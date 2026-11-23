@@ -4,6 +4,7 @@ use provenant_records::diagnostic::ContinuationCopyLimit;
 use provenant_records::diagnostic::{
     ContinuationField as F, ContinuationGuard, ContinuationIssue as I, ContinuationRule as R,
 };
+use provenant_records::warning::warn;
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum ContinuationRequestError {
@@ -416,8 +417,8 @@ pub(super) fn continuation_for_policy(
                     if effect.blocks() {
                         return Err(StateCopyError::resource(policy.fact(setting, None)).into());
                     }
-                    if let Some(message) = effect.message() {
-                        let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+                    if let provenant_records::policy::Effect::Warn(warning) = effect {
+                        warn(warning);
                     }
                     match setting {
                         ContinuationCopyLimit::Entries => policy.limits.entries = u32::MAX,
@@ -668,14 +669,13 @@ impl StateCopyPolicy {
                 }
             }
             Err(error) => {
-                if let provenant_records::policy::Effect::Warn(message) = enforcement.check(
+                if let provenant_records::policy::Effect::Warn(warning) = enforcement.check(
                     "CONTINUATION_STATECOPYPOLICY_READ_NONE",
                     provenant_records::policy::Facts::violation(format!(
                         "continuation copy settings unavailable ({error}); using compiled defaults"
                     )),
                 ) {
-                    use std::io::Write;
-                    let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+                    warn(warning);
                 }
                 let mut policy = Self::shipped(RETAINED_STATE);
                 policy.enforcement = Some(enforcement.clone());
@@ -977,8 +977,8 @@ fn copy_state_classified(
         if effect.blocks() {
             return result;
         }
-        if let Some(message) = effect.message() {
-            let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+        if let provenant_records::policy::Effect::Warn(warning) = effect {
+            warn(warning);
         }
         match setting {
             ContinuationCopyLimit::Bytes
@@ -1276,15 +1276,11 @@ fn warn_link(budget: &Budget<'_>, kind: &str) {
         .map_or("default", |receipt| receipt.source.as_str());
     let detail =
         format!("copying retained {kind} by content (lanes.access=host, source: {source})");
-    if let Some(message) = budget
-        .enforcement
-        .check(
-            "CONTINUATION_LINK_NONE",
-            provenant_records::policy::Facts::violation(detail),
-        )
-        .message()
-    {
-        let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+    if let provenant_records::policy::Effect::Warn(warning) = budget.enforcement.check(
+        "CONTINUATION_LINK_NONE",
+        provenant_records::policy::Facts::violation(detail),
+    ) {
+        warn(warning);
     }
 }
 

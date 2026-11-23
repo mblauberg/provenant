@@ -148,6 +148,14 @@ pub fn steer_restart_notice(roots: &provenant_core::Roots) -> Option<String> {
     ))
 }
 
+/// A steer restart notice is progress text on the command's output seam, not a
+/// warning: it must reach the user before the live attempt is cancelled.
+#[allow(clippy::disallowed_methods)]
+fn emit_notice(line: &str) {
+    use std::io::Write as _;
+    let _ = writeln!(io::stderr().lock(), "{line}");
+}
+
 /// Emit a notice, then take the action it describes. Isolated so ordering is
 /// testable: the notice must reach the user before the live attempt is cancelled.
 pub(crate) fn announce_before<E, S, R>(notice: Option<&str>, emit: E, act: S) -> R
@@ -185,14 +193,9 @@ pub fn deliver_steer(
     let store = provenant_run::RunStore::open(&context, &run_call)
         .map_err(|error| InboxError::Steer(error.to_string()))?;
     let notice = steer_restart_notice(edge.roots);
-    let outcome = announce_before(
-        notice.as_deref(),
-        |line| {
-            use std::io::Write as _;
-            let _ = writeln!(io::stderr().lock(), "{line}");
-        },
-        || store.steer(attempt, operation_id.clone(), text, &run_call),
-    );
+    let outcome = announce_before(notice.as_deref(), emit_notice, || {
+        store.steer(attempt, operation_id.clone(), text, &run_call)
+    });
     match outcome {
         Ok(provenant_run::SteerReceipt::Queued { message_id })
         | Ok(provenant_run::SteerReceipt::AlreadyQueued { message_id }) => Ok(message_id),
@@ -1318,6 +1321,10 @@ fn execute(
         },
     )?)
 }
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the binary edge's output seam writes the command result to stdout and diagnostics to stderr"
+)]
 pub fn run(
     command: HumanCommand,
     path: &str,

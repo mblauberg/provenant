@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use super::*;
+use provenant_records::warning::{CONFIG_KEY_IGNORED, Warning, warn};
 
 pub(super) fn list_data(
     roots: &Roots,
@@ -212,15 +213,17 @@ pub(super) fn edit_config(
     Ok(())
 }
 
-#[allow(clippy::print_stderr, reason = "warn about an uncatalogued model")]
 pub(super) fn set_pool(roots: &Roots, request: &RouteSet) -> Result<(), EdgeError> {
     let catalogue = crate::model_discovery::effective(roots)?;
     let model = ModelId::parse(&request.model.0)?;
     let entry = catalogue.model(&model);
     if entry.is_none() {
-        eprintln!(
-            "warning: model {} is absent from bundled and discovered catalogues; source=user",
-            model.as_str()
+        warn(
+            Warning::new(
+                CONFIG_KEY_IGNORED,
+                "model is absent from bundled and discovered catalogues (source=user)",
+            )
+            .subject(model.as_str()),
         );
     }
     if !REGISTRY
@@ -971,14 +974,13 @@ pub(super) fn execute_in(
                         )
                     },
                 );
-                let (mut recorded_readiness, offered_exclusions, offered_warnings) =
-                    filter_unoffered_readiness(
-                        recorded,
-                        &model,
-                        context.catalogue,
-                        records,
-                        query.account.as_deref(),
-                    );
+                let (mut recorded_readiness, offered_exclusions) = filter_unoffered_readiness(
+                    recorded,
+                    &model,
+                    context.catalogue,
+                    records,
+                    query.account.as_deref(),
+                );
                 let pools = context.catalogue.admission_pools(&model);
                 let quota_evidence = quota_observations(
                     context.catalogue,
@@ -1151,7 +1153,6 @@ pub(super) fn execute_in(
                     pacing,
                     recorded_readiness,
                     offered_exclusions,
-                    offered_warnings,
                     login_diagnostic,
                     quota,
                     admission_refusal,

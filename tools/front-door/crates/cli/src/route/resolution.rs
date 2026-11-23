@@ -1,4 +1,5 @@
 use super::*;
+use provenant_records::warning::{FORGE_CONTEXT_UNRESOLVED, Warning, warn};
 
 fn model_route(model: &ModelId) -> provenant_quota::ReadinessRoute {
     provenant_quota::ReadinessRoute::model(model.adapter(), model.model())
@@ -247,10 +248,9 @@ pub(crate) fn filter_unoffered_readiness(
     catalogue: &provenant_routing::Catalogue,
     accounts: &[provenant_quota::AccountRecord],
     pinned: Option<&str>,
-) -> (Vec<RecordedReadiness>, Vec<String>, Vec<String>) {
+) -> (Vec<RecordedReadiness>, Vec<String>) {
     let mut kept = Vec::new();
     let mut exclusions = Vec::new();
-    let mut warnings = Vec::new();
     for row in rows {
         let reports_offers = provenant_records::AdapterSpec::get(model.adapter())
             .is_some_and(|spec| spec.offered_models);
@@ -288,15 +288,16 @@ pub(crate) fn filter_unoffered_readiness(
             offered.join(", ")
         );
         if is_pinned {
-            warnings.push(format!(
-                "{detail}; pinned, so the launch is attempted anyway"
-            ));
+            warn(
+                Warning::new(FORGE_CONTEXT_UNRESOLVED, detail)
+                    .repair("The launch is attempted anyway because the account is pinned."),
+            );
             kept.push(row);
         } else {
             exclusions.push(detail);
         }
     }
-    (kept, exclusions, warnings)
+    (kept, exclusions)
 }
 
 /// The OpenCode snapshot reports the Go plan's pools, which only govern models
