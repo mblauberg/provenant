@@ -1086,7 +1086,7 @@ impl provenant_run::Providers for WriterProvider {
                     sandbox: provenant_confinement::run_config::SandboxMode::required(
                         true,
                         true,
-                        provenant_confinement::run_config::SandboxSource::Knob,
+                        provenant_records::Layer::Host,
                         None,
                     ),
                     backend: None,

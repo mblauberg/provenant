@@ -116,7 +116,7 @@ fn every_bundled_template_parses_and_resolves() {
             "{expected} missing"
         );
         library.resolve(expected).unwrap();
-        assert_eq!(library.layer(expected), Some(Layer::Bundled));
+        assert_eq!(library.layer(expected), Some(Layer::Default));
     }
 }
 
@@ -393,7 +393,7 @@ fn composite_template_from_a_repository_layer_nests_a_swarm() {
     let mut library = library();
     library
         .insert_toml(
-            Layer::Repository,
+            Layer::Project,
             "map-and-plan",
             r#"
 nodes = [
@@ -431,7 +431,7 @@ fn nested_composite_templates_compile_and_detect_recursion() {
     let mut library = library();
     library
         .insert_toml(
-            Layer::User,
+            Layer::Host,
             "inner",
             r#"
 nodes = [
@@ -445,7 +445,7 @@ type = "string"
         .unwrap();
     library
         .insert_toml(
-            Layer::User,
+            Layer::Host,
             "outer",
             r#"
 nodes = [
@@ -467,14 +467,14 @@ nodes = [
     );
     library
         .insert_toml(
-            Layer::Inline,
+            Layer::Launch,
             "loop-a",
             "nodes = [{ id = \"n\", use = \"loop-b\" }]",
         )
         .unwrap();
     library
         .insert_toml(
-            Layer::Inline,
+            Layer::Launch,
             "loop-b",
             "nodes = [{ id = \"n\", use = \"loop-a\" }]",
         )
@@ -528,16 +528,16 @@ fn flavours_and_layers_resolve_in_order() {
     assert!(library.resolve("review.missing").is_err());
 
     library
-        .insert_toml(Layer::User, "task", "brief = \"user\"\ntier = \"junior\"")
+        .insert_toml(Layer::Host, "task", "brief = \"user\"\ntier = \"junior\"")
         .unwrap();
     library
         .insert_toml(
-            Layer::Repository,
+            Layer::Project,
             "task",
             "brief = \"repository\"\ntier = \"senior\"",
         )
         .unwrap();
-    assert_eq!(library.layer("task"), Some(Layer::Repository));
+    assert_eq!(library.layer("task"), Some(Layer::Project));
     let node = Compiler::new(&library)
         .compile(&json!({"id": "t", "use": "task", "tier": "principal"}))
         .unwrap();
@@ -684,7 +684,7 @@ fn delivery_templates_admit_bounded_review_repairs() {
         assert_eq!(slice.node[TEMPLATE_FIELD], "implement.fix");
         let mut slices = library();
         slices
-            .insert(Layer::Inline, "repair-slice", slice.clone())
+            .insert(Layer::Launch, "repair-slice", slice.clone())
             .unwrap();
         let compiled = Compiler::new(&slices)
             .compile(&json!({"id":"slice", "use":"repair-slice"}))
@@ -785,7 +785,7 @@ fn writer_template_can_disable_no_work_continuation() {
     .unwrap();
     templates = templates
         .with(
-            Layer::Repository,
+            Layer::Project,
             &BTreeMap::from([("custom-writer".into(), custom)]),
         )
         .unwrap();
@@ -811,7 +811,7 @@ fn writer_template_can_disable_no_work_continuation() {
 fn template_node_fields_are_checked_and_extensions_are_explicit() {
     let mut library = library();
     library
-        .insert_toml(Layer::Inline, "typo", "[node]\nmisspelt_field = true")
+        .insert_toml(Layer::Launch, "typo", "[node]\nmisspelt_field = true")
         .unwrap();
     let error = Compiler::new(&library)
         .compile(&json!({"id":"stage", "use":"typo"}))
@@ -823,7 +823,7 @@ fn template_node_fields_are_checked_and_extensions_are_explicit() {
     );
     library
         .insert_toml(
-            Layer::Inline,
+            Layer::Launch,
             "extension",
             "[node.extensions]\ncustom = true",
         )
@@ -843,7 +843,7 @@ fn renamed_composites_keep_their_behaviour_and_bindings() {
     for name in ["review-panel", "repair", "review-repair"] {
         let copy = library.resolve(name).unwrap();
         library
-            .insert(Layer::Inline, &format!("copy-{name}"), copy)
+            .insert(Layer::Launch, &format!("copy-{name}"), copy)
             .unwrap();
     }
     let resolvers = BTreeMap::from([
@@ -1103,7 +1103,7 @@ fn malformed_review_repair_behaviour_reports_an_error() {
     let mut library = library();
     library
         .insert_toml(
-            Layer::Inline,
+            Layer::Launch,
             "broken",
             r#"
 composite_behaviour = "review_repair"
@@ -1152,7 +1152,7 @@ fn composite_members_reject_unknown_fields() {
         let mut library = library();
         library
             .insert(
-                Layer::Repository,
+                Layer::Project,
                 "local",
                 serde_json::from_value(json!({
                     "nodes":[member]
@@ -1176,7 +1176,7 @@ fn review_flavour_merges_extension_entries() {
     let mut library = library();
     library
         .insert_toml(
-            Layer::Repository,
+            Layer::Project,
             "review.local",
             r#"
 [parameters.lens]
@@ -1194,7 +1194,7 @@ custom = true
     assert_eq!(node.review_lens.as_deref(), Some("local"));
     library
         .insert_toml(
-            Layer::Repository,
+            Layer::Project,
             "review.local.explicit",
             r#"
 [node]
@@ -1230,9 +1230,7 @@ fn extensions_cannot_supply_compiled_node_fields() {
             "{error}"
         );
         let mut library = library();
-        library
-            .insert(Layer::Repository, "local", template)
-            .unwrap();
+        library.insert(Layer::Project, "local", template).unwrap();
         let error = Compiler::new(&library)
             .compile(&json!({"id":"stage", "use":"local", "with":{"root":"/any/root"}}))
             .unwrap_err()
@@ -1263,7 +1261,7 @@ fn leaf_node_tables_reject_instance_only_syntax() {
         let mut library = library();
         library
             .insert(
-                Layer::Inline,
+                Layer::Launch,
                 "invalid",
                 serde_json::from_value(json!({
                     "node":{field:"ignored"}
@@ -1284,7 +1282,7 @@ fn parameterised_composite_members_reject_unknown_fields() {
     let mut library = library();
     library
         .insert(
-            Layer::Inline,
+            Layer::Launch,
             "local",
             serde_json::from_value(json!({
                 "parameters":{"members":{"type":"list"}},
@@ -1377,7 +1375,7 @@ fn parameter_library() -> TemplateLibrary {
     let mut library = library();
     library
         .insert_toml(
-            Layer::Inline,
+            Layer::Launch,
             "gate",
             r#"
 brief = "Gate ${subject} at ${retries} tries"
@@ -1397,7 +1395,7 @@ default = 2
         .unwrap();
     library
         .insert_toml(
-            Layer::Inline,
+            Layer::Launch,
             "gate-pair",
             r#"
 nodes = [
@@ -1410,7 +1408,7 @@ type = "string"
         .unwrap();
     library
         .insert_toml(
-            Layer::Inline,
+            Layer::Launch,
             "level",
             r#"
 brief = "Check at ${level}"
@@ -1955,5 +1953,14 @@ fn batch_items_after_ordering_and_cycle_detection() {
     assert!(
         err_cycle.contains("slice-a") && err_cycle.contains("slice-b"),
         "{err_cycle}"
+    );
+}
+
+/// Spec: docs/specs/state.md#every-setting-reports-its-layer
+#[test]
+fn template_precedence_ranks_each_declared_layer_once() {
+    assert_eq!(
+        super::template::TEMPLATE_PRECEDENCE.0,
+        &[Layer::Default, Layer::Host, Layer::Project, Layer::Launch]
     );
 }

@@ -1,5 +1,79 @@
 use super::*;
 
+/// The checkpoint wire spelling of a template layer. This field is covered by
+/// the checkpoint digest, so its bytes stay as deployed while the in-memory
+/// type is the shared `Layer`. The adapter is private: a value that is not one
+/// of the four declared spellings is a decode error, never a fallback.
+/// Spec: docs/specs/state.md#every-setting-reports-its-layer
+mod template_layer_wire {
+    use super::*;
+    use serde::{Deserializer, Serializer};
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    enum Wire {
+        Bundled,
+        User,
+        Repository,
+        Inline,
+    }
+
+    impl Wire {
+        fn layer(self) -> Layer {
+            match self {
+                Self::Bundled => Layer::Default,
+                Self::User => Layer::Host,
+                Self::Repository => Layer::Project,
+                Self::Inline => Layer::Launch,
+            }
+        }
+
+        fn from_layer(layer: Layer) -> Option<Self> {
+            match layer {
+                Layer::Default => Some(Self::Bundled),
+                Layer::Host => Some(Self::User),
+                Layer::Project => Some(Self::Repository),
+                Layer::Launch => Some(Self::Inline),
+                _ => None,
+            }
+        }
+    }
+
+    pub(super) fn serialize<S>(
+        layers: &std::collections::BTreeMap<String, Layer>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        use serde::{Serialize, ser::Error};
+        layers
+            .iter()
+            .map(|(name, layer)| {
+                Wire::from_layer(*layer)
+                    .map(|wire| (name, wire))
+                    .ok_or_else(|| S::Error::custom("undeclared template layer"))
+            })
+            .collect::<Result<std::collections::BTreeMap<_, _>, _>>()?
+            .serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> Result<std::collections::BTreeMap<String, Layer>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        use serde::Deserialize;
+        Ok(
+            std::collections::BTreeMap::<String, Wire>::deserialize(deserializer)?
+                .into_iter()
+                .map(|(name, wire)| (name, wire.layer()))
+                .collect(),
+        )
+    }
+}
+
 pub(super) fn is_false(value: &bool) -> bool {
     !value
 }
@@ -84,7 +158,11 @@ pub struct GraphDocument {
     pub submission_patch: Option<super::patch::Patch>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub template_library: std::collections::BTreeMap<String, super::template::Template>,
-    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "std::collections::BTreeMap::is_empty",
+        with = "template_layer_wire"
+    )]
     pub template_layers: std::collections::BTreeMap<String, super::template::Layer>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub template_resolvers: std::collections::BTreeMap<String, Vec<String>>,

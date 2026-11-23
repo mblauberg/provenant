@@ -26,6 +26,7 @@ use super::{
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use provenant_records::Layer;
 use provenant_records::landing::{
     Authority, LandMember, LandRequest, LandingId, LandingRecord, MemberOutcome, ReviewProof,
 };
@@ -67,11 +68,11 @@ fn request_dir(state: &Path, key: provenant_core::Digest) -> PathBuf {
 }
 
 fn fixed_poll_interval(
-    source_layer: Option<&str>,
+    source_layer: Option<Layer>,
     request_poll_seconds: Option<u64>,
     resolved_poll_seconds: u64,
 ) -> Option<std::time::Duration> {
-    (request_poll_seconds.is_some() || source_layer.is_some_and(|layer| layer != "bundled"))
+    (request_poll_seconds.is_some() || source_layer.is_some_and(|layer| layer != Layer::Default))
         .then(|| std::time::Duration::from_secs(resolved_poll_seconds))
 }
 
@@ -475,7 +476,7 @@ impl Owner<'_> {
             policy
                 .fields
                 .get("poll_seconds")
-                .map(|field| field.source.layer.as_str()),
+                .map(|field| field.source.layer),
             context.request.policy.poll_seconds,
             settings.poll_seconds,
         );
@@ -1161,17 +1162,28 @@ mod tests {
     #[test]
     fn poll_interval_uses_source_layer_and_request_presence_not_value_comparison() {
         let default = Some(std::time::Duration::from_secs(30));
-        assert_eq!(fixed_poll_interval(Some("bundled"), None, 30), None);
-        for layer in ["host", "repository", "project", "tier", "invocation"] {
+        assert_eq!(fixed_poll_interval(Some(Layer::Default), None, 30), None);
+        for layer in [
+            Layer::Project,
+            Layer::Host,
+            Layer::HostProject,
+            Layer::Route,
+            Layer::Tier,
+            Layer::Launch,
+        ] {
             assert_eq!(
                 fixed_poll_interval(Some(layer), None, 30),
                 default,
-                "{layer}"
+                "{}",
+                layer.as_str()
             );
         }
-        assert_eq!(fixed_poll_interval(Some("bundled"), Some(30), 30), default);
         assert_eq!(
-            fixed_poll_interval(Some("project"), Some(7), 7),
+            fixed_poll_interval(Some(Layer::Default), Some(30), 30),
+            default
+        );
+        assert_eq!(
+            fixed_poll_interval(Some(Layer::HostProject), Some(7), 7),
             Some(std::time::Duration::from_secs(7))
         );
     }

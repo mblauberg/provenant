@@ -247,7 +247,7 @@ fn land_skeleton(tier: provenant_records::workflow::RiskTier) -> LandRecord {
         extra: Default::default(),
         tier,
         policy: crate::config::LandPolicy::Auto,
-        policy_source: crate::config::LandSource::Project,
+        policy_source: crate::config::Layer::Project,
         branch: String::new(),
         head: String::new(),
         authorised_by: Some(LandAuthority::Chair {

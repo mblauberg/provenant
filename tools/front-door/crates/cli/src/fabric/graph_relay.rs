@@ -1598,7 +1598,7 @@ fn relay_child_review_subjects(
 ) -> Result<Vec<Option<provenant_fabric_runtime::graph::SourceBinding>>, String> {
     let launch = request.launch.as_ref();
     let library = match launch {
-        Some(launch) => library.with(Layer::Inline, &launch.templates)?,
+        Some(launch) => library.with(Layer::Launch, &launch.templates)?,
         None => library.clone(),
     };
     let node = match launch {
@@ -1614,7 +1614,7 @@ fn relay_patch_review_subjects(
     patch: &provenant_fabric_runtime::graph::patch::Patch,
     library: &TemplateLibrary,
 ) -> Result<Vec<Option<provenant_fabric_runtime::graph::SourceBinding>>, String> {
-    let library = library.with(Layer::Inline, &patch.templates)?;
+    let library = library.with(Layer::Launch, &patch.templates)?;
     let mut subjects = Vec::new();
     for node in patch.nodes.iter().chain(&patch.replace) {
         collect_relay_review_subjects(node, None, &library, &mut Vec::new(), &mut subjects)?;
@@ -2418,8 +2418,8 @@ fn layered_templates(
     repository: &std::path::Path,
 ) -> Result<TemplateLibrary, String> {
     let mut library = TemplateLibrary::bundled();
-    library.load_dir(Layer::User, user)?;
-    library.load_dir(Layer::Repository, repository)?;
+    library.load_dir(Layer::Host, user)?;
+    library.load_dir(Layer::Project, repository)?;
     Ok(library)
 }
 

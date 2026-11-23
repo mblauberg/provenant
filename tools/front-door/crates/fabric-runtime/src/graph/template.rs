@@ -5,10 +5,12 @@
 //! node to the compiled `GraphNode` form the kernel already executes: `over`
 //! copies a node per named item with `${item}`, a template with nodes becomes a
 //! composite and `repeat` becomes a loop. A dotted name is a flavour that
-//! inherits its base (`review.security` extends `review`). Layers are bundled,
-//! user, repository and inline; a later layer shadows an earlier one.
+//! inherits its base (`review.security` extends `review`). Layers use the
+//! shared vocabulary (default, host, project, launch); a later layer shadows an
+//! earlier one.
 use super::*;
 use provenant_core::{close_matches, valid_name};
+use provenant_records::Precedence;
 use provenant_records::warning::{NAME_CASE_FOLDED, Warning, warn};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -1183,19 +1185,28 @@ impl Template {
     }
 }
 
-/// Where a template was defined. A later layer shadows an earlier one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Layer {
-    Bundled,
-    User,
-    Repository,
-    Inline,
+/// The shared vocabulary for where a template was defined. Exposed here so a
+/// caller that already names `graph::template::Layer` keeps naming the one
+/// shared type; the old four-variant enum is gone.
+pub use provenant_records::Layer;
+
+/// The layers a template can be declared in, lowest first. A later layer
+/// shadows an earlier one, and the rank keeps that order in one place.
+/// Spec: docs/specs/state.md#every-setting-reports-its-layer
+pub const TEMPLATE_PRECEDENCE: Precedence =
+    Precedence(&[Layer::Default, Layer::Host, Layer::Project, Layer::Launch]);
+
+fn layer_rank(layer: Layer) -> usize {
+    TEMPLATE_PRECEDENCE
+        .0
+        .iter()
+        .position(|candidate| *candidate == layer)
+        .unwrap_or(usize::MAX)
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TemplateLibrary {
-    entries: BTreeMap<String, BTreeMap<Layer, Template>>,
+    entries: BTreeMap<String, BTreeMap<usize, (Layer, Template)>>,
 }
 
 const BUNDLED: &[(&str, &str)] = &[
@@ -1297,7 +1308,7 @@ impl TemplateLibrary {
                     .entries
                     .entry((*name).into())
                     .or_default()
-                    .insert(Layer::Bundled, template);
+                    .insert(layer_rank(Layer::Default), (Layer::Default, template));
             }
         }
         // Invalid bundled assets are detected by the catalogue tests.
@@ -1306,6 +1317,9 @@ impl TemplateLibrary {
     }
 
     pub fn insert(&mut self, layer: Layer, name: &str, template: Template) -> Result<(), String> {
+        if !TEMPLATE_PRECEDENCE.0.contains(&layer) {
+            return Err(format!("template layer {} is not declared", layer.as_str()));
+        }
         if !valid_template_name(name) {
             return Err(format!("template name {name:?} is invalid"));
         }
@@ -1315,7 +1329,7 @@ impl TemplateLibrary {
         self.entries
             .entry(name.into())
             .or_default()
-            .insert(layer, template);
+            .insert(layer_rank(layer), (layer, template));
         Ok(())
     }
 
@@ -1371,7 +1385,7 @@ impl TemplateLibrary {
                 layers
                     .values()
                     .next_back()
-                    .map(|template| (name.clone(), template.clone()))
+                    .map(|(_, template)| (name.clone(), template.clone()))
             })
             .collect()
     }
@@ -1426,13 +1440,13 @@ impl TemplateLibrary {
     pub fn layer(&self, name: &str) -> Option<Layer> {
         self.entries
             .get(name)
-            .and_then(|layers| layers.keys().next_back().copied())
+            .and_then(|layers| layers.values().next_back().map(|(layer, _)| *layer))
     }
 
     fn own(&self, name: &str) -> Option<&Template> {
         self.entries
             .get(name)
-            .and_then(|layers| layers.values().next_back())
+            .and_then(|layers| layers.values().next_back().map(|(_, template)| template))
     }
 
     /// Resolve a name, applying each flavour over its base.

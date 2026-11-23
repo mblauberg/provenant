@@ -1318,13 +1318,13 @@ fn route_list_attributes_a_bundled_weight_to_the_bundled_layer() -> Result {
                 .find(|member| member["model"] == "codex/gpt-6-luna")
         })
         .ok_or("bundled junior member")?;
-    assert_eq!(member["weight_layer"], "bundled");
+    assert_eq!(member["weight_layer"], "default");
     let human = rig.command(&["route", "list", "--pool", "junior", "--full"])?;
     let human = String::from_utf8_lossy(&human.stdout.bytes);
     assert!(
         human.contains("codex/gpt-6-luna source=bundled weight=")
-            && human.contains("weight_layer=bundled"),
-        "human route list must name the bundled weight layer: {human}"
+            && human.contains("weight_layer=default"),
+        "human route list must name the default weight layer: {human}"
     );
     Ok(())
 }
@@ -1346,11 +1346,11 @@ fn route_list_attributes_an_overridden_weight_to_host_config() -> Result {
         })
         .ok_or("configured junior member")?;
     assert_eq!(member["weight"], 7);
-    assert_eq!(member["weight_layer"], "host config");
+    assert_eq!(member["weight_layer"], "host");
     let human = rig.command(&["route", "list", "--pool", "junior", "--full"])?;
     let human = String::from_utf8_lossy(&human.stdout.bytes);
     assert!(
-        human.contains("codex/gpt-6-luna source=user weight=7 weight_layer=host config"),
+        human.contains("codex/gpt-6-luna source=user weight=7 weight_layer=host"),
         "human route list must name the overriding config layer: {human}"
     );
     Ok(())

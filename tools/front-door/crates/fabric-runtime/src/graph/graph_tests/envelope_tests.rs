@@ -252,7 +252,7 @@ fn filled_land(tier: provenant_records::workflow::RiskTier) -> LandRecord {
         extra: Default::default(),
         tier,
         policy: crate::config::LandPolicy::Ask,
-        policy_source: crate::config::LandSource::Project,
+        policy_source: crate::config::Layer::Project,
         branch: worst(OUTPUT_FIELD_BYTES),
         head: worst(OUTPUT_FIELD_BYTES),
         authorised_by: Some(LandAuthority::Chair {

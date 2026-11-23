@@ -1205,7 +1205,7 @@ fn fragment(
             layers
                 .get(&name)
                 .copied()
-                .unwrap_or(super::template::Layer::Inline),
+                .unwrap_or(super::template::Layer::Launch),
             &name,
             template,
         )?;

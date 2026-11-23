@@ -596,7 +596,7 @@ fn child_patch(
     if let Some(launch) = &request.launch {
         let library = context
             .library
-            .with(template::Layer::Inline, &launch.templates)
+            .with(template::Layer::Launch, &launch.templates)
             .map_err(PatchError::from)?;
         let mut node = launch.node.clone();
         node["id"] = request.id.clone().into();

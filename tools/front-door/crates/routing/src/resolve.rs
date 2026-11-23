@@ -6,8 +6,9 @@ use provenant_records::route_selection::{
     OutcomePrior, PriorSource, RouteDiagnostics, SelectionRule, WeightSource,
 };
 use provenant_records::{
-    RouteAlternative, RouteAlternatives, RouteConfidentiality, RouteEligibility, RouteExclusion,
-    RouteExclusionReason, RouteReadiness, RouteSelectionCandidate, RouteSelectionReceipt,
+    Layer, Precedence, RouteAlternative, RouteAlternatives, RouteConfidentiality, RouteEligibility,
+    RouteExclusion, RouteExclusionReason, RouteReadiness, RouteSelectionCandidate,
+    RouteSelectionReceipt,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -172,42 +173,27 @@ pub struct AccountPacingView {
     pub profile: Option<PacingProfile>,
     pub expires: Option<provenant_core::WallTime>,
 }
-/// The configuration layer a pool weight was set in. Bundled weights come
+/// The layers a pool weight can come from, lowest first. Bundled weights come
 /// from the shipped catalogue; the others come from an owner's configuration
 /// at host or project scope. Distinct from `RoutePoolMemberView::source`,
 /// which names the model's own provenance at pool granularity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub enum WeightLayer {
-    #[serde(rename = "bundled")]
-    Bundled,
-    #[serde(rename = "host config")]
-    HostConfig,
-    #[serde(rename = "project config")]
-    ProjectConfig,
-}
-impl WeightLayer {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Bundled => "bundled",
-            Self::HostConfig => "host config",
-            Self::ProjectConfig => "project config",
-        }
-    }
-}
+/// Spec: docs/specs/state.md#every-setting-reports-its-layer
+pub const WEIGHT_PRECEDENCE: Precedence =
+    Precedence(&[Layer::Default, Layer::Host, Layer::Project]);
 /// A pool defined in configuration overrides the whole bundled pool, so all of
 /// its weights share the layer recorded for that pool. Compiled defaults carry
 /// no pools; a project-scoped origin is reported as such when present.
-fn pool_weight_layer(config: &crate::RoutingConfig, name: &str) -> WeightLayer {
+fn pool_weight_layer(config: &crate::RoutingConfig, name: &str) -> Layer {
     if !config.pools.contains_key(name) {
-        return WeightLayer::Bundled;
+        return Layer::Default;
     }
     match config
         .preference_sources
         .get(&format!("domains.routing.pools.{name}"))
         .map(String::as_str)
     {
-        Some("project") => WeightLayer::ProjectConfig,
-        _ => WeightLayer::HostConfig,
+        Some("project") => Layer::Project,
+        _ => Layer::Host,
     }
 }
 #[derive(Debug, Serialize)]
@@ -219,7 +205,7 @@ pub struct RoutePoolMemberView {
     /// Layer that supplied this member's weight.
     pub weight_source: String,
     pub weight: u8,
-    pub weight_layer: WeightLayer,
+    pub weight_layer: Layer,
     pub effort: Option<String>,
     pub efforts: Vec<String>,
     pub free: bool,
@@ -4127,4 +4113,18 @@ fn spent_windows_reset(
         latest = latest.max(Some(reset));
     }
     latest
+}
+
+#[cfg(test)]
+mod weight_precedence_tests {
+    use super::*;
+
+    /// Spec: docs/specs/state.md#every-setting-reports-its-layer
+    #[test]
+    fn pool_weights_rank_default_then_host_then_project() {
+        assert_eq!(
+            WEIGHT_PRECEDENCE.0,
+            &[Layer::Default, Layer::Host, Layer::Project]
+        );
+    }
 }
