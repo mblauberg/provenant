@@ -1477,6 +1477,80 @@ fn tampered_request_names_the_request_digest_that_failed() -> TestResult {
 }
 
 #[test]
+fn sealed_base_twelve_request_with_retired_policy_names_reads() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = input();
+    store.create(&input, &call)?;
+
+    let mut value = serde_json::to_value(&input.request)?;
+    let mut profile = serde_json::to_value(&input.request.task.profile)?;
+    profile["launch_policy"] = serde_json::json!({
+        "rules": [
+            {
+                "code": "LEGACY_GIT",
+                "boundary": "git_isolation",
+                "strength": "refuse",
+                "knob": null,
+                "justification": "pre-rename boundary",
+                "site": "fixture",
+                "threshold": null,
+                "refusable": false,
+                "source": "dispatch"
+            },
+            {
+                "code": "LEGACY_INTEGRITY",
+                "boundary": "data_integrity",
+                "strength": "refuse",
+                "knob": null,
+                "justification": "pre-rename boundary",
+                "site": "fixture",
+                "threshold": null,
+                "refusable": false,
+                "source": "dispatch"
+            }
+        ]
+    });
+    value["task"]
+        .as_object_mut()
+        .ok_or("task object")?
+        .insert("profile".into(), profile);
+    let raw = crate::db::bytes(&value)?;
+    let digest = provenant_records::stored_record_digest("run-request", 1, &raw)?;
+    let path = context
+        .state_root
+        .as_path()
+        .join(format!("attempts/{}/request.json", input.attempt_id));
+    std::fs::write(&path, &raw)?;
+    let mut operation = store
+        .operation(&input.operation_id, &call)?
+        .ok_or("operation")?;
+    operation.request_digest = digest;
+    store.db.execute(
+        "UPDATE attempts SET operation_record=?1 WHERE id=?2",
+        rusqlite::params![crate::db::bytes(&operation)?, input.attempt_id.to_string()],
+    )?;
+
+    // Base 12 sealed the resolved policy, whose retired boundary names the
+    // current types reject. It must remain readable as an unknown extra field.
+    let decoded = store.request(input.attempt_id, &call)?;
+    let sealed = decoded
+        .task
+        .profile
+        .extra
+        .get("launch_policy")
+        .ok_or("legacy launch policy")?;
+    assert_eq!(sealed["rules"][0]["boundary"], "git_isolation");
+    assert_eq!(sealed["rules"][1]["boundary"], "data_integrity");
+    assert_eq!(decoded.task.profile.name, input.request.task.profile.name);
+    Ok(())
+}
+
+#[test]
 fn sealed_request_bytes_are_verified_before_normalising_defaults() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;

@@ -1408,27 +1408,24 @@ mod tests {
 
     // Spec: docs/specs/fabric.md#bounded-graphs-and-route-fallback
     #[test]
-    fn recovery_stream_uses_sealed_task_policy() -> Result<(), Box<dyn std::error::Error>> {
+    fn recovery_stream_without_host_context_uses_the_compiled_default()
+    -> Result<(), Box<dyn std::error::Error>> {
         use provenant_providers::Adapter;
-        use provenant_records::policy::{Policy, Source, Strength};
+        use provenant_records::policy::{Source, Strength};
         let dir = tempfile::tempdir()?;
-        let (_, mut child) = child_fixture(dir.path(), &SystemClock::new())?;
-        let mut sealed = Policy::default();
-        sealed.overlay(
-            &[("STREAM_IDENTITY_MISMATCH".into(), Strength::Refuse)].into(),
-            Source::Project,
-        );
-        child.request.task.profile.launch_policy = Some(sealed);
+        let (_, child) = child_fixture(dir.path(), &SystemClock::new())?;
+        // A request carries dispatch overrides, never a resolved policy snapshot;
+        // without host state the stream falls back to the compiled table.
         let recovered = super::super::settlement_policy(None, Some(&child.request.task));
         let stream = provenant_providers::codex::Codex
             .stream_for_continuation("session", "model", &recovered)?;
         assert_eq!(
             stream.policy.rule("STREAM_IDENTITY_MISMATCH").rule.strength,
-            Strength::Refuse
+            Strength::Warn
         );
         assert_eq!(
             stream.policy.rule("STREAM_IDENTITY_MISMATCH").source,
-            Source::Project
+            Source::CompiledDefault
         );
         Ok(())
     }

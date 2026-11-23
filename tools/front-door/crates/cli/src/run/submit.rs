@@ -284,7 +284,7 @@ pub fn submit(
     submit_with_host(session, edge, submission, call, None)
 }
 
-/// The launch policy a submission seals: host knobs, then project rules,
+/// The launch policy a submission resolves: host knobs, then project rules,
 /// then dispatch overrides. The disk precheck decides under this same policy.
 fn submission_policy(
     config: &provenant_config::ResolvedConfig<crate::domains::Domains>,
@@ -666,13 +666,6 @@ fn submit_with_launcher(
             task_profile.parent_sandboxed = attempt.parent_sandboxed;
             task_profile.admitted_by = attempt.admitted_by.clone();
 
-            let policy = submission_policy(
-                &config,
-                &session.context.project_id.to_string(),
-                &task_profile,
-                &attempt.policy_overrides,
-            );
-            task_profile.launch_policy = Some(policy);
             if attempt.new_worktree.is_some()
                 || !attempt.capabilities.is_empty()
                 || !attempt.write_roots.is_empty()

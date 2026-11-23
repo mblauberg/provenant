@@ -824,9 +824,6 @@ fn settlement_policy(
             let (state, _) = context.disk_roots();
             provenant_config::policy::for_task(state, &context.project_id.to_string(), task)
         }
-        (None, Some(task)) if task.profile.launch_policy.is_some() => {
-            provenant_config::policy::for_task(Path::new(""), "", task)
-        }
         // TODO(#3371 seam): run owner supplies task policy for legacy decode callers.
         _ => provenant_records::policy::Policy::default(),
     }

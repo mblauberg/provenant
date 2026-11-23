@@ -131,28 +131,6 @@ pub fn dispatch(profile: &provenant_records::run::HarnessProfile) -> BTreeMap<St
     values
 }
 pub fn for_task(state: &Path, project: &str, task: &provenant_records::run::TaskRequest) -> Policy {
-    if let Some(snapshot) = &task.profile.launch_policy {
-        // Only configurable strengths can be restored. Persisted data cannot
-        // replace table-owned boundaries, codes, knobs or justifications.
-        let mut policy = Policy::default();
-        for row in snapshot.rules.iter().cloned() {
-            let Some(table_rule) = policy
-                .rules
-                .iter()
-                .find(|effective| effective.rule.code == row.rule.code)
-            else {
-                continue;
-            };
-            if table_rule.rule.knob.is_none() {
-                continue;
-            }
-            policy.overlay(
-                &BTreeMap::from([(row.rule.code, row.rule.strength)]),
-                row.source,
-            );
-        }
-        return policy;
-    }
     let values = dispatch(&task.profile);
     let project_id = task
         .profile

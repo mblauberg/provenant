@@ -152,6 +152,10 @@ Immutable boundary refusals use `boundary_error`. Heuristic scanners offer no st
 `policy.<CODE>` knobs are in `config/harness-knobs.json`. A write scope lists expected files: a
 writer edits another file when the fix needs it and lists it in its handoff, and only a strict
 `WRITE_SCOPE` policy refuses that, before publication, retaining private work.
+Policy is dispatch state: a request seals its knobs, overrides and project key,
+not a resolved policy table. Each launch and continuation resolves the host,
+project and dispatch layers afresh, so a project policy change applies to the
+next continuation while immutable boundary refusals never depend on a snapshot.
 - Why: advisory checks must not become accidental authority boundaries.
 
 Every provider lane has its native tool and shell surface; read-only mode constrains filesystem

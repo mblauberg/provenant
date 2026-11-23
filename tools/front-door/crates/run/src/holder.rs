@@ -649,7 +649,7 @@ pub struct SealedTask {
     pub writer_worktree: Option<provenant_records::custody::Subject>,
 }
 impl SealedTask {
-    /// Restore host-sealed launch policy before validating the next generation.
+    /// Restore host-sealed access before validating the next generation.
     pub fn apply_access(&self, task: &mut TaskRequest) {
         task.access.network = Some(self.effective_network);
         task.access.database_ipc = self.effective_database_ipc;
@@ -6882,18 +6882,10 @@ mod writer_recovery_tests {
         }
         if matches!(case, BudgetStopCase::StrictScope) {
             run.request.task.profile.write_scope = vec!["src".into()];
-            let mut settings = provenant_config::policy::Settings::default();
-            settings
-                .projects
-                .entry(execution.project_id.to_string())
-                .or_default()
-                .rules
-                .insert(
-                    "WRITE_SCOPE".into(),
-                    provenant_records::policy::Strength::Refuse,
-                );
-            run.request.task.profile.launch_policy =
-                Some(settings.resolve(&execution.project_id.to_string(), &Default::default()));
+            run.request.task.profile.policy_overrides.insert(
+                "WRITE_SCOPE".into(),
+                provenant_records::policy::Strength::Refuse,
+            );
         }
         store.create(&run, &call)?;
         let id = run.attempt_id;
