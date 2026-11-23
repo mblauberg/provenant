@@ -1,4 +1,5 @@
-//! Read-only lane-cache and worktree disk inventory.
+//! Read-only legacy lane-cache and worktree disk inventory. No launch creates
+//! a lane cache after #3802; these rows retire what older releases left.
 pub use provenant_os::fs::available_bytes_at;
 
 /// Sample the existing volume containing a prospective output path.
@@ -16,7 +17,7 @@ pub fn available_bytes_at_existing(path: &std::path::Path) -> std::io::Result<u6
 }
 
 /// The tightest output volume for lane admission, build pauses and settlement.
-/// Prospective cache paths are sampled at their nearest existing ancestor.
+/// Legacy cache paths are sampled at their nearest existing ancestor.
 pub fn lane_available_bytes(state: &Path, home: &Path, cwd: &Path) -> std::io::Result<u64> {
     lane_available_bytes_with(state, home, cwd, available_bytes_at_existing)
 }

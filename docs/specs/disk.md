@@ -65,7 +65,7 @@ private Cargo caches; a leftover directory holding only its ownership marker and
 `CACHEDIR.TAG` is reclaimed in one pass whatever its owning project. One owner
 classification (live, foreign, replaced, gone) serves the leftover lane caches
 and shared targets.
-Last use is the newer of the launch stamp and the newest file time,
+Last use is the newer of the recorded stamp and the newest file time,
 and every removal names its target, owning worktree, reason and dating
 evidence. Each removal rechecks last use under the Cargo locks immediately before
 detaching anything (newest file time, stamps and the cache root's activity

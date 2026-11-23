@@ -52,13 +52,15 @@ pub fn tag_cache_directory(directory: &Directory) -> Result<(), FsError> {
         Err(error) => Err(error),
     }
 }
-/// A Cargo target's last-use stamp. Launches and seeds replace it with the
-/// wall time in microseconds since the epoch; GC reads that content.
+/// A managed Cargo target's last-use stamp. Target and seed work replace it
+/// with the wall time in microseconds since the epoch; GC reads that content.
 pub const TARGET_LAST_USED: &str = ".provenant-last-used";
-/// The activity marker under each managed Cargo cache root. Every launch and
-/// seed replaces it after stamping its targets.
+/// The activity marker under each managed Cargo cache root. A target stamp
+/// replaces it after stamping its targets.
 pub const CACHE_ACTIVITY_MARKER: &str = ".provenant-cache-activity";
-/// The directories Cargo builds into under a private lane cache.
+/// The build directories a managed Cargo root may hold. Lane launches no
+/// longer create them; GC still recognises legacy lane caches and shared
+/// targets by these names.
 pub const CARGO_TARGET_NAMES: [&str; 2] = ["target", "target-lint"];
 
 /// A target's last-use stamp in nanoseconds; `None` when it is absent or
@@ -71,8 +73,8 @@ pub fn read_last_use_stamp(target: &Directory) -> Option<i128> {
     Some(i128::from(micros).saturating_mul(1_000))
 }
 
-/// Which activity marker a cache root held. Writers replace the marker after
-/// their stamps, so an unchanged marker means no stamp landed after it was
+/// Which activity marker a cache root held. A target stamp replaces the marker
+/// after its writes, so an unchanged marker means no stamp landed after it was
 /// read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct CacheActivity(Option<(u64, u64, i128)>);
@@ -163,7 +165,7 @@ pub enum CacheGcReason {
     /// used for `gc.cargo_target_idle`.
     ForeignIdle,
     /// Another directory now stands at the owner path. The cache key records
-    /// the original worktree's identity, so no worktree builds here again.
+    /// the original worktree's identity, so no worktree owns this cache again.
     Replaced,
     /// The cache holds only its ownership marker and directory tag. Releases
     /// before #3802 created these without building; nothing can use one, so it
@@ -1419,7 +1421,8 @@ fn prune_worktree_cache(
                 root.rename_noreplace(name, root, &detached)
             })
             .map_err(cache_fs_error("rename to tombstone", Path::new(name)))?;
-            // The lane path is now free for a writer to create a fresh cache.
+            // No launch recreates the cache; the tombstone only lets a later
+            // sweep skip duplicate removal work.
             drop(if idle_removal {
                 idle_guard.take()
             } else {
@@ -1682,7 +1685,7 @@ pub enum OwnerStatus {
     /// or another project's.
     Foreign,
     /// Another directory stands at the owner path. The cache key records the
-    /// original identity, so no worktree builds in this cache again.
+    /// original identity, so no worktree owns this cache again.
     Replaced,
     /// Nothing exists at the owner path.
     Gone,

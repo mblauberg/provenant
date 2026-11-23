@@ -1,8 +1,10 @@
-//! Bounded retention for managed private and shared Cargo target directories.
+//! Bounded retention for managed shared Cargo targets and legacy private lane
+//! caches left before #3802 removed lane builds.
 //!
-//! Targets live in per-worktree lane caches and per-project shared caches. A
-//! target directory is idle when a non-blocking exclusive flock succeeds on all of Cargo's
-//! `.cargo-lock`, `.cargo-build-lock` and `.cargo-artifact-lock`. The cap counts
+//! Targets live in per-project shared caches and, where an older release left
+//! them, per-worktree lane caches. A target directory is idle when a
+//! non-blocking exclusive flock succeeds on all of Cargo's `.cargo-lock`,
+//! `.cargo-build-lock` and `.cargo-artifact-lock`. The cap counts
 //! every managed target directory, idle and busy. Idle targets are removed least
 //! recently used first until the cap and the free-space floor both hold; when
 //! busy directories alone exceed the cap, every eligible idle directory goes and
@@ -1072,8 +1074,8 @@ pub fn mark_managed_target_use(home: &Path, target: &Path) -> io::Result<bool> {
     Ok(stamped)
 }
 
-/// Stamp every target under a private lane cache as used now: `target` and,
-/// when present, `target-lint`, which shares the cache and its owner.
+/// Stamp every target under a legacy private lane cache. No launch creates one
+/// after #3802; GC fixtures and retirement checks still use this helper.
 pub fn mark_cache_targets_used(home: &Path, cache: &Path) -> io::Result<usize> {
     let mut stamped = 0;
     for target in TARGETS {

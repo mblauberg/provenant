@@ -52,7 +52,7 @@ pub(crate) fn session_warning(state: &Path, home: &Path, cwd: &Path) -> Option<S
         for (name, path) in [
             ("state", state),
             ("checkout", cwd),
-            ("lane Cargo cache", cache.as_path()),
+            ("legacy lane Cargo cache", cache.as_path()),
         ] {
             let (path, device) = existing(path)?;
             if devices.contains(&device) {

@@ -384,7 +384,8 @@ pub const DEFAULT_LANE_PORT_BLOCKS: u64 = 64;
 /// Hard ceilings on the configurable lane caps.
 pub const WRITER_LANES_CEILING: u64 = 64;
 pub const PROJECT_WRITER_LANES_CEILING: u64 = 32;
-/// Recency grace for lane build output when `build_dir_grace_seconds` is unset.
+/// Recency grace for managed Cargo targets, including legacy lane build
+/// output, when `build_dir_grace_seconds` is unset.
 pub const DEFAULT_BUILD_DIR_GRACE_SECONDS: u64 = 15 * 60;
 /// The asset's -1 sentinel selects the host-dependent default.
 pub fn deserialize_auto<'de, D: serde::Deserializer<'de>>(

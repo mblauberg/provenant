@@ -20,6 +20,11 @@ release. A `PROVENANT_*` name the environment table does not declare is
 internal, and every `PROVENANT_TEST_*` name is internal by rule and never
 declared. Promoting an item is a one-entry change to its declaration.
 
+`PROVENANT_LANE_CARGO_LINT_TARGET` was formerly `stable`. It is removed rather
+than retired in place: its only producer was the lane Cargo cache, which writer
+lanes no longer create, so no lane sets it and no consumer can read it. The
+removal is named in the release notes even though it lands outside a major.
+
 - Why: a consumer must know which surfaces it may build on before it builds,
   and promising only what is used keeps the rest free to improve.
 - Owner: `crates/core/src/consumer_env.rs`

@@ -5204,7 +5204,8 @@ pub(super) fn prepare_candidates_inner(
             push_launch_warning(&mut route, warning);
         }
         // A read-only lane builds in its scratch by design. No writer launch
-        // exports a target; warn if an adapter still points one into attempt tmp.
+        // exports a target; warn if an adapter still points one into attempt tmp,
+        // where nothing preserves or reuses the output.
         if let Some((_, target_val)) = spec
             .env
             .iter()
@@ -5216,7 +5217,7 @@ pub(super) fn prepare_candidates_inner(
                 push_launch_warning(
                     &mut route,
                     format!(
-                        "CARGO_TARGET_DIR is set under the attempt's tmp directory ({}); build output bypasses the lane's warm target",
+                        "CARGO_TARGET_DIR is set under the attempt's tmp directory ({}); writer lanes have no Cargo target and this output is discarded with the attempt",
                         target_path.display()
                     ),
                 );
