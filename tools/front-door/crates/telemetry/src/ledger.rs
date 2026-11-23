@@ -10,8 +10,10 @@
 //! Every reader reports a line it does not recognise, by segment and line
 //! number. None is skipped silently.
 use crate::{CostTotal, PriceTable, TelemetryError, reducer::Money, segments};
-use provenant_core::{CancelToken, Clock, ProjectId, WallTime};
-use provenant_os::fs::{Directory, FsError, PublishMode, ledger::Ledger as JsonLedger};
+use provenant_core::{CancelToken, Clock, DurationMicros, ProjectId, WaitBudget, WallTime};
+use provenant_os::fs::{
+    Directory, FsError, LockGuard, LockMode, PublishMode, ledger::Ledger as JsonLedger,
+};
 use provenant_records::{AccountIdentity, AttemptFact, UsageSource, WorkKey};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -30,6 +32,11 @@ pub const V3_FORMAT: &str = "provenant.usage-ledger.v3";
 /// Where v3 source spellings map. The table is exhaustive: an unrecognised
 /// spelling is reported and copied to a sidecar, never guessed.
 const V3_SOURCE_SETTLEMENT: &str = "settlement";
+/// The write lock both settlement appends and the v3→v4 rewrite hold. A whole
+/// segment rewrite under this lock cannot lose a row another writer appended.
+const LOCK: &str = "usage-ledger.lock";
+/// Bounded wait for a live append to finish before giving up on a write.
+const LOCK_WAIT_MICROS: u64 = 5_000_000;
 /// Largest segment read. A segment holds one day of attempts.
 const SEGMENT_CAP: u64 = 64 << 20;
 
@@ -171,9 +178,10 @@ pub fn row(
     let usage = &fact.usage;
     Ok(Row {
         format: FORMAT.into(),
-        // Settlement reads the run store's usage into this ledger; the row is
-        // an ingest of that observation, not a live provider stream.
-        source: UsageSource::Ingest,
+        // Settlement reads the run store's usage after the attempt ends: that
+        // is a session-store observation. `Ingest` is reserved for a row from
+        // another host or lane, and a live stream is `Stream`.
+        source: UsageSource::SessionStore,
         project: fact.project_id,
         graph: key.graph().to_owned(),
         node: key.node().to_owned(),
@@ -210,13 +218,15 @@ pub struct Appended {
     pub unrecognised: Vec<Unrecognised>,
 }
 
-/// Append rows not already observed in the ledger, without a lock. Creates the
-/// ledger directory, never the state root. Each segment is read once.
+/// Append rows not already observed in the ledger. Creates the ledger
+/// directory, never the state root. The write lock is held across the whole
+/// read-modify-append so a concurrent v3→v4 rewrite cannot lose an appended
+/// row; under it, stray v3 rows in the touched segments are migrated first.
 pub fn append(
     state: &Path,
     rows: &[Row],
-    _clock: &dyn Clock,
-    _cancel: &CancelToken,
+    clock: &dyn Clock,
+    cancel: &CancelToken,
 ) -> Result<Appended, LedgerError> {
     let mut appended = Appended::default();
     if rows.is_empty() {
@@ -228,11 +238,28 @@ pub fn append(
         Err(error) if error.is_exists() => {}
         Err(error) => return Err(error.into()),
     }
+    // The lock lives in the state root, not beside the segments: every entry
+    // in the ledger directory that is not a segment is reported to readers.
+    let _lock = root.lock(
+        OsStr::new(LOCK),
+        LockMode::Exclusive,
+        WaitBudget::up_to(
+            clock.mono_now(),
+            DurationMicros::from_micros(LOCK_WAIT_MICROS),
+        ),
+        cancel,
+        clock,
+    )?;
     let directory = root.open_directory(OsStr::new(DIRECTORY))?;
     let mut segments = BTreeMap::<String, Vec<&Row>>::new();
     for row in rows {
         segments.entry(row.segment()).or_default().push(row);
     }
+    // A v2.8.2 process still running at install can append v3 rows after the
+    // one-shot step has run. Migrate them under this same lock on write-open;
+    // the reader stays strict and never learns to accept v3.
+    let touched: Vec<String> = segments.keys().cloned().collect();
+    migrate_v3_segments(state, &directory, &touched)?;
     for (segment, rows) in segments {
         let existing = read_segment(&directory, &segment)?;
         let created = existing.is_none();
@@ -427,9 +454,10 @@ pub struct V4Migration {
 /// source spelling maps through the exhaustive table above. A line whose
 /// source cannot be mapped is reported and copied unchanged to a
 /// `<segment>.v3-unmapped` sidecar, never guessed. Idempotent: a second run
-/// finds no v3 lines and changes nothing.
+/// finds no v3 lines and changes nothing. Install runs after the live-attempt
+/// advisory, so a busy write lock is a retryable failure, never a silent skip.
 pub fn migrate_to_v4(state: &Path) -> Result<V4Migration, LedgerError> {
-    let mut result = V4Migration::default();
+    let result = V4Migration::default();
     let root = match Directory::open_anchor(state) {
         Ok(root) => root,
         Err(error) if error.is_not_found() => return Ok(result),
@@ -440,9 +468,23 @@ pub fn migrate_to_v4(state: &Path) -> Result<V4Migration, LedgerError> {
         Err(error) if error.is_not_found() => return Ok(result),
         Err(error) => return Err(error.into()),
     };
+    let _guard: LockGuard = root.try_lock(OsStr::new(LOCK), LockMode::Exclusive)?;
     let names = segments::list(&directory)?;
+    migrate_v3_segments(state, &directory, &names)
+}
+
+/// Rewrite the v3 lines in `names` under an already held write lock. Both the
+/// install step and the append path share this one migration, so there is no
+/// second, permissive reader for old bytes.
+fn migrate_v3_segments(
+    state: &Path,
+    directory: &Directory,
+    names: &[String],
+) -> Result<V4Migration, LedgerError> {
+    let mut result = V4Migration::default();
     for name in names {
-        let Some(bytes) = read_segment(&directory, &name)? else {
+        let name = name.as_str();
+        let Some(bytes) = read_segment(directory, name)? else {
             continue;
         };
         let mut rewritten = Vec::new();
@@ -463,12 +505,14 @@ pub fn migrate_to_v4(state: &Path) -> Result<V4Migration, LedgerError> {
             }
             let source = value.get("source").and_then(serde_json::Value::as_str);
             let mapped = match source {
-                Some(V3_SOURCE_SETTLEMENT) => Some(UsageSource::Ingest),
+                // Settlement read the run store after the attempt. Ingest is
+                // for rows from another host or lane, not local settlement.
+                Some(V3_SOURCE_SETTLEMENT) => Some(UsageSource::SessionStore),
                 _ => None,
             };
             let Some(mapped) = mapped else {
                 result.unmapped.push(Unrecognised {
-                    segment: name.clone(),
+                    segment: name.to_owned(),
                     line: Some(index as u64 + 1),
                     reason: format!("unmappable v3 source {source:?}"),
                 });
@@ -489,7 +533,7 @@ pub fn migrate_to_v4(state: &Path) -> Result<V4Migration, LedgerError> {
         if changed {
             directory
                 .atomic_write(
-                    OsStr::new(&name),
+                    OsStr::new(name),
                     ".migration.",
                     &rewritten,
                     PublishMode::Replace,
@@ -497,7 +541,7 @@ pub fn migrate_to_v4(state: &Path) -> Result<V4Migration, LedgerError> {
                 .map_err(LedgerError::Filesystem)?;
             result
                 .changed
-                .push(state.join(DIRECTORY).join(&name).display().to_string());
+                .push(state.join(DIRECTORY).join(name).display().to_string());
         }
         if !sidecar.is_empty() {
             let sidecar_name = format!("{name}.v3-unmapped");
