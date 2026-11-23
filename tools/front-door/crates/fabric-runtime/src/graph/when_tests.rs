@@ -272,7 +272,7 @@ fn a_condition_reads_a_template_parameter_before_a_launch_value() {
     let mut library = template::TemplateLibrary::bundled();
     library
         .insert_toml(
-            template::Layer::Inline,
+            template::Layer::Launch,
             "pair",
             r#"
 doc = "Two stages, the second optional."

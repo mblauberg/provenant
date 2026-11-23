@@ -3,8 +3,23 @@ use std::collections::BTreeMap;
 
 use provenant_cli::domains::{LandOverride, LandSettings};
 use provenant_config::Origin;
+use provenant_records::{Layer, Precedence};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+/// The layers a landing policy leaf can come from, lowest first. Repository
+/// declarations sit beneath explicit host values; project overrides, target
+/// rules, tiers and the invocation each sit above them.
+/// Spec: docs/specs/state.md#every-setting-reports-its-layer
+pub const LAND_POLICY_PRECEDENCE: Precedence = Precedence(&[
+    Layer::Default,
+    Layer::Project,
+    Layer::Host,
+    Layer::HostProject,
+    Layer::Route,
+    Layer::Tier,
+    Layer::Launch,
+]);
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TargetRule {
@@ -16,7 +31,7 @@ pub struct TargetRule {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Source {
-    pub layer: String,
+    pub layer: Layer,
     pub path: Option<Value>,
     pub key: String,
     pub rule: Option<TargetRule>,
@@ -25,9 +40,9 @@ pub struct Source {
 }
 
 impl Source {
-    fn new(layer: &str, key: String, path: Option<Value>) -> Self {
+    fn new(layer: Layer, key: String, path: Option<Value>) -> Self {
         Self {
-            layer: layer.into(),
+            layer,
             path,
             key,
             rule: None,
@@ -183,9 +198,9 @@ impl LandPolicy {
             let key = format!("domains.pr.land.budget.rate_micros_per_minute.{pool}");
             let source = match origins.get(&key) {
                 Some(Origin::User { path }) => {
-                    Source::new("host", key.clone(), Some(serde_json::to_value(path)?))
+                    Source::new(Layer::Host, key.clone(), Some(serde_json::to_value(path)?))
                 }
-                _ => Source::new("bundled", key.clone(), None),
+                _ => Source::new(Layer::Default, key.clone(), None),
             };
             budget_rate_micros_per_minute.insert(
                 pool.clone(),
@@ -211,9 +226,9 @@ impl LandPolicy {
             });
             let source = match origin {
                 Some(Origin::User { path: file }) => {
-                    Source::new("host", path, Some(serde_json::to_value(file)?))
+                    Source::new(Layer::Host, path, Some(serde_json::to_value(file)?))
                 }
-                _ => Source::new("bundled", path, None),
+                _ => Source::new(Layer::Default, path, None),
             };
             fields.insert(
                 key,
@@ -245,7 +260,7 @@ impl LandPolicy {
                     if !beneath_host
                         || !rates
                             .get(pool)
-                            .is_some_and(|rate| rate.source.layer == "host")
+                            .is_some_and(|rate| rate.source.layer == Layer::Host)
                     {
                         rates.insert(
                             pool.clone(),
@@ -266,7 +281,7 @@ impl LandPolicy {
                 if !beneath_host
                     || !fields
                         .get(&key)
-                        .is_some_and(|field| field.source.layer == "host")
+                        .is_some_and(|field| field.source.layer == Layer::Host)
                 {
                     let field_source = source.field(&key, origins)?;
                     fields.insert(
@@ -286,7 +301,7 @@ impl LandPolicy {
                 &mut fields,
                 declaration,
                 Source::new(
-                    "repository",
+                    Layer::Project,
                     "domains.pr.land".into(),
                     Some(serde_json::to_value(path)?),
                 ),
@@ -300,7 +315,7 @@ impl LandPolicy {
                 &mut fields,
                 override_,
                 Source::new(
-                    "project",
+                    Layer::HostProject,
                     format!("domains.pr.land.projects.{}", project.unwrap_or_default()),
                     None,
                 ),
@@ -337,7 +352,7 @@ impl LandPolicy {
         } else {
             (&settings.branches, "domains.pr.land.branches".into(), None)
         };
-        let rules_file = Source::new("target_rule", rules_key.clone(), rules_path)
+        let rules_file = Source::new(Layer::Route, rules_key.clone(), rules_path)
             .field("", origins)?
             .path;
         if let Some(target) = target
@@ -356,7 +371,7 @@ impl LandPolicy {
                 &mut fields,
                 &override_,
                 Source {
-                    layer: "target_rule".into(),
+                    layer: Layer::Route,
                     path: rules_file.clone(),
                     key: format!("{rules_key}.{index}"),
                     rule: Some(TargetRule {
@@ -373,11 +388,11 @@ impl LandPolicy {
         }
         for (layer, key, override_) in [
             (
-                "tier",
+                Layer::Tier,
                 tier.map(|key| format!("domains.pr.land.tiers.{key}")),
                 tier.and_then(|key| settings.tiers.get(key)),
             ),
-            ("invocation", None, Some(invocation)),
+            (Layer::Launch, None, Some(invocation)),
         ] {
             if let Some(override_) = override_ {
                 if override_.branches.is_some() {
@@ -447,7 +462,7 @@ impl LandPolicy {
                 key.clone(),
                 Sourced {
                     value,
-                    source: Source::new("invocation", format!("request.{key}"), None),
+                    source: Source::new(Layer::Launch, format!("request.{key}"), None),
                     extra: Default::default(),
                 },
             );
@@ -556,15 +571,22 @@ mod tests {
             },
         )]);
         let cases = [
-            (None, None, None, None, Strategy::Batch, "host"),
-            (Some("p"), None, None, None, Strategy::Direct, "project"),
+            (None, None, None, None, Strategy::Batch, Layer::Host),
+            (
+                Some("p"),
+                None,
+                None,
+                None,
+                Strategy::Direct,
+                Layer::HostProject,
+            ),
             (
                 Some("p"),
                 Some("release/x"),
                 None,
                 None,
                 Strategy::Queue,
-                "target_rule",
+                Layer::Route,
             ),
             (
                 Some("p"),
@@ -572,7 +594,7 @@ mod tests {
                 Some("risk"),
                 None,
                 Strategy::Async,
-                "tier",
+                Layer::Tier,
             ),
             (
                 Some("p"),
@@ -580,7 +602,7 @@ mod tests {
                 Some("risk"),
                 Some(Strategy::Direct),
                 Strategy::Direct,
-                "invocation",
+                Layer::Launch,
             ),
         ];
         for (project, target, tier, strategy, expected, source) in cases {
@@ -655,7 +677,7 @@ mod tests {
             field.value,
             serde_json::to_value(&settings.approval_sources)?
         );
-        assert_eq!(field.source.layer, "bundled");
+        assert_eq!(field.source.layer, Layer::Default);
         settings.projects.insert(
             "p".into(),
             LandOverride {
@@ -674,7 +696,10 @@ mod tests {
             policy.fields["approval_sources"].value,
             serde_json::json!(["forge"])
         );
-        assert_eq!(policy.fields["approval_sources"].source.layer, "project");
+        assert_eq!(
+            policy.fields["approval_sources"].source.layer,
+            Layer::HostProject
+        );
         assert!(
             serde_json::from_value::<LandSettings>(
                 serde_json::json!({"approval_sources":["receipt"]})
@@ -731,17 +756,17 @@ mod tests {
         )?;
         assert_eq!(
             policy.budget_rate_micros_per_minute["host"].source.layer,
-            "host"
+            Layer::Host
         );
         assert_eq!(
             policy.budget_rate_micros_per_minute["project.with.dot"]
                 .source
                 .layer,
-            "project"
+            Layer::HostProject
         );
         assert_eq!(
             policy.budget_rate_micros_per_minute["shared"].source.layer,
-            "tier"
+            Layer::Tier
         );
         assert_eq!(
             policy.settings()?.budget.rate_micros_per_minute,
@@ -792,9 +817,9 @@ mod tests {
         let base = LandPolicy::resolve(&settings, &origins, None, None, &LandOverride::default())?;
         assert_eq!(base.fields["publish_settle_seconds"].value, 30);
         assert_eq!(base.fields["batch_size"].value, 7);
-        assert_eq!(base.fields["batch_size"].source.layer, "host");
+        assert_eq!(base.fields["batch_size"].source.layer, Layer::Host);
         assert!(base.fields["batch_size"].source.path.is_some());
-        assert_eq!(base.fields["gate.kind"].source.layer, "bundled");
+        assert_eq!(base.fields["gate.kind"].source.layer, Layer::Default);
         let project = LandPolicy::resolve(
             &settings,
             &origins,
@@ -805,10 +830,13 @@ mod tests {
         assert_eq!(project.fields["publish_settle_seconds"].value, 12);
         assert_eq!(
             project.fields["publish_settle_seconds"].source.layer,
-            "project"
+            Layer::HostProject
         );
         assert_eq!(project.fields["batch_size"].value, 4);
-        assert_eq!(project.fields["batch_size"].source.layer, "project");
+        assert_eq!(
+            project.fields["batch_size"].source.layer,
+            Layer::HostProject
+        );
         assert_eq!(project.fields["gate.timeout_seconds"].value, 50);
         let tier = LandPolicy::resolve(
             &settings,
@@ -818,21 +846,40 @@ mod tests {
             &LandOverride::default(),
         )?;
         assert_eq!(tier.fields["publish_settle_seconds"].value, 7);
-        assert_eq!(tier.fields["publish_settle_seconds"].source.layer, "tier");
+        assert_eq!(
+            tier.fields["publish_settle_seconds"].source.layer,
+            Layer::Tier
+        );
         assert_eq!(tier.fields["batch_size"].value, 2);
-        assert_eq!(tier.fields["batch_size"].source.layer, "tier");
+        assert_eq!(tier.fields["batch_size"].source.layer, Layer::Tier);
         let effective =
             LandPolicy::resolve(&settings, &origins, Some("p"), Some("high"), &invocation)?;
         assert_eq!(effective.fields["batch_size"].value, 1);
-        assert_eq!(effective.fields["batch_size"].source.layer, "invocation");
+        assert_eq!(effective.fields["batch_size"].source.layer, Layer::Launch);
         assert_eq!(
             effective.fields["gate.timeout_seconds"].source.layer,
-            "project"
+            Layer::HostProject
         );
         let resolved = effective.settings()?;
         assert_eq!(resolved.strategy, Strategy::Direct);
         assert_eq!(resolved.batch_size, 1);
         assert_eq!(resolved.gate.timeout_seconds, 50);
         Ok(())
+    }
+    /// Spec: docs/specs/state.md#every-setting-reports-its-layer
+    #[test]
+    fn landing_policy_precedence_preserves_the_declared_layer_order() {
+        assert_eq!(
+            LAND_POLICY_PRECEDENCE.0,
+            &[
+                Layer::Default,
+                Layer::Project,
+                Layer::Host,
+                Layer::HostProject,
+                Layer::Route,
+                Layer::Tier,
+                Layer::Launch,
+            ]
+        );
     }
 }

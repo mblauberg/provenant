@@ -6,6 +6,7 @@ use crate::permissions::{
 };
 use crate::review_exempt::{MAX_PATTERNS, ReviewExempt, valid_pattern};
 use provenant_config::{DomainConfig, DomainSection, FieldMetadata, SectionError};
+use provenant_records::run::SandboxConstraint;
 use provenant_records::{BudgetAction, BudgetGrace, Layer, Limit, LimitStrength};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -138,24 +139,11 @@ const MAX_SANDBOXED_ROUTES: usize = 64;
 fn default_sandboxed_routes() -> Vec<String> {
     Vec::new()
 }
-/// Why a lane runs with or without the sandbox, strongest reason first.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SandboxSource {
-    /// The lane was started, or added or replaced in a graph, by a lane
-    /// sandboxed by its route, its own parent or the knob.
-    Parent,
-    /// The route matches `domains.run.sandboxed_routes`.
-    Route,
-    /// Explicit network or path denials require kernel enforcement.
-    Restriction,
-    /// The host platform does not implement sandbox confinement.
-    Platform,
-    /// The `lanes.sandbox` knob, from the run, graph node or host `[knobs]`.
-    Knob,
-    /// Default resolution: lanes run unsandboxed like the CLI started by hand.
-    Default,
-}
+// The layers a sandbox mode can come from are declared once as
+// `provenant_records::run::SANDBOX_PRECEDENCE`, beside the receipt this mode
+// feeds. A restriction or an unsupported platform is a `SandboxConstraint`
+// beside the host layer, never a separate source of the value.
+// Spec: docs/specs/state.md#every-setting-reports-its-layer
 /// Whether launch needs a newly compiled profile to meet its selected policy.
 /// The inherited case is only produced when the route independently resolves
 /// to trusted, no-profile execution without the outer OS sandbox.
@@ -210,8 +198,13 @@ pub struct SandboxMode {
     pub requested: bool,
     /// Whether the lane effectively runs under a sandbox.
     pub effective: bool,
-    /// Why the lane runs with or without the sandbox.
-    pub source: SandboxSource,
+    /// The layer that decided whether the lane runs with or without the
+    /// sandbox. An explicit knob records the host layer with no constraint;
+    /// the caller that knows the knob's own layer can rebind it on the receipt.
+    pub source: Layer,
+    /// A cap from a restriction or the platform, beside the layer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub constraint: Option<SandboxConstraint>,
     /// Whether this attempt needs a new profile. This is internal launch
     /// state; receipts record the effective mode and source instead.
     #[serde(skip)]
@@ -226,13 +219,14 @@ impl SandboxMode {
     pub fn required(
         requested: bool,
         effective: bool,
-        source: SandboxSource,
+        source: Layer,
         warning: Option<String>,
     ) -> Self {
         Self {
             requested,
             effective,
             source,
+            constraint: None,
             backend_requirement: BackendRequirement::Required,
             warning,
         }
@@ -430,7 +424,8 @@ impl RunConfig {
             return SandboxMode {
                 requested,
                 effective: true,
-                source: SandboxSource::Restriction,
+                source: Layer::Host,
+                constraint: Some(SandboxConstraint::Restriction),
                 backend_requirement: BackendRequirement::Required,
                 warning: if inputs.knob == Some("off") {
                     Some(
@@ -455,7 +450,7 @@ impl RunConfig {
             return SandboxMode {
                 requested,
                 effective: true,
-                source: SandboxSource::Parent,
+                source: Layer::Parent,
                 backend_requirement: if trusted_inherited {
                     BackendRequirement::TrustedInherited
                 } else {
@@ -471,7 +466,8 @@ impl RunConfig {
             return SandboxMode {
                 requested,
                 effective,
-                source: SandboxSource::Platform,
+                source: Layer::Host,
+                constraint: Some(SandboxConstraint::Platform),
                 backend_requirement: BackendRequirement::Required,
                 warning: effective
                     .then(|| "requested sandbox is unavailable on this platform".into()),
@@ -483,7 +479,7 @@ impl RunConfig {
                 return SandboxMode {
                     requested: false,
                     effective: true,
-                    source: SandboxSource::Parent,
+                    source: Layer::Parent,
                     backend_requirement: BackendRequirement::Required,
                     warning: Some(
                         "active parent sandbox floor requires confinement despite sandbox=off"
@@ -506,7 +502,7 @@ impl RunConfig {
             return SandboxMode {
                 requested: false,
                 effective: false,
-                source: SandboxSource::Knob,
+                source: Layer::Host,
                 backend_requirement: BackendRequirement::Required,
                 warning,
             };
@@ -516,7 +512,7 @@ impl RunConfig {
             return SandboxMode {
                 requested: true,
                 effective: true,
-                source: SandboxSource::Knob,
+                source: Layer::Host,
                 backend_requirement: BackendRequirement::Required,
                 warning: None,
             };
@@ -526,7 +522,7 @@ impl RunConfig {
             SandboxMode {
                 requested: false,
                 effective: true,
-                source: SandboxSource::Parent,
+                source: Layer::Parent,
                 backend_requirement: BackendRequirement::Required,
                 warning: None,
             }
@@ -534,7 +530,7 @@ impl RunConfig {
             SandboxMode {
                 requested: false,
                 effective: true,
-                source: SandboxSource::Route,
+                source: Layer::Route,
                 backend_requirement: BackendRequirement::Required,
                 warning: None,
             }
@@ -542,7 +538,7 @@ impl RunConfig {
             SandboxMode {
                 requested: false,
                 effective: false,
-                source: SandboxSource::Default,
+                source: Layer::Default,
                 backend_requirement: BackendRequirement::Required,
                 warning: inputs
                     .knob
@@ -900,10 +896,10 @@ mod tests {
         let availability = Availability::Unavailable {
             reason: AvailabilityReason::ProbeFailed,
         };
-        let mut isolated = SandboxMode::required(true, true, SandboxSource::Knob, None);
+        let mut isolated = SandboxMode::required(true, true, Layer::Host, None);
         assert!(isolated.resolve_backend(availability, true).is_err());
         assert!(isolated.effective);
-        let mut host = SandboxMode::required(true, true, SandboxSource::Knob, None);
+        let mut host = SandboxMode::required(true, true, Layer::Host, None);
         assert!(host.resolve_backend(availability, false).is_ok());
         assert!(!host.effective);
         assert!(
@@ -1194,7 +1190,7 @@ mod tests {
                     mode.effective,
                     "inherited OS sandbox must always be reported effective"
                 );
-                assert_eq!(mode.source, SandboxSource::Parent);
+                assert_eq!(mode.source, Layer::Parent);
                 if knob == Some("off") {
                     assert!(
                         mode.warning.is_some(),
@@ -1305,7 +1301,8 @@ mod tests {
             let mode = default_config.sandbox_for(input);
             assert_eq!(mode.effective, knob == Some("on"));
             assert_eq!(mode.requested, knob == Some("on"));
-            assert_eq!(mode.source, SandboxSource::Platform);
+            assert_eq!(mode.source, Layer::Host);
+            assert_eq!(mode.constraint, Some(SandboxConstraint::Platform));
         }
     }
     #[test]

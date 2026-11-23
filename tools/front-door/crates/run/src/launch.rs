@@ -20,23 +20,13 @@ use std::{
 fn sandbox_mode_receipt(
     mode: &provenant_confinement::run_config::SandboxMode,
 ) -> provenant_records::run::SandboxModeReceipt {
-    use provenant_confinement::run_config::SandboxSource;
-    use provenant_records::{Layer, run::SandboxConstraint};
-    let (source, constraint) = match mode.source {
-        SandboxSource::Parent => (Layer::Parent, None),
-        SandboxSource::Route => (Layer::Route, None),
-        SandboxSource::Restriction => (Layer::Host, Some(SandboxConstraint::Restriction)),
-        SandboxSource::Platform => (Layer::Host, Some(SandboxConstraint::Platform)),
-        // The preparation edge records the knob's actual layer on the sibling
-        // admission receipt; the supervisor rebind keeps the host-layer default.
-        SandboxSource::Knob => (Layer::Host, None),
-        SandboxSource::Default => (Layer::Default, None),
-    };
     provenant_records::run::SandboxModeReceipt {
         requested: mode.requested,
         effective: mode.effective,
-        source,
-        constraint,
+        // The preparation edge records the knob's actual layer on the sibling
+        // admission receipt; the supervisor rebind keeps the host-layer default.
+        source: mode.source,
+        constraint: mode.constraint,
         warning: mode.warning.clone(),
         extra: Default::default(),
     }

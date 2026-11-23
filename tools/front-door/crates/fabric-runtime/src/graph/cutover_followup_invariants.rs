@@ -105,7 +105,7 @@ impl AttemptOwner for Owner {
     ) -> crate::config::LandChoice {
         crate::config::LandChoice {
             policy: crate::config::LandPolicy::Ask,
-            source: crate::config::LandSource::Project,
+            source: crate::config::Layer::Project,
         }
     }
     fn land(&mut self, request: LandRequest<'_>) -> Result<LandObservation, Self::Error> {

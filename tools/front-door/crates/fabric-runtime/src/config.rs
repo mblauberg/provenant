@@ -1,6 +1,7 @@
 //! Fabric owns domain policy and complete compiled profile assets.
 use provenant_config::{DomainConfig, DomainSection, FieldMetadata, Profile, SectionError};
 use provenant_core::HostId;
+use provenant_records::{Layer, Precedence};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -279,19 +280,16 @@ pub struct GraphLand {
     pub projects: BTreeMap<String, LandTiers>,
 }
 
+/// The layers a land policy can come from, lowest first. A project entry
+/// overrides the host entry, which overrides the compiled default.
+/// Spec: docs/specs/state.md#every-setting-reports-its-layer
+pub const LAND_PRECEDENCE: Precedence = Precedence(&[Layer::Default, Layer::Host, Layer::Project]);
+
 /// The effective policy for one tier and the layer it came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LandChoice {
     pub policy: LandPolicy,
-    pub source: LandSource,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LandSource {
-    Default,
-    Config,
-    Project,
+    pub source: Layer,
 }
 
 impl GraphLand {
@@ -322,17 +320,17 @@ impl GraphLand {
         {
             LandChoice {
                 policy,
-                source: LandSource::Project,
+                source: Layer::Project,
             }
         } else if let Some(policy) = host.get(tier) {
             LandChoice {
                 policy,
-                source: LandSource::Config,
+                source: Layer::Host,
             }
         } else {
             LandChoice {
                 policy: Self::default_policy(tier),
-                source: LandSource::Default,
+                source: Layer::Default,
             }
         }
     }
@@ -1421,7 +1419,7 @@ mod tests {
             choose(&land, None, RiskTier::Routine),
             LandChoice {
                 policy: LandPolicy::Auto,
-                source: LandSource::Default
+                source: Layer::Default
             }
         );
         assert_eq!(
@@ -1443,18 +1441,18 @@ mod tests {
             choose(&land, Some("p1"), RiskTier::Substantial),
             LandChoice {
                 policy: LandPolicy::Ask,
-                source: LandSource::Project
+                source: Layer::Project
             }
         );
         assert_eq!(
             choose(&land, Some("p2"), RiskTier::Substantial).source,
-            LandSource::Default
+            Layer::Default
         );
         assert_eq!(
             choose(&land, Some("p1"), RiskTier::Crucial),
             LandChoice {
                 policy: LandPolicy::Auto,
-                source: LandSource::Config
+                source: Layer::Host
             }
         );
         assert!(serde_json::from_str::<GraphLand>(r#"{"crucial":"never"}"#).is_err());
@@ -1693,6 +1691,14 @@ mod tests {
         assert_eq!(
             warning.message,
             "domains.fabric.lanes.max_concurrent_builds: unknown configuration key; ignored"
+        );
+    }
+    /// Spec: docs/specs/state.md#every-setting-reports-its-layer
+    #[test]
+    fn land_precedence_ranks_default_then_host_then_project() {
+        assert_eq!(
+            LAND_PRECEDENCE.0,
+            &[Layer::Default, Layer::Host, Layer::Project]
         );
     }
 }

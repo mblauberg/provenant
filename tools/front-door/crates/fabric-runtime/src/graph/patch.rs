@@ -1179,7 +1179,7 @@ pub fn compile_submission(
     }
     let library = context
         .library
-        .with(Layer::Inline, &patch.templates)
+        .with(Layer::Launch, &patch.templates)
         .map_err(PatchError::invalid)?;
     let compiler = Compiler {
         library: &library,
@@ -1188,7 +1188,7 @@ pub fn compile_submission(
     let mut nodes = compiler.compile_all(&patch.nodes)?;
     for (raw, node) in patch.nodes.iter().zip(&mut nodes) {
         if raw.get("use").and_then(Value::as_str) == Some("batch")
-            && library.layer("batch") == Some(Layer::Bundled)
+            && library.layer("batch") == Some(Layer::Default)
         {
             plans::provision_paths(
                 std::slice::from_mut(node),
@@ -1522,8 +1522,8 @@ pub(super) fn prepare(
         .unwrap_or_default();
     let library = context
         .library
-        .with(Layer::Repository, &catalogue)
-        .and_then(|library| library.with(Layer::Inline, &patch.templates))
+        .with(Layer::Project, &catalogue)
+        .and_then(|library| library.with(Layer::Launch, &patch.templates))
         .map_err(PatchError::invalid)?;
     let compiler = Compiler {
         library: &library,

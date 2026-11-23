@@ -1589,11 +1589,11 @@ impl Factory {
         }
         let mut library = TemplateLibrary::bundled();
         library
-            .load_dir(Layer::User, &config.join("provenant/templates"))
+            .load_dir(Layer::Host, &config.join("provenant/templates"))
             .map_err(|_| FacadeError::invalid(InvalidInputDetail::TemplateInvalid))?;
         library
             .load_dir(
-                Layer::Repository,
+                Layer::Project,
                 &self.cwd.join(provenant_config::repository_files::TEMPLATES),
             )
             .map_err(|_| FacadeError::invalid(InvalidInputDetail::TemplateInvalid))?;
@@ -1601,7 +1601,7 @@ impl Factory {
             let templates: BTreeMap<String, Template> = serde_json::from_value(inline.clone())
                 .map_err(|_| FacadeError::invalid(InvalidInputDetail::TemplateInvalid))?;
             library = library
-                .with(Layer::Inline, &templates)
+                .with(Layer::Launch, &templates)
                 .map_err(|_| FacadeError::invalid(InvalidInputDetail::TemplateInvalid))?;
         }
         Ok(library)
@@ -2026,7 +2026,7 @@ impl Factory {
                 .resolve(node["use"].as_str().unwrap_or("task"))
                 .map_err(graph_input_reason)?;
             let bundled_smoke =
-                node["use"] == "smoke" && library.layer("smoke") == Some(Layer::Bundled);
+                node["use"] == "smoke" && library.layer("smoke") == Some(Layer::Default);
             // Launch controls bind to one leaf. A composite has no single
             // worktree to bind, so name the first control it cannot take.
             let first_control = LAUNCH_CONTROLS
@@ -2098,7 +2098,7 @@ impl Factory {
             // Node parameters supplied explicitly (including CLI --set) beat
             // document settings; template defaults are the final fallback.
             let bundled_batch =
-                node["use"] == "batch" && library.layer("batch") == Some(Layer::Bundled);
+                node["use"] == "batch" && library.layer("batch") == Some(Layer::Default);
             let integration_branch = bundled_batch
                 .then(|| parameters.get("integration_branch").cloned())
                 .flatten()

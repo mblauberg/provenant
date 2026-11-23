@@ -447,7 +447,10 @@ fn sandbox_mode_for_access(
     });
     if floor && mode.effective {
         mode.requested = sandbox == Some("on");
-        mode.source = provenant_confinement::run_config::SandboxSource::Parent;
+        mode.source = provenant_records::Layer::Parent;
+        // The floor replaces the earlier cause outright, as it did when the
+        // mode carried a single source and no separate cap.
+        mode.constraint = None;
     }
     if warn {
         let source = task
@@ -571,34 +574,22 @@ pub(super) fn apply_sandbox_mode(
     });
     environment.retain(|(name, _)| name != SANDBOX);
     environment.push((SANDBOX.into(), mode.env_value().into()));
-    use provenant_confinement::run_config::SandboxSource;
-    use provenant_records::run::SandboxConstraint;
-    let (source, constraint) = match mode.source {
-        SandboxSource::Parent => (provenant_records::Layer::Parent, None),
-        SandboxSource::Route => (provenant_records::Layer::Route, None),
-        SandboxSource::Restriction => (
-            provenant_records::Layer::Host,
-            Some(SandboxConstraint::Restriction),
-        ),
-        SandboxSource::Platform => (
-            provenant_records::Layer::Host,
-            Some(SandboxConstraint::Platform),
-        ),
-        SandboxSource::Knob => (
-            task.profile
-                .knob_sources
-                .get("lanes.sandbox")
-                .copied()
-                .unwrap_or(provenant_records::Layer::Default),
-            None,
-        ),
-        SandboxSource::Default => (provenant_records::Layer::Default, None),
+    // A host-layer mode with no cap is the explicit knob: the preparation edge
+    // knows the knob's own layer, which the supervisor rebind does not.
+    let source = if mode.source == provenant_records::Layer::Host && mode.constraint.is_none() {
+        task.profile
+            .knob_sources
+            .get("lanes.sandbox")
+            .copied()
+            .unwrap_or(provenant_records::Layer::Default)
+    } else {
+        mode.source
     };
     route.sandbox = Some(run::SandboxModeReceipt {
         requested: mode.requested,
         effective: mode.effective,
         source,
-        constraint,
+        constraint: mode.constraint,
         warning: mode.warning,
         extra: Default::default(),
     });
