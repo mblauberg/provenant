@@ -2371,7 +2371,7 @@ mod tests {
         table.worktree_layout.default = PathBuf::from("trees/<branch>/checkout");
         assert!(table.validate().is_err());
 
-        // Spec: docs/specs/next-batch.md#contract
+        // Spec: docs/specs/next-batch.md#seam-5-the-worktree-and-landing-loop-a-chair-actually-uses
         // A parent-relative root places worktrees beside the checkout; an
         // absolute root places them anywhere. Both are declared roots and are
         // treated exactly like the default one.
@@ -3347,7 +3347,7 @@ mod tests {
         assert!(table.sourced_leaf("absent.leaf").is_empty());
     }
 
-    // Spec: docs/specs/next-batch.md#contract
+    // Spec: docs/specs/next-batch.md#seam-2-one-sourced-settings-vocabulary
     #[test]
     fn outside_worktree_roots_report_their_layer_and_origin() {
         let temp = tempfile::tempdir().unwrap();

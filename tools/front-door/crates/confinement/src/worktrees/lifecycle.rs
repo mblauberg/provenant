@@ -7,7 +7,7 @@ use std::path::Component;
 /// tip. `--base` is only the merge target; it never resets the branch. Emit the
 /// one typed warning that names both commits so the operator can merge the base
 /// before landing.
-/// Spec: docs/specs/next-batch.md#the-loop-a-chair-runs
+/// Spec: docs/specs/next-batch.md#seam-5-the-worktree-and-landing-loop-a-chair-actually-uses
 fn branch_behind_base_warning(branch: &str, head: GitOid, base: GitOid) -> String {
     let message = format!(
         "branch {branch} at {head} does not contain base {base}; reusing the branch at {head} with {base} as its merge target"
@@ -655,7 +655,7 @@ fn create_with_default(
     }
     // A declared `--base` is the merge target for an existing branch, never a
     // reset. Pin it once so the behind-base warning and the recorded base agree.
-    // Spec: docs/specs/next-batch.md#the-loop-a-chair-runs
+    // Spec: docs/specs/next-batch.md#seam-5-the-worktree-and-landing-loop-a-chair-actually-uses
     let requested_base = request
         .base
         .as_deref()

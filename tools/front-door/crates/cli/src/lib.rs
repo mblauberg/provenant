@@ -1827,7 +1827,7 @@ mod tests {
         assert!(text.contains("commands:"), "{text}");
 
         // A one-edit typo of a real command ranks that command first.
-        let ParseOutcome::Invalid { error, .. } = parsed(&["help", "confg", "path"]) else {
+        let ParseOutcome::Invalid { error, .. } = parsed(&["help", "konfig", "path"]) else {
             panic!("typo help path")
         };
         let text = error.to_string();

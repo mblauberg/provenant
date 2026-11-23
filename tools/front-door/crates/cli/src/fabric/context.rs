@@ -1272,7 +1272,7 @@ mod tests {
     #[test]
     // Spec: docs/specs/cli.md#every-name-refusal-lists-close-matches
     fn a_one_edit_peer_label_typo_ranks_the_configured_label_first() {
-        let close = super::close_host_names("workstaton", ["workstation", "laptop"]);
+        let close = super::close_host_names("worksttion", ["workstation", "laptop"]);
         assert_eq!(close.first().map(String::as_str), Some("workstation"));
         assert!(super::close_host_names("zzzzzz", ["workstation"]).is_empty());
     }

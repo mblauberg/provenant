@@ -472,7 +472,7 @@ pub(super) fn create_list_and_remove_a_managed_worktree() -> Result {
 }
 
 pub(super) fn existing_branch_behind_base_warns_and_keeps_its_tip() -> Result {
-    // Spec: docs/specs/next-batch.md#the-loop-a-chair-runs -- an existing branch
+    // Spec: docs/specs/next-batch.md#seam-5-the-worktree-and-landing-loop-a-chair-actually-uses -- an existing branch
     // behind its base warns BRANCH_BEHIND_BASE and proceeds; --base records the
     // merge target and never resets the branch.
     let rig = repository()?;

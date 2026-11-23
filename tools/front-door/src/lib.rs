@@ -702,7 +702,7 @@ fn config_show_ports(
             serde_json::Value::String(remote),
             full,
         ),
-        // Spec: docs/specs/next-batch.md#contract
+        // Spec: docs/specs/next-batch.md#seam-5-the-worktree-and-landing-loop-a-chair-actually-uses
         // Each declared root is reported with the layer and origin that set it.
         "worktree_layout.roots": config_port_leaf(
             &ports,
@@ -820,7 +820,7 @@ mod config_ports_tests {
         }));
     }
 
-    // Spec: docs/specs/next-batch.md#contract
+    // Spec: docs/specs/next-batch.md#seam-2-one-sourced-settings-vocabulary
     #[test]
     fn config_show_ports_reports_declared_worktree_roots_with_source() {
         let temp = tempfile::tempdir().unwrap();
@@ -898,7 +898,7 @@ fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::
                 serde_json::json!({
                     "schema_version": table.schema_version,
                     "ports": ports,
-                    // Spec: docs/specs/next-batch.md#contract
+                    // Spec: docs/specs/next-batch.md#seam-5-the-worktree-and-landing-loop-a-chair-actually-uses
                     // Effective worktree roots carry the layer and origin that
                     // declared them, including roots outside the checkout.
                     "worktree_layout": {

@@ -149,6 +149,19 @@ checkout's branch and ref tips (`primary-checkout.json`) so settlement can detec
 - Why: a provider's system prompt may name the primary checkout as the workspace root of a linked
   worktree, and a brief saying only "your worktree" loses to that absolute path.
 
+### Layered brief preamble
+
+Standing lane rules come from `lanes.brief_preamble`: a file path set at the host layer
+(`<state>/config.toml`), the project layer (`.provenant/config.toml`) and the launch layer
+(`--preamble-file`). The layers concatenate in that order, each labelled with its source. A
+file whose first line is a `<!-- provenant-roles: ... -->` header applies only to the roles it
+names: writer, review or read-only. A missing or unreadable file warns with its layer, and the
+launch proceeds without it. A writer's preamble also lists the project's declared no-build
+static checks from the port table under `Static checks:`, to run before pushing. Readers do
+not get that list.
+- Why: standing rules belong in one owned file per layer, not repeated in every brief, and a
+  writer should run the cheap checks the project declares before CI does.
+
 A node whose launch condition (`when`) does not hold never runs, so it needs no writer scope:
 submission neither inspects nor preflights its worktree. A composite template takes no launch
 control (access mode, worktree, branch, base or write scope) and the first one given is named in
