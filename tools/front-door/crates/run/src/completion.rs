@@ -8,7 +8,7 @@ use provenant_records::{
     AttemptFile, Layer, Source,
     handoff::{HANDOFF_BYTES, Handoff, HandoffError, HandoffResult},
     run::{PathScope, WriteSource},
-    warning::{CONFIG_MALFORMED, CONFIG_UNAVAILABLE, Warning, warn},
+    warning::{CONFIG_MALFORMED, CONFIG_UNAVAILABLE, PORT_STATIC_CHECK_INVALID, Warning, warn},
 };
 use std::{
     ffi::OsStr,
@@ -517,6 +517,49 @@ impl BriefPreamble {
             "Static checks: before pushing, run the project's no-build checks (source: {source}): {checks}. Report any failure in the handoff; a failure does not refuse the push and CI still gates the merge.\n"
         )
     }
+
+    /// Copy the project's `verify.static_checks` into the writer preamble.
+    /// Invalid declarations are advice, not a gate: each one is dropped with a
+    /// typed warning rather than refusing the launch, and the surviving checks
+    /// are labelled with the layer and key that declared them.
+    pub fn set_static_checks_from_ports(&mut self, ports: &provenant_config::PortTable) {
+        let origin = format!("{}#verify.static_checks", provenant_config::PORTS_CONFIG);
+        let source = Source {
+            layer: ports
+                .provenance()
+                .get("verify.static_checks")
+                .copied()
+                .unwrap_or(ports.verify.source),
+            origin: Some(origin.clone()),
+        };
+        let mut checks = Vec::new();
+        for (index, check) in ports.verify.static_checks.iter().enumerate() {
+            if check.is_valid() {
+                checks.push(BriefStaticCheck {
+                    argv: check.argv.clone(),
+                    cwd: check.cwd.clone(),
+                    timeout_seconds: check.timeout_seconds,
+                });
+            } else {
+                let subject = format!("{origin}[{index}]");
+                warn(
+                    Warning::new(
+                        PORT_STATIC_CHECK_INVALID,
+                        format!("dropped an invalid {subject} from the writer preamble"),
+                    )
+                    .subject(subject.clone())
+                    .source(source.clone())
+                    .repair(format!(
+                        "give {subject} a non-empty argv, a relative cwd and a positive timeout_seconds, or remove it"
+                    )),
+                );
+            }
+        }
+        self.static_checks = checks;
+        if !self.static_checks.is_empty() {
+            self.static_checks_source = Some(source);
+        }
+    }
 }
 
 /// Optional preamble overrides. Default uses the targeted verification paragraph.
@@ -940,6 +983,82 @@ mod tests {
         let reader = lane_preamble_with("Policy", &Default::default(), None, None, &reader_extras);
         assert!(!reader.contains("Writer-only project rule."), "{reader}");
         assert!(!reader.contains("Static checks:"), "{reader}");
+    }
+
+    /// A declared check travels from a written `.provenant/ports.json`, through
+    /// the port table, into the rendered writer prompt with its project source.
+    /// An invalid entry is dropped with a typed warning instead of refusing the
+    /// launch. Spec: docs/specs/run-launch.md#layered-brief-preamble
+    #[test]
+    fn ports_json_static_checks_reach_the_writer_preamble_with_source() {
+        let state = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join(".provenant")).unwrap();
+        std::fs::write(
+            project.path().join(".provenant/ports.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "verify": {
+                    "static_checks": [
+                        {"argv": ["scripts/check-extra-fields"], "cwd": ".", "timeout_seconds": 30},
+                        {"argv": [], "cwd": ".", "timeout_seconds": 30},
+                    ],
+                },
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        // An invalid static check is advice: it does not refuse the port table.
+        let ports = provenant_config::PortTable::read_for(Some(project.path()), state.path())
+            .expect("an invalid static check is not a table refusal");
+        assert_eq!(ports.verify.static_checks.len(), 2);
+        assert_eq!(
+            ports.provenance().get("verify.static_checks"),
+            Some(&Layer::Project)
+        );
+
+        let mut brief = BriefPreamble::default();
+        let ((), warnings) = provenant_records::warning::capture(|| {
+            brief.set_static_checks_from_ports(&ports);
+        });
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        let warning = &warnings[0];
+        assert_eq!(warning.code.as_ref(), PORT_STATIC_CHECK_INVALID.as_str());
+        let warning_source = warning.source.as_ref().expect("warning has a source");
+        assert_eq!(warning_source.layer, Layer::Project);
+        assert_eq!(
+            warning_source.origin.as_deref(),
+            Some(".provenant/ports.json#verify.static_checks")
+        );
+        let repair = warning.repair.as_deref().expect("warning has a repair");
+        assert!(repair.contains("verify.static_checks"), "{repair}");
+
+        assert_eq!(brief.static_checks.len(), 1, "{brief:?}");
+        assert_eq!(brief.static_checks[0].argv, ["scripts/check-extra-fields"]);
+        let brief_source = brief.static_checks_source.as_ref().expect("source present");
+        assert_eq!(brief_source.layer, Layer::Project);
+        assert_eq!(
+            brief_source.origin.as_deref(),
+            Some(".provenant/ports.json#verify.static_checks")
+        );
+
+        let writer = lane_preamble_with(
+            "Policy",
+            &Default::default(),
+            Some(crate::ResolvedCiScope::resolve(&Default::default())),
+            None,
+            &PreambleExtras {
+                brief: Some(brief),
+                role: BriefRole::Writer,
+                ..Default::default()
+            },
+        );
+        assert!(writer.contains("scripts/check-extra-fields"), "{writer}");
+        assert!(writer.contains("cap 30s"), "{writer}");
+        assert!(
+            writer.contains("source: project; .provenant/ports.json#verify.static_checks"),
+            "{writer}"
+        );
     }
 
     /// Spec: docs/specs/run-launch.md#layered-brief-preamble

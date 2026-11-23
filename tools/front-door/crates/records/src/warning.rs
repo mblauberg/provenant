@@ -225,6 +225,8 @@ pub const POOL_EFFORT_UNSUPPORTED: WarningCode = WarningCode("POOL_EFFORT_UNSUPP
 pub const PORT_DECLARATION_IGNORED: WarningCode = WarningCode("PORT_DECLARATION_IGNORED");
 /// An invalid verify port full-after duration fell back to the builtin.
 pub const PORT_DURATION_INVALID: WarningCode = WarningCode("PORT_DURATION_INVALID");
+/// An invalid `verify.static_checks` entry was dropped from the writer preamble.
+pub const PORT_STATIC_CHECK_INVALID: WarningCode = WarningCode("PORT_STATIC_CHECK_INVALID");
 /// An installed agent's PATH would fall back from the trusted Rust toolchain.
 pub const AGENT_TOOLCHAIN_PATH: WarningCode = WarningCode("AGENT_TOOLCHAIN_PATH");
 /// A stale menu login item remains registered after an upgrade.
