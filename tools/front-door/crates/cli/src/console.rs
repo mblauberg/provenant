@@ -20,7 +20,7 @@ pub mod tree_peer;
 
 pub use overview::summary_comparison;
 
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Console {
     /// Read local owner change generations
     Changes {

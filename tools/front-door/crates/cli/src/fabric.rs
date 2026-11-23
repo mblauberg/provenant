@@ -33,7 +33,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::{io, path::PathBuf};
 
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Fabric {
     /// Show this agent's project and inbox identity
     Identity,
@@ -56,13 +56,13 @@ pub enum Fabric {
     #[command(subcommand)]
     Claim(Claim),
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct Operation {
     /// Caller-chosen ID that makes retries idempotent
     #[arg(long)]
     pub operation_id: OperationId,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct SequencePage {
     /// Return entries after this sequence number
     #[arg(long, catalog_i64_range = 0..)]
@@ -77,7 +77,7 @@ pub enum Kind {
     Response,
     Note,
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Mail {
     /// Send a message to one or more inboxes
     Send {
@@ -116,7 +116,7 @@ pub enum Mail {
         operation: Operation,
     },
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Events {
     /// Read activity log entries
     Read {
@@ -135,7 +135,7 @@ pub enum Events {
         operation: Operation,
     },
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Claim {
     /// Acquire durable advisory custody
     Acquire {

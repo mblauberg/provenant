@@ -5,8 +5,8 @@ Anchor: `crates/cli/src/external_contract.rs::ExternalContract`
 
 What a repository, its scripts and its CI may rely on when they adopt
 Provenant or run beside it. Each table below renders one declaration in code
-(`provenant-cli print-reference-data` prints them) and a test fails when they
-disagree. [Using Provenant 2 from another repository](../runbooks/using-provenant-2-from-another-repository.md)
+(`cargo run -p provenant --bin print-reference-data` prints them) and a test
+fails when they disagree. [Using Provenant 2 from another repository](../runbooks/using-provenant-2-from-another-repository.md)
 is the procedure.
 
 ## Stability tiers

@@ -42,7 +42,9 @@ pub mod telemetry_value;
 use clap::builder::ArgExt;
 use clap::{Arg, ArgAction, ArgGroup, CommandFactory, FromArgMatches};
 pub use grammar::*;
-use provenant_records::{HelpArgument, HelpCatalogue, HelpCommand, HelpErrorCode, HelpGroup};
+use provenant_records::{
+    CommandError, HelpArgument, HelpCatalogue, HelpCommand, HelpErrorCode, HelpGroup, Outcome,
+};
 pub use render::*;
 use std::ffi::OsString;
 pub use telemetry_args::CostBy;
@@ -1177,8 +1179,137 @@ pub fn command_verbs() -> Vec<String> {
 /// Command paths plus the two non-command events recorded by usage telemetry.
 pub fn usage_verbs() -> Vec<String> {
     let mut verbs = vec!["parse".into(), "version".into()];
-    verbs.extend(command_verbs());
+    verbs.extend(
+        domains()
+            .iter()
+            .flat_map(|domain| domain.verbs)
+            .map(|verb| verb.path.join(" ")),
+    );
     verbs
+}
+
+/// The process seams a command sees. The binary selects an implementation at
+/// the process edge and the registry hands it to every verb, so a fixture
+/// reaches the command body without a process-global.
+pub trait Process {
+    /// Host admission observations used by the composed guardian.
+    fn admission_resources(&self) -> &dyn provenant_run::Resources {
+        &provenant_run::SystemResources
+    }
+    /// The guardian's clock, sampled at the process edge.
+    fn clock(&self) -> &dyn provenant_core::Clock {
+        &provenant_os::clock::SystemClock
+    }
+    /// Observes whether a worktree's writer is alive.
+    fn workers(&self) -> &'static dyn provenant_confinement::worktrees::WorkerObserver {
+        &provenant_confinement::worktrees::SystemWorkerObserver
+    }
+    /// Hands Run's terminal holder to the guardian composition.
+    fn holder(
+        &self,
+        holder: &dyn provenant_supervisor::Holder,
+        guard: &mut dyn FnMut(&dyn provenant_supervisor::Holder) -> u8,
+    ) -> u8 {
+        guard(holder)
+    }
+    /// Runs the guardian with the composed hooks.
+    fn supervise(
+        &self,
+        descriptors: &[OsString],
+        hooks: provenant_supervisor::GuardianHooks<'_>,
+    ) -> provenant_supervisor::custody::Result<()> {
+        provenant_supervisor::supervise(descriptors, hooks)
+    }
+}
+
+/// One command domain: a module under `src/commands/` owns its verbs.
+///
+/// Spec: docs/specs/rust-workspace.md#one-owner-per-command-domain
+#[derive(Debug)]
+pub struct Domain {
+    pub name: &'static str,
+    pub verbs: &'static [Verb],
+}
+
+/// One registry entry: the parsed command path, its stability and its owner.
+#[derive(Debug)]
+pub struct Verb {
+    /// `["worktree", "locate"]`; the persisted usage verb is `path.join(" ")`.
+    pub path: &'static [&'static str],
+    /// What `external_contract` declares for the command.
+    pub stability: provenant_core::consumer_env::Stability,
+    pub run: fn(&Invocation) -> Result<Outcome, CommandError>,
+}
+
+/// What a verb receives: the parsed command, the globals it was parsed with,
+/// its resolved path and the process seams selected at the edge.
+pub struct Invocation<'a> {
+    pub command: &'a Command,
+    pub globals: &'a Globals,
+    /// Space-joined command path, such as `quota tick`.
+    pub leaf: &'a str,
+    pub process: &'a dyn Process,
+}
+
+/// The domains the binary registered at its process edge.
+///
+/// The types live here rather than in the binary because `usage_verbs` and
+/// `external_contract` derive from the same table and the binary depends on
+/// this crate, not the reverse. `src/commands/mod.rs` owns `DOMAINS` and
+/// installs it once before the first command runs.
+static DOMAINS: std::sync::OnceLock<&'static [&'static Domain]> = std::sync::OnceLock::new();
+
+/// Installs the command registry for this process. Later calls are ignored.
+pub fn install_domains(domains: &'static [&'static Domain]) {
+    let _ = DOMAINS.set(domains);
+}
+
+/// The installed registry. Before installation the surface has no commands;
+/// the binary installs it before parsing anything that reads it.
+pub fn domains() -> &'static [&'static Domain] {
+    debug_assert!(
+        DOMAINS.get().is_some(),
+        "the command registry is installed at the process edge"
+    );
+    DOMAINS.get().copied().unwrap_or(&[])
+}
+
+/// A registry built from the grammar, for this crate's own tests. The binary
+/// installs the real one; the mapping test in `workspace_policy` pins the two.
+#[cfg(test)]
+pub(crate) fn install_test_domains() {
+    static FIXTURE: std::sync::OnceLock<&'static [&'static Domain]> = std::sync::OnceLock::new();
+    let fixture = FIXTURE.get_or_init(|| {
+        #[allow(clippy::result_large_err)]
+        fn unused(_: &Invocation) -> Result<Outcome, CommandError> {
+            Ok(Outcome::Ok)
+        }
+        let verbs: Vec<Verb> = command_verbs()
+            .into_iter()
+            .map(|path| {
+                let parts: Vec<&'static str> = path
+                    .split(' ')
+                    .map(|part| -> &'static str { Box::leak(part.to_owned().into_boxed_str()) })
+                    .collect();
+                let stability = if path == "process-tree" {
+                    provenant_core::consumer_env::Stability::Stable
+                } else {
+                    provenant_core::consumer_env::Stability::Evolving
+                };
+                Verb {
+                    path: Box::leak(parts.into_boxed_slice()),
+                    stability,
+                    run: unused,
+                }
+            })
+            .collect();
+        let domain: &'static Domain = Box::leak(Box::new(Domain {
+            name: "fixture",
+            verbs: Box::leak(verbs.into_boxed_slice()),
+        }));
+        Box::leak(Box::new([domain]))
+    });
+    install_domains(*fixture);
 }
 const WAIT_JSON_CONTRACT: &str = "With --json, wait writes JSONL: zero or more event objects followed by one terminal command-result envelope. Events have an `event` field; the terminal envelope has `command`, `status` and `data`. Settlement events are emitted without --follow; --follow also emits each observed transition.";
 
@@ -3409,6 +3540,7 @@ mod tests {
     }
     #[test]
     fn usage_verbs_include_optional_parents_only() {
+        install_test_domains();
         let verbs = usage_verbs();
         assert!(verbs.contains(&"hosts".to_owned()));
         assert!(verbs.contains(&"hosts doctor".to_owned()));

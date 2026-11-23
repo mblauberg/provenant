@@ -215,7 +215,7 @@ impl HeadlineArg {
         }
     }
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Accounts {
     /// List registered accounts
     List,

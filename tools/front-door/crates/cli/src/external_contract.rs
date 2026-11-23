@@ -167,15 +167,18 @@ fn strings(values: &[&str]) -> Vec<String> {
 /// The command behind the stable process-tree reading.
 const PROCESS_TREE_COMMAND: &str = "process-tree";
 
-/// Commands a stable entry names. Every other command is evolving.
-fn stable_commands() -> Vec<String> {
-    vec![PROCESS_TREE_COMMAND.to_owned()]
-}
-
-/// Whether `verb` is the command `core` or one of its subcommands.
-fn within(verb: &str, core: &str) -> bool {
-    verb.strip_prefix(core)
-        .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
+/// The registry's command paths, partitioned by the stability each verb declares.
+fn command_surface() -> (Vec<String>, Vec<String>) {
+    let mut stable = Vec::new();
+    let mut evolving = Vec::new();
+    for verb in crate::domains().iter().flat_map(|domain| domain.verbs) {
+        let path = verb.path.join(" ");
+        match verb.stability {
+            Stability::Stable => stable.push(path),
+            _ => evolving.push(path),
+        }
+    }
+    (stable, evolving)
 }
 
 /// The sole declaration of outward interfaces for the current release.
@@ -184,11 +187,7 @@ pub fn external_contract() -> ExternalContract {
     use provenant_supervisor::process_tree;
 
     let envelope = command_result_schema();
-    let stable = stable_commands();
-    let evolving = crate::command_verbs()
-        .into_iter()
-        .filter(|verb| !stable.iter().any(|core| within(verb, core)))
-        .collect();
+    let (stable, evolving) = command_surface();
     ExternalContract {
         schema_version: 2,
         interfaces: vec![
@@ -405,6 +404,7 @@ mod tests {
 
     #[test]
     fn the_consumer_contract_spec_agrees_with_the_declaration() {
+        crate::install_test_domains();
         let spec = spec();
         let contract = external_contract();
         for interface in &contract.interfaces {
@@ -475,6 +475,7 @@ mod tests {
 
     #[test]
     fn the_declaration_round_trips_and_partitions_the_command_surface() {
+        crate::install_test_domains();
         let declared = external_contract();
         let encoded = serde_json::to_vec(&declared).unwrap();
         let decoded: ExternalContract = serde_json::from_slice(&encoded).unwrap();
@@ -488,15 +489,9 @@ mod tests {
                 let evolving: BTreeSet<_> = evolving.iter().cloned().collect();
                 assert!(stable.is_disjoint(&evolving));
                 assert!(evolving.is_subset(&verbs));
-                assert!(
-                    stable
-                        .iter()
-                        .all(|core| verbs.iter().any(|verb| within(verb, core)))
-                );
-                assert!(
-                    verbs.iter().all(|verb| evolving.contains(verb)
-                        || stable.iter().any(|core| within(verb, core)))
-                );
+                assert!(stable.is_subset(&verbs));
+                assert!(stable.union(&evolving).all(|verb| verbs.contains(verb)));
+                assert_eq!(stable.len() + evolving.len(), verbs.len());
             }
         }
     }

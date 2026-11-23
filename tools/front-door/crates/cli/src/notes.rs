@@ -6,7 +6,7 @@ use provenant_fabric_runtime::notes::{Board, Host, Input, Scope};
 use provenant_fabric_runtime::relay::{ServiceError, ToolCall};
 use serde_json::Value;
 
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Notes {
     /// Append an observation; corrections reference an earlier source sequence
     Add {
@@ -36,7 +36,7 @@ pub enum Notes {
         limit: Option<u64>,
     },
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct ScopeArgs {
     /// Logical scope: project, GRAPH, or GRAPH/NODE (including descendants)
     #[arg(long, conflicts_with = "graph")]

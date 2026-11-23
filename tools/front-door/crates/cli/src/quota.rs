@@ -22,7 +22,7 @@ use std::{
 };
 use thiserror::Error;
 
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct Filter {
     /// Restrict to this adapter
     #[arg(long)]
@@ -58,7 +58,7 @@ pub enum Power {
     Battery,
     Low,
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Quota {
     /// Show recorded provider quota
     Show(Filter),
