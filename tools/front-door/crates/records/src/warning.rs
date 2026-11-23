@@ -70,6 +70,8 @@ pub const LIVE_RECORD_FORMAT_CHANGED: WarningCode = WarningCode("LIVE_RECORD_FOR
 pub const MIGRATION_STEP_FAILED: WarningCode = WarningCode("MIGRATION_STEP_FAILED");
 /// The state root overlaps a location the product treats as advisory.
 pub const STATE_ROOT_OVERLAP: WarningCode = WarningCode("STATE_ROOT_OVERLAP");
+/// A result exceeded the output cap and was bounded with a marker.
+pub const RESULT_TOO_LARGE: WarningCode = WarningCode("RESULT_TOO_LARGE");
 
 impl Warning {
     /// A warning with no subject, source or repair.
@@ -298,6 +300,7 @@ mod tests {
             super::LIVE_RECORD_FORMAT_CHANGED,
             super::MIGRATION_STEP_FAILED,
             super::STATE_ROOT_OVERLAP,
+            super::RESULT_TOO_LARGE,
         ] {
             let name = code.as_str();
             assert!(

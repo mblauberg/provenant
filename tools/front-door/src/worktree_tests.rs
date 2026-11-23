@@ -234,11 +234,15 @@ pub fn main() -> std::process::ExitCode {
         Some("--admission-only") => {
             let args = args.into_iter().skip(1);
             ExitCode::from(provenant_cli::run::with_deferred_provider_launch(|| {
-                crate::dispatch(provenant_cli::parse(args), &Fixture)
+                let (parsed, warnings) =
+                    provenant_records::warning::capture(|| provenant_cli::parse(args));
+                crate::dispatch(parsed, &Fixture, warnings)
             }))
         }
         Some("--state-dir" | "internal" | "admit") => {
-            let code = crate::dispatch(provenant_cli::parse(args), &Fixture);
+            let (parsed, warnings) =
+                provenant_records::warning::capture(|| provenant_cli::parse(args));
+            let code = crate::dispatch(parsed, &Fixture, warnings);
             // A fixture-only observation after the real command has rendered.
             if let Some(path) = std::env::var_os("FIXTURE_LAND_CWD_FILE") {
                 let result = std::env::current_dir()

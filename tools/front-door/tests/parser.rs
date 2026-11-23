@@ -881,3 +881,27 @@ fn hosts_doctor_uses_non_billing_status_and_preserves_identity_selection() -> Re
     );
     rig.assert_v1_root_untouched()
 }
+
+// Spec: docs/specs/cli.md#warnings-are-typed-values
+#[test]
+fn a_capitalised_target_warns_only_in_the_json_envelope() -> Result {
+    let rig = TestRig::new()?;
+    // The target is folded by a clap value parser, before dispatch installs the
+    // sink. Under --json that warning must reach the envelope, not stderr.
+    let out = rig.command(&["stop", "Fix-Login", "--json"])?;
+    let stderr = String::from_utf8_lossy(&out.stderr.bytes);
+    assert!(
+        !stderr.contains("warning:"),
+        "bare warning leaked: {stderr}"
+    );
+    let envelope: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
+    assert!(
+        envelope["warnings"]
+            .as_array()
+            .ok_or("warnings")?
+            .iter()
+            .any(|warning| warning["code"] == "NAME_CASE_FOLDED"),
+        "{envelope}"
+    );
+    Ok(())
+}

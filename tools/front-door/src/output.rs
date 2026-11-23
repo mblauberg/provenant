@@ -8,7 +8,7 @@
 
 use crate::overflow;
 use provenant_cli::{OverflowPolicy, RenderError, RenderMode, Summary};
-use provenant_records::warning::{self, Dedup, Sink, Warning};
+use provenant_records::warning::{self, Dedup, RESULT_TOO_LARGE, Sink, Warning};
 use provenant_records::{CommandResult, Outcome};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -34,6 +34,29 @@ struct CommandSink {
     state: Mutex<SinkState>,
 }
 
+impl CommandSink {
+    /// Show an accepted warning, then record its per-change key. Recording only
+    /// after the reader has it keeps a warning swallowed on an exit path that
+    /// never emits from being marked seen before it was displayed.
+    fn display(&self, warning: Warning) {
+        {
+            let mut err = io::stderr().lock();
+            let _ = writeln!(err, "warning: {}", warning.message);
+            if let Some(repair) = warning.repair.as_deref() {
+                let _ = writeln!(err, "  repair: {repair}");
+            }
+        }
+        remember_for_change(&warning);
+    }
+
+    /// Take warnings still held for an envelope that never arrived.
+    fn take_held(&self) -> Vec<Warning> {
+        let mut state = self.state.lock().expect("output sink lock");
+        state.seen.clear();
+        std::mem::take(&mut state.warnings)
+    }
+}
+
 impl Sink for CommandSink {
     /// A warning arrives here from `records::warning::warn`. Collapse repeats by
     /// key; skip per-change keys already remembered in the state root; then
@@ -47,7 +70,7 @@ impl Sink for CommandSink {
         if warning.dedup == Dedup::PerChange {
             let root = STATE_ROOT.read().expect("state root lock").clone();
             if let Some(root) = root
-                && !dedup::remember(&root, &key, &warning.code)
+                && dedup::was_seen(&root, &key)
             {
                 return;
             }
@@ -55,10 +78,25 @@ impl Sink for CommandSink {
         if state.json {
             state.warnings.push(warning);
         } else {
-            let mut err = io::stderr().lock();
-            let _ = writeln!(err, "warning: {}", warning.message);
-            if let Some(repair) = warning.repair.as_deref() {
-                let _ = writeln!(err, "  repair: {repair}");
+            drop(state);
+            self.display(warning);
+        }
+    }
+}
+
+/// Restores the previous sink on drop and drains warnings still held for an
+/// envelope that never arrived (a command that exits without emitting). Those
+/// warnings are shown once here instead of being swallowed.
+pub(crate) struct CommandSinkGuard {
+    _inner: warning::SinkGuard,
+}
+
+impl Drop for CommandSinkGuard {
+    fn drop(&mut self) {
+        let sink = COMMAND_SINK.read().expect("output sink lock").clone();
+        if let Some(sink) = sink {
+            for warning in sink.take_held() {
+                sink.display(warning);
             }
         }
     }
@@ -66,7 +104,7 @@ impl Sink for CommandSink {
 
 /// Install the command's sink. The guard restores the previous sink on drop,
 /// so nested dispatch in tests cannot leak one command's warnings into another.
-pub(crate) fn install_command_sink(json: bool) -> warning::SinkGuard {
+pub(crate) fn install_command_sink(json: bool) -> CommandSinkGuard {
     let sink = Arc::new(CommandSink {
         state: Mutex::new(SinkState {
             json,
@@ -77,7 +115,18 @@ pub(crate) fn install_command_sink(json: bool) -> warning::SinkGuard {
     if let Ok(mut slot) = COMMAND_SINK.write() {
         *slot = Some(sink.clone());
     }
-    warning::install(sink)
+    CommandSinkGuard {
+        _inner: warning::install(sink),
+    }
+}
+
+/// Carry warnings captured while parsing into the command sink. Parsing runs
+/// before dispatch installs the sink, so these are the only warnings raised
+/// before the command's envelope exists.
+pub(crate) fn replay_warnings(warnings: Vec<Warning>) {
+    for warning in warnings {
+        warning::warn(warning);
+    }
 }
 
 /// Name the state root used by per-change dedup. Called as soon as roots are
@@ -88,15 +137,28 @@ pub(crate) fn set_state_root(root: &Path) {
     }
 }
 
-/// Take the warnings collected for the current command's envelope.
+/// Record a per-change key after its warning has been shown. Invocation-scoped
+/// keys need no memory: one command shows each such warning at most once.
+fn remember_for_change(warning: &Warning) {
+    if warning.dedup != Dedup::PerChange {
+        return;
+    }
+    let root = STATE_ROOT.read().expect("state root lock").clone();
+    if let Some(root) = root {
+        dedup::remember(&root, &warning.key(), warning.code.as_ref());
+    }
+}
+
+/// Take the warnings collected for the current command's envelope. Per-change
+/// keys are remembered here, when the warnings enter the envelope the reader
+/// sees, and on the human path in `CommandSink::display`.
 fn take_warnings() -> Vec<Warning> {
     let sink = COMMAND_SINK.read().expect("output sink lock").clone();
-    sink.map(|sink| {
-        let mut state = sink.state.lock().expect("output sink lock");
-        state.seen.clear();
-        std::mem::take(&mut state.warnings)
-    })
-    .unwrap_or_default()
+    let warnings = sink.map(|sink| sink.take_held()).unwrap_or_default();
+    for warning in &warnings {
+        remember_for_change(warning);
+    }
+    warnings
 }
 
 pub(crate) fn emit<T: Serialize>(
@@ -266,6 +328,44 @@ pub(crate) fn emit_unpublished<T: Serialize>(
     read_only: bool,
     summary: Option<&Summary>,
 ) -> u8 {
+    emit_unpublished_with_writers(
+        result,
+        globals,
+        human,
+        read_only,
+        summary,
+        &mut io::stdout().lock(),
+        &mut io::stderr().lock(),
+    )
+}
+
+/// The emission seam for `emit_unpublished`: the bounded marker and its
+/// envelope go to the supplied writers so a test can drive the overflow path.
+#[allow(clippy::too_many_arguments)]
+fn emit_unpublished_with_writers<T: Serialize, Wout: Write, Werr: Write>(
+    result: &CommandResult<T>,
+    globals: &provenant_cli::Globals,
+    human: &str,
+    read_only: bool,
+    summary: Option<&Summary>,
+    stdout: &mut Wout,
+    stderr: &mut Werr,
+) -> u8 {
+    const REPAIR: &str = "narrow it with --since and --until";
+    // Under --json the cap notice must travel in the envelope: raising it
+    // before the drain puts it beside the command's other warnings. In human
+    // mode the sink prints it as soon as the render reports omitted bytes.
+    let over_cap = if globals.json {
+        let omitted = serde_json::to_vec(result)
+            .map(|bytes| bytes.len().saturating_sub(provenant_cli::MAX_RESULT_BYTES))
+            .unwrap_or_default();
+        if omitted > 0 {
+            warning::warn(too_large_warning(&result.command, omitted, REPAIR));
+        }
+        Some(omitted)
+    } else {
+        None
+    };
     let warnings = take_warnings();
     let rendered = if globals.json {
         let data = serde_json::to_value(&result.data).unwrap_or(Value::Null);
@@ -275,7 +375,7 @@ pub(crate) fn emit_unpublished<T: Serialize>(
             status: result.status,
             data,
             error: result.error.clone(),
-            warnings,
+            warnings: warnings.clone(),
         };
         render_unpublished(
             &json_result,
@@ -284,8 +384,8 @@ pub(crate) fn emit_unpublished<T: Serialize>(
             read_only,
             summary,
             provenant_cli::MAX_RESULT_BYTES,
-            &mut io::stdout().lock(),
-            &mut io::stderr().lock(),
+            &mut *stdout,
+            &mut *stderr,
         )
     } else {
         render_unpublished(
@@ -295,54 +395,72 @@ pub(crate) fn emit_unpublished<T: Serialize>(
             read_only,
             summary,
             provenant_cli::MAX_RESULT_BYTES,
-            &mut io::stdout().lock(),
-            &mut io::stderr().lock(),
+            &mut *stdout,
+            &mut *stderr,
         )
     };
-    const REPAIR: &str = "narrow it with --since and --until";
     match rendered {
         Ok(omitted) => {
-            if omitted > 0 {
-                let _ = writeln!(
-                    io::stderr().lock(),
-                    "warning: [RESULT_TOO_LARGE] {} exceeds 1 MiB (source: COMMAND_RESULT_MAX_BYTES); showing a bounded view with {omitted} bytes omitted; {REPAIR}",
-                    result.command
-                );
+            if !globals.json && omitted > 0 {
+                warning::warn(too_large_warning(&result.command, omitted, REPAIR));
             }
             provenant_cli::exit_status(&result.status)
         }
         Err(RenderError::TooLarge) => {
             // JSON cannot be clipped mid-object: emit a bounded marker instead.
-            let omitted = serde_json::to_vec(result)
-                .map(|bytes| bytes.len().saturating_sub(provenant_cli::MAX_RESULT_BYTES))
-                .unwrap_or_default();
-            let _ = writeln!(
-                io::stderr().lock(),
-                "warning: [RESULT_TOO_LARGE] {} exceeds 1 MiB (source: COMMAND_RESULT_MAX_BYTES); showing a bounded view with {omitted} bytes omitted; {REPAIR}",
-                result.command
-            );
+            let omitted = over_cap.unwrap_or_else(|| {
+                serde_json::to_vec(result)
+                    .map(|bytes| bytes.len().saturating_sub(provenant_cli::MAX_RESULT_BYTES))
+                    .unwrap_or_default()
+            });
             let marker = json!({
                 "truncated": true,
                 "omitted_bytes": omitted,
                 "source": "COMMAND_RESULT_MAX_BYTES",
                 "repair": REPAIR,
             });
-            let mut bounded = CommandResult::new(&result.command, result.status, marker);
-            // The marker replaces the oversized data, not the refusal. Keep the
-            // original typed error so an oversized failure still carries its
-            // code, repair and diagnostic, as the console and disk edges do.
-            bounded.error = result
-                .error
-                .as_ref()
-                .map(|error| provenant_cli::bounded_error(error, 512));
-            let _ = provenant_cli::render(&bounded, RenderMode::Json, &mut io::stdout().lock());
+            // The marker replaces the oversized data, not the refusal: carry the
+            // command's warnings and typed error onto it so neither is dropped.
+            let mut bounded = CommandResult {
+                schema_version: result.schema_version,
+                command: result.command.clone(),
+                status: result.status,
+                data: marker,
+                error: result
+                    .error
+                    .as_ref()
+                    .map(|error| provenant_cli::bounded_error(error, 512)),
+                warnings,
+            };
+            if !bounded
+                .warnings
+                .iter()
+                .any(|warning| warning.code.as_ref() == RESULT_TOO_LARGE.as_str())
+            {
+                bounded
+                    .warnings
+                    .push(too_large_warning(&result.command, omitted, REPAIR));
+            }
+            let _ = provenant_cli::render(&bounded, RenderMode::Json, &mut *stdout);
             provenant_cli::exit_status(&result.status)
         }
         Err(_) => {
-            let _ = io::stderr().write_all(b"provenant: IO: cannot write command result\n");
+            let _ = stderr.write_all(b"provenant: IO: cannot write command result\n");
             3
         }
     }
+}
+
+/// The typed cap notice. The bracketed code in the message keeps the human
+/// stderr line recognisable while the code itself travels in the envelope.
+fn too_large_warning(command: &str, omitted: usize, repair: &str) -> Warning {
+    Warning::new(
+        RESULT_TOO_LARGE,
+        format!(
+            "[RESULT_TOO_LARGE] {command} exceeds 1 MiB (source: COMMAND_RESULT_MAX_BYTES); showing a bounded view with {omitted} bytes omitted"
+        ),
+    )
+    .repair(repair)
 }
 
 /// Render a result within `limit`, bounding the human view with an explicit
@@ -397,8 +515,33 @@ mod dedup {
         migrations: &[],
     };
 
-    /// Record `key` and report whether it is new. Existing rows have their
-    /// count and last-seen time advanced; stale rows are pruned on every write.
+    /// Whether `key` has already been shown. A read-only check: it does not
+    /// mark the key, so a warning can be held for the envelope before it is
+    /// remembered at display time.
+    pub(super) fn was_seen(state_root: &Path, key: &str) -> bool {
+        let Ok(db) = open_connection(&state_root.join("warnings.sqlite3"), false) else {
+            return false;
+        };
+        if ensure_schema(&db, WARNINGS_SCHEMA).is_err() {
+            return false;
+        }
+        use provenant_core::Clock as _;
+        let now = provenant_os::clock::SystemClock.unix_seconds().max(0);
+        let retention = super::host_settings::dedup_retention_days(state_root);
+        let window = i64::try_from(retention.saturating_mul(86_400)).unwrap_or(i64::MAX);
+        let cutoff = now.saturating_sub(window);
+        // An expired key is new again: its row will be pruned on the next write.
+        db.query_row(
+            "SELECT 1 FROM seen WHERE key = ?1 AND last_seen >= ?2",
+            rusqlite::params![key, cutoff],
+            |_| Ok(()),
+        )
+        .is_ok()
+    }
+
+    /// Record `key` and report whether it is new. A fresh row starts at one;
+    /// only an existing row advances its count and last-seen time. Stale rows
+    /// are pruned on every write.
     pub(super) fn remember(state_root: &Path, key: &str, code: &str) -> bool {
         let Ok(mut db) = open_connection(&state_root.join("warnings.sqlite3"), false) else {
             return true;
@@ -416,23 +559,30 @@ mod dedup {
             Ok(tx) => tx,
             Err(_) => return true,
         };
-        let fresh = tx
-            .execute(
-                "INSERT INTO seen (key, code, first_seen, last_seen, count) VALUES (?1, ?2, ?3, ?3, 1) ON CONFLICT(key) DO NOTHING",
-                rusqlite::params![key, code, now],
+        let existed = tx
+            .query_row(
+                "SELECT 1 FROM seen WHERE key = ?1",
+                rusqlite::params![key],
+                |_| Ok(()),
             )
-            .map(|rows| rows == 1)
-            .unwrap_or(true);
-        let _ = tx.execute(
-            "UPDATE seen SET last_seen=?1, count=count+1 WHERE key=?2",
-            rusqlite::params![now, key],
-        );
+            .is_ok();
+        if existed {
+            let _ = tx.execute(
+                "UPDATE seen SET last_seen=?1, count=count+1 WHERE key=?2",
+                rusqlite::params![now, key],
+            );
+        } else {
+            let _ = tx.execute(
+                "INSERT INTO seen (key, code, first_seen, last_seen, count) VALUES (?1, ?2, ?3, ?3, 1)",
+                rusqlite::params![key, code, now],
+            );
+        }
         let _ = tx.execute(
             "DELETE FROM seen WHERE last_seen < ?1",
             rusqlite::params![cutoff],
         );
         let _ = tx.commit();
-        fresh
+        !existed
     }
 }
 
@@ -451,8 +601,9 @@ mod host_settings {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use provenant_records::warning::{WarningCode, capture};
+    use provenant_records::warning::{NAME_CASE_FOLDED, WarningCode, capture};
     use provenant_sqlite::{ensure_schema, open_connection};
+    use std::ffi::OsString;
 
     static TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -534,6 +685,150 @@ mod tests {
                 .map_while(Result::ok)
                 .collect();
             assert_eq!(remaining, ["sha256:fresh"]);
+        });
+    }
+
+    #[test]
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    fn parse_warnings_replayed_before_emit_reach_the_json_envelope() {
+        let _lock = TEST_LOCK.lock().expect("test lock");
+        // A capital target is folded by clap's value parser, which runs before
+        // dispatch installs the command sink.
+        let (parsed, parse_warnings) =
+            capture(|| provenant_cli::parse(["stop", "Fix-Login", "--json"].map(OsString::from)));
+        assert!(
+            matches!(parsed, provenant_cli::ParseOutcome::Invocation(_)),
+            "the command must parse"
+        );
+        assert!(
+            parse_warnings
+                .iter()
+                .any(|warning| warning.code.as_ref() == NAME_CASE_FOLDED.as_str()),
+            "{parse_warnings:?}"
+        );
+        let _sink = install_command_sink(true);
+        replay_warnings(parse_warnings);
+        let result = CommandResult::new("fixture", Outcome::Ok, json!({"ok": true}));
+        let mut globals = provenant_cli::Globals::default();
+        globals.json = true;
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        emit_with_writers(&result, &globals, &mut out, &mut err, "", false, None);
+        let envelope: Value = serde_json::from_slice(&out).expect("envelope");
+        assert!(
+            envelope["warnings"]
+                .as_array()
+                .expect("warnings")
+                .iter()
+                .any(|warning| warning["code"] == NAME_CASE_FOLDED.as_str()),
+            "{envelope}"
+        );
+        assert!(err.is_empty(), "{}", String::from_utf8_lossy(&err));
+    }
+
+    #[test]
+    // Spec: docs/specs/cli.md#one-bounded-envelope
+    fn an_oversized_json_result_carries_warnings_on_the_bounded_marker() {
+        let _lock = TEST_LOCK.lock().expect("test lock");
+        let _sink = install_command_sink(true);
+        let result = CommandResult::new(
+            "fixture",
+            Outcome::Ok,
+            "x".repeat(provenant_cli::MAX_RESULT_BYTES + 128),
+        );
+        let globals = provenant_cli::Globals {
+            json: true,
+            ..Default::default()
+        };
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let status =
+            emit_unpublished_with_writers(&result, &globals, "", false, None, &mut out, &mut err);
+        assert_eq!(status, 0);
+        assert!(err.is_empty(), "{}", String::from_utf8_lossy(&err));
+        let envelope: Value = serde_json::from_slice(&out).expect("bounded marker envelope");
+        assert_eq!(envelope["data"]["truncated"], true);
+        assert!(envelope["data"]["omitted_bytes"].as_u64().unwrap() > 0);
+        assert!(
+            envelope["warnings"]
+                .as_array()
+                .expect("warnings")
+                .iter()
+                .any(|warning| warning["code"] == RESULT_TOO_LARGE.as_str()),
+            "{envelope}"
+        );
+    }
+
+    #[test]
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    fn a_per_change_warning_is_remembered_only_after_display() {
+        with_root(|root| {
+            set_state_root(root);
+            let warning = Warning::new(NAME_CASE_FOLDED, "folded `Reader` to `reader`")
+                .subject("reader")
+                .once_per_change();
+            let key = warning.key();
+            let _sink = install_command_sink(true);
+            warning::warn(warning);
+            assert!(
+                !dedup::was_seen(root, &key),
+                "a warning held for the envelope is not remembered before display"
+            );
+            let taken = take_warnings();
+            assert_eq!(taken.len(), 1);
+            assert!(
+                dedup::was_seen(root, &key),
+                "entering the envelope shows the warning and remembers its key"
+            );
+        });
+    }
+
+    #[test]
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    fn an_exit_without_emitting_shows_and_remembers_held_warnings() {
+        with_root(|root| {
+            set_state_root(root);
+            let warning = Warning::new(NAME_CASE_FOLDED, "folded `Writer` to `writer`")
+                .subject("writer")
+                .once_per_change();
+            let key = warning.key();
+            {
+                let _sink = install_command_sink(true);
+                warning::warn(warning);
+                assert!(!dedup::was_seen(root, &key));
+            }
+            assert!(
+                dedup::was_seen(root, &key),
+                "the guard drains held warnings on exit so they are shown once"
+            );
+        });
+    }
+
+    #[test]
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    fn a_fresh_per_change_key_starts_at_one() {
+        with_root(|root| {
+            assert!(dedup::remember(root, "sha256:fresh", "A"));
+            let db = open_connection(&root.join("warnings.sqlite3"), true).expect("db");
+            let count: i64 = db
+                .query_row(
+                    "SELECT count FROM seen WHERE key = 'sha256:fresh'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("count");
+            assert_eq!(count, 1, "a new row is shown once and counted once");
+            drop(db);
+            assert!(!dedup::remember(root, "sha256:fresh", "A"));
+            let db = open_connection(&root.join("warnings.sqlite3"), true).expect("db");
+            let count: i64 = db
+                .query_row(
+                    "SELECT count FROM seen WHERE key = 'sha256:fresh'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("count");
+            assert_eq!(count, 2, "only a repeat advances the count");
         });
     }
 }

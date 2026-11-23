@@ -3,6 +3,7 @@
 //! a published artefact whose pointer keeps the result's original status.
 use crate::limits;
 pub use crate::limits::MAX_RESULT_BYTES;
+use provenant_records::warning::{RESULT_TOO_LARGE, Warning};
 use provenant_records::{CommandResult, Outcome};
 use serde::Serialize;
 use std::io::{self, Write};
@@ -1142,6 +1143,7 @@ pub fn render_or_publish<T: Serialize>(
                     };
                     let mut failure =
                         CommandResult::new(&result.command, Outcome::Error, Overflow { artifact });
+                    failure.warnings = result.warnings.clone();
                     failure.error = Some(provenant_records::CommandError::new(
                         code, message, None, repair,
                     ));
@@ -1187,18 +1189,6 @@ pub fn render_or_publish<T: Serialize>(
                         // a command failure.
                         let path_text =
                             serde_json::to_string(&path).map_err(RenderError::Encode)?;
-                        let _ = writeln!(
-                            stderr,
-                            "warning: [RESULT_TOO_LARGE] {} exceeds 1 MiB (source: COMMAND_RESULT_MAX_BYTES); paged to the owner-published artefact; proceeding",
-                            result.command
-                        );
-                        let paged = CommandResult::new(
-                            &result.command,
-                            result.status,
-                            Overflow {
-                                artifact: Some(path),
-                            },
-                        );
                         // Human transport names the pointer in the same typed
                         // path record; JSON carries it in data.artifact.
                         let human =
@@ -1213,6 +1203,33 @@ pub fn render_or_publish<T: Serialize>(
                                 }
                             }
                         };
+                        // The paged envelope keeps every warning the reader
+                        // already has and the one the page itself raises. Under
+                        // --json the cap notice is typed in that envelope, never
+                        // written to stderr; human mode routes it through warn.
+                        let mut paged = CommandResult::new(
+                            &result.command,
+                            result.status,
+                            Overflow {
+                                artifact: Some(path),
+                            },
+                        );
+                        paged.warnings = result.warnings.clone();
+                        let notice = Warning::new(
+                            RESULT_TOO_LARGE,
+                            format!(
+                                "[RESULT_TOO_LARGE] {} exceeds 1 MiB (source: COMMAND_RESULT_MAX_BYTES); paged to the owner-published artefact; proceeding",
+                                result.command
+                            ),
+                        )
+                        .repair(
+                            "Read the published artifact named in data.artifact for the full result; request a smaller page.",
+                        );
+                        if matches!(mode, RenderMode::Json) {
+                            paged.warnings.push(notice);
+                        } else {
+                            provenant_records::warning::warn(notice);
+                        }
                         render(&paged, fallback_mode, writer)?;
                         Ok(result.status)
                     }
@@ -1379,8 +1396,16 @@ mod overflow_tests {
         assert_eq!(value["status"], "ok");
         assert!(value["error"].is_null());
         assert!(value["data"]["artifact"].is_object());
-        let warning = String::from_utf8(errors)?;
-        assert!(warning.contains("warning: [RESULT_TOO_LARGE]"), "{warning}");
+        assert!(
+            value["warnings"]
+                .as_array()
+                .ok_or("warnings")?
+                .iter()
+                .any(|warning| warning["code"] == "RESULT_TOO_LARGE"),
+            "{value}"
+        );
+        let stderr = String::from_utf8(errors)?;
+        assert!(stderr.is_empty(), "{stderr}");
         Ok(())
     }
 }

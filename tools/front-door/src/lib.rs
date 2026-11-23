@@ -1246,7 +1246,11 @@ mod session_warning_tests {
 /// Run one parsed command line and count it, returning the exit status.
 // CLI reporting measures real elapsed time for operational diagnostics.
 #[allow(clippy::disallowed_methods)]
-pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
+pub fn dispatch(
+    parsed: ParseOutcome,
+    process: &dyn Process,
+    parse_warnings: Vec<provenant_records::warning::Warning>,
+) -> u8 {
     commands::install();
     let started = std::time::Instant::now();
     // Lets attempt context match an installed release without hashing the
@@ -1268,6 +1272,9 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
     // One sink for the whole command: warnings raised while resolving roots or
     // loading config reach it, and the guard restores the previous sink on exit.
     let _command_sink = output::install_command_sink(globals.json);
+    // Warnings raised by Clap's value parsers happened before the sink existed;
+    // replay them now so they reach the same envelope as every other warning.
+    output::replay_warnings(parse_warnings);
     // A command admitted under an admission class runs directly under that slot:
     // it needs no roots, telemetry or result envelope, and ends with the command's exit code.
     if let ParseOutcome::Invocation(inv) = &parsed
