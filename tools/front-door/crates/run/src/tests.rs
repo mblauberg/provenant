@@ -1280,6 +1280,7 @@ fn read_only_store_reports_whether_it_holds_a_run() -> TestResult {
     Ok(())
 }
 
+// Spec: docs/specs/cli.md#output-references-and-bounded-tails
 #[test]
 fn missing_output_is_not_found_only_after_terminal() -> TestResult {
     let temp = tempfile::tempdir()?;
@@ -1292,10 +1293,9 @@ fn missing_output_is_not_found_only_after_terminal() -> TestResult {
     let id = input.attempt_id;
     store.create(&input, &call)?;
     for part in [ArtifactPart::Result, ArtifactPart::Stderr] {
-        assert!(matches!(
-            store.read_output(id, part, ByteRange::default(), &context, &call),
-            Err(RunError::Nonterminal)
-        ));
+        let chunk = store.read_output(id, part, ByteRange::default(), &context, &call)?;
+        assert!(chunk.bytes.is_empty(), "{part:?}");
+        assert!(!chunk.complete, "{part:?}");
     }
     store.withdraw(
         id,

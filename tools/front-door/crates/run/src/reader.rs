@@ -1017,32 +1017,42 @@ impl RunStore {
             });
         }
         let record = self.record_observed(id, call)?;
-        let missing_output = if matches!(record.state, AttemptState::Terminal { .. }) {
-            RunError::NotFound
-        } else {
-            RunError::Nonterminal
+        let terminal = matches!(record.state, AttemptState::Terminal { .. });
+        // A live attempt has no sealed result yet. What has arrived so far is
+        // returned as an incomplete page, not a refusal: a caller may read
+        // again after settlement. Only a settled attempt can lack an artifact.
+        let partial = || {
+            (
+                Vec::new(),
+                false,
+                provenant_records::CanonicalV1::file_digest(&[]),
+            )
         };
         let (bytes, complete, digest) = match part {
             ArtifactPart::Stderr => {
                 let dir = self.attempt_dir(id, false)?;
-                let (bytes, complete) = match crate::artifacts::read_sealed_observed(
+                let sealed = crate::artifacts::read_sealed_observed(
                     &dir,
                     AttemptFile::Stderr.name(),
                     CAPTURE_LIMIT,
-                )? {
-                    Some(bytes) => (bytes, true),
-                    None => (
-                        crate::artifacts::read_sealed_observed(
-                            &dir,
-                            "stderr.log.tail",
-                            CAPTURE_LIMIT,
-                        )?
-                        .ok_or(missing_output)?,
-                        false,
-                    ),
+                )?;
+                let tail = if sealed.is_none() {
+                    crate::artifacts::read_sealed_observed(&dir, "stderr.log.tail", CAPTURE_LIMIT)?
+                } else {
+                    None
                 };
-                let digest = provenant_records::CanonicalV1::file_digest(&bytes);
-                (bytes, complete, digest)
+                match (sealed, tail) {
+                    (Some(bytes), _) => {
+                        let digest = provenant_records::CanonicalV1::file_digest(&bytes);
+                        (bytes, true, digest)
+                    }
+                    (None, Some(bytes)) => {
+                        let digest = provenant_records::CanonicalV1::file_digest(&bytes);
+                        (bytes, false, digest)
+                    }
+                    (None, None) if terminal => return Err(RunError::NotFound),
+                    (None, None) => partial(),
+                }
             }
             ArtifactPart::Transcript => {
                 let session = record.session.as_deref().ok_or(RunError::NotFound)?;
@@ -1065,17 +1075,24 @@ impl RunStore {
                 let digest = provenant_records::CanonicalV1::file_digest(&bytes);
                 (bytes, complete, digest)
             }
-            ArtifactPart::Prompt | ArtifactPart::Result => {
-                let (artifact, limit) = match part {
-                    ArtifactPart::Prompt => (&record.prompt, RECORD_LIMIT),
-                    _ => (record.result.as_ref().ok_or(missing_output)?, RESULT_LIMIT),
-                };
-                let bytes = self.artifact_bytes(artifact, limit)?;
+            ArtifactPart::Prompt => {
+                let bytes = self.artifact_bytes(&record.prompt, RECORD_LIMIT)?;
                 if std::str::from_utf8(&bytes).is_err() {
                     return Err(RunError::Validation("prompt/result is not UTF-8"));
                 }
-                (bytes, artifact.complete, artifact.digest)
+                (bytes, record.prompt.complete, record.prompt.digest)
             }
+            ArtifactPart::Result => match record.result.as_ref() {
+                Some(artifact) => {
+                    let bytes = self.artifact_bytes(artifact, RESULT_LIMIT)?;
+                    if std::str::from_utf8(&bytes).is_err() {
+                        return Err(RunError::Validation("prompt/result is not UTF-8"));
+                    }
+                    (bytes, artifact.complete, artifact.digest)
+                }
+                None if terminal => return Err(RunError::NotFound),
+                None => partial(),
+            },
         };
         if range.offset > bytes.len() as u64 {
             return Err(RunError::Validation("offset past EOF"));
@@ -1658,5 +1675,36 @@ mod tests {
             )
         );
         assert_eq!(graph_labels(None), (None, None, None));
+    }
+
+    // Spec: docs/specs/cli.md#output-references-and-bounded-tails
+    #[test]
+    fn a_nonterminal_attempt_reads_as_a_partial_page() {
+        use provenant_core::CancelToken;
+
+        let result = (|| -> std::result::Result<(), Box<dyn std::error::Error>> {
+            let temp = tempfile::tempdir()?;
+            let context = crate::tests::context(temp.path())?;
+            let clock = crate::tests::clock();
+            let cancel = CancelToken::new();
+            let call = crate::tests::call(&clock, &cancel);
+            let store = RunStore::open(&context, &call)?;
+            let input = crate::tests::input();
+            let id = input.attempt_id;
+            store.create(&input, &call)?;
+            assert!(!matches!(
+                store.record(id, &call)?.state,
+                AttemptState::Terminal { .. }
+            ));
+
+            for part in [ArtifactPart::Result, ArtifactPart::Stderr] {
+                let chunk = store.read_output(id, part, ByteRange::default(), &context, &call)?;
+                assert!(chunk.bytes.is_empty(), "{part:?}");
+                assert_eq!(chunk.len, 0, "{part:?}");
+                assert!(!chunk.complete, "{part:?}");
+            }
+            Ok(())
+        })();
+        assert!(result.is_ok(), "{result:?}");
     }
 }
