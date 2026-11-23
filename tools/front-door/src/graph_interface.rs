@@ -598,7 +598,7 @@ pub(crate) fn run(
             });
         if let Some(warning) = warning {
             warn(Warning::new(
-                provenant_records::warning::ADVISORY_FINDING,
+                provenant_records::warning::MODEL_SEGMENT_ADVISORY,
                 warning,
             ));
         }

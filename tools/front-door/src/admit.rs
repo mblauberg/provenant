@@ -592,7 +592,7 @@ fn run_build_job(
     let resolved_priority = context.port.priority_for(priority_class);
     for warning in &resolved_priority.warnings {
         warn(Warning::new(
-            provenant_records::warning::ADVISORY_FINDING,
+            provenant_records::warning::BUILD_PRIORITY_ADVISORY,
             warning.clone(),
         ));
     }
@@ -678,7 +678,7 @@ fn run_build_job(
         Ok(result) => {
             for warning in &result.outcome.warnings {
                 warn(Warning::new(
-                    provenant_records::warning::ADVISORY_FINDING,
+                    provenant_records::warning::BUILD_OUTCOME_ADVISORY,
                     warning.clone(),
                 ));
             }

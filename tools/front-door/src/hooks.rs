@@ -1343,7 +1343,7 @@ fn pre_push(remote: &str, globals: &Globals, deadline: Instant) -> Result<(), Er
                     // only the default-branch gate and a configured refuse stop
                     // the Git operation.
                     warn(Warning::new(
-                        provenant_records::warning::POLICY_WARNING,
+                        provenant_records::warning::PRE_PUSH_POLICY_ADVISORY,
                         format!("pre-push: {refusal}"),
                     ));
                     Ok(())
@@ -1504,7 +1504,7 @@ fn run_local_gate_with(
                 return Err(message.into());
             }
             warn(Warning::new(
-                provenant_records::warning::ADVISORY_FINDING,
+                provenant_records::warning::LOCAL_GATE_ADVISORY,
                 format!("pre-push: {message}"),
             ));
         }

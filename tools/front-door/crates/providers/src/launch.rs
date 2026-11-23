@@ -6,7 +6,7 @@ use provenant_confinement::permissions::{AccessMode, PathGrant, PathScope, Provi
 use provenant_records::{
     ResolvedRoute,
     policy::{Effect, Facts, Policy},
-    warning::{POLICY_WARNING, Warning, warn},
+    warning::{PROVIDER_POLICY_UNEXPECTED, Warning, warn},
 };
 use serde::Deserialize;
 use std::ffi::{OsStr, OsString};
@@ -476,7 +476,7 @@ pub(crate) fn policy_warning(
         Effect::Refuse(diagnostic) | Effect::Stop(diagnostic) => {
             warn(
                 Warning::new(
-                    POLICY_WARNING,
+                    PROVIDER_POLICY_UNEXPECTED,
                     diagnostic
                         .detail
                         .unwrap_or_else(|| "provider policy refused an operation".to_owned()),

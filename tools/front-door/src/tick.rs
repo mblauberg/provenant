@@ -441,7 +441,7 @@ pub(crate) fn gc_worker(globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
         for warning in schedule_build_hygiene(&resolved) {
             provenant_records::warning::warn(
                 provenant_records::warning::Warning::new(
-                    provenant_records::warning::ADVISORY_FINDING,
+                    provenant_records::warning::BUILD_HYGIENE_ADVISORY,
                     warning,
                 )
                 .once_per_change(),

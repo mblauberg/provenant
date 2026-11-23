@@ -80,7 +80,7 @@ pub fn run(tier: Option<&str>, commit: Option<&str>, affected: bool, globals: &G
     for warning in &full_after.warnings {
         provenant_records::warning::warn(
             provenant_records::warning::Warning::new(
-                provenant_records::warning::ADVISORY_FINDING,
+                provenant_records::warning::PORT_DURATION_INVALID,
                 warning.clone(),
             )
             .once_per_change(),
@@ -425,7 +425,7 @@ pub fn run(tier: Option<&str>, commit: Option<&str>, affected: bool, globals: &G
     let priority = context.port.priority_for("tier");
     for warning in &priority.warnings {
         provenant_records::warning::warn(provenant_records::warning::Warning::new(
-            provenant_records::warning::ADVISORY_FINDING,
+            provenant_records::warning::BUILD_PRIORITY_ADVISORY,
             warning.clone(),
         ));
     }

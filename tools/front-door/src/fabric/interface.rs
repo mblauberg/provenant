@@ -7649,7 +7649,7 @@ mod tests {
 pub(super) fn warn_operator(warning: impl std::fmt::Display) {
     provenant_records::warning::warn(
         provenant_records::warning::Warning::new(
-            provenant_records::warning::ADVISORY_FINDING,
+            provenant_records::warning::LAUNCH_ADVISORY,
             warning.to_string(),
         )
         .once_per_change(),

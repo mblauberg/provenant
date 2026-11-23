@@ -85,8 +85,6 @@ pub const TERMINAL_FAILURE_UNRETAINED: WarningCode = WarningCode("TERMINAL_FAILU
 /// Terminal settlement was incomplete, so the writer reservation is retained.
 pub const TERMINAL_PUBLICATION_INCOMPLETE: WarningCode =
     WarningCode("TERMINAL_PUBLICATION_INCOMPLETE");
-/// A non-boundary policy rule was violated; the caller warns and proceeds.
-pub const POLICY_WARNING: WarningCode = WarningCode("POLICY_WARNING");
 /// A configuration source could not be read, so compiled defaults applied.
 pub const CONFIG_UNAVAILABLE: WarningCode = WarningCode("CONFIG_UNAVAILABLE");
 /// An unrecognised entry in the project registry was ignored.
@@ -209,8 +207,48 @@ pub const ADMISSION_RECORD_MALFORMED: WarningCode = WarningCode("ADMISSION_RECOR
 pub const STEER_TARGET_SETTLED: WarningCode = WarningCode("STEER_TARGET_SETTLED");
 
 // Event-specific codes added when the warning slices named each site.
-/// An advisory finding supplied by a subsystem was reported to the operator.
-pub const ADVISORY_FINDING: WarningCode = WarningCode("ADVISORY_FINDING");
+// A violated policy rule warns under its own rule code (see policy.rs), so the
+// policy effects below name only the call sites that cannot honour a strict
+// effect; an advisory below names the one subsystem finding it reports.
+/// A strict non-boundary policy refusal was reported while the caller stopped.
+pub const POLICY_STRICT_REFUSAL: WarningCode = WarningCode("POLICY_STRICT_REFUSAL");
+/// Secret-shaped input policy returned a strict effect the scanner cannot honour.
+pub const SECRET_INPUT_POLICY_UNEXPECTED: WarningCode =
+    WarningCode("SECRET_INPUT_POLICY_UNEXPECTED");
+/// A provider policy rule returned a strict effect launch cannot honour.
+pub const PROVIDER_POLICY_UNEXPECTED: WarningCode = WarningCode("PROVIDER_POLICY_UNEXPECTED");
+/// A pre-push policy check was advisory and the push continued.
+pub const PRE_PUSH_POLICY_ADVISORY: WarningCode = WarningCode("PRE_PUSH_POLICY_ADVISORY");
+/// An unsupported pool effort was configured and remains advisory at load.
+pub const POOL_EFFORT_UNSUPPORTED: WarningCode = WarningCode("POOL_EFFORT_UNSUPPORTED");
+/// A port declaration in an ignored location was skipped.
+pub const PORT_DECLARATION_IGNORED: WarningCode = WarningCode("PORT_DECLARATION_IGNORED");
+/// An invalid verify port full-after duration fell back to the builtin.
+pub const PORT_DURATION_INVALID: WarningCode = WarningCode("PORT_DURATION_INVALID");
+/// An installed agent's PATH would fall back from the trusted Rust toolchain.
+pub const AGENT_TOOLCHAIN_PATH: WarningCode = WarningCode("AGENT_TOOLCHAIN_PATH");
+/// A stale menu login item remains registered after an upgrade.
+pub const STALE_LOGIN_ITEM_ADVISORY: WarningCode = WarningCode("STALE_LOGIN_ITEM_ADVISORY");
+/// A build priority selector fell back for the effective port.
+pub const BUILD_PRIORITY_ADVISORY: WarningCode = WarningCode("BUILD_PRIORITY_ADVISORY");
+/// A build-slot GC or prewarm hygiene step retained its targets.
+pub const BUILD_HYGIENE_ADVISORY: WarningCode = WarningCode("BUILD_HYGIENE_ADVISORY");
+/// A build outcome carried advice for the operator.
+pub const BUILD_OUTCOME_ADVISORY: WarningCode = WarningCode("BUILD_OUTCOME_ADVISORY");
+/// A session save, checkpoint or delivery carried advice for the operator.
+pub const SESSION_ADVISORY: WarningCode = WarningCode("SESSION_ADVISORY");
+/// A model is absent from the effective catalogue segment.
+pub const MODEL_SEGMENT_ADVISORY: WarningCode = WarningCode("MODEL_SEGMENT_ADVISORY");
+/// A fabric launch carried advice for the operator.
+pub const LAUNCH_ADVISORY: WarningCode = WarningCode("LAUNCH_ADVISORY");
+/// A default creation base fell back to local HEAD.
+pub const BASE_FALLBACK_ADVISORY: WarningCode = WarningCode("BASE_FALLBACK_ADVISORY");
+/// A graph exclusion was discarded for the accepted route.
+pub const EXCLUSION_ADVISORY: WarningCode = WarningCode("EXCLUSION_ADVISORY");
+/// An advisory local gate command failed without enforcing the push.
+pub const LOCAL_GATE_ADVISORY: WarningCode = WarningCode("LOCAL_GATE_ADVISORY");
+/// An install inspection finding was advisory.
+pub const INSTALL_FINDING_ADVISORY: WarningCode = WarningCode("INSTALL_FINDING_ADVISORY");
 /// A wait budget exceeded its maximum and was clamped.
 pub const WAIT_BUDGET_CLAMPED: WarningCode = WarningCode("WAIT_BUDGET_CLAMPED");
 /// The model catalogue could not be read; a bundled or empty catalogue applied.
@@ -551,7 +589,10 @@ mod tests {
             super::ANSWER_DELIVERY_RETAINED,
             super::TERMINAL_FAILURE_UNRETAINED,
             super::TERMINAL_PUBLICATION_INCOMPLETE,
-            super::POLICY_WARNING,
+            super::POLICY_STRICT_REFUSAL,
+            super::SECRET_INPUT_POLICY_UNEXPECTED,
+            super::PROVIDER_POLICY_UNEXPECTED,
+            super::PRE_PUSH_POLICY_ADVISORY,
             super::CONFIG_UNAVAILABLE,
             super::PROJECT_DIRECTORY_IGNORED,
             super::DISK_FLOOR_LOW,
@@ -606,7 +647,21 @@ mod tests {
             super::WRITER_UNPUSHED_WORK,
             super::PRIMARY_POSITION_UNRECORDED,
             super::ADMISSION_RECORD_MALFORMED,
-            super::ADVISORY_FINDING,
+            super::POOL_EFFORT_UNSUPPORTED,
+            super::PORT_DECLARATION_IGNORED,
+            super::PORT_DURATION_INVALID,
+            super::AGENT_TOOLCHAIN_PATH,
+            super::STALE_LOGIN_ITEM_ADVISORY,
+            super::BUILD_PRIORITY_ADVISORY,
+            super::BUILD_HYGIENE_ADVISORY,
+            super::BUILD_OUTCOME_ADVISORY,
+            super::SESSION_ADVISORY,
+            super::MODEL_SEGMENT_ADVISORY,
+            super::LAUNCH_ADVISORY,
+            super::BASE_FALLBACK_ADVISORY,
+            super::EXCLUSION_ADVISORY,
+            super::LOCAL_GATE_ADVISORY,
+            super::INSTALL_FINDING_ADVISORY,
             super::WAIT_BUDGET_CLAMPED,
             super::MODEL_CATALOGUE_UNAVAILABLE,
             super::QUOTA_READINESS_UNSYNCED,

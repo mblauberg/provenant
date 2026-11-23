@@ -185,10 +185,10 @@ pub fn input_warnings(
             // credential matches are handled by their owning publication
             // boundary before any mutation.
             Effect::Refuse(_) | Effect::Stop(_) => {
-                use provenant_records::warning::{POLICY_WARNING, Warning};
+                use provenant_records::warning::{SECRET_INPUT_POLICY_UNEXPECTED, Warning};
                 let rule = policy.rule("SECRET_SHAPED_INPUT");
                 warnings.push(Warning::new(
-                    POLICY_WARNING,
+                    SECRET_INPUT_POLICY_UNEXPECTED,
                     format!(
                         "[SECRET_SHAPED_INPUT] {path} looks like a credential (strength=Warn, source={:?}, knob={})",
                         rule.source,

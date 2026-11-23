@@ -1,5 +1,5 @@
 //! One executable policy table, shared by enforcement and presentation.
-use crate::warning::{self, CONFIG_KEY_IGNORED, CONFIG_MALFORMED, POLICY_WARNING, Warning};
+use crate::warning::{self, CONFIG_KEY_IGNORED, CONFIG_MALFORMED, Warning, WarningCode};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::OnceLock};
 
@@ -180,6 +180,21 @@ pub fn table() -> &'static [Rule] {
             .rule
     })
 }
+
+/// A violated policy rule warns under its own stable rule code, so each code
+/// names one event instead of sharing a catch-all `POLICY_WARNING`. The code is
+/// read from the compiled table, the authoritative source of rule codes, which
+/// lives for the process lifetime.
+/// Spec: docs/specs/cli.md#warnings-are-typed-values
+#[allow(clippy::expect_used)] // check() calls this only for table-owned rule codes.
+fn rule_warning_code(code: &str) -> WarningCode {
+    let rule = table()
+        .iter()
+        .find(|rule| rule.code == code)
+        .expect("policy code in table");
+    WarningCode(rule.code.as_str())
+}
+
 impl Default for Policy {
     fn default() -> Self {
         Self {
@@ -280,9 +295,9 @@ impl Policy {
         );
         match rule.strength {
             Strength::Off => Effect::Proceed,
-            Strength::Warn => {
-                Effect::Warn(Warning::new(POLICY_WARNING, message).subject(code.to_owned()))
-            }
+            Strength::Warn => Effect::Warn(
+                Warning::new(rule_warning_code(code), message).subject(code.to_owned()),
+            ),
             Strength::Refuse if rule.boundary == Boundary::None => Effect::Stop(Box::new(
                 crate::diagnostic::Diagnostic::new(code).detail(message),
             )),
@@ -474,6 +489,32 @@ mod tests {
                 .is_some_and(|d| d.contains("Project"))
         );
     }
+    /// Spec: docs/specs/cli.md#warnings-are-typed-values
+    #[test]
+    fn a_violated_rule_warns_under_its_own_code_not_a_catch_all() {
+        let policy = Policy::default();
+        let ((), warnings) = crate::warning::capture(|| {
+            assert!(
+                policy
+                    .warn_or("LANE_DEPTH", Facts::violation("depth 5 exceeds 4"), |_| ())
+                    .is_ok()
+            );
+            assert!(
+                policy
+                    .warn_or(
+                        "PR_ATTEMPT_STATE",
+                        Facts::violation("attempt a1 ended failed"),
+                        |_| ()
+                    )
+                    .is_ok()
+            );
+        });
+        assert_eq!(warnings.len(), 2);
+        assert_eq!(warnings[0].code.as_ref(), "LANE_DEPTH");
+        assert_eq!(warnings[1].code.as_ref(), "PR_ATTEMPT_STATE");
+        assert_ne!(warnings[0].code, warnings[1].code);
+    }
+
     #[test]
     fn opening_a_pr_from_an_unsettled_attempt_warns_and_can_be_made_a_stop() {
         let mut policy = Policy::default();

@@ -441,11 +441,17 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
                     });
                 }
             }
-            for message in crate::pool_effort_warnings(&roots).into_iter().chain(
-                provenant_config::port_declaration_warnings(Some(&project), roots.state.as_path()),
-            ) {
+            for message in crate::pool_effort_warnings(&roots) {
                 warn(Warning::new(
-                    provenant_records::warning::ADVISORY_FINDING,
+                    provenant_records::warning::POOL_EFFORT_UNSUPPORTED,
+                    message,
+                ));
+            }
+            for message in
+                provenant_config::port_declaration_warnings(Some(&project), roots.state.as_path())
+            {
+                warn(Warning::new(
+                    provenant_records::warning::PORT_DECLARATION_IGNORED,
                     message,
                 ));
             }
@@ -532,7 +538,10 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
                     )
                 })
             }) {
-                warn(Warning::new(provenant_records::warning::ADVISORY_FINDING, message));
+                warn(Warning::new(
+                    provenant_records::warning::AGENT_TOOLCHAIN_PATH,
+                    message,
+                ));
             }
             let apps = crate::apps::dir(&targets.home);
             let login_item = crate::apps::stale_login_item(&apps);
@@ -553,7 +562,7 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
                     )
                 };
                 warn(Warning::new(
-                    provenant_records::warning::ADVISORY_FINDING,
+                    provenant_records::warning::STALE_LOGIN_ITEM_ADVISORY,
                     message,
                 ));
             }
