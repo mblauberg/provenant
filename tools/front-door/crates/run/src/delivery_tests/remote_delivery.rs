@@ -129,8 +129,12 @@ fn launch_and_stop_publication_share_one_remote_refresh()
         .push(("PROVENANT_GIT".into(), wrapper.into_os_string()));
 
     let launch = fixture.prepare()?;
-    let request = HostDeliveryContext::destination(DeliveryMode::Push, "lane")?
-        .ok_or("stop-publish destination")?;
+    let request = HostDeliveryContext::destination(
+        DeliveryMode::Push,
+        "lane",
+        &crate::forge_for("origin", "main", &[]),
+    )?
+    .ok_or("stop-publish destination")?;
     let stopped = launch.prepare_stop_publish(&fixture.writer, &request)?;
     assert!(
         stopped.has_stop_publish(),
