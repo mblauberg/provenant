@@ -65,6 +65,17 @@ pub enum HandoffStatus {
     Blocked,
 }
 
+impl HandoffStatus {
+    /// The wire spelling, for human rendering.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Done => "done",
+            Self::StoppedEarly => "stopped_early",
+            Self::Blocked => "blocked",
+        }
+    }
+}
+
 impl<'de> Deserialize<'de> for HandoffStatus {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let text = String::deserialize(d)?;

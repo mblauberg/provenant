@@ -271,10 +271,18 @@ impl ResultProjection {
         match &commands.value {
             Some(receipts) => {
                 for receipt in receipts {
-                    let command = receipt.command.as_deref().unwrap_or("unknown");
+                    let command = receipt
+                        .value
+                        .as_ref()
+                        .and_then(|value| value.command.as_deref())
+                        .unwrap_or("unknown");
+                    let exit = receipt
+                        .value
+                        .as_ref()
+                        .map(CommandReceipt::exit_code_text)
+                        .unwrap_or_else(|| "unknown".to_owned());
                     out.push_str(&format!(
-                        "  - {command}: exit {}, {}\n",
-                        receipt.exit_code_text(),
+                        "  - {command}: exit {exit}, {}\n",
                         receipt.observed_label()
                     ));
                 }
@@ -308,7 +316,7 @@ impl ResultProjection {
         let outside = scope
             .value
             .as_ref()
-            .map(|report| report.clone().compact().out_of_scope_count)
+            .map(|report| report.out_of_scope_count())
             .map(|count| count.to_string())
             .unwrap_or_else(|| "unknown".to_owned());
         out.push_str(&format!(

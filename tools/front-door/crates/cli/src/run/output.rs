@@ -66,16 +66,19 @@ pub(super) fn result_projection(
         value: None,
         extra: Default::default(),
     };
-    let handoff = data["handoff"]["Ok"].clone().and_then(|value| {
-        serde_json::from_value::<provenant_records::handoff::Handoff>(value).ok()
-    });
+    let handoff = serde_json::from_value::<provenant_records::handoff::Handoff>(
+        data["handoff"]["Ok"].clone(),
+    )
+    .ok();
     let verify = handoff
         .as_ref()
         .map(|handoff| handoff.verify.clone())
         .or_else(|| {
-            data["selected"]["verify"]
-                .as_array()
-                .and_then(|values| serde_json::from_value(values.clone()).ok())
+            let verify = &data["selected"]["verify"];
+            verify
+                .is_array()
+                .then(|| serde_json::from_value(verify.clone()).ok())
+                .flatten()
         });
     ResultProjection::new(
         provenant_records::RecordHeader::V1,
