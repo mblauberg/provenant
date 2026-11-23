@@ -1801,6 +1801,9 @@ mod tests {
             occupancy: Occupancy::Available,
             owner: Err("worktree registration was not observed".into()),
             primary: false,
+            lane: None,
+            attempt: None,
+            base: None,
         };
         assert_eq!(worktree_warning(&info, &base, "origin"), None);
         info.head = provenant_core::GitOid::parse(&"b".repeat(40)).unwrap();

@@ -161,6 +161,55 @@ pub fn owned_worktree_paths(
     Ok(listing)
 }
 
+/// Every registered checkout whose owner record is readable, paired with its
+/// canonical checkout path. A bounded host-state read: no checkout is opened
+/// and no process is observed, so status can join an attempt to its worktree
+/// without a full worktree context.
+pub fn worktree_owner_index(common: &Path) -> Result<Vec<(PathBuf, WorktreeOwner)>, WorktreeError> {
+    let directory = match Directory::open_anchor(common) {
+        Ok(directory) => directory,
+        Err(error) if error.is_not_found() => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let registrations = match directory.open_verified_directory(OsStr::new("worktrees")) {
+        Ok(directory) => directory,
+        Err(error) if error.is_not_found() => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut index = Vec::new();
+    for (count, name) in registrations.entries()?.enumerate() {
+        if count >= MAX_WORKTREES {
+            return Err(WorktreeError::InvalidOutput);
+        }
+        let name = name?;
+        if registrations.metadata_at(&name, false)?.kind == provenant_os::fs::FileKind::Regular {
+            continue;
+        }
+        let registration = registrations.open_verified_directory(&name)?;
+        let owner: WorktreeOwner =
+            match read_bounded(&registration, OsStr::new(OWNER), MAX_STATE_RECORD) {
+                Ok(bytes) => {
+                    serde_json::from_slice(&bytes).map_err(|_| WorktreeError::InvalidOutput)?
+                }
+                Err(error) if error.is_not_found() => continue,
+                Err(error) => return Err(error.into()),
+            };
+        validate(&owner)?;
+        let bytes = read_bounded(&registration, OsStr::new("gitdir"), 4096)?;
+        let backlink =
+            crate::repo::parse_git_path(&bytes, b"").ok_or(WorktreeError::InvalidOutput)?;
+        let marker =
+            crate::repo::resolve_git_path(&common.join("worktrees").join(name), &backlink)?;
+        if marker.file_name() != Some(OsStr::new(".git")) {
+            return Err(WorktreeError::InvalidOutput);
+        }
+        let path = marker.parent().ok_or(WorktreeError::InvalidOutput)?;
+        let path = path.to_path_buf();
+        index.push((path, owner));
+    }
+    Ok(index)
+}
+
 pub fn save_owner(worktree: &VerifiedWorktree, owner: &WorktreeOwner) -> Result<(), WorktreeError> {
     validate(owner)?;
     worktree.repo().revalidate()?;
@@ -564,7 +613,11 @@ pub fn prune_owned(
                 owner: Ok(Some(owner.clone())),
                 primary: false,
                 occupancy: Occupancy::Available,
-            };
+                lane: None,
+                attempt: None,
+                base: None,
+            }
+            .with_owner_identity(&Ok(Some(owner.clone())));
             let record = super::gc::begin_worktree_retirement(
                 context,
                 retirement,

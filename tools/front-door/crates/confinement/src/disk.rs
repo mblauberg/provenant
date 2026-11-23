@@ -267,6 +267,9 @@ pub fn worktrees(
             occupancy,
             owner: Err("worktree registration was not observed".into()),
             primary: false,
+            lane: None,
+            attempt: None,
+            base: None,
         };
         let first = report.entries.len();
         if let Some(index) = report.measure("worktree", &info.path) {

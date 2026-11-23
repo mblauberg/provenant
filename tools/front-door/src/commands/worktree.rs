@@ -23,6 +23,11 @@ pub static DOMAIN: Domain = Domain {
             run,
         },
         Verb {
+            path: &["worktree", "locate"],
+            stability: Stability::Evolving,
+            run,
+        },
+        Verb {
             path: &["worktree", "remove"],
             stability: Stability::Evolving,
             run,

@@ -1068,6 +1068,11 @@ pub enum Worktree {
     },
     /// List worktrees
     List,
+    /// Print the checkout path for a branch, lane, attempt or PR number
+    Locate {
+        /// Branch, lane, attempt id or pull request number
+        query: String,
+    },
     /// Explain a worktree's state and suggest one repair command
     Doctor {
         /// Checkout path, relative to the selected project when not absolute

@@ -11,9 +11,28 @@ invoking directory.
 
 ```sh
 provenant worktree create fix/repo-example --base origin/main   # base defaults to the current head
-provenant worktree list
+provenant worktree list                                         # path, lane and base per checkout
+provenant worktree locate fix/repo-example                      # also lane, attempt or PR number
 provenant worktree remove fix-repo-example                      # --discard also deletes an unmerged branch
 ```
+
+`provenant worktree locate QUERY` answers "where is the checkout for this
+branch, lane, attempt or pull request?" for chairs. QUERY may be a full or
+short branch, a lane name, an attempt id or a PR number (with or without `#`).
+In human mode it prints the path alone, so it composes with the shell:
+
+```sh
+cd "$(provenant worktree locate fix/repo-example)"
+```
+
+With `--json` it returns `{path, branch, lane, base}` inside the command
+envelope. A query that matches nothing is refused with close matches. The same
+`path` and `base` are carried on `provenant status --json` lane rows.
+
+`provenant worktree remove` refuses only a dirty checkout or one a live writer
+holds. It records `{branch, tip, path, at}` in `<state>/worktrees/removed.jsonl`
+(`provenant.worktree-removed.v1`) and prints the record. It deletes the local
+branch when it is merged into its base; an unmerged branch is kept and named.
 
 Options are in `provenant worktree --help`; project setup is in
 [configuration](runbooks/configuration.md#worktree-setup). If a worktree is

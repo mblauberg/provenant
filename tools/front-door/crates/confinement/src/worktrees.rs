@@ -56,7 +56,7 @@ pub use lifecycle::*;
 pub use owner::{
     OwnedWorktreeIssue, OwnedWorktreeListing, WorktreeOrigin, WorktreeOwner, branch_ownership,
     load_owner, owned_worktree_paths, prune_owned, refresh_owner_reference_while_held,
-    save_lane_owner_when_free, save_owner, update_owner_when_unchanged,
+    save_lane_owner_when_free, save_owner, update_owner_when_unchanged, worktree_owner_index,
 };
 pub use refs::{RefLedger, RefObservation, RefRecord};
 pub use removal::{
@@ -76,7 +76,9 @@ use crate::utility::{
 };
 use provenant_config::ProjectBinding;
 use provenant_core::Clock;
-use provenant_core::{AttemptId, CancelToken, GitOid, WaitBudget, hex};
+use provenant_core::{
+    AttemptId, CancelToken, GitOid, NameKind, NameRefusal, WaitBudget, close_matches, hex,
+};
 use provenant_os::exec::{ExecOutcome, Executor, Termination};
 use provenant_os::fs::{Directory, FsError, LockGuard, LockMode, PublishMode, canonicalize};
 #[cfg(test)]
@@ -832,11 +834,49 @@ pub struct WorktreeInfo {
     /// The existing owner record, or the evidence that it could not be read.
     pub owner: Result<Option<WorktreeOwner>, String>,
     pub primary: bool,
+    /// Lane name carried by `provenant-owner.json`: its declared label, or the
+    /// short branch name when a lane did not declare one.
+    pub lane: Option<String>,
+    /// Attempt that owns the checkout, from `provenant-owner.json`.
+    pub attempt: Option<AttemptId>,
+    /// Base commit pinned when the checkout was created, from the owner record.
+    pub base: Option<String>,
+}
+
+/// Project the chair-facing identity carried by `provenant-owner.json`. Absent
+/// or unreadable owner records yield no invented lane, attempt or base.
+pub(crate) fn owner_identity(
+    owner: &Result<Option<WorktreeOwner>, String>,
+) -> (Option<String>, Option<AttemptId>, Option<String>) {
+    match owner {
+        Ok(Some(owner)) => (
+            owner
+                .label
+                .clone()
+                .or_else(|| owner.branch.rsplit('/').next().map(str::to_owned)),
+            owner.attempt_id,
+            Some(owner.base.clone()),
+        ),
+        _ => (None, None, None),
+    }
 }
 
 impl WorktreeInfo {
     pub fn is_unowned(&self) -> bool {
         !self.primary && matches!(self.owner, Ok(None))
+    }
+
+    /// Build the identity fields from an already-loaded owner record. Every
+    /// constructor calls this so the projection cannot drift between rows.
+    pub(crate) fn with_owner_identity(
+        mut self,
+        owner: &Result<Option<WorktreeOwner>, String>,
+    ) -> Self {
+        let (lane, attempt, base) = owner_identity(owner);
+        self.lane = lane;
+        self.attempt = attempt;
+        self.base = base;
+        self
     }
 
     fn owner_label(&self) -> &'static str {
@@ -858,7 +898,12 @@ impl Serialize for WorktreeInfo {
         S: Serializer,
     {
         let path = StructuredPathWire::from_path(&self.path).map_err(serde::ser::Error::custom)?;
-        let fields = 6 + usize::from(self.is_unowned()) + usize::from(!self.warnings.is_empty());
+        let fields = 6
+            + usize::from(self.is_unowned())
+            + usize::from(!self.warnings.is_empty())
+            + usize::from(self.lane.is_some())
+            + usize::from(self.attempt.is_some())
+            + usize::from(self.base.is_some());
         let mut state = serializer.serialize_struct("WorktreeInfo", fields)?;
         if !self.warnings.is_empty() {
             state.serialize_field("warnings", &self.warnings)?;
@@ -869,11 +914,103 @@ impl Serialize for WorktreeInfo {
         state.serialize_field("dirty", &self.dirty)?;
         state.serialize_field("writer", self.occupancy.label())?;
         state.serialize_field("owner", self.owner_label())?;
+        if let Some(lane) = &self.lane {
+            state.serialize_field("lane", lane)?;
+        }
+        if let Some(attempt) = &self.attempt {
+            state.serialize_field("attempt", attempt)?;
+        }
+        if let Some(base) = &self.base {
+            state.serialize_field("base", base)?;
+        }
         if self.is_unowned() {
             state.serialize_field("next", "No Provenant lane currently owns this checkout. Inspect its custody, then select it explicitly with --worktree <path>.")?;
         }
         state.end()
     }
+}
+
+/// A `worktree locate` query resolves to exactly one inventory row or a
+/// refusal carrying ranked close matches. Matching is exact and covers every
+/// query kind: full or short branch, lane name, attempt id and PR number.
+///
+/// Spec: docs/specs/next-batch.md#worktree-locate
+pub fn locate<'a>(query: &str, rows: &'a [WorktreeInfo]) -> Result<&'a WorktreeInfo, NameRefusal> {
+    let folded = query.to_lowercase();
+    if let Some(row) = rows.iter().find(|row| locate_matches(row, query, &folded)) {
+        return Ok(row);
+    }
+    let mut universe: Vec<String> = Vec::new();
+    for row in rows {
+        if let Some(branch) = &row.branch {
+            universe.push(branch.clone());
+            if let Some(short) = branch.strip_prefix("refs/heads/") {
+                universe.push(short.to_owned());
+            }
+        }
+        if let Some(lane) = &row.lane {
+            universe.push(lane.clone());
+        }
+        if let Some(attempt) = &row.attempt {
+            universe.push(attempt.to_string());
+        }
+    }
+    let candidates = close_matches(&folded, universe.iter().map(String::as_str))
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    Err(NameRefusal {
+        kind: NameKind("worktree"),
+        query: query.to_owned(),
+        candidates,
+    })
+}
+
+fn locate_matches(row: &WorktreeInfo, query: &str, folded: &str) -> bool {
+    let short = row
+        .branch
+        .as_deref()
+        .and_then(|branch| branch.strip_prefix("refs/heads/"));
+    let branch_hit = row
+        .branch
+        .as_deref()
+        .is_some_and(|branch| branch.eq_ignore_ascii_case(query))
+        || short.is_some_and(|branch| branch.eq_ignore_ascii_case(query));
+    if branch_hit
+        || row
+            .lane
+            .as_deref()
+            .is_some_and(|lane| lane.to_lowercase() == folded)
+        || row
+            .attempt
+            .as_ref()
+            .is_some_and(|attempt| attempt.to_string().eq_ignore_ascii_case(query))
+    {
+        return true;
+    }
+    // A bare number, with or without a `#`, also names a pull request. Branch
+    // and lane spellings that carry the number resolve without a forge call.
+    let number = query.strip_prefix('#').unwrap_or(query);
+    if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+        return false;
+    }
+    let spellings = [
+        format!("pr{number}"),
+        format!("pr-{number}"),
+        format!("pr/{number}"),
+        format!("pull/{number}"),
+        format!("refs/pull/{number}/head"),
+        format!("#{number}"),
+    ];
+    row.branch.as_deref().is_some_and(|branch| {
+        spellings
+            .iter()
+            .any(|spelling| branch.eq_ignore_ascii_case(spelling))
+    }) || row.lane.as_deref().is_some_and(|lane| {
+        spellings
+            .iter()
+            .any(|spelling| lane.eq_ignore_ascii_case(spelling))
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -1016,6 +1153,7 @@ mod lifecycle_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn detached_worktree_refusal_carries_the_head_and_declared_remedies() {
@@ -1140,6 +1278,83 @@ mod tests {
         let duplicate_head = b"worktree /tmp/tree\0HEAD 0000000000000000000000000000000000000000\0HEAD 0000000000000000000000000000000000000000\0branch refs/heads/topic\0\0";
         assert!(parse_worktree_list(missing_head).is_err());
         assert!(parse_worktree_list(duplicate_head).is_err());
+    }
+
+    fn located_fixture(
+        branch: &str,
+        lane: Option<&str>,
+        attempt: Option<[u8; 16]>,
+    ) -> WorktreeInfo {
+        let owner = WorktreeOwner {
+            attempt_id: attempt.map(AttemptId::from_bytes),
+            operation_id: None,
+            branch: branch.to_owned(),
+            base: "1".repeat(40),
+            host: provenant_core::HostId::from_bytes([1; 16]),
+            created_at: WallTime::from_micros(1).unwrap(),
+            origin: WorktreeOrigin::Lane,
+            label: lane.map(str::to_owned),
+            reference: None,
+        };
+        WorktreeInfo {
+            warnings: Vec::new(),
+            path: PathBuf::from(format!("/repo/.worktrees/{branch}")),
+            branch: Some(format!("refs/heads/{branch}")),
+            head: GitOid::parse(&"2".repeat(40)).unwrap(),
+            dirty: WorktreeCondition::Clean,
+            occupancy: Occupancy::Available,
+            owner: Ok(Some(owner.clone())),
+            primary: false,
+            lane: None,
+            attempt: None,
+            base: None,
+        }
+        .with_owner_identity(&Ok(Some(owner)))
+    }
+
+    // Spec: docs/specs/next-batch.md#worktree-locate
+    #[test]
+    fn locate_resolves_every_query_kind_and_refuses_with_close_matches() {
+        let attempt = [7; 16];
+        let attempt_text = AttemptId::from_bytes(attempt).to_string();
+        let rows = vec![
+            located_fixture("feature/topic", Some("w3-topic"), Some(attempt)),
+            located_fixture("pr/3810", None, None),
+        ];
+        for query in [
+            "feature/topic",
+            "refs/heads/feature/topic",
+            "w3-topic",
+            attempt_text.as_str(),
+        ] {
+            assert_eq!(
+                locate(query, &rows).map(|row| &row.path),
+                Ok(&rows[0].path),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            locate("3810", &rows).map(|row| &row.path),
+            Ok(&rows[1].path)
+        );
+        assert_eq!(
+            locate("pr-3810", &rows).map(|row| &row.path),
+            Ok(&rows[1].path)
+        );
+        let refusal = locate("featur/topic", &rows).expect_err("typo must refuse");
+        assert_eq!(refusal.kind, NameKind("worktree"));
+        assert!(!refusal.candidates.is_empty());
+    }
+
+    // Spec: docs/specs/next-batch.md#worktree-list-carries-lane-and-base
+    #[test]
+    fn worktree_info_serializes_owner_lane_attempt_and_base() {
+        let row = located_fixture("feature/topic", None, Some([3; 16]));
+        let value = serde_json::to_value(&row).expect("worktree row");
+        assert_eq!(value["lane"], json!("feature/topic"));
+        assert_eq!(value["base"], json!("1".repeat(40)));
+        assert!(value["attempt"].is_string());
+        assert_eq!(value["writer"], json!("free"));
     }
 }
 
