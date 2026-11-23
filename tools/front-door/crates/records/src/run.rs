@@ -1,6 +1,8 @@
 //! Strict run-store records. Facts are constructed only after store validation.
 pub use crate::Layer;
-use crate::{CanonicalError, CanonicalV1, FileDigest, PathWire, Precedence};
+use crate::{
+    CanonicalError, CanonicalV1, Cost, FileDigest, PathWire, Precedence, Tokens, UsageSource,
+};
 use provenant_core::{
     ActorId, AttemptId, DeliveryId, Digest, GitOid, OperationId, ProjectId, WallTime,
 };
@@ -1164,17 +1166,17 @@ impl From<RouteRecord> for crate::RouteFact {
     }
 }
 impl UsageRecord {
-    /// Fresh tokens the writer token budget counts: uncached input, cache
-    /// writes and output (including reasoning). Cache reads are excluded
-    /// because each call re-reads the whole context, so counting them would
-    /// exhaust the budget on rereads instead of new work. `None` means the
-    /// provider reported none of these categories, which is not zero.
+    /// Fresh tokens the writer token budget counts: input with cache reads
+    /// removed, cache writes and output (including reasoning). Cache reads are
+    /// excluded because each call re-reads the whole context, so counting them
+    /// would exhaust the budget on rereads instead of new work. `None` means
+    /// the provider reported none of these categories, which is not zero.
     pub fn fresh_tokens(&self) -> Option<u64> {
         [
-            self.uncached_input,
-            self.cache_write,
-            self.output_excluding_reasoning,
-            self.reasoning,
+            self.tokens.input,
+            self.tokens.cache_write,
+            self.tokens.output,
+            self.tokens.reasoning,
         ]
         .into_iter()
         .try_fold(None, |sum: Option<u64>, part| match part {
@@ -1185,33 +1187,40 @@ impl UsageRecord {
     }
 
     /// Input the provider reported, including cached reads and writes. This
-    /// is the provider's own cumulative input figure, not the budget's unit;
-    /// it is reported beside the counted figure so the units cannot be
-    /// confused. `None` when the provider reported no input categories.
+    /// is the provider's own input figure, not the budget's unit; it is
+    /// reported beside the counted figure so the units cannot be confused.
+    /// `None` when the provider reported no input categories.
     pub fn input_including_cache(&self) -> Option<u64> {
-        [self.uncached_input, self.cache_read, self.cache_write]
-            .into_iter()
-            .try_fold(None, |sum: Option<u64>, part| match part {
-                Some(n) => Some(Some(sum.unwrap_or(0).saturating_add(n))),
-                None => Some(sum),
-            })
-            .flatten()
+        [
+            self.tokens.input,
+            self.tokens.cache_read,
+            self.tokens.cache_write,
+        ]
+        .into_iter()
+        .try_fold(None, |sum: Option<u64>, part| match part {
+            Some(n) => Some(Some(sum.unwrap_or(0).saturating_add(n))),
+            None => Some(sum),
+        })
+        .flatten()
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// One attempt's usage, in the shared token and cost shape. Buckets stay
+/// absent until a provider states them; the source is typed, never a guessed
+/// string. `extra` keeps forward-compatible fields, not usage semantics.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UsageRecord {
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
-    pub uncached_input: Option<u64>,
-    pub cache_read: Option<u64>,
-    pub cache_write: Option<u64>,
-    /// The long-TTL part of `cache_write`, where the provider splits writes.
+    /// Token buckets as merged by the adapter's declared semantics.
     #[serde(default)]
-    pub cache_write_1h: Option<u64>,
-    pub output_excluding_reasoning: Option<u64>,
-    pub reasoning: Option<u64>,
-    pub source: Option<String>,
+    pub tokens: Tokens,
+    /// A stated or priced cost, when the adapter observed one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<Cost>,
+    /// Where this record was observed.
+    #[serde(default = "UsageRecord::default_source")]
+    pub source: UsageSource,
     pub context_basis_points: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub per_attempt: Option<bool>,
@@ -1219,6 +1228,29 @@ pub struct UsageRecord {
     pub session_total: Option<Box<UsageRecord>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gh_invocations: Option<GhInvocationReceipt>,
+}
+
+impl Default for UsageRecord {
+    fn default() -> Self {
+        Self {
+            extra: crate::ExtraFields::new(),
+            tokens: Tokens::default(),
+            cost: None,
+            source: Self::default_source(),
+            context_basis_points: None,
+            per_attempt: None,
+            session_total: None,
+            gh_invocations: None,
+        }
+    }
+}
+
+impl UsageRecord {
+    /// An unmarked record is one the provider stream reported. Callers that
+    /// observe usage elsewhere set the typed source explicitly.
+    fn default_source() -> UsageSource {
+        UsageSource::Stream
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1236,12 +1268,12 @@ pub struct GhInvocationReceipt {
 impl From<UsageRecord> for crate::Usage {
     fn from(u: UsageRecord) -> Self {
         Self {
-            uncached_input: u.uncached_input,
-            cache_read: u.cache_read,
-            cache_write: u.cache_write,
-            cache_write_1h: u.cache_write_1h,
-            output_excluding_reasoning: u.output_excluding_reasoning,
-            reasoning: u.reasoning,
+            uncached_input: u.tokens.input,
+            cache_read: u.tokens.cache_read,
+            cache_write: u.tokens.cache_write,
+            cache_write_1h: u.tokens.cache_write_1h,
+            output_excluding_reasoning: u.tokens.output,
+            reasoning: u.tokens.reasoning,
         }
     }
 }
@@ -3491,7 +3523,7 @@ mod tests {
     {
         let value = serde_json::json!({
             "per_attempt":true,
-            "session_total":{"uncached_input":12,"future_nested":true},
+            "session_total":{"tokens":{"input":12},"future_nested":true},
             "gh_invocations":{"count":4,"budget":3,"source":"launch","over_budget":true},
             "future":true
         });
@@ -3501,7 +3533,7 @@ mod tests {
             usage
                 .session_total
                 .as_deref()
-                .and_then(|total| total.uncached_input),
+                .and_then(|total| total.tokens.input),
             Some(12)
         );
         assert_eq!(

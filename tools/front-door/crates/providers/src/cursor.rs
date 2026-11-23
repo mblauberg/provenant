@@ -444,13 +444,15 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
         } => {
             let mut events = vec![E::Session(session_id)];
             if let Some(usage) = usage {
-                events.push(E::Usage {
-                    input: usage.input,
-                    output: usage.output,
-                    cache_read: usage.cache_read,
-                    cache_write: usage.cache_write,
-                    cache_write_1h: None,
-                });
+                events.push(E::Usage(crate::usage::UsageReport::step(
+                    provenant_records::Tokens {
+                        input: Some(usage.input),
+                        output: Some(usage.output),
+                        cache_read: usage.cache_read,
+                        cache_write: usage.cache_write,
+                        ..provenant_records::Tokens::default()
+                    },
+                )));
             }
             if is_error || subtype != "success" {
                 if let Some(result) = result.filter(|message| !message.is_empty()) {

@@ -11,7 +11,10 @@ use crate::usage::{Identity, UnknownIdentityReason};
 use crate::{claude::Raw, segments};
 use provenant_core::{Clock, MonoTime, Roots};
 use provenant_os::fs::{Directory, FsError, LockMode, PublishMode};
-use provenant_records::AccountIdentity;
+use provenant_providers::{UsageAccumulator, UsageReport};
+use provenant_records::{
+    AccountIdentity, Tokens, UsageRecord, UsageScope, UsageSemantics, UsageSource,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -117,13 +120,36 @@ pub struct Row {
     /// Provider-reported reasoning tokens; absent means unreported, never zero.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_tokens: Option<u64>,
+    /// Where this row's usage was observed. Every ingest row is an ingest.
+    #[serde(default = "ingest_source")]
+    pub usage_source: UsageSource,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply: Option<crate::signals::ReplyContext>,
     #[serde(default, flatten)]
     pub extra: provenant_records::ExtraFields,
 }
 
+fn ingest_source() -> UsageSource {
+    UsageSource::Ingest
+}
+
 impl Row {
+    /// The shared usage record this row projects, tagged with its typed source.
+    pub fn usage_record(&self) -> UsageRecord {
+        UsageRecord {
+            tokens: Tokens {
+                input: Some(self.uncached_input),
+                cache_read: Some(self.cache_read),
+                cache_write: Some(self.cache_write),
+                cache_write_1h: Some(self.cache_write_1h),
+                output: Some(self.output),
+                reasoning: self.reasoning_tokens,
+            },
+            source: self.usage_source,
+            ..UsageRecord::default()
+        }
+    }
+
     pub fn buckets(&self) -> [u64; 5] {
         [
             self.uncached_input,
@@ -717,17 +743,32 @@ fn row(session: String, message: String, pending: Pending) -> Row {
         .unwrap_or(0)
         .max(one_hour_named);
     let one_hour = one_hour_named.min(creation);
+    // One report per message, merged by the declared semantics. The native
+    // transcript states fresh input and cache buckets apart, so no normalising
+    // is needed; the accumulator is still the single place buckets combine.
+    let mut accumulator =
+        UsageAccumulator::new(UsageSemantics::new(UsageScope::Step, false, false));
+    accumulator.push(UsageReport::step(Tokens {
+        input: raw.input_tokens,
+        cache_read: raw.cache_read_input_tokens,
+        cache_write: Some(creation - one_hour),
+        cache_write_1h: Some(one_hour),
+        output: raw.output_tokens,
+        reasoning: raw.reasoning_tokens,
+        ..Tokens::default()
+    }));
+    let (tokens, _) = accumulator.total();
     Row {
         schema_version: ROW_SCHEMA_VERSION,
         identity: pending.identity,
         provider: PROVIDER.into(),
         model: pending.model,
         effort: pending.effort,
-        uncached_input: raw.input_tokens.unwrap_or(0),
-        cache_read: raw.cache_read_input_tokens.unwrap_or(0),
-        cache_write: creation - one_hour,
-        cache_write_1h: one_hour,
-        output: raw.output_tokens.unwrap_or(0),
+        uncached_input: tokens.input.unwrap_or(0),
+        cache_read: tokens.cache_read.unwrap_or(0),
+        cache_write: tokens.cache_write.unwrap_or(0),
+        cache_write_1h: tokens.cache_write_1h.unwrap_or(0),
+        output: tokens.output.unwrap_or(0),
         timestamp: pending.timestamp.to_string(),
         session,
         message,
@@ -735,7 +776,8 @@ fn row(session: String, message: String, pending: Pending) -> Row {
         agent_id: pending.agent_id,
         native_config: pending.native_config,
         native_attempt: None,
-        reasoning_tokens: raw.reasoning_tokens,
+        reasoning_tokens: tokens.reasoning,
+        usage_source: UsageSource::Ingest,
         reply: Some(pending.reply),
         extra: Default::default(),
     }

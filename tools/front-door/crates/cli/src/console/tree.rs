@@ -439,7 +439,7 @@ mod tests {
             provider: Some("codex".into()),
             ..Default::default()
         });
-        observed.usage.uncached_input = Some(42);
+        observed.usage.tokens.input = Some(42);
         let db = rusqlite::Connection::open(roots.state.as_path().join("run.sqlite3"))?;
         db.execute(
             "UPDATE attempts SET record=?1 WHERE id=?2",

@@ -866,15 +866,16 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
             events
         }
         Event::Result { result } => {
-            let mut events = vec![E::Usage {
-                input: result.usage.input_tokens,
-                output: result.usage.output_tokens,
-                // Agy's `cache_read_tokens` is not recorded: nothing shows whether
-                // `input_tokens` already contains it, so splitting would guess.
-                cache_read: None,
-                cache_write: None,
-                cache_write_1h: None,
-            }];
+            let mut events = vec![E::Usage(crate::usage::UsageReport::step(
+                provenant_records::Tokens {
+                    input: Some(result.usage.input_tokens),
+                    output: Some(result.usage.output_tokens),
+                    // Agy's `cache_read_tokens` is not recorded: nothing shows
+                    // whether `input_tokens` already contains it, so splitting
+                    // would guess.
+                    ..provenant_records::Tokens::default()
+                },
+            ))];
             if !result.conversation_id.is_empty() {
                 events.push(E::Session(result.conversation_id));
             }

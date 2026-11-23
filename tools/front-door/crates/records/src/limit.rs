@@ -580,11 +580,14 @@ mod tests {
             ..LaneLimits::default()
         };
         let usage = crate::run::UsageRecord {
-            uncached_input: Some(100),
-            cache_read: Some(5_000),
-            cache_write: Some(20),
-            output_excluding_reasoning: Some(30),
-            reasoning: Some(10),
+            tokens: crate::Tokens {
+                input: Some(100),
+                cache_read: Some(5_000),
+                cache_write: Some(20),
+                output: Some(30),
+                reasoning: Some(10),
+                ..crate::Tokens::default()
+            },
             ..Default::default()
         };
         let codex = limits.budget_usage(&usage, Some("codex")).unwrap();

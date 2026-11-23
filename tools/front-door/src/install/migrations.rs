@@ -23,6 +23,7 @@ const STEPS: &[&dyn Migration] = &[
     &PortSourceSpellings,
     &PortConfigSourceSpellings,
     &RetireWarningMarkers,
+    &UsageLedgerV4,
 ];
 
 /// `builtin` was the old spelling of the compiled-default layer. The shared
@@ -201,6 +202,35 @@ impl Migration for RetireWarningMarkers {
                     .changed
                     .push(state_root.join(&name).display().to_string());
             }
+        }
+        Ok(report)
+    }
+}
+
+/// Usage ledger rows move from v3 to v4. Buckets carry over; the source
+/// spelling maps through one exhaustive table. A line that cannot be mapped is
+/// reported and copied unchanged to a `.v3-unmapped` sidecar, never guessed.
+struct UsageLedgerV4;
+
+impl Migration for UsageLedgerV4 {
+    fn id(&self) -> &'static str {
+        "usage-ledger-v4"
+    }
+
+    fn apply(&self, state_root: &Path) -> Result<MigrationReport, MigrationError> {
+        let result = provenant_telemetry::ledger::migrate_to_v4(state_root)
+            .map_err(|error| MigrationError::new(error.to_string()))?;
+        let mut report = MigrationReport::new(self.id());
+        report.changed = result.changed;
+        for unmapped in result.unmapped {
+            warning::warn(
+                Warning::new(
+                    MIGRATION_STEP_FAILED,
+                    format!("usage ledger line could not be mapped to v4: {unmapped}"),
+                )
+                .subject(unmapped.segment.clone())
+                .repair("inspect the .v3-unmapped sidecar; no value was guessed"),
+            );
         }
         Ok(report)
     }

@@ -757,11 +757,11 @@ pub(crate) fn graph_attempt_usage(
 ) -> provenant_fabric_runtime::graph::AttemptUsage {
     let usage = &record.usage;
     let categories = [
-        usage.uncached_input,
-        usage.cache_read,
-        usage.cache_write,
-        usage.output_excluding_reasoning,
-        usage.reasoning,
+        usage.tokens.input,
+        usage.tokens.cache_read,
+        usage.tokens.cache_write,
+        usage.tokens.output,
+        usage.tokens.reasoning,
     ];
     // Reasoning is counted inside output, so providers never report it apart.
     let tokens_partial = categories[..4].iter().any(Option::is_none);

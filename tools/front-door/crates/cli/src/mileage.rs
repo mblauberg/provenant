@@ -425,6 +425,7 @@ mod tests {
             native_config: None,
             native_attempt: None,
             reasoning_tokens: None,
+            usage_source: provenant_records::UsageSource::Ingest,
             reply: None,
         }
     }

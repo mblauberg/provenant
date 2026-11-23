@@ -26,6 +26,26 @@ unrecognised lines are reported. Cost reports read the ledger.
   reader of one ledger cannot disagree with itself.
 - Owner: `crates/telemetry/src/ledger.rs`, `src/settlement.rs`
 
+## Usage merges by declared semantics
+
+Provider usage travels as one typed report. An adapter builds it from the
+buckets it actually observed and declares, once in `AdapterSpec`, what one
+report means: a step or the run's total, whether the stated input includes
+cache reads and writes, and whether reports arrive while the run can still be
+stopped. One `UsageAccumulator` applies that declaration: a keyed step report
+replaces its key's earlier report, keyless step reports add, and a cumulative
+report replaces the running total. An unstated bucket stays absent, never a
+guessed zero, and input is normalised to exclude cache reads only where the
+adapter declared they were included. No reader infers any of this from a
+provider's name.
+
+The ledger moves to v4 on upgrade. Buckets carry over and v3 source spellings
+map through one exhaustive table; a line whose source cannot be mapped is
+reported and copied unchanged to a `.v3-unmapped` sidecar, never guessed.
+- Why: a last-wins fold undercounts multi-turn usage, and a guessed source
+  would attribute spend to an account or host that never reported it.
+- Owner: `crates/providers/src/usage.rs`, `crates/telemetry/src/ledger.rs`
+
 ## Bounded, honest totals
 
 The reducer refuses over-limit input, never partial totals. Known values and

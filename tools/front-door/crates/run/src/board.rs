@@ -286,8 +286,8 @@ mod tests {
         );
         let old = fixture.store.record(id, &call)?;
         let mut updated = old.clone();
-        updated.usage.uncached_input = Some(0);
-        updated.usage.reasoning = Some(7);
+        updated.usage.tokens.input = Some(0);
+        updated.usage.tokens.reasoning = Some(7);
         updated.revision += 1;
         fixture.store.write(&call, |tx| {
             crate::admission::update_attempt(tx, &old, &updated)

@@ -23,7 +23,7 @@ pub struct Tokens {
 
 /// What one usage report means: the step that just finished or the run's
 /// running total.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UsageScope {
     /// One step's tokens.
@@ -51,6 +51,31 @@ pub enum CostOrigin {
     Provider,
     /// The bundled or configured model catalogue.
     Catalogue,
+}
+
+/// The declared meaning of one adapter's usage reports. The accumulator reads
+/// this, so no reader guesses scope or cache inclusion from a report in
+/// isolation, nor from a provider's name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct UsageSemantics {
+    /// What one report means: a step that finished, or the run's total.
+    pub scope: UsageScope,
+    /// Whether the reported `input` already includes cache reads and writes.
+    /// Fresh input is derived by removing every stated cache bucket.
+    pub input_includes_cache_read: bool,
+    /// Reports arrive during the run, so a token budget can act on them.
+    pub live: bool,
+}
+
+impl UsageSemantics {
+    /// Declare the meaning of an adapter's usage reports.
+    pub const fn new(scope: UsageScope, input_includes_cache_read: bool, live: bool) -> Self {
+        Self {
+            scope,
+            input_includes_cache_read,
+            live,
+        }
+    }
 }
 
 /// Where a usage record was observed.

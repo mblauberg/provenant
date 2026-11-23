@@ -144,15 +144,16 @@ pub fn group<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ledger::{Cost, FORMAT, Source, Tokens};
+    use crate::ledger::{Cost, FORMAT, Tokens};
     use provenant_core::{ProjectId, WallTime};
     use provenant_records::AccountIdentity;
+    use provenant_records::UsageSource;
 
     fn row(attempt: &str, account: Option<&str>, cost: Option<(u64, bool)>) -> Row {
         let token = Some(1);
         Row {
             format: FORMAT.into(),
-            source: Source::Settlement,
+            source: UsageSource::Ingest,
             project: ProjectId::from_bytes([1; 16]),
             graph: "graph".into(),
             node: "node".into(),
