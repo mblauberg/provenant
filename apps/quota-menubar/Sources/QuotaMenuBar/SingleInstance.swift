@@ -24,9 +24,28 @@ struct InstanceMarker: Equatable {
         self.nonce = nonce
     }
 
+    /// Publishes via a temporary file beside `url` and an atomic rename, so a
+    /// concurrent reader never observes a partially written marker.
     func write(to url: URL) throws {
-        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try Data("\(pid)\n\(nonce)".utf8).write(to: url, options: .atomic)
+        let directory = url.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let temporary = directory.appending(
+            path: ".\(url.lastPathComponent).\(UUID().uuidString).tmp",
+            directoryHint: .notDirectory
+        )
+        try Data("\(pid)\n\(nonce)".utf8).write(to: temporary)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        var failure: Int32 = 0
+        let renamed = temporary.path.withCString { source in
+            url.path.withCString { destination in
+                if rename(source, destination) == 0 { return true }
+                failure = errno
+                return false
+            }
+        }
+        if !renamed {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(failure), userInfo: nil)
+        }
     }
 }
 
@@ -35,23 +54,66 @@ enum SingleInstance {
         .appending(path: "Library/Caches/dev.provenant.quota-menubar", directoryHint: .isDirectory)
         .appending(path: "instance", directoryHint: .notDirectory)
 
-    /// The live owner an incoming process must replace, unless it is this process.
-    static func ownerToReplace(_ marker: InstanceMarker?, pid: pid_t, isAlive: (pid_t) -> Bool) -> pid_t? {
-        guard let marker, marker.pid != pid, isAlive(marker.pid) else { return nil }
+    /// The executable backing `pid`, or nil when it cannot be inspected.
+    static func executablePath(for pid: pid_t) -> String? {
+        var buffer = [CChar](repeating: 0, count: Int(PROC_PIDPATHINFO_MAXSIZE))
+        let length = proc_pidpath(pid, &buffer, UInt32(buffer.count))
+        guard length > 0 else { return nil }
+        return String(cString: buffer)
+    }
+
+    /// Whether `pid` still runs this app's executable. A stale marker's PID can
+    /// be reused by an unrelated same-user process, which must never be signalled.
+    static func runsThisApp(_ pid: pid_t) -> Bool {
+        guard let own = executablePath(for: ProcessInfo.processInfo.processIdentifier),
+              let other = executablePath(for: pid) else { return false }
+        return own == other
+    }
+
+    /// The live owner an incoming process must replace, unless it is this
+    /// process, is dead, or no longer runs this app's executable.
+    static func ownerToReplace(
+        _ marker: InstanceMarker?,
+        pid: pid_t,
+        isAlive: (pid_t) -> Bool,
+        isMenuBar: (pid_t) -> Bool
+    ) -> pid_t? {
+        guard let marker, marker.pid != pid, isAlive(marker.pid), isMenuBar(marker.pid) else { return nil }
         return marker.pid
     }
 
-    /// Stops a live older owner, then publishes this process as the owner.
+    /// Stops a verified older owner, publishes this process as the owner, then
+    /// confirms after a short delay that no competing launch replaced its marker.
+    /// Returns false when this process lost a concurrent-start race and must yield.
+    @discardableResult
     static func takeOver(
         url: URL = SingleInstance.markerURL,
         pid: pid_t = ProcessInfo.processInfo.processIdentifier,
+        nonce: String = UUID().uuidString,
         terminate: (pid_t) -> Void = { _ = kill($0, SIGTERM) },
-        isAlive: (pid_t) -> Bool = { kill($0, 0) == 0 }
-    ) {
-        if let previous = ownerToReplace(InstanceMarker(url: url), pid: pid, isAlive: isAlive) {
+        isAlive: (pid_t) -> Bool = { kill($0, 0) == 0 },
+        isMenuBar: (pid_t) -> Bool = { SingleInstance.runsThisApp($0) },
+        delay: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }
+    ) -> Bool {
+        if let previous = ownerToReplace(
+            InstanceMarker(url: url), pid: pid, isAlive: isAlive, isMenuBar: isMenuBar
+        ) {
             terminate(previous)
-            for _ in 0..<20 where isAlive(previous) { Thread.sleep(forTimeInterval: 0.05) }
+            for _ in 0..<20 where isAlive(previous) { delay(0.05) }
         }
-        try? InstanceMarker(pid: pid, nonce: UUID().uuidString).write(to: url)
+        let marker = InstanceMarker(pid: pid, nonce: nonce)
+        do {
+            try marker.write(to: url)
+        } catch {
+            // Without a writable cache we cannot join the handover, but a
+            // transient failure must not leave no menu bar after the old owner
+            // was stopped.
+            return true
+        }
+        // A competing launch may have overwritten the marker while we published.
+        // Re-read once the writes settle: only the process whose nonce survives
+        // owns the menu bar.
+        delay(0.1)
+        return InstanceMarker(url: url) == marker
     }
 }
