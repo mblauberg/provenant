@@ -37,18 +37,25 @@ struct Report {
     path: PathBuf,
 }
 
-/// Where init reads and writes the port table: the checkout root, where
-/// checkout-scoped readers (`verify`) look for it, whether init runs from the
-/// root or a subdirectory. Init needs the checkout's Git metadata to plan, so a
-/// directory outside any checkout is refused here rather than half-planned.
+/// Where init reads and writes the port table: the verified primary project
+/// checkout, where project-scoped readers (`verify`, writer launch confinement)
+/// look for it, whether init runs from the primary, a subdirectory, or a linked
+/// worktree. Init needs the checkout's Git metadata to plan, so a directory
+/// outside any checkout is refused here rather than half-planned.
 fn resolve_project(
     globals: &provenant_cli::Globals,
-) -> Result<crate::roots::Resolved, crate::roots::RootError> {
-    crate::roots::resolve(
+) -> Result<crate::roots::Resolved, Box<dyn std::error::Error>> {
+    let mut context = crate::roots::resolve(
         globals,
         crate::roots::Workspace::Checkout,
         crate::roots::Product::Optional,
-    )
+    )?;
+    let layout = crate::roots::project_layout(&context.roots, &context.project)?;
+    context.project = layout
+        .project()
+        .ok_or("verified project layout has no primary checkout")?
+        .to_path_buf();
+    Ok(context)
 }
 
 /// Resolve the choices for a checkout. Host declarations are part of the
@@ -323,6 +330,66 @@ mod tests {
         assert!(!subdir.join(provenant_config::PORTS_CONFIG).exists());
     }
 
+    /// A linked worktree shares the primary checkout's project identity, so the
+    /// table belongs at the primary checkout where project-scoped readers look.
+    #[test]
+    fn init_from_a_linked_worktree_writes_the_table_at_the_primary_checkout() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let checkout = root.path().join("primary");
+        let linked = root.path().join("linked");
+        let state = root.path().join("state");
+        fs::create_dir_all(&checkout).expect("checkout");
+        fs::create_dir_all(&state).expect("state");
+        provenant_os::fixture::run_git(&checkout, &["init", "-q"]).expect("git init");
+        fs::write(checkout.join("tracked.txt"), "base\n").expect("tracked file");
+        provenant_os::fixture::run_git(&checkout, &["add", "tracked.txt"]).expect("add");
+        provenant_os::fixture::run_git(&checkout, &["commit", "-qm", "base"]).expect("commit");
+        provenant_os::fixture::run_git(
+            &checkout,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                linked.to_str().expect("UTF-8 path"),
+            ],
+        )
+        .expect("linked worktree");
+        provenant_os::fixture::run_git(
+            &checkout,
+            &["remote", "add", "upstream", "git@example.com:up.git"],
+        )
+        .expect("remote");
+        write(
+            &checkout,
+            ".git/refs/remotes/upstream/HEAD",
+            "ref: refs/heads/trunk\n",
+        );
+
+        let globals = provenant_cli::Globals {
+            project: Some(linked.clone()),
+            ..Default::default()
+        };
+        let context = resolve_project(&globals).expect("primary from a linked worktree");
+        let primary = fs::canonicalize(&checkout).expect("canonical primary");
+        assert_eq!(context.project, primary);
+
+        let plan = plan(&context.project, context.roots.state.as_path()).expect("plan at primary");
+        let path = context.project.join(provenant_config::PORTS_CONFIG);
+        assert_eq!(path, primary.join(".provenant/ports.json"));
+        assert!(write_initial(&path, &plan.document).expect("write at primary"));
+        assert!(path.is_file());
+        assert!(!linked.join(provenant_config::PORTS_CONFIG).exists());
+
+        let report = Report {
+            plan,
+            wrote: true,
+            path: path.clone(),
+        };
+        let human = render(&report);
+        assert!(human.contains(&path.display().to_string()), "{human}");
+    }
+
     /// Outside any checkout there is no Git metadata to plan from: init
     /// refuses instead of writing a table no checkout-scoped reader finds.
     #[test]
@@ -332,9 +399,12 @@ mod tests {
             project: Some(root.path().to_path_buf()),
             ..Default::default()
         };
-        assert!(matches!(
-            resolve_project(&globals),
-            Err(crate::roots::RootError::Checkout)
-        ));
+        let error = resolve_project(&globals).expect_err("refused outside a checkout");
+        assert!(
+            error
+                .downcast_ref::<crate::roots::RootError>()
+                .is_some_and(|error| matches!(error, crate::roots::RootError::Checkout)),
+            "{error}"
+        );
     }
 }
