@@ -1,4 +1,3 @@
-
 include!("interface_implement_invariants.rs");
 #[test]
 fn tier_override_preserves_leaf_family_constraints() {
