@@ -280,9 +280,15 @@ value is an explicit Git ref; `lanes.read_source_fetch_first` fetches from the r
 before the ref is read. `--source local` maps onto `checkout` and `--source upstream` onto
 `default_branch` at the launch layer, so the flag wins over the host or project knob. The registry
 default and the resolver agree: `config schema` reports `auto` when no knob is set.
-`bind_default_read_only_source` pins the graph's read-only nodes to the resolved commit, and the
-plan node of `implement --plan` binds to the launch's `--base` through the same resolver. A review
-range, an authored document and a writer launch keep resolving their own subject. The warning
+`bind_default_read_only_source` pins the graph's read-only nodes to the resolved commit. A writer
+launch instead resolves one base by role before sealing its identity: explicit `--base`; else the
+`--branch` default; else the HEAD of a named `--worktree` or a composite bound with
+`--set worktree=PATH`; else none, with an advisory warning that its identity falls back to the
+caller checkout. The writer's own nodes, its launch identity and the stale-checkout warning skip
+the read-only default; its read-only members (a plan node, or a composite's review and gate nodes)
+read the writer base when one is known and the read-only default otherwise. A review range and an
+authored document keep resolving their own subject. Writer-ness is the resolved graph's roles — a
+launch is a writer when a node that will run writes a worktree — not one launch input. The warning
 names the ref, the commit and the layer that chose it; `read_source` on the launch result and the
 explain status names the same commit. Absent or unusable Git evidence stays advisory and never
 refuses the launch.

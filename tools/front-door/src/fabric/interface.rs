@@ -1,4 +1,8 @@
 //! Document-based graph service shared by the CLI and the lane relay.
+use super::writer_base::{
+    DEFAULT_WRITER_BASE, bind_default_read_only_source, bind_writer_base_source,
+    resolve_writer_base,
+};
 use super::*;
 use provenant_fabric_runtime::graph::{
     FileJournal, GraphDocument, GraphJournal, GraphStatus, Layer, Template, TemplateLibrary,
@@ -610,54 +614,6 @@ fn bind_submission_subject(node: &mut provenant_fabric_runtime::graph::GraphNode
     }
 }
 
-/// Pin a plain read-only node to the resolved upstream head. Explicit source
-/// bindings, continuations and writer nodes keep their own subject; nested
-/// templates are visited so every reader in a composite sees the same tree.
-fn bind_default_read_only_source(
-    node: &mut provenant_fabric_runtime::graph::GraphNode,
-    commit: &str,
-) {
-    if node.access == provenant_fabric_runtime::graph::AccessMode::ReadOnly
-        && node.source.is_none()
-        && node.continues.is_none()
-    {
-        node.source = Some(provenant_fabric_runtime::graph::SourceBinding::Commit {
-            commit: commit.into(),
-        });
-    }
-    if let Some(composite) = &mut node.composite {
-        for child in &mut composite.nodes {
-            bind_default_read_only_source(child, commit);
-        }
-    }
-    if let Some(loop_spec) = &mut node.loop_body {
-        for child in &mut loop_spec.body {
-            bind_default_read_only_source(child, commit);
-        }
-    }
-}
-
-/// Bind the plan node of `implement --plan` to the commit named by the
-/// launch's `--base`, resolved through the same read-source resolver. The plan
-/// then reads the base it will implement instead of the caller's checkout.
-fn bind_plan_base_source(node: &mut provenant_fabric_runtime::graph::GraphNode, commit: &str) {
-    if node.template.as_deref() == Some("plan") || node.id == "plan" {
-        node.source = Some(provenant_fabric_runtime::graph::SourceBinding::Commit {
-            commit: commit.into(),
-        });
-    }
-    if let Some(composite) = &mut node.composite {
-        for child in &mut composite.nodes {
-            bind_plan_base_source(child, commit);
-        }
-    }
-    if let Some(loop_spec) = &mut node.loop_body {
-        for child in &mut loop_spec.body {
-            bind_plan_base_source(child, commit);
-        }
-    }
-}
-
 fn bind_review_base(node: &mut provenant_fabric_runtime::graph::GraphNode, base: &str) {
     node.review_base = Some(base.into());
     if let Some(composite) = &mut node.composite {
@@ -827,6 +783,54 @@ fn read_source_report(
     })
 }
 
+/// The resolved node a template or `use` launch runs, taken before the graph
+/// id is chosen. Its lowered roles decide whether the launch is a writer.
+struct TemplateLaunch {
+    node: Value,
+    integration_branch: Option<String>,
+}
+
+impl TemplateLaunch {
+    /// Whether the lowered launch runs a worktree writer under a condition
+    /// that holds. Read-source defaults belong to readers; a writer starts
+    /// from its own base however the launch is expressed.
+    fn writes_worktree(
+        &self,
+        library: &TemplateLibrary,
+        resolvers: &BTreeMap<String, Vec<String>>,
+    ) -> Result<bool, FacadeError> {
+        let lowered = provenant_fabric_runtime::graph::template::Compiler { library, resolvers }
+            .lower(&self.node)
+            .map_err(compile_error)?;
+        Ok(lowered_writes_worktree(&lowered))
+    }
+}
+
+/// Whether a lowered node, its members or its loop body write a worktree.
+/// A condition that does not hold removes the node and everything under it.
+fn lowered_writes_worktree(node: &Value) -> bool {
+    let holds = node
+        .get("when")
+        .and_then(|terms| {
+            serde_json::from_value::<Vec<provenant_fabric_runtime::graph::WhenTerm>>(terms.clone())
+                .ok()
+        })
+        .is_none_or(|terms| provenant_fabric_runtime::graph::when::holds(&terms));
+    if !holds {
+        return false;
+    }
+    if node.get("access").and_then(Value::as_str) == Some("worktree_write") {
+        return true;
+    }
+    ["/composite/nodes", "/loop/body"]
+        .into_iter()
+        .any(|pointer| {
+            node.pointer(pointer)
+                .and_then(Value::as_array)
+                .is_some_and(|children| children.iter().any(lowered_writes_worktree))
+        })
+}
+
 /// Apply plain-task execution controls before template lowering and patch admission.
 fn bind_launch_controls(
     input: &Value,
@@ -865,7 +869,7 @@ fn bind_launch_controls(
                 .as_str()
                 .filter(|value| !value.is_empty())
                 .ok_or_else(|| invalid("base"))?,
-            None => "refs/remotes/origin/HEAD",
+            None => DEFAULT_WRITER_BASE,
         };
         provenant_confinement::repo::GitRevision::new(base).map_err(|_| invalid("base"))?;
         let worktree = ports
@@ -2088,16 +2092,58 @@ impl Factory {
                 "could not read the run configuration; lanes.read_source keeps its compiled default",
             );
         }
+        // Resolve the graph a template launch runs before sealing its identity.
+        // Writer-ness is the resolved roles' answer, not one launch key's.
+        let template_launch = if raw.is_none() || lane_document.is_some() {
+            Some(self.template_launch(
+                input,
+                raw,
+                lane_document,
+                route.as_ref(),
+                &context,
+                &mut input_warnings,
+            )?)
+        } else {
+            None
+        };
+        let writer_launch = match &template_launch {
+            Some(launch) => launch.writes_worktree(&library, &resolver)?,
+            None => false,
+        };
+        // Resolve the one base a writer starts from before sealing its identity.
+        // Its read-only members read that base; only a writer that names no base
+        // falls back to the caller checkout, and only then does a read-only
+        // source pin still apply to it.
+        let writer_base = if writer_launch {
+            Some(resolve_writer_base(
+                input,
+                &self.context.project_root,
+                &self.cwd,
+                self.context.roots.state.as_path(),
+                &read_source,
+                git.as_deref(),
+            ))
+        } else {
+            None
+        };
+        if let Some(warning) = writer_base
+            .as_ref()
+            .and_then(|base| base.fallback_warning(&self.cwd))
+        {
+            input_warnings.push(warning);
+        }
         // A plain read-only task from a checkout behind its fetched upstream
         // reviews that upstream head, not its stale local tree. Explicit source
-        // choices, authored documents, writer launches and review ranges keep
-        // resolving their own subject. Absent Git evidence stays advisory.
+        // choices, authored documents, review ranges and a writer with a known
+        // base keep resolving their own subject. A writer with no base still
+        // pins its read-only members, but never its own identity. Absent Git
+        // evidence stays advisory.
         let default_source = if review_subject.is_none()
             && raw.is_none()
-            && !matches!(
-                input.get("access").and_then(Value::as_str),
-                Some("worktree_write")
-            ) {
+            && writer_base
+                .as_ref()
+                .is_none_or(|base| base.commit.is_none())
+        {
             provenant_cli::run::read_only_source_ref(
                 self.context.roots.state.as_path(),
                 &self.cwd,
@@ -2106,32 +2152,29 @@ impl Factory {
         } else {
             None
         };
-        // The plan node of `implement --plan` reads the base the launch names,
-        // resolved through the same resolver as any other explicit ref.
-        let plan_base_source = if review_subject.is_none() {
-            input.get("base").and_then(Value::as_str).and_then(|base| {
-                let choice = provenant_cli::run::ReadSourceChoice {
-                    value: base.to_owned(),
-                    fetch_first: read_source.fetch_first,
-                    layer: provenant_records::Layer::Launch,
-                    origin: Some("--base".into()),
-                };
-                provenant_cli::run::read_only_source_ref(
-                    self.context.roots.state.as_path(),
-                    &self.cwd,
-                    &choice,
-                )
-            })
-        } else {
-            None
-        };
-        // The commit the launch starts from belongs to its identity. A checkout
+        // The commit the launch starts from belongs to its identity: a writer
+        // starts from its base, a reader from its resolved source. A checkout
         // with no commit yet simply has none.
-        let source_commit = resolved_head.clone().or_else(|| match &default_source {
-            Some(selected) => Some(selected.commit.to_string()),
-            None => git
-                .as_deref()
-                .and_then(|git| provenant_run::resolve_git_base(git, &self.cwd, "HEAD").ok()),
+        let source_commit = resolved_head.clone().or_else(|| {
+            if writer_launch {
+                writer_base
+                    .as_ref()
+                    .and_then(|base| base.commit.clone())
+                    .or_else(|| {
+                        git.as_deref().and_then(|git| {
+                            provenant_run::resolve_git_base(git, &self.cwd, "HEAD").ok()
+                        })
+                    })
+            } else {
+                default_source
+                    .as_ref()
+                    .map(|selected| selected.commit.to_string())
+                    .or_else(|| {
+                        git.as_deref().and_then(|git| {
+                            provenant_run::resolve_git_base(git, &self.cwd, "HEAD").ok()
+                        })
+                    })
+            }
         });
         if resolved_head.is_none() && raw.and_then(|document| document.get("graph_id")).is_none() {
             resolved_head = source_commit.clone();
@@ -2228,198 +2271,18 @@ impl Factory {
                 document
             }
         } else {
-            let mut node = match lane_document {
-                Some(document) if document.get("use").is_some() => {
-                    let mut node = document.clone();
-                    provenant_fabric_runtime::graph::template::separate_document_fields(&mut node)
-                        .map_err(|_| {
-                            FacadeError::invalid(InvalidInputDetail::Field("schema_version".into()))
-                        })?;
-                    node
-                }
-                Some(_) => json!({"id":"task", "use":"lane-document"}),
-                None => json!({"id":"task", "use":"task"}),
-            };
-            if node.get("id").is_none() {
-                node["id"] = json!("task");
-            }
-            if let Some(name) = input.get("template").filter(|value| !value.is_null()) {
-                node["use"] = name.clone();
-            }
-            // The CLI brief is a node prompt; template parameters retain their names.
-            for (field, node_field) in [("brief", "prompt"), ("over", "over")] {
-                if let Some(value) = input.get(field).filter(|value| !value.is_null()) {
-                    node[node_field] = value.clone();
-                }
-            }
-            if let Some(RouteChoice::Alias(alias)) = &route {
-                node["tier"] = json!(alias);
-            }
-            let template = library
-                .resolve(node["use"].as_str().unwrap_or("task"))
-                .map_err(graph_input_reason)?;
-            let bundled_smoke =
-                node["use"] == "smoke" && library.layer("smoke") == Some(Layer::Default);
-            // Launch controls bind to one leaf. A composite has no single
-            // worktree to bind, so name the first control it cannot take.
-            let first_control = LAUNCH_CONTROLS
-                .iter()
-                .find(|field| input.get(**field).is_some_and(|value| !value.is_null()));
-            if template.is_composite()
-                && !bundled_smoke
-                && let Some(field) = first_control
-            {
-                return Err(FacadeError::invalid(InvalidInputDetail::Field(
-                    (*field).into(),
-                )));
-            }
-            // The smoke template binds its controls to its write node only,
-            // so they are bound onto a scratch node and carried as parameters.
-            let mut smoke_writer = json!({});
-            if bundled_smoke {
-                for field in ["access", "write_scope"] {
-                    if input.get(field).is_some_and(|value| !value.is_null()) {
-                        return Err(FacadeError::invalid(InvalidInputDetail::Field(
-                            field.into(),
-                        )));
-                    }
-                }
-            }
-            bind_launch_controls(
-                input,
-                if bundled_smoke {
-                    &mut smoke_writer
-                } else {
-                    &mut node
-                },
-                &self.context.project_root,
-                &self.context.port_table,
-            )?;
-            let mut parameters = node.get("with").cloned().unwrap_or_else(|| json!({}));
-            let overrides = input
-                .get("set")
-                .filter(|value| !value.is_null())
-                .cloned()
-                .unwrap_or_else(|| json!({}));
-            parameters
-                .as_object_mut()
-                .ok_or_else(|| FacadeError::invalid(InvalidInputDetail::Field("set".into())))?
-                .extend(
-                    overrides
-                        .as_object()
-                        .ok_or_else(|| {
-                            FacadeError::invalid(InvalidInputDetail::Field("set".into()))
-                        })?
-                        .clone(),
-                );
-            if review_launch && let Some(parameters) = parameters.as_object_mut() {
-                parameters.remove("subject");
-                parameters.remove("review_base");
-            }
-            if template.parameters.contains_key("brief")
-                && let Some(brief) = input.get("brief").filter(|value| !value.is_null())
-            {
-                parameters["brief"] = brief.clone();
-            }
-            if template.is_composite() {
-                let fields = node.as_object_mut().ok_or_else(|| {
-                    FacadeError::invalid(InvalidInputDetail::Field("document".into()))
-                })?;
-                fields.remove("prompt");
-                fields.remove("tier");
-            }
-            // Node parameters supplied explicitly (including CLI --set) beat
-            // document settings; template defaults are the final fallback.
-            let bundled_batch =
-                node["use"] == "batch" && library.layer("batch") == Some(Layer::Default);
-            let integration_branch = bundled_batch
-                .then(|| parameters.get("integration_branch").cloned())
-                .flatten()
-                .or_else(|| {
-                    raw.and_then(|document| document.get("integration_branch"))
-                        .filter(|branch| !branch.is_null())
-                        .cloned()
-                })
-                .or_else(|| {
-                    bundled_batch
-                        .then(|| {
-                            template
-                                .parameters
-                                .get("integration_branch")?
-                                .default
-                                .clone()
-                        })
-                        .flatten()
-                });
-            if bundled_batch && let Some(branch) = &integration_branch {
-                parameters["integration_branch"] = branch.clone();
-            }
-            if bundled_smoke {
-                let is_remote = input
-                    .get("host")
-                    .and_then(Value::as_str)
-                    .is_some_and(|h| !h.is_empty() && !matches!(h, "local" | "localhost"));
-                let controls = smoke_writer
-                    .as_object()
-                    .is_some_and(|node| !node.is_empty());
-                if controls {
-                    // A remote graph must not retain or transmit a caller path.
-                    if let Some(field) = first_control.filter(|_| is_remote) {
-                        return Err(FacadeError::invalid(InvalidInputDetail::Field(
-                            (*field).into(),
-                        )));
-                    }
-                    // A control and a `--set` of the same binding are two
-                    // answers to one question.
-                    if ["worktree", "write_attempt"]
-                        .iter()
-                        .any(|name| overrides.get(*name).is_some())
-                    {
-                        return Err(FacadeError::invalid(InvalidInputDetail::Field(
-                            "set".into(),
-                        )));
-                    }
-                    parameters["worktree"] = smoke_writer["worktree"].clone();
-                    if let Some(attempt) = smoke_writer.get("attempt") {
-                        parameters["write_attempt"] = attempt.clone();
-                    }
-                }
-                if is_remote {
-                    // A remote graph must not retain or transmit a caller path,
-                    // even though the writer is skipped by its launch condition.
-                    parameters["worktree"] = json!("");
-                }
-                let requested = parameters.get("smoke-write").is_some();
-                if !requested {
-                    let worktree = parameters
-                        .get("worktree")
-                        .and_then(Value::as_str)
-                        .unwrap_or("");
-                    parameters["smoke-write"] = json!(!is_remote && !worktree.is_empty());
-                }
-                if parameters["smoke-write"] != json!(true) {
-                    let reason = if is_remote {
-                        "remote placement does not accept caller paths"
-                    } else if requested {
-                        "smoke-write is not enabled"
-                    } else {
-                        "no writer worktree supplied; pass --worktree PATH or --branch B to run it"
-                    };
-                    input_warnings.push(format!(
-                        "smoke skipped node write: {reason}; read and review nodes still run"
-                    ));
-                }
-            }
-            node["with"] = parameters;
+            let launch = template_launch.as_ref().ok_or_else(|| {
+                FacadeError::invalid(InvalidInputDetail::Field("document".into()))
+            })?;
             patch::compile_submission(
                 id,
                 &Patch {
                     schema_version: patch::PATCH_SCHEMA_VERSION,
-                    nodes: vec![node],
+                    nodes: vec![launch.node.clone()],
                     ..Default::default()
                 },
                 &context,
-                integration_branch.as_ref().and_then(Value::as_str),
+                launch.integration_branch.as_deref(),
             )
             .map_err(graph_patch_error)?
         };
@@ -2504,19 +2367,19 @@ impl Factory {
                 provenant_fabric_runtime::graph::minimum_schema_version(&document),
             ));
         }
-        if let Some(selected) = &default_source {
-            let commit = selected.commit.to_string();
+        let writer_commit = writer_base.as_ref().and_then(|base| base.commit.as_deref());
+        if let Some(commit) = writer_commit {
+            let commit = commit.to_owned();
             for node in &mut document.nodes {
-                bind_default_read_only_source(node, &commit);
+                bind_writer_base_source(node, &commit);
             }
             document.schema_version = document.schema_version.max(u64::from(
                 provenant_fabric_runtime::graph::minimum_schema_version(&document),
             ));
-        }
-        if let Some(selected) = &plan_base_source {
+        } else if let Some(selected) = &default_source {
             let commit = selected.commit.to_string();
             for node in &mut document.nodes {
-                bind_plan_base_source(node, &commit);
+                bind_default_read_only_source(node, &commit);
             }
             document.schema_version = document.schema_version.max(u64::from(
                 provenant_fabric_runtime::graph::minimum_schema_version(&document),
@@ -2596,7 +2459,7 @@ impl Factory {
         if let Some(warning) = review_subject.and_then(|subject| subject.warning) {
             input_warnings.push(warning);
         }
-        if let Some(selected) = &default_source {
+        if !writer_launch && let Some(selected) = &default_source {
             let warning =
                 provenant_cli::run::read_only_source_warning(&self.cwd, selected, &read_source);
             warn_operator(&warning);
@@ -2730,6 +2593,212 @@ impl Factory {
             "requested": requested, "graph": id, "replayed": replayed, "superseded": taken,
         });
         Ok(result)
+    }
+
+    /// Resolve the node a template or `use` launch runs before its identity is
+    /// sealed. A writer's roles decide whether a read-only default source applies
+    /// at all, and its base supplies the identity commit.
+    fn template_launch(
+        &self,
+        input: &Value,
+        raw: Option<&Value>,
+        lane_document: Option<&Value>,
+        route: Option<&RouteChoice>,
+        context: &PatchContext<'_>,
+        input_warnings: &mut Vec<String>,
+    ) -> Result<TemplateLaunch, FacadeError> {
+        let mut node = match lane_document {
+            Some(document) if document.get("use").is_some() => {
+                let mut node = document.clone();
+                provenant_fabric_runtime::graph::template::separate_document_fields(&mut node)
+                    .map_err(|_| {
+                        FacadeError::invalid(InvalidInputDetail::Field("schema_version".into()))
+                    })?;
+                node
+            }
+            Some(_) => json!({"id":"task", "use":"lane-document"}),
+            None => json!({"id":"task", "use":"task"}),
+        };
+        if node.get("id").is_none() {
+            node["id"] = json!("task");
+        }
+        if let Some(name) = input.get("template").filter(|value| !value.is_null()) {
+            node["use"] = name.clone();
+        }
+        // The CLI brief is a node prompt; template parameters retain their names.
+        for (field, node_field) in [("brief", "prompt"), ("over", "over")] {
+            if let Some(value) = input.get(field).filter(|value| !value.is_null()) {
+                node[node_field] = value.clone();
+            }
+        }
+        if let Some(RouteChoice::Alias(alias)) = route {
+            node["tier"] = json!(alias);
+        }
+        let template = context
+            .library
+            .resolve(node["use"].as_str().unwrap_or("task"))
+            .map_err(graph_input_reason)?;
+        // The same template the launch declared: review ranges are bound on
+        // the host, so the node never carries its own subject or base.
+        let review_launch = template.accepts_review_range();
+        let bundled_smoke =
+            node["use"] == "smoke" && context.library.layer("smoke") == Some(Layer::Default);
+        // Launch controls bind to one leaf. A composite has no single
+        // worktree to bind, so name the first control it cannot take.
+        let first_control = LAUNCH_CONTROLS
+            .iter()
+            .find(|field| input.get(**field).is_some_and(|value| !value.is_null()));
+        if template.is_composite()
+            && !bundled_smoke
+            && let Some(field) = first_control
+        {
+            return Err(FacadeError::invalid(InvalidInputDetail::Field(
+                (*field).into(),
+            )));
+        }
+        // The smoke template binds its controls to its write node only,
+        // so they are bound onto a scratch node and carried as parameters.
+        let mut smoke_writer = json!({});
+        if bundled_smoke {
+            for field in ["access", "write_scope"] {
+                if input.get(field).is_some_and(|value| !value.is_null()) {
+                    return Err(FacadeError::invalid(InvalidInputDetail::Field(
+                        field.into(),
+                    )));
+                }
+            }
+        }
+        bind_launch_controls(
+            input,
+            if bundled_smoke {
+                &mut smoke_writer
+            } else {
+                &mut node
+            },
+            &self.context.project_root,
+            &self.context.port_table,
+        )?;
+        let mut parameters = node.get("with").cloned().unwrap_or_else(|| json!({}));
+        let overrides = input
+            .get("set")
+            .filter(|value| !value.is_null())
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        parameters
+            .as_object_mut()
+            .ok_or_else(|| FacadeError::invalid(InvalidInputDetail::Field("set".into())))?
+            .extend(
+                overrides
+                    .as_object()
+                    .ok_or_else(|| FacadeError::invalid(InvalidInputDetail::Field("set".into())))?
+                    .clone(),
+            );
+        if review_launch && let Some(parameters) = parameters.as_object_mut() {
+            parameters.remove("subject");
+            parameters.remove("review_base");
+        }
+        if template.parameters.contains_key("brief")
+            && let Some(brief) = input.get("brief").filter(|value| !value.is_null())
+        {
+            parameters["brief"] = brief.clone();
+        }
+        if template.is_composite() {
+            let fields = node.as_object_mut().ok_or_else(|| {
+                FacadeError::invalid(InvalidInputDetail::Field("document".into()))
+            })?;
+            fields.remove("prompt");
+            fields.remove("tier");
+        }
+        // Node parameters supplied explicitly (including CLI --set) beat
+        // document settings; template defaults are the final fallback.
+        let bundled_batch =
+            node["use"] == "batch" && context.library.layer("batch") == Some(Layer::Default);
+        let integration_branch = bundled_batch
+            .then(|| parameters.get("integration_branch").cloned())
+            .flatten()
+            .or_else(|| {
+                raw.and_then(|document| document.get("integration_branch"))
+                    .filter(|branch| !branch.is_null())
+                    .cloned()
+            })
+            .or_else(|| {
+                bundled_batch
+                    .then(|| {
+                        template
+                            .parameters
+                            .get("integration_branch")?
+                            .default
+                            .clone()
+                    })
+                    .flatten()
+            });
+        if bundled_batch && let Some(branch) = &integration_branch {
+            parameters["integration_branch"] = branch.clone();
+        }
+        if bundled_smoke {
+            let is_remote = input
+                .get("host")
+                .and_then(Value::as_str)
+                .is_some_and(|h| !h.is_empty() && !matches!(h, "local" | "localhost"));
+            let controls = smoke_writer
+                .as_object()
+                .is_some_and(|node| !node.is_empty());
+            if controls {
+                // A remote graph must not retain or transmit a caller path.
+                if let Some(field) = first_control.filter(|_| is_remote) {
+                    return Err(FacadeError::invalid(InvalidInputDetail::Field(
+                        (*field).into(),
+                    )));
+                }
+                // A control and a `--set` of the same binding are two
+                // answers to one question.
+                if ["worktree", "write_attempt"]
+                    .iter()
+                    .any(|name| overrides.get(*name).is_some())
+                {
+                    return Err(FacadeError::invalid(InvalidInputDetail::Field(
+                        "set".into(),
+                    )));
+                }
+                parameters["worktree"] = smoke_writer["worktree"].clone();
+                if let Some(attempt) = smoke_writer.get("attempt") {
+                    parameters["write_attempt"] = attempt.clone();
+                }
+            }
+            if is_remote {
+                // A remote graph must not retain or transmit a caller path,
+                // even though the writer is skipped by its launch condition.
+                parameters["worktree"] = json!("");
+            }
+            let requested = parameters.get("smoke-write").is_some();
+            if !requested {
+                let worktree = parameters
+                    .get("worktree")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                parameters["smoke-write"] = json!(!is_remote && !worktree.is_empty());
+            }
+            if parameters["smoke-write"] != json!(true) {
+                let reason = if is_remote {
+                    "remote placement does not accept caller paths"
+                } else if requested {
+                    "smoke-write is not enabled"
+                } else {
+                    "no writer worktree supplied; pass --worktree PATH or --branch B to run it"
+                };
+                input_warnings.push(format!(
+                    "smoke skipped node write: {reason}; read and review nodes still run"
+                ));
+            }
+        }
+        node["with"] = parameters;
+        Ok(TemplateLaunch {
+            node,
+            integration_branch: integration_branch
+                .as_ref()
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        })
     }
 
     /// Inspect source and state admission without preparing a provider. The
@@ -3872,6 +3941,15 @@ fn add(row: &mut Value, key: &str, value: u64) {
 }
 
 #[cfg(test)]
+#[path = "interface_writer_source_tests.rs"]
+#[allow(
+    dead_code,
+    unused_imports,
+    reason = "the custom worktree driver omits libtest functions"
+)]
+mod writer_source_tests;
+
+#[cfg(test)]
 #[allow(
     dead_code,
     unused_imports,
@@ -4154,7 +4232,7 @@ mod tests {
         Ok(())
     }
 
-    fn factory(rig: &TestRig) -> Result<Factory> {
+    pub(super) fn factory(rig: &TestRig) -> Result<Factory> {
         let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
         // Library unit tests inherit the lane environment, where Context::open
         // requires a project binding instead of creating one as a CLI would.
@@ -6362,6 +6440,158 @@ mod tests {
             "a local source must not report an upstream pin: {local_warnings:?}"
         );
         Ok(())
+    }
+
+    /// Regression #3870: a writer launch never takes the read-only default
+    /// source, however it names its checkout. A stale primary checkout must not
+    /// warn, pin the launch, or supply the identity commit.
+    /// Spec: docs/specs/run-launch.md#inputs-and-resources
+    #[test]
+    fn writer_launch_never_takes_the_read_only_default_source() -> Result {
+        let rig = TestRig::new()?;
+        let remote = rig.root.join("remote.git");
+        let remote = remote.to_str().ok_or("remote path")?;
+        git(&rig, &["init", "-q", "--bare", remote])?;
+        git(
+            &rig,
+            &["-C", remote, "symbolic-ref", "HEAD", "refs/heads/master"],
+        )?;
+        let commit = |message: &str| {
+            git(
+                &rig,
+                &[
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "commit",
+                    "-q",
+                    "-m",
+                    message,
+                ],
+            )
+        };
+        std::fs::write(rig.project.join("file"), "one\n")?;
+        git(&rig, &["add", "file"])?;
+        commit("one")?;
+        let stale = git(&rig, &["rev-parse", "HEAD"])?;
+        git(&rig, &["branch", "-M", "master"])?;
+        std::fs::write(rig.project.join("file"), "two\n")?;
+        git(&rig, &["add", "file"])?;
+        commit("two")?;
+        let upstream = git(&rig, &["rev-parse", "HEAD"])?;
+        git(&rig, &["remote", "add", "origin", remote])?;
+        git(&rig, &["push", "-q", "origin", "master"])?;
+        git(&rig, &["remote", "set-head", "origin", "master"])?;
+        git(&rig, &["reset", "-q", "--hard", &stale])?;
+
+        let factory = factory(&rig)?;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
+        // A writer template and a read-only template bound to a writer
+        // worktree both resolve to a writer graph.
+        for template in ["implement", "task"] {
+            let mut input = json!({
+                "op":"run","template":template,"brief":"Fix the parser","explain":true,
+                "branch":"fix/writer","base":upstream
+            });
+            if template == "implement" {
+                input["set"] = json!({"plan": false});
+            }
+            let launch = factory
+                .graph_document(input, budget, &cancel)
+                .map_err(|error| {
+                    format!("{template} writer launch from a stale checkout: {error:?}")
+                })?;
+            assert!(
+                launch["read_source"]["commit"].is_null(),
+                "{template} writer launch must not pin a read source: {launch}"
+            );
+            assert!(
+                !launch["warnings"].as_array().is_some_and(|warnings| {
+                    warnings.iter().any(|warning| {
+                        warning
+                            .as_str()
+                            .is_some_and(|text| text.contains("read-only lane will read"))
+                    })
+                }),
+                "{template} writer launch must not warn about a read-only source: {launch}"
+            );
+            assert!(
+                launch["document"]["nodes"][0]["source"].is_null(),
+                "{template} writer launch must keep its own base: {launch}"
+            );
+        }
+        Ok(())
+    }
+
+    /// Regression #3870: a writer's launch identity starts from its base, so
+    /// advancing the caller's checkout does not make it a different launch.
+    #[test]
+    fn writer_launch_identity_follows_its_base_not_the_checkout_head() -> Result {
+        let rig = TestRig::new()?;
+        git(&rig, &["config", "user.name", "Test"])?;
+        git(&rig, &["config", "user.email", "test@example.invalid"])?;
+        std::fs::write(rig.project.join("file"), "one\n")?;
+        git(&rig, &["add", "file"])?;
+        git(&rig, &["commit", "-q", "-m", "one"])?;
+        let base = git(&rig, &["rev-parse", "HEAD"])?;
+
+        let factory = factory(&rig)?;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
+        let digest = || -> Result<String> {
+            let launch = factory.graph_document(
+                json!({
+                    "op":"run","template":"implement","brief":"Fix the parser","explain":true,
+                    "branch":"fix/writer","base":base,"set":{"plan":false}
+                }),
+                budget,
+                &cancel,
+            )?;
+            Ok(launch["document"]["replay_digest"]
+                .as_str()
+                .ok_or("replay digest")?
+                .to_owned())
+        };
+        let first = digest()?;
+        std::fs::write(rig.project.join("file"), "two\n")?;
+        git(&rig, &["add", "file"])?;
+        git(&rig, &["commit", "-q", "-m", "two"])?;
+        assert_eq!(
+            first,
+            digest()?,
+            "the writer's identity must follow its base, not the checkout head"
+        );
+        Ok(())
+    }
+
+    /// A writer hidden under a composite still makes the launch a writer; a
+    /// writer whose condition does not hold leaves it a reader. Fixtures come
+    /// from the bundled templates' own lowering, so the roles under test are
+    /// the ones the compiler produces.
+    #[test]
+    fn writer_roles_follow_the_lowered_graph_and_its_conditions() {
+        let library = TemplateLibrary::bundled();
+        let resolvers = BTreeMap::new();
+        let lower = |node: Value| -> Value {
+            provenant_fabric_runtime::graph::template::Compiler {
+                library: &library,
+                resolvers: &resolvers,
+            }
+            .lower(&node)
+            .expect("bundled template lowers")
+        };
+        // A bundled writer template lowers to a worktree writer.
+        assert!(lowered_writes_worktree(&lower(json!({"use":"implement"}))));
+        // The bundled smoke template carries a writer under `smoke-write`,
+        // which defaults to false: the same launch stays read-only until the
+        // condition holds.
+        assert!(!lowered_writes_worktree(&lower(json!({"use":"smoke"}))));
+        assert!(lowered_writes_worktree(&lower(json!({
+            "use":"smoke",
+            "with":{"smoke-write":true, "worktree":"/tmp/writer"}
+        }))));
     }
 
     /// Spec: docs/specs/run-launch.md#inputs-and-resources
