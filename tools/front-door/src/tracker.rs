@@ -48,13 +48,15 @@ impl TrackerPort {
     }
 
     fn issue(&mut self, root: &Path, number: u64, timeout: Duration) -> Result<Issue, String> {
+        let ports = provenant_config::PortTable::read_for(Some(root), &self.state)
+            .map_err(|error| error.to_string())?;
+        let policy = provenant_config::operation_policy(&self.state, root, &ports);
         let mut forge = provenant_config::ForgePort::new(
             self.port.clone(),
             "tracker",
             root,
             &self.state,
-            // TODO(#3371 seam): caller owner supplies the operation-scoped policy.
-            std::sync::Arc::new(provenant_records::policy::Policy::default()),
+            policy,
         )
         .map_err(|error| error.to_string())?;
         let response = forge

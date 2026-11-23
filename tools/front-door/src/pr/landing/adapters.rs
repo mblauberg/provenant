@@ -1094,13 +1094,15 @@ impl Repo for GitRepo<'_> {
         }
         let input = serde_json::to_vec(attempt)
             .map_err(|error| LandingError::Refused(format!("encode command intent: {error}")))?;
+        let ports = provenant_config::PortTable::read_for(Some(&self.project), &self.host_state)
+            .map_err(|error| LandingError::Refused(format!("read port table: {error}")))?;
+        let policy = provenant_config::operation_policy(&self.host_state, &self.project, &ports);
         let mut forge = provenant_config::ForgePort::from_land_port(
             port,
             "land",
             &self.project,
             &self.host_state,
-            // TODO(#3371 seam): caller owner supplies the operation-scoped policy.
-            std::sync::Arc::new(provenant_records::policy::Policy::default()),
+            policy,
         )
         .map_err(|error| LandingError::Refused(format!("prepare repository publisher: {error}")))?;
         provenant_confinement::publication::install_forge(

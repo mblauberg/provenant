@@ -98,13 +98,17 @@ impl<'a> Owner<'a> {
                     self.roots.state.as_path(),
                 )
                 .map_err(|error| error.to_string())?;
+                let policy = provenant_config::operation_policy(
+                    self.roots.state.as_path(),
+                    self.project.as_path(),
+                    &ports,
+                );
                 let mut forge = provenant_config::ForgePort::new(
                     ports.forge,
                     "forge",
                     self.project.as_path(),
                     self.roots.state.as_path(),
-                    // TODO(#3371 seam): caller owner supplies the operation-scoped policy.
-                    std::sync::Arc::new(provenant_records::policy::Policy::default()),
+                    policy,
                 )
                 .map_err(|error| error.to_string())?;
                 let response = forge

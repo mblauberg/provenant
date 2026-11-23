@@ -142,14 +142,8 @@ pub(crate) fn forge_execute(
         return Err("forge operation must name the builtin forge executable".into());
     }
     let ports = provenant_config::PortTable::read_for(Some(project), state)?;
-    let mut forge = provenant_config::ForgePort::new(
-        ports.forge,
-        "forge",
-        project,
-        state,
-        // TODO(#3371 seam): caller owner supplies the operation-scoped policy.
-        std::sync::Arc::new(provenant_records::policy::Policy::default()),
-    )?;
+    let policy = provenant_config::operation_policy(state, project, &ports);
+    let mut forge = provenant_config::ForgePort::new(ports.forge, "forge", project, state, policy)?;
     provenant_confinement::publication::install_forge(
         &mut forge,
         project.to_owned(),

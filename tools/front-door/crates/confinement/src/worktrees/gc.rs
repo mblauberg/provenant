@@ -201,9 +201,11 @@ pub fn branch_candidate(
 }
 
 /// The local branches one GC pass must never select for retirement: the
-/// default branch named by the fetched upstream, `origin/HEAD` or `main`, and
-/// every branch a worktree has checked out. One filter serves both the ref
-/// ledger's records and the untracked-local observation.
+/// default branch from the one resolved forge context, the branch named by the
+/// fetched upstream, and every branch a worktree has checked out. One filter
+/// serves both the ref ledger's records and the untracked-local observation.
+///
+/// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
 #[derive(Clone, Debug, Default)]
 pub struct LocalRetirementScope {
     /// Default-branch names. No GC path may retire these, whether they are
@@ -218,29 +220,33 @@ pub struct LocalRetirementScope {
 impl LocalRetirementScope {
     /// Build the exclusions from an inventory the caller already read. A
     /// preview consults the same snapshot it reports instead of re-reading.
+    #[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
     fn from_inventory(
         context: &WorktreeContext<'_>,
         upstream: Option<&LandingTarget>,
         inventory: &[GitWorktree],
-        cancel: &CancelToken,
+        _cancel: &CancelToken,
     ) -> Result<Self, WorktreeError> {
         let mut defaults = BTreeSet::new();
-        // `main` is always a default-branch name even when no remote advertises it.
-        defaults.insert("refs/heads/main".to_owned());
         if let Some(reference) = upstream.and_then(|target| target.reference.as_ref())
             && let Some(local) = local_branch_name(reference.as_str())
         {
             defaults.insert(local);
         }
-        if let Ok(revision) = GitRevision::new("refs/remotes/origin/HEAD")
-            && let Some(symbolic) = context
-                .facts
-                .symbolic_revision(context, revision, cancel)
-                .ok()
-                .flatten()
-            && let Some(local) = local_branch_name(&symbolic)
+        // The default branch comes from the one forge context, never from a
+        // hard-coded `origin/HEAD` or `main`. The declaration and the branch
+        // upstream both reach it through `ForgeContext::resolve`.
+        if let Some(project) = context.layout.project()
+            && let Ok(ports) = provenant_config::PortTable::read_project_only(project)
+            && let Ok(git) = provenant_config::ForgeGit::new(project)
         {
-            defaults.insert(local);
+            let config = provenant_config::ForgeConfig::new(
+                &ports,
+                provenant_records::policy::Policy::default(),
+            );
+            if let Ok(forge) = provenant_config::ForgeContext::resolve(project, &config, &git) {
+                defaults.insert(format!("refs/heads/{}", forge.default_branch.value));
+            }
         }
         let mut checked_out = BTreeSet::new();
         for entry in inventory {

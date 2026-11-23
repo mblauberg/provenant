@@ -40,6 +40,15 @@ location.
 - A malformed layer names its file and key. A bad project layer is warned and
   skipped so commands that do not need it still run; an unreadable host layer
   still refuses lane identity.
+- `git.remote` and `git.protected` declare the one Git context every forge call
+  shares. Declare them in any ports layer, for example
+  `{"git": {"remote": "upstream", "protected": ["release"]}}`. An omitted
+  `git.remote` is detected from the current branch's upstream, then the sole
+  remote; a refusal lists the remotes seen with close matches instead of
+  assuming `origin`. An omitted `git.protected` is the default branch plus the
+  forge-reported protected branches. `git.remote` and `git.protected` report
+  their layer and key in `config ports --json`; detected values report
+  `detected` with the branch key or ref that produced them.
 - `verify.base`, when no layer sets it, is inferred from
   `refs/remotes/<remote>/HEAD` for `verify.remote` and shown as inferred. If no
   remote HEAD resolves, the refusal shows an example to put in a ports layer.
