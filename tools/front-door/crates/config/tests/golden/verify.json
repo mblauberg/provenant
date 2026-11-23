@@ -38,6 +38,14 @@
   "quarantine_command": [
     "scripts/flaky-quarantine"
   ],
+  "format": {
+    "stack": "rust",
+    "cwd": ".",
+    "argv": [
+      "cargo",
+      "fmt"
+    ]
+  },
   "tiers": {
     "0": {
       "commands": [

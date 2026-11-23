@@ -334,19 +334,29 @@ impl Approver<'_, '_> {
                         head,
                         self.target,
                     )?;
-                let format_only = receipt.kind == provenant_cli::domains::ApprovalCarry::Format
-                    && receipt.current_head == head
-                    && format_delta_only(
-                        state,
-                        self.repo.project_path(),
-                        &receipt.approved_head,
-                        head,
-                    );
-                if receipt.kind == provenant_cli::domains::ApprovalCarry::Format
-                    && !format_only
+                let format = (receipt.kind == provenant_cli::domains::ApprovalCarry::Format
+                    && receipt.current_head == head)
+                    .then(|| {
+                        format_delta_only(
+                            state,
+                            self.repo.project_path(),
+                            &receipt.approved_head,
+                            head,
+                        )
+                    });
+                let format_only = format.as_ref().is_some_and(|result| result.matched);
+                if let Some(result) = format.as_ref()
+                    && !result.matched
                     && let Some(warnings) = approvals.warnings
                 {
-                    warnings.borrow_mut().push(format!("pull request {number}: format approval carry unavailable because the configured formatter is missing, failed, or does not reproduce the current tree; treating the delta as content"));
+                    let reason = if result.disabled {
+                        "format approval carry is off: verify.format is none"
+                    } else {
+                        "format approval carry unavailable because the configured formatter is missing, failed, or does not reproduce the current tree; treating the delta as content"
+                    };
+                    warnings
+                        .borrow_mut()
+                        .push(format!("pull request {number}: {reason}"));
                 }
                 let mut carried = Vec::new();
                 if enabled && (clean_merge || format_only) {
@@ -435,6 +445,7 @@ impl Approver<'_, '_> {
                 .unwrap_or_else(|| parent.clone());
             let mut base_head = String::new();
             let mut carry_kind: Option<provenant_cli::domains::ApprovalCarry> = None;
+            let mut format_source: Option<provenant_records::Source> = None;
             if !carried.is_empty() && parents.len() > 1 {
                 base_head = parents[1].clone();
                 if approvals
@@ -455,17 +466,23 @@ impl Approver<'_, '_> {
                     .carry_kinds
                     .contains(&provenant_cli::domains::ApprovalCarry::Format)
             {
-                if let Some(state) = approvals.carry_state
-                    && format_delta_only(
-                        state,
-                        self.repo.project_path(),
-                        &classification_head,
-                        head,
-                    )
-                {
+                let format = approvals.carry_state.map(|state| {
+                    format_delta_only(state, self.repo.project_path(), &classification_head, head)
+                });
+                let matched = format.as_ref().is_some_and(|result| result.matched);
+                let disabled = format.as_ref().is_some_and(|result| result.disabled);
+                if matched {
                     carry_kind = Some(provenant_cli::domains::ApprovalCarry::Format);
+                    format_source = format.as_ref().and_then(|result| result.source.clone());
                 } else if let Some(warnings) = approvals.warnings {
-                    warnings.borrow_mut().push(format!("pull request {number}: format approval carry unavailable because the configured formatter is missing, failed, or does not reproduce the current tree; treating the delta as content"));
+                    let reason = if disabled {
+                        "format approval carry is off: verify.format is none"
+                    } else {
+                        "format approval carry unavailable because the configured formatter is missing, failed, or does not reproduce the current tree; treating the delta as content"
+                    };
+                    warnings
+                        .borrow_mut()
+                        .push(format!("pull request {number}: {reason}"));
                 }
             }
             if let Some(kind) = carry_kind
@@ -484,12 +501,29 @@ impl Approver<'_, '_> {
                             current_head: head.into(),
                             base_head: base_head.clone(),
                             kind,
+                            format_source: format_source.clone(),
                             extra: Default::default(),
                         },
                     )?;
                 }
                 if let Some(warnings) = approvals.warnings {
-                    warnings.borrow_mut().push(format!("pull request {number}: carried independent approval across {kind} delta ({classification_head})"));
+                    let detail = if kind == provenant_cli::domains::ApprovalCarry::Format {
+                        format_source
+                            .as_ref()
+                            .map(|source| {
+                                format!(
+                                    " using format command from {}",
+                                    source
+                                        .origin
+                                        .as_deref()
+                                        .unwrap_or_else(|| source.layer.as_str())
+                                )
+                            })
+                            .unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
+                    warnings.borrow_mut().push(format!("pull request {number}: carried independent approval across {kind} delta ({classification_head}){detail}"));
                 }
                 let first = &carried[0];
                 return Ok(Decision::Approved(Approved {
@@ -506,6 +540,7 @@ impl Approver<'_, '_> {
                     current_head: head.to_owned(),
                     base_head,
                     kind,
+                    format_source,
                     extra: Default::default(),
                 });
             } else {
@@ -639,77 +674,66 @@ fn approval_evidence_at(
     evidence
 }
 
+/// What the port table declared for a format carry, and whether the declared
+/// command reproduced the approved tree. The source travels with a successful
+/// carry so the receipt names the layer that chose the command.
+struct FormatCarry {
+    matched: bool,
+    source: Option<provenant_records::Source>,
+    disabled: bool,
+}
+
 fn format_delta_only(
     state: &std::path::Path,
     project: Option<&std::path::Path>,
     approved: &str,
     current: &str,
-) -> bool {
-    let Some(project) = project else { return false };
+) -> FormatCarry {
+    let unavailable = || FormatCarry {
+        matched: false,
+        source: None,
+        disabled: false,
+    };
+    let Some(project) = project else {
+        return unavailable();
+    };
     let Ok(ports) = provenant_config::PortTable::read_for(Some(project), state) else {
-        return false;
+        return unavailable();
     };
-    let Some(command) = ports
-        .verify
-        .tiers
-        .values()
-        .flat_map(|tier| tier.commands.iter())
-        .find(|command| formatter_kind(command).is_some())
-    else {
-        return false;
+    let declared = ports.verify_format();
+    let provenant_config::VerifyFormat::Command(command) = &declared.value else {
+        return FormatCarry {
+            matched: false,
+            source: Some(declared.source),
+            disabled: true,
+        };
     };
-    let kind = formatter_kind(command).unwrap_or_default();
-    let mut argv: Vec<String> = command
+    if command
         .argv
-        .iter()
-        .map(String::as_str)
-        .filter(|part| {
-            !matches!(
-                *part,
-                "{packages}" | "{integration_args}" | "{quarantine_args}" | "--check" | "--"
-            )
-        })
-        .map(str::to_owned)
-        .collect();
-    match kind {
-        "cargo-fmt" => {}
-        "prettier" => {
-            if !argv
-                .iter()
-                .any(|arg| matches!(arg.as_str(), "--write" | "-w"))
-            {
-                argv.push("--write".into());
-            }
-        }
-        "biome" => {
-            if !argv
-                .iter()
-                .any(|arg| matches!(arg.as_str(), "--write" | "-w"))
-            {
-                argv.push("--write".into());
-            }
-        }
-        "black" | "ruff-format" => {}
-        "gofmt" => {
-            if !argv.iter().any(|arg| arg == "-w") {
-                argv.insert(1, "-w".into());
-            }
-        }
-        _ => return false,
+        .first()
+        .is_none_or(|program| program.is_empty())
+    {
+        return FormatCarry {
+            matched: false,
+            source: Some(declared.source),
+            disabled: true,
+        };
     }
+    let source = Some(declared.source);
+    let argv: Vec<&str> = command.argv.iter().map(String::as_str).collect();
     let workspace = |root: &std::path::Path| root.join(&ports.verify.workspace).join(&command.cwd);
     let root = match crate::scratch_dir::ScratchDir::new_in(
         &std::env::temp_dir(),
         "provenant-approval-format-",
     ) {
         Ok(dir) => dir,
-        Err(_) => return false,
+        Err(_) => return unavailable(),
     };
     let left = root.path().join("approved");
     let right = root.path().join("current");
     let git = provenant_os::git::git_executable().and_then(|path| path.to_str().map(str::to_owned));
     let Some(git) = git else {
-        return false;
+        return unavailable();
     };
     let add = |path: &std::path::Path, commit: &str| {
         let args = [
@@ -731,15 +755,13 @@ fn format_delta_only(
                 success = false;
                 continue;
             }
-            let args: Vec<&str> = argv.iter().map(String::as_str).collect();
             success =
-                crate::pr::execute_for(&workdir, &args, std::time::Duration::from_secs(300), false)
+                crate::pr::execute_for(&workdir, &argv, std::time::Duration::from_secs(300), false)
                     .is_ok_and(|result| {
                         result.termination == provenant_os::exec::Termination::Exit(0)
                     });
         }
     }
-    argv.clear();
     let tree = |path: &std::path::Path| -> Option<String> {
         let path = path.to_str()?;
         let args = [git.as_str(), "-C", path, "add", "-A"];
@@ -776,32 +798,10 @@ fn format_delta_only(
             );
         }
     }
-    same
-}
-
-fn formatter_kind(command: &provenant_config::TierCommand) -> Option<&'static str> {
-    let parts: Vec<_> = command.argv.iter().map(String::as_str).collect();
-    if parts.contains(&"fmt")
-        && parts
-            .first()
-            .is_some_and(|program| program.rsplit('/').next() == Some("cargo"))
-    {
-        Some("cargo-fmt")
-    } else if parts.contains(&"prettier") {
-        Some("prettier")
-    } else if parts.contains(&"biome") {
-        Some("biome")
-    } else if parts.contains(&"black") {
-        Some("black")
-    } else if parts.windows(2).any(|pair| pair == ["ruff", "format"]) {
-        Some("ruff-format")
-    } else if parts
-        .first()
-        .is_some_and(|program| program.rsplit('/').next() == Some("gofmt"))
-    {
-        Some("gofmt")
-    } else {
-        None
+    FormatCarry {
+        matched: same,
+        source,
+        disabled: false,
     }
 }
 
@@ -1014,6 +1014,10 @@ mod tests {
                 } else {
                     provenant_cli::domains::ApprovalCarry::Format
                 },
+                format_source: (kind == "format").then(|| provenant_records::Source {
+                    layer: provenant_records::Layer::Detected,
+                    origin: Some("detected#verify.format".into()),
+                }),
                 extra: Default::default(),
             };
             if receipt_exists {
@@ -1147,6 +1151,13 @@ mod tests {
             .map_err(|error| LandingError::Failed(error.to_string()))?;
         let mut ports = provenant_config::PortTable::builtin();
         ports.verify.workspace = std::path::PathBuf::from("workspace");
+        ports.verify.format = Some(provenant_config::VerifyFormat::Command(
+            provenant_config::TierCommand {
+                stack: "rust".into(),
+                cwd: ".".into(),
+                argv: vec!["cargo".into(), "fmt".into(), "--all".into()],
+            },
+        ));
         ports
             .verify
             .tiers
@@ -1227,14 +1238,23 @@ mod tests {
                 .iter()
                 .any(|warning| warning.contains("carried independent approval across format"))
         );
-        assert!(
-            super::super::receipt::read_approval_carry(
-                state.as_path(),
-                "fake-repository",
-                77,
-                &current,
-            )?
-            .is_some()
+        let receipt = super::super::receipt::read_approval_carry(
+            state.as_path(),
+            "fake-repository",
+            77,
+            &current,
+        )?
+        .ok_or_else(|| LandingError::Failed("format carry wrote no receipt".into()))?;
+        assert_eq!(
+            receipt.format_source.as_ref().map(|source| source.layer),
+            Some(provenant_records::Layer::Project)
+        );
+        assert_eq!(
+            receipt
+                .format_source
+                .as_ref()
+                .and_then(|source| source.origin.as_deref()),
+            Some(".provenant/ports.json#verify.format")
         );
 
         std::fs::write(
@@ -1271,19 +1291,9 @@ mod tests {
                 .iter()
                 .any(|warning| warning.contains("format approval carry unavailable"))
         );
-        // An absent project layer falls back to the built-in cargo formatter.
-        // Explicitly remove formatter commands to exercise the missing case.
-        for tier in ports.verify.tiers.values_mut() {
-            tier.commands
-                .retain(|command| super::formatter_kind(command).is_none());
-            if tier.commands.is_empty() {
-                tier.commands.push(provenant_config::TierCommand {
-                    stack: String::new(),
-                    cwd: ".".into(),
-                    argv: vec!["true".into()],
-                });
-            }
-        }
+        // An explicit `"none"` declaration turns the carry off, whatever the
+        // detected default would have picked. Spec: docs/specs/next-batch.md#seam-2-one-sourced-settings-vocabulary
+        ports.verify.format = Some(provenant_config::VerifyFormat::None);
         std::fs::write(
             ports_dir.join("ports.json"),
             serde_json::to_vec(&ports).map_err(|error| LandingError::Failed(error.to_string()))?,
@@ -1312,8 +1322,244 @@ mod tests {
             warnings
                 .borrow()
                 .iter()
-                .any(|warning| warning.contains("configured formatter is missing"))
+                .any(|warning| warning.contains("format approval carry is off"))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn unrecognised_format_command_runs_exactly_as_declared() -> Result<(), LandingError> {
+        // Spec: docs/specs/next-batch.md#seam-2-one-sourced-settings-vocabulary
+        let root = tempfile::tempdir().map_err(|error| LandingError::Failed(error.to_string()))?;
+        let project = root.path().join("project");
+        let state = root.path().join("state");
+        std::fs::create_dir_all(&project)
+            .and_then(|()| std::fs::create_dir_all(&state))
+            .map_err(|error| LandingError::Failed(error.to_string()))?;
+        let git = provenant_os::git::git_executable()
+            .and_then(|path| path.to_str().map(str::to_owned))
+            .ok_or_else(|| LandingError::Failed("Git executable is unavailable".into()))?;
+        let run_git = |args: &[&str]| -> Result<String, LandingError> {
+            let argv = std::iter::once(git.as_str())
+                .chain(args.iter().copied())
+                .collect::<Vec<_>>();
+            let output =
+                crate::pr::execute_for(&project, &argv, std::time::Duration::from_secs(60), false)
+                    .map_err(|error| LandingError::Failed(error.to_string()))?;
+            if output.termination != provenant_os::exec::Termination::Exit(0) {
+                return Err(LandingError::Failed(
+                    String::from_utf8_lossy(&output.stderr.bytes).into_owned(),
+                ));
+            }
+            Ok(String::from_utf8_lossy(&output.stdout.bytes)
+                .trim()
+                .to_owned())
+        };
+        run_git(&["init", "-q", "--initial-branch=main"])?;
+        run_git(&["config", "user.name", "Fixture"])?;
+        run_git(&["config", "user.email", "fixture@example.invalid"])?;
+        let workspace = project.join("workspace");
+        std::fs::create_dir_all(workspace.join("src"))
+            .map_err(|error| LandingError::Failed(error.to_string()))?;
+        std::fs::write(
+            workspace.join("Cargo.toml"),
+            "[package]\nname='custom-format-fixture'\nversion='0.1.0'\nedition='2021'\n",
+        )
+        .map_err(|error| LandingError::Failed(error.to_string()))?;
+        std::fs::write(workspace.join("src/lib.rs"), "pub fn value( ){let n=1;n}\n")
+            .map_err(|error| LandingError::Failed(error.to_string()))?;
+        // The declared command is `sh format.sh`, not a formatter name the old
+        // guesser knew, yet it is the command the carry must run verbatim.
+        std::fs::write(
+            workspace.join("format.sh"),
+            "#!/bin/sh\nexec \"${CARGO:-cargo}\" fmt --all\n",
+        )
+        .map_err(|error| LandingError::Failed(error.to_string()))?;
+        let mut ports = provenant_config::PortTable::builtin();
+        ports.verify.workspace = std::path::PathBuf::from("workspace");
+        ports.verify.format = Some(provenant_config::VerifyFormat::Command(
+            provenant_config::TierCommand {
+                stack: "custom".into(),
+                cwd: ".".into(),
+                argv: vec!["sh".into(), "format.sh".into()],
+            },
+        ));
+        let ports_dir = project.join(".provenant");
+        std::fs::create_dir_all(&ports_dir)
+            .and_then(|()| {
+                std::fs::write(
+                    ports_dir.join("ports.json"),
+                    serde_json::to_vec(&ports).map_err(std::io::Error::other)?,
+                )
+            })
+            .map_err(|error| LandingError::Failed(error.to_string()))?;
+        run_git(&[
+            "add",
+            "workspace/Cargo.toml",
+            "workspace/src/lib.rs",
+            "workspace/format.sh",
+            ".provenant/ports.json",
+        ])?;
+        run_git(&["commit", "-qm", "approved"])?;
+        let approved = run_git(&["rev-parse", "HEAD"])?;
+        let formatted = crate::pr::execute_for(
+            &workspace,
+            &["sh", "format.sh"],
+            std::time::Duration::from_secs(300),
+            false,
+        )
+        .map_err(|error| LandingError::Failed(error.to_string()))?;
+        if formatted.termination != provenant_os::exec::Termination::Exit(0) {
+            return Err(LandingError::Failed(
+                "fixture custom formatter failed".into(),
+            ));
+        }
+        run_git(&["add", "workspace/src/lib.rs"])?;
+        run_git(&["commit", "-qm", "format"])?;
+        let current = run_git(&["rev-parse", "HEAD"])?;
+        let sources = [ApprovalSource::Forge];
+        let reviews = FakeReviews::default();
+        let mut forge = FakeForge::default();
+        forge.approvals_at_head.insert(
+            (77, approved.clone()),
+            vec![crate::pr::landing::ports::Approval {
+                reference: "format-review".into(),
+                reviewer: "reviewer".into(),
+            }],
+        );
+        let mut repo = FakeRepo {
+            project_path: Some(project.clone()),
+            ..Default::default()
+        };
+        repo.parents.insert(current.clone(), vec![approved.clone()]);
+        let warnings = std::cell::RefCell::new(Vec::new());
+        let decision = Approvals::new(&sources, &reviews)
+            .with_warnings(&warnings)
+            .with_carry(
+                state.as_path(),
+                &[provenant_cli::domains::ApprovalCarry::Format],
+            )
+            .at(&mut repo, "base")
+            .decide(&mut forge, 77, &current, "author")?;
+        assert!(matches!(decision, Decision::Approved(_)));
+        let receipt = super::super::receipt::read_approval_carry(
+            state.as_path(),
+            "fake-repository",
+            77,
+            &current,
+        )?
+        .ok_or_else(|| LandingError::Failed("custom formatter carry wrote no receipt".into()))?;
+        let source = receipt.format_source.as_ref().ok_or_else(|| {
+            LandingError::Failed("carry receipt did not name its format source".into())
+        })?;
+        assert_eq!(source.layer, provenant_records::Layer::Project);
+        assert_eq!(
+            source.origin.as_deref(),
+            Some(".provenant/ports.json#verify.format")
+        );
+        assert!(
+            warnings
+                .borrow()
+                .iter()
+                .any(|warning| warning.contains("using format command from"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn detected_format_carry_names_detected_source_on_the_receipt() -> Result<(), LandingError> {
+        // Spec: docs/specs/next-batch.md#seam-2-one-sourced-settings-vocabulary
+        let root = tempfile::tempdir().map_err(|error| LandingError::Failed(error.to_string()))?;
+        let project = root.path().join("project");
+        let state = root.path().join("state");
+        std::fs::create_dir_all(&project)
+            .and_then(|()| std::fs::create_dir_all(&state))
+            .map_err(|error| LandingError::Failed(error.to_string()))?;
+        let git = provenant_os::git::git_executable()
+            .and_then(|path| path.to_str().map(str::to_owned))
+            .ok_or_else(|| LandingError::Failed("Git executable is unavailable".into()))?;
+        let run_git = |args: &[&str]| -> Result<String, LandingError> {
+            let argv = std::iter::once(git.as_str())
+                .chain(args.iter().copied())
+                .collect::<Vec<_>>();
+            let output =
+                crate::pr::execute_for(&project, &argv, std::time::Duration::from_secs(60), false)
+                    .map_err(|error| LandingError::Failed(error.to_string()))?;
+            if output.termination != provenant_os::exec::Termination::Exit(0) {
+                return Err(LandingError::Failed(
+                    String::from_utf8_lossy(&output.stderr.bytes).into_owned(),
+                ));
+            }
+            Ok(String::from_utf8_lossy(&output.stdout.bytes)
+                .trim()
+                .to_owned())
+        };
+        run_git(&["init", "-q", "--initial-branch=main"])?;
+        run_git(&["config", "user.name", "Fixture"])?;
+        run_git(&["config", "user.email", "fixture@example.invalid"])?;
+        std::fs::create_dir_all(project.join("src"))
+            .map_err(|error| LandingError::Failed(error.to_string()))?;
+        std::fs::write(
+            project.join("Cargo.toml"),
+            "[package]\nname='detected-format-fixture'\nversion='0.1.0'\nedition='2021'\n",
+        )
+        .map_err(|error| LandingError::Failed(error.to_string()))?;
+        std::fs::write(project.join("src/lib.rs"), "pub fn value( ){let n=1;n}\n")
+            .map_err(|error| LandingError::Failed(error.to_string()))?;
+        run_git(&["add", "Cargo.toml", "src/lib.rs"])?;
+        run_git(&["commit", "-qm", "approved"])?;
+        let approved = run_git(&["rev-parse", "HEAD"])?;
+        let cargo = std::env::var_os("CARGO")
+            .and_then(|path| path.into_string().ok())
+            .unwrap_or_else(|| "cargo".into());
+        let formatted = crate::pr::execute_for(
+            &project,
+            &[&cargo, "fmt", "--all"],
+            std::time::Duration::from_secs(300),
+            false,
+        )
+        .map_err(|error| LandingError::Failed(error.to_string()))?;
+        if formatted.termination != provenant_os::exec::Termination::Exit(0) {
+            return Err(LandingError::Failed("fixture cargo fmt failed".into()));
+        }
+        run_git(&["add", "src/lib.rs"])?;
+        run_git(&["commit", "-qm", "format"])?;
+        let current = run_git(&["rev-parse", "HEAD"])?;
+        let sources = [ApprovalSource::Forge];
+        let reviews = FakeReviews::default();
+        let mut forge = FakeForge::default();
+        forge.approvals_at_head.insert(
+            (77, approved.clone()),
+            vec![crate::pr::landing::ports::Approval {
+                reference: "format-review".into(),
+                reviewer: "reviewer".into(),
+            }],
+        );
+        let mut repo = FakeRepo {
+            project_path: Some(project.clone()),
+            ..Default::default()
+        };
+        repo.parents.insert(current.clone(), vec![approved.clone()]);
+        let decision = Approvals::new(&sources, &reviews)
+            .with_carry(
+                state.as_path(),
+                &[provenant_cli::domains::ApprovalCarry::Format],
+            )
+            .at(&mut repo, "base")
+            .decide(&mut forge, 77, &current, "author")?;
+        assert!(matches!(decision, Decision::Approved(_)));
+        let receipt = super::super::receipt::read_approval_carry(
+            state.as_path(),
+            "fake-repository",
+            77,
+            &current,
+        )?
+        .ok_or_else(|| LandingError::Failed("detected format carry wrote no receipt".into()))?;
+        let source = receipt.format_source.as_ref().ok_or_else(|| {
+            LandingError::Failed("carry receipt did not name its format source".into())
+        })?;
+        assert_eq!(source.layer, provenant_records::Layer::Detected);
+        assert_eq!(source.origin.as_deref(), Some("detected#verify.format"));
         Ok(())
     }
 
