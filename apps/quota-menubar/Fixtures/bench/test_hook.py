@@ -12,7 +12,7 @@ spec.loader.exec_module(hook)
 
 def answer():
     page = json.dumps({"items": [{"answer": {"id": "a"}, "delivery": {"answer_id": "a", "target_session": "chair"}}], "truncated": False})
-    return json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse",
+    return json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse",
                         "additionalContext": "Answers\n<untrusted_answer_data>\n" + page + "\n</untrusted_answer_data>"}}).encode()
 
 

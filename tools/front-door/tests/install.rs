@@ -649,7 +649,7 @@ fn hook_ownership_survives_upgrade_without_flags_and_explicit_off_removes_it() -
                     .as_str()
                     .is_some_and(|selector| selector.starts_with("hook:")))
         );
-        assert!(fs::read_to_string(&settings)?.contains("'hook' 'claude' 'pre-tool-use'"));
+        assert!(fs::read_to_string(&settings)?.contains("'hook' 'claude' 'post-tool-use'"));
         if explicit_off {
             let moved = rig.root.join("new-bin");
             let output = rig.command(&[
@@ -675,7 +675,7 @@ fn hook_ownership_survives_upgrade_without_flags_and_explicit_off_removes_it() -
             if modified {
                 let mut document: serde_json::Value =
                     serde_json::from_slice(&fs::read(&settings)?)?;
-                document["hooks"]["PreToolUse"][0]["hooks"][0]["timeout"] = serde_json::json!(123);
+                document["hooks"]["PostToolUse"][0]["hooks"][0]["timeout"] = serde_json::json!(123);
                 fs::write(&settings, serde_json::to_vec(&document)?)?;
             }
             let output = rig.command(&[
@@ -720,7 +720,7 @@ fn hook_ownership_survives_upgrade_without_flags_and_explicit_off_removes_it() -
         }
         let retained = fs::read_to_string(&settings)?;
         if modified {
-            assert!(retained.contains("'hook' 'claude' 'pre-tool-use'"));
+            assert!(retained.contains("'hook' 'claude' 'post-tool-use'"));
             assert!(retained.contains("123"));
             assert!(!retained.contains("'hook' 'claude' 'pre-compact'"));
         } else {
@@ -729,6 +729,43 @@ fn hook_ownership_survives_upgrade_without_flags_and_explicit_off_removes_it() -
         rig.assert_v1_root_untouched()?;
     }
     Ok(())
+}
+
+#[test]
+fn check_install_confirms_claude_answer_delivery_runs_after_the_tool() -> Result {
+    let rig = TestRig::new()?;
+    let stage = staged(&rig)?;
+    let installed = rig.command(&[
+        "install",
+        "--source",
+        stage.to_str().ok_or("stage")?,
+        "--harness",
+        "claude",
+        "--hooks",
+        "on",
+        "--json",
+    ])?;
+    assert_eq!(
+        code(&installed),
+        0,
+        "{}",
+        String::from_utf8_lossy(&installed.stdout.bytes)
+    );
+    let checked = rig.command(&["check", "install", "--json"])?;
+    let report: serde_json::Value = serde_json::from_slice(&checked.stdout.bytes)?;
+    assert_eq!(code(&checked), 0, "{report}");
+
+    let hooks = managed_hooks(&rig.root.join("claude/settings.json"))?;
+    assert!(hooks.get("PreToolUse").is_none(), "{hooks}");
+    assert!(hooks["PostToolUse"].is_array(), "{hooks}");
+    let command = hooks["PostToolUse"][0]["hooks"][0]["command"]
+        .as_str()
+        .ok_or("hook command")?;
+    assert!(
+        command.contains("'hook' 'claude' 'post-tool-use'"),
+        "{command}"
+    );
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -2401,7 +2438,7 @@ fn install_and_upgrade_leave_every_registered_account_identical() -> Result {
     assert_eq!(code(&installed), 0, "{installed:?}");
     let identical = |release: &Path| -> Result {
         let reference = managed_hooks(&claude[0].join("settings.json"))?;
-        assert!(reference["PreToolUse"].is_array(), "{reference}");
+        assert!(reference["PostToolUse"].is_array(), "{reference}");
         for directory in &claude {
             let link = fs::read_link(directory.join("skills/example"))?;
             assert!(link.starts_with(release), "{directory:?}: {link:?}");
@@ -2539,7 +2576,7 @@ fn check_install_reports_drift_per_account_and_accounts_sync_repairs_it() -> Res
     assert_eq!(status, 0, "{synced}");
     assert!(fs::symlink_metadata(work.join("skills/example")).is_ok());
     // Removing every managed hook is the account's own choice and sticks.
-    assert!(hooks["PreToolUse"].is_array());
+    assert!(hooks["PostToolUse"].is_array());
     assert!(managed_hooks(&settings)?.is_null());
     let repaired: serde_json::Value = serde_json::from_slice(&fs::read(&settings)?)?;
     assert_eq!(repaired["model"], "opus");

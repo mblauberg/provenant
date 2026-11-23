@@ -120,7 +120,7 @@ fn first_warning(state: &Path, text: Option<&str>, warning: &Finding) -> bool {
 fn first_warning_bytes(state: &Path, text: &[u8], message: &str) -> bool {
     // The command edge reads settings for usage attribution before dispatching
     // the hook. Suppress those advisories as well as the hook's own reads.
-    if is_pre_tool_hook(std::env::args_os().skip(1)) {
+    if is_answer_delivery_hook(std::env::args_os().skip(1)) {
         return false;
     }
     let mut bytes = (text.len() as u64).to_be_bytes().to_vec();
@@ -152,12 +152,14 @@ pub(crate) fn warn_unknown_input_once(state: &Path, bytes: &[u8], warning: &Inpu
     }
 }
 
-fn is_pre_tool_hook(args: impl IntoIterator<Item = std::ffi::OsString>) -> bool {
-    let claude = provenant_records::Harness::Claude.spec().name;
+fn is_answer_delivery_hook(args: impl IntoIterator<Item = std::ffi::OsString>) -> bool {
     let mut words = args.into_iter();
     words.any(|word| word == "hook")
-        && words.any(|word| word == claude)
-        && words.any(|word| word == "pre-tool-use")
+        && words.any(|word| {
+            provenant_records::HookAction::ALL.iter().any(|action| {
+                action.is_answer_delivery() && word.to_str() == Some(action.command())
+            })
+        })
 }
 
 /// Validate changed domain sections strictly through their owning validators.
@@ -2733,11 +2735,17 @@ mod warning_tests {
     }
 
     #[test]
-    fn pre_tool_hook_arguments_are_identified() {
-        assert!(is_pre_tool_hook(
-            ["--json", "hook", "claude", "pre-tool-use"].map(Into::into)
-        ));
-        assert!(!is_pre_tool_hook(["config", "show"].map(Into::into)));
+    fn answer_delivery_hook_arguments_are_identified() {
+        let claude = provenant_records::Harness::Claude.spec().name;
+        for command in [
+            provenant_records::HookAction::PreToolUse.command(),
+            provenant_records::HookAction::PostToolUse.command(),
+        ] {
+            assert!(is_answer_delivery_hook(
+                ["--json", "hook", claude, command].map(Into::into)
+            ));
+        }
+        assert!(!is_answer_delivery_hook(["config", "show"].map(Into::into)));
     }
 
     #[derive(Clone, Debug, Default, Serialize, Deserialize)]

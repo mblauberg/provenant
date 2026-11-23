@@ -43,14 +43,12 @@ fn registrations_for(harnesses: &[Harness], lane: bool) -> Vec<HookRegistration>
                             return None;
                         };
                         // Shell and tool policy belongs to the outer lane
-                        // confinement. The answer-delivery guard abstains in a
-                        // lane, so registering it there adds no capability.
-                        if lane && *action == HookAction::PreToolUse {
+                        // confinement. Answer delivery abstains in a lane, so
+                        // registering it there adds no capability.
+                        if lane && action.is_answer_delivery() {
                             return None;
                         }
-                        if *action == HookAction::PreToolUse
-                            && !install.answer_delivery.is_supported()
-                        {
+                        if action.is_answer_delivery() && !install.answer_delivery.is_supported() {
                             return None;
                         }
                         if matches!(
@@ -434,6 +432,25 @@ pub(crate) fn register(
     let mut changes = Vec::new();
     let mut owned = Vec::new();
     let mut relinquished_modified = false;
+    let declared_actions: BTreeSet<&str> = targets
+        .hook_specs
+        .iter()
+        .filter(|spec| spec.harness == harness)
+        .map(|spec| spec.action.command())
+        .collect();
+    let inherited_actions: BTreeSet<String> = inherited
+        .iter()
+        .filter_map(|selector| read_identity(selector).ok())
+        .filter(|old| old.harness == harness.spec().name)
+        .map(|old| old.action)
+        .collect();
+    // An upgrade can retire an action and declare its replacement. The receipt
+    // still owns the retired leaf, so the harness's declared set inherits that
+    // ownership; without this a plain upgrade (no explicit `--hooks on`) would
+    // silently lose the replacement.
+    let retires_owned = inherited_actions
+        .iter()
+        .any(|action| !declared_actions.contains(action.as_str()));
     for spec in targets.hook_specs.iter().filter(|spec| {
         spec.harness == harness && !matches!(spec.protocol, HookProtocol::OpenCodePlugin)
     }) {
@@ -443,12 +460,8 @@ pub(crate) fn register(
             .and_then(Value::as_str)
             .ok_or(InstallError::InvalidConfig("hook command"))?;
         let sel = selector(spec, command)?;
-        let was_owned = follows_siblings
-            || inherited.iter().any(|selector| {
-                read_identity(selector).is_ok_and(|old| {
-                    old.harness == spec.harness.spec().name && old.action == spec.action.command()
-                })
-            });
+        let was_owned =
+            follows_siblings || retires_owned || inherited_actions.contains(spec.action.command());
         if !targets.hooks && !was_owned {
             continue;
         }
@@ -725,7 +738,7 @@ mod tests {
                         action,
                         HookAction::ChairPrompt | HookAction::ChairStart | HookAction::ChairStop
                     ))
-                    || (*action == HookAction::PreToolUse
+                    || (action.is_answer_delivery()
                         && (lane || !install.answer_delivery.is_supported()))
                 {
                     return None;
@@ -809,7 +822,18 @@ mod tests {
                         row.action
                     );
                 }
-                assert!(!source.contains("\"action\":\"pre-tool-use\""));
+                for action in HookAction::ALL
+                    .iter()
+                    .copied()
+                    .filter(|action| action.is_answer_delivery())
+                {
+                    assert!(
+                        !source.contains(&format!("\"action\":\"{}\"", action.command())),
+                        "{} {:?}",
+                        adapter.name,
+                        action
+                    );
+                }
             } else {
                 let settings = lane_hook_settings(adapter.id, binary, state).unwrap();
                 let bytes = serde_json::to_vec(&settings).unwrap();
@@ -821,5 +845,25 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn claude_answer_delivery_is_registered_only_after_the_tool() {
+        let rows = registrations(&[Harness::Claude]);
+        assert!(
+            rows.iter()
+                .any(|row| { row.action == HookAction::PostToolUse && row.event == "PostToolUse" }),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .all(|row| !(row.action.is_answer_delivery() && row.event == "PreToolUse")),
+            "{rows:?}"
+        );
+        assert!(
+            registrations_for(&[Harness::Codex], false)
+                .iter()
+                .any(|row| row.action == HookAction::PreToolUse && row.event == "PreToolUse")
+        );
     }
 }

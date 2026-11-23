@@ -221,11 +221,17 @@ macro_rules! hook_actions {
             pub const fn command(self) -> &'static str {
                 match self { $( Self::$action => $command, )+ }
             }
+            /// Answer delivery is the only use of a tool hook. Which native
+            /// event carries it is per adapter; neither event grants policy.
+            pub const fn is_answer_delivery(self) -> bool {
+                matches!(self, Self::PreToolUse | Self::PostToolUse)
+            }
         }
     };
 }
 hook_actions! {
     PreToolUse => "pre-tool-use",
+    PostToolUse => "post-tool-use",
     PreCompact => "pre-compact",
     Compact => "compact",
     ChairPrompt => "chair-prompt",
@@ -289,9 +295,12 @@ const CHAIR_HOOKS_NOT_APPLICABLE: &str =
     "Provenant chair switching is enabled only for adapters declaring chair_switch";
 const CHAIR_HOOKS_SOURCE: &str = "AdapterSpec.chair_switch in crates/records/src/adapters.rs";
 const CLAUDE_HOOK_EVENTS: &[HookEvent] = &[
+    // Claude Code treats a failed PreToolUse hook as a refusal of the tool.
+    // Answer delivery offers untrusted inbox data and needs no such authority,
+    // so it runs after the tool through PostToolUse's additionalContext.
     HookEvent::Supported {
-        action: HookAction::PreToolUse,
-        event: "PreToolUse",
+        action: HookAction::PostToolUse,
+        event: "PostToolUse",
         matcher: None,
         timeout_seconds: None,
     },
@@ -351,6 +360,8 @@ const CLAUDE_HOOK_EVENTS: &[HookEvent] = &[
     },
 ];
 const CODEX_HOOK_EVENTS: &[HookEvent] = &[
+    // Codex keeps its declared PreToolUse answer-delivery mapping: this release
+    // has no verified non-blocking Codex event that carries additionalContext.
     HookEvent::Supported {
         action: HookAction::PreToolUse,
         event: "PreToolUse",

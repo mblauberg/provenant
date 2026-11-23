@@ -262,13 +262,13 @@ fn chair_session_hooks_are_silent_in_lanes_and_the_answer_guard_stays_active() -
         assert!(output.stderr.bytes.is_empty(), "{hook}: {output:?}");
     }
 
-    // PreToolUse still executes its lane-aware path, leaving answer delivery
+    // PostToolUse still executes its lane-aware path, leaving answer delivery
     // to Fabric mail rather than being swallowed with chair lifecycle hooks.
     let guard = run_hook(
         &rig,
-        "pre-tool-use",
+        "post-tool-use",
         &json!({
-            "hook_event_name":"PreToolUse",
+            "hook_event_name":"PostToolUse",
             "tool_name":"Bash",
             "tool_input":{"command":"git status --short"},
             "cwd":rig.project,
