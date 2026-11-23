@@ -82,14 +82,16 @@
             "title": "Board fixture",
             "transcript": null,
             "usage": {
-              "cache_read": null,
-              "cache_write": null,
-              "cache_write_1h": null,
               "context_basis_points": null,
-              "output_excluding_reasoning": null,
-              "reasoning": null,
-              "source": null,
-              "uncached_input": null
+              "source": "stream",
+              "tokens": {
+                "cache_read": null,
+                "cache_write": null,
+                "cache_write_1h": null,
+                "input": null,
+                "output": null,
+                "reasoning": null
+              }
             },
             "waiting_for": null,
             "write_grants": []

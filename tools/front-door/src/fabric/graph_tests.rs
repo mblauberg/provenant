@@ -3232,8 +3232,11 @@ mod result_tests {
 
         use serde_json::json;
         let prices = usage_prices();
-        let full = json!({"uncached_input":1_000_000, "cache_read":1_000_000,
-            "cache_write":1_000_000, "output_excluding_reasoning":1_000_000, "reasoning":1_000_000});
+        // Spec: docs/specs/next-batch.md#seam-6-adapter-usage-accounting
+        // UsageRecord holds a typed `tokens` bucket; the old flat spellings are
+        // forward-compatible extras and carry no usage semantics.
+        let full = json!({"tokens":{"input":1_000_000, "cache_read":1_000_000,
+            "cache_write":1_000_000, "output":1_000_000, "reasoning":1_000_000}});
         let result = super::graph_attempt_usage(
             usage_record("priced", full.clone(), Some(1001)),
             Some(&prices),
@@ -3299,8 +3302,8 @@ mod result_tests {
         let without_reasoning = super::graph_attempt_usage(
             usage_record(
                 "priced",
-                json!({"uncached_input":1_000_000, "cache_read":1_000_000,
-                    "cache_write":1_000_000, "output_excluding_reasoning":1_000_000}),
+                json!({"tokens":{"input":1_000_000, "cache_read":1_000_000,
+                    "cache_write":1_000_000, "output":1_000_000}}),
                 Some(1000),
             ),
             Some(&prices),
@@ -3311,7 +3314,7 @@ mod result_tests {
         assert_eq!(without_reasoning.cost_micro_usd, Some(10_000_000));
 
         let partial = super::graph_attempt_usage(
-            usage_record("priced", json!({"uncached_input":1_000_000}), Some(1000)),
+            usage_record("priced", json!({"tokens":{"input":1_000_000}}), Some(1000)),
             Some(&prices),
             None,
         );

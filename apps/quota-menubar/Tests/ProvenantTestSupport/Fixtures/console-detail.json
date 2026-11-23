@@ -53,13 +53,16 @@
       "run": "65656565656565656565656565656565"
     },
     "usage": {
-      "cache_read": null,
-      "cache_write": null,
       "context_basis_points": null,
-      "output_excluding_reasoning": null,
-      "reasoning": null,
-      "source": null,
-      "uncached_input": null
+      "source": "stream",
+      "tokens": {
+        "cache_read": null,
+        "cache_write": null,
+        "cache_write_1h": null,
+        "input": null,
+        "output": null,
+        "reasoning": null
+      }
     },
     "usage_coverage": {
       "known": [],
