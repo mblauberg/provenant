@@ -1,5 +1,11 @@
 # Slice w1-forge: ForgeContext: one remote, default branch, protected set and policy
 
+## Amendments (chair, 23 Nov 2026, against main af8a73e3e9 after v2.8.2)
+These supersede any conflicting text below.
+- #3768 added a fourth default-branch discovery (`origin/HEAD` or `main`) in `crates/confinement/src/worktrees/gc.rs` and `src/lane_cleanup.rs`; replace it with ForgeContext too (both are in your write scope).
+- `install.rs`, `fabric/owner.rs` and `fabric/interface.rs` use `Policy::default()` without a `TODO(#3371 seam)` comment; include them.
+
+
 Issues: #3288 #3505. Wave 1 of the next batch; integration branch `batch/next`. Expected size about 750 changed lines. Starts after w1-interfaces have integrated.
 
 ## Outcome

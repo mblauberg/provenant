@@ -1,5 +1,10 @@
 # Slice w2-warn-lib-a: Warnings codemod: config, records, core, routing, quota, providers, os, sqlite, telemetry
 
+## Amendments (chair, 23 Nov 2026, against main af8a73e3e9 after v2.8.2)
+These supersede any conflicting text below.
+- Moved here from w1-envelope: change `Effect::Warn(String)` to `Effect::Warn(Warning)` in `crates/records/src/policy.rs`, with `Policy::warn_or` calling `records::warning::warn`. Each wave-2 codemod slice updates the `Effect::Warn` match arms in the crates it owns (no arm formats text); the integrated head compiles only when all four land, which the wave gate checks.
+
+
 Issues: #3778. Wave 2 of the next batch; integration branch `batch/next`. Expected size about 500 changed lines.
 
 ## Outcome

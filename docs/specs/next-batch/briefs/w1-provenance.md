@@ -1,5 +1,11 @@
 # Slice w1-provenance: Persisted source families onto Layer
 
+## Amendments (chair, 23 Nov 2026, against main af8a73e3e9 after v2.8.2)
+These supersede any conflicting text below.
+- `LIVE_RECORD_FORMAT` is 6 on main; bump it to 7 (once for this batch; later slices that change records reuse 7).
+- `crates/records/tests/persisted_enum_names.rs` pins serialised enum names; update it in this slice for every rename (it is in your write scope).
+
+
 Issues: #3777. Wave 1 of the next batch; integration branch `batch/next`. Expected size about 700 changed lines. Starts after w1-interfaces have integrated.
 
 ## Outcome

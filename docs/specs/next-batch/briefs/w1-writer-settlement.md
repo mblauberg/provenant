@@ -1,5 +1,13 @@
 # Slice w1-writer-settlement: Writer settlement decides Git-operation state before publication
 
+## Amendments (chair, 23 Nov 2026, against main af8a73e3e9 after v2.8.2)
+These supersede any conflicting text below.
+- #3840 changed the settlement driver: phases Import, Publish, Record, with the host merge identified by its recorded OID (`publication_tip`). The Git-operation decision runs before `begin_import` and also on resume when the recorded phase is already Publish or Record.
+- Owner rule (scope note on #3407, 19 Nov; the issue body's "Under the owner rules" line): a mid-operation state confined to the lane's own Git (private dir or candidate git-common) warns, names the latest commit (symbolic or detached HEAD) and where the in-progress state is retained, and proceeds with the lane's committed tip, leaving that in-progress state intact (never reset or cleaned). Settlement refuses only when it would leave the host checkout mid-operation, and then before import, with checkout bytes unchanged. This replaces the "nothing is published" fixtures and the "must never publish a tip from a stopped mid-operation lane" sentence below.
+- Fixtures: mid-cherry-pick (resolved, uncommitted) in candidate git-common -> warning naming the commit, committed tip published, in-progress state still present; mid-rebase in the private dir -> same; host checkout mid-operation -> refused before import, checkout bytes unchanged; clean lane publishes as before.
+- Bisect (item 4) is already fixed (`BISECT_START` in both lists); out of scope beyond the shared inventory.
+
+
 Issues: #3407. Wave 1 of the next batch; integration branch `batch/next`. Expected size about 450 changed lines.
 
 ## Outcome

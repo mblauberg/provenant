@@ -1,5 +1,11 @@
 # Slice w1-names: One close-match ranker and name refusal
 
+## Amendments (chair, 23 Nov 2026, against main af8a73e3e9 after v2.8.2)
+These supersede any conflicting text below.
+- #3808 is closed: #3822 already shipped nested `help` paths and the `config path` grammar. Write "Refs #3808", not "Closes". Drop any work on help paths or `config path`.
+- Still to do: collapse the edit-distance copies (`core::edit_distance` `crates/core/src/lib.rs`, `fabric-runtime/src/graph/template.rs`, `config/src/knobs.rs`, `cli/src/route.rs`, and the one in `cli/src/lib.rs`) into the one ranker; case-fold graph names in `graph_name_fault` (template.rs) and `check_name` (`cli/src/.../target.rs`) with *NAME_CASE_FOLDED*; candidates for unknown adapter (`crates/routing/src/lib.rs` `#[error("unknown adapter")]`) and the bare-model refusal (`graph_interface.rs`), keeping the existing redaction guards (`bare_model_detail`, `clap_error`).
+
+
 Issues: #3808. Wave 1 of the next batch; integration branch `batch/next`. Expected size about 500 changed lines. Starts after w1-interfaces have integrated.
 
 ## Outcome

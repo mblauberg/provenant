@@ -1,5 +1,11 @@
 # Slice w1-project-dirs: One host-project directory key
 
+## Amendments (chair, 23 Nov 2026, against main af8a73e3e9 after v2.8.2)
+These supersede any conflicting text below.
+- ProjectId is the canonical key: `config/src/ports.rs` already calls the `<project_key>` layout obsolete and warns on a misplaced `ports.json`. No need to confirm the key.
+- `config/src/ports.rs` and `config/src/github_policy.rs` also build `projects/` paths; move them too (in your write scope).
+
+
 Issues: #3777 (bug). Wave 1 of the next batch; integration branch `batch/next`. Expected size about 350 changed lines. Starts after w1-interfaces have integrated.
 
 ## Outcome

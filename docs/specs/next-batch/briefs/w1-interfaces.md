@@ -1,5 +1,12 @@
 # Slice w1-interfaces: Shared seam types and the migration registry
 
+## Amendments (chair, 23 Nov 2026, against main af8a73e3e9 after v2.8.2)
+These supersede any conflicting text below.
+- SQLite stores already migrate on writable open (`provenant_sqlite::Migration { from, to, sql }` in `crates/sqlite/src/schema.rs`; documented in `docs/specs/state.md` "one-shot migrations"). `records::migrate` and the install-receipt migration steps are for non-SQLite state only (files, ledgers, receipts); say so in the module docs and in the new doc section so it agrees with state.md. Do not duplicate or wrap the SQLite mechanism.
+- Current numbers: `LIVE_RECORD_FORMAT` = 6 (`crates/records/src/install.rs`), run store base 13, `INSTALL_RECEIPT_SCHEMA_VERSION` = 2 (no `migrations` field yet).
+- The w1-record-migration slice was dropped (done by #3822); there is no *boundary-aliases* step to register.
+
+
 Issues: #3777 #3778 #3808 #3709. Wave 1 of the next batch; integration branch `batch/next`. Expected size about 550 changed lines.
 
 ## Outcome

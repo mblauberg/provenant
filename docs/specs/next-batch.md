@@ -585,14 +585,9 @@ Steps in this batch:
 4. *usage-ledger-v4*
 5. *pre-rename-boundary-records*
 
-**Step 5 and #3815.** #3815 decodes the retired `Boundary` names as
-`OtherWork` wherever a policy snapshot is read, on the grounds that "stored
-rows cannot be rewritten". That is a legacy reader. Under the owner's stance
-it should be one migration step that rewrites the snapshots, then deletes
-the aliases. The exception is if a digest seals the rows, which the
-`w1-record-migration` slice confirms first. If one does, the clean break
-#3815 already uses (drop the policy snapshot on decode) extends to every
-reader, and the aliases still go.
+**Step 5 and #3815.** Done by #3822 before this batch: the retired `Boundary`
+aliases are deleted and run stores at base 12 are rewritten once on writable
+open (base 13). No step 5 remains; the list keeps its number for reference.
 
 ## Dependents: output and adoption
 
@@ -696,8 +691,8 @@ Three waves of `batch` documents share one integration branch,
 - Wave 2 finishes the seams by moving every caller.
 - Wave 3 holds the dependents.
 
-Within a wave, `after` orders the slices that share files. The rest run in
-parallel with disjoint write scopes.
+Within a wave, `after` orders every pair of slices whose write scopes share a
+file. The rest run in parallel with disjoint write scopes.
 
 Lanes run `cargo fmt` only. Between waves the chair runs one integrated
 clippy check on the integration head, then pushes it so CI tests run while
@@ -707,14 +702,14 @@ There is one gate per wave rather than one at the end. Lanes never compile,
 and a broken base would multiply errors in every dependent slice. Each gate
 costs one warm clippy run.
 
-### Wave 1: seam cores (10 slices, about 5800 lines)
+### Wave 1: seam cores (9 slices, about 5500 lines)
 | Slice | Issues | Model | Lines | After | Outcome |
 |---|---|---|---|---|---|
 | w1-interfaces | #3777 #3778 #3808 #3709 | DeepSeek | 550 | none | Shared seam types and the migration registry |
 | w1-registry | #3774 | DeepSeek | 800 | none | Command registry replaces the dispatch match |
 | w1-envelope | #3778 #3813 #3812 | DeepSeek | 650 | w1-interfaces, w1-registry | One warning emitter and envelope v2 |
 | w1-provenance | #3777 | DeepSeek | 700 | w1-interfaces | Persisted source families onto Layer |
-| w1-record-migration | #3801 follow-up | DeepSeek | 300 | w1-interfaces | Turn the pre-rename boundary aliases into a migration step |
+| ~~w1-record-migration~~ | #3801 follow-up | - | - | - | Done by #3822 (aliases deleted; base-12 stores rewritten on open); dropped from wave 1 |
 | w1-names | #3808 | DeepSeek | 500 | w1-interfaces | One close-match ranker and name refusal |
 | w1-forge | #3288 #3505 | DeepSeek | 750 | w1-interfaces | ForgeContext: one remote, default branch, protected set and policy |
 | w1-usage | #3709 (seam half) | DeepSeek | 750 | w1-interfaces | UsageReport, declared semantics and one accumulator |

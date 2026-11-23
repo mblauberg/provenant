@@ -1,5 +1,11 @@
 # Slice w1-envelope: One warning emitter and envelope v2
 
+## Amendments (chair, 23 Nov 2026, against main af8a73e3e9 after v2.8.2)
+These supersede any conflicting text below.
+- Do NOT change `Effect::Warn(String)` in this slice: its match arms live in 29 files across every crate, which wave 2's warnings codemod owns. Leave `records/src/policy.rs` untouched; the `Effect::Warn(Warning)` change moves to w2-warn-lib-a (policy.rs) with each wave-2 codemod slice updating its arms.
+- `ENVELOPE_VERSION` is 1 (`records/src/wire/mod.rs`); the `emit*` functions are still in `src/lib.rs`; marker writers are `config/src/loader.rs` and `src/roots.rs`.
+
+
 Issues: #3778 #3813 #3812. Wave 1 of the next batch; integration branch `batch/next`. Expected size about 650 changed lines. Starts after w1-interfaces, w1-registry have integrated.
 
 ## Outcome
