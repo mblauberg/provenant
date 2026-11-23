@@ -220,7 +220,8 @@ pub struct LocalGateOverride {
 }
 
 macro_rules! land_enum {
-    ($name:ident, $default:ident, $($variant:ident),+ $(,)?) => {
+    ($(#[$meta:meta])* $name:ident, $default:ident, $($variant:ident),+ $(,)?) => {
+        $(#[$meta])*
         #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
         #[serde(rename_all = "snake_case")]
         pub enum $name { #[default] $default, $($variant),+ }
@@ -229,19 +230,34 @@ macro_rules! land_enum {
 
 land_enum!(Publication, Auto, RestOrdered, FastForward);
 land_enum!(MergeMethod, Merge, Squash, Rebase);
-/// When a ruleset demands a review the authenticated owner cannot satisfy,
-/// `when_review_unavailable` lets land retry with admin authority — but only
-/// after land's own gate passed, and only when granted in the host layer.
-land_enum!(AdminPublication, Never, WhenReviewUnavailable);
+land_enum!(
+    /// When a ruleset demands a review the authenticated owner cannot satisfy,
+    /// `when_review_unavailable` lets land retry with admin authority — but only
+    /// after land's own gate passed, and only when granted in the host layer.
+    AdminPublication,
+    Never,
+    WhenReviewUnavailable
+);
 land_enum!(PrCiMode, Always, OptIn, Affected, None);
 land_enum!(LocalGateMode, Warn, Enforce, Off);
-// What stands as a pull request's approval for batch landing: an approving
-// forge review or an independent Provenant review on the exact head.
-land_enum!(ApprovalSource, ProvenantReview, Forge);
-// What approval a pull request needs. `auto` is `none` for a pull request that
-// touches only tests, docs or review-exempt paths and `carry` otherwise.
-// `none`: CI only. `carry` and `delta` require approval on the exact head.
-land_enum!(ApprovalTier, Auto, None, Carry, Delta);
+land_enum!(
+    /// What stands as a pull request's approval for batch landing: an approving
+    /// forge review or an independent Provenant review on the exact head.
+    ApprovalSource,
+    ProvenantReview,
+    Forge
+);
+land_enum!(
+    /// What approval a pull request needs. `auto` is `none` for a pull request
+    /// that touches only tests, docs or review-exempt paths and `carry`
+    /// otherwise. `none`: CI only. `carry` and `delta` require approval on the
+    /// exact head.
+    ApprovalTier,
+    Auto,
+    None,
+    Carry,
+    Delta
+);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]

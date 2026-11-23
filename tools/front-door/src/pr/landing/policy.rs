@@ -939,8 +939,10 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         use provenant_records::warning;
 
-        let mut settings = LandSettings::default();
-        settings.admin_publication = AdminPublication::WhenReviewUnavailable;
+        let settings = LandSettings {
+            admin_publication: AdminPublication::WhenReviewUnavailable,
+            ..LandSettings::default()
+        };
         let path = PathWire::from_relative(&RelativePath::parse("config.toml")?)?;
         let origins = BTreeMap::from([(
             "domains.pr.land.admin_publication".into(),
@@ -979,7 +981,7 @@ mod tests {
         assert_eq!(ignored.publication.mode, AdminPublication::Never);
         assert!(!ignored.publication.allows_review_unavailable());
         assert_eq!(warnings.len(), 1, "{warnings:?}");
-        assert_eq!(warnings[0].code.as_str(), "SETTING_LAYER_IGNORED");
+        assert_eq!(warnings[0].code, "SETTING_LAYER_IGNORED");
         assert_eq!(
             warnings[0].source.as_ref().map(|source| source.layer),
             Some(Layer::HostProject)

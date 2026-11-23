@@ -204,12 +204,10 @@ pub fn merge_member(
         forge.merge(number, head, method)
     };
     match result {
-        Err(
-            error @ LandingError::RefusedWith {
-                cause: "REVIEW_REQUIRED",
-                ..
-            },
-        ) if reviewed && grant.allows_review_unavailable() => {
+        Err(LandingError::RefusedWith {
+            cause: "REVIEW_REQUIRED",
+            ..
+        }) if reviewed && grant.allows_review_unavailable() => {
             // The only 405 this grant may answer. The gate has passed, the
             // member carries independent review evidence, and the owner gave
             // host-layer permission; the admin call still uses their authority.

@@ -461,7 +461,7 @@ fn derive_target_from_members(
     members: &[u64],
 ) -> Result<provenant_records::provenance::Sourced<String>, Box<dyn std::error::Error>> {
     use provenant_records::{Layer, Source, Sourced};
-    let mut counts = std::collections::BTreeMap::new();
+    let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     let mut order = Vec::new();
     for number in members {
         let base = forge.pull_request(*number)?.base_branch;
