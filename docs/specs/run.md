@@ -198,13 +198,15 @@ chose it. A lane opens its own pull request with `gh pr create --body-file`;
 ## Writer pin and re-pin
 
 A graph pins its source commit at submission; a retry keeps that pin and the predecessor's
-terminal head. Before any plan node spends tokens the host preflights the writer worktree: a
-dirty tree is refused at submission, naming the paths and `lanes.writer_dirty` with its layer.
-That one setting chooses `refuse` (default), `wip_commit` (a local WIP commit recorded in
-the graph events before launch) or `continue_in_place` (a warning naming the retained paths).
-The preflight covers writer leaves in composites and loops. WIP mutation holds writer
-exclusion, refuses unsettled reservations and rechecks head and dirty paths under it.
-Credential and Git-internal roots are refused under every value.
+terminal head. Before any plan node spends tokens the host preflights the writer worktree.
+`lanes.writer_dirty` names its effective value and layer: `wip_commit` (default) commits an
+unheld tree's edits as a local WIP commit before launch, warns *WORKTREE_ADOPTED_DIRTY*
+naming the commit and records it in the graph events; `refuse` stops at submission naming the
+paths and the setting; `continue_in_place` keeps the edits and warns naming the retained
+paths. A worktree another lane holds is always refused (boundary 2). The preflight covers
+writer leaves in composites and loops. WIP mutation holds writer exclusion, refuses unsettled
+reservations and rechecks head and dirty paths under it. Credential and Git-internal roots are
+refused under every value.
 
 On a manual retry whose worktree head descends from the pinned commit, the retry re-pins to
 that head and warns with both ids. A head that is not a descendant is refused, naming the pin

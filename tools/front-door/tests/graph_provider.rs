@@ -2689,6 +2689,79 @@ fn continue_in_place_launches_direct_writer_graph() -> Result {
 fn wip_commit_launches_direct_writer_graph() -> Result {
     dirty_writer_mode_launches_direct_graph("wip_commit")
 }
+
+// Spec: docs/specs/next-batch.md#seam-5-the-worktree-and-landing-loop-a-chair-actually-uses
+fn unheld_dirty_tree_adoption_warns_with_commit() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    let rig = writer_registry_fixture()?;
+    let _cleanup = rig.process_cleanup();
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.routing.pools]\njunior=[{model='codex/gpt-6-luna',effort='low'}]\n",
+    )?;
+    let made = rig.command(&[
+        "worktree",
+        "create",
+        "dirty-lane",
+        "--base",
+        "HEAD",
+        "--json",
+    ])?;
+    assert_eq!(code(&made), 0, "{made:?}");
+    let tree = rig.project.join(".worktrees/dirty-lane");
+    fs::write(tree.join("retained.txt"), "draft")?;
+    let git_head = || -> Result<String> {
+        let result = provenant_os::fixture::git_command()
+            .current_dir(&tree)
+            .args(["rev-parse", "HEAD"])
+            .output()?;
+        assert!(result.status.success());
+        Ok(String::from_utf8(result.stdout)?.trim().to_owned())
+    };
+    let before = git_head()?;
+    let graph = rig.root.join("dirty-adoption.json");
+    fs::write(
+        &graph,
+        serde_json::to_vec(&json!({
+            "schema_version": support::GRAPH_DOCUMENT_SCHEMA_VERSION,
+            "graph_id": "dirty-adoption",
+            "nodes": [{
+                "id": "writer", "prompt": "fixture writer", "access": "worktree_write",
+                "worktree": tree, "route": {"alias": "junior"}
+            }]
+        }))?,
+    )?;
+    let settled = rig.run_and_wait(&["--file", graph.to_str().ok_or("graph")?], "30s")?;
+    assert!(
+        settled.launch_value["error"].is_null(),
+        "{}",
+        settled.launch_value
+    );
+    let after = git_head()?;
+    assert_ne!(
+        before, after,
+        "the unheld tree must be adopted as a WIP commit"
+    );
+    assert_eq!(fs::read_to_string(tree.join("retained.txt"))?, "draft");
+    let warning = settled.launch_value["warnings"]
+        .as_array()
+        .and_then(|warnings| {
+            warnings
+                .iter()
+                .find(|warning| warning["code"] == "WORKTREE_ADOPTED_DIRTY")
+        })
+        .ok_or("missing WORKTREE_ADOPTED_DIRTY warning")?;
+    assert!(
+        warning["message"]
+            .as_str()
+            .is_some_and(|message| message.contains(after.as_str()) && message.contains("WIP")),
+        "the warning must name the WIP commit: {warning}"
+    );
+    Ok(())
+}
+
 /// Distinct branch launches start directly without repository-wide waiting.
 fn distinct_branch_writer_launches_start_without_shared_waits() -> Result {
     if !graph_fixture_available()? {
@@ -6502,6 +6575,10 @@ fn main() -> ExitCode {
             (
                 "wip_commit_launches_direct_writer_graph",
                 wip_commit_launches_direct_writer_graph,
+            ),
+            (
+                "unheld_dirty_tree_adoption_warns_with_commit",
+                unheld_dirty_tree_adoption_warns_with_commit,
             ),
             ("graph_writer_restarts_fresh", graph_writer_restarts_fresh),
             ("nested_writer_fixture_child", nested_writer_fixture_child),
