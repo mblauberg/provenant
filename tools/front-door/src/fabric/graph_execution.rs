@@ -248,11 +248,9 @@ fn preflight_writer_worktrees(
 /// The admission checks a fresh submission and `run --explain` share. Explain
 /// must run these too, so an explanation that passes cannot be refused by the
 /// launch's pre-attempt validation.
-pub(crate) fn validate_new_submission(
+fn validate_static_submission(
     factory: &super::Factory,
     document: &provenant_fabric_runtime::graph::GraphDocument,
-    expanded: &provenant_fabric_runtime::graph::GraphDocument,
-    facts: &provenant_confinement::worktrees::RepoFacts,
 ) -> Result<(), FacadeError> {
     if let Err(reason) =
         provenant_cli::route::validate_graph_exclusions(&document.exclude, &factory.context.roots)
@@ -276,7 +274,125 @@ pub(crate) fn validate_new_submission(
         factory.context.port_table.worktree_layout.clone(),
     )
     .map_err(super::interface::graph_patch_error)?;
+    Ok(())
+}
+
+pub(crate) fn validate_new_submission(
+    factory: &super::Factory,
+    document: &provenant_fabric_runtime::graph::GraphDocument,
+    expanded: &provenant_fabric_runtime::graph::GraphDocument,
+    facts: &provenant_confinement::worktrees::RepoFacts,
+) -> Result<(), FacadeError> {
+    validate_static_submission(factory, document)?;
     validate_delivery_targets(factory, expanded, facts, false)
+}
+
+/// The read-only form of the same checks for `run --explain`. It must not
+/// allocate product state or a writer Git home, so it reads the checkout
+/// branch directly and checks a protected target with project-only ports.
+pub(crate) fn validate_explain_submission(
+    factory: &super::Factory,
+    document: &provenant_fabric_runtime::graph::GraphDocument,
+    expanded: &provenant_fabric_runtime::graph::GraphDocument,
+) -> Result<(), FacadeError> {
+    validate_static_submission(factory, document)?;
+    if let Some(branch) = &document.integration_branch {
+        provenant_run::HostDeliveryContext::validate_integration_target_read_only(
+            &factory.cwd,
+            branch,
+        )
+        .map_err(run_error)?;
+    }
+    for node in &expanded.nodes {
+        if !provenant_fabric_runtime::graph::when::holds(&node.when) {
+            continue;
+        }
+        if let Some(provenant_records::run::DeliveryMode::Integrate(target)) = &node.delivery {
+            provenant_run::HostDeliveryContext::validate_integration_target_read_only(
+                &factory.cwd,
+                target,
+            )
+            .map_err(run_error)?;
+        }
+        if node.provision_worktree {
+            continue;
+        }
+        if node.delivery == Some(provenant_records::run::DeliveryMode::Push) {
+            let path = node
+                .worktree
+                .as_deref()
+                .ok_or_else(|| FacadeError::field("worktree"))?;
+            provenant_run::HostDeliveryContext::validate_integration_target_read_only(
+                &factory.cwd,
+                &read_only_worktree_branch(factory, node, path)?,
+            )
+            .map_err(run_error)?;
+        }
+        if let Some(provenant_records::run::DeliveryMode::Integrate(target)) = &node.delivery
+            && !target.starts_with("origin/")
+            && let Some(path) = node.worktree.as_deref()
+            && read_only_worktree_branch(factory, node, path)? == *target
+        {
+            return Err(FacadeError::DispatchRefused {
+                fact: None,
+                disk: None,
+                reason: format!(
+                    "worktree {path} is on the integration branch {target}; create it with `git worktree add -b batch/work PATH BASE`"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Read a writer checkout's branch from its Git directory without opening a
+/// writer home or product state.
+fn read_only_worktree_branch(
+    factory: &super::Factory,
+    node: &provenant_fabric_runtime::graph::GraphNode,
+    path: &str,
+) -> Result<String, FacadeError> {
+    let given = Path::new(path);
+    let worktree = if given.is_absolute() {
+        given.to_path_buf()
+    } else {
+        factory.context.project_root.join(given)
+    };
+    if !worktree.is_dir() {
+        return Err(FacadeError::WorktreeMissing {
+            path: Some(worktree.to_string_lossy().into_owned()),
+            node: Some(node.id.clone()),
+        });
+    }
+    let marker = worktree.join(".git");
+    let gitdir = if marker.is_dir() {
+        marker
+    } else {
+        let text = std::fs::read_to_string(&marker).map_err(|_| FacadeError::field("worktree"))?;
+        let line = text
+            .trim()
+            .strip_prefix("gitdir:")
+            .ok_or_else(|| FacadeError::field("worktree"))?
+            .trim();
+        let directory = PathBuf::from(line);
+        if directory.is_absolute() {
+            directory
+        } else {
+            worktree.join(directory)
+        }
+    };
+    let head =
+        std::fs::read_to_string(gitdir.join("HEAD")).map_err(|_| FacadeError::field("worktree"))?;
+    head.trim()
+        .strip_prefix("ref: refs/heads/")
+        .map(str::to_owned)
+        .ok_or_else(|| FacadeError::DispatchRefused {
+            fact: Some(
+                provenant_fabric_runtime::coordination::facade::DispatchRefusalFact::DetachedWriter,
+            ),
+            disk: None,
+            reason: "writer needs a branch".into(),
+        })
 }
 
 /// Refuse a graph whose delivery target is checked out in the writer's own

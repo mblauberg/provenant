@@ -2367,12 +2367,7 @@ impl Factory {
                 })?;
             // Explain runs the launch's pre-attempt admission checks, so an
             // explanation that passes means the same input admits a launch.
-            super::graph_execution::validate_new_submission(
-                self,
-                &document,
-                &expanded,
-                &provenant_confinement::worktrees::RepoFacts::default(),
-            )?;
+            super::graph_execution::validate_explain_submission(self, &document, &expanded)?;
             let mut writer_budgets = Vec::new();
             for node in &expanded.nodes {
                 if node.access != provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
@@ -7163,7 +7158,7 @@ mod tests {
                     "schema_version":2, "graph_id":format!("writer-review-{risk}"),
                     "review_base":original, "context":{"risk_tier":risk},
                     "nodes":[
-                        {"id":"writer", "use":"implement", "with":{"plan":false}, "worktree":rig.project, "write_scope":["."], "delivery":"push"},
+                        {"id":"writer", "use":"implement", "with":{"plan":false}, "worktree":rig.project, "write_scope":["."]},
                         {"id":"review", "use":"review-panel", "after":["writer"], "source":{"type":"head","node":"writer"}}
                     ]
                 }
