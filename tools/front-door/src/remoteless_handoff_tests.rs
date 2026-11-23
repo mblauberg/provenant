@@ -32,9 +32,11 @@ impl WorkerObserver for Free {
     }
 }
 
-/// A checkout with no remotes at all, opened into the real hand-off `Source`.
-/// The absence is resolved by production code, never injected by the test.
-struct RemoteLessSource {
+/// A checkout opened into the real hand-off `Source`. `new` has no remotes at
+/// all; the absence (or presence, in the control) is resolved by production
+/// code via `resolve_remote` and passed to the consumers — never injected by
+/// the test as a literal `None` or `Some("")`.
+struct HandoffSource {
     _temp: tempfile::TempDir,
     source: Source,
     state: PathBuf,
@@ -42,7 +44,7 @@ struct RemoteLessSource {
     home: PathBuf,
 }
 
-impl RemoteLessSource {
+impl HandoffSource {
     fn new() -> FixtureResult<Self> {
         let temp = tempfile::tempdir()?;
         let home = temp.path().join("home");
@@ -83,6 +85,23 @@ impl RemoteLessSource {
         })
     }
 
+    /// Positive control: the same checkout with a single configured remote.
+    /// The URL is deliberately unreachable so a consumer that receives the
+    /// resolved `Some("origin")` fails in Git rather than silently succeeding.
+    fn with_origin() -> FixtureResult<Self> {
+        let fixture = Self::new()?;
+        provenant_os::fixture::run_git(
+            &fixture.project,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "/nonexistent-remoteless-handoff.git",
+            ],
+        )?;
+        Ok(fixture)
+    }
+
     fn tree(&self) -> Tree {
         Tree {
             path: self.project.clone(),
@@ -105,7 +124,7 @@ impl RemoteLessSource {
 /// both consumers below would receive an empty name instead of an absence.
 #[test]
 fn resolve_remote_reports_an_absent_remote_as_none() -> FixtureResult<()> {
-    let fixture = RemoteLessSource::new()?;
+    let fixture = HandoffSource::new()?;
     let ports = provenant_config::PortTable::builtin();
     let resolved = resolve_remote(&fixture.state, &fixture.project, &ports)
         .map_err(|refusal| refusal.message)?;
@@ -117,13 +136,17 @@ fn resolve_remote_reports_an_absent_remote_as_none() -> FixtureResult<()> {
 /// refuse with `WIP_REFUSED` before any `git push` could see an empty name.
 #[test]
 fn wip_refuses_without_a_remote() -> FixtureResult<()> {
-    let fixture = RemoteLessSource::new()?;
+    let fixture = HandoffSource::new()?;
+    let ports = provenant_config::PortTable::builtin();
+    let remote = resolve_remote(&fixture.state, &fixture.project, &ports)
+        .map_err(|refusal| refusal.message)?;
+    assert_eq!(remote, None, "the fixture must resolve to a real absence");
     let refusal = wip(
         &fixture.source,
         &Free,
         &provenant_confinement::worktrees::RepoFacts::default(),
         &fixture.tree(),
-        None,
+        remote.as_deref(),
     )
     .expect_err("a WIP hand-off without a remote must be refused");
     assert_eq!(refusal.code(), "WIP_REFUSED");
@@ -140,7 +163,11 @@ fn wip_refuses_without_a_remote() -> FixtureResult<()> {
 /// never with a `"/<branch>"` name built from an empty string.
 #[test]
 fn recreate_refuses_each_branch_without_a_remote() -> FixtureResult<()> {
-    let fixture = RemoteLessSource::new()?;
+    let fixture = HandoffSource::new()?;
+    let ports = provenant_config::PortTable::builtin();
+    let remote = resolve_remote(&fixture.state, &fixture.project, &ports)
+        .map_err(|refusal| refusal.message)?;
+    assert_eq!(remote, None, "the fixture must resolve to a real absence");
     let clock = SystemClock::new();
     let target = Target {
         context: &fixture.source.context,
@@ -152,7 +179,7 @@ fn recreate_refuses_each_branch_without_a_remote() -> FixtureResult<()> {
         budget: WaitBudget::cli(clock.mono_now(), 30)?,
     };
     let branches = vec!["lane".to_owned(), "other".to_owned()];
-    let made = recreate(&target, &branches, None);
+    let made = recreate(&target, &branches, remote.as_deref());
     assert_eq!(made.len(), branches.len());
     for worktree in &made {
         assert!(!worktree.created);
@@ -163,5 +190,43 @@ fn recreate_refuses_each_branch_without_a_remote() -> FixtureResult<()> {
             Some("a hand-off needs a Git remote to recreate branches")
         );
     }
+    Ok(())
+}
+
+/// Positive control for both refusal tests: a configured remote resolves to
+/// `Some("origin")` and is forwarded into the Git path. A rewrite that injects
+/// a literal `None`, or flattens the resolved name to `""`, fails here.
+#[test]
+fn a_configured_remote_reaches_git_through_recreate() -> FixtureResult<()> {
+    let fixture = HandoffSource::with_origin()?;
+    let ports = provenant_config::PortTable::builtin();
+    let remote = resolve_remote(&fixture.state, &fixture.project, &ports)
+        .map_err(|refusal| refusal.message)?;
+    assert_eq!(remote.as_deref(), Some("origin"));
+
+    let clock = SystemClock::new();
+    let target = Target {
+        context: &fixture.source.context,
+        home: &fixture.home,
+        cwd: &fixture.project,
+        workers: &Free,
+        source: HostId::from_bytes([1; 16]),
+        clock: &clock,
+        budget: WaitBudget::cli(clock.mono_now(), 30)?,
+    };
+    let made = recreate(&target, &["lane".to_owned()], remote.as_deref());
+    assert_eq!(made.len(), 1);
+    let error = made[0]
+        .error
+        .as_deref()
+        .expect("recreating from a configured remote must attempt the Git fetch");
+    assert!(
+        error.contains("origin/lane"),
+        "the resolved remote must reach the Git fetch, got {error}"
+    );
+    assert!(
+        !error.contains("needs a Git remote"),
+        "the Some path must not take the absent-remote refusal: {error}"
+    );
     Ok(())
 }

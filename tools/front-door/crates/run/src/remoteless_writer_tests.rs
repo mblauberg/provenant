@@ -175,3 +175,125 @@ fn verify_writer_git_paths_none_ignores_remote_namespace() -> FixtureResult<()> 
     crate::writer::verify_writer_git_paths(common, &branch, None)?;
     Ok(())
 }
+
+const WRITER_CHILD: &str = "PROVENANT_REMOTELESS_WRITER_CHILD";
+const WRITER_LOG: &str = "PROVENANT_REMOTELESS_WRITER_GIT_LOG";
+const WRITER_RAN: &str = "PROVENANT_REMOTELESS_WRITER_RAN";
+
+/// Child side of `prepare_writer_git_never_passes_an_empty_remote_to_git`.
+/// Builds a fresh remote-less checkout under the recording Git, discards the
+/// setup invocations, then drives the production preparation on it.
+fn child_prepare_writer_git() -> FixtureResult<()> {
+    let log = PathBuf::from(std::env::var_os(WRITER_LOG).ok_or("missing writer Git log")?);
+    let ran = PathBuf::from(std::env::var_os(WRITER_RAN).ok_or("missing child marker")?);
+    let fixture = RemotelessFixture::new()?;
+    let lane = fixture.add_worktree("lane", "lane")?;
+    let mut writer = fixture.prepare(&lane)?;
+    std::fs::write(&ran, "1")?;
+    // Only the production call under test may appear in the log the parent
+    // reads; fixture setup uses the same recording executable.
+    std::fs::write(&log, "")?;
+    assert_eq!(
+        crate::writer::terminal_forge_remote(&fixture.state, &fixture.project),
+        None,
+        "the remote-less fixture must resolve to a genuine absence"
+    );
+    crate::writer::prepare_writer_git(
+        &mut writer,
+        &fixture.state,
+        &fixture.root,
+        None,
+        &crate::writer::isolated_lane_access_receipt(),
+        &provenant_core::CancelToken::new(),
+        &provenant_records::policy::Policy::default(),
+        (None, None),
+    )?;
+    Ok(())
+}
+
+/// The direct consumers above pass a literal `None`. This test is the one that
+/// resolves the absence from a real remote-less checkout and drives the
+/// production `prepare_writer_git`, where the resolved remote reaches the Git
+/// path checks and refresh. A re-flatten to `""` would appear in the recorded
+/// invocations as an empty argument, `refs/remotes//` or `--remotes=`.
+#[test]
+fn prepare_writer_git_never_passes_an_empty_remote_to_git() -> FixtureResult<()> {
+    if std::env::var_os(WRITER_CHILD).is_some() {
+        return child_prepare_writer_git();
+    }
+    let temp = tempfile::tempdir()?;
+    let bin = temp.path().join("bin");
+    let log = temp.path().join("git.log");
+    let ran = temp.path().join("child.ran");
+    std::fs::create_dir(&bin)?;
+    let wrapper = bin.join("git");
+    let git = provenant_os::git::git_executable().ok_or("git unavailable")?;
+    // Bracket every argument so an empty one is visible as `<>` in the log;
+    // `"$*"` alone would collapse it into an ambiguous run of spaces.
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\n{{ printf 'CALL'; for a in \"$@\"; do printf ' <%s>' \"$a\"; done; printf '\\n'; }} >> '{}'\nexec '{}' \"$@\"\n",
+            log.display(),
+            git.display()
+        ),
+    )?;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))?;
+
+    // Prime the wrapper and prove it records into the very log we read, then
+    // clear the prime so only the child's Git work can appear.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "the test primes its own recording Git wrapper"
+    )]
+    let primed = std::process::Command::new(&wrapper)
+        .arg("--version")
+        .output()?;
+    assert!(
+        primed.status.success(),
+        "the recording wrapper must run Git"
+    );
+    assert!(
+        std::fs::read_to_string(&log)?.contains("<--version>"),
+        "the recording wrapper must append every argument to the log"
+    );
+    std::fs::write(&log, "")?;
+
+    let test_path = provenant_os::fixture::exact_test_path(
+        module_path!(),
+        "prepare_writer_git_never_passes_an_empty_remote_to_git",
+    );
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "the test re-runs itself with a recording Git"
+    )]
+    let status = std::process::Command::new(std::env::current_exe()?)
+        .args(["--exact", test_path.as_str(), "--nocapture"])
+        .env_clear()
+        .env("HOME", temp.path())
+        .env("PATH", "/usr/bin:/bin")
+        .env(provenant_core::consumer_env::GIT, &wrapper)
+        .env(WRITER_CHILD, "1")
+        .env(WRITER_LOG, &log)
+        .env(WRITER_RAN, &ran)
+        .status()?;
+    assert!(status.success(), "the recording child writer test failed");
+    assert!(
+        ran.exists(),
+        "the exact child test must have run; a renamed child matches nothing and still exits 0"
+    );
+
+    let calls = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        !calls.trim().is_empty(),
+        "prepare_writer_git must have invoked the recording Git"
+    );
+    for needle in ["<>", "refs/remotes//", "--remotes="] {
+        assert!(
+            !calls.contains(needle),
+            "an empty remote reached Git via {needle}: {calls}"
+        );
+    }
+    Ok(())
+}

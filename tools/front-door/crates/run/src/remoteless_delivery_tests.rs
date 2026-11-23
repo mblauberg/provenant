@@ -82,6 +82,7 @@ fn prepare_refuses_a_push_without_a_remote() {
 
 const CHILD: &str = "PROVENANT_REMOTELESS_REFRESH_CHILD";
 const LOG: &str = "PROVENANT_REMOTELESS_GIT_LOG";
+const RAN: &str = "PROVENANT_REMOTELESS_REFRESH_RAN";
 
 /// Assert, in a child with a controlled environment, that
 /// `refresh_origin(.., None)` never invokes Git. The child runs with
@@ -96,6 +97,7 @@ fn refresh_origin_none_performs_no_fetch() -> FixtureResult<()> {
     let temp = tempfile::tempdir()?;
     let bin = temp.path().join("bin");
     let log = temp.path().join("git.log");
+    let ran = temp.path().join("child.ran");
     std::fs::create_dir(&bin)?;
     let wrapper = bin.join("git");
     let git = provenant_os::git::git_executable().ok_or("git unavailable")?;
@@ -110,20 +112,46 @@ fn refresh_origin_none_performs_no_fetch() -> FixtureResult<()> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))?;
 
+    // Prove the wrapper records into the very log the parent reads, then clear
+    // the prime so only the child's Git work can appear below.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "the test primes its own recording Git wrapper"
+    )]
+    let primed = std::process::Command::new(&wrapper)
+        .arg("--version")
+        .output()?;
+    assert!(
+        primed.status.success(),
+        "the recording wrapper must run Git"
+    );
+    assert!(
+        std::fs::read_to_string(&log)?.contains("--version"),
+        "the recording wrapper must append every invocation to the log"
+    );
+    std::fs::write(&log, "")?;
+
+    let test_path =
+        provenant_os::fixture::exact_test_path(module_path!(), "refresh_origin_none_child");
     #[allow(
         clippy::disallowed_methods,
         reason = "the test re-runs itself with a recording Git"
     )]
     let status = std::process::Command::new(std::env::current_exe()?)
-        .args(["refresh_origin_none_child", "--nocapture"])
+        .args(["--exact", test_path.as_str(), "--nocapture"])
         .env_clear()
         .env("HOME", temp.path())
         .env("PATH", "/usr/bin:/bin")
-        .env("PROVENANT_GIT", &wrapper)
+        .env(provenant_core::consumer_env::GIT, &wrapper)
         .env(CHILD, "1")
         .env(LOG, &log)
+        .env(RAN, &ran)
         .status()?;
     assert!(status.success(), "the recording child test failed");
+    assert!(
+        ran.exists(),
+        "the exact child test must have run; a renamed child matches nothing and still exits 0"
+    );
 
     let calls = std::fs::read_to_string(&log).unwrap_or_default();
     assert!(
@@ -134,12 +162,14 @@ fn refresh_origin_none_performs_no_fetch() -> FixtureResult<()> {
 }
 
 /// Child side of `refresh_origin_none_performs_no_fetch`. A no-op when the
-/// whole suite runs; the parent sets `CHILD` and an exact test filter.
+/// whole suite runs; the parent sets `CHILD`, an exact test filter and `RAN`.
 #[test]
 fn refresh_origin_none_child() -> FixtureResult<()> {
     if std::env::var_os(CHILD).is_none() {
         return Ok(());
     }
+    let ran = PathBuf::from(std::env::var_os(RAN).ok_or("missing child-ran marker path")?);
+    std::fs::write(&ran, "1")?;
     let log = PathBuf::from(std::env::var_os(LOG).ok_or("missing log path")?);
     let cancel = CancelToken::new();
     crate::HostDeliveryContext::refresh_origin(
