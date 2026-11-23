@@ -65,6 +65,8 @@ pub(crate) enum Error {
     Exec(#[from] provenant_os::exec::ExecError),
     #[error(transparent)]
     GitConfigRead(Box<provenant_os::git_config::ConfigError<Error>>),
+    #[error("cannot resolve forge context: {0}")]
+    ForgeContextUnresolved(provenant_config::ForgeContextError),
     #[error("Git executable unavailable")]
     GitUnavailable,
     #[error("cannot establish worktree lock budget")]
@@ -93,13 +95,25 @@ fn note_kept_unmerged() {
 }
 
 fn warn_fetch(error: &Error) {
-    provenant_records::warning::warn(
-        provenant_records::warning::Warning::new(
-            provenant_records::warning::REMOTE_FETCH_FAILED,
+    use provenant_records::warning::{Warning, warn};
+
+    // A forge refusal keeps its typed cause (the remotes seen and close
+    // matches) and carries a declaration the operator can make; other fetch
+    // failures keep the generic code. The warning is the public boundary, so
+    // the repair travels with the cause instead of being dropped at the caller.
+    // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    let warning = match error {
+        Error::ForgeContextUnresolved(_) => Warning::new(
+            provenant_records::warning::FORGE_CONTEXT_UNRESOLVED,
             format!("{error}; using the current integration resolution"),
         )
-        .once_per_change(),
-    );
+        .repair(error.repair()),
+        _ => Warning::new(
+            provenant_records::warning::REMOTE_FETCH_FAILED,
+            format!("{error}; using the current integration resolution"),
+        ),
+    };
+    warn(warning.once_per_change());
 }
 
 pub(crate) fn local_worktree_message(error: &WorktreeError) -> String {
@@ -143,6 +157,9 @@ impl Error {
             }
             Self::CacheGc(..) | Self::RetentionCollection(_) | Self::GcObservation(_) => {
                 "resolve the reported collection error, then rerun `provenant gc`"
+            }
+            Self::ForgeContextUnresolved(_) => {
+                "declare `git.remote` in .provenant/ports.json (or the host ports), then rerun `provenant gc`"
             }
             Self::Utility(_) => "correct the reported utility error and retry the worktree command",
             Self::Config(_) | Self::GitConfigRead(_) => crate::REPAIR_CONFIG,
@@ -5257,6 +5274,24 @@ mod gc_subpass_removal_tests {
     use super::*;
     #[allow(unused_imports)]
     use provenant_records::custody::{RefEndpoint, RefOrigin, RefOwnership};
+
+    #[test]
+    // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    fn a_forge_fetch_refusal_keeps_its_cause_and_repair_in_the_warning() {
+        let error = Error::ForgeContextUnresolved(provenant_config::ForgeContextError::NoRemote {
+            remotes: vec!["alpha".into(), "beta".into()],
+            close: vec!["alpha".into(), "beta".into()],
+        });
+        let (_, warnings) = provenant_records::capture(|| warn_fetch(&error));
+        let warning = warnings
+            .iter()
+            .find(|warning| warning.code.as_ref() == "FORGE_CONTEXT_UNRESOLVED")
+            .expect("a typed forge refusal warning");
+        assert!(warning.message.contains("alpha"), "{}", warning.message);
+        assert!(warning.message.contains("beta"), "{}", warning.message);
+        let repair = warning.repair.as_deref().expect("an actionable repair");
+        assert!(repair.contains("git.remote"), "{repair}");
+    }
 
     #[test]
     fn actual_gc_lifts_unsettled_branch_removal_and_preview_keeps_none() {

@@ -2440,16 +2440,47 @@ mod tests {
             });
             let scope = scope?;
             assert!(scope.unresolved(), "{warnings:?}");
-            assert!(
-                warnings
-                    .iter()
-                    .any(|warning| { warning.code.as_ref() == "FORGE_CONTEXT_UNRESOLVED" }),
-                "{warnings:?}"
-            );
+            let refusal = warnings
+                .iter()
+                .find(|warning| warning.code.as_ref() == "FORGE_CONTEXT_UNRESOLVED")
+                .expect("a fail-closed forge refusal");
+            let repair = refusal.repair.as_deref().expect("an actionable repair");
+            assert!(repair.contains("git.remote"), "{repair}");
+            assert!(repair.contains("provenant gc"), "{repair}");
             for branch in ["main", "lane/old", "lane/changed"] {
                 let reference = GitRefName::branch(branch).expect("branch");
                 assert!(!scope.permits(&reference), "{branch} must not be retired");
             }
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    #[test]
+    // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    fn a_missing_remote_head_warns_with_a_followable_repair()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = CleanupFixture::new()?;
+        // The checkout has a remote but no `refs/remotes/<remote>/HEAD` and no
+        // declared default branch: the context is unresolved and GC fails closed.
+        std::fs::remove_file(fixture.project.join(".git/refs/remotes/bound/HEAD"))?;
+        fixture.with_context(|context, cancel| {
+            let (scope, warnings) = provenant_records::capture(|| {
+                worktrees::local_retirement_scope(context, None, cancel)
+            });
+            let scope = scope?;
+            assert!(scope.unresolved(), "{warnings:?}");
+            let refusal = warnings
+                .iter()
+                .find(|warning| warning.code.as_ref() == "FORGE_CONTEXT_UNRESOLVED")
+                .expect("a fail-closed forge refusal");
+            let repair = refusal.repair.as_deref().expect("an actionable repair");
+            assert!(
+                repair.contains("git remote set-head bound --auto"),
+                "{repair}"
+            );
+            assert!(repair.contains("git.default_branch"), "{repair}");
+            assert!(repair.contains("provenant gc"), "{repair}");
             Ok(())
         })?;
         Ok(())
