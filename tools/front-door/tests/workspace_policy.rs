@@ -35,7 +35,7 @@ const LAYERS: &[(&str, &[&str])] = &[
     // because records depends only on core.
     ("os", &["core", "records"]),
     // Per-byte redaction, built optimised in dev and test profiles.
-    ("redact", &["core", "os"]),
+    ("redact", &["core", "records", "os"]),
     // Port-plan tests read the default lane settings from config (a sibling
     // layer), so the edge is acyclic.
     ("supervisor", &["core", "records", "os", "config", "redact"]),
