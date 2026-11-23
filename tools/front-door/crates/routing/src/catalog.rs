@@ -1503,6 +1503,24 @@ impl provenant_core::Catalogue for BareModelCatalogue<'_> {
     }
 }
 
+/// A model's declared effort variants resolved through the shared name
+/// machinery. The variants are the catalogue's recorded controls, not a guess
+/// from a provider name or a route's spelling.
+struct VariantCatalogue<'a>(&'a [String]);
+
+impl provenant_core::Catalogue for VariantCatalogue<'_> {
+    type Item = usize;
+    const KIND: provenant_core::NameKind = provenant_core::NameKind("variant");
+
+    fn names(&self) -> Vec<String> {
+        self.0.to_vec()
+    }
+
+    fn lookup(&self, canonical: &str) -> Option<Self::Item> {
+        self.0.iter().position(|variant| variant == canonical)
+    }
+}
+
 /// Production catalogues come from the bundled asset. A caller cannot deserialize
 /// or change family/effort rows while retaining an existing revision.
 #[derive(Debug, Clone, Serialize)]
@@ -1957,6 +1975,17 @@ impl Catalogue {
                     .map(|(_, full)| (*full).to_owned())
             })
             .collect()
+    }
+    /// The typed refusal for an effort a model does not declare, ranked over
+    /// that model's variants. `None` when the model is uncatalogued or declares
+    /// that effort. The refusal carries close matches for the launch diagnostic.
+    pub fn variant_refusal(
+        &self,
+        model: &ModelId,
+        effort: &str,
+    ) -> Option<provenant_core::NameRefusal> {
+        let entry = self.model(model)?;
+        provenant_core::resolve(&VariantCatalogue(&entry.efforts), effort).err()
     }
 
     pub fn latest_family(&self, selector: &str) -> Option<&ModelId> {
@@ -2982,6 +3011,30 @@ mod tests {
                 "{short} has no catalogued provider segment"
             );
         }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod variant_tests {
+    use super::*;
+
+    // Spec: docs/specs/routing.md#exact-selection-no-inference
+    #[test]
+    fn an_unknown_effort_refuses_over_the_models_declared_variants()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let catalogue = Catalogue::bundled()?;
+        let model = ModelId::parse("claude/claude-haiku-5-5")?;
+        assert!(catalogue.variant_refusal(&model, "high").is_none());
+        let refusal = catalogue
+            .variant_refusal(&model, "hig")
+            .ok_or("a variant the model does not declare must refuse")?;
+        assert_eq!(refusal.kind, provenant_core::NameKind("variant"));
+        assert_eq!(refusal.query, "hig");
+        assert!(refusal.candidates.contains(&"high".to_owned()));
+        let message = refusal.to_string();
+        assert!(message.contains("unknown variant `hig`"), "{message}");
+        assert!(message.contains("close matches: high"), "{message}");
         Ok(())
     }
 }

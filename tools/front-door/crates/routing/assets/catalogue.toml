@@ -4,7 +4,7 @@
 # Pool metadata is migrated from the legacy routing catalogue; exact execution
 # support still depends on each provider's current availability observation.
 schema_version = 1
-revision = "route-pools-20261123-opencode-hy4-free"
+revision = "route-variants-20261123-opencode"
 
 [[models]]
 model = "claude/claude-haiku-4-5-20251001"
@@ -45,8 +45,8 @@ trains_on_prompts = false
 [[models]]
 model = "opencode/opencode-go/deepseek-v4.1-flash"
 monthly_allowance_usd = 80
-efforts = []
-evidence_ref = "docs/research/opencode-go-models.md#flash-fallbacks; accessed 2026-10-28"
+efforts = ["low", "high", "max"]
+evidence_ref = "docs/research/opencode-go-models.md#flash-fallbacks; accessed 2026-10-28; variants: docs/research/opencode-interface.md#errors (server /api/model, 2026-11-20)"
 trains_on_prompts = false
 
 [[models.policy_rules]]
@@ -261,8 +261,8 @@ trains_on_prompts = false
 [[models]]
 model = "opencode/opencode/deepseek-v4.1-flash-free"
 free = true
-efforts = []
-evidence_ref = "https://opencode.ai/docs/zen (privacy: zero retention, no training; not an exception); accessed 2026-10-30"
+efforts = ["low", "high", "max"]
+evidence_ref = "https://opencode.ai/docs/zen (privacy: zero retention, no training; not an exception); accessed 2026-10-30; variants: docs/research/opencode-interface.md#errors (server /api/model, 2026-11-20)"
 trains_on_prompts = false
 
 [[models]]
@@ -275,8 +275,8 @@ trains_on_prompts = false
 [[models]]
 model = "opencode/opencode/hy4-flash-free"
 free = true
-efforts = []
-evidence_ref = "https://opencode.ai/docs/console/models (Hy4 flash Free; zero retention, no training); accessed 2026-11-23"
+efforts = ["none", "high"]
+evidence_ref = "https://opencode.ai/docs/console/models (Hy4 flash Free; zero retention, no training); accessed 2026-11-23; variants: docs/research/opencode-interface.md#errors (server /api/model, 2026-11-20)"
 trains_on_prompts = false
 
 [pacing]
