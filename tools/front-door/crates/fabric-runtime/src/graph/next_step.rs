@@ -176,21 +176,25 @@ fn graph_target(route: &GraphRoute) -> Option<ladder::Target> {
     }
 }
 
-/// Whether two routes name the same model. One spelling is fixed at graph
-/// admission, so parsing the stored id is the only comparison needed; a route
-/// that already names the ladder's choice is not offered a second time.
+/// Whether a declared route is the same target the ladder already hands off
+/// to. One spelling is fixed at graph admission, so parsing the stored id is
+/// the only model comparison needed; account and effort are compared as the
+/// route carries them. A route that differs by either is a real alternative
+/// and stays beside the hand-off, even when the model is the same.
 /// Spec: docs/specs/fabric.md#one-model-spelling-per-route
-fn same_model(left: &GraphRoute, right: &GraphRoute) -> bool {
+fn same_target(left: &GraphRoute, right: &GraphRoute) -> bool {
     let parsed = |route: &GraphRoute| {
         route
             .model
             .as_deref()
             .and_then(|model| provenant_routing::ModelId::parse(model).ok())
     };
-    match (parsed(left), parsed(right)) {
-        (Some(left), Some(right)) => left == right,
-        _ => left == right,
-    }
+    left.account == right.account
+        && left.effort == right.effort
+        && match (parsed(left), parsed(right)) {
+            (Some(left), Some(right)) => left == right,
+            _ => left == right,
+        }
 }
 
 /// The graph route a ladder target launches as.
@@ -355,7 +359,7 @@ pub(super) fn depletion_successor(
             routes.extend(
                 restart_routes(node, progress)
                     .into_iter()
-                    .filter(|route| !same_model(route, &first))
+                    .filter(|route| !same_target(route, &first))
                     .filter(|route| {
                         pinned_account.is_none_or(|pin| {
                             route
