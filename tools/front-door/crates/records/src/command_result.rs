@@ -103,6 +103,16 @@ impl NextStep {
             why: why.into(),
         }
     }
+    /// Build a step from literal arguments. Owners use this form so the argv a
+    /// consumer reads and the line the edge prints come from one value.
+    pub fn from_args(argv: &[&str], why: impl Into<String>) -> Self {
+        Self::new(argv.iter().map(|arg| (*arg).to_owned()).collect(), why)
+    }
+    /// Build a step from an already-safe command string whose arguments are
+    /// separated by whitespace. Each token becomes one literal argv entry.
+    pub fn from_command(command: &str, why: impl Into<String>) -> Self {
+        Self::new(command.split_whitespace().map(str::to_owned).collect(), why)
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]

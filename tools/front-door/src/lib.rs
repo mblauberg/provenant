@@ -146,7 +146,7 @@ fn accounts_summary(settings: &provenant_providers::accounts::Settings) -> prove
             )
         })
         .collect();
-    provenant_cli::Summary::new(headline, rows, None)
+    provenant_cli::Summary::new(headline, rows)
 }
 /// Reusable next steps for the common refusals. Every `fail` call supplies a
 /// repair explicitly, so the renderer never has to synthesise one.
@@ -1662,7 +1662,7 @@ mod unpublished_result_tests {
             "ci_patience_source": "--wait",
             "warnings": ["inspect the selected gate"]
         });
-        let summary = land_explanation(&data, &provenant_cli::Globals::default()).unwrap();
+        let (summary, step) = land_explanation(&data, &provenant_cli::Globals::default()).unwrap();
         let text = summary.lines.join("\n");
         for field in data["fields"].as_object().unwrap().values() {
             assert!(text.contains(field["source"]["layer"].as_str().unwrap()));
@@ -1670,11 +1670,12 @@ mod unpublished_result_tests {
         for warning in data["warnings"].as_array().unwrap() {
             assert!(text.contains(warning.as_str().unwrap()));
         }
-        assert!(
-            summary
-                .next
-                .as_deref()
-                .is_some_and(|next| next.ends_with("land --explain --json"))
+        assert_eq!(
+            step.argv,
+            ["provenant", "land", "--explain", "--json"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
         );
         assert_eq!(summary.omitted, 0);
     }

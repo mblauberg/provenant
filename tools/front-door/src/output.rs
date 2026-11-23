@@ -48,21 +48,15 @@ pub(crate) fn command_prefix(globals: &provenant_cli::Globals, cwd: &Path) -> Co
 }
 
 /// Render the envelope's next-step data as human lines. This is the only place
-/// a `next` argv becomes text; JSON carries the arrays instead.
+/// a `next` argv becomes text; JSON carries the arrays instead. Each line carries
+/// the step's `why` sentence and its one rendered command, so the human view and
+/// the JSON array are two views of the same typed value.
 fn next_text(steps: &[NextStep], globals: &provenant_cli::Globals) -> String {
     if steps.is_empty() || globals.json {
         return String::new();
     }
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let prefix = command_prefix(globals, &cwd);
-    let mut out = String::new();
-    for step in steps {
-        match prefix.render_argv(&step.argv) {
-            Some(command) => out.push_str(&format!("next: {command}\n")),
-            None => out.push_str("next: [this command cannot be shown safely]\n"),
-        }
-    }
-    out
+    provenant_cli::next_steps_text(steps, &command_prefix(globals, &cwd))
 }
 
 /// The command's sink, installed once before any path can raise a warning.
@@ -322,12 +316,6 @@ pub(crate) fn emit_with_writers<T: Serialize, Wout: Write, Werr: Write>(
     summary: Option<&Summary>,
 ) -> u8 {
     let warnings = take_warnings();
-    let next = next_text(&result.next, globals);
-    let human_text: Cow<str> = if next.is_empty() {
-        Cow::Borrowed(human)
-    } else {
-        Cow::Owned(format!("{human}{next}"))
-    };
     let explanation = if summary.is_none() && result.command == "land" {
         serde_json::to_value(&result.data)
             .ok()
@@ -335,7 +323,23 @@ pub(crate) fn emit_with_writers<T: Serialize, Wout: Write, Werr: Write>(
     } else {
         None
     };
-    let summary = summary.or(explanation.as_ref());
+    // The land explanation's suggested command is a typed step on the envelope,
+    // never a formatted line inside a summary. An owner-supplied array wins.
+    let steps: Cow<'_, [NextStep]> = if result.next.is_empty() {
+        explanation
+            .as_ref()
+            .map(|(_, step)| Cow::Owned(vec![step.clone()]))
+            .unwrap_or_else(|| Cow::Borrowed(&[]))
+    } else {
+        Cow::Borrowed(&result.next)
+    };
+    let next = next_text(&steps, globals);
+    let human_text: Cow<str> = if next.is_empty() {
+        Cow::Borrowed(human)
+    } else {
+        Cow::Owned(format!("{human}{next}"))
+    };
+    let summary = summary.or(explanation.as_ref().map(|(summary, _)| summary));
     let mode = if !globals.json && matches!(result.command.as_str(), "help" | "version") {
         RenderMode::Human {
             text: human_text.as_ref(),
@@ -357,7 +361,7 @@ pub(crate) fn emit_with_writers<T: Serialize, Wout: Write, Werr: Write>(
             data,
             error: result.error.clone(),
             warnings: warnings.clone(),
-            next: result.next.clone(),
+            next: steps.to_vec(),
         };
         provenant_cli::render_or_publish(
             &json_result,
@@ -396,8 +400,12 @@ pub(crate) fn emit_with_writers<T: Serialize, Wout: Write, Werr: Write>(
     }
 }
 
-/// A policy explanation is a structured result; compact output names omitted rows.
-pub(crate) fn land_explanation(data: &Value, globals: &provenant_cli::Globals) -> Option<Summary> {
+/// A policy explanation is a structured result; compact output names omitted
+/// rows. Its suggested command is a typed step, not a formatted summary line.
+pub(crate) fn land_explanation(
+    data: &Value,
+    _globals: &provenant_cli::Globals,
+) -> Option<(Summary, NextStep)> {
     let fields = data.get("fields")?.as_object()?;
     let mut rows = Vec::new();
     for (key, label) in [
@@ -436,11 +444,11 @@ pub(crate) fn land_explanation(data: &Value, globals: &provenant_cli::Globals) -
                 .map(|warning| format!("warning: {warning}")),
         );
     }
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let detail = command_prefix(globals, &cwd)
-        .runnable("land --explain --json")
-        .unwrap_or_else(|| "provenant land --explain --json".to_owned());
-    Some(Summary::new("Landing policy", rows, Some(detail)))
+    let step = NextStep::from_args(
+        &["provenant", "land", "--explain", "--json"],
+        "review the landing policy with full detail",
+    );
+    Some((Summary::new("Landing policy", rows), step))
 }
 
 /// `emit_summarised` for a result the caller narrows rather than reads from an
@@ -830,6 +838,201 @@ mod tests {
         );
         assert_eq!(envelope["next"][0]["why"], "check CI");
         assert!(err.is_empty(), "{}", String::from_utf8_lossy(&err));
+    }
+
+    /// The envelope's `next` array and the one human line the edge prints are
+    /// two views of the same typed step. Every owner family pins this.
+    fn assert_next_agrees(command: &str, steps: Vec<NextStep>) {
+        let _lock = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let result = CommandResult::new(command, Outcome::Ok, json!({})).with_next(steps.clone());
+
+        let json_globals = provenant_cli::Globals {
+            json: true,
+            ..Default::default()
+        };
+        let sink = install_command_sink(true);
+        let mut json_out = Vec::new();
+        let mut err = Vec::new();
+        emit_with_writers(
+            &result,
+            &json_globals,
+            &mut json_out,
+            &mut err,
+            "",
+            false,
+            None,
+        );
+        let envelope: Value = serde_json::from_slice(&json_out).expect("envelope");
+        let on_wire: Vec<NextStep> =
+            serde_json::from_value(envelope["next"].clone()).expect("next steps");
+        assert_eq!(on_wire, steps, "JSON must carry the exact argv and why");
+        drop(sink);
+
+        let human_globals = provenant_cli::Globals {
+            json: false,
+            full: true,
+            ..Default::default()
+        };
+        let sink = install_command_sink(false);
+        let mut human_out = Vec::new();
+        let mut err = Vec::new();
+        emit_with_writers(
+            &result,
+            &human_globals,
+            &mut human_out,
+            &mut err,
+            "",
+            false,
+            None,
+        );
+        let text = String::from_utf8(human_out).expect("human text");
+        let prefix = provenant_workflow::session::CommandPrefix::default();
+        assert_eq!(
+            text,
+            provenant_cli::next_steps_text(&steps, &prefix),
+            "the human line must be rendered from the same array"
+        );
+        assert_eq!(text.lines().count(), steps.len());
+        for step in &steps {
+            let rendered = prefix.render_argv(&step.argv).expect("renderable argv");
+            assert!(
+                text.lines()
+                    .any(|line| line.ends_with(&format!("; {rendered}"))
+                        || line == format!("next: {rendered}")),
+                "no human line matches argv {:?}: {text}",
+                step.argv
+            );
+        }
+    }
+
+    #[test]
+    // Spec: docs/specs/cli.md#one-bounded-envelope-clipped-with-a-warning
+    fn next_agrees_for_launch() {
+        assert_next_agrees(
+            "run",
+            vec![NextStep::from_args(
+                &["provenant", "wait", "review-1"],
+                "follow this run",
+            )],
+        );
+    }
+
+    #[test]
+    // Spec: docs/specs/cli.md#one-bounded-envelope-clipped-with-a-warning
+    fn next_agrees_for_wait() {
+        assert_next_agrees(
+            "wait",
+            vec![NextStep::from_command(
+                "provenant status mixed/fast mixed/slow",
+                "mixed/fast settled ok, mixed/slow failed",
+            )],
+        );
+    }
+
+    #[test]
+    // Spec: docs/specs/cli.md#one-bounded-envelope-clipped-with-a-warning
+    fn next_agrees_for_status() {
+        assert_next_agrees(
+            "status",
+            vec![NextStep::from_args(
+                &[
+                    "provenant",
+                    "status",
+                    "--all",
+                    "--limit",
+                    "50",
+                    "--cursor",
+                    "7",
+                ],
+                "read the next page of graphs",
+            )],
+        );
+    }
+
+    #[test]
+    // Spec: docs/specs/cli.md#one-bounded-envelope-clipped-with-a-warning
+    fn next_agrees_for_steer() {
+        assert_next_agrees(
+            "steer",
+            vec![NextStep::from_command(
+                "provenant status fix-2",
+                "re-read the graph",
+            )],
+        );
+    }
+
+    #[test]
+    // Spec: docs/specs/cli.md#one-bounded-envelope-clipped-with-a-warning
+    fn next_agrees_for_pr() {
+        assert_next_agrees(
+            "pr status",
+            vec![NextStep::from_command(
+                "provenant ci failures pr 1669",
+                "inspect the failing checks",
+            )],
+        );
+    }
+
+    #[test]
+    // Spec: docs/specs/cli.md#one-bounded-envelope-clipped-with-a-warning
+    fn next_agrees_for_worktree() {
+        assert_next_agrees(
+            "worktree gc",
+            vec![NextStep::from_command(
+                "provenant gc --apply",
+                "apply the pending retention",
+            )],
+        );
+    }
+
+    #[test]
+    // Spec: docs/specs/cli.md#one-bounded-envelope-clipped-with-a-warning
+    fn next_agrees_for_ci() {
+        assert_next_agrees(
+            "ci failures",
+            vec![NextStep::from_command(
+                "gh run rerun 42 --failed",
+                "rerun the failed jobs",
+            )],
+        );
+    }
+
+    #[test]
+    // Spec: docs/specs/cli.md#one-bounded-envelope-clipped-with-a-warning
+    fn a_real_command_owner_carries_a_non_empty_next_array() {
+        let _lock = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // A real graph-status projection, not a hand-built fixture: the owner's
+        // own builder produces the step from the row data a failing graph emits.
+        let rows = vec![json!({
+            "kind": "graph",
+            "id": "g",
+            "state": "failed",
+            "next": "provenant retry g",
+        })];
+        let steps: Vec<NextStep> = crate::fabric::graph_status_next(&rows)
+            .into_iter()
+            .collect();
+        assert!(
+            !steps.is_empty(),
+            "the real owner must suggest a next command"
+        );
+        assert_eq!(steps[0].argv, ["provenant", "retry", "g"]);
+        let result = CommandResult::new("status", Outcome::Ok, json!({})).with_next(steps);
+        let globals = provenant_cli::Globals {
+            json: true,
+            ..Default::default()
+        };
+        let sink = install_command_sink(true);
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        emit_with_writers(&result, &globals, &mut out, &mut err, "", false, None);
+        drop(sink);
+        let envelope: Value = serde_json::from_slice(&out).expect("envelope");
+        assert!(envelope["next"].as_array().is_some_and(|a| !a.is_empty()));
     }
 
     #[test]

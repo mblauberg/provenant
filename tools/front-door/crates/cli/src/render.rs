@@ -3,8 +3,10 @@
 //! a published artefact whose pointer keeps the result's original status.
 use crate::limits;
 pub use crate::limits::MAX_RESULT_BYTES;
+use provenant_records::command_result::NextStep;
 use provenant_records::warning::{RESULT_TOO_LARGE, Warning};
 use provenant_records::{CommandResult, Outcome};
+use provenant_workflow::session::CommandPrefix;
 use serde::Serialize;
 use std::io::{self, Write};
 use thiserror::Error;
@@ -63,13 +65,57 @@ pub fn render_command_result<T: Serialize>(
 ) -> Result<Outcome, RenderError> {
     let seam = COMMAND_SEAM.get();
     result.warnings = seam.map(|seam| (seam.take)()).unwrap_or_default();
+    // The library edge renders the envelope's typed next steps from the same
+    // array JSON carries. Surfaces here pass their argv literally, so the plain
+    // prefix is the one formatter their commands need.
+    let next = next_steps_text(&result.next, &CommandPrefix::default());
     // Without an installed edge (a library caller or a test) there is no
     // reader, so the rendered bytes go nowhere rather than to process streams.
     let (mut out, mut err): Streams = match seam {
         Some(seam) => (seam.streams)(),
         None => (Box::new(io::sink()), Box::new(io::sink())),
     };
-    let rendered = render_or_publish(result, mode, &mut out, &mut err, publish, policy);
+    let rendered = match mode {
+        RenderMode::Json => render_or_publish(result, mode, &mut out, &mut err, publish, policy),
+        RenderMode::Human {
+            text,
+            read_only,
+            summary,
+        } => {
+            let human = format!("{text}{next}");
+            render_or_publish(
+                result,
+                RenderMode::Human {
+                    text: &human,
+                    read_only,
+                    summary,
+                },
+                &mut out,
+                &mut err,
+                publish,
+                policy,
+            )
+        }
+        RenderMode::Compact {
+            text,
+            read_only,
+            summary,
+        } => {
+            let human = format!("{text}{next}");
+            render_or_publish(
+                result,
+                RenderMode::Compact {
+                    text: &human,
+                    read_only,
+                    summary,
+                },
+                &mut out,
+                &mut err,
+                publish,
+                policy,
+            )
+        }
+    };
     drop((out, err));
     if let Some(seam) = seam {
         if rendered.is_ok() {
@@ -82,19 +128,20 @@ pub fn render_command_result<T: Serialize>(
 }
 
 /// The compact view an owner supplies for the default human output: a headline
-/// of counts, then the rows that need action first, and the one typed next
-/// command. The generic truncator is only a fallback for owners without one.
+/// of counts, then the rows that need action first. Suggested commands are not
+/// part of a summary: the owner puts them on the envelope's `next` array and the
+/// binary edge renders that array once. The generic truncator is only a fallback
+/// for owners without a summary.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Summary {
     pub lines: Vec<String>,
-    pub next: Option<String>,
     /// Rows the owner held back; the renderer says so and names `--full`.
     pub omitted: usize,
 }
 impl Summary {
     /// A headline, then `rows` in the owner's priority order, bounded by the
     /// shared row limits. Rows past the limit are counted, not dropped silently.
-    pub fn new(headline: impl Into<String>, rows: Vec<String>, next: Option<String>) -> Self {
+    pub fn new(headline: impl Into<String>, rows: Vec<String>) -> Self {
         let omitted = rows.len().saturating_sub(limits::SUMMARY_ROWS);
         let lines = std::iter::once(headline.into())
             .chain(
@@ -103,25 +150,13 @@ impl Summary {
                     .map(|row| bounded_text(row, limits::SUMMARY_ROW_BYTES)),
             )
             .collect();
-        Self {
-            lines,
-            next,
-            omitted,
-        }
+        Self { lines, omitted }
     }
     /// Text the owner has already bounded; shown as it is.
-    pub fn verbatim(text: &str, next: Option<String>) -> Self {
+    pub fn verbatim(text: &str) -> Self {
         Self {
             lines: text.lines().map(str::to_owned).collect(),
-            next,
             omitted: 0,
-        }
-    }
-    /// Only a next command; the body falls back to the generic truncator.
-    pub fn next_only(next: Option<String>) -> Self {
-        Self {
-            next,
-            ..Self::default()
         }
     }
     /// `3 running, 1 failed` in the order given, skipping zero counts.
@@ -133,6 +168,29 @@ impl Summary {
             .collect::<Vec<_>>()
             .join(", ")
     }
+}
+
+/// The one formatter that turns the envelope's typed next steps into human
+/// lines. Every edge calls it with the command prefix appropriate to its caller;
+/// JSON never calls it and carries the argv arrays instead. A step's `why` and
+/// its rendered `argv` are both derived from the same typed value.
+/// Spec: docs/specs/cli.md#one-bounded-envelope-clipped-with-a-warning
+pub fn next_steps_text(steps: &[NextStep], prefix: &CommandPrefix) -> String {
+    let mut out = String::new();
+    for step in steps {
+        match prefix.render_argv(&step.argv) {
+            Some(command) if !command.is_empty() => {
+                let why = bounded_text(&step.why, limits::SUMMARY_ROW_BYTES);
+                if why.is_empty() {
+                    out.push_str(&format!("next: {command}\n"));
+                } else {
+                    out.push_str(&format!("next: {why}; {command}\n"));
+                }
+            }
+            _ => out.push_str("next: [this command cannot be shown safely]\n"),
+        }
+    }
+    out
 }
 
 #[derive(Clone, Copy)]
@@ -359,9 +417,6 @@ fn compact_text(command: &str, text: &str, summary: Option<&Summary>) -> String 
         }
         None => fallback_text(command, text),
     };
-    if let Some(next) = summary.and_then(|summary| summary.next.as_deref()) {
-        out.push_str(&format!("next: {next}\n"));
-    }
     out
 }
 #[derive(Debug, Error)]
@@ -480,6 +535,9 @@ pub fn render_within<T: Serialize>(
                             RenderMode::Json => {}
                         }
                     }
+                    // The repair is a typed field of the error envelope, not an
+                    // owner suggestion: JSON carries it at `error.repair` and
+                    // this renders that same field once for a human reader.
                     text.push_str(&format!(
                         "next: {}\n",
                         error.repair.as_deref().unwrap_or_default()
@@ -490,16 +548,7 @@ pub fn render_within<T: Serialize>(
                     RenderMode::Compact { text, summary, .. } => {
                         compact_text(&result.command, text, summary)
                     }
-                    RenderMode::Human { text, summary, .. } => {
-                        let mut full = text.to_owned();
-                        if let Some(next) = summary.and_then(|summary| summary.next.as_deref()) {
-                            if !full.is_empty() && !full.ends_with('\n') {
-                                full.push('\n');
-                            }
-                            full.push_str(&format!("next: {next}\n"));
-                        }
-                        full
-                    }
+                    RenderMode::Human { text, .. } => text.to_owned(),
                     RenderMode::Json => String::new(),
                 },
             };
@@ -635,13 +684,12 @@ pub fn terse(value: &serde_json::Value) -> String {
 mod tests {
     use super::*;
     #[test]
-    fn compact_uses_the_owner_summary_and_one_typed_next() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn compact_uses_the_owner_summary_without_rendering_next()
+    -> Result<(), Box<dyn std::error::Error>> {
         let text = "detail\n".repeat(500);
         let summary = Summary::new(
             "3 lanes: 1 failed, 2 running",
             vec!["aaaa failed".into(), "bbbb running".into()],
-            Some("provenant output aaaa".into()),
         );
         let result = CommandResult::new("lanes", Outcome::Ok, ());
         let mut bytes = Vec::new();
@@ -654,9 +702,11 @@ mod tests {
             },
             &mut bytes,
         )?;
+        // Suggested commands are rendered by the binary edge from the envelope's
+        // next array, never by the summary renderer.
         assert_eq!(
             String::from_utf8(bytes)?,
-            "3 lanes: 1 failed, 2 running\naaaa failed\nbbbb running\nnext: provenant output aaaa\n"
+            "3 lanes: 1 failed, 2 running\naaaa failed\nbbbb running\n"
         );
         Ok(())
     }
@@ -665,7 +715,7 @@ mod tests {
         let rows = (0..limits::SUMMARY_ROWS + 5)
             .map(|n| format!("row {n}"))
             .collect();
-        let summary = Summary::new("head", rows, None);
+        let summary = Summary::new("head", rows);
         assert_eq!(summary.omitted, 5);
         let result = CommandResult::new("lanes", Outcome::Ok, ());
         let mut bytes = Vec::new();
@@ -756,8 +806,8 @@ mod tests {
         assert!(omitted > 0 && omitted < text.len());
     }
     #[test]
-    fn full_shows_the_owner_text_then_the_typed_next() -> Result<(), Box<dyn std::error::Error>> {
-        let summary = Summary::next_only(Some("provenant output aaaa".into()));
+    fn full_shows_the_owner_text_without_rendering_next() -> Result<(), Box<dyn std::error::Error>>
+    {
         let result = CommandResult::new("lanes", Outcome::Ok, ());
         let mut bytes = Vec::new();
         render(
@@ -765,14 +815,11 @@ mod tests {
             RenderMode::Human {
                 text: "body\n",
                 read_only: true,
-                summary: Some(&summary),
+                summary: None,
             },
             &mut bytes,
         )?;
-        assert_eq!(
-            String::from_utf8(bytes)?,
-            "body\nnext: provenant output aaaa\n"
-        );
+        assert_eq!(String::from_utf8(bytes)?, "body\n");
         Ok(())
     }
     #[test]

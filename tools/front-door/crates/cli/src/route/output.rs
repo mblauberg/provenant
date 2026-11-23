@@ -530,7 +530,7 @@ pub fn run(
             None => String::new(),
         }
     };
-    let summary = match &result.data {
+    let (summary, next) = match &result.data {
         Some(Data::List(list)) => {
             let counts = [
                 ("valid pairs", list.valid_pairs.len()),
@@ -581,25 +581,35 @@ pub fn run(
                 )
             }));
             rows.extend(list.pools.keys().map(|name| format!("pool {name}")));
+            (
+                Some(crate::Summary::new(
+                    format!(
+                        "catalogue {}: {}",
+                        list.catalogue_revision,
+                        crate::Summary::tally(&counts)
+                    ),
+                    rows,
+                )),
+                Some(provenant_records::command_result::NextStep::from_command(
+                    "provenant route resolve MODEL",
+                    "inspect a resolved model route",
+                )),
+            )
+        }
+        Some(Data::Pacing(report)) => (
             Some(crate::Summary::new(
                 format!(
-                    "catalogue {}: {}",
-                    list.catalogue_revision,
-                    crate::Summary::tally(&counts)
+                    "recorded {}; {} active pacing overrides",
+                    report.recorded,
+                    report.active_overrides.len()
                 ),
-                rows,
-                Some("provenant route resolve MODEL".to_owned()),
-            ))
-        }
-        Some(Data::Pacing(report)) => Some(crate::Summary::new(
-            format!(
-                "recorded {}; {} active pacing overrides",
-                report.recorded,
-                report.active_overrides.len()
-            ),
-            Vec::new(),
-            Some("provenant route override list".to_owned()),
-        )),
+                Vec::new(),
+            )),
+            Some(provenant_records::command_result::NextStep::from_command(
+                "provenant route override list",
+                "list the pacing overrides",
+            )),
+        ),
         Some(Data::Overrides(report)) => {
             let active = report.overrides.iter().filter(|row| row.active).count();
             let tally = format!(
@@ -636,19 +646,25 @@ pub fn run(
             } else {
                 "provenant route override clear"
             };
-            Some(crate::Summary::new(
-                headline,
-                report
-                    .overrides
-                    .iter()
-                    .map(OverrideRow::line)
-                    .chain(report.notes.iter().map(|note| format!("note: {note}")))
-                    .collect(),
-                Some(next.to_owned()),
-            ))
+            (
+                Some(crate::Summary::new(
+                    headline,
+                    report
+                        .overrides
+                        .iter()
+                        .map(OverrideRow::line)
+                        .chain(report.notes.iter().map(|note| format!("note: {note}")))
+                        .collect(),
+                )),
+                Some(provenant_records::command_result::NextStep::from_command(
+                    next,
+                    "manage the scheduling overrides",
+                )),
+            )
         }
-        _ => None,
+        _ => (None, None),
     };
+    result.next.extend(next);
     let listing = matches!(
         command,
         Route::Override(RouteOverride {

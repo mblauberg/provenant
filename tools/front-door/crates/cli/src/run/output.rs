@@ -160,6 +160,9 @@ pub fn render_output(command: Output, read: Result<(Value, String), Fail>) -> Re
         } else {
             output_summary_default(&out.result.data, &out.human, headed, Some(&command.target))
         });
+        out.result.next = output_next_step(&out.result.data, Some(&command.target))
+            .into_iter()
+            .collect();
         if warn_human
             && out
                 .result
@@ -390,27 +393,41 @@ fn summary(
         let body = crate::head_and_tail(text, limits::OUTPUT_BYTES);
         lines.extend(body.lines().map(str::to_owned));
     }
-    // The graph handle retains placement without exposing the internal ID or
-    // adding summary-only fields to the public output data schema.
-    let target = target.map(ToString::to_string);
+    crate::Summary { lines, omitted: 0 }
+}
+
+/// The owner's suggested command travels on the envelope's `next` array, never
+/// as a line inside the compact summary. The edge renders it once from the argv.
+pub(super) fn output_next_step(
+    data: &Value,
+    target: Option<&crate::Target>,
+) -> Option<provenant_records::command_result::NextStep> {
+    use provenant_records::command_result::NextStep;
+    let target = target?;
     let state = data["state"].as_str().unwrap_or_default();
-    let next = target.and_then(|target| {
-        if data["eof"] == json!(false) {
-            let offset = data["next_offset"].as_u64()?;
-            Some(format!(
-                "provenant output {target} --part {} --offset {offset}",
-                data["part"].as_str().unwrap_or("result")
-            ))
-        } else if matches!(state, "queued" | "starting" | "running" | "settling") {
-            Some(format!("provenant wait {target}"))
-        } else {
-            None
-        }
-    });
-    crate::Summary {
-        lines,
-        next,
-        omitted: 0,
+    if data["eof"] == json!(false) {
+        let offset = data["next_offset"].as_u64()?;
+        let part = data["part"].as_str().unwrap_or("result");
+        Some(NextStep::from_args(
+            &[
+                "provenant",
+                "output",
+                &target.to_string(),
+                "--part",
+                part,
+                "--offset",
+                &offset.to_string(),
+            ],
+            "read the next page of this output",
+        ))
+    } else if matches!(state, "queued" | "starting" | "running" | "settling") {
+        let handle = target.to_string();
+        Some(NextStep::from_args(
+            &["provenant", "wait", &handle],
+            "wait for this work to settle",
+        ))
+    } else {
+        None
     }
 }
 
@@ -1225,16 +1242,23 @@ mod tests {
                 max_bytes: 65536,
             };
             let rendered = super::render_output(command.clone(), Ok((data.clone(), String::new())));
-            let next = rendered.summary.unwrap().next.unwrap();
             assert_eq!(
-                next,
-                "provenant output repair/writer#2 --part result --offset 42"
+                rendered.result.next[0].argv,
+                [
+                    "provenant",
+                    "output",
+                    "repair/writer#2",
+                    "--part",
+                    "result",
+                    "--offset",
+                    "42"
+                ]
             );
             data["eof"] = json!(true);
             let rendered = super::render_output(command, Ok((data, String::new())));
             assert_eq!(
-                rendered.summary.unwrap().next.as_deref(),
-                Some("provenant wait repair/writer#2")
+                rendered.result.next[0].argv,
+                ["provenant", "wait", "repair/writer#2"]
             );
         }
     }

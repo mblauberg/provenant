@@ -417,9 +417,19 @@ pub fn read_only_checkout_warning(
 }
 
 fn reply(command: &str, outcome: Result<(Value, String), Fail>) -> Reply {
+    reply_with_next(command, outcome, Vec::new())
+}
+
+/// `reply` for an owner that suggests commands: the steps go on the envelope
+/// so JSON and the edge's one human rendering cannot diverge.
+fn reply_with_next(
+    command: &str,
+    outcome: Result<(Value, String), Fail>,
+    next: Vec<provenant_records::command_result::NextStep>,
+) -> Reply {
     match outcome {
         Ok((data, human)) => Reply {
-            result: CommandResult::new(command, Status::Ok, data),
+            result: CommandResult::new(command, Status::Ok, data).with_next(next),
             human,
             summary: None,
             read_only: false,
@@ -1785,6 +1795,7 @@ fn attach_freshness(
     prices: &provenant_telemetry::PriceTable,
     data: &mut Value,
     human: &mut String,
+    next: &mut Vec<provenant_records::command_result::NextStep>,
 ) -> Result<(), Fail> {
     let today = jiff::Timestamp::from_microsecond(now(&SystemClock::new())?.as_micros())
         .map_err(|error| Fail::new(Status::Error, ErrorKind::Time, error.to_string()))?
@@ -1792,11 +1803,18 @@ fn attach_freshness(
         .date();
     let freshness = prices.freshness(today);
     if freshness.stale {
-        human.insert_str(0, &format!(
-            "price sheet reviewed {} days ago ({}), over the {}-day limit\nnext: review and refresh with `provenant telemetry prices refresh`\n",
-            freshness.age_days,
-            freshness.reviewed_at,
-            freshness.max_age_days.unwrap_or(0)
+        human.insert_str(
+            0,
+            &format!(
+                "price sheet reviewed {} days ago ({}), over the {}-day limit\n",
+                freshness.age_days,
+                freshness.reviewed_at,
+                freshness.max_age_days.unwrap_or(0)
+            ),
+        );
+        next.push(provenant_records::command_result::NextStep::from_command(
+            "provenant telemetry prices refresh",
+            "review and refresh the stale price sheet",
         ));
     }
     data["price_freshness"] = json!(freshness);
@@ -2316,10 +2334,10 @@ fn prices_refresh_inner(command: PricesRefresh, edge: &Edge<'_>) -> Result<(Valu
         plain_text(&primary_origin, 256),
         command.out.display()
     );
-    if proposal.is_clean() {
-        human.push_str("next: nothing to review\n");
-    } else {
-        human.push_str("next: review the proposal, then edit config/telemetry-prices.toml\n");
+    // Advisory prose, not a command suggestion: a proposal has no argv a
+    // consumer could copy, so it stays in the human text without a `next:` line.
+    if !proposal.is_clean() {
+        human.push_str("review the proposal, then edit config/telemetry-prices.toml\n");
     }
     let mut data = data;
     data["clean"] = json!(proposal.is_clean());

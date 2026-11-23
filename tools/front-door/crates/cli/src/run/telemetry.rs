@@ -3,7 +3,10 @@ use super::*;
 /// Usage and cost over this project's terminal attempts, priced from the
 /// reviewed table shipped with the product.
 pub fn stats(command: Stats, edge: &Edge<'_>) -> Reply {
-    reply("telemetry stats", stats_inner(command, edge))
+    match stats_inner(command, edge) {
+        Ok((data, human, next)) => reply_with_next("telemetry stats", Ok((data, human)), next),
+        Err(error) => reply("telemetry stats", Err(error)),
+    }
 }
 
 pub(super) fn cache_kpi_rows(
@@ -107,7 +110,17 @@ pub(super) fn price_table(
     .map_err(|error| Fail::new(Status::Error, ErrorKind::Prices, error.to_string()))
 }
 
-pub(super) fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, String), Fail> {
+pub(super) fn stats_inner(
+    command: Stats,
+    edge: &Edge<'_>,
+) -> Result<
+    (
+        Value,
+        String,
+        Vec<provenant_records::command_result::NextStep>,
+    ),
+    Fail,
+> {
     use run::AttemptReader;
     let prices = price_table(edge)?;
     let instant = |time: Option<jiff::Timestamp>| {
@@ -469,7 +482,8 @@ pub(super) fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, Str
         );
         data["pipeline"] = pipeline;
     }
-    attach_freshness(&prices, &mut data, &mut human)?;
+    let mut next = Vec::new();
+    attach_freshness(&prices, &mut data, &mut human, &mut next)?;
     if let Some(error) = chair_error {
         human.push_str(&format!(
             "chair sessions not read: {}\n",
@@ -480,7 +494,7 @@ pub(super) fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, Str
     // Cost has one producer: `telemetry cost` reads it from the usage ledger.
     strip_cost(&mut data);
     omit_per_attempt_rows(&mut data);
-    Ok((data, human))
+    Ok((data, human, next))
 }
 
 /// This project's finished attempts since `since` whose delivery has an

@@ -1378,11 +1378,17 @@ fn emit(leaf: &str, result: Result<Report, Box<dyn std::error::Error>>, globals:
                     format!("{subject}: ")
                 }
             );
-            // The rerun is advice shown to the chair; nothing executes it.
-            let next = report.rerun.clone();
-            let summary = provenant_cli::Summary::new(headline, rows(&report), next);
+            // The rerun is advice shown to the chair; nothing executes it. It
+            // travels as a typed step so JSON and the human line stay in step.
+            let next = report.rerun.clone().map(|command| {
+                provenant_records::command_result::NextStep::from_command(
+                    &command,
+                    "rerun the failed jobs",
+                )
+            });
+            let summary = provenant_cli::Summary::new(headline, rows(&report));
             emit_summarised(
-                &CommandResult::new(leaf, outcome, report),
+                &CommandResult::new(leaf, outcome, report).with_next(next.into_iter().collect()),
                 globals,
                 &text,
                 true,
@@ -1438,10 +1444,18 @@ fn emit_reports(
             };
             let headline =
                 format!("{subject}{failing_jobs} failed job(s), {tests} failing test(s)");
-            let next = reports.iter().find_map(|report| report.rerun.clone());
-            let summary = provenant_cli::Summary::new(headline, all_rows, next);
+            let next = reports
+                .iter()
+                .find_map(|report| report.rerun.clone())
+                .map(|command| {
+                    provenant_records::command_result::NextStep::from_command(
+                        &command,
+                        "rerun the failed jobs",
+                    )
+                });
+            let summary = provenant_cli::Summary::new(headline, all_rows);
             emit_summarised(
-                &CommandResult::new(leaf, outcome, reports),
+                &CommandResult::new(leaf, outcome, reports).with_next(next.into_iter().collect()),
                 globals,
                 &text,
                 true,
