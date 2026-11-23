@@ -27,12 +27,15 @@ path inside the attempt directory).
 - Why: a retained writer must not contend with itself or retry an unchanged failure forever.
 
 A result a lane leaves group- or other-readable in Provenant's private attempt directory is a
-recoverable condition, not a settlement refusal. Settlement tightens that regular, single-link,
-owned file through its open descriptor, warns with the path and the old mode, and continues. A
+recoverable condition, not a settlement refusal. Settlement's own read of `result.md` tightens that
+regular, single-link, owned file through its open descriptor, warns with the path and the old mode,
+and continues. That repair is scoped to this one settlement read: every other sealed name, and every
+later read of `result.md`, still refuses an over-broad mode so a regression stays visible. A
 symlink, a foreign owner or a path outside the attempt directory still refuses: a stalled reason
 for either names the remedy.
 - Why: custody protects the private store and the lane's finished work, so an over-broad mode
-  should be repaired rather than strand a completed writer.
+  should be repaired rather than strand a completed writer, while a repair on an unrelated read
+  would hide the defect and widen what a reader accepts.
 - Owner: `crates/run/src/artifacts.rs`, `crates/os/src/fs.rs`
 
 Only the detached worker's acquisition of an exited attempt's writer lock waits, within the

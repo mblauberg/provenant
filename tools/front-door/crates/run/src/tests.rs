@@ -1365,18 +1365,21 @@ fn streamed_result_is_verified_and_raw_across_chunks() -> TestResult {
         use std::os::unix::fs::PermissionsExt;
         crate::artifacts::PRIVATE_MODE_REPAIRS.with(|warnings| warnings.borrow_mut().clear());
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))?;
-        assert_eq!(
-            store.stream_result(id, &call, None)?.digest,
-            CanonicalV1::file_digest(text.as_bytes()).to_string()
-        );
-        let warnings =
-            crate::artifacts::PRIVATE_MODE_REPAIRS.with(|warnings| warnings.borrow().clone());
-        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        let expected = std::path::PathBuf::from(format!("attempts/{id}/result.md"));
         assert!(
-            warnings[0].contains("0644"),
-            "warning must name the old mode: {warnings:?}"
+            matches!(store.stream_result(id, &call, None), Err(RunError::UnsafePath { path, check: PathCheck::Mode }) if path == expected),
+            "a mode regression after settlement must refuse, not be repaired by a read"
         );
-        assert_eq!(std::fs::metadata(&path)?.permissions().mode() & 0o077, 0);
+        assert!(
+            crate::artifacts::PRIVATE_MODE_REPAIRS.with(|warnings| warnings.borrow().is_empty()),
+            "the presentation read must not report a repair"
+        );
+        assert_eq!(
+            std::fs::metadata(&path)?.permissions().mode() & 0o077,
+            0o044,
+            "the presentation read must leave the mode alone"
+        );
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     }
     std::fs::write(&path, vec![b'x'; text.len() + 1])?;
     assert_eq!(

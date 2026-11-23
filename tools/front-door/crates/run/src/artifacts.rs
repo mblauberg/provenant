@@ -198,9 +198,11 @@ impl RunStore {
             });
         }
         let dir = self.attempt_dir(id, false)?;
-        let name = OsStr::new("result.md");
-        let mut file = dir.open_read(name)?;
-        let before = private_metadata(&dir, name, &file, file.metadata()?, true)?;
+        let mut file = dir.open_read(OsStr::new("result.md"))?;
+        let before = file.metadata()?;
+        if let Some(check) = PathCheck::file(before) {
+            return Err(RunError::unsafe_entry(&dir, OsStr::new("result.md"), check));
+        }
         if before.size != artifact.bytes {
             return Err(RunError::artifact_mismatch(
                 ArtifactCheck::RecordedLength,
@@ -333,21 +335,32 @@ pub(crate) fn artifact_path(attempt: provenant_core::AttemptId, name: &str) -> R
 }
 /// Opens of a sealed name that concurrent replacements may retire in a row.
 const REPLACED_OPENS: usize = 4;
-/// Rendered private-mode repair warnings, for tests that cannot read the
-/// process-wide stderr stream without racing other tests. Thread-local so each
-/// test collects only its own repairs and no `static` needs `Sync` for the
-/// non-`Sync` `RefCell` it holds; the production warning still goes to stderr.
 #[cfg(test)]
 thread_local! {
+    /// Rendered private-mode repair warnings, for tests that cannot read the
+    /// process-wide stderr stream without racing other tests. Thread-local so
+    /// each test collects only its own repairs and no `static` needs `Sync` for
+    /// the non-`Sync` `RefCell` it holds; the production warning still goes to
+    /// stderr.
     pub(crate) static PRIVATE_MODE_REPAIRS: std::cell::RefCell<Vec<String>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
+/// What a private read may do about an over-broad mode. Every sealed read
+/// refuses it, because a mode defect outside the settlement of `result.md`
+/// reports something the owner must see. Only [`read_settled_result`] repairs.
+#[derive(Clone, Copy)]
+enum ModePolicy {
+    Refuse,
+    RepairSettledResult,
+}
+
 /// Judge a sealed regular file through its open descriptor. A too-broad mode
-/// on a file a lane left in Provenant's private attempt directory is repaired
-/// in place with a warning naming the path and the old mode; a link, foreign
-/// owner, symlink or other kind stays refused. `repair` is false for a handle
-/// already retired by a rename, which the caller retries instead.
+/// is repaired in place with a warning naming the path and the old mode only
+/// when `repair` is set, which the settlement read of `result.md` alone does;
+/// a link, foreign owner, symlink or other kind stays refused. `repair` is
+/// false for a handle already retired by a rename, which the caller retries
+/// instead.
 fn private_metadata(
     dir: &Directory,
     name: &OsStr,
@@ -401,6 +414,21 @@ pub(crate) mod sync_probe {
 pub(crate) fn read_sealed(dir: &Directory, name: &str, limit: u64) -> Result<Option<Vec<u8>>> {
     read_sealed_observing(dir, name, limit, || {})
 }
+/// The settlement read of `result.md`, and the one private read allowed to
+/// repair a mode a lane left too broad. Settlement warns and tightens the
+/// regular, single-link, owned file through its open descriptor rather than
+/// stranding a finished writer. Every other sealed name, and every other read
+/// of this one, still refuses so a mode regression stays visible.
+pub(crate) fn read_settled_result(dir: &Directory) -> Result<Option<Vec<u8>>> {
+    read_sealed_with(
+        dir,
+        AttemptFile::Result.name(),
+        RESULT_LIMIT,
+        true,
+        ModePolicy::RepairSettledResult,
+        || {},
+    )
+}
 /// A read-only observation of a sealed name. It skips the two syncs that make
 /// [`read_sealed`] durable, so callers report what is published without paying
 /// an `F_FULLFSYNC` per read. Never use the bytes to decide a write.
@@ -409,7 +437,7 @@ pub(crate) fn read_sealed_observed(
     name: &str,
     limit: u64,
 ) -> Result<Option<Vec<u8>>> {
-    read_sealed_with(dir, name, limit, false, || {})
+    read_sealed_with(dir, name, limit, false, ModePolicy::Refuse, || {})
 }
 /// A checkpoint such as process.json is replaced by rename while readers poll it.
 /// A handle opened just before the rename then reports no links. That is a
@@ -422,13 +450,14 @@ pub(crate) fn read_sealed_observing(
     limit: u64,
     opened: impl FnMut(),
 ) -> Result<Option<Vec<u8>>> {
-    read_sealed_with(dir, name, limit, true, opened)
+    read_sealed_with(dir, name, limit, true, ModePolicy::Refuse, opened)
 }
 fn read_sealed_with(
     dir: &Directory,
     name: &str,
     limit: u64,
     durable: bool,
+    policy: ModePolicy,
     mut opened: impl FnMut(),
 ) -> Result<Option<Vec<u8>>> {
     let mut retired = 0;
@@ -445,7 +474,8 @@ fn read_sealed_with(
             links: meta.links.max(1),
             ..meta
         };
-        private_metadata(dir, OsStr::new(name), &file, judged, !unlinked)?;
+        let repair = matches!(policy, ModePolicy::RepairSettledResult) && !unlinked;
+        private_metadata(dir, OsStr::new(name), &file, judged, repair)?;
         if unlinked {
             retired += 1;
             if retired >= REPLACED_OPENS {
@@ -612,7 +642,7 @@ mod tests {
     }
 
     #[test]
-    fn read_sealed_repairs_a_broad_mode_but_refuses_other_unsafe_entries() -> TestResult {
+    fn read_sealed_refuses_a_broad_mode_and_never_tightens_it() -> TestResult {
         let temp = tempfile::tempdir()?;
         let dir = Directory::open_anchor(temp.path())?;
         checkpoint(&dir, b"x")?;
@@ -642,16 +672,41 @@ mod tests {
             temp.path().join("process.json"),
             std::fs::Permissions::from_mode(0o644),
         )?;
+        let error = read_sealed(&dir, "process.json", 1024).expect_err("group-readable");
+        assert!(matches!(
+            error,
+            RunError::UnsafePath {
+                path,
+                check: PathCheck::Mode,
+            } if path == dir.anchored_path().join("process.json")
+        ));
         assert_eq!(
-            read_sealed(&dir, "process.json", 1024)?.as_deref(),
-            Some(b"x".as_slice())
+            dir.metadata_at(name, false)?.mode & 0o077,
+            0o044,
+            "a private read must not repair the mode"
         );
+        assert!(
+            PRIVATE_MODE_REPAIRS.with(|warnings| warnings.borrow().is_empty()),
+            "a refused read must not report a repair"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn read_settled_result_repairs_a_broad_mode_and_warns() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let dir = Directory::open_anchor(temp.path())?;
+        seal(&dir, AttemptFile::Result.name(), b"x", RESULT_LIMIT)?;
+        PRIVATE_MODE_REPAIRS.with(|warnings| warnings.borrow_mut().clear());
+        let path = temp.path().join(AttemptFile::Result.name());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))?;
+        assert_eq!(read_settled_result(&dir)?.as_deref(), Some(b"x".as_slice()));
         let warnings = PRIVATE_MODE_REPAIRS.with(|warnings| warnings.borrow().clone());
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(
             warnings[0].contains(
                 &dir.anchored_path()
-                    .join("process.json")
+                    .join(AttemptFile::Result.name())
                     .display()
                     .to_string()
             ),
@@ -661,7 +716,7 @@ mod tests {
             warnings[0].contains("0644"),
             "warning must name the old mode: {warnings:?}"
         );
-        let after = dir.metadata_at(name, false)?;
+        let after = dir.metadata_at(OsStr::new(AttemptFile::Result.name()), false)?;
         assert_eq!(after.mode & 0o077, 0);
         assert_eq!(PathCheck::file(after), None);
         Ok(())
