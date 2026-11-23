@@ -1080,7 +1080,7 @@ fn loop_extension_refusals_keep_the_rule_and_identifier() {
     checkpoint.extensions.push("loop.revise.rounds=2".into());
     for (value, rule) in [("loop.revise.rounds=02", refusal::ExtensionRule::NonIncreasing), ("loop.revise.rounds=4", refusal::ExtensionRule::MaxExtensionRounds)] {
         let before = checkpoint.clone();
-        let error = match admit_candidate(&document, Some(&checkpoint), &[value.into()], &limits, &Default::default(), None) { Ok(_) => panic!("expected refusal"), Err(error) => error };
+        let error = match admit_candidate(&document, Some(&checkpoint), &[value.into()], &limits, &Default::default(), None, None) { Ok(_) => panic!("expected refusal"), Err(error) => error };
         let CandidateError::Extension(cause) = error else { panic!("expected extension refusal") };
         assert_eq!(cause.rule, rule);
         assert_eq!(cause.loop_id.as_deref(), Some("revise"));

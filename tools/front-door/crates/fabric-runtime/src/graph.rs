@@ -23,6 +23,8 @@ mod ci;
 pub use ci::{CiFailedCheck, CiTarget};
 mod budget;
 mod candidate;
+mod canonical;
+pub use canonical::{canonicalise_route_models, canonicalise_route_nodes};
 pub mod refusal;
 pub use candidate::{AdmittedCandidate, CandidateError, admit_candidate, admit_running_candidate};
 mod cancellation_intent;
@@ -3748,10 +3750,10 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             candidate
         }
         None => match stored.as_ref() {
-            Some(checkpoint) => {
-                admit_running_candidate(document, checkpoint, extensions, limits, budget, None)
-            }
-            None => admit_candidate(document, None, extensions, limits, budget, None),
+            Some(checkpoint) => admit_running_candidate(
+                document, checkpoint, extensions, limits, budget, None, None,
+            ),
+            None => admit_candidate(document, None, extensions, limits, budget, None, None),
         }
         .map_err(|error| match error {
             CandidateError::CheckpointTopology { node, invariant } => GraphError::BadCheckpoint {

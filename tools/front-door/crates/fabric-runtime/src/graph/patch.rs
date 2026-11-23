@@ -537,6 +537,17 @@ fn admit_patch_for_retry(
                 plan,
                 ..
             } = *admission;
+            // The nodes an admitted patch stores must carry the same one model
+            // spelling as the compiled preview, whichever path admitted them.
+            // Warnings already surfaced from the shared compiler in `prepare`.
+            // Spec: docs/specs/fabric.md#one-model-spelling-per-route
+            let mut warnings = Vec::new();
+            let catalogue = provenant_routing::Catalogue::bundled().ok();
+            super::canonicalise_route_nodes(
+                &mut expansion.nodes,
+                catalogue.as_ref(),
+                &mut warnings,
+            );
             if let Some(parent) = parent {
                 for node in &mut expansion.nodes {
                     node.parent_node = Some(parent.id.clone());
@@ -1245,6 +1256,7 @@ fn admit_submission(
         context.limits,
         &Default::default(),
         None,
+        None,
     )
     .map_err(|error| {
         let mut refusal = PatchError::invalid(error.to_string());
@@ -1809,6 +1821,7 @@ pub(super) fn prepare(
         context.limits,
         &Default::default(),
         None,
+        None,
     )
     .map_err(|error| {
         let mut refusal = PatchError::invalid(error.to_string());
@@ -1822,6 +1835,11 @@ pub(super) fn prepare(
         refusal.candidate = Some(Box::new(error));
         refusal
     })?;
+    // Model canonicalisation warnings from the shared compiler belong on the
+    // admitted expansion, just like the patch's own advisory warnings.
+    expansion
+        .floor_warnings
+        .extend(admitted.warnings.iter().cloned());
     let preview = admitted.expanded;
     let plan = admitted.plan;
     Ok(Prepared::Ready(Box::new(Admission {

@@ -67,6 +67,9 @@ pub struct AdmittedCandidate {
     pub(super) plan: PlannedGraph,
     pub(super) effective_budget: crate::config::GraphBudget,
     pub(super) growth_limit: Option<GraphStructuralLimit>,
+    /// Model canonicalisation warnings from the admission compiler. The host
+    /// forwards these with the other graph input warnings.
+    pub warnings: Vec<String>,
 }
 
 impl AdmittedCandidate {
@@ -84,6 +87,7 @@ pub fn admit_candidate(
     limits: &crate::config::GraphLimits,
     budget: &crate::config::GraphBudget,
     requester_path: Option<&[u8]>,
+    catalogue: Option<&provenant_routing::Catalogue>,
 ) -> Result<AdmittedCandidate, CandidateError> {
     admit(
         document,
@@ -92,6 +96,7 @@ pub fn admit_candidate(
         limits,
         budget,
         requester_path,
+        catalogue,
         false,
     )
 }
@@ -104,6 +109,7 @@ pub fn admit_running_candidate(
     limits: &crate::config::GraphLimits,
     budget: &crate::config::GraphBudget,
     requester_path: Option<&[u8]>,
+    catalogue: Option<&provenant_routing::Catalogue>,
 ) -> Result<AdmittedCandidate, CandidateError> {
     admit(
         document,
@@ -112,6 +118,7 @@ pub fn admit_running_candidate(
         limits,
         budget,
         requester_path,
+        catalogue,
         true,
     )
 }
@@ -124,6 +131,7 @@ fn admit(
     limits: &crate::config::GraphLimits,
     budget: &crate::config::GraphBudget,
     requester_path: Option<&[u8]>,
+    catalogue: Option<&provenant_routing::Catalogue>,
     running_unchanged: bool,
 ) -> Result<AdmittedCandidate, CandidateError> {
     GraphInput::Resume {
@@ -199,8 +207,18 @@ fn admit(
         }
     }
     validate_schema(document).map_err(CandidateError::from_admission)?;
-    let expanded = plans::expand_typed(document, &all, expansions, &generous)
+    let mut expanded = plans::expand_typed(document, &all, expansions, &generous)
         .map_err(CandidateError::from_admission)?;
+    // One model spelling per route is decided here: the shared compile gate
+    // both submit and patch admission pass through. The host supplies the
+    // effective catalogue; callers without one use the bundled catalogue.
+    // Spec: docs/specs/fabric.md#one-model-spelling-per-route
+    let bundled = if catalogue.is_some() {
+        None
+    } else {
+        provenant_routing::Catalogue::bundled().ok()
+    };
+    let warnings = super::canonicalise_route_models(&mut expanded, catalogue.or(bundled.as_ref()));
     validate_schema(&expanded).map_err(CandidateError::from_admission)?;
     if checkpoint.is_none()
         && expanded.nodes.iter().any(|node| {
@@ -264,5 +282,6 @@ fn admit(
         plan,
         effective_budget,
         growth_limit,
+        warnings,
     })
 }

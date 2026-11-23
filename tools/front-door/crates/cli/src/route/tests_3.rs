@@ -152,6 +152,11 @@
         // unknown readiness must still permit a family present in the pool.
         assert_eq!(super::resolve_review_family(&roots, &serde_json::json!("test"), Some("openai"), &[])?, "openai");
         assert_eq!(super::resolve_review_family(&roots, &serde_json::json!("test"), Some("anthropic"), &[])?, "anthropic");
+        // A review tier table built from an adapter and a relative model must
+        // resolve: the shared canonicaliser supplies the full id first.
+        // Spec: docs/specs/fabric.md#one-model-spelling-per-route
+        let table = serde_json::json!({"adapter":"claude", "model":"claude-haiku-5-5"});
+        assert_eq!(super::resolve_review_family(&roots, &table, Some("anthropic"), &[])?, "anthropic");
         let absent = super::resolve_review_family(&roots, &serde_json::json!("test"), Some("missing-family"), &[]).unwrap_err();
         assert!(absent.contains("missing-family") && absent.contains("count 1"), "{absent}");
         let original_config = std::fs::read_to_string(&path)?;

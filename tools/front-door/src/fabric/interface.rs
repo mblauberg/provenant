@@ -2296,11 +2296,11 @@ impl Factory {
                 bind_review_warning(node, warning);
             }
         }
-        // One model spelling per route is decided here, the compile gate both
-        // launch and explain share, before the document is sealed or replayed.
+        // Fix the document's own spelling before it is sealed or replayed so
+        // explain shows the same ids the shared admission compiler will store.
         // Spec: docs/specs/fabric.md#one-model-spelling-per-route
         let catalogue = provenant_cli::route::effective_catalogue(&self.context.roots).ok();
-        input_warnings.extend(super::graph_execution::canonicalise_route_models(
+        input_warnings.extend(provenant_fabric_runtime::graph::canonicalise_route_models(
             &mut document,
             catalogue.as_ref(),
         ));
@@ -2338,6 +2338,7 @@ impl Factory {
             &self.context.config.graph.limits,
             &self.context.config.graph.budget,
             Some(&self.requester_lane_path()?),
+            catalogue.as_ref(),
         )
         .map_err(FacadeError::graph_candidate)?;
         if let Some(warning) = review_subject.and_then(|subject| subject.warning) {
@@ -2741,6 +2742,7 @@ impl Factory {
                 bind_read_roots(node, &value)?;
             }
         }
+        let catalogue = provenant_cli::route::effective_catalogue(&self.context.roots).ok();
         provenant_fabric_runtime::graph::admit_candidate(
             &execution.document,
             Some(&checkpoint),
@@ -2748,6 +2750,7 @@ impl Factory {
             &self.context.config.graph.limits,
             &self.context.config.graph.budget,
             execution.requester_path.as_deref(),
+            catalogue.as_ref(),
         )
         .map_err(FacadeError::graph_candidate)?;
         // save writes patch events before publishing the checkpoint, under this lock.
@@ -4223,6 +4226,7 @@ mod tests {
             &[],
             &factory.context.config.graph.limits,
             &factory.context.config.graph.budget,
+            None,
             None,
         )?;
         factory.context.config.graph.limits.node_prompt_bytes = 1;

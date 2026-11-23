@@ -1430,13 +1430,18 @@ pub fn tier_route(
     effort: Option<&Value>,
     read_only: bool,
 ) -> Result<(&'static str, Value), String> {
+    let catalogue = provenant_routing::Catalogue::bundled().ok();
     if tier.is_array() {
         if effort.is_some() {
             return Err(format!(
                 "node {id}: route lists cannot be combined with effort"
             ));
         }
-        return Ok(("routes", tier.clone()));
+        let mut routes = tier.clone();
+        for route in routes.as_array_mut().into_iter().flatten() {
+            provenant_routing::canonical_route_value(route, catalogue.as_ref());
+        }
+        return Ok(("routes", routes));
     }
     let mut route = match tier {
         Value::String(name) if !name.is_empty() => {
@@ -1480,6 +1485,10 @@ pub fn tier_route(
             ));
         }
     };
+    // Tiers built from an adapter and a relative model must reach resolution
+    // as one full id, just like an admission route. Alias-only routes are
+    // untouched. Spec: docs/specs/fabric.md#one-model-spelling-per-route
+    provenant_routing::canonical_route_value(&mut route, catalogue.as_ref());
     if let Some(effort) = effort {
         route["effort"] = effort.clone();
     }
@@ -2606,6 +2615,29 @@ mod tests {
         assert_eq!(route["adapter"], "opencode");
         assert_eq!(route["model"], id);
         assert_eq!(route["effort"], "low");
+    }
+
+    // Spec: docs/specs/fabric.md#one-model-spelling-per-route
+    #[test]
+    fn relative_model_tier_tables_and_lists_lower_to_full_ids() {
+        let table = json!({"adapter":"opencode", "model":"opencode/hy4-flash-free"});
+        let (key, route) = tier_route("review", &table, None, true).unwrap();
+        assert_eq!(key, "route");
+        assert_eq!(route["model"], "opencode/opencode/hy4-flash-free");
+
+        // A bare model on a non-namespaced adapter still becomes a parseable
+        // full id, so review-family resolution no longer fails on a bare name.
+        let bare = json!({"adapter":"anthropic", "model":"claude-sonnet-5-5"});
+        let (_, route) = tier_route("review", &bare, None, true).unwrap();
+        assert_eq!(route["model"], "anthropic/claude-sonnet-5-5");
+        assert!(provenant_routing::ModelId::parse(route["model"].as_str().unwrap()).is_ok());
+
+        let (key, routes) = tier_route("review", &json!([table]), None, true).unwrap();
+        assert_eq!(key, "routes");
+        assert_eq!(
+            routes[0]["model"], "opencode/opencode/hy4-flash-free",
+            "route list members canonicalise too"
+        );
     }
 }
 
