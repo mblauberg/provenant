@@ -1,4 +1,4 @@
-## Added
+## Additions
 
 ### CLI and install
 

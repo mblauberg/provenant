@@ -1,5 +1,5 @@
-## Changes
-### Names
+## Behaviour changes
+### CLI and install
 
 - Unknown model, adapter, template and knob names now list close matches
   ranked by one shared ranker; names typed with capitals are lower-cased with

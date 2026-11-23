@@ -1,5 +1,5 @@
 ## Fixes
-### OpenCode stream
+### Telemetry and providers
 
 - OpenCode lanes record per-step token usage and provider-stated cost, end on
   endless provider retries at the adapter's bound instead of the wall timeout,

@@ -1,6 +1,6 @@
-## Added
+## Additions
 
-### Landing
+### Git and safety
 
 - `provenant land` can publish with the owner's admin authority when a ruleset
   demands a review the authenticated owner cannot give, if the host config

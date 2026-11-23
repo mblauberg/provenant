@@ -1,5 +1,5 @@
 ## Fixes
-### OpenCode variants
+### Telemetry and providers
 
 - An OpenCode route whose effort the model does not offer is refused at
   resolution with the valid variants listed, and the provider's

@@ -1,5 +1,5 @@
 ## Fixes
-### Upgrade and stored state
+### CLI and install
 
 - Attempt records written by v2.8.2 decode again after upgrade. A writable open
   of the run store now runs the base-13-to-14 migration once, which rewrites the

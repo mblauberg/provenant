@@ -1,6 +1,6 @@
-## Added
+## Additions
 
-### Worktrees
+### Git and safety
 
 - Worktree layout roots may lie outside the checkout: the layout port accepts
   absolute and parent-relative roots from the repository or host port table,

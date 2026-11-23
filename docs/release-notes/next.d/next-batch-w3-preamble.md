@@ -1,6 +1,6 @@
-## Added
+## Additions
 
-### Lanes
+### Lanes and settlement
 
 - A layered `lanes.brief_preamble` file carries standing lane rules, so briefs
   carry only the task. Host, project (`.provenant/config.toml`) and launch
