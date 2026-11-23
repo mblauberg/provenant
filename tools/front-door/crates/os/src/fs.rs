@@ -534,6 +534,10 @@ thread_local! {
     /// not consume the fixture's simulation of a concurrent reaper.
     pub(crate) static OWNER_LOCK_ACQUIRE_HOOK: std::cell::RefCell<Option<OwnerLockHook>> =
         const { std::cell::RefCell::new(None) };
+    /// Run when a contended owner lock is about to wait, named so an unrelated
+    /// acquisition in the same thread does not consume the fixture.
+    pub(crate) static OWNER_LOCK_WAIT_HOOK: std::cell::RefCell<Option<OwnerLockHook>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// Directory enumerations started by this thread, so a caller can show that a
@@ -1050,6 +1054,12 @@ impl Directory {
             if remaining.is_zero() {
                 return Err(FsError::LockTimeout { path, timeout });
             }
+            #[cfg(any(test, feature = "fixture"))]
+            OWNER_LOCK_WAIT_HOOK.with(|hook| {
+                if let Some(hook) = hook.borrow_mut().as_mut() {
+                    hook(name);
+                }
+            });
             os::wait(remaining.min(Duration::from_millis(5)));
         }
     }

@@ -3,11 +3,12 @@
 
 use super::{BuildError, Job, RunContext};
 use provenant_config::{BuildOverflow, ResolvedAdmissionClass};
-use provenant_core::CancelToken;
+use provenant_core::{CancelToken, Clock, DurationMicros, WaitBudget};
 use provenant_os::admission::{
     AdmissionSlots, HeldGuard, HostHeldGuard, HostWaitGuard, WaitGuard, mark_held_with_command,
     mark_host_held_with_command, mark_host_waiting_with_command, mark_waiting_with_command,
 };
+use provenant_os::clock::SystemClock;
 use provenant_os::fs::{Directory, FsError, LockGuard, LockMode, LockRefusal, PublishMode};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -386,10 +387,21 @@ pub fn admit(request: &AdmissionRequest<'_>) -> Result<Admitted, BuildError> {
     // so the ticket bytes live in the adjacent JSON file.
     // A reaper in another participant's scan can unlink this freshly created
     // lock in the window before our flock lands. That lock never became ours;
-    // recreate it. Bound the retries so a persistent refusal still surfaces.
+    // recreate it. The probe can also hold the lock briefly while it decides
+    // the entry is live, but our own ticket is never a stale entry: wait out
+    // that transient hold instead of refusing admission on a zero-timeout
+    // acquisition. Bound both so a persistent refusal still surfaces.
+    const TICKET_LOCK_GRACE: DurationMicros = DurationMicros::from_micros(1_000_000);
+    let clock = SystemClock::new();
     let mut departed = 0;
     let guard = loop {
-        match dir.try_lock(OsStr::new(&lock_name), LockMode::Exclusive) {
+        match dir.lock(
+            OsStr::new(&lock_name),
+            LockMode::Exclusive,
+            WaitBudget::up_to(clock.mono_now(), TICKET_LOCK_GRACE),
+            request.cancel,
+            &clock,
+        ) {
             Ok(guard) => break guard,
             Err(error) if entry_departed(&error) && departed < 8 => departed += 1,
             Err(error) => return Err(unavailable(error)),
@@ -868,6 +880,52 @@ mod tests {
             assert!(matches!(handle.join().unwrap(), Err(BuildError::Cancelled)));
         });
         drop(held);
+    }
+    #[test]
+    fn probe_holding_ticket_lock_does_not_refuse_admission() {
+        let state = tempfile::tempdir().unwrap();
+        AdmissionSlots::provision(state.path(), "build", 1).unwrap();
+        let held_slot = AdmissionSlots::open(state.path(), "build")
+            .unwrap()
+            .try_acquire(1)
+            .unwrap()
+            .unwrap();
+        let path = state.path().join("build/queue/build");
+        std::fs::create_dir_all(&path).unwrap();
+        let dir = Directory::open_anchor(&path).unwrap();
+        // A scan can win the lock in the window before the waiter's flock
+        // lands. It holds that lock only while it proves the entry live or
+        // reaps it, so the waiter must wait rather than report a timeout.
+        let probe = dir
+            .try_lock(OsStr::new("contended.lock"), LockMode::Exclusive)
+            .unwrap();
+        let lock_path = path.join("contended.lock");
+        let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let cancel = CancelToken::new();
+        std::thread::scope(|scope| {
+            let handle = scope.spawn(move || {
+                provenant_os::fixture::on_owner_lock_wait(move |name| {
+                    if name == OsStr::new("contended.lock") {
+                        let _ = waiting_tx.send(());
+                    }
+                });
+                let admitted = matches!(
+                    admit(&request(state.path(), "contended", "owner", "a", &cancel)),
+                    Ok(Admitted::Held { .. })
+                );
+                result_tx.send(admitted).unwrap();
+            });
+            // The waiter reaches the lock only after the probe already holds it.
+            waiting_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            // The probe reaps the entry and releases the lock; the waiter then
+            // recreates its own lock and proceeds.
+            std::fs::remove_file(&lock_path).unwrap();
+            drop(probe);
+            drop(held_slot);
+            assert!(result_rx.recv_timeout(Duration::from_secs(10)).unwrap());
+            handle.join().unwrap();
+        });
     }
     #[test]
     fn concurrent_holders_never_exceed_limit() {
