@@ -271,6 +271,7 @@ fn retry_of_a_declared_stop_preserves_a_valid_checkpoint() {
             &document.nodes[0].id,
             None,
             &patch::PatchContext {
+                catalogue: None,
                 library: &template::TemplateLibrary::bundled(),
                 resolvers: &Default::default(),
 
@@ -630,6 +631,62 @@ fn ladder_facts() -> DepletionFacts {
         confidential: false,
         now: provenant_core::WallTime::from_micros(1_000_000).unwrap(),
     }
+}
+
+// Spec: docs/specs/fabric.md#one-model-spelling-per-route
+#[test]
+fn a_declared_relative_route_equal_to_the_handoff_target_appears_once() {
+    let full = "opencode/opencode/deepseek-v4.1-flash-free";
+    let document = document("worktree_write", serde_json::Value::Null);
+    let plan = validate_flat_plan(&document, &Default::default())
+        .unwrap()
+        .0;
+    let mut node = plan.nodes[0].clone();
+    // The host entry point already fixed the spelling of the node's routes.
+    // The second route was declared provider-relative and carries a different
+    // account, so whole-route comparison would still offer it beside the
+    // ladder's hand-off to the same model.
+    node.routes = vec![
+        serde_json::from_value(json!({"adapter":"opencode","model":full})).unwrap(),
+        serde_json::from_value(json!({"adapter":"opencode","model":full,"account":"other"}))
+            .unwrap(),
+        serde_json::from_value(json!({"adapter":"second","model":"second/model"})).unwrap(),
+    ];
+    let progress: NodeProgress = serde_json::from_value(json!({
+        "id": "work",
+        "state": "failed",
+        "attempts": [{
+            "launched": true,
+            "key": {"graph_id":"g-next","node_id":"work","attempt":1,"route_index":0},
+            "route": {"adapter":"opencode","model":full},
+            "state": "terminal",
+            "attempt_ref": "a/1",
+            "outcome": "other_failure",
+            "launch_actor": "chair"
+        }]
+    }))
+    .unwrap();
+    let model = provenant_routing::ModelId::parse(full).unwrap();
+    let mut facts = ladder_facts();
+    facts.stopped.model = model.clone();
+    for fact in &mut facts.readiness {
+        fact.model = model.clone();
+    }
+    let successor = next_step::depletion_successor(
+        &node,
+        &progress,
+        StopCause::UsageLimited,
+        &mut move |_| -> Result<Option<DepletionFacts>, String> { Ok(Some(facts.clone())) },
+    );
+    assert_eq!(
+        successor
+            .routes
+            .iter()
+            .map(|route| route.model.as_deref())
+            .collect::<Vec<_>>(),
+        [Some(full), Some("second/model")],
+        "a declared route equal to the hand-off target must not be offered twice"
+    );
 }
 
 /// The restart record a settled stop saved, with the routes it launched on.

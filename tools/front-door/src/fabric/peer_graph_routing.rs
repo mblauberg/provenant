@@ -1096,7 +1096,7 @@ fn production_owner_panel_uses_distinct_families_and_synthesises()
     let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
         "schema_version":2, "graph_id":"production-panel", "template_library":{}, "nodes":[
             {"id":"writer", "prompt":"write", "access":"worktree_write", "worktree":fixture.worktree,
-                "route":{"adapter":"codex","model":"gpt-6-luna"}},
+                "route":{"adapter":"codex","model":"codex/gpt-6-luna"}},
             {"id":"one", "prompt":"review", "access":"read_only", "depends_on":["writer"],
                 "distinct_from":"dependencies", "distinct_strength":"require",
                 "family_group":"panel", "routes":[{"alias":"panel-fixture"},{"alias":"panel-fixture"}]},
@@ -1107,7 +1107,7 @@ fn production_owner_panel_uses_distinct_families_and_synthesises()
                 "distinct_from":"dependencies", "distinct_strength":"require",
                 "family_group":"panel", "routes":[{"alias":"panel-fixture"},{"alias":"panel-fixture"}]},
             {"id":"synthesis", "prompt":"synthesise", "access":"read_only", "depends_on":["one","two","three"],
-                "route":{"adapter":"codex","model":"gpt-6-luna"}}
+                "route":{"adapter":"codex","model":"codex/gpt-6-luna"}}
         ]
     }))?;
     let mut journal = graph::FileJournal::open(

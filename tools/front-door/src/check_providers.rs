@@ -391,7 +391,7 @@ fn live(
         "schema_version":2,"graph_id":name,"limits":{"continuations":0,"concurrency":1},
         "nodes":[{"id":"smoke","use":"task","prompt":PROMPT,"access":"read_only",
             "on_stop":on_stop,"attempt":{"provider_timeout":settings.timeout_seconds.value},
-            "route":{"adapter":row.model.adapter(),"model":row.model.model(),"account":row.account_key,"effort":row.effort}}]
+            "route":{"adapter":row.model.adapter(),"model":row.model.as_str(),"account":row.account_key,"effort":row.effort}}]
     }}), budget, &cancel).err();
     if let Some(error) = &launch_error {
         row.error_code = Some(error.code().to_owned());

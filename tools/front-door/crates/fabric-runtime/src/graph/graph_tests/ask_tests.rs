@@ -844,6 +844,7 @@ fn principal_scope_gate_notifies_once_and_only_waits_outside_approved_scope() {
             let resolvers = std::collections::BTreeMap::new();
             let limits = crate::config::GraphLimits::default();
             let context = patch::PatchContext {
+                catalogue: None,
                 library: &library,
                 resolvers: &resolvers,
 
@@ -913,6 +914,7 @@ fn principal_scope_gate_notifies_once_and_only_waits_outside_approved_scope() {
             let resolvers = std::collections::BTreeMap::new();
             let limits = crate::config::GraphLimits::default();
             let context = patch::PatchContext {
+                catalogue: None,
                 library: &library,
                 resolvers: &resolvers,
 
@@ -985,6 +987,7 @@ fn principal_container_retry_does_not_reuse_owner_decision() {
     let resolvers = std::collections::BTreeMap::new();
     let limits = crate::config::GraphLimits::default();
     let context = patch::PatchContext {
+        catalogue: None,
         library: &library,
         resolvers: &resolvers,
 

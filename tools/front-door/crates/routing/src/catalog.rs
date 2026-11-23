@@ -5,6 +5,7 @@ use crate::{
 };
 use provenant_config::{DomainConfig, DomainSection, FieldMetadata, Profile, SectionError};
 use provenant_core::close_matches;
+use provenant_records::warning::{ROUTE_MODEL_NOT_CATALOGUED, Warning};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
@@ -2346,6 +2347,114 @@ pub fn free_pools(adapter: &str, free: impl FnOnce() -> bool) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The one route-model canonicaliser: decide the single full `ADAPTER/ID`
+/// spelling from a route's adapter, declared model and effective catalogue.
+/// It is pure and idempotent: a declared id that already names the adapter is
+/// returned byte-for-byte (with a typed warning when the catalogue does not
+/// know it), never prefixed again. Only a bare or short `NAMESPACE/NAME` is
+/// resolved: catalogue match, else a single unique namespaced candidate, else
+/// the adapter-prefixed spelling with a warning. A model id may itself contain
+/// `/`, so the declared spelling is never split by hand.
+/// Spec: docs/specs/fabric.md#one-model-spelling-per-route
+pub fn canonical_route_model(
+    adapter: &str,
+    model: &str,
+    catalogue: Option<&Catalogue>,
+) -> (String, Option<Warning>) {
+    // Without the effective catalogue there is no lookup to decide a rewrite.
+    // Keep the declared spelling; no bundled fallback hides a missing source.
+    let Some(catalogue) = catalogue else {
+        return (model.to_owned(), None);
+    };
+    if adapter.is_empty() || model.is_empty() {
+        return (model.to_owned(), None);
+    }
+    let qualified = format!("{adapter}/{model}");
+    // The declared model may already be a full id, a short `NAMESPACE/NAME`, or
+    // a bare name. Parse it before deciding; never split a stored id by hand.
+    let declared = ModelId::parse(model).ok();
+    if let Some(parsed) = &declared
+        && parsed.adapter() == adapter
+    {
+        if catalogue.model(parsed).is_some() {
+            return (model.to_owned(), None);
+        }
+        // A full id that names this adapter is final, catalogued or not. On a
+        // namespaced adapter (OpenCode's PROVIDER/MODEL) an id whose model
+        // has no `/` is a short PROVIDER/NAME form instead: it resolves below
+        // through the adapter-qualified catalogue match first.
+        let namespaced =
+            provenant_records::AdapterSpec::get(adapter).is_some_and(|spec| spec.namespaced_models);
+        if !namespaced || parsed.model().contains('/') {
+            return (
+                model.to_owned(),
+                Some(catalogue_warning(adapter, model, Some(parsed), catalogue)),
+            );
+        }
+    }
+    let qualified_id = ModelId::parse(&qualified).ok();
+    if qualified_id
+        .as_ref()
+        .is_some_and(|id| catalogue.model(id).is_some())
+    {
+        return (qualified, None);
+    }
+    if let Some(id) = qualified_id.as_ref().or(declared.as_ref()) {
+        let candidates = catalogue.namespaced_candidates(id);
+        if candidates.len() == 1 {
+            return (candidates[0].as_str().to_owned(), None);
+        }
+    }
+    (
+        qualified,
+        Some(catalogue_warning(
+            adapter,
+            model,
+            qualified_id.as_ref(),
+            catalogue,
+        )),
+    )
+}
+
+fn catalogue_warning(
+    adapter: &str,
+    model: &str,
+    id: Option<&ModelId>,
+    catalogue: &Catalogue,
+) -> Warning {
+    let repair = id
+        .map(|id| catalogue.nearest_models(id))
+        .filter(|near| !near.is_empty())
+        .map_or_else(
+            || "check `provenant route list` for catalogued model ids".to_owned(),
+            |near| format!("did you mean {}?", near.join(", ")),
+        );
+    Warning::new(
+        ROUTE_MODEL_NOT_CATALOGUED,
+        format!("route {adapter}/{model} is not in the catalogue; {repair}"),
+    )
+}
+
+/// Canonicalise a JSON route table's `model` field in place, preserving its
+/// adapter and all other fields. Used by tier lowering, which builds route
+/// tables from an adapter and a model before graph admission sees them.
+pub fn canonical_route_value(
+    route: &mut serde_json::Value,
+    catalogue: Option<&Catalogue>,
+) -> Option<Warning> {
+    let (Some(adapter), Some(model)) = (
+        route.get("adapter").and_then(serde_json::Value::as_str),
+        route.get("model").and_then(serde_json::Value::as_str),
+    ) else {
+        return None;
+    };
+    let (canonical, warning) = canonical_route_model(adapter, model, catalogue);
+    if route.get("model").and_then(serde_json::Value::as_str) != Some(canonical.as_str()) {
+        route["model"] = serde_json::Value::String(canonical);
+    }
+    warning
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3011,6 +3120,68 @@ mod tests {
                 "{short} has no catalogued provider segment"
             );
         }
+        Ok(())
+    }
+
+    // Spec: docs/specs/fabric.md#one-model-spelling-per-route
+    #[test]
+    fn canonical_route_model_resolves_a_relative_opencode_id()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let catalogue = Catalogue::bundled()?;
+        let (full, warning) =
+            super::canonical_route_model("opencode", "opencode/hy4-flash-free", Some(&catalogue));
+        assert_eq!(full, "opencode/opencode/hy4-flash-free");
+        assert!(warning.is_none(), "{warning:?}");
+        // The provider segment selects the catalogued provider: the Go
+        // account's id is a different, equally exact, route.
+        let (go, warning) = super::canonical_route_model(
+            "opencode",
+            "opencode-go/hy4-flash-free",
+            Some(&catalogue),
+        );
+        assert_eq!(go, "opencode/opencode-go/hy4-flash-free");
+        assert!(warning.is_none(), "{warning:?}");
+        // A bare relative model with a non-namespaced adapter becomes a full
+        // id (parseable downstream) and warns, rather than staying bare.
+        let (full, warning) =
+            super::canonical_route_model("anthropic", "claude-sonnet-5-5", Some(&catalogue));
+        assert_eq!(full, "anthropic/claude-sonnet-5-5");
+        assert!(warning.is_some(), "an uncatalogued id must warn");
+        Ok(())
+    }
+
+    // Spec: docs/specs/fabric.md#one-model-spelling-per-route
+    #[test]
+    fn canonical_route_model_is_idempotent() -> Result<(), Box<dyn std::error::Error>> {
+        let catalogue = Catalogue::bundled()?;
+        for (adapter, model) in [
+            ("opencode", "opencode/opencode/hy4-flash-free"),
+            ("opencode", "opencode/opencode/uncatalogued-fixture-model"),
+            ("opencode", "opencode/hy4-flash-free"),
+            ("anthropic", "claude-sonnet-5-5"),
+        ] {
+            let (once, first_warning) =
+                super::canonical_route_model(adapter, model, Some(&catalogue));
+            let (twice, second_warning) =
+                super::canonical_route_model(adapter, &once, Some(&catalogue));
+            assert_eq!(twice, once, "f(f({model})) rewrote a stored id");
+            assert_eq!(
+                second_warning.as_ref().map(|warning| warning.code),
+                first_warning.as_ref().map(|warning| warning.code),
+                "warning code changed on the second pass for {model}"
+            );
+        }
+        // A full id that names the adapter but is absent from the catalogue is
+        // kept, not turned into `adapter/adapter/...`; it warns with one code.
+        let (full, warning) = super::canonical_route_model(
+            "opencode",
+            "opencode/opencode/uncatalogued-fixture-model",
+            Some(&catalogue),
+        );
+        assert_eq!(full, "opencode/opencode/uncatalogued-fixture-model");
+        let warning = warning.expect("an uncatalogued full id must warn");
+        assert_eq!(warning.code, ROUTE_MODEL_NOT_CATALOGUED);
+        assert!(warning.message.contains("uncatalogued-fixture-model"));
         Ok(())
     }
 }

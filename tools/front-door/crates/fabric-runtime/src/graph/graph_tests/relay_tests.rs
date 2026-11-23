@@ -46,6 +46,7 @@ fn add(
     let resolvers = Default::default();
     let limits = plans::generous();
     let context = patch::PatchContext {
+        catalogue: None,
         journal: None,
         library: &library,
         resolvers: &resolvers,
@@ -448,6 +449,7 @@ fn child_admission_refusals_are_atomic_and_shape_only_ids_are_allowed() {
     let resolvers = Default::default();
     let limits = plans::generous();
     let context = patch::PatchContext {
+        catalogue: None,
         journal: None,
         library: &library,
         resolvers: &resolvers,
@@ -498,6 +500,59 @@ fn child_admission_refusals_are_atomic_and_shape_only_ids_are_allowed() {
     assert!(!receipt.replayed);
     assert_eq!(patch::revision(&checkpoint), 1);
     assert!(ids(&document, &checkpoint).contains(&receipt.node));
+}
+
+// Spec: docs/specs/fabric.md#one-model-spelling-per-route
+#[test]
+fn relay_child_route_model_is_canonicalised_by_the_context_catalogue() {
+    let catalogue = provenant_routing::Catalogue::bundled().expect("bundled catalogue");
+    let (document, mut checkpoint) = live(None);
+    let mut request = child("modelled", "relay-child-model");
+    request.launch = Some(relay::ChildLaunch {
+        templates: Default::default(),
+        node: json!({
+            "id": "modelled",
+            "access": "read_only",
+            "prompt": "Model child",
+            "route": {"adapter": "opencode", "model": "opencode/hy4-flash-free"}
+        }),
+    });
+    let library = template::TemplateLibrary::bundled();
+    let resolvers = Default::default();
+    let limits = plans::generous();
+    // The context carries the host's effective catalogue; admission must not
+    // silently fall back to a bundled one or leave the short model relative.
+    let context = patch::PatchContext {
+        catalogue: Some(&catalogue),
+        journal: None,
+        library: &library,
+        resolvers: &resolvers,
+        limits: &limits,
+        worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
+    };
+    relay::admit_child_bound(
+        &mut patch::LiveGraph {
+            document: &document,
+            checkpoint: &mut checkpoint,
+        },
+        "a",
+        &request,
+        &context,
+        None,
+    )
+    .expect("child admits");
+    let added = checkpoint
+        .expansions
+        .last()
+        .and_then(|expansion| expansion.nodes.iter().find(|node| node.id == "a--modelled"))
+        .expect("added child node");
+    assert_eq!(
+        added
+            .route
+            .as_ref()
+            .and_then(|route| route.model.as_deref()),
+        Some("opencode/opencode/hy4-flash-free")
+    );
 }
 
 #[test]
@@ -657,6 +712,7 @@ fn detached_children_do_not_gate_their_parents_dependants() {
     let resolvers = Default::default();
     let limits = plans::generous();
     let context = patch::PatchContext {
+        catalogue: None,
         journal: None,
         library: &library,
         resolvers: &resolvers,
@@ -874,6 +930,7 @@ fn writer_child_binds_parent_branch_and_replays_original_source() {
     let resolvers = Default::default();
     let limits = plans::generous();
     let context = patch::PatchContext {
+        catalogue: None,
         library: &library,
         resolvers: &resolvers,
         limits: &limits,
@@ -966,6 +1023,7 @@ fn review_panel_child_resolves_host_lenses_preserves_subject_and_replays() {
     ]);
     let limits = plans::generous();
     let context = patch::PatchContext {
+        catalogue: None,
         library: &library,
         resolvers: &resolvers,
         limits: &limits,
@@ -1046,6 +1104,7 @@ fn child_receipt_replay_uses_original_request_after_template_and_parent_changes(
     let resolvers = Default::default();
     let limits = plans::generous();
     let context = patch::PatchContext {
+        catalogue: None,
         library: &library,
         resolvers: &resolvers,
         limits: &limits,
@@ -1080,6 +1139,7 @@ fn child_receipt_replay_uses_original_request_after_template_and_parent_changes(
     let resolvers = Default::default();
     let limits = plans::generous();
     let context = patch::PatchContext {
+        catalogue: None,
         library: &library,
         resolvers: &resolvers,
         limits: &limits,
@@ -1360,6 +1420,7 @@ fn successful_final_patch_producer_leaves_its_planned_work_pending() {
     let resolvers = Default::default();
     let limits = plans::generous();
     let context = patch::PatchContext {
+        catalogue: None,
         journal: None,
         library: &library,
         resolvers: &resolvers,
@@ -1537,6 +1598,7 @@ fn child_writer_admission_uses_the_declared_worktree_template() {
     ports.worktree_layout.roots = vec!["trees".into()];
     ports.worktree_layout.default = "trees/<branch>".into();
     let context = patch::PatchContext {
+        catalogue: None,
         library: &library,
         resolvers: &resolvers,
 
@@ -1583,6 +1645,7 @@ fn child_writer_admission_uses_the_declared_worktree_template() {
     ports.worktree_layout.roots = vec!["moved".into()];
     ports.worktree_layout.default = "moved/<branch>".into();
     let changed_context = patch::PatchContext {
+        catalogue: None,
         library: &library,
         resolvers: &resolvers,
 
@@ -1760,6 +1823,7 @@ fn bound_direct_and_planned_child_preserves_explicit_worktree_and_upstream_sourc
         let resolvers = Default::default();
         let limits = plans::generous();
         let context = patch::PatchContext {
+            catalogue: None,
             journal: None,
             library: &library,
             resolvers: &resolvers,
@@ -1985,6 +2049,7 @@ nodes = [{id = "lens", use = "review", with = {lens = "tests"}}]
     let resolvers = Default::default();
     let limits = plans::generous();
     let context = patch::PatchContext {
+        catalogue: None,
         journal: None,
         library: &library,
         resolvers: &resolvers,

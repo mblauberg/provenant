@@ -187,6 +187,7 @@ fn public_patch_preserves_inactive_composite_and_replays_derived_state() {
     let resolvers = Default::default();
     let limits = plans::generous();
     let context = patch::PatchContext {
+        catalogue: None,
         library: &library,
         resolvers: &resolvers,
 
@@ -329,6 +330,7 @@ fn public_patch_skip_survives_unrelated_edits_and_retry_supersedes_it() {
     let resolvers = Default::default();
     let limits = plans::generous();
     let context = patch::PatchContext {
+        catalogue: None,
         library: &library,
         resolvers: &resolvers,
 

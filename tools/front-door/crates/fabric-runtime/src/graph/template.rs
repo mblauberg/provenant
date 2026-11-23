@@ -2132,14 +2132,18 @@ impl<'a> Compiler<'a> {
                             let model_str = m
                                 .as_str()
                                 .ok_or_else(|| format!("item `{id}` model must be text"))?;
-                            let (adapter, model_name) = model_str.split_once('/').ok_or_else(|| {
+                            // The requested model travels as one full ADAPTER/ID,
+                            // exactly as `--model` does: a model id may itself
+                            // contain '/', so a relative spelling would lose
+                            // its upstream group at route resolution.
+                            let model = provenant_routing::ModelId::parse(model_str).map_err(|_| {
                                 format!(
                                     "item `{id}` model must be in the form `adapter/model` (got `{model_str}`)"
                                 )
                             })?;
                             Some(serde_json::json!({
-                                "adapter": adapter,
-                                "model": model_name,
+                                "adapter": model.adapter(),
+                                "model": model.as_str(),
                             }))
                         } else {
                             None

@@ -25,6 +25,7 @@ pub fn validate_submission_snapshot(
     let library = TemplateLibrary::bundled();
     let resolvers = BTreeMap::new();
     let context = PatchContext {
+        catalogue: None,
         library: &library,
         resolvers: &resolvers,
         journal: None,
@@ -328,6 +329,10 @@ pub struct PatchContext<'a> {
     pub limits: &'a crate::config::GraphLimits,
     /// The project's declared worktree layout used for generated child paths.
     pub worktree_layout: provenant_config::WorktreeLayoutPort,
+    /// The host's effective routing catalogue. Every host path that admits a
+    /// patch supplies it, so `prepare` can decide one model spelling for the
+    /// nodes it adds. In-process callers without a host pass `None`.
+    pub catalogue: Option<&'a provenant_routing::Catalogue>,
 }
 
 /// Detect a credential shape for advisory warnings only.
@@ -542,6 +547,9 @@ fn admit_patch_for_retry(
                 plan,
                 ..
             } = *admission;
+            // Patch nodes were canonicalised once in `prepare` with the host's
+            // effective catalogue; admission stores that spelling unchanged.
+            // Spec: docs/specs/fabric.md#one-model-spelling-per-route
             if let Some(parent) = parent {
                 for node in &mut expansion.nodes {
                     node.parent_node = Some(parent.id.clone());
@@ -1092,6 +1100,7 @@ pub fn submission(
     let library = TemplateLibrary::bundled();
     let resolvers = BTreeMap::new();
     let context = PatchContext {
+        catalogue: None,
         library: &library,
         resolvers: &resolvers,
 
@@ -1512,7 +1521,7 @@ pub(super) fn prepare(
         Preparation::Live { .. } => None,
         Preparation::FinalFragment => catalogue_spec,
     };
-    let catalogue: BTreeMap<String, Template> = catalogue_spec
+    let planner_templates: BTreeMap<String, Template> = catalogue_spec
         .map(|(_, spec)| {
             spec.templates
                 .iter()
@@ -1522,7 +1531,7 @@ pub(super) fn prepare(
         .unwrap_or_default();
     let library = context
         .library
-        .with(Layer::Project, &catalogue)
+        .with(Layer::Project, &planner_templates)
         .and_then(|library| library.with(Layer::Launch, &patch.templates))
         .map_err(PatchError::invalid)?;
     let compiler = Compiler {
@@ -1535,7 +1544,7 @@ pub(super) fn prepare(
         let mut node = compiler.compile(raw)?;
         let used = raw.get("use").and_then(Value::as_str);
         let trusted = used.is_some_and(|name| {
-            (catalogue.contains_key(name) || context.library.layer(name).is_some())
+            (planner_templates.contains_key(name) || context.library.layer(name).is_some())
                 && !patch.templates.contains_key(name)
                 && ![
                     "role",
@@ -1731,6 +1740,18 @@ pub(super) fn prepare(
         }
         replaced.push(node);
     }
+    // One spelling of each model a patch adds or replaces is decided here,
+    // before the candidate is built, with the host's effective catalogue.
+    // Admission only reads the stored ids.
+    // Spec: docs/specs/fabric.md#one-model-spelling-per-route
+    let mut model_warnings = Vec::new();
+    super::canonicalise_route_nodes(&mut nodes, context.catalogue, &mut model_warnings);
+    super::canonicalise_route_nodes(&mut replaced, context.catalogue, &mut model_warnings);
+    warnings.extend(
+        model_warnings
+            .into_iter()
+            .map(|warning| warning.to_string()),
+    );
     // Every node a lane or planner adds or replaces names it, whatever the
     // author wrote, so the graph owner can apply that lane's sandbox floor.
     if let Some(parent) = parent {
@@ -1991,6 +2012,7 @@ mod advisory_write_scope_tests {
             None,
             &patch,
             &PatchContext {
+                catalogue: None,
                 library: &library,
                 resolvers: &resolvers,
                 journal: None,
@@ -2083,6 +2105,7 @@ mod advisory_write_scope_tests {
             None,
             &submission,
             &PatchContext {
+                catalogue: None,
                 library: &library,
                 resolvers: &resolvers,
                 journal: None,

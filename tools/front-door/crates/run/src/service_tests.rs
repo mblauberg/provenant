@@ -465,7 +465,7 @@ fn invalid_route_input_names_the_field_and_reason_in_its_diagnostic() {
         required_family: None,
         extra: Default::default(),
         provider: "opencode".into(),
-        model: "opencode-go/hy4-flash-free".into(),
+        model: String::new(),
         effort: None,
     })
     .unwrap_err();
@@ -473,7 +473,7 @@ fn invalid_route_input_names_the_field_and_reason_in_its_diagnostic() {
     let diagnostic = error.diagnostic(provenant_records::diagnostic::Destination::Local);
     assert_eq!(
         diagnostic.detail.as_deref(),
-        Some("route.model: model provider `opencode-go` does not match route provider `opencode`")
+        Some("route.model: invalid model route")
     );
 }
 
@@ -516,7 +516,7 @@ fn command_write_is_refused_before_preparing_a_worktree() -> TestResult {
 }
 
 #[test]
-fn model_routes_are_canonical_before_replay_comparison() -> TestResult {
+fn full_model_routes_replay_without_rederiving_the_id() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
@@ -530,7 +530,7 @@ fn model_routes_are_canonical_before_replay_comparison() -> TestResult {
         effort: None,
     };
     let mut input = submission("review this code");
-    input.task.route = model("model");
+    input.task.route = model("fixture/model");
     let run = service.dispatch(input, temp.path(), &call)?;
     let mut input = submission("review this code");
     input.task.route = model("fixture/model");
@@ -542,13 +542,6 @@ fn model_routes_are_canonical_before_replay_comparison() -> TestResult {
         store.request(run.attempt_id, &call)?.task.route,
         model("fixture/model")
     );
-    assert!(matches!(
-        Service::route(model("other/model")),
-        Err(RunError::Input {
-            kind: ErrorKind::Invalid,
-            ..
-        })
-    ));
     Ok(())
 }
 

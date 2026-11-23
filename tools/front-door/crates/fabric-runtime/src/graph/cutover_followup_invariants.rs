@@ -541,6 +541,7 @@ fn retry_context<'a>(
     limits: &'a crate::config::GraphLimits,
 ) -> patch::PatchContext<'a> {
     patch::PatchContext {
+        catalogue: None,
         library,
         resolvers,
 

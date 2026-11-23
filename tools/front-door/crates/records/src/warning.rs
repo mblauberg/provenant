@@ -357,6 +357,10 @@ pub const FORWARDER_UNAVAILABLE: WarningCode = WarningCode("FORWARDER_UNAVAILABL
 /// Retry admission skipped ambient credentials outside the bounded exact matcher.
 pub const RETRY_CREDENTIALS_SKIPPED: WarningCode = WarningCode("RETRY_CREDENTIALS_SKIPPED");
 
+/// A route model is a full `ADAPTER/ID` that the effective catalogue does not
+/// know. The declared spelling is preserved; the warning names it.
+pub const ROUTE_MODEL_NOT_CATALOGUED: WarningCode = WarningCode("ROUTE_MODEL_NOT_CATALOGUED");
+
 impl Warning {
     /// A warning with no subject, source or repair.
     pub fn new(code: WarningCode, message: impl Into<String>) -> Self {

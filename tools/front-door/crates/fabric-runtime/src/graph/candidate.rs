@@ -116,7 +116,6 @@ pub fn admit_running_candidate(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn admit(
     document: &GraphDocument,
     checkpoint: Option<&GraphCheckpoint>,
@@ -201,6 +200,9 @@ fn admit(
     validate_schema(document).map_err(CandidateError::from_admission)?;
     let expanded = plans::expand_typed(document, &all, expansions, &generous)
         .map_err(CandidateError::from_admission)?;
+    // Route models are canonicalised once by the host entry point that holds
+    // the effective catalogue. Admission reads the stored ids verbatim and
+    // never rewrites them. Spec: docs/specs/fabric.md#one-model-spelling-per-route
     validate_schema(&expanded).map_err(CandidateError::from_admission)?;
     if checkpoint.is_none()
         && expanded.nodes.iter().any(|node| {

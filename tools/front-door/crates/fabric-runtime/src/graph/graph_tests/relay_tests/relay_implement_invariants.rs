@@ -11,6 +11,7 @@ mod relay_provisioning {
             let resolvers = Default::default();
             let limits = plans::generous();
             let context = patch::PatchContext {
+                catalogue: None,
                 journal: None,
                 library: &library,
                 resolvers: &resolvers,

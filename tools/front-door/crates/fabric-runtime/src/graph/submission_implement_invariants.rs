@@ -53,6 +53,7 @@ fn submitted_implementation_preserves_its_compiled_topology_across_replays() {
                 let submitted = document.submission_patch.as_ref().unwrap();
                 let resolvers = Default::default();
                 let context = patch::PatchContext {
+                    catalogue: None,
                     library: &library,
                     resolvers: &resolvers,
 

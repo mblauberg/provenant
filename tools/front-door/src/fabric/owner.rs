@@ -990,9 +990,7 @@ impl BoundGraphOwner<'_> {
             if let Some(model) = owner
                 .snapshot(target, self.budget, self.cancel)?
                 .applied_route
-                .and_then(|route| {
-                    canonical_prior_model(route.provider.as_deref(), route.model.as_deref())
-                })
+                .and_then(|route| prior_model(route.model.as_deref()))
             {
                 models.push(model);
             }
@@ -1385,14 +1383,24 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             .iter()
             .map(|slot| (slot.lens.clone(), panel.lens_advice(&slot.lens, true)))
             .collect();
+        // Lower repair-panel tiers with the host's effective catalogue and
+        // surface every warning; no bundled fallback in product code.
+        let catalogue = provenant_cli::route::effective_catalogue(&self.factory.context.roots).ok();
         let slots = panel
             .slots
             .into_iter()
             .map(|slot| {
-                let (key, mut route) = crate::graph_support::tier_route(
-                    &slot.lens, &slot.tier, None, true,
+                let (key, mut route, warnings) = crate::graph_support::tier_route(
+                    &slot.lens,
+                    &slot.tier,
+                    None,
+                    true,
+                    catalogue.as_ref(),
                 )
                 .map_err(|_| "repair review route is invalid; correct reviewer tier settings")?;
+                for warning in warnings {
+                    let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+                }
                 if let Some(family) = slot
                     .satisfied_family
                     .as_ref()
@@ -1428,6 +1436,10 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
 
     fn input_cap_source(&self) -> provenant_fabric_runtime::graph::InputCapSource {
         self.factory.context.graph_prompt_limit_source
+    }
+
+    fn catalogue(&self) -> Option<provenant_routing::Catalogue> {
+        provenant_cli::route::effective_catalogue(&self.factory.context.roots).ok()
     }
 
     fn graph_admission_policy(&self) -> provenant_records::policy::Policy {
@@ -3117,11 +3129,7 @@ impl BoundGraphOwner<'_> {
         // accepted operation is observed as it was launched.
         if !accepted
             && let Some(model) = &route.model
-            && exact_route_refused(
-                &exact_model(route.adapter.as_deref(), model),
-                &excluded_families,
-                node.require_distinct,
-            )
+            && exact_route_refused(model.as_str(), &excluded_families, node.require_distinct)
         {
             return Ok(StartedAttempt::Refused(AttemptObservation::Terminal {
                 attempt_ref: None,
@@ -3563,7 +3571,7 @@ impl BoundGraphOwner<'_> {
                             extra: Default::default(),
                             required_family: route.required_family.clone(),
                             provider: adapter.clone(),
-                            model: exact_model(Some(adapter), model),
+                            model: model.to_owned(),
                             effort: route.effort.clone(),
                         }
                     }
@@ -3678,8 +3686,7 @@ impl BoundGraphOwner<'_> {
         // inherited. Warn at the graph host and retain it in the checkpoint.
         if !accepted
                 && let Some(model) = route.model.as_deref()
-                && let Ok(model) =
-                    provenant_routing::ModelId::parse(&exact_model(route.adapter.as_deref(), model))
+                && let Ok(model) = provenant_routing::ModelId::parse(model)
                 // Resolve against the same effective (bundled + discovered)
                 // catalogue and revision that `route list` uses, not just the
                 // bundled catalogue. One lookup shared with the CLI warning.
@@ -3689,8 +3696,14 @@ impl BoundGraphOwner<'_> {
                 // catalogue model; only a truly unknown model warns here.
                 && catalogue.resolve_family_alias(&model).is_none()
         {
+            let nearer = catalogue.nearest_models(&model);
+            let repair = if nearer.is_empty() {
+                "check `provenant route list` for catalogued model ids".to_owned()
+            } else {
+                format!("did you mean {}?", nearer.join(", "))
+            };
             let warning = format!(
-                "model {} is not in the catalogue; the provider will check it",
+                "model {} is not in the catalogue; {repair}; the provider will check it",
                 model.as_str()
             );
             warn(
@@ -4306,41 +4319,32 @@ pub(crate) fn graph_capability_overrides(
     (document.capability.clone(), document.no_capability.clone())
 }
 
-/// A graph route's exact model in `ADAPTER/ID` form.
-/// Canonicalise `provider/model` from the adapter and the model spelling a
-/// route carries. The adapter is the provider segment; a model that already
-/// starts with it is canonical, while a provider-relative id such as
-/// `opencode-go/<model>` still needs the adapter prefix.
-pub(crate) fn exact_model(adapter: Option<&str>, model: &str) -> String {
-    match adapter {
-        Some(adapter) if !adapter.is_empty() && !model.starts_with(&format!("{adapter}/")) => {
-            format!("{adapter}/{model}")
-        }
-        _ => model.to_owned(),
-    }
+/// The full catalogue id a prior attempt ran, as stored on its applied route.
+/// Graph admission already fixed this spelling; parsing it here only confirms
+/// it, and never derives an id from the adapter and the text again.
+fn prior_model(model: Option<&str>) -> Option<String> {
+    let model = model?;
+    Some(
+        provenant_routing::ModelId::parse(model)
+            .ok()?
+            .as_str()
+            .to_owned(),
+    )
 }
 
-fn canonical_prior_model(adapter: Option<&str>, model: Option<&str>) -> Option<String> {
-    model.map(|model| exact_model(adapter, model))
-}
-
-// Spec: docs/specs/retry-owner.md#recovery-preserves-work-and-budget
+// Spec: docs/specs/fabric.md#one-model-spelling-per-route
 #[test]
-fn retry_prior_model_uses_canonical_adapter_id() {
+fn retry_prior_model_uses_the_stored_full_id() {
     assert_eq!(
-        canonical_prior_model(Some("claude"), Some("claude-sonnet-5-5")).as_deref(),
+        prior_model(Some("claude/claude-sonnet-5-5")).as_deref(),
         Some("claude/claude-sonnet-5-5")
     );
     assert_eq!(
-        canonical_prior_model(Some("claude"), Some("claude/claude-sonnet-5-5")).as_deref(),
-        Some("claude/claude-sonnet-5-5")
-    );
-    // A provider-relative model keeps its upstream group and gains the adapter.
-    assert_eq!(
-        canonical_prior_model(Some("opencode"), Some("opencode-go/hy4-flash-free")).as_deref(),
+        prior_model(Some("opencode/opencode-go/hy4-flash-free")).as_deref(),
         Some("opencode/opencode-go/hy4-flash-free")
     );
-    assert_eq!(canonical_prior_model(None, None), None);
+    assert_eq!(prior_model(None), None);
+    assert_eq!(prior_model(Some("claude-sonnet-5-5")), None);
 }
 
 /// Whether required family separation refuses an exact route before launch.

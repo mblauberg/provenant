@@ -2066,6 +2066,7 @@ impl Factory {
             .zip(resolved_head.as_deref());
         let resolver = self.launch_resolvers_for_tier(raw, route.as_ref(), review_range)?;
         let context = PatchContext {
+            catalogue: None,
             library: &library,
             resolvers: &resolver,
 
@@ -2541,6 +2542,21 @@ impl Factory {
                 bind_review_warning(node, warning);
             }
         }
+        // Fix the document's own spelling here, before it is sealed or replayed,
+        // so explain shows exactly the ids admission will read verbatim.
+        // Spec: docs/specs/fabric.md#one-model-spelling-per-route
+        let catalogue = provenant_cli::route::effective_catalogue(&self.context.roots).ok();
+        // The host owns the effective catalogue and decides every model
+        // spelling here, once. Admission reads the stored ids verbatim.
+        // Spec: docs/specs/fabric.md#one-model-spelling-per-route
+        input_warnings.extend(
+            provenant_fabric_runtime::graph::canonicalise_route_models(
+                &mut document,
+                catalogue.as_ref(),
+            )
+            .into_iter()
+            .map(|warning| warning.to_string()),
+        );
         document.set_replay_digest(&digest);
         // Explain is read-only and still shows the compiled submission. For a
         // launch, the host performs writer preflight before sealing the patch.
@@ -2955,6 +2971,7 @@ impl Factory {
             .ok_or(FacadeError::NotFound)?;
         let library = self.template_library(None)?;
         let resolver = self.launch_resolvers(Some(&encode(&execution.document)?))?;
+        let catalogue = provenant_cli::route::effective_catalogue(&self.context.roots).ok();
         let admitted = patch::admit_patch(
             &mut LiveGraph {
                 document: &execution.document,
@@ -2963,6 +2980,7 @@ impl Factory {
             None,
             &patch,
             &PatchContext {
+                catalogue: catalogue.as_ref(),
                 library: &library,
                 resolvers: &resolver,
 
@@ -3164,6 +3182,7 @@ impl Factory {
                     &node,
                     input.get("brief").and_then(Value::as_str),
                     &PatchContext {
+                        catalogue: None,
                         library: &library,
                         resolvers: &resolver,
 

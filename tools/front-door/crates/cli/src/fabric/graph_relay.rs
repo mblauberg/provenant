@@ -686,7 +686,11 @@ fn serve_authorised(
                 &review_subjects,
             )
             .map_err(|error| refused("invalid_review", error))?;
+            // The host decides one spelling of every model a child route adds,
+            // so relay children reach launch with the same full ids as edits.
+            let catalogue = crate::route::effective_catalogue(&context.roots).ok();
             let patch_context = PatchContext {
+                catalogue: catalogue.as_ref(),
                 journal: None,
                 library: &library,
                 resolvers: &resolvers,
@@ -909,6 +913,7 @@ fn serve_authorised(
             .map_err(|error| refused("invalid_review", error))?;
             // The ID selects this graph; prepare checks each skip/replace target
             // against the calling parent's subtree, with the planner exemption.
+            let catalogue = crate::route::effective_catalogue(&context.roots).ok();
             let admitted = provenant_fabric_runtime::graph::patch::admit_patch(
                 &mut LiveGraph {
                     document: &document,
@@ -917,6 +922,7 @@ fn serve_authorised(
                 Some(&parent),
                 &patch,
                 &PatchContext {
+                    catalogue: catalogue.as_ref(),
                     journal: None,
                     library: &library,
                     resolvers: &resolvers,
@@ -1434,22 +1440,41 @@ pub fn tier_route(
     tier: &Value,
     effort: Option<&Value>,
     read_only: bool,
-) -> Result<(&'static str, Value), String> {
+    catalogue: Option<&provenant_routing::Catalogue>,
+) -> Result<
+    (
+        &'static str,
+        Value,
+        Vec<provenant_records::warning::Warning>,
+    ),
+    String,
+> {
+    let mut warnings = Vec::new();
     if tier.is_array() {
         if effort.is_some() {
             return Err(format!(
                 "node {id}: route lists cannot be combined with effort"
             ));
         }
-        return Ok(("routes", tier.clone()));
+        let mut routes = tier.clone();
+        for route in routes.as_array_mut().into_iter().flatten() {
+            if let Some(warning) = provenant_routing::canonical_route_value(route, catalogue) {
+                warnings.push(warning);
+            }
+        }
+        return Ok(("routes", routes, warnings));
     }
     let mut route = match tier {
         Value::String(name) if !name.is_empty() => {
-            if let Some((adapter, model)) = name.split_once('/') {
-                let (model, embedded_effort) = model
+            if name.contains('/') {
+                // An exact tier is one full catalogue id. The model id itself
+                // may contain '/', so only parse it once and keep its spelling.
+                let (text, embedded_effort) = name
                     .split_once('@')
-                    .map_or((model, None), |(model, effort)| (model, Some(effort)));
-                if adapter.is_empty() || model.is_empty() || embedded_effort == Some("") {
+                    .map_or((name.as_str(), None), |(text, effort)| (text, Some(effort)));
+                let model = provenant_routing::ModelId::parse(text)
+                    .map_err(|_| format!("node {id}: invalid exact-model tier {name}"))?;
+                if embedded_effort == Some("") {
                     return Err(format!("node {id}: invalid exact-model tier {name}"));
                 }
                 if embedded_effort.is_some() && effort.is_some() {
@@ -1457,7 +1482,7 @@ pub fn tier_route(
                         "node {id}: exact-model tier and effort both specify effort"
                     ));
                 }
-                let mut route = json!({"adapter":adapter,"model":model});
+                let mut route = json!({"adapter":model.adapter(),"model":model.as_str()});
                 if let Some(embedded_effort) = embedded_effort {
                     route["effort"] = json!(embedded_effort);
                 }
@@ -1481,14 +1506,20 @@ pub fn tier_route(
             ));
         }
     };
+    // Tiers built from an adapter and a relative model must reach resolution
+    // as one full id, just like an admission route. Alias-only routes are
+    // untouched. Spec: docs/specs/fabric.md#one-model-spelling-per-route
+    if let Some(warning) = provenant_routing::canonical_route_value(&mut route, catalogue) {
+        warnings.push(warning);
+    }
     if let Some(effort) = effort {
         route["effort"] = effort.clone();
     }
     let alias_only = route.get("alias").is_some() && route.get("model").is_none();
     if read_only && alias_only {
-        Ok(("routes", json!([route.clone(), route])))
+        Ok(("routes", json!([route.clone(), route]), warnings))
     } else {
-        Ok(("route", route))
+        Ok(("route", route, warnings))
     }
 }
 
@@ -1502,6 +1533,7 @@ pub fn launch_resolvers(
         review,
         document,
         ReviewDiffSelection::NotRequested,
+        None,
         |_, family| {
             Err(format!(
                 "required provider family {}: route eligibility context unavailable",
@@ -1572,9 +1604,16 @@ fn launch_resolvers_at_roots_with_selection(
 ) -> Result<std::collections::BTreeMap<String, Vec<String>>, String> {
     let exclude = document.exclude.clone();
     let review = &with_repository_floors(review, cwd)?;
-    launch_resolvers_with(review, document, pinned_diff, |slot, family| {
-        crate::route::resolve_review_family(roots, &slot.tier, family, &exclude)
-    })
+    // Review panel tiers lower with the same effective catalogue the host
+    // uses at submit, so a discovered model is never treated as uncatalogued.
+    let catalogue = crate::route::effective_catalogue(roots).ok();
+    launch_resolvers_with(
+        review,
+        document,
+        pinned_diff,
+        catalogue.as_ref(),
+        |slot, family| crate::route::resolve_review_family(roots, &slot.tier, family, &exclude),
+    )
 }
 
 /// Resolve relayed panels against the source each child or patch actually
@@ -1786,6 +1825,7 @@ fn launch_resolvers_with(
     review: &provenant_routing::ReviewConfig,
     document: &provenant_fabric_runtime::graph::GraphDocument,
     pinned_diff: ReviewDiffSelection,
+    catalogue: Option<&provenant_routing::Catalogue>,
     eligible: impl FnMut(&provenant_routing::ResolvedSlot, Option<&str>) -> Result<String, String>,
 ) -> Result<std::collections::BTreeMap<String, Vec<String>>, String> {
     let mut request = document.review.clone().unwrap_or_default();
@@ -1924,7 +1964,10 @@ fn launch_resolvers_with(
     let mut lenses = Vec::with_capacity(panel.slots.len());
     let mut routes = Vec::with_capacity(panel.slots.len());
     for slot in panel.slots {
-        let (key, mut route) = tier_route(&slot.lens, &slot.tier, None, true)?;
+        let (key, mut route, warnings) = tier_route(&slot.lens, &slot.tier, None, true, catalogue)?;
+        for warning in warnings {
+            provenant_records::warning::warn(warning);
+        }
         if let Some(family) = slot
             .satisfied_family
             .as_ref()
@@ -2609,6 +2652,60 @@ mod tests {
             .unwrap();
         assert_eq!(node.prompt, "Repository brief");
         assert!(library.resolve("task").is_ok());
+    }
+
+    // Spec: docs/specs/fabric.md#one-model-spelling-per-route
+    #[test]
+    fn exact_model_tier_lowers_to_its_full_catalogue_id() {
+        let catalogue = provenant_routing::Catalogue::bundled().unwrap();
+        let id = "opencode/opencode/deepseek-v4.1-flash-free";
+        let (key, route, warnings) = tier_route(
+            "review",
+            &json!(format!("{id}@low")),
+            None,
+            true,
+            Some(&catalogue),
+        )
+        .unwrap();
+        assert_eq!(key, "route");
+        assert_eq!(route["adapter"], "opencode");
+        assert_eq!(route["model"], id);
+        assert_eq!(route["effort"], "low");
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    // Spec: docs/specs/fabric.md#one-model-spelling-per-route
+    #[test]
+    fn relative_model_tier_tables_and_lists_lower_to_full_ids() {
+        let catalogue = provenant_routing::Catalogue::bundled().unwrap();
+        let table = json!({"adapter":"opencode", "model":"opencode/hy4-flash-free"});
+        let (key, route, warnings) =
+            tier_route("review", &table, None, true, Some(&catalogue)).unwrap();
+        assert_eq!(key, "route");
+        assert_eq!(route["model"], "opencode/opencode/hy4-flash-free");
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        // A bare model on a non-namespaced adapter still becomes a parseable
+        // full id, so review-family resolution no longer fails on a bare name.
+        let bare = json!({"adapter":"anthropic", "model":"claude-sonnet-5-5"});
+        let (_, route, warnings) =
+            tier_route("review", &bare, None, true, Some(&catalogue)).unwrap();
+        assert_eq!(route["model"], "anthropic/claude-sonnet-5-5");
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(
+            warnings[0].code,
+            provenant_records::warning::ROUTE_MODEL_NOT_CATALOGUED
+        );
+        assert!(provenant_routing::ModelId::parse(route["model"].as_str().unwrap()).is_ok());
+
+        let (key, routes, warnings) =
+            tier_route("review", &json!([table]), None, true, Some(&catalogue)).unwrap();
+        assert_eq!(key, "routes");
+        assert_eq!(
+            routes[0]["model"], "opencode/opencode/hy4-flash-free",
+            "route list members canonicalise too"
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
     }
 }
 
@@ -4521,6 +4618,7 @@ mod panel_tests {
                 Some("caller"),
                 &patch,
                 &PatchContext {
+                    catalogue: None,
                     library: &library,
                     resolvers: &resolvers,
                     limits: &limits,
@@ -4728,6 +4826,7 @@ mod panel_tests {
             None,
             &patch,
             &PatchContext {
+                catalogue: None,
                 library: &library,
                 resolvers: &crucial,
                 limits: &limits,
@@ -4776,9 +4875,10 @@ mod panel_tests {
             }]);
 
         for selection in [ReviewDiffSelection::Incomplete(Vec::new()), incomplete_size] {
-            let resolvers =
-                launch_resolvers_with(&review, &document, selection, |_, _| Ok("fixture".into()))
-                    .unwrap();
+            let resolvers = launch_resolvers_with(&review, &document, selection, None, |_, _| {
+                Ok("fixture".into())
+            })
+            .unwrap();
             let lenses = &resolvers["review-panel"];
             for lens in &configured_floor_lenses {
                 assert!(
@@ -4807,9 +4907,10 @@ mod panel_tests {
             numstat: Some(String::new()),
             tree: Some(String::new()),
         }]);
-        let quick =
-            launch_resolvers_with(&review, &document, empty_diff, |_, _| Ok("fixture".into()))
-                .unwrap();
+        let quick = launch_resolvers_with(&review, &document, empty_diff, None, |_, _| {
+            Ok("fixture".into())
+        })
+        .unwrap();
         assert!(
             quick
                 .values()
@@ -4830,7 +4931,7 @@ mod panel_tests {
             }])
         };
         // A bundled boundary floor adds its lens, never deep, and never refuses.
-        let bundled = launch_resolvers_with(&review, &document, boundary_diff(), |_, _| {
+        let bundled = launch_resolvers_with(&review, &document, boundary_diff(), None, |_, _| {
             Ok("fixture".into())
         })
         .unwrap();
@@ -4862,10 +4963,11 @@ mod panel_tests {
             },
         );
         project.floors.get_mut("unknown").unwrap().lenses = vec!["tests".into()];
-        let protected = launch_resolvers_with(&project, &document, boundary_diff(), |_, _| {
-            Ok("fixture".into())
-        })
-        .unwrap();
+        let protected =
+            launch_resolvers_with(&project, &document, boundary_diff(), None, |_, _| {
+                Ok("fixture".into())
+            })
+            .unwrap();
         let floor: Value = serde_json::from_str(&protected["review-coverage-floor"][0]).unwrap();
         assert_eq!(floor["hard"], true);
         let required = floor["required_lenses"].as_array().unwrap();
@@ -4907,6 +5009,7 @@ mod panel_tests {
                 numstat: Some("1\t0\tdocs/guide.md\0".into()),
                 tree: Some("tools/front-door/Cargo.toml".into()),
             }]),
+            None,
             |_, _| Ok("fixture".into()),
         )
         .unwrap();
@@ -4983,6 +5086,7 @@ mod panel_tests {
             &config.review,
             &document,
             ReviewDiffSelection::NotRequested,
+            None,
             |slot, required| {
                 let result = provenant_routing::resolve_for_account_with_seed_excluding_family(
                     &RouteRequest {
@@ -5057,6 +5161,7 @@ mod panel_tests {
             &config.review,
             &document,
             ReviewDiffSelection::NotRequested,
+            None,
             |_, _| Err("candidate account unavailable; excluded by policy".into()),
         )
         .unwrap_err();

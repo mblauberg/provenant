@@ -493,18 +493,8 @@ impl<'a> Service<'a> {
                         "route.model: invalid model route",
                     ));
                 }
-                let model = match model.split_once('/') {
-                    Some((prefix, id)) if prefix == provider && !id.is_empty() => model,
-                    Some((prefix, _)) => {
-                        return Err(input_error(
-                            ErrorKind::Invalid,
-                            format!(
-                                "route.model: model provider `{prefix}` does not match route provider `{provider}`"
-                            ),
-                        ));
-                    }
-                    None => format!("{provider}/{model}"),
-                };
+                // The model is the full catalogue id fixed by the caller;
+                // never derive it again from the adapter and the model text.
                 Ok(RequestedRoute::Model {
                     extra,
                     required_family,
