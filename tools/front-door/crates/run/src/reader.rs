@@ -888,30 +888,32 @@ impl RunStore {
             }
         {
             let delivery: WriterDeliveryReceipt = crate::db::decode(&raw)?;
-            // The sealed request binds this attempt to one planned destination
-            // and delivery mode. A delivery artifact is authoritative only when
-            // it names that destination; a stray receipt for another branch or
-            // remote must never settle this attempt. Only an integrate receipt
-            // may name a head other than the sealed writer head: integration
-            // publishes the lane to its destination and the receipt can carry
-            // the integrated tip. Push and pr receipts keep the head equality
-            // check, so a receipt delivered for H1 cannot settle a sealed H2
-            // that was never delivered.
+            // Only an integrate receipt may name a head other than the sealed
+            // writer head: integration publishes the lane to its destination and
+            // the receipt can carry the integrated tip. That exception holds only
+            // for the planned destination, so a stray receipt for another branch
+            // or remote never settles this attempt. Push and pr receipts keep
+            // head equality, so a receipt delivered for H1 cannot settle a sealed
+            // H2 that was never delivered.
             let planned = self
                 .request_observed(id, call)
                 .ok()
                 .and_then(|request| request.task.deliver);
-            let same_destination = record.delivery.as_ref().is_some_and(|sealed| {
-                sealed.branch == delivery.branch && sealed.remote == delivery.remote
-            }) || planned.as_ref().is_some_and(|deliver| {
-                deliver.branch == delivery.branch && deliver.remote == delivery.remote
-            });
+            // With no sealed or planned destination there is nothing to bind;
+            // only head equality can then admit the receipt.
+            let same_destination = record.delivery.is_none() && planned.is_none()
+                || record.delivery.as_ref().is_some_and(|sealed| {
+                    sealed.branch == delivery.branch && sealed.remote == delivery.remote
+                })
+                || planned.as_ref().is_some_and(|deliver| {
+                    deliver.branch == delivery.branch && deliver.remote == delivery.remote
+                });
             let integrate = planned
                 .as_ref()
                 .is_some_and(|deliver| matches!(deliver.mode, DeliveryMode::Integrate(_)));
             if delivery.head.is_some()
                 && same_destination
-                && (integrate || delivery.head == record.head)
+                && (delivery.head == record.head || integrate)
             {
                 record.delivery = Some(delivery);
             }
