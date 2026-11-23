@@ -2003,10 +2003,13 @@ pub(in crate::run) fn read_only_source_ref(
             Some(fallback)
         })?
     } else if choice.value == "default_branch" {
-        configured_upstream(&executor, &repo, &utility, budget, &cancel).or_else(|| {
-            let remote = resolved_forge_remote(state, ancestor)?;
-            default_upstream(&executor, &repo, &utility, budget, &cancel, &remote)
-        })?
+        // An explicit default_branch pins the fetched default branch, never
+        // this checkout's configured tracking upstream: a feature branch may
+        // track a different branch and must still read the forge default.
+        // Only the empty compiled-default case above uses configured_upstream.
+        // Spec: docs/specs/run-launch.md#inputs-and-resources
+        let remote = resolved_forge_remote(state, ancestor)?;
+        default_upstream(&executor, &repo, &utility, budget, &cancel, &remote)?
     } else {
         resolve_upstream_ref(&executor, &repo, &utility, budget, &cancel, &choice.value)?
     };

@@ -228,6 +228,10 @@ beside the type it owns, is:
 - Land policies use `LAND_PRECEDENCE`: default, host, project.
 - Graph templates use `TEMPLATE_PRECEDENCE`: default, host, project, launch.
 - Pool weights use `WEIGHT_PRECEDENCE`: default, host, project.
+- Observation retry uses `RETRY_PRECEDENCE`: default, profile, host, project,
+  launch. The `ci.retry.*` values are one family shared by every CI reader.
+- Admin publication grants use `ADMIN_PUBLICATION_PRECEDENCE`: default, host. A
+  grant from another layer is ignored and warned with its source.
 
 Every production resolver builds its candidates and merges them with its own
 const; the const is the single declaration of order, and a candidate from a

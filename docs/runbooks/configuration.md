@@ -29,7 +29,10 @@ location.
 
 - A layer sets only the fields it changes. Objects deep-merge, so
   `{"verify": {"base": "origin/master"}}` keeps the other verify fields. Arrays
-  replace. `schema_version` is optional in a layer.
+  replace. `schema_version` is optional in a layer; the current port-table
+  version is 3. A repository `.provenant/ports.json` still declaring 2 is read
+  with the current schema after a `CONFIG_MALFORMED` warning whose repair is to
+  set `"schema_version": 3` in that file (or rerun init to regenerate it).
 - Provenance is per dotted leaf (for example `build.prepare`, `verify.base`):
   each leaf reports the highest layer that set it, in `config show --full`
   and `config ports --json`.

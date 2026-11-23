@@ -311,9 +311,9 @@ pub struct ReadOnlySourceRef {
 }
 
 /// The sourced choice of what a read-only lane reads. `value` is `checkout`,
-/// `default_branch`, an explicit ref, or empty for the compiled default; the
-/// layer and origin are the ones the owner actually set the knob at, so every
-/// warning and receipt names the same place.
+/// `default_branch`, an explicit ref, or empty for the compiled default (the
+/// `auto` registry value); the layer and origin are the ones the owner actually
+/// set the knob at, so every warning and receipt names the same place.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReadSourceChoice {
     pub value: String,

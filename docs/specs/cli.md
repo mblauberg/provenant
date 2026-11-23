@@ -136,8 +136,9 @@ passing `--project PATH` as the repair.
 
 ### Warnings are typed values
 
-A warning is a typed value: a stable UPPER_SNAKE code from the declared
-catalogue, a one-sentence message, and optional subject, source and repair.
+A warning is a typed value: a stable UPPER_SNAKE code from one of the two
+declared catalogues, a one-sentence message, and optional subject, source and
+repair.
 Library code never writes a warning itself: one function routes each warning to
 the innermost thread-local capture on this thread, then to the command's process
 sink, then to stderr as `warning: <message>` when neither is installed. A sink
@@ -147,12 +148,18 @@ on the prose, and adding a code is additive. A repeated key collapses per
 invocation or per change; a per-change key hashes the code, subject and message
 and is remembered in the state root. Each code names one event; there are no
 catch-all codes, so `CONFIG_MALFORMED` means a configuration file or value was
-malformed and nothing else. The declared catalogue in
-`crates/records/src/warning.rs` is authoritative: every const carries a one-line
-meaning and the upper-snake test lists exactly those consts.
+malformed and nothing else. The const catalogue in
+`crates/records/src/warning.rs` declares the library's codes: every const carries
+a one-line meaning and the upper-snake test derives its list from those consts.
+Policy rule codes are the second catalogue, declared in the compiled policy
+table `run/assets/policy.toml` and read by `crates/records/src/policy.rs`; a
+violated rule warns under its own rule code and reaches the same sink and
+envelope. Both catalogues follow the same stability rules: a code names one event
+for the lifetime of its declaration and adding a code is additive.
 - Why: a consumer needs to act on a warning without matching text, and a
   command that returns warnings as data must not also print them.
-- Owner: `crates/records/src/warning.rs`, the binary edge that installs the sink
+- Owner: `crates/records/src/warning.rs`, `run/assets/policy.toml`, the binary
+  edge that installs the sink
 
 ### Run refusals keep their own code at the facade
 
@@ -405,7 +412,9 @@ available and the forge through the resolved `ForgeContext` otherwise, and it
 owns the bounded wait, cadence and sourced retry family. `pr status`, the landing
 gate's `await_pr_ci`, `ci failures` and review-subject selection call that one
 reader instead of running `gh` themselves. Retry and backoff values are one
-sourced family (`ci.retry.*`), so a pause names the layer and place that set it.
+sourced family (`ci.retry.*`), registered in `config/harness-knobs.json` and
+set with `provenant config set` or under `[knobs]`, so a pause names the layer
+and place that set it.
 
 `pr status` reports each pull request's head, check rollup and failed check
 names from one batched GraphQL read when available, and falls back between
@@ -455,8 +464,9 @@ unreadable log is reported as unreadable evidence, never as zero failures.
 A `wait --pr` reading of a head with no reported checks names why before it
 suggests an action. The observer reads `mergeable` and `mergeStateStatus` from
 the PR resource first and rereads an UNKNOWN mergeability a bounded number of
-times (the sourced `ci.retry.mergeable_attempts` setting, default 3, in
-`src/pr/observer/retry.rs`) before choosing:
+times (the sourced `ci.retry.mergeable_attempts` setting, default 3, registered
+in `config/harness-knobs.json` and resolved in `src/pr/observer/retry.rs`)
+before choosing:
 
 - `merge_conflict`: GitHub reports the head as conflicting. It starts no
   `pull_request` workflows for a conflicting head, so the next step is to merge

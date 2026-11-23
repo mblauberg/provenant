@@ -152,6 +152,49 @@ impl Retry {
         }
     }
 
+    /// Merge the `ci.retry.*` knobs into the family, keeping each knob's layer
+    /// and origin. Duration knobs are integer milliseconds; attempt knobs are
+    /// counts. An absent or unreadable knob keeps the compiled default.
+    /// Spec: docs/specs/cli.md#ci-observations
+    pub(crate) fn from_knobs(
+        knobs: &std::collections::BTreeMap<String, Sourced<serde_json::Value>>,
+    ) -> Self {
+        fn duration(
+            knobs: &std::collections::BTreeMap<String, Sourced<serde_json::Value>>,
+            name: &str,
+        ) -> Option<Sourced<Duration>> {
+            let knob = knobs.get(name)?;
+            let millis = knob.value.as_u64()?;
+            Some(Sourced {
+                value: Duration::from_millis(millis),
+                source: knob.source.clone(),
+            })
+        }
+
+        fn count<T: TryFrom<u64>>(
+            knobs: &std::collections::BTreeMap<String, Sourced<serde_json::Value>>,
+            name: &str,
+        ) -> Option<Sourced<T>> {
+            let knob = knobs.get(name)?;
+            let value = T::try_from(knob.value.as_u64()?).ok()?;
+            Some(Sourced {
+                value,
+                source: knob.source.clone(),
+            })
+        }
+
+        Self::resolve(
+            duration(knobs, "ci.retry.poll"),
+            duration(knobs, "ci.retry.first"),
+            duration(knobs, "ci.retry.last"),
+            duration(knobs, "ci.retry.slice"),
+            count(knobs, "ci.retry.mergeable_attempts"),
+            duration(knobs, "ci.retry.mergeable_pause"),
+            count(knobs, "ci.retry.head_attempts"),
+            duration(knobs, "ci.retry.head_delay"),
+        )
+    }
+
     /// `LAYER (origin)` for one value, for a warning that names why a pause was
     /// chosen.
     #[allow(dead_code, reason = "available to every waiter that reports a pause")]
@@ -201,5 +244,34 @@ mod tests {
         assert_eq!(retry.slice.value, Duration::from_millis(50));
         assert_eq!(retry.head_attempts.value, 4);
         assert_eq!(retry.head_delay.value, Duration::from_millis(250));
+    }
+
+    /// Spec: docs/specs/cli.md#ci-observations
+    #[test]
+    fn knobs_override_the_shared_family_and_keep_their_source() {
+        let mut knobs = std::collections::BTreeMap::new();
+        knobs.insert(
+            "ci.retry.mergeable_attempts".to_owned(),
+            sourced(
+                serde_json::json!(7),
+                Layer::Host,
+                Some("config.toml#ci.retry.mergeable_attempts"),
+            ),
+        );
+        knobs.insert(
+            "ci.retry.head_delay".to_owned(),
+            sourced(
+                serde_json::json!(9),
+                Layer::Project,
+                Some("config.toml#ci.retry.head_delay"),
+            ),
+        );
+        let retry = Retry::from_knobs(&knobs);
+        assert_eq!(retry.mergeable_attempts.value, 7);
+        assert_eq!(retry.mergeable_attempts.source.layer, Layer::Host);
+        assert_eq!(retry.head_delay.value, Duration::from_millis(9));
+        assert_eq!(retry.head_delay.source.layer, Layer::Project);
+        assert_eq!(retry.poll.value, DEFAULT_POLL);
+        assert_eq!(retry.poll.source.layer, Layer::Default);
     }
 }
