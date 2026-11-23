@@ -8,7 +8,7 @@ what you may rely on and how stable each item is (stability tiers, command
 grammar, run files, environment, state root, exit codes); this page is the
 procedure. Check an item's tier there before you build on it, and read the release
 notes on each minor upgrade. Moving a host from 1.x is in the
-[install runbook](install.md#first-20-install-after-1x).
+[install runbook](install.md#migrating-from-1x).
 
 ## Adopt with no repository changes
 
