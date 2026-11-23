@@ -609,6 +609,16 @@ impl AttemptSpec {
         if let Some(scope) = &self.ci_scope {
             knobs.push(format!("lanes.ci_scope={scope}"));
         }
+        // The launch layer of the layered brief preamble. Carried as an
+        // attempt input so it travels with the sealed graph and is recorded
+        // with its source like any other launch knob.
+        if let Some(path) = self
+            .extra
+            .get("preamble_file")
+            .and_then(|value| value.as_str())
+        {
+            knobs.push(format!("lanes.brief_preamble={path}"));
+        }
         knobs
     }
 

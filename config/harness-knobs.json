@@ -14,6 +14,7 @@
       "lanes.cargo_cache_max",
       "lanes.ci_scope",
       "lanes.verification",
+      "lanes.brief_preamble",
       "lanes.writer_dirty",
       "lanes.gh_budget",
       "lanes.isolation",
@@ -630,6 +631,13 @@
       "full_after": {"type": "duration", "allowed": "0 or whole seconds, minutes, hours, days or weeks", "default": "24h", "effect": "Run a full workspace selection when this long has elapsed since the last full selection."}
     }
   },
+  "port_verify_settings": {
+    "path": "verify",
+    "where": "the `verify` object of host, host-project or project ports.json",
+    "settings": {
+      "static_checks": {"type": "array", "allowed": "list of {argv, cwd, timeout_seconds} entries; argv has a non-empty program, cwd is repository-relative and timeout_seconds is positive", "default": "[]", "effect": "Cheap repository checks a writer runs before pushing, named in the writer preamble with this leaf's source. They need no build; an absent or empty list adds no preamble text, and a failure is reported in the handoff without refusing the push. CI still gates the merge."}
+    }
+  },
   "domain_policy_settings": {
     "path": "domains.policy",
     "settings": {
@@ -937,6 +945,12 @@
       "reader": "tools/front-door/crates/run/src/verification.rs",
       "effect": "Verification guidance in a writer lane's preamble. The lane formats only: it never compiles, seeds or admits a build. targeted (default) names the touched crates and their tests that the chair's integrated check compiles and lints; check narrows that to the touched crates; full names the whole workspace. CI runs the full suite in every case. A brief line `Verification scope: targeted` (or check or full) overrides the knob; the preamble then names source brief. Host and project [knobs] name source host or project. Set per run with --knob lanes.verification=targeted.",
       "trade_off": "Advisory guidance; a wider scope spends the chair's host build cap, never the lane's, because lanes do not build."
+    },
+    "lanes.brief_preamble": {
+      "type": "string", "default": "", "status": "wired",
+      "reader": "tools/front-door/crates/run/src/completion.rs",
+      "effect": "Path to a standing lane-rules file, set at the host layer in <state>/config.toml or the project layer in .provenant/config.toml under [knobs]. Host, project and launch (--preamble-file) layers concatenate in that order, each labelled with its source and skippable to roles writer, review or read-only through a first-line `<!-- provenant-roles: ... -->` header. A missing or unreadable file warns with its layer and the launch proceeds. Cargo target, CI scope and verification lines keep their own knobs.",
+      "trade_off": "A layered file keeps repeated lane rules in one place so briefs carry only the task; an unreadable layer adds a warning without blocking launch."
     },
     "lanes.writer_dirty": {
       "type": "enum",

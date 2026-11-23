@@ -462,6 +462,11 @@ fn launch_input(input: &Value) -> Result<Value, FacadeError> {
             attempt[field] = value.clone();
         }
     }
+    // `--preamble-file` is a launch-layer input. Carry it on the attempt so
+    // `lane_knobs` records it as `lanes.brief_preamble` from the launch layer.
+    if let Some(value) = input.get("preamble_file").filter(|value| !value.is_null()) {
+        attempt["preamble_file"] = value.clone();
+    }
     // Retain provenance when these run controls are merged onto a template.
     for field in ["token_budget", "on_budget", "budget_grace", "lane_access"] {
         if attempt.get(field).is_some() {

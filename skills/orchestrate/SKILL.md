@@ -43,6 +43,27 @@ and key; Provenant keeps no lifecycle for it. `cloud collect KEY` adds a
 worktree holding the branch it pushed, which then goes through review like any
 other.
 
+## Brief preamble
+
+Standing lane rules go in a layered `lanes.brief_preamble` file, not in each
+brief. The knob names a file at the host layer (`<state>/config.toml`) and at
+the project layer (`.provenant/config.toml`) under `[knobs]`; `provenant run
+--preamble-file PATH` adds the launch layer. The three layers concatenate in
+host, project, launch order and each is labelled with its source in every lane
+preamble, so briefs carry only the task. A file scoped to one role starts with
+`<!-- provenant-roles: writer, review, read-only -->` on its first line and is
+shown only to those roles; a file with no such header applies to all. A missing
+or unreadable file warns with its layer and the launch proceeds. Cargo target,
+CI scope and verification lines keep their own knobs and are not repeated in
+the preamble file.
+
+A project may declare cheap `verify.static_checks` entries in its port table
+(`.provenant/ports.json`): each has an `argv`, a repository-relative `cwd` and a
+`timeout_seconds` cap. The writer preamble names them with their source and
+tells the writer to run them before pushing. They need no build. A failure is
+reported in the handoff, does not refuse the push, and CI still gates the
+merge. With no declaration, no static-check text is added.
+
 ## Wait and recover
 
 Block on one `wait` call, with `--any` for the first settlement; never poll.
