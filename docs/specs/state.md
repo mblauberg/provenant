@@ -215,6 +215,19 @@ Each family declares its precedence once, lowest first, beside the type it owns:
   records its actual layer; a platform or restriction is a `constraint` beside
   the layer, not a source of the value.
 
+The run store's base-13-to-14 migration (`crates/run/src/migration_13_14.sql`)
+is the one rewrite for these renames. On a writable open it rewrites each stored
+attempt record: `route_policy` becomes `route`, a sandbox `restriction` or
+`platform` becomes a `constraint` beside the `host` layer and a `knob` becomes
+`host`, a resource fact's `configuration` becomes `host` and `shipped_default`
+becomes `default`, and a port binding's `builtin` becomes `default`. The same
+migration moves v2.8.2 flat usage buckets (`uncached_input`,
+`output_excluding_reasoning`, `cache_read`, `cache_write`, `cache_write_1h`,
+`reasoning`, including a retained session total) under `tokens` and maps the old
+free-form source to the typed `stream` source, preserving every stated number.
+A malformed row is skipped so it fails only its own decode; a row already in the
+new shape is left byte-identical. No decoder accepts a retired spelling.
+
 ### One sourced port table
 
 One table declares forge operations, verify, land, CI observation, worktree
