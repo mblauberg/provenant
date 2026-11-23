@@ -127,9 +127,10 @@ mod fixtures {
             "verified_owner": "02020202020202020202020202020202",
             "read_only_writable": [],
             "protected_paths": [],
-            "usage": {"uncached_input": null, "cache_read": null, "cache_write": null,
-                "cache_write_1h": null, "output_excluding_reasoning": null, "reasoning": null,
-                "source": null, "context_basis_points": null},
+            // Spec: docs/specs/next-batch.md#seam-6-adapter-usage-accounting
+            // UsageRecord carries typed token buckets and a non-optional source.
+            "usage": {"tokens":{"input": null, "cache_read": null, "cache_write": null,
+                "cache_write_1h": null, "output": null, "reasoning": null}},
             "prompt": {"path": {"encoding": "utf8", "path": "attempts/65656565656565656565656565656565/prompt.txt"},
                 "digest": "sha256:aaecb569221e2e49869a9b3e5d61280a2098fb65b08bae1198e892e8f6f00aba",
                 "bytes": 12, "complete": true, "redacted": false},
@@ -473,8 +474,9 @@ mod fixtures {
                         "artifacts": [{"name": "prompt", "bytes": 12, "complete": true,
                             "digest": "sha256:aaecb569221e2e49869a9b3e5d61280a2098fb65b08bae1198e892e8f6f00aba",
                             "present": true, "redacted": false}],
-                        "usage": {"uncached_input": null, "cache_read": null, "cache_write": null,
-                            "output_excluding_reasoning": null, "reasoning": null, "context_basis_points": null, "source": null},
+                        "usage": {"tokens":{"input": null, "cache_read": null, "cache_write": null,
+                            "cache_write_1h": null, "output": null, "reasoning": null},
+                            "source": "stream", "context_basis_points": null},
                         "usage_coverage": {"known": [], "missing": ["uncached_input", "cache_read", "cache_write", "output_excluding_reasoning", "reasoning"]},
                         "linked_inbox_requests": [],
                         "coverage": {"linked_inbox_requests": "complete", "nested": "bounded_tree_search", "peer": "not_searched"}

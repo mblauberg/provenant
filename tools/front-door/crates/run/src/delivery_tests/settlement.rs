@@ -557,26 +557,6 @@ fn prepare_candidate_git(
     Ok(scratch)
 }
 
-/// Run Git against the lane's candidate view, with the provider's binding.
-fn run_in_candidate(
-    fixture: &PrepareFixture,
-    scratch: &Path,
-    args: &[&str],
-) -> std::result::Result<std::process::Output, Box<dyn std::error::Error>> {
-    let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-    Ok(provenant_os::fixture::git_command_at(&git)
-        .env_clear()
-        .envs(fixture.environment.iter().map(|(key, value)| (key, value)))
-        .env("GIT_DIR", scratch.join("git-common"))
-        .env("GIT_COMMON_DIR", scratch.join("git-common"))
-        .env("GIT_OBJECT_DIRECTORY", scratch.join("git-objects"))
-        .env("GIT_INDEX_FILE", scratch.join("git-common/index"))
-        .env("GIT_WORK_TREE", &fixture.writer.worktree)
-        .current_dir(&fixture.writer.worktree)
-        .args(args)
-        .output()?)
-}
-
 // Spec: docs/specs/run-settlement.md#settlement
 #[test]
 fn terminal_warns_and_publishes_a_cherry_pick_in_the_candidate_git()
@@ -589,13 +569,13 @@ fn terminal_warns_and_publishes_a_cherry_pick_in_the_candidate_git()
     crate::writer::GIT_OPERATION_WARNINGS.with(|warnings| warnings.borrow_mut().clear());
     assert!(!fixture.terminal(|| {
         let scratch = prepare_candidate_git(&fixture)?;
-        let outcome =
-            run_in_candidate(&fixture, &scratch, &["cherry-pick", "--no-commit", &picked])?;
-        assert!(
-            outcome.status.success(),
-            "{}",
-            String::from_utf8_lossy(&outcome.stderr)
-        );
+        // Spec: docs/specs/run-settlement.md#settlement -- git-cherry-pick(1)
+        // does not set CHERRY_PICK_HEAD under --no-commit, so write the
+        // resolved-but-uncommitted state the owner rule covers directly.
+        std::fs::write(
+            scratch.join("git-common").join("CHERRY_PICK_HEAD"),
+            format!("{picked}\n"),
+        )?;
         Ok(())
     })?);
     let candidate = fixture.root.join("attempt/tmp/candidate-0/git-common");

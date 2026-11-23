@@ -14,6 +14,18 @@ use std::{
 };
 use support::{Result, TestRig, code};
 
+/// Under `--json` a typed warning lives in the command envelope, never on raw
+/// stderr. Spec: docs/specs/next-batch.md#seam-1-settings-and-warnings.
+fn envelope_warns(report: &Value, text: &str) -> bool {
+    report["warnings"].as_array().is_some_and(|warnings| {
+        warnings.iter().any(|warning| {
+            warning["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(text))
+        })
+    })
+}
+
 // Medium: a real shell inherits the provider's lane environment and native
 // confinement. No network, provider login, compiler or sleeps are involved.
 fn writer_shell_probe() -> Result<String> {
@@ -1562,7 +1574,19 @@ fn remote_only_writer_cli_starts_at_remote_tip() -> Result {
         report["data"]["checkpoint"]["nodes"][0]["new_worktree_base"], remote_tip,
         "recovery must retain the selected remote tip before provisioning"
     );
-    assert!(combined.contains("warning: ignoring --base"), "{combined}");
+    // Spec: docs/specs/next-batch.md#seam-1-settings-and-warnings -- under
+    // --json warnings travel in the envelope, never on raw stderr.
+    assert!(
+        settled.launch_value["warnings"]
+            .as_array()
+            .is_some_and(|warnings| warnings.iter().any(|warning| {
+                warning["code"] == "BRANCH_BEHIND_BASE"
+                    && warning["message"]
+                        .as_str()
+                        .is_some_and(|message| message.contains("ignoring --base"))
+            })),
+        "no BRANCH_BEHIND_BASE warning in the launch envelope: {combined}"
+    );
 
     let args = vec![
         "run",
@@ -1729,8 +1753,11 @@ fn graph_opencode_observes_v2_wal_session() -> Result {
                 settled.launch_value
             );
             if batch.iter().any(|case| case.2 == "model_unavailable") {
-                let stderr = String::from_utf8_lossy(&settled.launch.stderr.bytes);
-                assert!(stderr.contains("not in the catalogue"), "{stderr}");
+                assert!(
+                    envelope_warns(&settled.launch_value, "not in the catalogue"),
+                    "{}",
+                    settled.launch_value
+                );
             }
             for &(operation, _, expected, model, account) in batch {
                 let node = settled.checkpoint["nodes"]
@@ -3058,10 +3085,7 @@ fn partial_quota_alias_fixture(writer: bool) -> Result {
         "graph writer predecessor must survive admission"
     );
     assert_eq!(first["state"], "quota_limited", "{lanes}");
-    assert_eq!(
-        first["usage"]["output_excluding_reasoning"], 2280,
-        "{lanes}"
-    );
+    assert_eq!(first["usage"]["tokens"]["output"], 2280, "{lanes}");
     assert_eq!(
         first["applied_route"]["model"], "codex/gpt-6-luna",
         "{lanes}"
@@ -5260,10 +5284,12 @@ fn run_graph_provider_with_wait(
         )?,
     )?;
     let settled = rig.run_and_wait(&["--file", document.to_str().ok_or("document")?], wait)?;
-    let out = &settled.launch;
     if unlisted {
-        let stderr = String::from_utf8_lossy(&out.stderr.bytes);
-        assert!(stderr.contains("not in the catalogue"), "{stderr}");
+        assert!(
+            envelope_warns(&settled.launch_value, "not in the catalogue"),
+            "{}",
+            settled.launch_value
+        );
     }
     let response = &settled.launch_value;
     // The wait reports how the graph ended: settled, unsuccessful, needing
@@ -5600,9 +5626,9 @@ fn uncatalogued_cli_model_launches_and_surfaces_provider_failure() -> Result {
         let settled = rig.wait_launched(launch, value, "30s")?;
         assert_eq!(settled.exit(), expected, "{:?}", settled.wait);
         assert!(
-            String::from_utf8_lossy(&settled.launch.stderr.bytes).contains("not in the catalogue"),
-            "{:?}",
-            settled.launch
+            envelope_warns(&settled.launch_value, "not in the catalogue"),
+            "{}",
+            settled.launch_value
         );
         let node = settled.checkpoint["nodes"][0]["id"]
             .as_str()
@@ -6267,10 +6293,10 @@ fn discovered_exact_model_launch_has_no_catalogue_warning() -> Result {
         "{:?}",
         discovered.launch_value
     );
-    let stderr = String::from_utf8_lossy(&discovered.launch.stderr.bytes);
     assert!(
-        !stderr.contains("not in the catalogue"),
-        "discovered exact model warned: {stderr}"
+        !envelope_warns(&discovered.launch_value, "not in the catalogue"),
+        "discovered exact model warned: {}",
+        discovered.launch_value
     );
 
     let unknown = run_one("unknown-exact", "opencode/opencode/uncatalogued-3531")?;
@@ -6280,10 +6306,10 @@ fn discovered_exact_model_launch_has_no_catalogue_warning() -> Result {
         "{:?}",
         unknown.launch_value
     );
-    let stderr = String::from_utf8_lossy(&unknown.launch.stderr.bytes);
     assert!(
-        stderr.contains("not in the catalogue"),
-        "unknown model did not warn: {stderr}"
+        envelope_warns(&unknown.launch_value, "not in the catalogue"),
+        "unknown model did not warn: {}",
+        unknown.launch_value
     );
 
     cleanup.disarm();

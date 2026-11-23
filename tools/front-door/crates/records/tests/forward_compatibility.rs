@@ -263,7 +263,6 @@ cases! {
     requested_named_preserves_digest: run::RequestedRoute => requested_route();
     requested_review_preserves_digest: run::RequestedRoute => json!({"kind":"review","name":"senior","effort":null,"excluded_families":[],"distinct_families":false});
     route_record_preserves_digest: run::RouteRecord => route_record();
-    usage_record_preserves_digest: run::UsageRecord => json!({});
     operation_record_preserves_digest: run::OperationRecord => json!({"schema_version":1,"project_id":ID,"actor_id":ID,"operation_id":"operation","kind":"dispatch","request_digest":digest(),"state":"accepted"});
     refused_operation_preserves_digest: run::OperationRecord => json!({"schema_version":1,"project_id":ID,"actor_id":ID,"operation_id":"operation","kind":"dispatch","request_digest":digest(),"state":"refused","refusal":{"code":"REFUSED","detail":"not admitted"},"worktree":"lane-branch","refused_at":NOW,"refusal_chair":{"host":ID,"actor":ID}});
     queued_state_preserves_digest: run::AttemptState => json!({"state":"queued"});
@@ -341,6 +340,18 @@ fn attempt_record_preserves_digest() -> TestResult {
     add_future_fields(&mut value);
     value["key"] = key;
     assert_preserved::<run::AttemptRecord>("run-attempt", value)
+}
+
+#[test]
+fn usage_record_preserves_digest() -> TestResult {
+    let mut value = normalise::<run::UsageRecord>(json!({}))?;
+    // Tokens is a closed value struct (six Option buckets, Copy per the seam
+    // contract). Unlike record payloads it deliberately discards unknown
+    // fields; the record's `extra` map keeps the forward fields that survive.
+    let tokens = value["tokens"].clone();
+    add_future_fields(&mut value);
+    value["tokens"] = tokens;
+    assert_preserved::<run::UsageRecord>("usage_record_preserves_digest", value)
 }
 
 #[test]

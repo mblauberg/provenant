@@ -90,14 +90,17 @@ fn publish_no_clobber(source: &Path, target: &Path) -> Result<bool, MigrationErr
     let target_parent = target
         .parent()
         .ok_or_else(|| MigrationError::new(format!("{}: no parent directory", target.display())))?;
-    let name = source
+    let source_name = source
         .file_name()
         .ok_or_else(|| MigrationError::new(format!("{}: no file name", source.display())))?;
+    let target_name = target
+        .file_name()
+        .ok_or_else(|| MigrationError::new(format!("{}: no file name", target.display())))?;
     let from = Directory::open_anchor(source_parent)
         .map_err(|error| MigrationError::new(format!("{}: {error}", source_parent.display())))?;
     let to = Directory::open_anchor(target_parent)
         .map_err(|error| MigrationError::new(format!("{}: {error}", target_parent.display())))?;
-    match from.rename_noreplace(name, &to, name) {
+    match from.rename_noreplace(source_name, &to, target_name) {
         Ok(()) => Ok(true),
         Err(FsError::Rename { source: error, .. }) if error.kind() == ErrorKind::AlreadyExists => {
             Ok(false)
