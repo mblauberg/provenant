@@ -1,5 +1,6 @@
 #![allow(clippy::unwrap_used)]
 use super::*;
+use provenant_records::Layer;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -363,8 +364,8 @@ fn malformed_authority_knobs_fall_back_to_their_restrictive_value() {
         crate::knobs::registry().unwrap().knobs["lanes.launch_retry_limit"].default
     );
     assert_eq!(
-        config.knobs["lanes.launch_retry_limit"].source,
-        KnobSource::Default
+        config.knobs["lanes.launch_retry_limit"].source.layer,
+        Layer::Default
     );
     assert_eq!(config.warnings.len(), 1);
     assert_eq!(config.warnings[0].rule, "type");
@@ -385,8 +386,8 @@ fn a_misspelt_knob_warns_once_with_the_nearest_name_and_keeps_defaults() {
         + 1;
     assert_eq!(config.warnings[0].line, source_line);
     assert_eq!(
-        config.knobs["lanes.max_concurrency"].source,
-        KnobSource::Default
+        config.knobs["lanes.max_concurrency"].source.layer,
+        Layer::Default
     );
     // The location prints as plain text, never as a Debug rendering.
     let error = load(&roots, Some(&b"schema_version=1\n[knobs]\nx=[\n"[..])).unwrap_err();
@@ -419,7 +420,7 @@ fn unquoted_dotted_knob_names_are_the_knob() {
     let config = load(&roots, Some(text.as_bytes())).unwrap();
     assert!(config.warnings.is_empty(), "{:?}", config.warnings);
     assert_eq!(config.knobs["lanes.publish"].value, false);
-    assert_eq!(config.knobs["lanes.publish"].source, KnobSource::Override);
+    assert_eq!(config.knobs["lanes.publish"].source.layer, Layer::Host);
     assert_eq!(config.knobs["lanes.max_depth"].value, 3);
     assert_eq!(config.knobs["chair.auto_switch"].value, true);
     // Each flattened name gets the normal validation.

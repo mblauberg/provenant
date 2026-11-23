@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use super::*;
 use provenant_core::Roots;
+use provenant_records::Layer;
 use serde::Deserialize;
 use std::{io, path::Path, sync::OnceLock};
 
@@ -38,7 +39,7 @@ fn refusal_notice_defaults_to_inbox_and_accepts_off() {
     let name = "chair.refusal_notice";
     let defaults = load::<&[u8]>(&roots(), None).unwrap();
     assert_eq!(defaults.knobs[name].value, "inbox");
-    assert_eq!(defaults.knobs[name].source, KnobSource::Default);
+    assert_eq!(defaults.knobs[name].source.layer, Layer::Default);
     let mut doc = toml_edit::DocumentMut::new();
     doc["schema_version"] = toml_edit::value(1);
     KnobEdit::Set { name, value: "off" }
@@ -46,7 +47,7 @@ fn refusal_notice_defaults_to_inbox_and_accepts_off() {
         .unwrap();
     let configured = load(&roots(), Some(doc.to_string().as_bytes())).unwrap();
     assert_eq!(configured.knobs[name].value, "off");
-    assert_eq!(configured.knobs[name].source, KnobSource::Override);
+    assert_eq!(configured.knobs[name].source.layer, Layer::Host);
     assert!(
         KnobEdit::Set {
             name,
@@ -1556,8 +1557,10 @@ fn set_knob_is_written_atomically_and_shown_with_its_source() {
     assert_eq!(read(&roots).unwrap(), shown);
     knob_edit(&roots, KnobEdit::Unset("lanes.max_concurrency")).unwrap();
     assert_eq!(
-        read(&roots).unwrap().knobs["lanes.max_concurrency"].source,
-        KnobSource::Default
+        read(&roots).unwrap().knobs["lanes.max_concurrency"]
+            .source
+            .layer,
+        Layer::Default
     );
     knob_edit(&roots, KnobEdit::Profile("economy")).unwrap();
     knob_edit(
@@ -1574,14 +1577,14 @@ fn set_knob_is_written_atomically_and_shown_with_its_source() {
     assert_eq!(shown.profile, Profile::Economy);
     let knob = &shown.knobs["lanes.max_concurrency"];
     assert_eq!(
-        (knob.value.as_i64(), knob.source),
-        (Some(2), KnobSource::Override)
+        (knob.value.as_i64(), knob.source.layer),
+        (Some(2), Layer::Host)
     );
     knob_edit(&roots, KnobEdit::Unset("lanes.max_concurrency")).unwrap();
     let shown = read(&roots).unwrap();
     assert_eq!(
-        shown.knobs["lanes.max_concurrency"].source,
-        KnobSource::Profile
+        shown.knobs["lanes.max_concurrency"].source.layer,
+        Layer::Profile
     );
 }
 #[test]
@@ -1647,7 +1650,7 @@ fn read_only_batch_concurrency_has_its_own_knob() {
         (writers.value.as_i64(), readers.value.as_i64()),
         (Some(8), Some(16))
     );
-    assert_eq!(readers.source, KnobSource::Default);
+    assert_eq!(readers.source.layer, Layer::Default);
     let set = |name, value| knob_edit(&roots, KnobEdit::Set { name, value });
     set("lanes.max_concurrency_read_only", "16").unwrap();
     assert!(matches!(
@@ -1934,17 +1937,16 @@ fn launch_retry_knobs_are_listed_with_defaults_bounds_and_sources() {
     .unwrap();
     assert_eq!(config.knobs["lanes.launch_retry_limit"].value, 1);
     assert_eq!(
-        config.knobs["lanes.launch_retry_limit"].source,
-        KnobSource::Override
+        config.knobs["lanes.launch_retry_limit"].source.layer,
+        Layer::Host
     );
 }
 
 /// Every registered knob reports the layer that set it, so limits, receipts
-/// and status read one truthful source: the registry default, host
-/// configuration (its `[knobs]` table or its selected preset) or a launch.
+/// and status read one truthful source: the registry default, the selected
+/// preset, host configuration (its `[knobs]` table) or a launch.
 #[test]
 fn every_registered_knob_reports_the_layer_that_set_it() {
-    use provenant_records::Layer;
     let registry = knobs::registry().unwrap();
     let text = |value: &serde_json::Value| match value {
         serde_json::Value::String(text) => text.clone(),
@@ -1982,7 +1984,11 @@ fn every_registered_knob_reports_the_layer_that_set_it() {
             .dispatch_profile(&[])
             .unwrap();
         for name in values.knobs.keys() {
-            assert_eq!(knob_source(&profile, name), Layer::Host, "{preset}: {name}");
+            assert_eq!(
+                knob_source(&profile, name),
+                Layer::Profile,
+                "{preset}: {name}"
+            );
         }
     }
 }
@@ -2039,7 +2045,7 @@ fn config_show_includes_redaction_value_and_source() {
     let fixture = Files::new();
     let shown = config_show(&fixture.roots, &domains::NO_DOMAINS).unwrap();
     assert_eq!(shown.knobs["redaction"].value, "off");
-    assert_eq!(shown.knobs["redaction"].source, KnobSource::Default);
+    assert_eq!(shown.knobs["redaction"].source.layer, Layer::Default);
     std::fs::create_dir(fixture.roots.state.as_path()).unwrap();
     std::fs::write(
         fixture.config(),
@@ -2048,5 +2054,5 @@ fn config_show_includes_redaction_value_and_source() {
     .unwrap();
     let shown = config_show(&fixture.roots, &domains::NO_DOMAINS).unwrap();
     assert_eq!(shown.knobs["redaction"].value, "secrets");
-    assert_eq!(shown.knobs["redaction"].source, KnobSource::Override);
+    assert_eq!(shown.knobs["redaction"].source.layer, Layer::Host);
 }

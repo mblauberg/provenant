@@ -319,7 +319,7 @@ pub struct RoutingConfig {
     pub allow_unknown_partial_headroom: bool,
     /// Source captured with the effective value by the composition edge.
     #[serde(skip)]
-    pub partial_headroom_source: Option<provenant_config::KnobValue>,
+    pub partial_headroom_source: Option<provenant_records::Sourced<serde_json::Value>>,
     pub capacity_cooldown_seconds: u64,
     /// Further attempts after a capacity or quota settlement, on the same
     /// session where it resumes or a fresh draw where it cannot. Zero retries

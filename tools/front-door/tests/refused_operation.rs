@@ -91,12 +91,8 @@ fn dirty_writer_refusal_is_durable_visible_and_notified_once() -> Result {
             "{shown}"
         );
         assert_eq!(
-            shown["data"]["knobs"]["chair.refusal_notice"]["source"],
-            if notice == "off" {
-                "override"
-            } else {
-                "default"
-            },
+            shown["data"]["knobs"]["chair.refusal_notice"]["layer"],
+            if notice == "off" { "host" } else { "default" },
             "{shown}"
         );
         let made = rig.command(&[

@@ -2,7 +2,16 @@
 pub use crate::Layer;
 use crate::Precedence;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::{fmt, path::Path};
+
+/// The one rendering of a layer in warnings, receipts and explanations. Family
+/// source enums no longer carry their own `as_str` or `description`.
+/// Spec: docs/specs/state.md#every-setting-reports-its-layer
+impl fmt::Display for Layer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.description())
+    }
+}
 
 /// Maximum UTF-8 bytes in each projected field, after terminal escaping.
 pub const MAX_DIAGNOSTIC_BYTES: usize = 1024;

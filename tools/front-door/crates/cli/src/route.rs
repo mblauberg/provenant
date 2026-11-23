@@ -969,7 +969,7 @@ fn override_value(row: &provenant_routing::PacingOverride) -> toml_edit::Value {
 }
 #[derive(Serialize)]
 pub struct RoutePreview {
-    pub allow_unknown_partial_headroom: provenant_config::KnobValue,
+    pub allow_unknown_partial_headroom: provenant_records::Sourced<serde_json::Value>,
     /// Persisted exclusion rows that were repaired or ignored on reading.
     pub exclusion_notes: Vec<String>,
     pub model_policy: provenant_routing::EffectiveModelPolicy,

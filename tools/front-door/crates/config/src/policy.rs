@@ -52,7 +52,7 @@ impl Settings {
     pub fn resolve_with_knobs(
         &self,
         project: &str,
-        knobs: &BTreeMap<String, crate::KnobValue>,
+        knobs: &BTreeMap<String, provenant_records::Sourced<serde_json::Value>>,
         dispatch: &BTreeMap<String, Strength>,
     ) -> Policy {
         let mut policy = Policy::default();
@@ -145,11 +145,14 @@ pub fn for_task(state: &Path, project: &str, task: &provenant_records::run::Task
     read(state, project_id.as_deref().unwrap_or(project), &values)
 }
 
-pub fn overlay_knobs(policy: &mut Policy, knobs: &BTreeMap<String, crate::KnobValue>) {
+pub fn overlay_knobs(
+    policy: &mut Policy,
+    knobs: &BTreeMap<String, provenant_records::Sourced<serde_json::Value>>,
+) {
     let values = knobs
         .iter()
         .filter_map(|(name, knob)| {
-            if knob.source != crate::KnobSource::Override {
+            if knob.source.layer != provenant_records::Layer::Host {
                 return None;
             }
             Some((

@@ -3,7 +3,8 @@
 //! `config unset` make to the user's `config.toml`, plus the one config editor
 //! that every command uses to rewrite that file.
 use crate::{ConfigError, Profile};
-use serde::{Deserialize, Serialize};
+use provenant_records::{Layer, Precedence, Source, Sourced};
+use serde::Deserialize;
 use serde_json::Value;
 use std::{collections::BTreeMap, sync::OnceLock};
 use toml_edit::{DocumentMut, Item, TableLike};
@@ -62,18 +63,22 @@ pub(crate) struct Preset {
     pub(crate) knobs: BTreeMap<String, Value>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum KnobSource {
-    Default,
-    Profile,
-    Override,
-}
-/// An effective knob value and the layer that supplied it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct KnobValue {
-    pub value: Value,
-    pub source: KnobSource,
+/// The knob family's layers, lowest first. The registry default is the floor,
+/// a named preset overrides it, and an entry in the host's `[knobs]` table
+/// overrides the preset. A launch flag is recorded separately in the sealed
+/// profile and is not a configuration layer.
+/// Spec: docs/specs/state.md#every-setting-reports-its-layer
+pub const KNOB_PRECEDENCE: Precedence = Precedence(&[Layer::Default, Layer::Profile, Layer::Host]);
+
+/// An effective knob value tagged with its layer.
+fn sourced(value: Value, layer: Layer) -> Sourced<Value> {
+    Sourced {
+        value,
+        source: Source {
+            layer,
+            origin: None,
+        },
+    }
 }
 
 /// One change to the user's config file.
@@ -116,7 +121,7 @@ impl<D> crate::ResolvedConfig<D> {
             || self
                 .knobs
                 .get(name)
-                .is_some_and(|knob| knob.source == KnobSource::Override)
+                .is_some_and(|knob| knob.source.layer == Layer::Host)
     }
 
     /// Resolve a task's final policy without changing the config file.
@@ -139,25 +144,16 @@ impl<D> crate::ResolvedConfig<D> {
             if name != "lanes.access" {
                 check(spec, &value).map_err(|rule| invalid(name, rule))?;
             }
-            knobs.insert(
-                name.into(),
-                KnobValue {
-                    value,
-                    source: KnobSource::Override,
-                },
-            );
+            // A dispatch override is a launch-time source, not a config layer.
+            knobs.insert(name.into(), sourced(value, Layer::Launch));
         }
-        let launch_overrides: std::collections::BTreeSet<&str> = overrides
-            .iter()
-            .filter_map(|entry| entry.split_once('=').map(|(name, _)| name))
-            .collect();
         // The layer that set every effective knob. A knob absent from the
         // map took its registry default, so the map stays small.
         let knob_sources = knobs
             .iter()
             .filter_map(|(name, knob)| {
-                let source = layer(knob.source, launch_overrides.contains(name.as_str()));
-                (source != provenant_records::Layer::Default).then(|| (name.clone(), source))
+                let layer = knob.source.layer;
+                (layer != Layer::Default).then(|| (name.clone(), layer))
             })
             .collect();
         Ok(provenant_records::run::HarnessProfile {
@@ -188,30 +184,15 @@ impl<D> crate::ResolvedConfig<D> {
     }
 }
 
-/// The layer a lane reports for a knob: a launch override, host
-/// configuration (its `[knobs]` table or the profile preset it selected), or
-/// the registry default.
-fn layer(source: KnobSource, launched: bool) -> provenant_records::Layer {
-    use provenant_records::Layer;
-    match source {
-        KnobSource::Override if launched => Layer::Launch,
-        KnobSource::Override | KnobSource::Profile => Layer::Host,
-        KnobSource::Default => Layer::Default,
-    }
-}
-
 /// The layer that set knob `name` for a sealed profile, as
 /// [`crate::ResolvedConfig::dispatch_profile`] recorded it. Every limit,
 /// receipt and status line reads its source here.
-pub fn knob_source(
-    profile: &provenant_records::run::HarnessProfile,
-    name: &str,
-) -> provenant_records::Layer {
+pub fn knob_source(profile: &provenant_records::run::HarnessProfile, name: &str) -> Layer {
     profile
         .knob_sources
         .get(name)
         .copied()
-        .unwrap_or(provenant_records::Layer::Default)
+        .unwrap_or(Layer::Default)
 }
 
 /// Parsed once; the embedded text is immutable.
@@ -477,25 +458,16 @@ pub(crate) fn resolve(
     profile: Profile,
     overrides: Option<&dyn TableLike>,
     malformed_table: bool,
-) -> Result<(BTreeMap<String, KnobValue>, Vec<KnobProblem>), ConfigError> {
+) -> Result<(BTreeMap<String, Sourced<Value>>, Vec<KnobProblem>), ConfigError> {
     let registry = registry()?;
     let preset = registry.presets.get(profile_name(profile));
     let mut knobs = BTreeMap::new();
     for (name, spec) in &registry.knobs {
         let from_preset = preset.and_then(|p| p.knobs.get(name));
         let value = match (from_preset, safe_value(name)) {
-            (_, Some(safe)) if malformed_table => KnobValue {
-                value: safe,
-                source: KnobSource::Default,
-            },
-            (Some(value), _) => KnobValue {
-                value: value.clone(),
-                source: KnobSource::Profile,
-            },
-            (None, _) => KnobValue {
-                value: spec.default.clone(),
-                source: KnobSource::Default,
-            },
+            (_, Some(safe)) if malformed_table => sourced(safe, Layer::Default),
+            (Some(value), _) => sourced(value.clone(), Layer::Profile),
+            (None, _) => sourced(spec.default.clone(), Layer::Default),
         };
         knobs.insert(name.clone(), value);
     }
@@ -518,23 +490,11 @@ pub(crate) fn resolve(
             .and_then(|value| check(spec, &value).map(|()| value));
         match checked {
             Ok(value) => {
-                knobs.insert(
-                    name.into(),
-                    KnobValue {
-                        value,
-                        source: KnobSource::Override,
-                    },
-                );
+                knobs.insert(name.into(), sourced(value, Layer::Host));
             }
             Err(rule) => {
                 if let Some(safe) = safe_value(name) {
-                    knobs.insert(
-                        name.into(),
-                        KnobValue {
-                            value: safe,
-                            source: KnobSource::Default,
-                        },
-                    );
+                    knobs.insert(name.into(), sourced(safe, Layer::Default));
                 }
                 problems.push(KnobProblem {
                     name: name.into(),
@@ -831,4 +791,37 @@ pub fn documented_field(path: &str) -> bool {
             }
         })
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod precedence_tests {
+    use super::*;
+
+    /// Spec: docs/specs/state.md#every-setting-reports-its-layer
+    #[test]
+    fn every_knob_layer_set_picks_the_host_and_shadows_the_rest() {
+        let candidates = KNOB_PRECEDENCE
+            .0
+            .iter()
+            .copied()
+            .map(|layer| sourced(Value::Null, layer));
+        let merge = KNOB_PRECEDENCE.merge(candidates);
+        assert_eq!(
+            merge
+                .winner
+                .as_ref()
+                .map(|candidate| candidate.source.layer),
+            Some(Layer::Host)
+        );
+        assert_eq!(
+            merge
+                .shadowed
+                .iter()
+                .map(|candidate| candidate.source.layer)
+                .collect::<Vec<_>>(),
+            [Layer::Default, Layer::Profile]
+        );
+        assert!(merge.ignored.is_empty());
+    }
 }

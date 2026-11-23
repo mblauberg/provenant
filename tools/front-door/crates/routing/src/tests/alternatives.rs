@@ -413,7 +413,7 @@ fn review_configuration_inherits_and_overrides_shipped_defaults()
         format!("{:?}", shipped.shapes["quick"].synthesis).to_lowercase()
     );
     assert_eq!(synthesis.value, "model");
-    assert_eq!(synthesis.source, provenant_config::Layer::User);
+    assert_eq!(synthesis.source, provenant_records::Layer::Host);
     assert_eq!(synthesis.values, ["model", "reduce"]);
     let floor = schema
         .fields
@@ -422,7 +422,7 @@ fn review_configuration_inherits_and_overrides_shipped_defaults()
         .ok_or("security floor schema field")?;
     assert_eq!(floor.default, shipped.floors["security"].tier);
     assert_eq!(floor.value, "substantial");
-    assert_eq!(floor.source, provenant_config::Layer::User);
+    assert_eq!(floor.source, provenant_records::Layer::Host);
 
     let extensible = load_routing(
         "schema_version=1\n[domains.routing.review.shapes.custom]\nreviewers=[{pool='senior',count=1}]\n[domains.routing.review.select]\nby_risk={medium='custom'}\n",

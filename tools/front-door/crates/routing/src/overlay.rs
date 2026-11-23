@@ -11,7 +11,8 @@
 //! leave the catalogue invalid is skipped with a warning that names its layer.
 
 use crate::{Capability, Catalogue, ModelEntry, ModelId, MonthlyAllowance, RoutePoolMember};
-use provenant_config::{OverlayLayer, OverlaySource, OverlayWarning};
+use provenant_config::{OverlayLayer, OverlayWarning};
+use provenant_records::Layer;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -32,8 +33,8 @@ pub struct CatalogueSources {
 }
 
 impl CatalogueSources {
-    fn record(models: &mut BTreeMap<String, String>, key: String, source: OverlaySource) {
-        if source != OverlaySource::Bundled {
+    fn record(models: &mut BTreeMap<String, String>, key: String, source: Layer) {
+        if source != Layer::Default {
             models.insert(key, source.as_str().to_owned());
         }
     }
@@ -93,11 +94,7 @@ struct ModelOverlay {
 impl ModelOverlay {
     /// `policy_rules` are the rules the model already carries: an overlay
     /// changes catalogue facts and never replaces a model's policy rules.
-    fn into_entry(
-        self,
-        source: OverlaySource,
-        policy_rules: Vec<crate::ModelPolicyRule>,
-    ) -> ModelEntry {
+    fn into_entry(self, source: Layer, policy_rules: Vec<crate::ModelPolicyRule>) -> ModelEntry {
         ModelEntry {
             model: self.model,
             capability: self.capability,
@@ -392,7 +389,7 @@ fn remove_model(catalogue: &mut Catalogue, model: &ModelId) {
     }
 }
 
-fn apply_pool_member(catalogue: &mut Catalogue, entry: PoolMemberOverlay, source: OverlaySource) {
+fn apply_pool_member(catalogue: &mut Catalogue, entry: PoolMemberOverlay, source: Layer) {
     let pool = entry.pool;
     let model = entry.model;
     let member = RoutePoolMember {
@@ -481,7 +478,7 @@ mod tests {
         let (model, rules) = (entry.model.clone(), entry.policy_rules.len());
         let efforts = format!("{:?}", entry.efforts).replace('"', "'");
         let layer = provenant_config::OverlayLayer {
-            source: OverlaySource::Host,
+            source: Layer::Host,
             text: format!(
                 "[[catalogue.models]]\nmodel = '{}'\nefforts = {efforts}\nevidence_ref = 'owner fact'\nfamily = 'overlay-family'\n",
                 model.as_str()
@@ -513,7 +510,7 @@ mod tests {
             .ok_or("the bundled catalogue carries a pool")?;
         let efforts = format!("{:?}", member.efforts).replace('"', "'");
         let layer = provenant_config::OverlayLayer {
-            source: OverlaySource::Host,
+            source: Layer::Host,
             text: format!(
                 "[[catalogue.pool_members]]\npool = '{pool}'\nmodel = '{}'\nweight = 1\nefforts = {efforts}\n",
                 member.model.as_str()

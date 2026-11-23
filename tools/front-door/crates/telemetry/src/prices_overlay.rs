@@ -10,7 +10,8 @@
 use crate::{
     BillingKind, ConfiguredModel, ConfiguredPrices, PriceError, PriceTable, Rates, validate_prices,
 };
-use provenant_config::{OverlaySource, OverlayWarning};
+use provenant_config::OverlayWarning;
+use provenant_records::Layer;
 use serde::Deserialize;
 use std::{
     io,
@@ -154,7 +155,7 @@ pub fn load(
                     } else {
                         config.models.push(model);
                     }
-                    if layer.source != OverlaySource::Bundled {
+                    if layer.source != Layer::Default {
                         sources.insert(pair, layer.source.as_str().to_owned());
                     }
                 }

@@ -44,7 +44,7 @@ pub struct HistoryLimits {
     pub max_bytes: usize,
 }
 impl HistoryLimits {
-    pub(crate) fn from_knobs(knobs: &BTreeMap<String, crate::KnobValue>) -> Self {
+    pub(crate) fn from_knobs(knobs: &BTreeMap<String, provenant_records::Sourced<Value>>) -> Self {
         let get = |name: &str, fallback: u64| {
             knobs
                 .get(name)
