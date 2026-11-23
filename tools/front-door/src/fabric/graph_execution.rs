@@ -1827,7 +1827,7 @@ impl Factory {
         })
     }
 
-    fn graph_checkout(&self) -> Result<PathBuf, provenant_os::fs::FsError> {
+    pub(crate) fn graph_checkout(&self) -> Result<PathBuf, provenant_os::fs::FsError> {
         provenant_os::git::repository_path(&self.cwd, provenant_os::git::RepositoryPath::Toplevel)
             .map_err(|source| provenant_os::fs::FsError::Io {
                 operation: "locate graph checkout",
