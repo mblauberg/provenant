@@ -20,8 +20,6 @@
       "lanes.receipts",
       "lanes.history.rebase",
       "lanes.history.unrooted_tip",
-      "lanes.history.conflict_markers",
-      "lanes.history.default_branch_rewrite",
       "routing.exclude",
       "routing.graph_exclude",
       "fabric.accept_handoff",
