@@ -319,7 +319,7 @@ fn checked_out_parent_integration_defers_without_touching_edits()
                 &fixture.writer,
                 &fixture.request,
                 head,
-                &crate::forge_for("origin", "main", &[]),
+                Some(&crate::forge_for("origin", "main", &[])),
             );
             editing.store(false, std::sync::atomic::Ordering::Relaxed);
             editor
@@ -367,7 +367,7 @@ fn checked_out_parent_integration_defers_without_touching_edits()
             &fixture.writer,
             &fixture.request,
             head,
-            &crate::forge_for("origin", "main", &[]),
+            Some(&crate::forge_for("origin", "main", &[])),
         )?;
         let published = host.command(
             &fixture.writer.worktree,
@@ -569,7 +569,7 @@ fn assert_host_delivery_repository_fact_caps() -> std::result::Result<(), Box<dy
             &fixture.writer,
             &fixture.request,
             head,
-            &crate::forge_for("origin", "main", &[]),
+            Some(&crate::forge_for("origin", "main", &[])),
         )
         .unwrap_err();
     assert!(

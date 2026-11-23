@@ -27,15 +27,23 @@ fn delivery_advisory(message: impl Into<String>) {
     warn(Warning::new(DELIVERY_REFRESH_FAILED, message.into()));
 }
 
-/// Build a forge context from explicit values for callers that own those
-/// values already (fixtures, pinned dispatch), rather than rediscovering them.
+/// Build a forge context from explicit values for test fixtures, never for
+/// production. Production resolves the context once through [`resolve_forge`]
+/// and passes it down; a checkout without a remote has no context rather than
+/// an empty remote name.
 /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+#[cfg(any(test, feature = "fixture"))]
+#[doc(hidden)]
 pub fn forge_for(
     remote: &str,
     default_branch: &str,
     protected: &[&str],
 ) -> provenant_config::ForgeContext {
     use provenant_records::provenance::{Layer, Source, Sourced};
+    assert!(
+        !remote.trim().is_empty(),
+        "a fixture forge context needs a non-empty remote name"
+    );
     let source = Source {
         layer: Layer::Detected,
         origin: Some("explicit fixture values".to_owned()),
@@ -982,7 +990,7 @@ impl HostDeliveryContext {
             git: host.executable("git", &writer)?,
             gh: None,
         });
-        host.refuse_protected_target(&writer, branch, Stage::Prepare, forge)
+        host.refuse_protected_target(&writer, branch, Stage::Prepare, Some(forge))
     }
     /// A publication ref is distinct from a PR's base, which may be protected.
     pub fn check_delivery_branch(
@@ -1011,7 +1019,7 @@ impl HostDeliveryContext {
             git: host.executable("git", &writer)?,
             gh: None,
         });
-        host.refuse_protected_target(&writer, target, Stage::Prepare, forge)
+        host.refuse_protected_target(&writer, target, Stage::Prepare, Some(forge))
     }
 
     fn refuse_protected_target(
@@ -1019,7 +1027,7 @@ impl HostDeliveryContext {
         writer: &WriterRequest,
         target: &str,
         stage: Stage,
-        forge: &provenant_config::ForgeContext,
+        forge: Option<&provenant_config::ForgeContext>,
     ) -> Result<()> {
         if !self
             .command(
@@ -1042,7 +1050,7 @@ impl HostDeliveryContext {
         // integration). A compiled-in `main`/`master` fallback could retire a
         // differently named default, so an unknown default protects nothing.
         // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
-        let protected_default = forge.is_protected(target);
+        let protected_default = forge.is_some_and(|forge| forge.is_protected(target));
         let trees = self.command(
             &writer.worktree,
             "git",
@@ -1139,7 +1147,7 @@ impl HostDeliveryContext {
             None
         };
         let branch = publication.as_deref().unwrap_or(branch);
-        host.refuse_protected_target(&writer, branch, Stage::Push, forge)?;
+        host.refuse_protected_target(&writer, branch, Stage::Push, Some(forge))?;
         let reference = format!("refs/heads/{branch}");
         if local {
             host.refuse_remote_symbolic_target(project, &bound.push_url, branch, Stage::Push)?;
@@ -1290,13 +1298,25 @@ impl HostDeliveryContext {
         branch: &str,
         forge: &provenant_config::ForgeContext,
     ) -> Result<Option<WriterDeliveryRequest>> {
-        let qualified = format!("{}/", forge.remote.value);
+        Self::destination_for_remote(mode, branch, &forge.remote.value)
+    }
+
+    /// Resolve a destination from an already-known remote name. Callers that
+    /// carry the resolved remote but have no full context (a sealed request, a
+    /// stop-publication recovery) use this instead of rebuilding a context.
+    /// An absent remote is represented by the caller, never invented here.
+    pub fn destination_for_remote(
+        mode: crate::DeliveryMode,
+        branch: &str,
+        remote: &str,
+    ) -> Result<Option<WriterDeliveryRequest>> {
+        let qualified = format!("{remote}/");
         let (remote, destination, open_pr) = match &mode {
             crate::DeliveryMode::None => return Ok(None),
-            crate::DeliveryMode::Push => (forge.remote.value.clone(), branch.to_owned(), false),
-            crate::DeliveryMode::Pr => (forge.remote.value.clone(), branch.to_owned(), true),
+            crate::DeliveryMode::Push => (remote.to_owned(), branch.to_owned(), false),
+            crate::DeliveryMode::Pr => (remote.to_owned(), branch.to_owned(), true),
             crate::DeliveryMode::Integrate(target) => match target.strip_prefix(&qualified) {
-                Some(branch) => (forge.remote.value.clone(), branch.to_owned(), false),
+                Some(branch) => (remote.to_owned(), branch.to_owned(), false),
                 None => (String::new(), target.clone(), false),
             },
         };
@@ -1431,29 +1451,19 @@ impl HostDeliveryContext {
         self.prepare_with_fetch(writer, request, true)
     }
 
-    /// The forge context for a preparation guard. Prefer the owner's resolved
-    /// context; sealed holders from before that was carried resolve one from
-    /// the host/project port table. A checkout with no declared default keeps
-    /// working: the guard falls back to the request's remote and reports no
-    /// protected names, while the primary-checkout rule still applies.
+    /// Resolve the forge context for a preparation guard when the owner did not
+    /// pass one: sealed holders from before that was carried resolve it from
+    /// the host/project port table. A checkout that cannot resolve a remote or
+    /// default branch keeps working, reporting no protected names while the
+    /// primary-checkout rule still applies.
     /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
-    fn forge_for_preparation(
+    fn resolve_preparation_forge(
         &self,
         writer: &WriterRequest,
-        request: &WriterDeliveryRequest,
-    ) -> provenant_config::ForgeContext {
-        let fallback = forge_for(&request.remote, "", &[]);
-        let Some(forge) = &self.forge else {
-            let Some(state) = self.host_state() else {
-                return fallback;
-            };
-            let Ok(ports) = provenant_config::PortTable::read_for(Some(&writer.project), &state)
-            else {
-                return fallback;
-            };
-            return resolve_forge(&state, &writer.project, &ports).unwrap_or(fallback);
-        };
-        forge.clone()
+    ) -> Option<provenant_config::ForgeContext> {
+        let state = self.host_state()?;
+        let ports = provenant_config::PortTable::read_for(Some(&writer.project), &state).ok()?;
+        resolve_forge(&state, &writer.project, &ports).ok()
     }
 
     fn prepare_with_fetch(
@@ -1485,8 +1495,11 @@ impl HostDeliveryContext {
         let common_git_dir = self.trusted_common_git_dir(writer, stage)?;
         self.set_host_project(&common_git_dir);
         // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
-        let forge = self.forge_for_preparation(writer, request);
-        self.refuse_protected_target(writer, &request.branch, stage, &forge)?;
+        if self.forge.is_none() {
+            let resolved = self.resolve_preparation_forge(writer);
+            self.forge = resolved;
+        }
+        self.refuse_protected_target(writer, &request.branch, stage, self.forge.as_ref())?;
         if matches!(request.mode, crate::DeliveryMode::Integrate(_)) && request.remote.is_empty() {
             let branch = self.command(
                 &writer.worktree,
@@ -1623,7 +1636,7 @@ impl HostDeliveryContext {
     /// `target` is the private Git directory and the one remote to refresh.
     pub(crate) fn refresh_origin(
         writer: &WriterRequest,
-        target: (&Path, &str),
+        target: (&Path, Option<&str>),
         host_state: &Path,
         cancel: &provenant_core::CancelToken,
         facts: &provenant_confinement::worktrees::RepoFacts,
@@ -1631,6 +1644,10 @@ impl HostDeliveryContext {
         policy: &provenant_records::policy::Policy,
     ) -> Result<()> {
         let (git_dir, remote) = target;
+        // A checkout with no remote has no tracking branch to refresh.
+        let Some(remote) = remote else {
+            return Ok(());
+        };
         let mut host = Self::capture()
             .with_lane_access(access.0.cloned(), access.1)
             .with_policy(policy.clone())
@@ -1835,7 +1852,7 @@ impl HostDeliveryContext {
         let branch_ref = GitRefName::branch(branch)
             .map_err(|error| RunError::delivery(stage, DeliveryCause::parse(error)))?;
         let common = self.common_git_dir(&writer.project, stage)?;
-        crate::writer::verify_writer_git_paths(&common, &branch_ref, remote)?;
+        crate::writer::verify_writer_git_paths(&common, &branch_ref, Some(remote))?;
         self.validate_transport_helpers(writer)?;
         let source = format!("refs/heads/{branch}");
         // Read and fetch the same sealed destination used for the later push.
@@ -2792,7 +2809,7 @@ impl HostDeliveryContext {
         writer: &WriterRequest,
         request: &WriterDeliveryRequest,
         head: GitOid,
-        forge: &provenant_config::ForgeContext,
+        forge: Option<&provenant_config::ForgeContext>,
     ) -> Result<WriterIntegration> {
         let stage = Stage::Integrate;
         self.refuse_protected_target(writer, &request.branch, stage, forge)
@@ -2813,9 +2830,10 @@ impl HostDeliveryContext {
         }
         let destination = format!("refs/heads/{}", request.branch);
         let remote = !request.remote.is_empty();
+        let resolved_remote = forge.is_some_and(|forge| request.remote == forge.remote.value);
         let target = if remote {
             let tracking = format!("refs/remotes/{}/{}", request.remote, request.branch);
-            if request.remote != forge.remote.value {
+            if !resolved_remote {
                 self.refuse_symref_destination(&writer.worktree, &tracking, Stage::Fetch)?;
                 self.command(
                     &writer.worktree,
@@ -2835,8 +2853,8 @@ impl HostDeliveryContext {
         } else {
             destination.clone()
         };
-        let expected = if remote && request.remote == forge.remote.value {
-            self.refresh_target_and_resolve(writer, &request.branch, stage, &forge.remote.value)?
+        let expected = if remote && resolved_remote {
+            self.refresh_target_and_resolve(writer, &request.branch, stage, &request.remote)?
         } else {
             self.command(
                 &writer.worktree,
@@ -3004,12 +3022,12 @@ impl HostDeliveryContext {
                 ],
                 stage,
             )?;
-            let verified = if request.remote == forge.remote.value {
+            let verified = if resolved_remote {
                 self.refresh_target_and_resolve(
                     writer,
                     &request.branch,
                     Stage::Verify,
-                    &forge.remote.value,
+                    &request.remote,
                 )?
             } else {
                 self.refuse_symref_destination(&writer.worktree, &target, Stage::Verify)?;
@@ -3201,11 +3219,16 @@ impl HostDeliveryContext {
             ));
         }
         // The destination was built from the owner's forge context and carries
-        // its remote; reuse that value rather than resolving a second context
-        // that could disagree with the one already sealed at launch.
+        // its remote; reuse that context rather than resolving a second one
+        // that could disagree with the one already sealed at launch. A holder
+        // deserialized without the context resolves one from the host/project
+        // port table; an unresolvable one protects only the primary checkout.
         // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
-        let forge = forge_for(&request.remote, "", &[]);
-        self.refuse_protected_target(writer, &request.branch, Stage::Push, &forge)
+        let forge = match self.forge.as_ref() {
+            Some(forge) => Some(forge.clone()),
+            None => self.resolve_preparation_forge(writer),
+        };
+        self.refuse_protected_target(writer, &request.branch, Stage::Push, forge.as_ref())
             .map_err(|error| match error {
                 RunError::DeliveryLimit { .. } | RunError::DeliveryFact { .. } => error,
                 other => RunError::delivery(Stage::Prepare, DeliveryCause::parse(other)),
@@ -3216,7 +3239,7 @@ impl HostDeliveryContext {
         if matches!(request.mode, crate::DeliveryMode::Integrate(_)) {
             return Ok(Published {
                 pull_request: None,
-                integration: Some(self.integrate(writer, request, head, &forge)?),
+                integration: Some(self.integrate(writer, request, head, forge.as_ref())?),
             });
         }
         let bound = self.bound.as_ref().ok_or_else(|| {

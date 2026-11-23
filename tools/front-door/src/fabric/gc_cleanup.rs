@@ -201,11 +201,10 @@ fn delivered_removal_evidence(
         {
             return false;
         }
-        let forge = provenant_run::forge_for(&request.remote, &request.remote, &[]);
-        let Ok(Some(destination)) = provenant_run::HostDeliveryContext::destination(
+        let Ok(Some(destination)) = provenant_run::HostDeliveryContext::destination_for_remote(
             request.mode.clone(),
             &request.branch,
-            &forge,
+            &request.remote,
         ) else {
             return false;
         };

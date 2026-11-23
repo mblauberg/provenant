@@ -237,7 +237,7 @@ fn integration_refuses_default_fallbacks_remote_head_and_primary_branch()
     let head = host.head(&fixture.writer)?;
     let integration = crate::forge_for("origin", "integration", &[]);
     assert!(matches!(
-        host.integrate(&fixture.writer, &fixture.request, head, &integration),
+        host.integrate(&fixture.writer, &fixture.request, head, Some(&integration)),
         Err(RunError::Delivery {
             stage: WriterDeliveryStage::Integrate,
             ..
@@ -288,7 +288,7 @@ fn integration_rechecks_primary_checkout_after_preparation()
             &fixture.writer,
             &fixture.request,
             head,
-            &crate::forge_for("origin", "main", &[])
+            Some(&crate::forge_for("origin", "main", &[]))
         ),
         Err(RunError::Delivery {
             stage: WriterDeliveryStage::Integrate,
@@ -588,7 +588,7 @@ fn two_lanes_contend_for_integration_without_losing_either_head()
                 &fixture.writer,
                 &fixture.request,
                 first_head,
-                &crate::forge_for("origin", "main", &[]),
+                Some(&crate::forge_for("origin", "main", &[])),
             )
         });
         let two = scope.spawn(|| {
@@ -597,7 +597,7 @@ fn two_lanes_contend_for_integration_without_losing_either_head()
                 &second_writer,
                 &fixture.request,
                 second_head,
-                &crate::forge_for("origin", "main", &[]),
+                Some(&crate::forge_for("origin", "main", &[])),
             )
         });
         (
@@ -622,7 +622,7 @@ fn two_lanes_contend_for_integration_without_losing_either_head()
             &fixture.writer,
             &fixture.request,
             first_head,
-            &crate::forge_for("origin", "main", &[]),
+            Some(&crate::forge_for("origin", "main", &[])),
         )?;
     }
     if let Err(error) = two {
@@ -640,7 +640,7 @@ fn two_lanes_contend_for_integration_without_losing_either_head()
             &second_writer,
             &fixture.request,
             second_head,
-            &crate::forge_for("origin", "main", &[]),
+            Some(&crate::forge_for("origin", "main", &[])),
         )?;
     }
     for head in [first_head, second_head] {
@@ -844,7 +844,7 @@ fn remote_integration_refreshes_the_leased_destination()
         &fixture.writer,
         &fixture.request,
         head,
-        &crate::forge_for("origin", "main", &[]),
+        Some(&crate::forge_for("origin", "main", &[])),
     )?;
     assert_eq!(
         host.command(
@@ -859,7 +859,7 @@ fn remote_integration_refreshes_the_leased_destination()
         &fixture.writer,
         &fixture.request,
         head,
-        &crate::forge_for("origin", "main", &[]),
+        Some(&crate::forge_for("origin", "main", &[])),
     )?;
     Ok(())
 }
@@ -891,7 +891,7 @@ fn remote_integration_refuses_a_symbolic_destination()
             &fixture.writer,
             &fixture.request,
             head,
-            &crate::forge_for("origin", "main", &[])
+            Some(&crate::forge_for("origin", "main", &[]))
         ),
         Err(RunError::Delivery {
             stage: WriterDeliveryStage::Integrate,
@@ -929,7 +929,7 @@ fn local_integration_fast_forwards_merges_and_replays()
         &fixture.writer,
         &fixture.request,
         head,
-        &crate::forge_for("origin", "main", &[]),
+        Some(&crate::forge_for("origin", "main", &[])),
     )?;
     assert_eq!(
         host.command(
@@ -944,7 +944,7 @@ fn local_integration_fast_forwards_merges_and_replays()
         &fixture.writer,
         &fixture.request,
         head,
-        &crate::forge_for("origin", "main", &[]),
+        Some(&crate::forge_for("origin", "main", &[])),
     )?;
     // Divergent commits with a common tree still require a two-parent merge.
     fixture.commit(&fixture.writer.project, "integration side")?;
@@ -955,7 +955,7 @@ fn local_integration_fast_forwards_merges_and_replays()
         &fixture.writer,
         &fixture.request,
         head,
-        &crate::forge_for("origin", "main", &[]),
+        Some(&crate::forge_for("origin", "main", &[])),
     )?;
     let parents = host.command(
         &fixture.writer.project,
@@ -996,7 +996,7 @@ fn fast_forward_only_integration_advances_but_never_merges()
         &fixture.writer,
         &fixture.request,
         first,
-        &crate::forge_for("origin", "main", &[]),
+        Some(&crate::forge_for("origin", "main", &[])),
     )?;
     assert_eq!(rev(&fixture, "integration")?, first.to_string());
     // A head the target already contains integrates nothing and is not an error.
@@ -1004,7 +1004,7 @@ fn fast_forward_only_integration_advances_but_never_merges()
         &fixture.writer,
         &fixture.request,
         first,
-        &crate::forge_for("origin", "main", &[]),
+        Some(&crate::forge_for("origin", "main", &[])),
     )?;
     // The target moved elsewhere: the round is refused instead of merged.
     fixture.commit(&fixture.writer.project, "someone else")?;
@@ -1017,7 +1017,7 @@ fn fast_forward_only_integration_advances_but_never_merges()
             &fixture.writer,
             &fixture.request,
             second,
-            &crate::forge_for("origin", "main", &[]),
+            Some(&crate::forge_for("origin", "main", &[])),
         )
         .unwrap_err();
     assert!(matches!(refused, RunError::IntegrationHeadMoved));
@@ -1053,7 +1053,7 @@ fn local_integration_conflict_dirty_and_checked_out_refuse_without_partial_state
     fixture.commit(&fixture.writer.worktree, "lane conflict")?;
     let head = host.head(&fixture.writer)?;
     assert!(matches!(
-        host.integrate(&fixture.writer, &fixture.request, head, &crate::forge_for("origin", "main", &[])),
+        host.integrate(&fixture.writer, &fixture.request, head, Some(&crate::forge_for("origin", "main", &[]))),
         Err(RunError::IntegrationConflict { child_head, conflicting_files })
             if child_head == head && conflicting_files == ["conflict"]
     ));
@@ -1074,7 +1074,7 @@ fn local_integration_conflict_dirty_and_checked_out_refuse_without_partial_state
             &fixture.writer,
             &fixture.request,
             head,
-            &crate::forge_for("origin", "main", &[])
+            Some(&crate::forge_for("origin", "main", &[]))
         )
         .is_err()
     );

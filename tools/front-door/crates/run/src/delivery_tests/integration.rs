@@ -513,7 +513,7 @@ fn delivery_refuses_corrupt_reachable_content_before_log_or_integration()
             &fixture.writer,
             &request,
             head,
-            &crate::forge_for("origin", "main", &[])
+            Some(&crate::forge_for("origin", "main", &[]))
         ),
         Err(RunError::Delivery {
             stage: WriterDeliveryStage::Integrate,
@@ -546,7 +546,7 @@ fn integration_refreshes_forged_tracking_ref_and_fails_closed()
         &fixture.writer,
         &fixture.request,
         head,
-        &crate::forge_for("origin", "main", &[]),
+        Some(&crate::forge_for("origin", "main", &[])),
     )?;
     let remote = host.command(
         &fixture.writer.worktree,
@@ -591,7 +591,7 @@ fn integration_refreshes_forged_tracking_ref_and_fails_closed()
             &fixture.writer,
             &fixture.request,
             next,
-            &crate::forge_for("origin", "main", &[])
+            Some(&crate::forge_for("origin", "main", &[]))
         )
         .is_err()
     );
@@ -1290,7 +1290,7 @@ fn delivery_receipts_record_the_destination_tips_from_the_bound_endpoint()
         &fixture.writer,
         &fixture.request,
         second,
-        &crate::forge_for("origin", "main", &[]),
+        Some(&crate::forge_for("origin", "main", &[])),
     )?;
     assert_eq!(integrated.remote, "");
     assert_eq!(integrated.push_url, None);
@@ -1302,7 +1302,7 @@ fn delivery_receipts_record_the_destination_tips_from_the_bound_endpoint()
         &fixture.writer,
         &fixture.request,
         second,
-        &crate::forge_for("origin", "main", &[]),
+        Some(&crate::forge_for("origin", "main", &[])),
     )?;
     assert_eq!(replay.previous, Some(second));
     assert_eq!(replay.integrated, second);
