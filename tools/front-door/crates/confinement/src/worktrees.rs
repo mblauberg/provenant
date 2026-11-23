@@ -188,6 +188,12 @@ pub enum WorktreeError {
     PortConfiguration(#[source] io::Error),
     #[error("worktree request is invalid")]
     InvalidRequest,
+    #[error("worktree for branch {branch} already exists at {}", .path.display())]
+    WorktreeExists {
+        path: PathBuf,
+        branch: String,
+        reason: String,
+    },
     #[error(
         "registered Git project has no verified primary checkout; run `provenant worktree list` from its primary checkout to refresh the layout, then retry"
     )]
@@ -441,6 +447,9 @@ impl WorktreeError {
     pub fn repair(&self) -> Option<&'static str> {
         Some(match self {
             Self::StaleRegistration => "run `git worktree prune`, then retry",
+            Self::WorktreeExists { .. } => {
+                "run `provenant worktree list` to inspect the existing checkout, then remove it with `provenant worktree remove NAME` or retry with a matching clean tree"
+            }
             Self::GitEntryHeld { locked: true } => "run `git worktree unlock <path>`, then retry",
             Self::GitEntryHeld { locked: false } => {
                 "run `git worktree prune` to clear the missing checkout, or restore its directory, then retry"
