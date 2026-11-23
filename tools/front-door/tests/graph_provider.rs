@@ -5302,7 +5302,7 @@ fn run_graph_provider_with_wait(
     assert!(response["error"].is_null(), "{response}");
     let lane = provider_lane(rig, &settled.checkpoint["nodes"][0])?;
     if graph_id == "fixture-claude" && !lane["started_at"].is_null() {
-        let stderr = String::from_utf8_lossy(&out.stderr.bytes);
+        let stderr = String::from_utf8_lossy(&settled.launch.stderr.bytes);
         assert_eq!(
             stderr
                 .lines()
