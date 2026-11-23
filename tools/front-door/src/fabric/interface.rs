@@ -3942,6 +3942,11 @@ fn add(row: &mut Value, key: &str, value: u64) {
 
 #[cfg(test)]
 #[path = "interface_writer_source_tests.rs"]
+#[allow(
+    dead_code,
+    unused_imports,
+    reason = "the custom worktree driver omits libtest functions"
+)]
 mod writer_source_tests;
 
 #[cfg(test)]

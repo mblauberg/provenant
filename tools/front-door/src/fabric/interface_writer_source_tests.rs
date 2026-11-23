@@ -136,9 +136,7 @@ fn writer_worktree_base_drives_identity_not_the_caller_head() -> Result {
     use provenant_fabric_runtime::graph::template::{NameDecision, decide_graph_name};
     let existing = vec!["writer-identity".to_owned()];
     let stored = |id: &str| (id == "writer-identity").then(|| digest.clone());
-    match decide_graph_name("writer-identity", &digest, true, &existing, stored)
-        .map_err(|reason| reason)?
-    {
+    match decide_graph_name("writer-identity", &digest, true, &existing, stored)? {
         NameDecision::Replay(id) => assert_eq!(id, "writer-identity"),
         other => panic!("the same launch must replay one graph, got {other:?}"),
     }
