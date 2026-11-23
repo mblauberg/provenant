@@ -634,9 +634,16 @@ fn bare_model_detail(model: &str, error: &BareModelError) -> String {
             "model {shown} is offered by several providers: {}; name one as provider/model",
             candidates.join(", ")
         ),
-        BareModelError::Unknown => format!(
-            "unknown model {shown}; no catalogued provider offers it, so name it in the provider/model form"
-        ),
+        BareModelError::Unknown { candidates } => {
+            let mut detail = format!(
+                "unknown model {shown}; no catalogued provider offers it, so name it in the provider/model form"
+            );
+            if !candidates.is_empty() {
+                detail.push_str("; close matches: ");
+                detail.push_str(&candidates.join(", "));
+            }
+            detail
+        }
     }
 }
 
@@ -1266,9 +1273,16 @@ mod tests {
             detail,
             "model `gpt-6.1-terra` is offered by several providers: codex/gpt-6.1-terra, cursor/gpt-6.1-terra; name one as provider/model"
         );
-        // A name that is not identifier-shaped is never echoed.
-        let secret = bare_model_detail("sk-x y", &BareModelError::Unknown);
+        // A name that is not identifier-shaped is never echoed, even when the
+        // refusal carries close matches.
+        let secret = bare_model_detail(
+            "sk-x y",
+            &BareModelError::Unknown {
+                candidates: vec!["gpt-6.1-terra".into()],
+            },
+        );
         assert!(!secret.contains("sk-x y"), "{secret}");
+        assert!(secret.contains("close matches: gpt-6.1-terra"), "{secret}");
     }
 
     #[test]

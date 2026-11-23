@@ -1604,25 +1604,26 @@ fn graph_names_are_valid_ids_within_the_bound() {
         "a1-b2",
         &"a".repeat(MAX_GRAPH_NAME_BYTES),
     ] {
-        assert_eq!(graph_name_fault(ok), None, "{ok}");
+        assert!(fold_graph_name(ok).is_ok(), "{ok}");
     }
+    // Capitals fold to lower case instead of being refused.
+    assert_eq!(fold_graph_name("Fix-2").unwrap(), "fix-2");
     for bad in [
         "",
         "1a",
         "-a",
         "a-",
         "a--b",
-        "A",
         "a_b",
         "a.b",
         &"a".repeat(MAX_GRAPH_NAME_BYTES + 1),
     ] {
-        assert!(graph_name_fault(bad).is_some(), "{bad}");
+        assert!(fold_graph_name(bad).is_err(), "{bad}");
     }
     let names: Vec<_> = library().names().map(str::to_owned).collect();
     for template in names {
         let base = default_graph_base(&template);
-        assert_eq!(graph_name_fault(&format!("{base}-1")), None, "{template}");
+        assert!(fold_graph_name(&format!("{base}-1")).is_ok(), "{template}");
     }
 }
 
@@ -1699,7 +1700,7 @@ fn an_unnamed_launch_takes_a_unique_valid_handle_and_never_replays() {
     for _ in 0..5 {
         let (id, replayed) = launch(&mut journal, &base, "same", false).unwrap();
         assert!(!replayed);
-        assert_eq!(graph_name_fault(&id), None, "{id}");
+        assert!(fold_graph_name(&id).is_ok(), "{id}");
         assert!(seen.insert(id));
     }
     assert!(seen.contains("review-adversarial-1"));

@@ -4,6 +4,7 @@ use crate::{
     request::{effort_valid, identifier},
 };
 use provenant_config::{DomainConfig, DomainSection, FieldMetadata, Profile, SectionError};
+use provenant_core::close_matches;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
@@ -1471,9 +1472,35 @@ pub enum BareModelError {
     /// Several adapters offer the name; `candidates` are their `ADAPTER/ID` forms.
     #[error("several providers offer this model")]
     Ambiguous { candidates: Vec<String> },
-    /// No catalogued model carries the name.
+    /// No catalogued model carries the name; `candidates` are close model IDs.
     #[error("no catalogued provider offers this model")]
-    Unknown,
+    Unknown { candidates: Vec<String> },
+}
+
+/// Bare model names resolved through the shared name machinery.
+struct BareModelCatalogue<'a>(&'a Catalogue);
+
+impl provenant_core::Catalogue for BareModelCatalogue<'_> {
+    type Item = ModelId;
+    const KIND: provenant_core::NameKind = provenant_core::NameKind("model");
+
+    fn names(&self) -> Vec<String> {
+        self.0
+            .models
+            .iter()
+            .map(|row| row.model.model().to_owned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    fn lookup(&self, canonical: &str) -> Option<Self::Item> {
+        self.0
+            .models
+            .iter()
+            .find(|row| row.model.model() == canonical)
+            .map(|row| row.model.clone())
+    }
 }
 
 /// Production catalogues come from the bundled asset. A caller cannot deserialize
@@ -1897,25 +1924,9 @@ impl Catalogue {
     pub fn overlay_sources(&self) -> &crate::overlay::CatalogueSources {
         &self.overlay_sources
     }
-    /// Similar recorded model IDs in the same adapter and OpenCode namespace.
-    /// Results are ordered by edit distance and exclude unrelated names.
+    /// Similar recorded model IDs in the same adapter and OpenCode namespace,
+    /// ranked by the shared close-match ranker. Unrelated names are excluded.
     pub fn nearest_models(&self, model: &ModelId) -> Vec<String> {
-        fn distance(a: &str, b: &str) -> usize {
-            let b: Vec<char> = b.chars().collect();
-            let mut row: Vec<usize> = (0..=b.len()).collect();
-            for (i, ca) in a.chars().enumerate() {
-                let mut diagonal = row[0];
-                row[0] = i + 1;
-                for (j, cb) in b.iter().enumerate() {
-                    let above = row[j + 1];
-                    row[j + 1] = (diagonal + usize::from(ca != *cb))
-                        .min(row[j] + 1)
-                        .min(above + 1);
-                    diagonal = above;
-                }
-            }
-            row[b.len()]
-        }
         // Every OpenCode path component before the model name is its namespace.
         fn parts(id: &ModelId) -> (&str, &str) {
             if provenant_records::AdapterSpec::get(id.adapter())
@@ -1927,23 +1938,25 @@ impl Catalogue {
             }
         }
         let (namespace, name) = parts(model);
-        let mut matches: Vec<_> = self
+        let scoped: Vec<(&str, &str)> = self
             .models
             .iter()
             .filter(|entry| entry.model.adapter() == model.adapter())
             .filter_map(|entry| {
                 let (entry_namespace, entry_name) = parts(&entry.model);
-                if entry_namespace != namespace {
-                    return None;
-                }
-                let edits = distance(name, entry_name);
-                // Allow small typos, while limiting suggestions for long names.
-                let cutoff = (name.chars().count().max(entry_name.chars().count()) / 3).clamp(1, 3);
-                (edits <= cutoff).then(|| (edits, entry.model.as_str().to_owned()))
+                (entry_namespace == namespace).then_some((entry_name, entry.model.as_str()))
             })
             .collect();
-        matches.sort();
-        matches.into_iter().take(3).map(|(_, id)| id).collect()
+        let short_names: Vec<&str> = scoped.iter().map(|(short, _)| *short).collect();
+        close_matches(name, short_names)
+            .into_iter()
+            .filter_map(|matched| {
+                scoped
+                    .iter()
+                    .find(|(short, _)| *short == matched)
+                    .map(|(_, full)| (*full).to_owned())
+            })
+            .collect()
     }
 
     pub fn latest_family(&self, selector: &str) -> Option<&ModelId> {
@@ -2159,7 +2172,19 @@ impl Catalogue {
             .collect();
         match offered.as_slice() {
             [only] => Ok((*only).clone()),
-            [] => Err(BareModelError::Unknown),
+            [] => {
+                // A qualified `ADAPTER/ID` is deliberate, not a typo of a bare
+                // name, so it never gets candidates.
+                let candidates = if name.contains('/') {
+                    Vec::new()
+                } else {
+                    match provenant_core::resolve(&BareModelCatalogue(self), name) {
+                        Ok(_) => Vec::new(),
+                        Err(refusal) => refusal.candidates,
+                    }
+                };
+                Err(BareModelError::Unknown { candidates })
+            }
             several => Err(BareModelError::Ambiguous {
                 candidates: several.iter().map(|id| id.as_str().to_owned()).collect(),
             }),

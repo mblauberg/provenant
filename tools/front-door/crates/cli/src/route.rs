@@ -546,29 +546,13 @@ fn match_name(
     }
     Err(close_matches(&lower, routes, models))
 }
-/// Up to eight routes and models that share the name as a substring or a
-/// prefix, or are one or two edits away.
+/// The routes and models close to `name`, ranked by the shared ranker.
 fn close_matches(lower: &str, routes: &BTreeSet<String>, models: &[String]) -> Vec<String> {
-    let near = |candidate: &str| {
-        let candidate = candidate.to_ascii_lowercase();
-        let id = candidate.split_once('/').map_or(&*candidate, |(_, id)| id);
-        let prefix = lower
-            .chars()
-            .zip(id.chars())
-            .take_while(|(a, b)| a == b)
-            .count();
-        id.contains(lower)
-            || lower.contains(id)
-            || prefix >= 3
-            || crate::edit_distance(lower, id) <= 2
-            || crate::edit_distance(lower, &candidate) <= 2
-    };
-    routes
-        .iter()
-        .chain(models)
-        .filter(|candidate| near(candidate))
-        .take(8)
-        .cloned()
+    let mut universe: Vec<&str> = routes.iter().map(String::as_str).collect();
+    universe.extend(models.iter().map(String::as_str));
+    provenant_core::close_matches(lower, universe)
+        .into_iter()
+        .map(str::to_owned)
         .collect()
 }
 fn close(matches: &[String]) -> String {
@@ -609,8 +593,13 @@ fn resolve_request(
         match match_name(name, &routes, &models).map_err(|close| unresolved(name, close))? {
             Named::Route(route) => request.route = Some(route),
             Named::Model(model) => {
-                request.model =
-                    Some(Model::from_str(&model).map_err(|_| unresolved(name, Vec::new()))?)
+                let parsed = Model::from_str(&model).map_err(|_| {
+                    unresolved(
+                        &model,
+                        close_matches(&model.to_ascii_lowercase(), &routes, &models),
+                    )
+                })?;
+                request.model = Some(parsed)
             }
         }
     } else if let Some(route) = request.route.as_deref()
@@ -1000,7 +989,17 @@ mod route_tests {
         ResolvedRoute, RouteAlternatives, RouteConfidentiality, RouteEligibility, RouteReadiness,
         RouteSelectionCandidate, RouteSelectionReceipt,
     };
+    use std::collections::BTreeSet;
     use std::error::Error;
+
+    #[test]
+    // Spec: docs/specs/cli.md#every-name-refusal-lists-close-matches
+    fn close_matches_ranks_a_one_edit_typo_first() {
+        let routes = BTreeSet::from(["utility".to_owned()]);
+        let models = vec!["opencode/opencode/hy4-flash-free".to_owned()];
+        let matches = super::close_matches("utilty", &routes, &models);
+        assert_eq!(matches.first().map(String::as_str), Some("utility"));
+    }
 
     include!("route/tests_1.rs");
     include!("route/tests_2.rs");

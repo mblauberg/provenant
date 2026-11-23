@@ -504,7 +504,7 @@ fn exact_unknown_is_retained_but_requires_availability() -> Result<(), Box<dyn s
     ));
     assert!(matches!(
         resolve(&request("invented/id")?, &context),
-        Err(RoutingError::UnknownAdapter)
+        Err(RoutingError::UnknownAdapter { .. })
     ));
     Ok(())
 }

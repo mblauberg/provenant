@@ -40,8 +40,8 @@ pub enum RoutingError {
     InvalidValue,
     #[error("at most two distinct alternatives, different from the primary, are allowed")]
     Alternatives,
-    #[error("unknown adapter")]
-    UnknownAdapter,
+    #[error("unknown adapter{}", close(.candidates))]
+    UnknownAdapter { candidates: Vec<String> },
     #[error("{0}")]
     UnsupportedLaunch(String),
     #[error("unknown named route")]
@@ -72,7 +72,46 @@ pub enum RoutingError {
     ReviewDemand,
 }
 
+fn close(matches: &[String]) -> String {
+    if matches.is_empty() {
+        String::new()
+    } else {
+        format!("; close matches: {}", matches.join(", "))
+    }
+}
+
+/// Adapter names resolved through the shared name machinery.
+struct AdapterCatalogue;
+
+impl provenant_core::Catalogue for AdapterCatalogue {
+    type Item = &'static str;
+    const KIND: provenant_core::NameKind = provenant_core::NameKind("adapter");
+
+    fn names(&self) -> Vec<String> {
+        provenant_records::ADAPTER_SPECS
+            .iter()
+            .map(|spec| spec.name.to_owned())
+            .collect()
+    }
+
+    fn lookup(&self, canonical: &str) -> Option<Self::Item> {
+        provenant_records::ADAPTER_SPECS
+            .iter()
+            .find(|spec| spec.name == canonical)
+            .map(|spec| spec.name)
+    }
+}
+
 impl RoutingError {
+    /// Refuse an unknown adapter, listing the close adapter names.
+    pub fn unknown_adapter(name: &str) -> Self {
+        let candidates = match provenant_core::resolve(&AdapterCatalogue, name) {
+            Ok(_) => Vec::new(),
+            Err(refusal) => refusal.candidates,
+        };
+        Self::UnknownAdapter { candidates }
+    }
+
     /// Stable identifier for the refusal, independent of its display text.
     pub fn code(&self) -> &'static str {
         match self {
@@ -80,7 +119,7 @@ impl RoutingError {
             Self::InvalidModel => "invalid_model",
             Self::InvalidValue => "invalid_value",
             Self::Alternatives => "alternatives",
-            Self::UnknownAdapter => "unknown_adapter",
+            Self::UnknownAdapter { .. } => "unknown_adapter",
             Self::UnsupportedLaunch(_) => "unsupported_launch",
             Self::UnknownRoute => "unknown_route",
             Self::ConfidentialModel => "confidential_model",

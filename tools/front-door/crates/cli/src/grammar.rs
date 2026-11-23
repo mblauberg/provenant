@@ -748,10 +748,11 @@ pub struct GraphRunArgs {
 }
 
 /// A graph name, checked where it is typed so a bad one is a usage error.
+/// Capitals are folded to lower case with a warning instead of being refused.
 fn graph_name(text: &str) -> Result<String, String> {
-    match provenant_fabric_runtime::graph::template::graph_name_fault(text) {
-        None => Ok(text.to_owned()),
-        Some(fault) => {
+    match provenant_fabric_runtime::graph::template::fold_graph_name(text) {
+        Ok(name) => Ok(name),
+        Err(fault) => {
             let suggestion = provenant_fabric_runtime::graph::template::default_graph_base(text);
             if suggestion != text {
                 Err(format!("{fault}; try `{suggestion}`"))
@@ -1253,15 +1254,20 @@ pub(crate) fn since(value: &str) -> Result<jiff::Timestamp, String> {
 #[cfg(test)]
 mod target_tests {
     use super::{graph_name, since};
+    use provenant_records::warning::{NAME_CASE_FOLDED, capture};
 
     #[test]
-    fn graph_name_refusal_suggests_the_normalised_name() {
-        for (bad, suggestion) in [
-            ("Foo-", "foo"),
-            ("Foo", "foo"),
-            ("foo--bar", "foo-bar"),
-            ("UPPER", "upper"),
-        ] {
+    // Spec: docs/specs/cli.md#every-name-refusal-lists-close-matches
+    fn graph_name_folds_capitals_and_suggests_for_other_faults() {
+        let (folded, warnings) = capture(|| graph_name("Fix-Login").unwrap());
+        assert_eq!(folded, "fix-login");
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.code.as_ref() == NAME_CASE_FOLDED.0),
+            "{warnings:?}"
+        );
+        for (bad, suggestion) in [("foo-", "foo"), ("foo--bar", "foo-bar"), ("a_b", "a-b")] {
             let error = graph_name(bad).expect_err(bad);
             assert!(error.contains(suggestion), "{bad}: {error}");
             assert!(error.contains("try `"), "{bad}: {error}");

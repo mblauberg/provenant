@@ -1974,7 +1974,7 @@ fn a_named_run_replays_its_input_and_a_changed_input_takes_the_next_name() -> Re
             .ok_or("graph id")?
             .to_owned();
         assert!(
-            provenant_fabric_runtime::graph::template::graph_name_fault(&id).is_none(),
+            provenant_fabric_runtime::graph::template::fold_graph_name(&id).is_ok(),
             "{id}"
         );
         assert!(id.starts_with("stamp-"), "{id}");
