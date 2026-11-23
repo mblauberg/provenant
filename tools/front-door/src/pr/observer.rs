@@ -2082,9 +2082,17 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
                         crate::pr::landing::model::GateResult::Pending => "pending",
                         other => panic!("unexpected gate result {other:?}"),
                     };
+                    // Read 0 deliberately injects an in-progress run, so both
+                    // waiters must agree on `pending` there; the final state
+                    // is checked on the settled read.
+                    let read_expected = if index == 0 {
+                        ("pending", "pending")
+                    } else {
+                        expected
+                    };
                     assert_eq!(
                         (status, gate),
-                        expected,
+                        read_expected,
                         "the landing gate and wait --pr must agree on read {index}"
                     );
                     Ok::<_, ()>(if index == 0 {

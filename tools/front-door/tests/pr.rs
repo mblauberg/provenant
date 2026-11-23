@@ -565,9 +565,11 @@ fn land_explains_poll_and_budget_sources() -> Result {
         default["data"]["fields"]["poll_seconds"]["value"],
         provenant_cli::domains::LandSettings::default().poll_seconds
     );
+    // One layer vocabulary names every setting's source; a shipped default is
+    // reported as `default`, not the retired `bundled` spelling.
     assert_eq!(
         default["data"]["fields"]["poll_seconds"]["source"]["layer"],
-        "bundled"
+        "default"
     );
     fs::write(
         rig.state.join("config.toml"),

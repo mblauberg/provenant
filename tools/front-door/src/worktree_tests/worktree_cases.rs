@@ -690,11 +690,19 @@ pub(super) fn remove_by_name_deletes_a_branch_fully_contained_in_integration() -
     let at_tip = rig.project.join(".worktrees/at-tip");
     let output = command(&rig, &["worktree", "remove", "at-tip", "--json"])?;
     assert_eq!(code(&output), 0);
-    assert!(
-        String::from_utf8_lossy(&output.stderr.bytes)
-            .contains("using the current integration resolution")
-    );
     let removed = json(&output)?;
+    // A failed optional fetch is reported as a typed warning in the v2
+    // envelope, not as prose on stderr.
+    assert!(
+        removed["warnings"].as_array().is_some_and(|warnings| {
+            warnings.iter().any(|warning| {
+                warning["message"].as_str().is_some_and(|message| {
+                    message.contains("using the current integration resolution")
+                })
+            })
+        }),
+        "envelope must carry the fetch-fallback warning: {removed}"
+    );
     assert_eq!(
         removed["data"]["pruned_refs"],
         serde_json::json!(["at-tip"])

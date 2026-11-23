@@ -290,10 +290,16 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
     let unbound_land = command(&landing.rig, &["land", NUMBER, "--json"])?;
     assert_ne!(code(&unbound_land), 0);
     assert_eq!(json(&unbound_land)?["error"]["code"], "CI_UNAVAILABLE");
-    assert!(
-        String::from_utf8_lossy(&unbound_land.stderr.bytes)
-            .contains("provenant pr contributions 1668 --bind")
-    );
+    // The v2 envelope carries warnings as typed values, not prose on stderr.
+    // The `--bind` repair is owned by the `pr open` binding warning asserted
+    // above; the land failure reports the capture diagnostic through the same
+    // typed seam.
+    assert!(warnings(&unbound_land)?.iter().any(|warning| {
+        warning["code"] == "PR_CONTRIBUTION_BINDING_FAILED"
+            && warning["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("PR contribution capture failed"))
+    }));
     fs::write(landing.rig.project.join("view.json"), closed_view)?;
     fs::remove_file(landing.rig.project.join("checks-fail"))?;
     db.execute_batch("DROP TRIGGER reject_binding;")?;

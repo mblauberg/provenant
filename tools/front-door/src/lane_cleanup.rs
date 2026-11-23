@@ -1816,6 +1816,12 @@ pub(crate) fn settle_integrated(
         previous: integration.previous,
         integrated: integration.integrated,
     }];
+    // A `None` scope now means the worktree inventory could not be read, so
+    // `remote_outcomes` retains every record. Settle with the same declared
+    // local retirement scope the production sweep uses, or this lane's own
+    // remote branch is never retired after its integration receipt proves it
+    // landed. Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    let scope = worktrees::local_retirement_scope(context, Some(&root), cancel).ok();
     let outcomes = remote_outcomes(
         context,
         &ledger,
@@ -1825,7 +1831,7 @@ pub(crate) fn settle_integrated(
         sweep,
         &PortLookup(retirement),
         Some(retirement),
-        None,
+        scope.as_ref(),
         None,
         cancel,
     );
