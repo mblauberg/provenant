@@ -6,6 +6,8 @@ Procedure for `provenant disk report` and `provenant gc`. The rules are in the
 [disk spec](../specs/disk.md) and [state spec](../specs/state.md#retention-keeps-evidence).
 Keys, defaults and their sources are in `provenant config schema --all`
 (`gc.*`, `retention.*`, `lanes.cargo_cache_max`) and `provenant config show --full`.
+A lane cache that holds only its ownership marker and `CACHEDIR.TAG` is
+reclaimed in one pass; lane launches no longer create one.
 
 ## Inspect, preview, apply
 
@@ -87,8 +89,9 @@ trigger; `provenant tick` takes the same path.
   path cannot be represented, the worktree stays. Clean subsumed removals need
   no archive.
 - A process denied observation (EPERM) yields one aggregated warning, not a
-  block, when no observed path is beneath a candidate. Incomplete descriptor
-  evidence still protects the candidate.
+  block, when no observed path is beneath a candidate and its credentials could
+  own that candidate; other users' and system processes are not reported.
+  Incomplete descriptor evidence still protects the candidate.
 
 ### Scheduling
 

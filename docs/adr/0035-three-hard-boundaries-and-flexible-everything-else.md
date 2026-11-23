@@ -44,11 +44,13 @@ matched values. Persisted formats are versioned, and each owner defines its
 current field shape.
 
 Interfaces and stored shapes change without compatibility shims, older-shape
-readers, aliases or general migrations. The sole bounded exception is
-additive SQLite schema steps within one state-root format major. A store's
-`user_version` is a per-store base identifier fixed for that root major; it
-does not advance independently. A non-additive stored change requires the
-next root format major and a fresh state root.
+readers or aliases. Stored state changes by additive SQLite schema steps within
+one state-root format major, or by one declared migration that rewrites the
+rows the new types cannot read and advances that store's base version. The
+migration runs once on a writable open, and a reader of the older base refuses
+until it has run; there is no compatibility path afterwards. Any other
+non-additive stored change requires the next root format major and a fresh
+state root.
 
 Local execution data, provider histories and graph text remain lossless in
 host-owned private state. File modes are defence in depth, not isolation from

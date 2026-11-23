@@ -135,10 +135,6 @@ test "$notified" = yes
                             .into(),
                     scope: PathScope::Subtree,
                 },
-                cargo_cache: PathGrant {
-                    path: "/fixture/cache".into(),
-                    scope: PathScope::Subtree,
-                },
             }));
         } else {
             plan.mode = AccessMode::ReadOnly;

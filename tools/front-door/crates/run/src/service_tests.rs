@@ -28,25 +28,9 @@ fn dispatch_preserves_launch_fields_on_request_reopen() -> TestResult {
         assert_eq!(task.access.write_roots, roots);
         let project_id = store.context.project_id;
         assert_eq!(task.profile.policy_project, Some(project_id));
-        let policy = task
-            .profile
-            .launch_policy
-            .as_ref()
-            .ok_or("launch policy snapshot")?;
-        assert_eq!(
-            policy.rule("WRITE_SCOPE").source,
-            provenant_records::policy::Source::CompiledDefault
-        );
-        assert_eq!(
-            policy.rule("WRITE_SCOPE").rule.strength,
-            provenant_records::policy::Strength::Warn
-        );
-        assert_eq!(
-            policy
-                .rule("HAND_OFF_RUNSTORE_HAND_OFF_AUTHORITY")
-                .rule
-                .strength,
-            provenant_records::policy::Strength::Refuse
+        assert!(
+            !task.profile.extra.contains_key("launch_policy"),
+            "the request carries dispatch inputs, not a resolved policy snapshot"
         );
     }
     Ok(())

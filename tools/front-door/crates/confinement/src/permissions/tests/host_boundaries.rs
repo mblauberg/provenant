@@ -73,10 +73,6 @@ fn native_host_inventory_protects_aliases_and_later_worktrees()
             path: "/fixture/home/Library/Application Support/provenant/worktree-git/fixture".into(),
             scope: PathScope::Subtree,
         },
-        cargo_cache: PathGrant {
-            path: root.join("cache"),
-            scope: PathScope::Subtree,
-        },
     }));
     plan.network = NetworkAccess::Open;
     for shell in ["/bin/sh", "/bin/bash"] {

@@ -729,7 +729,7 @@ fn verify_lane_profile(
         .writer
         .as_ref()
         .map(|w| (&w.worktree, &w.branch));
-    // Run creates the writer's ref parents and lane cache under custody.
+    // Run creates the writer's ref parents and shared Git state under custody.
     if let (Some((worktree, branch)), AccessMode::WorktreeWrite(authority)) =
         (writer, &confinement.plan.permissions().mode)
     {

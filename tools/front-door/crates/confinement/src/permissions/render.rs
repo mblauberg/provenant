@@ -3,8 +3,6 @@
 #[cfg(target_os = "macos")]
 use super::validation::filtered_native_controls_with_policy;
 use super::*;
-#[cfg(target_os = "macos")]
-use crate::cache::verify_cache_metadata;
 use provenant_records::policy::{Effect, Facts, Policy};
 #[cfg(target_os = "macos")]
 use sha2::{Digest, Sha256};
@@ -410,20 +408,6 @@ fn compile_sbpl_inner(
             .map_err(compile_authority_error)?;
     }
     verify_state_writes(plan, profile, anchors)?;
-    if let AccessMode::WorktreeWrite(authority) = &plan.mode {
-        verify_state_write(plan, &authority.cargo_cache, anchors)?;
-        let cache = anchors
-            .directories
-            .iter()
-            .find(|anchor| anchor.path == authority.cargo_cache.path)
-            .ok_or_else(|| anchor_at(&authority.cargo_cache.path, "lane cache anchor not held"))?;
-        verify_cache_metadata(
-            &cache
-                .directory
-                .metadata()
-                .map_err(PermissionError::Filesystem)?,
-        )?;
-    }
     if plan.scratch.scope != PathScope::Subtree {
         return Err(PermissionError::InvalidPath(plan.scratch.path.clone()));
     }
@@ -550,20 +534,6 @@ fn compile_sbpl_inner(
                 .verify_grant_held(grant)
                 .map_err(compile_authority_error)?;
         }
-    }
-    if let AccessMode::WorktreeWrite(authority) = &plan.mode {
-        verify_state_write(plan, &authority.cargo_cache, anchors)?;
-        let cache = anchors
-            .directories
-            .iter()
-            .find(|anchor| anchor.path == authority.cargo_cache.path)
-            .ok_or_else(|| anchor_at(&authority.cargo_cache.path, "lane cache anchor not held"))?;
-        verify_cache_metadata(
-            &cache
-                .directory
-                .metadata()
-                .map_err(PermissionError::Filesystem)?,
-        )?;
     }
     anchors.verify_all().map_err(compile_authority_error)?;
     for grant in discovery() {
@@ -1016,15 +986,6 @@ fn render_profile_with_policy(
             worktree_grants.ok_or(PermissionError::GitWriteAuthorityMissing)?,
             &authority.git_state,
         )?;
-        for operation in ["file-read*", "file-write*"] {
-            push_rule(
-                &mut source,
-                "allow",
-                operation,
-                &authority.cargo_cache.path,
-                PathScope::Subtree,
-            )?;
-        }
     }
 
     // Writers' fixtures bind and connect to Unix-domain sockets in their own

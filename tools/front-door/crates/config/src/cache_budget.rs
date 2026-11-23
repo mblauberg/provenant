@@ -1,4 +1,5 @@
-//! Host-wide Cargo cache budget, shared by launch admission and collection.
+//! Host-wide Cargo cache budget, read by GC collection and disk-pressure
+//! collection. Launches no longer evict or create lane caches.
 use std::path::Path;
 
 pub const KNOB: &str = "lanes.cargo_cache_max";

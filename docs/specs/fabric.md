@@ -142,8 +142,9 @@ instruct.
 
 Policy has three operation scopes. Graph-wide replay validation and expansion use
 current host then project policy; node decisions add that node's dispatch overlay;
-attempt resume, settlement, publication and recovery use the sealed task-profile
-snapshot. Host-only operations without a project use host policy.
+attempt resume, settlement, publication and recovery resolve current host and
+project policy and apply the request's sealed dispatch overrides and project key.
+Host-only operations without a project use host policy.
 
 The runtime admits a template, document or planner fragment only after checking
 schema capability, structural limits, the fully expanded plan, the checkpoint

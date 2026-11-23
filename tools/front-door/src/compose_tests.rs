@@ -280,7 +280,7 @@ pub(crate) fn read_only_dispatch_applies_bound_git_and_project_writes() -> Resul
     Ok(())
 }
 
-pub(crate) fn writer_dispatch_uses_lane_cache_and_narrow_provider_state() -> Result {
+pub(crate) fn writer_dispatch_creates_no_lane_cache_and_narrow_provider_state() -> Result {
     if !writer_backend_available()? {
         return Ok(());
     }
@@ -293,16 +293,13 @@ pub(crate) fn writer_dispatch_uses_lane_cache_and_narrow_provider_state() -> Res
     )?;
     let (_, context) = writer_context(&rig)?;
     let cleanup = super::worktree_tests::writer_process_cleanup(&context);
-    let attempt = dispatch(&rig, "writer")?;
-    let cache = PathBuf::from(fs::read_to_string(
-        attempt.join("provider-state/candidate-0/compose-cache"),
-    )?);
-    assert!(cache.starts_with(rig.home.join("Library/Caches/provenant-lane-cargo")));
+    let _attempt = dispatch(&rig, "writer")?;
     assert!(
-        fs::read(cache.join(".provenant-worktree-owner"))?
-            .starts_with(b"provenant-lane-cargo-owner-v2\n")
+        !rig.home
+            .join("Library/Caches/provenant-lane-cargo")
+            .exists(),
+        "a writer launch must not create a lane Cargo cache"
     );
-    assert_eq!(fs::read(cache.join("target/compose-target"))?, b"target");
     // Shared config remains immutable until the host delivery owner composes #1255.
     assert_eq!(git(&rig, &["config", "--get", "user.name"])?, "Fixture");
     let store = super::worktree_tests::open_writer_store(&context)?;
@@ -331,15 +328,14 @@ pub(crate) fn provider() -> Result {
         }
         denied(&cwd.join("outside-exception"))?;
     } else if prompt.ends_with("writer") {
-        let target =
-            PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").ok_or("CARGO_TARGET_DIR missing")?);
+        assert!(
+            std::env::var_os("CARGO_TARGET_DIR").is_none()
+                && std::env::var_os("CARGO_BUILD_BUILD_DIR").is_none(),
+            "a writer lane gets no Cargo target"
+        );
         let cargo = PathBuf::from(std::env::var_os("CARGO_HOME").ok_or("CARGO_HOME missing")?);
-        let cache = target.parent().ok_or("cache")?;
         // Lanes use the host's Cargo home as a subagent would; only credentials stay out.
         assert_eq!(cargo, home.join(".cargo"));
-        assert!(!cargo.starts_with(cache));
-        fs::create_dir_all(&target)?;
-        fs::write(target.join("compose-target"), b"target")?;
         let registry_entry = cargo.join("registry/compose-home");
         fs::write(&registry_entry, b"shared Cargo source write")?;
         assert_eq!(
@@ -360,10 +356,6 @@ pub(crate) fn provider() -> Result {
         for name in provenant_confinement::cargo::TRACKING_FILES {
             fs::write(cargo.join(name), b"fixture tracking")?;
         }
-        fs::write(
-            state.join("compose-cache"),
-            cache.as_os_str().as_encoded_bytes(),
-        )?;
         for name in [
             ".claude/settings.json",
             ".claude/hooks/compose",

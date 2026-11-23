@@ -1310,14 +1310,8 @@ pub(crate) fn finalise_provider_env(
             binding
         }
     };
-    let (target, lint_target) = lane_targets(input);
-    cargo_environment(
-        &binding,
-        input.home,
-        (&target, &lint_target),
-        access,
-        &mut spec.env,
-    );
+    let target = lane_target(input, access);
+    cargo_environment(&binding, input.home, target.as_deref(), &mut spec.env);
     binding.source_environment(input.confined.permissions().network, &mut spec.env);
     spec.tool_requirements.cargo_home = Some(binding);
     if input.sandboxed() {
@@ -1926,18 +1920,11 @@ mod git_tests {
     }
 }
 
-/// The lane's private, writable cache root: the writer's lane cache
-/// (`Library/Caches/provenant-lane-cargo/<sha256>`) or a read-only lane's
-/// scratch. Build output and mutable package-manager configuration live here.
+/// The lane's private, writable cache root: attempt scratch. Build output and
+/// mutable package-manager configuration live here and are discarded with the
+/// attempt; no durable per-lane cache is created.
 pub(crate) fn lane_cache<'a>(input: &'a PrepareInput<'_>) -> &'a Path {
-    match &input.confined.permissions().mode {
-        provenant_confinement::permissions::AccessMode::ReadOnly => {
-            &input.confined.permissions().scratch.path
-        }
-        provenant_confinement::permissions::AccessMode::WorktreeWrite(authority) => {
-            &authority.cargo_cache().path
-        }
-    }
+    &input.confined.permissions().scratch.path
 }
 
 /// Keep the selected files visible to the single closure resolver even when
@@ -2014,12 +2001,10 @@ fn rust_toolchain(
     let cargo = input.home.join(".cargo");
     let rustup = input.home.join(".rustup");
     let cache = lane_cache(input);
-    let (target, _) = lane_targets(input);
-    // The host prepares the writer cache itself under custody. Cargo
-    // creates target/ after launch, so anchor the cache.
-    // A read-only lane's cache is its scratch, which rustdoc also uses (via
-    // TMPDIR) for the doc-test binaries it compiles and runs. The lane can
-    // already execute everything it builds and its read-only worktree.
+    let target = lane_target(input, access);
+    // A lane's scratch is also where rustdoc keeps doc-test binaries (via
+    // TMPDIR). The lane can already execute everything it builds and its
+    // read-only worktree.
     tool_exec_roots.push(subtree(cache));
     runtime_reads.extend([subtree(cargo.join("bin")), subtree(&rustup)]);
     tool_exec_roots.extend([
@@ -2031,23 +2016,22 @@ fn rust_toolchain(
     }
     // A shared or configured target lies outside run-owned state, which setup
     // may not create in. The host creates it before launch (preparation), so
-    // setup only anchors a target inside the lane cache.
-    if access == Access::ReadOnly && target.starts_with(cache) {
+    // setup only anchors a target inside scratch.
+    if let Some(target) = target
+        && target.starts_with(cache)
+    {
         setup.push(SetupStep::CreateDir(target));
     }
 }
 
-/// The lane's Cargo cache locations, used only for confinement path hygiene.
-/// Lanes never compile; these paths are not build targets.
-fn lane_targets(input: &PrepareInput<'_>) -> (PathBuf, PathBuf) {
-    let cache = lane_cache(input);
-    let target = (input.host_var)("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| cache.join("target"));
-    let lint = (input.host_var)(provenant_core::consumer_env::LANE_CARGO_LINT_TARGET)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| cache.join("target-lint"));
-    (target, lint)
+/// A read-only lane's disposable Cargo target, used only for confinement path
+/// hygiene. Writers build nowhere, so they get none.
+fn lane_target(input: &PrepareInput<'_>, access: Access) -> Option<PathBuf> {
+    (access == Access::ReadOnly).then(|| {
+        (input.host_var)("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| lane_cache(input).join("target"))
+    })
 }
 
 /// A configured target lies outside the lane cache, so its grants are not
@@ -2060,28 +2044,15 @@ fn external_target_grants(
     access: Access,
     requirements: &mut ToolRequirements,
 ) {
-    let cache = lane_cache(input);
-    let (target, lint) = lane_targets(input);
-    let lint = (access == Access::WorktreeWrite).then_some(lint);
-    // The project target is resolved from the canonical workspace; compare
-    // both spellings of the worktree.
-    let worktree = (access == Access::WorktreeWrite).then(|| {
-        let canonical = input.cwd.canonicalize().ok();
-        (input.cwd, canonical)
-    });
-    let in_worktree = |path: &Path| {
-        worktree.as_ref().is_some_and(|(cwd, canonical)| {
-            path.starts_with(cwd) || canonical.as_ref().is_some_and(|c| path.starts_with(c))
-        })
+    let Some(target) = lane_target(input, access) else {
+        return;
     };
-    for path in std::iter::once(target).chain(lint) {
-        if path.starts_with(cache) || in_worktree(&path) {
-            continue;
-        }
-        requirements.reads.push(subtree(&path));
-        requirements.writes.push(subtree(&path));
-        requirements.exec.push(subtree(path));
+    if target.starts_with(lane_cache(input)) {
+        return;
     }
+    requirements.reads.push(subtree(&target));
+    requirements.writes.push(subtree(&target));
+    requirements.exec.push(subtree(target));
 }
 
 /// One finalisation seam for all native adapters, including those that skip
@@ -2089,20 +2060,13 @@ fn external_target_grants(
 fn cargo_environment(
     binding: &provenant_confinement::cargo::CargoHome,
     home: &Path,
-    (target, lint_target): (&Path, &Path),
-    access: Access,
+    target: Option<&Path>,
     env: &mut Vec<(OsString, OsString)>,
 ) {
-    env.retain(|(key, _)| key != provenant_core::consumer_env::LANE_CARGO_LINT_TARGET);
-    binding.lane_cargo_environment_with_target(home, target, env);
-    if access == Access::WorktreeWrite {
-        // Lint-only runs set both CARGO_TARGET_DIR and CARGO_BUILD_BUILD_DIR to
-        // this sibling. Cargo locks the build directory, so they then do not
-        // queue behind test and build runs in the lane's own target/.
-        env.push((
-            provenant_core::consumer_env::LANE_CARGO_LINT_TARGET.into(),
-            lint_target.as_os_str().to_os_string(),
-        ));
+    match target {
+        Some(target) => binding.lane_cargo_environment_with_target(home, target, env),
+        // Writers inherit no target selector: Cargo uses its worktree default.
+        None => binding.lane_cargo_environment(home, env),
     }
 }
 

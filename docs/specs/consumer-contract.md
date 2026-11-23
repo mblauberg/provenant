@@ -20,6 +20,11 @@ release. A `PROVENANT_*` name the environment table does not declare is
 internal, and every `PROVENANT_TEST_*` name is internal by rule and never
 declared. Promoting an item is a one-entry change to its declaration.
 
+`PROVENANT_LANE_CARGO_LINT_TARGET` was formerly `stable`. It is removed rather
+than retired in place: its only producer was the lane Cargo cache, which writer
+lanes no longer create, so no lane sets it and no consumer can read it. The
+removal is named in the release notes even though it lands outside a major.
+
 - Why: a consumer must know which surfaces it may build on before it builds,
   and promising only what is used keeps the rest free to improve.
 - Owner: `crates/core/src/consumer_env.rs`
@@ -72,7 +77,6 @@ port commands, and `caller` ones are read only from the caller.
 | `PROVENANT_SANDBOX` | lane | stable | `on` when the lane runs inside Provenant's native sandbox, `off` when it does not. | every lane |
 | `PROVENANT_LANE_DEPTH` | lane | evolving | Nesting depth: 1 for a lane the caller started, one more per nested lane. Absent or `0` means not in a lane. | every lane |
 | `PROVENANT_PROCESS_TREE` | lane | stable | Names the sample behind `provenant process-tree --json`. Its presence is the contract; read the sample through that command, never the file. | while the supervisor samples the lane's processes (`domains.run.resource_sample_interval_ms` set, or an admission class sets `memory_per_slot`; off otherwise) |
-| `PROVENANT_LANE_CARGO_LINT_TARGET` | lane | stable | A Cargo target directory beside the lane's own, for lint-only runs: point CARGO_TARGET_DIR and CARGO_BUILD_BUILD_DIR at it so lints do not queue behind builds. | writer lanes |
 | `PROVENANT_LANE_PORT_BASE` | lane | evolving | First port of the lane's private port block. | writer lanes holding an allocated port block |
 | `PROVENANT_LANE_PORT_COUNT` | lane | evolving | Number of ports in the lane's private block. | writer lanes holding an allocated port block |
 | `PROVENANT_STATE_DIR` | lane_or_caller | evolving | State root. A caller sets it to use a root other than `~/.local/share/provenant/v2`; in a lane it names the attempt's private store. | every lane; when a caller leaves it unset the default root applies |

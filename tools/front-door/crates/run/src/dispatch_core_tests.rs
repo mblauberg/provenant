@@ -557,7 +557,6 @@ fn launch_records_plan_write_grants_and_git_digest() -> TestResult {
         ];
         if writer {
             expected.extend([
-                (WriteSource::LaneCache, "/fixture/cache", PathScope::Subtree),
                 (
                     WriteSource::GitState,
                     "/fixture/git-state/git-common",

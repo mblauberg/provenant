@@ -843,8 +843,8 @@ pub(crate) fn scheduled_gc(
     })
 }
 
-/// `provenant gc`: remove orphaned and idle lane caches, sparing any whose
-/// worktree has a live or unobservable writer.
+/// `provenant gc`: remove orphaned and idle legacy lane caches, sparing any
+/// whose worktree has a live or unobservable writer.
 pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
     // Keep per-PID EPERM census detail behind the global --full flag; the
     // default prints one aggregate warning with a count.
@@ -1132,7 +1132,7 @@ fn gc_data_summary(data: &GcData) -> String {
         human.push_str(&format!("Cargo cache warning: {warning}\n"));
     }
     for error in &data.build_dirs.errors {
-        human.push_str(&format!("lane build output: {error}\n"));
+        human.push_str(&format!("Cargo target: {error}\n"));
     }
     for target in &data.build_dirs.busy {
         human.push_str(&format!("busy Cargo target {}\n", target.display()));

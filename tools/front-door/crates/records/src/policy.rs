@@ -363,6 +363,7 @@ const fn strength_name(strength: Strength) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn generated_guidance_tracks_every_supported_strength() {
         for rule in table() {

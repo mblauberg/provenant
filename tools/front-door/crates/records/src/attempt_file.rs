@@ -127,6 +127,18 @@ impl AttemptFile {
         Self::ALL.into_iter().find(|file| file.name() == name)
     }
 
+    /// Entries settlement reads that a provider may have written into the
+    /// attempt directory. Settlement repairs an over-broad mode on exactly
+    /// these, because the file is the lane's own evidence rather than a
+    /// host-written record; a host-written record keeps refusing a mode defect
+    /// so it stays visible.
+    pub const PROVIDER_SETTLEMENT_INPUTS: [Self; 2] = [Self::Result, Self::Handoff];
+
+    /// Whether this entry belongs to [`Self::PROVIDER_SETTLEMENT_INPUTS`].
+    pub const fn provider_settlement_input(self) -> bool {
+        matches!(self, Self::Result | Self::Handoff)
+    }
+
     /// Whether the entry is a directory rather than a file.
     pub const fn is_directory(self) -> bool {
         matches!(
@@ -167,6 +179,39 @@ mod tests {
         names.dedup();
         assert_eq!(names.len(), AttemptFile::ALL.len());
         assert_eq!(AttemptFile::from_name("unlisted.json"), None);
+    }
+
+    #[test]
+    fn provider_settlement_inputs_are_the_files_settlement_may_repair() {
+        assert_eq!(
+            AttemptFile::PROVIDER_SETTLEMENT_INPUTS,
+            [AttemptFile::Result, AttemptFile::Handoff]
+        );
+        for file in AttemptFile::ALL {
+            assert_eq!(
+                file.provider_settlement_input(),
+                AttemptFile::PROVIDER_SETTLEMENT_INPUTS.contains(&file),
+                "{}",
+                file.name()
+            );
+        }
+        for host_written in [
+            AttemptFile::Prompt,
+            AttemptFile::Process,
+            AttemptFile::TerminalPending,
+            AttemptFile::CustodyLock,
+        ] {
+            assert!(
+                !host_written.provider_settlement_input(),
+                "{}",
+                host_written.name()
+            );
+        }
+        assert!(
+            AttemptFile::PROVIDER_SETTLEMENT_INPUTS
+                .iter()
+                .all(|file| !file.is_directory())
+        );
     }
 
     #[test]

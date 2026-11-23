@@ -66,7 +66,6 @@ pub const ROOT: &str = "PROVENANT_ROOT";
 pub const GIT: &str = "PROVENANT_GIT";
 pub const SANDBOX: &str = "PROVENANT_SANDBOX";
 pub const PROCESS_TREE: &str = "PROVENANT_PROCESS_TREE";
-pub const LANE_CARGO_LINT_TARGET: &str = "PROVENANT_LANE_CARGO_LINT_TARGET";
 pub const LANE_HEAD: &str = "PROVENANT_LANE_HEAD";
 pub const LANE_BASE: &str = "PROVENANT_LANE_BASE";
 pub const PRIMARY_CHECKOUT: &str = "PROVENANT_PRIMARY_CHECKOUT";
@@ -171,13 +170,6 @@ pub const CONSUMER_ENV: &[EnvVar] = &[
         Stable,
         "Names the sample behind `provenant process-tree --json`. Its presence is the contract; read the sample through that command, never the file.",
         "while the supervisor samples the lane's processes (`domains.run.resource_sample_interval_ms` set, or an admission class sets `memory_per_slot`; off otherwise)",
-    ),
-    var(
-        LANE_CARGO_LINT_TARGET,
-        Lane,
-        Stable,
-        "A Cargo target directory beside the lane's own, for lint-only runs: point CARGO_TARGET_DIR and CARGO_BUILD_BUILD_DIR at it so lints do not queue behind builds.",
-        "writer lanes",
     ),
     var(
         LANE_PORT_BASE,

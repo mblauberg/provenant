@@ -8,12 +8,12 @@
 //! - `--disable-sandbox`: the lane profile already confines the manifest
 //!   process and every build tool, so the nested profile adds nothing.
 //! - `--build-system native`: writes only the package scratch path (`.build`
-//!   by default), `TMPDIR` and the lane cache, all writable to a writer.
+//!   by default), `TMPDIR` and lane scratch, all writable to a writer.
 //! - `--scratch-path`: read-only lanes put SwiftPM's build output in their
 //!   private scratch instead of the read-only workspace.
 //! - SwiftPM's cache, configuration and security directories, and the Clang
-//!   module cache, move from the user's `~/Library` and `~/.cache` into the
-//!   lane cache, so no shared host store is written.
+//!   module cache, move from the user's `~/Library` and `~/.cache` into lane
+//!   scratch, so no shared host store is written.
 //!
 //! The grants add read and execute on the selected developer directory (the
 //! Xcode toolchain or SDK), and read on Xcode's shared frameworks that
@@ -170,11 +170,7 @@ impl SwiftToolchain {
         } else {
             (String::new(), String::new())
         };
-        let cache_hint = if read_only {
-            "lane scratch"
-        } else {
-            "lane cache"
-        };
+        let cache_hint = "lane scratch";
         Ok(format!(
             r#"#!/bin/sh
 # Provenant lane shim: SwiftPM inside the lane's Seatbelt profile.

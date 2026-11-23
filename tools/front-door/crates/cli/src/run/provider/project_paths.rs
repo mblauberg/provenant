@@ -384,7 +384,7 @@ mod tests {
                 permissions.mode = AccessMode::WorktreeWrite(Box::new(serde_json::from_value(
                     json!({
                         "git_grants_digest": vec![7_u8; 32], "publishing": false,
-                        "common_git_dir": common, "git_state": {"path": root.join("git-state"), "scope": "subtree"}, "cargo_cache": {"path": root.join("cache"), "scope": "subtree"}
+                        "common_git_dir": common, "git_state": {"path": root.join("git-state"), "scope": "subtree"}
                     }),
                 )?));
             }
@@ -681,7 +681,7 @@ mod tests {
                 permissions.mode = AccessMode::WorktreeWrite(Box::new(serde_json::from_value(
                     json!({
                         "git_grants_digest": vec![7_u8; 32], "publishing": false,
-                        "common_git_dir": common, "git_state": {"path": root.join("git-state"), "scope": "subtree"}, "cargo_cache": {"path": root.join("cache"), "scope": "subtree"}
+                        "common_git_dir": common, "git_state": {"path": root.join("git-state"), "scope": "subtree"}
                     }),
                 )?));
             }
@@ -876,7 +876,7 @@ mod tests {
                 AccessMode::WorktreeWrite(Box::new(
                     serde_json::from_value::<WorktreeWriteAuthority>(json!({
                         "git_grants_digest": vec![7_u8; 32], "publishing": false,
-                        "common_git_dir": common, "git_state": {"path": scratch.join("git-state"), "scope": "subtree"}, "cargo_cache": {"path": scratch.join("cache"), "scope": "subtree"}
+                        "common_git_dir": common, "git_state": {"path": scratch.join("git-state"), "scope": "subtree"}
                     }))?,
                 ))
             } else {
@@ -1045,7 +1045,7 @@ mod tests {
                     WorktreeWriteAuthority,
                 >(json!({
                     "git_grants_digest": vec![7_u8; 32], "publishing": false,
-                    "common_git_dir": common, "git_state": {"path": scratch.join("git-state"), "scope": "subtree"}, "cargo_cache": {"path": scratch.join("cache"), "scope": "subtree"}
+                    "common_git_dir": common, "git_state": {"path": scratch.join("git-state"), "scope": "subtree"}
                 }))?)),
                 read_only: None,
                 scratch: grant(scratch.clone()),

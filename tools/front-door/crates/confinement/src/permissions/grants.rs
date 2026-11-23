@@ -1,33 +1,16 @@
 //! Worktree Git write grants bound into writer authority.
 
 use super::*;
-use crate::cache::{CARGO_CACHE_OWNER, CacheOwner, encode_cache_owner, verify_cache_metadata};
+use crate::cache::verify_cache_metadata;
 use crate::repo::{GitRefName, VerifiedWorktree};
-use provenant_os::fs::{Directory, PublishMode};
+use provenant_os::fs::Directory;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
-use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 
-/// The lane-only build cache belonging to this verified worktree incarnation.
-/// Host-derived canonical paths and held Git identities separate repositories,
-/// same-named worktrees and worktrees recreated at an earlier path.
-pub fn worktree_cargo_cache(
-    home: &Path,
-    worktree: &VerifiedWorktree,
-    credentials: &provenant_core::CredentialRoots,
-) -> Result<PathGrant, PermissionError> {
-    let grant = PathGrant {
-        path: worktree_cargo_cache_path(home, worktree)?,
-        scope: PathScope::Subtree,
-    };
-    validate_noncredential_grant(&grant, credentials)?;
-    Ok(grant)
-}
-
-/// Derive the identity-bound cache path used by a verified worktree.
-/// Callers that expose it as a permission grant must use
-/// [`worktree_cargo_cache`] so declared credentials are checked.
+/// The identity-bound lane cache path written by releases before lane Cargo
+/// caches were removed. GC derives it to find and retire those leftovers; no
+/// launch creates or grants it.
 pub fn worktree_cargo_cache_path(
     home: &Path,
     worktree: &VerifiedWorktree,
@@ -152,10 +135,11 @@ pub(super) fn worktree_git_state_host_files(container: &PathGrant) -> [PathGrant
 }
 
 /// Prepare only host-derived writer directories outside the child sandbox. This
-/// creates the lane cache and shared Git-state container and data directories.
-/// Call while holding writer custody, before collecting `required_anchors`.
-/// The container and Git configuration remain host-owned; shared refs and
-/// objects are writable through the two narrowly scoped children.
+/// creates the shared Git-state container and data directories, and any parent
+/// directories the worktree grants need. Call while holding writer custody,
+/// before collecting `required_anchors`. The container and Git configuration
+/// remain host-owned; shared refs and objects are writable through the two
+/// narrowly scoped children.
 pub fn prepare_writer_directories(
     worktree: &VerifiedWorktree,
     selected_ref: &GitRefName,
@@ -173,38 +157,29 @@ pub fn prepare_writer_directories(
         credentials
     };
     let grants = WorktreeWriteGrants::derive(worktree, selected_ref);
-    if grants.digest(&authority.cargo_cache, &authority.git_state) != authority.git_grants_digest {
+    if grants.digest(&authority.git_state) != authority.git_grants_digest {
         return Err(PermissionError::GitWriteAuthorityMissing);
     }
     grants.validate(credentials)?;
-    validate_writer_cache(authority, worktree, home, credentials)?;
     validate_writer_git_state(authority, worktree, selected_ref, home, credentials)?;
     let paths: BTreeSet<_> = grants
         .iter()
-        .chain([&authority.cargo_cache])
         .filter_map(|grant| match grant.scope {
             PathScope::Subtree => Some(grant.path.as_path()),
             PathScope::Exact => grant.path.parent(),
         })
         .collect();
     for path in paths {
-        create_derived_directory(path, &authority.cargo_cache.path, worktree)?;
+        create_derived_directory(path)?;
     }
     prepare_git_state_directories(&authority.git_state)?;
     Ok(())
 }
 
-/// Create `path` one verified component at a time, never following links. On
-/// the way, the lane cache and its parent must be private to this user, and the
-/// cache gets the owner marker GC reads to tie it to `worktree`.
-fn create_derived_directory(
-    path: &Path,
-    cache: &Path,
-    worktree: &VerifiedWorktree,
-) -> Result<(), PermissionError> {
+/// Create `path` one verified component at a time, never following links.
+fn create_derived_directory(path: &Path) -> Result<(), PermissionError> {
     let mut directory =
         Directory::open_anchor(Path::new("/")).map_err(PermissionError::Filesystem)?;
-    let mut traversed = PathBuf::from("/");
     for component in path.components() {
         let Component::Normal(name) = component else {
             continue;
@@ -223,40 +198,6 @@ fn create_derived_directory(
             }
             Err(error) => return Err(PermissionError::Filesystem(error)),
         };
-        traversed.push(name);
-        if traversed == cache || Some(traversed.as_path()) == cache.parent() {
-            verify_cache_metadata(&directory.metadata().map_err(PermissionError::Filesystem)?)?;
-        }
-        if traversed == cache {
-            let identity = worktree.identity();
-            let marker = encode_cache_owner(&CacheOwner {
-                path: worktree.path().to_path_buf(),
-                identity: (identity.device, identity.inode),
-            });
-            directory
-                .atomic_write(
-                    OsStr::new(CARGO_CACHE_OWNER),
-                    ".provenant-owner-",
-                    &marker,
-                    PublishMode::Replace,
-                )
-                .map_err(PermissionError::Filesystem)?;
-            // One tag covers every target under the cache, including a
-            // `target-lint` that Cargo did not create.
-            crate::cache::tag_cache_directory(&directory).map_err(PermissionError::Filesystem)?;
-        }
-    }
-    Ok(())
-}
-
-pub(super) fn validate_writer_cache(
-    authority: &WorktreeWriteAuthority,
-    worktree: &VerifiedWorktree,
-    home: &Path,
-    credentials: &provenant_core::CredentialRoots,
-) -> Result<(), PermissionError> {
-    if authority.cargo_cache != worktree_cargo_cache(home, worktree, credentials)? {
-        return Err(PermissionError::GitWriteAuthorityMissing);
     }
     Ok(())
 }
@@ -354,12 +295,12 @@ impl WorktreeWriteGrants {
         [&self.worktree, &self.private_git_dir, &self.common_git_dir].into_iter()
     }
 
-    pub(super) fn digest(&self, cache: &PathGrant, git_state: &PathGrant) -> [u8; 32] {
+    pub(super) fn digest(&self, git_state: &PathGrant) -> [u8; 32] {
         let mut digest = Sha256::new();
-        digest.update(b"provenant-worktree-git-grants-v14\0");
+        digest.update(b"provenant-worktree-git-grants-v15\0");
         digest.update((self.branch.len() as u64).to_be_bytes());
         digest.update(self.branch.as_bytes());
-        for grant in self.iter().chain([cache, git_state]) {
+        for grant in self.iter().chain([git_state]) {
             let bytes = grant.path.as_os_str().as_encoded_bytes();
             digest.update((bytes.len() as u64).to_be_bytes());
             digest.update(bytes);

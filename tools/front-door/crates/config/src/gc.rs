@@ -157,7 +157,7 @@ retention_classes! {
         owner: Confinement,
         adapter: lane_cargo_caches,
         eligibility: Declared,
-        detail: "settled lane; verified cache owner and free writer custody",
+        detail: "legacy cache left before lane builds were removed; verified owner and free writer custody",
         settings: ["gc.idle", "lanes.cargo_cache_max"],
         triggers: GC_SETTLEMENT
     },
@@ -384,7 +384,8 @@ pub const DEFAULT_LANE_PORT_BLOCKS: u64 = 64;
 /// Hard ceilings on the configurable lane caps.
 pub const WRITER_LANES_CEILING: u64 = 64;
 pub const PROJECT_WRITER_LANES_CEILING: u64 = 32;
-/// Recency grace for lane build output when `build_dir_grace_seconds` is unset.
+/// Recency grace for managed Cargo targets, including legacy lane build
+/// output, when `build_dir_grace_seconds` is unset.
 pub const DEFAULT_BUILD_DIR_GRACE_SECONDS: u64 = 15 * 60;
 /// The asset's -1 sentinel selects the host-dependent default.
 pub fn deserialize_auto<'de, D: serde::Deserializer<'de>>(

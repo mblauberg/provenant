@@ -181,16 +181,20 @@ fn registered_adapters_render_common_lane_capabilities() -> Result<(), Box<dyn s
                         .map(|(_, value)| Path::new(value))
                 };
                 assert_eq!(env_path("CARGO_HOME"), Some(host_cargo), "{context}");
-                let target =
-                    env_path("CARGO_TARGET_DIR").expect("every launch binds its Cargo target");
-                let cache = match &plan.permissions().mode {
-                    AccessMode::ReadOnly => &plan.permissions().scratch,
-                    AccessMode::WorktreeWrite(authority) => authority.cargo_cache(),
-                };
-                assert!(
-                    target.starts_with(&cache.path),
-                    "{context}: target outside lane cache"
-                );
+                match &plan.permissions().mode {
+                    AccessMode::ReadOnly => {
+                        let target = env_path("CARGO_TARGET_DIR")
+                            .expect("a read-only launch binds scratch as its Cargo target");
+                        assert!(
+                            target.starts_with(&plan.permissions().scratch.path),
+                            "{context}: target outside scratch"
+                        );
+                    }
+                    AccessMode::WorktreeWrite(_) => {
+                        assert!(env_path("CARGO_TARGET_DIR").is_none(), "{context}");
+                        assert!(env_path("CARGO_BUILD_BUILD_DIR").is_none(), "{context}");
+                    }
+                }
                 let rendered = provenant_confinement::permissions::snapshot::render(
                     plan.permissions(),
                     &launch.profile,

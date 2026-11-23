@@ -994,9 +994,10 @@ fn registry_provider_resolves_prepares_and_reports_quota(
         for record in records { record.account_key = None; }
     };
     if unknown_identity {
-        let mut strict = provenant_records::policy::Policy::default();
-        strict.overlay(&[("QUOTA_IDENTITY_UNKNOWN".into(), provenant_records::policy::Strength::Refuse)].into(), provenant_records::policy::Source::Project);
-        task.profile.launch_policy = Some(strict);
+        task.profile.policy_overrides.insert(
+            "QUOTA_IDENTITY_UNKNOWN".into(),
+            provenant_records::policy::Strength::Refuse,
+        );
         let result = super::preparation::prepare_candidates_inner(
             &registry, &providers, &task, prompt, &paths, None, Some(&locate), None, None, None,
             Some(&alter),
@@ -1006,7 +1007,7 @@ fn registry_provider_resolves_prepares_and_reports_quota(
             Err(super::preparation::PrepareError::Candidates { skipped_routes, .. })
                 if skipped_routes.iter().any(|route| route.cause == Some(provenant_records::RouteExclusionReason::UnknownAccount))
         ), "strict unknown identity must refuse preparation for that reason");
-        task.profile.launch_policy = None;
+        task.profile.policy_overrides.remove("QUOTA_IDENTITY_UNKNOWN");
     }
     let prepared = super::preparation::prepare_candidates_inner(
         &registry,

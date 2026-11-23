@@ -248,8 +248,8 @@ pub fn enable_wal(db: &Connection) -> Result<(), WalError> {
 
 mod schema;
 pub use schema::{
-    RESET_CODE, Schema, Step, StepKind, VersionError, check_format, check_version, ensure_schema,
-    schema_matches, stored_version, validate_steps,
+    Migration, RESET_CODE, Schema, Step, StepKind, VersionError, check_format, check_version,
+    ensure_schema, schema_matches, stored_version, validate_steps,
 };
 
 #[cfg(test)]
@@ -466,6 +466,7 @@ mod tests {
         sql: "CREATE TABLE t (v INTEGER) STRICT;\nCREATE INDEX t_v ON t(v);\nPRAGMA user_version=3;",
         version: 3,
         steps: &[],
+        migrations: &[],
     };
 
     #[test]

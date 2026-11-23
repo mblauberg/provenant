@@ -1,6 +1,10 @@
 //! The attempt holder: Run's admission and terminal transaction, composed into
 //! the same-binary guardian. It runs while the guardian still holds custody.
-use crate::{artifacts::read_sealed, launch::Providers, *};
+use crate::{
+    artifacts::{read_sealed, read_settled},
+    launch::Providers,
+    *,
+};
 use provenant_core::{ActorId, AttemptId, CancelToken, Clock, OperationId, ProjectId, RootInputs};
 use provenant_os::{clock::SystemClock, exec::Termination, fs::Directory};
 use provenant_supervisor::{
@@ -649,7 +653,7 @@ pub struct SealedTask {
     pub writer_worktree: Option<provenant_records::custody::Subject>,
 }
 impl SealedTask {
-    /// Restore host-sealed launch policy before validating the next generation.
+    /// Restore host-sealed access before validating the next generation.
     pub fn apply_access(&self, task: &mut TaskRequest) {
         task.access.network = Some(self.effective_network);
         task.access.database_ipc = self.effective_database_ipc;
@@ -3609,7 +3613,12 @@ impl RunStore {
             });
         }
         // External delivery runs only from the committed decision below.
-        let result_orphan = read_sealed(attempt, "result.md", RESULT_LIMIT)?.is_some();
+        let result_orphan = read_settled(
+            attempt,
+            provenant_records::AttemptFile::Result,
+            RESULT_LIMIT,
+        )?
+        .is_some();
         let delivery_applicable = succeeded_before_stop
             && !cancelled
             && exit.stop_reason.is_none()
@@ -6980,18 +6989,10 @@ mod writer_recovery_tests {
         }
         if matches!(case, BudgetStopCase::StrictScope) {
             run.request.task.profile.write_scope = vec!["src".into()];
-            let mut settings = provenant_config::policy::Settings::default();
-            settings
-                .projects
-                .entry(execution.project_id.to_string())
-                .or_default()
-                .rules
-                .insert(
-                    "WRITE_SCOPE".into(),
-                    provenant_records::policy::Strength::Refuse,
-                );
-            run.request.task.profile.launch_policy =
-                Some(settings.resolve(&execution.project_id.to_string(), &Default::default()));
+            run.request.task.profile.policy_overrides.insert(
+                "WRITE_SCOPE".into(),
+                provenant_records::policy::Strength::Refuse,
+            );
         }
         store.create(&run, &call)?;
         let id = run.attempt_id;
@@ -7259,7 +7260,9 @@ mod writer_recovery_tests {
             )?;
             assert_eq!(report["code"], "WRITE_SCOPE");
             assert_eq!(report["strength"], "refuse");
-            assert_eq!(report["source"], "project");
+            // The strict scope comes from the request's sealed dispatch
+            // override, not a project rule.
+            assert_eq!(report["source"], "dispatch");
             assert!(
                 !report["out_of_scope_paths"]
                     .as_array()

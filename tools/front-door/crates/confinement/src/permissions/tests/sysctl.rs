@@ -130,10 +130,6 @@ fn process_arguments_are_private_across_sandbox_boundaries()
                             .into(),
                     scope: PathScope::Subtree,
                 },
-                cargo_cache: PathGrant {
-                    path: root.join("cache"),
-                    scope: PathScope::Subtree,
-                },
             }))
         } else {
             AccessMode::ReadOnly

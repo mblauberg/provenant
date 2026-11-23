@@ -156,7 +156,7 @@ pub struct DiskVolume {
     pub available_bytes: u64,
 }
 
-/// A lane cache's immediate children: `target` and the rest.
+/// A legacy lane cache's immediate children: `target` and the rest.
 /// The parts use unshared bytes and sum to the lane's unshared total.
 #[derive(Debug, Default, Serialize)]
 pub struct DiskParts {

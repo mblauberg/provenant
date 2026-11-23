@@ -86,6 +86,33 @@ pub(super) fn mark_unreadable_process_warning(boot: &str, pid: i64) -> bool {
     warned.insert((boot.to_owned(), pid))
 }
 
+/// Only a process that could own a candidate checkout can hold it. Credentials
+/// read from the kernel decide the cohort: a process whose real, effective and
+/// saved uids all differ from the current user and every root owner cannot hold
+/// a same-user checkout. Missing credentials keep the warning, because an
+/// unreadable process may still be the current user's. Foreign EPERM processes
+/// (system daemons and other users on macOS included) say nothing.
+pub(super) fn unreadable_cohort_pids(
+    pids: &BTreeSet<i64>,
+    cwd_observer: &dyn CwdObserver,
+    roots: &[PathBuf],
+) -> BTreeSet<i64> {
+    let mut owners = vec![provenant_os::fs::effective_uid()];
+    owners.extend(
+        roots
+            .iter()
+            .filter_map(|root| std::fs::metadata(root).ok().map(|metadata| metadata.uid())),
+    );
+    pids.iter()
+        .copied()
+        .filter(|pid| {
+            cwd_observer
+                .process_uids(*pid)
+                .is_none_or(|uids| owners.iter().any(|owner| !uids.all_differ_from(*owner)))
+        })
+        .collect()
+}
+
 /// Report the EPERM processes of one census as a single line with a count and
 /// what they mean. Processes already warned about in this boot are omitted, so
 /// repeated censuses on the same host do not repeat the warning. The per-PID
@@ -1327,7 +1354,10 @@ pub(super) fn worker_evidence_from_census(
         &mut held,
         keep_going,
     );
-    warn_unreadable_processes(&current.identity.boot, &unreadable_warnings);
+    warn_unreadable_processes(
+        &current.identity.boot,
+        &unreadable_cohort_pids(&unreadable_warnings, cwd_observer, roots),
+    );
     WorkerEvidence {
         held_incomplete: incomplete
             || states

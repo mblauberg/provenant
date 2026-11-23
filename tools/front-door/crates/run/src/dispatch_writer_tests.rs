@@ -15,8 +15,10 @@ fn write_grants_wire_bound_and_git_digest_are_preserved() -> TestResult {
     let id = prepared.attempt_id;
     let grant = WriteGrantRecord {
         extra: Default::default(),
-        source: WriteSource::LaneCache,
-        path: provenant_records::AbsolutePath::new(std::path::Path::new("/fixture/cache"))?,
+        source: WriteSource::GitState,
+        path: provenant_records::AbsolutePath::new(std::path::Path::new(
+            "/fixture/git-state/git-common",
+        ))?,
         scope: PathScope::Subtree,
     };
     let max_grant_bytes = provenant_records::run::MAX_WRITE_GRANT_BYTES as usize;
