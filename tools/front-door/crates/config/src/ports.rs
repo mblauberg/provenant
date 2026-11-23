@@ -1,6 +1,5 @@
 //! One sourced, versioned declaration for repository integration ports.
 use provenant_records::FileDigest;
-use provenant_records::provenance::Source;
 use provenant_records::warning::{CONFIG_MALFORMED, Warning, warn};
 pub use provenant_records::{
     CommandExitCodes, DEFAULT_PORT_COMMAND_RECEIPT_AGE_DAYS, ExitDisposition, Layer,

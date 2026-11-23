@@ -157,6 +157,7 @@ fn run(inv: &Call) -> Result<Outcome, CommandError> {
 }
 
 #[cfg(test)]
+#[allow(unused_imports, dead_code)] // The worktree driver includes the library without a test harness.
 mod tests {
     use super::*;
     use provenant_records::provenance::Layer;
@@ -206,10 +207,10 @@ mod tests {
         let state = root.path().join("state");
         fs::create_dir_all(&state).expect("state");
         fixture(project);
-        let plan = plan(project, &state).expect("plan");
+        let first = plan(project, &state).expect("plan");
 
         assert_eq!(
-            keys(&plan),
+            keys(&first),
             [
                 "git.remote",
                 "git.protected",
@@ -218,37 +219,43 @@ mod tests {
                 "build.stacks"
             ]
         );
-        assert_eq!(value(&plan, "git.remote").as_str(), Some("upstream"));
-        assert_eq!(value(&plan, "verify.remote").as_str(), Some("upstream"));
-        assert_eq!(value(&plan, "verify.base").as_str(), Some("upstream/trunk"));
-        assert_eq!(value(&plan, "git.protected"), &serde_json::json!(["trunk"]));
-        assert_eq!(value(&plan, "build.stacks"), &serde_json::json!(["rust"]));
+        assert_eq!(value(&first, "git.remote").as_str(), Some("upstream"));
+        assert_eq!(value(&first, "verify.remote").as_str(), Some("upstream"));
+        assert_eq!(
+            value(&first, "verify.base").as_str(),
+            Some("upstream/trunk")
+        );
+        assert_eq!(
+            value(&first, "git.protected"),
+            &serde_json::json!(["trunk"])
+        );
+        assert_eq!(value(&first, "build.stacks"), &serde_json::json!(["rust"]));
 
-        let remote = &plan.choices[0].source;
+        let remote = &first.choices[0].source;
         assert_eq!(remote.layer, Layer::Detected);
         assert_eq!(remote.origin.as_deref(), Some("the sole Git remote"));
-        let base = &plan.choices[3].source;
+        let base = &first.choices[3].source;
         assert_eq!(base.layer, Layer::Detected);
         assert_eq!(base.origin.as_deref(), Some("refs/remotes/upstream/HEAD"));
-        let stacks = &plan.choices[4].source;
+        let stacks = &first.choices[4].source;
         assert_eq!(stacks.layer, Layer::Detected);
 
         // Detection-owned leaves are deliberately absent from the document.
-        assert_eq!(plan.document["schema_version"], 3);
-        assert_eq!(plan.document["git"]["remote"], "upstream");
-        assert_eq!(plan.document["verify"]["base"], "upstream/trunk");
+        assert_eq!(first.document["schema_version"], 3);
+        assert_eq!(first.document["git"]["remote"], "upstream");
+        assert_eq!(first.document["verify"]["base"], "upstream/trunk");
         assert_eq!(
-            plan.document["build"]["stacks"],
+            first.document["build"]["stacks"],
             serde_json::json!(["rust"])
         );
-        assert!(plan.document["verify"].get("tiers").is_none());
-        assert!(plan.document["verify"].get("default_tier").is_none());
+        assert!(first.document["verify"].get("tiers").is_none());
+        assert!(first.document["verify"].get("default_tier").is_none());
 
         let path = project.join(provenant_config::PORTS_CONFIG);
-        assert!(write_initial(&path, &plan.document).expect("write"));
+        assert!(write_initial(&path, &first.document).expect("write"));
         let written = fs::read(&path).expect("read back");
         let reparsed: serde_json::Value = serde_json::from_slice(&written).expect("decode");
-        assert_eq!(reparsed, plan.document);
+        assert_eq!(reparsed, first.document);
 
         // A second run leaves the file byte-identical and says what it would add.
         let again = plan(project, &state).expect("second plan");
