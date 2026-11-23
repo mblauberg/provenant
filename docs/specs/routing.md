@@ -382,8 +382,9 @@ login all resolve to the same typed identity (adapter, key, entry id, label).
 Each calling context declares the forms it accepts and projects that identity to
 its own canonical output; no caller re-matches the reference. A reference that
 matches more than one account is ambiguous in every context, with the matching
-labels named as the repair. A miss lists close matching labels only — never a
-directory, key or credential value.
+labels named as the repair. A miss lists close matching labels only — never
+another account's directory, key or credential value; the setting path the
+operator wrote is echoed.
 
 ## Launch route and role tiers
 
