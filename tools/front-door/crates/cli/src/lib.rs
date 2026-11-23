@@ -220,7 +220,15 @@ fn parse_with_models(
         } else if command.is_empty() && *all {
             (all_command_help(&expanded), String::from("provenant"))
         } else {
-            resolved_help_text(command, &mut expanded)
+            match resolved_help_text(command, &mut expanded) {
+                Ok(resolved) => resolved,
+                Err(error) => {
+                    return ParseOutcome::Invalid {
+                        error,
+                        globals: invocation.globals,
+                    };
+                }
+            }
         };
         let text = if !command.is_empty() && !all && is_core_scope(&model, &scope) {
             append_child_index(text, &scope)
@@ -895,22 +903,38 @@ fn expanded_scoped_help(scope: &str, mut model: clap::Command) -> (String, HelpC
     (text, catalogue)
 }
 /// Render the long help of the command `path` names against `model`, with the
-/// scope the walk resolved. An unmatched component stops at the deepest matched
-/// command, whose rendered help lists its valid children. Explicit quota
-/// maintenance stays addressable even though the compact listing hides it.
-fn resolved_help_text(path: &[String], model: &mut clap::Command) -> (String, String) {
+/// scope the walk resolved. Words after a command that takes positional
+/// arguments are its arguments (`help run implement` is `run`'s help). Any
+/// other unmatched or hidden component is an unknown help command, and the
+/// error names the valid children at that level. Explicit quota maintenance
+/// stays addressable even though the compact listing hides it.
+fn resolved_help_text(
+    path: &[String],
+    model: &mut clap::Command,
+) -> Result<(String, String), CliError> {
     let mut scope = String::from("provenant");
     // Resolve the path read-only first: a mutable walk that can stop early
     // keeps its last borrow alive past the loop.
     let mut names = Vec::new();
     let mut current: &clap::Command = model;
     for component in path {
-        let Some(child) = current.find_subcommand(component) else {
-            break;
+        let visible = current
+            .find_subcommand(component)
+            .filter(|child| !child.is_hide_set() || scope == "provenant quota");
+        let Some(child) = visible else {
+            if current.get_positionals().next().is_some() {
+                break;
+            }
+            let children: Vec<_> = current
+                .get_subcommands()
+                .filter(|child| !child.is_hide_set())
+                .map(clap::Command::get_name)
+                .collect();
+            return Err(CliError::invalid(format!(
+                "unknown help command `{component}` under `{scope}`; commands: {}",
+                children.join(", ")
+            )));
         };
-        if child.is_hide_set() && scope != "provenant quota" {
-            break;
-        }
         scope = format!("{scope} {}", child.get_name());
         names.push(child.get_name().to_string());
         current = child;
@@ -918,12 +942,12 @@ fn resolved_help_text(path: &[String], model: &mut clap::Command) -> (String, St
     let mut selected = model;
     for name in &names {
         let Some(child) = selected.find_subcommand_mut(name) else {
-            return (String::new(), scope);
+            return Ok((String::new(), scope));
         };
         *child = child.clone().hide(false);
         selected = child;
     }
-    (selected.render_long_help().to_string(), scope)
+    Ok((selected.render_long_help().to_string(), scope))
 }
 // Explicit help can address quota maintenance without advertising it in the
 // default catalogue. Only the validated scope is revealed, never its siblings.
@@ -1648,11 +1672,13 @@ mod tests {
                 .any(|command| command.command == "provenant config")
         );
 
-        // An unknown component stops at the deepest matched level, whose help
-        // lists its valid children from the same command model.
-        let ParseOutcome::Help { text, .. } = parsed(&["help", "config", "no-such-command"]) else {
+        // An unknown component is refused, and the error names the valid
+        // children at the deepest matched level from the same command model.
+        let ParseOutcome::Invalid { error, .. } = parsed(&["help", "config", "no-such-command"])
+        else {
             panic!("unknown help path")
         };
+        let text = error.to_string();
         let model = expanded_model();
         let children: Vec<_> = model
             .find_subcommand("config")
@@ -1677,13 +1703,15 @@ mod tests {
             ("--state-dir", 1),
             ("--project", 1),
         ] {
-            let count = all
+            let lines: Vec<_> = all
                 .lines()
-                .filter(|line| line.trim_start().starts_with(flag))
-                .count();
+                .filter(|line| line.split_whitespace().next() == Some(flag))
+                .collect();
             assert_eq!(
-                count, expected,
-                "{flag} appears {count} times in help --all"
+                lines.len(),
+                expected,
+                "{flag} appears {} times in help --all: {lines:#?}",
+                lines.len()
             );
         }
     }

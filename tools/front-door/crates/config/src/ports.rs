@@ -2273,7 +2273,11 @@ mod tests {
         );
         let value = serde_json::to_value(&table).unwrap();
         assert!(value["verify"]["tiers"]["0"]["commands"][0].is_object());
-        assert_eq!(serde_json::from_value::<PortTable>(value).unwrap(), table);
+        // Provenance is derived from the layer walk and never serialised, so
+        // the decoded table carries the same ports but not the labels' history.
+        let decoded = serde_json::from_value::<PortTable>(value.clone()).unwrap();
+        assert_eq!(decoded.verify, table.verify);
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), value);
     }
 
     // Spec: docs/specs/state.md#one-sourced-port-table

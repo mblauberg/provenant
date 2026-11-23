@@ -1007,7 +1007,23 @@ fn smoke_nodes_resolve_on_a_free_capable_tier() {
         now: provenant_core::WallTime::from_unix_seconds(100).unwrap(),
         host: "smoke-route-test",
     };
-    for node in compiled.composite.unwrap().nodes {
+    // A fan-out node (the review panel) is a boundary: its tier lives on the
+    // member leaves it expands to, so walk down to every leaf that runs.
+    fn leaves(nodes: Vec<GraphNode>) -> Vec<GraphNode> {
+        nodes
+            .into_iter()
+            .flat_map(|node| match node.composite.clone() {
+                Some(composite) => leaves(composite.nodes),
+                None => vec![node],
+            })
+            .collect()
+    }
+    let leaves = leaves(compiled.composite.unwrap().nodes);
+    assert!(
+        leaves.iter().any(|node| node.review_lens.is_some()),
+        "the review panel's lens leaves are part of the smoke graph"
+    );
+    for node in leaves {
         // A template leaf's `tier` lowers to the node's route alias.
         let tier = node
             .route

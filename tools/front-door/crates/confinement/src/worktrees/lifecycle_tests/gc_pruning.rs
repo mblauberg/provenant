@@ -1353,7 +1353,12 @@ fn gc_never_retires_a_linked_worktree_on_the_default_branch() -> Result<(), Box<
     let test = TestContext::new(&fixture)?;
     let context = test.context();
     let lane = gc_merged_worktree(&test, &context, "gc-default-lane")?;
-    let branch = lane.branch.as_deref().ok_or("fixture lane has no branch")?;
+    // `WorktreeInfo::branch` is the full ref; the tracking name needs the short one.
+    let branch = lane
+        .branch
+        .as_deref()
+        .and_then(|branch| branch.strip_prefix("refs/heads/"))
+        .ok_or("fixture lane has no local branch")?;
     // Name this linked worktree's branch as the default through origin/HEAD
     // while the primary checkout stays on the repository's initial branch.
     let tracking = format!("refs/remotes/origin/{branch}");
