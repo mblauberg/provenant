@@ -362,7 +362,7 @@ mod tests {
         // merge, so an unknown value falls back to the documented default and
         // says which layer supplied the text and that the default now stands.
         let mut profile = HarnessProfile::default();
-        profile.knobs.insert(REBASE.into(), Value::from("alow"));
+        profile.knobs.insert(REBASE.into(), Value::from("permit"));
         profile
             .knob_sources
             .insert(REBASE.into(), LimitSource::Host);
@@ -370,8 +370,8 @@ mod tests {
         assert_eq!(history.rebase.value, Rebase::Allow);
         assert_eq!(history.rebase.source, LimitSource::Default);
         assert_eq!(
-            unknown_value(REBASE, "alow", LimitSource::Host, Rebase::Allow.as_str()),
-            "lanes.history.rebase = alow (source: host) is not a value of this setting; using allow (source: default)"
+            unknown_value(REBASE, "permit", LimitSource::Host, Rebase::Allow.as_str()),
+            "lanes.history.rebase = permit (source: host) is not a value of this setting; using allow (source: default)"
         );
 
         // The restrictive default is no proof of safe fallback: the same text
