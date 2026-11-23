@@ -135,12 +135,19 @@ fn settled_attempt(
         read_prompts: false,
     };
     let store = provenant_run::RunStore::open(&execution, &call)?;
-    let number = if graph != "lane-read-children" {
-        54
-    } else if success {
-        51
+    // Every graph owns its attempts: the host checks each attempt's work key
+    // against the graph node that names it, so graphs cannot share fixtures.
+    let (success_number, failure_number) = match graph {
+        "lane-read-children" => (51, 52),
+        "lane-read-sibling" => (53, 54),
+        "lane-read-foreign" => (55, 56),
+        "lane-read-other-project" => (57, 58),
+        _ => return Err(format!("no fixture attempts reserved for {graph}").into()),
+    };
+    let number = if success {
+        success_number
     } else {
-        52
+        failure_number
     };
     let id = AttemptId::from_bytes([number; 16]);
     let prompt = "fixture child";
@@ -299,16 +306,18 @@ fn seal_graph_chair(
     Ok(())
 }
 
-/// Bind a graph whose settled nodes reuse the fixture attempts, so a lane can
-/// read output, status and trace from it once its chair session is admitted.
+/// Bind a graph whose settled nodes name their own settled attempts, so a lane
+/// can read output, status and trace from it once its chair session is
+/// admitted. The attempts' work keys must match this graph's nodes.
 fn bind_sibling_graph(
     context: &Context,
+    rig: &TestRig,
     project: provenant_core::ProjectId,
     directory: &std::path::Path,
     graph: &str,
-    success: AttemptId,
-    failure: AttemptId,
 ) -> Result<()> {
+    let success = settled_attempt(context, rig, true, graph)?;
+    let failure = settled_attempt(context, rig, false, graph)?;
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), 30)?;
@@ -407,21 +416,19 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
     let sibling_graph = "lane-read-sibling";
     bind_sibling_graph(
         &context,
+        &rig,
         context.identity.project,
         &rig.project,
         sibling_graph,
-        success,
-        failure,
     )?;
     seal_graph_chair(&context, context.identity.project, sibling_graph, "chair-a")?;
     let foreign_graph = "lane-read-foreign";
     bind_sibling_graph(
         &context,
+        &rig,
         context.identity.project,
         &rig.project,
         foreign_graph,
-        success,
-        failure,
     )?;
     seal_graph_chair(&context, context.identity.project, foreign_graph, "chair-b")?;
     // The chair index is project-scoped: a graph from another project stays
@@ -430,11 +437,10 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
     let other_project_graph = "lane-read-other-project";
     bind_sibling_graph(
         &context,
+        &rig,
         other_project,
         &rig.project,
         other_project_graph,
-        success,
-        failure,
     )?;
     seal_graph_chair(&context, other_project, other_project_graph, "chair-a")?;
     let mut holder = provenant_run::HolderContext {
