@@ -70,6 +70,8 @@ pub const LIVE_RECORD_FORMAT_CHANGED: WarningCode = WarningCode("LIVE_RECORD_FOR
 pub const MIGRATION_STEP_FAILED: WarningCode = WarningCode("MIGRATION_STEP_FAILED");
 /// The state root overlaps a location the product treats as advisory.
 pub const STATE_ROOT_OVERLAP: WarningCode = WarningCode("STATE_ROOT_OVERLAP");
+/// The one forge context could not be resolved, so a fail-closed path applies.
+pub const FORGE_CONTEXT_UNRESOLVED: WarningCode = WarningCode("FORGE_CONTEXT_UNRESOLVED");
 
 impl Warning {
     /// A warning with no subject, source or repair.

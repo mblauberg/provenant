@@ -1844,6 +1844,9 @@ pub(crate) fn retention_event(
                 context.clock,
                 cancel,
             )?;
+            let forge = worktrees::forge_context(context)
+                .map_err(|_| Error::GcObservation("cannot resolve forge context"))?;
+            let default_source = format!("{}/{}", forge.remote.value, forge.default_branch.value);
             let policy = worktrees::WorktreeGcPolicy {
                 mode: worktrees::CollectionMode::LandingCleanup,
                 proof: Some(evidence),
@@ -1891,7 +1894,7 @@ pub(crate) fn retention_event(
                                     | LandingSource::TreeEquivalent { reference, .. } => {
                                         reference.strip_prefix("refs/remotes/").unwrap_or(reference)
                                     }
-                                    _ => "origin/HEAD",
+                                    _ => default_source.as_str(),
                                 },
                                 ids,
                             );

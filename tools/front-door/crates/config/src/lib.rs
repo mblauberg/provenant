@@ -54,7 +54,7 @@ pub mod detect;
 pub mod forge;
 pub use forge::{
     Config as ForgeConfig, ForgeContext, ForgeContextError, ForgeProbe, Git as ForgeGit,
-    NoForgeProbe, operation_policy,
+    NoForgeProbe, operation_policy, resolve_for,
 };
 pub mod ports;
 mod project_binding;

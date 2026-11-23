@@ -23,8 +23,8 @@ mod roots;
 pub use roots::*;
 pub mod names;
 pub use names::{
-    Catalogue, Fold, NameKind, NameRefusal, Resolved, close_matches, edit_distance, resolve,
-    valid_name,
+    Catalogue, Fold, NameKind, NameRefusal, Resolved, close_matches, close_matches_with_cap,
+    edit_distance, resolve, valid_name,
 };
 pub mod retry;
 pub mod review_cover;

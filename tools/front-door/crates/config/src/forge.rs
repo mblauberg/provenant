@@ -122,7 +122,7 @@ impl ForgeContext {
         config: &Config<'_>,
         git: &Git,
     ) -> Result<Self, ForgeContextError> {
-        let remote = Self::resolve_remote(config, git)?;
+        let remote = Self::remote(config, git)?;
         let default_branch = Self::resolve_default_branch(config, git, &remote.value)?;
         let protected = Self::resolve_protected(config, &default_branch.value);
         Ok(Self {
@@ -146,10 +146,10 @@ impl ForgeContext {
                 .any(|candidate| short_branch(candidate) == branch)
     }
 
-    fn resolve_remote(
-        config: &Config<'_>,
-        git: &Git,
-    ) -> Result<Sourced<String>, ForgeContextError> {
+    /// Resolve just the remote from the same inputs the full context uses.
+    /// Consumers that must ask the forge before trusting a local default branch
+    /// need the remote without a resolution that prefers local Git metadata.
+    pub fn remote(config: &Config<'_>, git: &Git) -> Result<Sourced<String>, ForgeContextError> {
         let declared = config.ports.git.remote.trim();
         if !declared.is_empty() {
             return Ok(Sourced {
@@ -268,12 +268,20 @@ impl ForgeContext {
 }
 
 /// Shorten a fully qualified branch name to the name operators declare.
+///
+/// A local branch's whole remainder is its name (`refs/heads/release/1.0` is
+/// `release/1.0`). Only a remote-tracking ref drops the remote's name before
+/// the branch (`refs/remotes/origin/main` is `main`). Splitting the already
+/// stripped local remainder would truncate nested branch names and leave
+/// single-segment ones qualified.
 fn short_branch(branch: &str) -> &str {
-    branch
-        .strip_prefix("refs/heads/")
-        .or_else(|| branch.strip_prefix("refs/remotes/"))
-        .and_then(|rest| rest.split_once('/').map(|(_, name)| name))
-        .unwrap_or(branch)
+    if let Some(rest) = branch.strip_prefix("refs/heads/") {
+        rest
+    } else if let Some(rest) = branch.strip_prefix("refs/remotes/") {
+        rest.split_once('/').map_or(rest, |(_, name)| name)
+    } else {
+        branch
+    }
 }
 
 /// The layer of a declared port leaf, with an origin that names the file and
@@ -330,33 +338,31 @@ fn sourced_policy(policy: Policy) -> Sourced<Policy> {
     }
 }
 
-/// The operation policy from the one resolved forge context. Every forge
-/// construction takes this instead of `Policy::default()`, so a configured
-/// policy override reaches the port's evidence and publication checks.
+/// The owner's operation policy for one forge construction.
 ///
-/// A checkout whose Git metadata is unavailable still proceeds: the owner's
-/// policy is already resolved from its own config and carries its layer. The
-/// warning says which half of the context could not be resolved.
-#[allow(clippy::print_stderr)]
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
-pub fn operation_policy(state: &Path, project: &Path, ports: &PortTable) -> std::sync::Arc<Policy> {
+/// The policy is read from the owner's own config and already carries its
+/// layer. Resolving a forge context cannot change it — the context returns the
+/// policy it was given — so this reads it directly. A checkout with no usable
+/// Git metadata therefore does not print a spurious warning on every forge
+/// construction. Callers needing the remote, default branch or protected set
+/// resolve the context themselves through [`resolve_for`].
+pub fn operation_policy(
+    state: &Path,
+    project: &Path,
+    _ports: &PortTable,
+) -> std::sync::Arc<Policy> {
     let project_id = crate::ports::project_key_for(project).unwrap_or_default();
-    let policy = crate::policy::read(state, &project_id, &Default::default());
-    let config = Config::new(ports, policy.clone());
-    let resolved = match Git::new(project)
-        .and_then(|git| ForgeContext::resolve(project, &config, &git))
-    {
-        Ok(context) => context.policy.value,
-        Err(error) => {
-            use std::io::Write;
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: forge context unavailable ({error}); using the owner's operation policy"
-            );
-            policy
-        }
-    };
-    std::sync::Arc::new(resolved)
+    std::sync::Arc::new(crate::policy::read(state, &project_id, &Default::default()))
+}
+
+/// Resolve the one forge context from the full port table: host declarations
+/// and project declarations together, never just the project file. Every
+/// consumer of the remote, default branch or protected set goes through this
+/// so a declaration in either layer reaches all of them.
+pub fn resolve_for(project: &Path, ports: &PortTable) -> Result<ForgeContext, ForgeContextError> {
+    let config = Config::new(ports, Policy::default());
+    let git = Git::new(project)?;
+    ForgeContext::resolve(project, &config, &git)
 }
 
 /// A bounded, read-only view of a checkout's Git metadata. It never runs a
@@ -728,12 +734,37 @@ mod tests {
     #[test]
     fn declared_protected_branches_override_detection() {
         let fixture = Fixture::new("[remote \"upstream\"]\n");
+        // A resolution needs a default branch; the declared protected branch is
+        // shortened while the default branch stays protected automatically.
+        fixture.set_remote_head("upstream", "main");
         let mut ports = PortTable::builtin();
         ports.git.protected = vec!["refs/heads/released".to_owned()];
         ports.git.source = Layer::Project;
         let result = context(&fixture, &ports).expect("resolve");
-        assert_eq!(result.protected.value, ["released"]);
+        assert_eq!(result.protected.value, ["main", "released"]);
         assert!(result.is_protected("released"));
+        assert!(result.is_protected("refs/heads/released"));
+    }
+
+    #[test]
+    fn short_branch_keeps_nested_local_branches_and_drops_only_remote_names() {
+        assert_eq!(short_branch("refs/heads/main"), "main");
+        assert_eq!(short_branch("refs/heads/release/1.0"), "release/1.0");
+        assert_eq!(short_branch("refs/remotes/origin/main"), "main");
+        assert_eq!(short_branch("release/1.0"), "release/1.0");
+    }
+
+    #[test]
+    fn a_nested_protected_branch_is_shortened_without_truncation() {
+        let fixture = Fixture::new("[remote \"upstream\"]\n");
+        fixture.set_remote_head("upstream", "main");
+        let mut ports = PortTable::builtin();
+        ports.git.protected = vec!["refs/heads/release/1.0".to_owned()];
+        ports.git.source = Layer::Project;
+        let result = context(&fixture, &ports).expect("resolve");
+        assert_eq!(result.protected.value, ["main", "release/1.0"]);
+        assert!(result.is_protected("release/1.0"));
+        assert!(result.is_protected("refs/heads/release/1.0"));
     }
 
     /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
@@ -757,6 +788,18 @@ mod tests {
             "PORT_COMMAND_EVIDENCE"
         );
         assert_eq!(result.policy.value.rules[0].rule.strength, Strength::Refuse);
+    }
+
+    #[test]
+    fn operation_policy_reads_the_owner_policy_without_resolving_or_warning() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let ports = PortTable::builtin();
+        let (policy, warnings) = provenant_records::capture(|| {
+            let policy = operation_policy(root.path(), &root.path().join("no-checkout"), &ports);
+            (*policy).clone()
+        });
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(policy, Policy::default());
     }
 
     /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command

@@ -23,6 +23,16 @@ pub fn edit_distance(left: &str, right: &str) -> usize {
 /// prefix, then substring, then edit distance at most `max(1, len / 3)`; at
 /// most five. Input order breaks ties.
 pub fn close_matches<'a>(query: &str, universe: impl IntoIterator<Item = &'a str>) -> Vec<&'a str> {
+    close_matches_with_cap(query, universe, 5)
+}
+
+/// The same ranking with an explicit cap. Callers whose catalogue has a larger
+/// historical candidate budget use this instead of reimplementing the ranker.
+pub fn close_matches_with_cap<'a>(
+    query: &str,
+    universe: impl IntoIterator<Item = &'a str>,
+    cap: usize,
+) -> Vec<&'a str> {
     let folded = query.to_lowercase();
     let limit = (query.chars().count() / 3).max(1);
     let mut ranked = Vec::new();
@@ -45,7 +55,7 @@ pub fn close_matches<'a>(query: &str, universe: impl IntoIterator<Item = &'a str
     ranked.sort_by_key(|(rank, distance, index, _)| (*rank, *distance, *index));
     ranked
         .into_iter()
-        .take(5)
+        .take(cap)
         .map(|(_, _, _, candidate)| candidate)
         .collect()
 }

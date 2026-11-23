@@ -547,12 +547,31 @@ fn match_name(
     Err(close_matches(&lower, routes, models))
 }
 /// The routes and models close to `name`, ranked by the shared ranker.
+///
+/// A model is offered under both its id (what an operator types) and its full
+/// `adapter/id` ref (what the catalogue lists), so a typo in the id still finds
+/// the model. The route catalogue keeps its historical eight-candidate cap.
 fn close_matches(lower: &str, routes: &BTreeSet<String>, models: &[String]) -> Vec<String> {
+    let by_id: Vec<(&str, &str)> = models
+        .iter()
+        .map(|model| {
+            let id = model.split_once('/').map_or(model.as_str(), |(_, id)| id);
+            (id, model.as_str())
+        })
+        .collect();
     let mut universe: Vec<&str> = routes.iter().map(String::as_str).collect();
+    universe.extend(by_id.iter().map(|(id, _)| *id));
     universe.extend(models.iter().map(String::as_str));
-    provenant_core::close_matches(lower, universe)
+    let mut seen = std::collections::BTreeSet::new();
+    provenant_core::close_matches_with_cap(lower, universe, 8)
         .into_iter()
-        .map(str::to_owned)
+        .filter_map(|candidate| {
+            let full = by_id
+                .iter()
+                .find(|(id, _)| *id == candidate)
+                .map_or(candidate, |(_, full)| *full);
+            seen.insert(full).then(|| full.to_owned())
+        })
         .collect()
 }
 fn close(matches: &[String]) -> String {
@@ -999,6 +1018,33 @@ mod route_tests {
         let models = vec!["opencode/opencode/hy4-flash-free".to_owned()];
         let matches = super::close_matches("utilty", &routes, &models);
         assert_eq!(matches.first().map(String::as_str), Some("utility"));
+    }
+
+    #[test]
+    // Spec: docs/specs/cli.md#every-name-refusal-lists-close-matches
+    fn close_matches_ranks_an_id_typo_first() {
+        let routes = BTreeSet::new();
+        let models = vec![
+            "opencode/opencode/hy4-model-00".to_owned(),
+            "opencode/opencode/hy4-flash-free".to_owned(),
+        ];
+        let matches = super::close_matches("hy4-flsh-free", &routes, &models);
+        assert_eq!(
+            matches.first().map(String::as_str),
+            Some("opencode/opencode/hy4-flash-free"),
+            "{matches:?}"
+        );
+    }
+
+    #[test]
+    // Spec: docs/specs/cli.md#every-name-refusal-lists-close-matches
+    fn close_matches_keeps_the_eight_candidate_cap() {
+        let routes = BTreeSet::new();
+        let models: Vec<String> = (0..12)
+            .map(|index| format!("opencode/opencode/hy4-model-{index:02}"))
+            .collect();
+        let matches = super::close_matches("hy4", &routes, &models);
+        assert_eq!(matches.len(), 8, "{matches:?}");
     }
 
     include!("route/tests_1.rs");

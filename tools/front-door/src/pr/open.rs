@@ -55,8 +55,9 @@ struct Named {
     name: String,
 }
 
-/// The forge API half of context resolution. Local Git metadata is preferred;
-/// this probe is consulted only when the checkout has no remote `HEAD` symref.
+/// The forge API half of context resolution. It is authoritative for the
+/// default branch: a local remote `HEAD` symref can be stale after a rename,
+/// so the probe is asked before the local symref is trusted.
 struct RepositoryForge<'a> {
     state: &'a Path,
     project: &'a Path,
@@ -80,23 +81,40 @@ impl provenant_config::ForgeProbe for RepositoryForge<'_> {
 }
 
 /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
-#[allow(clippy::print_stderr)]
 fn default_branch(state: &Path, project: &Path) -> Result<String> {
     let ports = provenant_config::PortTable::read_for(Some(project), state)?;
     let policy = provenant_config::operation_policy(state, project, &ports);
+    let config = provenant_config::ForgeConfig::new(&ports, (*policy).clone());
+    let git = provenant_config::ForgeGit::new(project).map_err(|error| {
+        format!("cannot read the checkout's Git metadata for the default branch: {error}")
+    })?;
+    let remote = provenant_config::ForgeContext::remote(&config, &git)
+        .map_err(|error| {
+            format!("cannot resolve the forge remote for the default branch: {error}")
+        })?
+        .value;
     let probe = RepositoryForge { state, project };
-    let mut config = provenant_config::ForgeConfig::new(&ports, (*policy).clone());
-    config.forge = &probe;
-    if let Ok(git) = provenant_config::ForgeGit::new(project)
-        && let Ok(context) = provenant_config::ForgeContext::resolve(project, &config, &git)
-    {
-        return Ok(context.default_branch.value);
+    // Ask the forge first: a renamed default branch makes the local symref
+    // stale, but the forge names the branch the pull request must target.
+    if let Some(branch) = provenant_config::ForgeProbe::default_branch(&probe, &remote) {
+        return Ok(branch);
     }
-    // Without local Git metadata only the forge API can name the default
-    // branch; warn and proceed rather than guessing a name.
-    eprintln!("warning: local Git metadata unavailable; asking the forge for the default branch");
-    provenant_config::ForgeProbe::default_branch(&probe, "")
-        .ok_or_else(|| "cannot resolve the repository's default branch".into())
+    // The forge did not answer. The local symref is the only source left; it is
+    // reported as such rather than as an unrelated Git metadata failure.
+    if let Some(branch) = git.remote_head(&remote) {
+        provenant_records::warning::warn(
+            provenant_records::Warning::new(
+                provenant_records::warning::FORGE_CONTEXT_UNRESOLVED,
+                format!("the forge did not name a default branch for {remote}; using the local remote HEAD symref"),
+            )
+            .once_per_change(),
+        );
+        return Ok(branch);
+    }
+    Err(format!(
+        "cannot resolve the repository's default branch: neither the forge nor {remote}/HEAD named one"
+    )
+    .into())
 }
 
 /// Resolve the remote-tracking base through the command's bounded facts session.
@@ -352,6 +370,23 @@ pub(super) fn run(command: PrOpen, globals: &Globals) -> u8 {
 mod tests {
     #[allow(unused_imports)] // The PR test driver includes this module without libtest.
     use super::*;
+
+    #[test]
+    fn default_branch_reports_the_real_metadata_failure() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let state = temp.path().join("state");
+        provenant_os::fixture::private_state_dir(&state)?;
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&project)?;
+        let error = default_branch(&state, &project).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot read the checkout's Git metadata"),
+            "{error}"
+        );
+        Ok(())
+    }
 
     #[test]
     fn base_commit_uses_bounded_repository_facts() -> Result<()> {
