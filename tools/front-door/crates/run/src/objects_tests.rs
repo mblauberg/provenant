@@ -1620,9 +1620,12 @@ fn a_branch_rewound_behind_its_launch_base_is_refused_not_fast_forwarded() -> Te
 
 #[test]
 fn a_head_the_branch_already_contains_never_advances_to_a_tip_someone_else_reached() -> TestResult {
-    let fixture = Fixture::new("sha1")?;
-    // The host advanced the branch past the lane head, so publication finds
-    // the head already contained and changes nothing.
+    let mut fixture = Fixture::new("sha1")?;
+    let (_attempt, _scratch) = fixture.overlay()?;
+    fixture.import()?;
+    // Publish the lane head, then let the host advance the branch past it, so
+    // the next publication finds the head already contained and changes nothing.
+    publish_tip(&fixture, fixture.head, fixture.import_attempt)?;
     let ahead = child_of(&fixture, fixture.head, "host advance")?;
     update_ref(&fixture, "refs/heads/lane", ahead)?;
     let published = publish_tip(&fixture, fixture.head, fixture.import_attempt)?;

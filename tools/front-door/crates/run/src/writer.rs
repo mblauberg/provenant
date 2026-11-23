@@ -4134,7 +4134,7 @@ impl WriterLaunch {
                     history,
                 },
             )?;
-            let ancestor = published.ancestor;
+            let ancestor = &published.ancestor;
             if let Some(warning) = ancestor.warning(self.branch.as_str(), base, published.tip) {
                 // Best effort: the ancestor is also in the branch reflog.
                 let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
