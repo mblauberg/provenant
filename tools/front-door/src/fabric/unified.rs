@@ -638,6 +638,7 @@ fn status_step_why(row: &Value) -> &'static str {
     match row["state"].as_str() {
         Some("failed" | "blocked" | "unresolved" | "unreadable") => "the graph failed",
         Some("paused") => "the graph needs input",
+        Some("cancelled") => "the graph was cancelled",
         Some("complete" | "succeeded" | "terminal")
             if row["outcome"]
                 .as_str()
@@ -5779,13 +5780,6 @@ mod tests {
         assert!(first_node.contains("AUTH_REQUIRED"), "{reading}");
         let step = graph_status_next(&rows).expect("a failed graph offers a next step");
         assert_eq!(step.argv, ["provenant", "retry", "g/parent"]);
-        assert_eq!(
-            provenant_cli::next_steps_text(
-                &[step],
-                &provenant_workflow::session::CommandPrefix::default()
-            ),
-            "next: the graph failed; provenant retry g/parent\n"
-        );
         // Per-state omission counts are checked at the CLI boundary; do not
         // pin the human omission sentence here.
         assert_eq!(rows[1]["cause_code"], "AUTH_REQUIRED");
@@ -5927,13 +5921,73 @@ mod tests {
         assert!(reading.starts_with("g complete"), "{reading}");
         let step = graph_status_next(&rows).expect("a settled graph offers a next step");
         assert_eq!(step.argv, ["provenant", "output", "g"]);
-        assert_eq!(
-            provenant_cli::next_steps_text(
-                &[step],
-                &provenant_workflow::session::CommandPrefix::default()
+    }
+
+    #[test]
+    fn status_step_why_names_the_state_behind_every_projected_command() {
+        // The next command is only useful when its sentence names the state
+        // that selected it. Every arm of status_step_why a projection can reach
+        // is pinned here, so a new row state cannot silently inherit the
+        // generic fallback sentence.
+        use provenant_cli::next_steps_text;
+        use provenant_workflow::session::CommandPrefix;
+
+        for (row, why, command) in [
+            (
+                json!({"kind":"node","id":"g/parent","state":"failed","outcome":null,"next":"provenant retry g/parent"}),
+                "the graph failed",
+                "provenant retry g/parent",
             ),
-            "next: the graph is complete; provenant output g\n"
-        );
+            (
+                json!({"kind":"node","id":"g/parent","state":"blocked","outcome":null,"next":"provenant retry g/parent"}),
+                "the graph failed",
+                "provenant retry g/parent",
+            ),
+            (
+                json!({"kind":"graph","id":"g","state":"paused","outcome":null,"next":"provenant retry g"}),
+                "the graph needs input",
+                "provenant retry g",
+            ),
+            (
+                json!({"kind":"graph","id":"g","state":"cancelled","outcome":null,"next":"provenant output g"}),
+                "the graph was cancelled",
+                "provenant output g",
+            ),
+            (
+                json!({"kind":"graph","id":"g","state":"complete","outcome":"succeeded","next":"provenant output g"}),
+                "the graph is complete",
+                "provenant output g",
+            ),
+            (
+                json!({"kind":"graph","id":"g","state":"complete","outcome":"failed","next":"provenant retry g"}),
+                "the graph did not succeed",
+                "provenant retry g",
+            ),
+            (
+                json!({"kind":"node","id":"g/parent","state":"running","outcome":null,"next":"provenant wait g/parent"}),
+                "the graph is still running",
+                "provenant wait g/parent",
+            ),
+            (
+                json!({"kind":"node","id":"g/parent","state":"skipped","outcome":null,"next":"provenant output g/parent"}),
+                "the graph needs attention",
+                "provenant output g/parent",
+            ),
+        ] {
+            let step = graph_status_next(std::slice::from_ref(&row))
+                .expect("each projected state offers one next step");
+            assert_eq!(
+                step.argv,
+                command.split_whitespace().collect::<Vec<_>>(),
+                "{row}"
+            );
+            assert_eq!(step.why, why, "{row}");
+            assert_eq!(
+                next_steps_text(&[step], &CommandPrefix::default()),
+                format!("next: {why}; {command}\n"),
+                "{row}"
+            );
+        }
     }
 
     #[test]

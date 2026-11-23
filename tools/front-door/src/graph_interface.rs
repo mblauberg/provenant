@@ -223,7 +223,8 @@ fn run_human(
     // The reason comes from the run's own status: a copied command is useful
     // only when the reader knows which state made it the next step.
     let (rest, why) = match data["status"].as_str() {
-        Some("complete" | "cancelled") => (format!("output {graph}"), "the run is complete"),
+        Some("complete") => (format!("output {graph}"), "the run is complete"),
+        Some("cancelled") => (format!("output {graph}"), "the run was cancelled"),
         Some("paused") => (format!("status {graph}"), "the run is paused"),
         _ => (format!("wait {graph}"), "the run is still running"),
     };
@@ -1409,6 +1410,11 @@ mod tests {
                 "complete",
                 "provenant output review-1",
                 "the run is complete",
+            ),
+            (
+                "cancelled",
+                "provenant output review-1",
+                "the run was cancelled",
             ),
             ("paused", "provenant status review-1", "the run is paused"),
         ] {
