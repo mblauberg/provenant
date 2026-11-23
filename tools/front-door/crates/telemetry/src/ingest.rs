@@ -12,9 +12,8 @@ use crate::{claude::Raw, segments};
 use provenant_core::{Clock, MonoTime, Roots};
 use provenant_os::fs::{Directory, FsError, LockMode, PublishMode};
 use provenant_providers::{UsageAccumulator, UsageReport};
-use provenant_records::{
-    AccountIdentity, Tokens, UsageRecord, UsageScope, UsageSemantics, UsageSource,
-};
+use provenant_records::run::UsageRecord;
+use provenant_records::{AccountIdentity, Tokens, UsageScope, UsageSemantics, UsageSource};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{

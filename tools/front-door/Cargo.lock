@@ -747,6 +747,7 @@ dependencies = [
  "provenant-config",
  "provenant-core",
  "provenant-os",
+ "provenant-providers",
  "provenant-records",
  "provenant-routing",
  "provenant-test-support",
