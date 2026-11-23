@@ -952,6 +952,7 @@ fn protected_review_retains_candidate_and_paths_without_delivery() -> TestResult
             schema_version: 1,
             head,
             stop_work: None,
+            warnings: Vec::new(),
         })?,
         RECORD_LIMIT,
     )?;
@@ -1015,6 +1016,7 @@ fn review_required_identity_mismatch_keeps_the_writers_head() -> TestResult {
             schema_version: 1,
             head,
             stop_work: None,
+            warnings: Vec::new(),
         })?,
         RECORD_LIMIT,
     )?;

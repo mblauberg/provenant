@@ -1008,6 +1008,7 @@ fn a_late_host_limit_fails_the_receipt_at_its_stage_and_keeps_the_reason()
             schema_version: 1,
             head,
             stop_work: None,
+            warnings: Vec::new(),
         })?,
         RECORD_LIMIT,
     )?;

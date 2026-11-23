@@ -70,6 +70,8 @@ pub const LIVE_RECORD_FORMAT_CHANGED: WarningCode = WarningCode("LIVE_RECORD_FOR
 pub const MIGRATION_STEP_FAILED: WarningCode = WarningCode("MIGRATION_STEP_FAILED");
 /// The state root overlaps a location the product treats as advisory.
 pub const STATE_ROOT_OVERLAP: WarningCode = WarningCode("STATE_ROOT_OVERLAP");
+/// A lane's unfinished Git operation is retained while its committed tip settles.
+pub const GIT_OPERATION_RETAINED: WarningCode = WarningCode("GIT_OPERATION_RETAINED");
 
 impl Warning {
     /// A warning with no subject, source or repair.
@@ -298,6 +300,7 @@ mod tests {
             super::LIVE_RECORD_FORMAT_CHANGED,
             super::MIGRATION_STEP_FAILED,
             super::STATE_ROOT_OVERLAP,
+            super::GIT_OPERATION_RETAINED,
         ] {
             let name = code.as_str();
             assert!(

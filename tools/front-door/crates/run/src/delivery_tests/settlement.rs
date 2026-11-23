@@ -107,6 +107,7 @@ fn review_delivery_requires_acceptance_and_exact_head()
             schema_version: 1,
             head,
             stop_work: None,
+            warnings: Vec::new(),
         })?,
         RECORD_LIMIT,
     )?;
@@ -286,6 +287,7 @@ fn settled_delivery_refuses_dirty_or_changed_head_and_replays_success()
             schema_version: 1,
             head,
             stop_work: None,
+            warnings: Vec::new(),
         })?,
         RECORD_LIMIT,
     )?;
@@ -650,6 +652,9 @@ fn terminal_refuses_before_import_when_the_host_checkout_is_mid_operation()
     let fixture = PrepareFixture::new()?;
     let marker = fixture.writer.project.join(".git/rebase-merge");
     std::fs::create_dir_all(&marker)?;
+    // An operation on the lane branch is one settlement moves, so it must
+    // refuse before import with the checkout's bytes unchanged.
+    std::fs::write(marker.join("head-name"), "refs/heads/lane\n")?;
     let checkout = fixture.writer.worktree.join("AGENTS.md");
     let before = std::fs::read(&checkout).ok();
     let error = fixture
@@ -676,6 +681,67 @@ fn terminal_refuses_before_import_when_the_host_checkout_is_mid_operation()
     Ok(())
 }
 
+// Spec: docs/specs/run-settlement.md#settlement
+#[test]
+fn terminal_warns_and_proceeds_for_an_unrelated_host_checkout_rebase()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    let marker = fixture.writer.project.join(".git/rebase-merge");
+    std::fs::create_dir_all(&marker)?;
+    std::fs::write(marker.join("head-name"), "refs/heads/side\n")?;
+    crate::writer::GIT_OPERATION_WARNINGS.with(|warnings| warnings.borrow_mut().clear());
+    let (settled, captured) = provenant_records::warning::capture(|| fixture.terminal(|| Ok(())));
+    assert!(
+        !settled?,
+        "an owner rebase on an unrelated branch must not refuse a linked lane"
+    );
+    assert!(marker.is_dir(), "the host operation is left intact");
+    assert!(
+        captured.iter().any(|warning| {
+            warning.code.as_str() == "GIT_OPERATION_RETAINED"
+                && warning.message.contains("refs/heads/side")
+        }),
+        "{captured:?}"
+    );
+    let attempt = provenant_os::fs::Directory::open_anchor(&fixture.root.join("attempt"))?;
+    let raw = crate::artifacts::read_sealed(&attempt, "writer-terminal.json", crate::RECORD_LIMIT)?
+        .ok_or("settled writer terminal record")?;
+    let terminal: crate::writer::WriterTerminal = crate::db::decode(&raw)?;
+    assert!(
+        terminal
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("refs/heads/side")),
+        "{:?}",
+        terminal.warnings
+    );
+    Ok(())
+}
+
+// Spec: docs/specs/run-settlement.md#settlement
+#[test]
+fn terminal_refuses_when_the_host_checkout_rebases_the_delivery_destination()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    let marker = fixture.writer.project.join(".git/rebase-merge");
+    std::fs::create_dir_all(&marker)?;
+    std::fs::write(marker.join("head-name"), "refs/heads/published/lane\n")?;
+    let error = fixture
+        .terminal(|| Ok(()))
+        .expect_err("host rebases the delivery destination");
+    assert!(
+        matches!(
+            error.downcast_ref::<RunError>(),
+            Some(RunError::Writer(
+                provenant_confinement::worktrees::WorktreeError::GitOperationInProgress
+            ))
+        ),
+        "{error:?}"
+    );
+    assert!(marker.is_dir(), "the host operation is left intact");
+    Ok(())
+}
+
 #[test]
 fn terminal_names_a_writer_left_off_the_lane_branch()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -690,6 +756,55 @@ fn terminal_names_a_writer_left_off_the_lane_branch()
         error.downcast_ref::<RunError>(),
         Some(RunError::WriterHeadNotLaneBranch)
     ));
+    Ok(())
+}
+
+#[test]
+fn terminal_refuses_a_conflicted_merge_off_the_lane_branch()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    let merge_head = fixture
+        .writer
+        .project
+        .join(".git/worktrees/lane/MERGE_HEAD");
+    let error = fixture
+        .terminal(|| {
+            fixture.lane_git(&["checkout", "-qb", "other"])?;
+            let head = fixture.git_text(&["rev-parse", "HEAD"])?;
+            std::fs::write(&merge_head, format!("{head}\n"))?;
+            Ok(())
+        })
+        .expect_err("an operation must not hide a writer off the lane branch");
+    assert!(matches!(
+        error.downcast_ref::<RunError>(),
+        Some(RunError::WriterHeadNotLaneBranch)
+    ));
+    assert!(merge_head.is_file(), "the conflicted merge is left intact");
+    Ok(())
+}
+
+#[test]
+fn terminal_allows_a_detached_head_only_under_a_lane_rebase()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    let marker = fixture
+        .writer
+        .project
+        .join(".git/worktrees/lane/rebase-merge");
+    crate::writer::GIT_OPERATION_WARNINGS.with(|warnings| warnings.borrow_mut().clear());
+    let settled = fixture.terminal(|| {
+        fixture.lane_git(&["checkout", "-q", "--detach"])?;
+        std::fs::create_dir_all(&marker)?;
+        std::fs::write(marker.join("head-name"), "refs/heads/lane\n")?;
+        Ok(())
+    })?;
+    assert!(!settled);
+    assert!(marker.is_dir(), "the lane rebase is left intact");
+    let warnings = crate::writer::GIT_OPERATION_WARNINGS.with(|warnings| warnings.borrow().clone());
+    assert!(
+        warnings.iter().any(|warning| warning.contains("rebase")),
+        "{warnings:?}"
+    );
     Ok(())
 }
 

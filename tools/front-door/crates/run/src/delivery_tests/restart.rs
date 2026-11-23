@@ -109,6 +109,7 @@ fn delivery_restart_case(
             schema_version: 1,
             head,
             stop_work: None,
+            warnings: Vec::new(),
         })?,
         RECORD_LIMIT,
     )?;

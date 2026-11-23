@@ -162,20 +162,131 @@ pub fn check_git_operation_terminal(
     Ok(())
 }
 
-/// Refuse only when settlement would leave the host checkout mid-operation.
-/// A lane's own operation lives in its private Git and its candidate view;
-/// the primary checkout records its operation in the shared common directory.
-/// A bare common directory has no checkout to leave mid-operation.
-pub fn check_host_checkout_terminal(repo: &VerifiedRepo) -> Result<(), WorktreeError> {
-    if repo.is_bare() {
-        return Ok(());
+/// The ref a rebase recorded as the branch it is replaying, when this Git
+/// directory holds a rebase whose `head-name` can be read. Missing or malformed
+/// state means the ref is unknown, not that no rebase is in progress.
+pub fn rebase_operation_ref(directory: &Directory) -> Option<String> {
+    for marker in ["rebase-merge", "rebase-apply"] {
+        if let Ok(sub) = directory.open_verified_directory(OsStr::new(marker))
+            && let Ok(raw) = sub.read_stable(OsStr::new("head-name"), 1024)
+            && let Ok(value) = String::from_utf8(raw)
+        {
+            let value = value.trim();
+            if !value.is_empty() {
+                return Some(value.to_owned());
+            }
+        }
     }
-    let directory = if repo.is_primary_checkout() {
+    None
+}
+
+/// The ref an unfinished operation in `directory` acts on, when it names one.
+/// A rebase keeps the branch in its `head-name`; every other operation acts on
+/// the checkout's `HEAD`. A detached `HEAD` names no ref and is reported as
+/// unknown, which never blocks settlement on its own.
+fn operation_ref(directory: &Directory, marker: GitOperationMarker) -> Option<String> {
+    if (marker.marker == "rebase-merge" || marker.marker == "rebase-apply")
+        && let Some(reference) = rebase_operation_ref(directory)
+    {
+        return Some(reference);
+    }
+    let raw = directory.read_stable(OsStr::new("HEAD"), 1024).ok()?;
+    let head = std::str::from_utf8(&raw).ok()?.trim();
+    head.strip_prefix("ref: ").map(str::to_owned)
+}
+
+/// An unfinished operation found in the host checkout and whether it blocks
+/// settlement. The marker is reported so an unrelated operation can be named
+/// in a warning; only `blocks` decides whether settlement refuses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HostCheckoutOperation {
+    pub marker: GitOperationMarker,
+    /// The ref the operation acts on, when it names one.
+    pub reference: Option<String>,
+    pub blocks: bool,
+}
+
+/// Decide whether an unfinished operation in the host checkout blocks
+/// settlement. A bare common directory has no checkout to leave mid-operation.
+///
+/// The host checkout is the primary checkout when a lane runs in a linked
+/// worktree: its operation markers live in the shared common directory, but
+/// settlement never writes that checkout's files or index. Only an operation
+/// on a ref settlement moves (the lane branch or the delivery destination) can
+/// therefore conflict and refuse before import. Every other host operation is
+/// retained and reported for a warning. When the lane's own worktree *is* the
+/// primary checkout, settlement writes that checkout, so any unfinished
+/// operation there blocks.
+pub fn check_host_checkout_terminal(
+    repo: &VerifiedRepo,
+    moved_refs: &[&str],
+) -> Result<Option<HostCheckoutOperation>, WorktreeError> {
+    if repo.is_bare() {
+        return Ok(None);
+    }
+    let primary = repo.is_primary_checkout();
+    let directory = if primary {
         repo.private_dir()
     } else {
         repo.common_dir()
     };
-    check_git_operation_terminal(directory, None)
+    let Some(marker) = incomplete_git_operation(directory, None)? else {
+        return Ok(None);
+    };
+    let reference = operation_ref(directory, marker);
+    let blocks = host_operation_blocks(primary, reference.as_deref(), moved_refs);
+    Ok(Some(HostCheckoutOperation {
+        marker,
+        reference,
+        blocks,
+    }))
+}
+
+/// The decision made by [`check_host_checkout_terminal`] from the facts it
+/// observed. Kept pure so every branch can be pinned without building a repo.
+fn host_operation_blocks(primary: bool, reference: Option<&str>, moved_refs: &[&str]) -> bool {
+    primary || reference.is_some_and(|reference| moved_refs.contains(&reference))
+}
+
+#[cfg(test)]
+mod host_checkout_tests {
+    use super::*;
+
+    #[test]
+    fn unrelated_host_operation_does_not_block_a_linked_lane() {
+        assert!(!host_operation_blocks(
+            false,
+            Some("refs/heads/side"),
+            &["refs/heads/lane", "refs/heads/published/lane"]
+        ));
+        // An unknown ref (detached HEAD, unreadable head-name) is not a moved
+        // ref, so it cannot refuse settlement on its own.
+        assert!(!host_operation_blocks(false, None, &["refs/heads/lane"]));
+    }
+
+    #[test]
+    fn host_operation_on_a_moved_ref_blocks_a_linked_lane() {
+        assert!(host_operation_blocks(
+            false,
+            Some("refs/heads/lane"),
+            &["refs/heads/lane", "refs/heads/published/lane"]
+        ));
+        assert!(host_operation_blocks(
+            false,
+            Some("refs/heads/published/lane"),
+            &["refs/heads/lane", "refs/heads/published/lane"]
+        ));
+    }
+
+    #[test]
+    fn primary_checkout_operation_blocks_even_on_an_unrelated_ref() {
+        assert!(host_operation_blocks(
+            true,
+            Some("refs/heads/side"),
+            &["refs/heads/lane"]
+        ));
+        assert!(host_operation_blocks(true, None, &["refs/heads/lane"]));
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]

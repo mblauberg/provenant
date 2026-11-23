@@ -869,6 +869,7 @@ impl RunStore {
             }
             record.head = Some(writer.head);
             record.stop_work = writer.stop_work;
+            record.warnings = writer.warnings;
         }
         if matches!(
             record.state,

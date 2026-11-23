@@ -8,6 +8,7 @@ fn row() -> LaneRow {
     LaneRow {
         git_import_failure: None,
         stop_work: None,
+        warnings: None,
         terminal_cause: None,
         project_id: "9".repeat(32),
         graph: "g".into(),

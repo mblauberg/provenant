@@ -2638,6 +2638,9 @@ pub struct AttemptRecord {
     /// Host summary of committed and dirty writer work after a stop.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_work: Option<StopWorkSummary>,
+    /// Settlement warnings recorded once in the writer terminal record.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
     pub verified_owner: Option<ActorId>,
     pub session: Option<String>,
     pub queued_at: WallTime,

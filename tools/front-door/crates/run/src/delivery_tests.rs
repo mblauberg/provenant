@@ -531,9 +531,11 @@ impl PrepareFixture {
                 format!("{tip}\n"),
             )?;
         }
-        // Publication reads the sealed request for its launch base ref.
+        // Publication reads the sealed request for its launch base ref; the
+        // delivery destination is one of the refs a host operation may not move.
         let mut request = tests::input().request;
         request.task.base_ref = base_ref.map(str::to_owned);
+        request.task.deliver = Some(self.request.clone());
         crate::artifacts::seal(
             &attempt,
             "request.json",
