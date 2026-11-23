@@ -633,6 +633,7 @@ mod tests {
     #[test]
     fn a_sole_remote_is_detected_with_its_source() {
         let fixture = Fixture::new("[remote \"upstream\"]\n\turl = git@example.com:up.git\n");
+        fixture.set_remote_head("upstream", "main");
         let result = context(&fixture, &PortTable::builtin()).expect("resolve");
         assert_eq!(result.remote.value, "upstream");
         assert_eq!(result.remote.source.layer, Layer::Detected);
@@ -645,6 +646,7 @@ mod tests {
             "[remote \"origin\"]\n\turl = one\n[remote \"upstream\"]\n\turl = two\n\
              [branch \"topic\"]\n\tremote = upstream\n",
         );
+        fixture.set_remote_head("upstream", "main");
         let result = context(&fixture, &PortTable::builtin()).expect("resolve");
         assert_eq!(result.remote.value, "upstream");
         assert_eq!(
@@ -674,6 +676,7 @@ mod tests {
         let mut ports = PortTable::builtin();
         ports.git.remote = "pinned".to_owned();
         ports.git.source = Layer::Project;
+        fixture.set_remote_head("pinned", "main");
         let result = context(&fixture, &ports).expect("resolve");
         assert_eq!(result.remote.value, "pinned");
         assert_eq!(result.remote.source.layer, Layer::Project);
@@ -774,6 +777,7 @@ mod tests {
             .insert("project".to_owned(), crate::policy::Project { rules });
         let policy = settings.resolve("project", &BTreeMap::new());
         let ports = PortTable::builtin();
+        fixture.set_remote_head("upstream", "main");
         let config = Config::new(&ports, policy);
         let result = ForgeContext::resolve(&config, &fixture.git()).expect("resolve");
         assert_eq!(result.policy.source.layer, Layer::Project);
@@ -808,6 +812,7 @@ mod tests {
             },
         );
         let ports = PortTable::builtin();
+        fixture.set_remote_head("upstream", "main");
         let config = Config::new(&ports, settings.resolve("project", &BTreeMap::new()));
         let context = ForgeContext::resolve(&config, &fixture.git()).expect("resolve");
         let adapter = crate::ports::Adapter::new(

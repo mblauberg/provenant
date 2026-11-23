@@ -684,6 +684,7 @@ fn gc_dry_run_keeps_a_merged_foreign_worktree_when_foreign_cleanup_is_off()
 fn gc_dry_run_retains_preview_dirty_worktree() -> Result<(), Box<dyn Error>> {
     // Spec: docs/specs/supervisor.md#pruning-and-gc-need-proof
     let fixture = Fixture::new()?;
+    declare_forge_default(&fixture)?;
     fs::write(fixture.root.join(".gitignore"), "cache/\n")?;
     fixture.run(&["add", ".gitignore"])?;
     fixture.run(&["commit", "-m", "ignore cache"])?;
@@ -1399,7 +1400,7 @@ fn gc_never_retires_a_linked_worktree_on_the_default_branch() -> Result<(), Box<
     assert!(
         report.candidates.iter().any(|candidate| {
             candidate.path == lane.path
-                && candidate.detail.as_deref() == Some("default branch is never retired")
+                && candidate.detail.as_deref() == Some("protected branch is never retired")
         }),
         "{:?}",
         report.candidates
