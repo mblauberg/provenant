@@ -3,23 +3,9 @@ use std::collections::BTreeMap;
 
 use provenant_cli::domains::{LandOverride, LandSettings};
 use provenant_config::Origin;
-use provenant_records::{Layer, Precedence};
+use provenant_records::Layer;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-
-/// The layers a landing policy leaf can come from, lowest first. Repository
-/// declarations sit beneath explicit host values; project overrides, target
-/// rules, tiers and the invocation each sit above them.
-/// Spec: docs/specs/state.md#every-setting-reports-its-layer
-pub const LAND_POLICY_PRECEDENCE: Precedence = Precedence(&[
-    Layer::Default,
-    Layer::Project,
-    Layer::Host,
-    Layer::HostProject,
-    Layer::Route,
-    Layer::Tier,
-    Layer::Launch,
-]);
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TargetRule {
@@ -865,21 +851,5 @@ mod tests {
         assert_eq!(resolved.batch_size, 1);
         assert_eq!(resolved.gate.timeout_seconds, 50);
         Ok(())
-    }
-    /// Spec: docs/specs/state.md#every-setting-reports-its-layer
-    #[test]
-    fn landing_policy_precedence_preserves_the_declared_layer_order() {
-        assert_eq!(
-            LAND_POLICY_PRECEDENCE.0,
-            &[
-                Layer::Default,
-                Layer::Project,
-                Layer::Host,
-                Layer::HostProject,
-                Layer::Route,
-                Layer::Tier,
-                Layer::Launch,
-            ]
-        );
     }
 }

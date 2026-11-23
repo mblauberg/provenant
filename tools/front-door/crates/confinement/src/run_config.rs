@@ -451,6 +451,7 @@ impl RunConfig {
                 requested,
                 effective: true,
                 source: Layer::Parent,
+                constraint: None,
                 backend_requirement: if trusted_inherited {
                     BackendRequirement::TrustedInherited
                 } else {
@@ -480,6 +481,7 @@ impl RunConfig {
                     requested: false,
                     effective: true,
                     source: Layer::Parent,
+                    constraint: None,
                     backend_requirement: BackendRequirement::Required,
                     warning: Some(
                         "active parent sandbox floor requires confinement despite sandbox=off"
@@ -503,6 +505,7 @@ impl RunConfig {
                 requested: false,
                 effective: false,
                 source: Layer::Host,
+                constraint: None,
                 backend_requirement: BackendRequirement::Required,
                 warning,
             };
@@ -513,6 +516,7 @@ impl RunConfig {
                 requested: true,
                 effective: true,
                 source: Layer::Host,
+                constraint: None,
                 backend_requirement: BackendRequirement::Required,
                 warning: None,
             };
@@ -523,6 +527,7 @@ impl RunConfig {
                 requested: false,
                 effective: true,
                 source: Layer::Parent,
+                constraint: None,
                 backend_requirement: BackendRequirement::Required,
                 warning: None,
             }
@@ -531,6 +536,7 @@ impl RunConfig {
                 requested: false,
                 effective: true,
                 source: Layer::Route,
+                constraint: None,
                 backend_requirement: BackendRequirement::Required,
                 warning: None,
             }
@@ -539,6 +545,7 @@ impl RunConfig {
                 requested: false,
                 effective: false,
                 source: Layer::Default,
+                constraint: None,
                 backend_requirement: BackendRequirement::Required,
                 warning: inputs
                     .knob
