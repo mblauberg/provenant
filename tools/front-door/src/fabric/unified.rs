@@ -1801,26 +1801,175 @@ pub(crate) fn unified_graph_command(
     }
 }
 
-/// Queue steering for one live attempt. Steering never reaches a settled
-/// attempt, and its text is bounded at 4 KiB.
+/// Outcomes of one `steer` command. Settled targets are handled by the sourced
+/// `lanes.steer_settled` setting and emit success with these two variants.
+enum SteerResult {
+    Queued(Value),
+    Pending(Value),
+    Refused(&'static str),
+    SettledQueued(Value),
+    SettledWarned(Value),
+    Unsupported(provenant_records::control::ControlReceipt),
+}
+
+/// What a steer aimed at an already settled lane does (`lanes.steer_settled`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SteerSettledMode {
+    Queue,
+    Warn,
+}
+
+/// The effective `lanes.steer_settled` value and the source that set it. An
+/// unreadable host config is advisory: warn, use the shipped `queue` default
+/// and keep the note for the follow-up rather than dropping the instruction.
+fn steer_settled_setting(
+    factory: &super::Factory,
+) -> (SteerSettledMode, provenant_records::provenance::Source) {
+    use provenant_records::provenance::{Layer, Source};
+
+    let default = (
+        SteerSettledMode::Queue,
+        Source {
+            layer: Layer::Default,
+            origin: None,
+        },
+    );
+    let config = match provenant_cli::config_reads::read_for(&factory.context.roots, "run") {
+        Ok(config) => config,
+        Err(error) => {
+            let safe = provenant_records::diagnostic::safe_text(&error.to_string());
+            provenant_records::warning::warn(provenant_records::warning::Warning::new(
+                provenant_records::warning::CONFIG_UNAVAILABLE,
+                format!("steer settled setting unavailable ({safe}); using default queue"),
+            ));
+            return default;
+        }
+    };
+    let Some(knob) = config.knobs.get("lanes.steer_settled") else {
+        return default;
+    };
+    let mode = match knob.value.as_str() {
+        Some("warn") => SteerSettledMode::Warn,
+        Some("queue") => SteerSettledMode::Queue,
+        _ => {
+            provenant_records::warning::warn(
+                provenant_records::warning::Warning::new(
+                    provenant_records::warning::CONFIG_MALFORMED,
+                    "unrecognised lanes.steer_settled value; using default queue",
+                )
+                .source(knob.source.clone()),
+            );
+            SteerSettledMode::Queue
+        }
+    };
+    (mode, knob.source.clone())
+}
+
+/// A settled steer target resolved: keep the note for its next follow-up or
+/// warn and do nothing, by sourced setting. All work (reading the bounded note
+/// and, in `queue`, writing the scoped shared note) happens inside the closure
+/// so the process sink sees the warning before `emit` collects it.
+fn settled_steer_result(
+    factory: &super::Factory,
+    args: &provenant_cli::inbox::Steer,
+    resolved: &Resolved,
+    already_normalised: Option<String>,
+) -> Result<SteerResult, Box<dyn std::error::Error>> {
+    use provenant_fabric_runtime::notes::{Host, Input, Scope};
+
+    let (mode, source) = steer_settled_setting(factory);
+    let target = args.target.to_string();
+    let follow_up = match &resolved.node {
+        Some(node) => format!("{}/{}", resolved.graph, node),
+        None => resolved.graph.clone(),
+    };
+    match mode {
+        SteerSettledMode::Warn => {
+            provenant_records::warning::warn(
+                provenant_records::warning::Warning::new(
+                    provenant_records::warning::STEER_TARGET_SETTLED,
+                    format!("{target} has settled; steering was ignored"),
+                )
+                .subject(target.clone())
+                .source(source)
+                .repair(format!(
+                    "set lanes.steer_settled=queue or run `provenant retry {follow_up} --brief-file FILE`"
+                )),
+            );
+            Ok(SteerResult::SettledWarned(serde_json::json!({
+                "queued": false,
+                "target": target,
+            })))
+        }
+        SteerSettledMode::Queue => {
+            let text = match already_normalised {
+                Some(text) => text,
+                None => {
+                    let brief = provenant_cli::brief::select_brief_source([
+                        args.brief
+                            .clone()
+                            .map(provenant_cli::brief::BriefSource::Text),
+                        args.brief_file
+                            .clone()
+                            .map(provenant_cli::brief::BriefSource::file),
+                    ])?
+                    .ok_or_else(|| std::io::Error::other("steer requires a brief source"))?;
+                    let raw = provenant_cli::brief::read_brief(
+                        brief,
+                        provenant_records::control::CONTROL_TEXT_BYTES,
+                    )?;
+                    provenant_fabric_runtime::graph::normalise_prompt_text(&raw)
+                        .map_err(std::io::Error::other)?
+                }
+            };
+            let scope = Scope::Subtree {
+                graph: resolved.graph.clone(),
+                node: resolved
+                    .node
+                    .clone()
+                    .or_else(|| {
+                        resolved
+                            .work_key(factory.context.identity.project)
+                            .map(|key| key.node().to_owned())
+                    })
+                    .unwrap_or_else(|| "root".to_owned()),
+            };
+            let host = Host::chair(factory.context.identity.project, None);
+            let cancel = provenant_core::CancelToken::new();
+            provenant_cli::notes::execute_host(
+                &factory.context,
+                &host,
+                Input::Add {
+                    text,
+                    tags: vec!["steer".into(), "follow-up".into()],
+                    scope,
+                    resolves: None,
+                },
+                &factory.clock,
+                &cancel,
+            )?;
+            Ok(SteerResult::SettledQueued(serde_json::json!({
+                "queued": true,
+                "target": target,
+                "follow_up": follow_up,
+            })))
+        }
+    }
+}
+
+/// Queue steering for one attempt. Steering a settled lane is handled by
+/// `settled_steer_result`; steering text is bounded at 4 KiB.
 pub(crate) fn unified_graph_steer(
     args: &provenant_cli::inbox::Steer,
     globals: &provenant_cli::Globals,
     workers: &'static dyn WorkerObserver,
 ) -> u8 {
-    enum SteerResult {
-        Queued(Value),
-        Pending(Value),
-        Refused(&'static str),
-        Settled,
-        Unsupported(provenant_records::control::ControlReceipt),
-    }
     let result = (|| -> Result<SteerResult, Box<dyn std::error::Error>> {
         let factory = factory(globals, workers)?;
         let (resolved, checkpoint) =
             resolve_with_checkpoint(&factory, &args.target, Want::Attempt { settled: false })?;
         if super::steer::selected_is_settled(&resolved, &checkpoint) {
-            return Ok(SteerResult::Settled);
+            return settled_steer_result(&factory, args, &resolved, None);
         }
         let project = factory.context.identity.project;
         let work_key = resolved
@@ -1909,7 +2058,9 @@ pub(crate) fn unified_graph_steer(
                 BoundFacade { factory }.inbox_owner(input, Some(host.into()), budget, &cancel)
             };
         match super::steer::verified_target(&factory, &resolved, &current, budget, &cancel) {
-            super::steer::TargetProof::Settled => return Ok(SteerResult::Settled),
+            super::steer::TargetProof::Settled => {
+                return settled_steer_result(&factory, args, &resolved, Some(text.clone()));
+            }
             super::steer::TargetProof::Conflict => {
                 return Ok(SteerResult::Refused(
                     "steering requires one verified, accepted, current live attempt",
@@ -2014,16 +2165,17 @@ pub(crate) fn unified_graph_steer(
             "steering queued; owner verification will retry\n",
             false,
         ),
-        Ok(SteerResult::Settled) => crate::fail_with_repair(
-            "steer",
-            provenant_records::Outcome::Refused,
-            "steer_target_refused",
-            &format!(
-                "{} has settled; start a follow-up or retry with an amended brief",
-                args.target
-            ),
-            &format!("provenant retry {} --brief-file FILE", args.target),
+        Ok(SteerResult::SettledQueued(data)) => crate::emit(
+            &provenant_records::CommandResult::new("steer", provenant_records::Outcome::Ok, data),
             globals,
+            "steering queued for the next follow-up\n",
+            false,
+        ),
+        Ok(SteerResult::SettledWarned(data)) => crate::emit(
+            &provenant_records::CommandResult::new("steer", provenant_records::Outcome::Ok, data),
+            globals,
+            "steering ignored; the target has settled\n",
+            false,
         ),
         Ok(SteerResult::Refused(message)) => crate::fail(
             "steer",

@@ -2675,16 +2675,126 @@ fn steer_graph_and_node_refuse_an_unlaunched_attempt_before_reading_stdin() -> R
     )?;
     journal.save(&checkpoint)?;
     drop(journal);
+    // Spec: docs/specs/fabric.md#session-ready-steering
+    // The default `lanes.steer_settled=queue` keeps the note for the next
+    // follow-up and names it in the output instead of refusing.
     let (output, value) =
         rig.run(&["steer", "steer-ambiguous/accept", "--brief", "amended work"])?;
-    assert!(!output.status.success(), "{value}");
-    let message = value["error"]["message"].as_str().ok_or("message")?;
-    assert!(message.contains("settled"), "{message}");
-    assert!(
-        value["error"]["repair"]
-            .as_str()
-            .is_some_and(|next| next.contains("retry steer-ambiguous/accept --brief-file")),
+    assert!(output.status.success(), "{value}");
+    assert_eq!(value["status"], "ok", "{value}");
+    assert_eq!(value["data"]["queued"], true, "{value}");
+    assert_eq!(
+        value["data"]["follow_up"], "steer-ambiguous/accept",
         "{value}"
+    );
+    // The queued note reaches the follow-up as a scoped shared note.
+    let (output, notes) = rig.run(&[
+        "notes",
+        "read",
+        "--scope",
+        "steer-ambiguous/accept",
+        "--replay",
+    ])?;
+    assert!(output.status.success(), "{notes}");
+    let events = notes["data"]["events"].as_array().ok_or("notes events")?;
+    assert!(
+        events.iter().any(|event| {
+            event["detail"]["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("amended work"))
+        }),
+        "{notes}"
+    );
+    Ok(())
+}
+
+// Spec: docs/specs/fabric.md#session-ready-steering
+#[test]
+fn steer_on_a_settled_lane_warns_without_effect_when_configured() -> Result {
+    let rig = GraphProject::new()?;
+    let path = rig.document(&json!({"schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":"steer-settled-warn","nodes":[{"id":"accept","kind":"gate","access":"read_only","condition":{"type":"budget"}}]}))?;
+    let output = rig.command().args(["run", "--file"]).arg(path).output()?;
+    assert!(output.status.success(), "{output:?}");
+    std::fs::write(
+        rig.state().join("config.toml"),
+        "schema_version=1\n[knobs]\n'lanes.steer_settled'='warn'\n",
+    )?;
+    let checkpoint_path = graph_records(&rig.state())?
+        .into_iter()
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| name == "graph-steer-settled-warn.json")
+        })
+        .ok_or("checkpoint")?;
+    use provenant_core::{CancelToken, Clock, RootInputs, StateRoot, WaitBudget};
+    use provenant_fabric_runtime::graph::{
+        AttemptOutcome, AttemptState, FileJournal, GraphJournal, NodeState,
+    };
+    let mut inputs = RootInputs::new(rig.temp.path().to_path_buf(), rig.root.clone());
+    inputs.state_dir = Some(rig.state());
+    let state = StateRoot::resolve(&inputs, &provenant_os::fs::SystemPathResolver)?;
+    let project = checkpoint_path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .ok_or("project id")?
+        .parse()?;
+    let execution =
+        FileJournal::execution(&state, project, "steer-settled-warn")?.ok_or("execution")?;
+    let mut checkpoint =
+        FileJournal::read_checkpoint(&state, project, "steer-settled-warn")?.ok_or("checkpoint")?;
+    let attempt = json!({"key":{"graph_id":"steer-settled-warn","node_id":"accept","route_index":0, "attempt": 1},
+        "launched":false,"route":{"alias":"senior"},"state":"starting","attempt_ref":null,
+        "outcome":null,"launch_actor":"fixture"});
+    checkpoint.nodes[0].state = NodeState::Succeeded;
+    checkpoint.nodes[0].attempts = serde_json::from_value(json!([attempt]))?;
+    checkpoint.nodes[0].attempts[0].state = AttemptState::Terminal;
+    checkpoint.nodes[0].attempts[0].outcome = Some(AttemptOutcome::Succeeded);
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = CancelToken::new();
+    let mut journal = FileJournal::open(
+        &state,
+        project,
+        "steer-settled-warn",
+        WaitBudget::cli(clock.mono_now(), 5)?,
+        &cancel,
+        &clock,
+    )?;
+    journal.bind(execution)?;
+    journal.save(&checkpoint)?;
+    drop(journal);
+    let (output, value) = rig.run(&[
+        "steer",
+        "steer-settled-warn/accept",
+        "--brief",
+        "ignored steer note",
+    ])?;
+    assert!(output.status.success(), "{value}");
+    assert_eq!(value["status"], "ok", "{value}");
+    assert_eq!(value["data"]["queued"], false, "{value}");
+    assert!(
+        value["warnings"].as_array().is_some_and(|warnings| {
+            warnings
+                .iter()
+                .any(|warning| warning["code"] == "STEER_TARGET_SETTLED")
+        }),
+        "{value}"
+    );
+    // warn mode writes no note for the follow-up.
+    let (output, notes) = rig.run(&[
+        "notes",
+        "read",
+        "--scope",
+        "steer-settled-warn/accept",
+        "--replay",
+    ])?;
+    assert!(output.status.success(), "{notes}");
+    let events = notes["data"]["events"].as_array().ok_or("notes events")?;
+    assert!(
+        events.iter().all(|event| !event["detail"]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("ignored steer note"))),
+        "{notes}"
     );
     Ok(())
 }
