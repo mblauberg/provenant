@@ -723,9 +723,9 @@ costs one warm clippy run.
 | w2-warn-lib-b | #3778 | Hy | 500 | none | Warnings codemod: run, confinement, supervisor, fabric-runtime, workflow and the remaining library crates |
 | w2-warn-cli | #3778 | Hy | 500 | none | Warnings codemod: crates/cli |
 | w2-warn-src | #3778 | Hy | 600 | none | Warnings codemod: the binary under src/ |
-| w2-sources-config | #3777 | Hy | 450 | none | Config source families onto Layer |
-| w2-sources-other | #3777 | Hy | 450 | none | Run, routing, fabric and landing source families onto Layer |
-| w2-remote-literals | #3288 | Hy | 500 | none | Replace compiled-in origin, main and master with ForgeContext |
+| w2-sources-config | #3777 | Hy | 450 | w2-warn-lib-a, w2-warn-cli, w2-warn-src | Config source families onto Layer |
+| w2-sources-other | #3777 | Hy | 450 | w2-warn-lib-a, w2-warn-lib-b, w2-warn-src | Run, routing, fabric and landing source families onto Layer |
+| w2-remote-literals | #3288 | Hy | 500 | w2-warn-lib-b, w2-warn-src | Replace compiled-in origin, main and master with ForgeContext |
 
 ### Wave 3: dependents (18 slices, about 9350 lines)
 | Slice | Issues | Model | Lines | After | Outcome |

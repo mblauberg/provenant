@@ -1,5 +1,11 @@
 # Slice w2-warn-lib-b: Warnings codemod: run, confinement, supervisor, fabric-runtime, workflow and the remaining library crates
 
+## Amendment (chair, 23 Nov 2026, after wave 1 integrated on batch/next)
+This supersedes any conflicting text below.
+- Wave 1 no longer bans `std::io::stdout`/`std::io::stderr`, and the temporary `// next-batch wave 2 removes` allow markers are gone: the ban landed before its callers moved and left clippy red. **w2-warn-lib-a re-adds both entries to tools/front-door/clippy.toml** (the reasons wave 1 used: "Report warnings through records::warning::warn; the binary edge writes to stderr only in its output seam." and "Command output belongs to the binary edge's output seam; warnings go through records::warning.").
+- Every warn slice: find the raw sites in your scope with `git grep -n -E 'io::std(out|err)\(|eprintln!|eprint!|println!|print!\('`. Route warnings through `provenant_records::warning::warn` with a catalogued `WarningCode`, and command output through the binary edge's output seam. Where stdout or stderr is the protocol itself (a build script's `cargo:` directives, a fixture child's wire, a test harness's own report), keep it under a narrow `#[allow(clippy::disallowed_methods)]` with a reason comment, as tools/front-door/build.rs does.
+- New WarningCodes go in crates/records/src/warning.rs and its upper-snake catalogue test. If your scope excludes that file, name the code you need in the handoff and use the nearest existing code.
+
 Issues: #3778. Wave 2 of the next batch; integration branch `batch/next`. Expected size about 500 changed lines.
 
 ## Outcome
