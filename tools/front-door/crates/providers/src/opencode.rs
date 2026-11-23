@@ -5,6 +5,7 @@ use crate::{LaunchSpec, ProviderError, ProviderEvent as E, StreamState, stream::
 use provenant_confinement::permissions::{
     AuthenticationProfile, NetworkEndpoint, ProviderProfile, ProviderProfileSpec,
 };
+use provenant_records::{Cost, CostOrigin, Tokens};
 use serde::Deserialize;
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -20,9 +21,11 @@ impl provenant_os::capture::FrameDecoder for OpenCode {
         use provenant_os::capture::FrameEvent;
         Ok(
             if decode(frame).is_ok_and(|events| {
-                events
-                    .iter()
-                    .any(|event| matches!(event, E::QuotaLimited { .. }))
+                // A retry past the adapter's bound emits one of these, so a
+                // provider loop cannot hold the lane to its wall timeout.
+                events.iter().any(|event| {
+                    matches!(event, E::QuotaLimited { .. } | E::ModelOverloaded { .. })
+                })
             }) {
                 FrameEvent::Terminal
             } else {
@@ -86,6 +89,15 @@ pub const REGISTRATION: crate::Registration = crate::Registration {
 crate::adapter!(OpenCode, "opencode", prepare, failure_diagnostic);
 /// The JSON run stream carries no answering-model position.
 const MODEL_ON_WIRE: bool = false;
+
+/// Retry bounds declared by the OpenCode adapter. A 429 carries a reset
+/// instant and never recovers inside one attempt, so one retry is already past
+/// the bound; a 5xx retry loop is bounded by the ten attempts OpenCode itself
+/// makes before it stops (interface study, 20 Nov 2026). These are the only
+/// source of the bound: no caller guesses it from a provider name or a report.
+/// Spec: docs/specs/routing.md#capacity-is-not-quota
+const RATE_LIMIT_RETRY_BOUND: u64 = 1;
+const CAPACITY_RETRY_BOUND: u64 = 10;
 
 /// Confirm that the retained database contains the exact session identity.
 /// OpenCode 2.x stores sessions in `session_v2`; a missing table or session is
@@ -869,6 +881,14 @@ enum Event {
         session: String,
         part: Finish,
     },
+    /// A provider retry: unlike `error` this never ends the CLI process, so
+    /// without it a 429 loop runs until the lane's wall timeout.
+    #[serde(rename = "retry")]
+    Retry {
+        #[serde(default)]
+        attempt: Option<u64>,
+        error: RetryError,
+    },
     Error {
         error: Failure,
         #[serde(rename = "sessionID", default)]
@@ -892,6 +912,16 @@ enum Event {
     },
     #[serde(other)]
     Other,
+}
+#[derive(Deserialize)]
+struct RetryError {
+    #[serde(default, rename = "type")]
+    kind: String,
+    #[serde(default)]
+    status: Option<u16>,
+    message: Option<String>,
+    #[serde(default, rename = "retryAfterMs")]
+    retry_after_ms: Option<serde_json::Value>,
 }
 #[derive(Deserialize)]
 struct Failure {
@@ -1001,8 +1031,116 @@ struct Text {
 }
 #[derive(Deserialize)]
 struct Finish {
+    /// The step's own id, used as the usage report's key so a repeated
+    /// step_finish replaces that step instead of double-counting it.
+    #[serde(default)]
+    id: Option<String>,
     reason: String,
+    #[serde(default)]
+    tokens: Option<StepTokens>,
+    #[serde(default)]
+    cost: Option<f64>,
 }
+#[derive(Deserialize)]
+struct StepTokens {
+    #[serde(default)]
+    input: Option<u64>,
+    #[serde(default)]
+    output: Option<u64>,
+    #[serde(default)]
+    reasoning: Option<u64>,
+    #[serde(default)]
+    cache: Option<StepCache>,
+}
+#[derive(Deserialize)]
+struct StepCache {
+    #[serde(default)]
+    read: Option<u64>,
+    #[serde(default)]
+    write: Option<u64>,
+}
+
+/// OpenCode states cost as USD. Keep it in integer micros, as the shared
+/// `Cost` contract requires; an absent, negative or non-finite figure is not
+/// a stated cost and stays unknown.
+fn stated_cost(dollars: Option<f64>) -> Option<Cost> {
+    let dollars = dollars?;
+    if !dollars.is_finite() || dollars < 0.0 {
+        return None;
+    }
+    Some(Cost {
+        micros: (dollars * 1_000_000.0).round() as u64,
+        currency: "USD".into(),
+        stated_by: CostOrigin::Provider,
+    })
+}
+
+/// Turn one `step_finish` into a typed usage report. Only buckets the step
+/// actually stated are present; a stream with no tokens leaves usage unknown,
+/// never zero. Spec: docs/specs/telemetry.md#usage-merges-by-declared-semantics
+fn step_usage(finish: Finish) -> Option<crate::usage::UsageReport> {
+    let tokens = finish.tokens?;
+    let buckets = Tokens {
+        input: tokens.input,
+        output: tokens.output,
+        reasoning: tokens.reasoning,
+        cache_read: tokens.cache.as_ref().and_then(|cache| cache.read),
+        cache_write: tokens.cache.and_then(|cache| cache.write),
+        ..Tokens::default()
+    };
+    let mut report = crate::usage::UsageReport::step(buckets);
+    if let Some(id) = finish.id {
+        report = report.key(id);
+    }
+    if let Some(cost) = stated_cost(finish.cost) {
+        report = report.cost(cost);
+    }
+    Some(report)
+}
+
+/// Decide what a provider retry means. A rate-limit retry carries a reset and
+/// cannot recover in this attempt, so the first one is already past its bound
+/// and ends the attempt as usage-limited. A capacity retry is transient until
+/// it reaches OpenCode's own ten-attempt bound, or names an endpoint that is
+/// unavailable. Spec: docs/specs/routing.md#capacity-is-not-quota
+fn retry_events(error: RetryError, attempt: Option<u64>) -> Vec<E> {
+    let message = error
+        .message
+        .filter(|message| !message.is_empty())
+        .unwrap_or_else(|| "provider retry".into());
+    let is_rate_limit = error.kind == "provider.rate-limit" || error.status == Some(429);
+    let is_capacity = error.kind == "provider.internal"
+        && error
+            .status
+            .is_some_and(|status| (500..600).contains(&status));
+    let past = |bound| attempt.unwrap_or(1).max(1) >= bound;
+    if is_rate_limit {
+        if past(RATE_LIMIT_RETRY_BOUND) {
+            // The same typed signal the final-error path emits, carrying the
+            // provider's reset, so settlement sees a usage-limited attempt.
+            vec![E::QuotaLimited {
+                message,
+                pool: None,
+                resets_in_seconds: parse_retry_after(error.retry_after_ms.as_ref()),
+            }]
+        } else {
+            vec![E::RateLimited { message }]
+        }
+    } else if is_capacity {
+        let endpoint_unavailable = message
+            .to_ascii_lowercase()
+            .contains("endpoint is unavailable");
+        if endpoint_unavailable || past(CAPACITY_RETRY_BOUND) {
+            vec![E::ModelOverloaded { message }]
+        } else {
+            vec![E::TransientError]
+        }
+    } else {
+        // An unclassified retry is not evidence of a refusal; keep waiting.
+        vec![E::TransientError]
+    }
+}
+
 fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
     Ok(match wire::<Event>(bytes)? {
         // OpenCode emits completed text parts, but can drop the final
@@ -1015,12 +1153,17 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
             E::Terminal,
         ],
         Event::StepFinish { session, part } => {
+            let stop = part.reason == "stop";
             let mut events = vec![E::Session(session)];
-            if part.reason == "stop" {
+            if let Some(report) = step_usage(part) {
+                events.push(E::Usage(report));
+            }
+            if stop {
                 events.push(E::Terminal);
             }
             events
         }
+        Event::Retry { attempt, error } => retry_events(error, attempt),
         Event::Quota {
             message,
             response,
@@ -1087,12 +1230,12 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
                         .unwrap_or_else(|| "provider model unavailable".into()),
                 }
             } else if error.kind == "provider.internal"
-                && (error.status == Some(529)
-                    || (error.status == Some(500)
-                        && error.message.as_deref().is_some_and(|message| {
-                            message.to_ascii_lowercase().contains("overloaded")
-                        })))
+                && error
+                    .status
+                    .is_some_and(|status| (500..600).contains(&status))
             {
+                // Any upstream 5xx is capacity, not a generic error, and never
+                // a quota hold: the account may still have allowance.
                 E::ModelOverloaded {
                     message: error
                         .message
@@ -1311,25 +1454,36 @@ mod tests {
         assert_eq!(outcome.session(), Some("ses_x"));
     }
 
+    // Spec: docs/specs/routing.md#capacity-is-not-quota
     #[test]
-    fn upstream_529_is_a_typed_overload() {
-        let events = decode(br#"{"type":"error","error":{"type":"provider.internal","status":529,"message":"Overloaded"}}"#).unwrap();
-        assert_eq!(
-            events,
-            vec![E::ModelOverloaded {
-                message: "Overloaded".into()
-            }]
-        );
-        assert_eq!(
-            decode(br#"{"type":"error","error":{"type":"provider.internal","status":500,"message":"Overloaded"}}"#).unwrap(),
-            vec![E::ModelOverloaded { message: "Overloaded".into() }]
-        );
-        for raw in [
-            br#"{"type":"error","error":{"type":"provider.internal","status":500,"message":"UnexpectedStatus: 500"}}"#.as_slice(),
-            br#"{"type":"error","error":{"type":"unknown","status":529,"message":"Overloaded"}}"#.as_slice(),
+    fn upstream_5xx_is_capacity_not_a_generic_error_or_quota_hold() {
+        for (raw, message) in [
+            (
+                br#"{"type":"error","error":{"type":"provider.internal","status":529,"message":"Overloaded"}}"#.as_slice(),
+                "Overloaded",
+            ),
+            (
+                br#"{"type":"error","error":{"type":"provider.internal","status":500,"message":"Overloaded"}}"#.as_slice(),
+                "Overloaded",
+            ),
+            (
+                br#"{"type":"error","error":{"type":"provider.internal","status":500,"message":"Upstream request failed: Endpoint is unavailable."}}"#.as_slice(),
+                "Upstream request failed: Endpoint is unavailable.",
+            ),
         ] {
-            assert_eq!(decode(raw).unwrap(), vec![E::Error]);
+            assert_eq!(
+                decode(raw).unwrap(),
+                vec![E::ModelOverloaded {
+                    message: message.into()
+                }]
+            );
         }
+        // Only the typed provider.internal kind is capacity; an untyped error
+        // with a 5xx status stays generic.
+        assert_eq!(
+            decode(br#"{"type":"error","error":{"type":"unknown","status":529,"message":"Overloaded"}}"#).unwrap(),
+            vec![E::Error]
+        );
         let events = decode(br#"{"type":"error","sessionID":"ses_x","error":{"type":"provider.internal","status":529,"message":"Overloaded"}}"#).unwrap();
         assert_eq!(
             events,
@@ -1339,6 +1493,148 @@ mod tests {
                     message: "Overloaded".into()
                 }
             ]
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, E::QuotaLimited { .. }))
+        );
+    }
+
+    // Spec: docs/specs/telemetry.md#usage-merges-by-declared-semantics
+    #[test]
+    fn step_finish_reports_keyed_usage_and_provider_cost() {
+        let raw = concat!(
+            "{\"type\":\"step_finish\",\"sessionID\":\"ses_x\",\"part\":{\"id\":\"step-1\",\"reason\":\"tool-calls\",\"tokens\":{\"input\":9276,\"output\":3,\"reasoning\":0,\"cache\":{\"read\":1792,\"write\":0}},\"cost\":0.5}}\n",
+            "{\"type\":\"step_finish\",\"sessionID\":\"ses_x\",\"part\":{\"id\":\"step-2\",\"reason\":\"stop\",\"tokens\":{\"input\":10,\"output\":4},\"cost\":0.25}}\n",
+        );
+        let events = decode(raw.as_bytes()).unwrap();
+        let reports: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                E::Usage(report) => Some(report.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reports.len(), 2);
+        assert_eq!(reports[0].scope, provenant_records::UsageScope::Step);
+        assert_eq!(reports[0].key.as_deref(), Some("step-1"));
+        assert_eq!(reports[0].tokens.input, Some(9276));
+        assert_eq!(reports[0].tokens.cache_read, Some(1792));
+        assert_eq!(reports[0].tokens.reasoning, Some(0));
+        let cost = reports[0].cost.as_ref().expect("stated cost");
+        assert_eq!(cost.micros, 500_000);
+        assert_eq!(cost.currency, "USD");
+        assert_eq!(cost.stated_by, CostOrigin::Provider);
+        assert_eq!(reports[1].key.as_deref(), Some("step-2"));
+
+        let semantics = provenant_records::AdapterSpec::get("opencode")
+            .expect("declared adapter")
+            .usage;
+        let mut accumulator = crate::UsageAccumulator::new(semantics);
+        for report in &reports {
+            accumulator.push(report.clone());
+        }
+        let (tokens, cost) = accumulator.total();
+        assert_eq!(tokens.input, Some(9286));
+        assert_eq!(tokens.output, Some(7));
+        assert_eq!(tokens.cache_read, Some(1792));
+        assert_eq!(tokens.cache_write, Some(0));
+        assert_eq!(cost.expect("cost").micros, 250_000);
+    }
+
+    // Spec: docs/specs/telemetry.md#usage-merges-by-declared-semantics
+    #[test]
+    fn step_finish_without_tokens_leaves_usage_unknown() {
+        for raw in [
+            br#"{"type":"step_finish","sessionID":"ses_x","part":{"reason":"stop"}}"#.as_slice(),
+            br#"{"type":"step_finish","sessionID":"ses_x","part":{"id":"step-1","reason":"tool-calls","cost":0}}"#.as_slice(),
+        ] {
+            let events = decode(raw).unwrap();
+            assert!(events.iter().all(|event| !matches!(event, E::Usage(_))));
+        }
+    }
+
+    // Spec: docs/specs/routing.md#capacity-is-not-quota
+    #[test]
+    fn rate_limit_retry_ends_the_attempt_with_a_reset() {
+        use crate::ExitObservation;
+        use provenant_os::capture::{FrameDecoder, FrameEvent};
+        let frame = concat!(
+            r#"{"type":"retry","attempt":1,"error":{"type":"provider.rate-limit","#,
+            r#""status":429,"message":"rate limited","retryAfterMs":30000}}"#,
+            "\n",
+        );
+        let events = decode(frame.as_bytes()).unwrap();
+        assert_eq!(
+            events,
+            vec![E::QuotaLimited {
+                message: "rate limited".into(),
+                pool: None,
+                resets_in_seconds: Some(30),
+            }]
+        );
+        assert_eq!(
+            OpenCode.decode(frame.as_bytes()).unwrap(),
+            FrameEvent::Terminal
+        );
+
+        let mut stream = OpenCode
+            .stream(None, &provenant_records::policy::Policy::default())
+            .unwrap();
+        OpenCode.observe(&mut stream, frame.as_bytes()).unwrap();
+        let outcome = OpenCode
+            .finish(
+                stream,
+                ExitObservation {
+                    code: None,
+                    timed_out: true,
+                },
+            )
+            .unwrap();
+        assert_eq!(outcome.status(), crate::OutcomeStatus::Refused);
+    }
+
+    // Spec: docs/specs/routing.md#capacity-is-not-quota
+    #[test]
+    fn capacity_retry_loop_ends_at_the_bound() {
+        use provenant_os::capture::{FrameDecoder, FrameEvent};
+        let retry = |attempt| {
+            format!(
+                "{{\"type\":\"retry\",\"attempt\":{attempt},\"error\":{{\"type\":\"provider.internal\",\"status\":500,\"message\":\"Upstream request failed\"}}}}\n"
+            )
+        };
+        for attempt in 1..CAPACITY_RETRY_BOUND {
+            let raw = retry(attempt);
+            assert_eq!(decode(raw.as_bytes()).unwrap(), vec![E::TransientError]);
+            assert_eq!(
+                OpenCode.decode(raw.as_bytes()).unwrap(),
+                FrameEvent::Progress
+            );
+        }
+        // An untyped provider.internal retry (no 5xx status, no attempt) is
+        // transient too: one internal retry does not end the attempt.
+        let plain =
+            br#"{"type":"retry","error":{"type":"provider.internal","message":"internal"}}"#;
+        assert_eq!(decode(plain).unwrap(), vec![E::TransientError]);
+        assert_eq!(OpenCode.decode(plain).unwrap(), FrameEvent::Progress);
+
+        let raw = retry(CAPACITY_RETRY_BOUND);
+        let events = decode(raw.as_bytes()).unwrap();
+        assert_eq!(
+            events,
+            vec![E::ModelOverloaded {
+                message: "Upstream request failed".into()
+            }]
+        );
+        assert_eq!(
+            OpenCode.decode(raw.as_bytes()).unwrap(),
+            FrameEvent::Terminal
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, E::QuotaLimited { .. }))
         );
     }
 
