@@ -14,7 +14,10 @@ use provenant_core::{Clock, Roots, WallTime};
 use provenant_os::clock::SystemClock;
 use provenant_os::fs::FsError;
 use provenant_providers::{AvailabilityRecord, REGISTRY};
-use provenant_records::{CommandError, CommandResult, Outcome, RouteReadiness};
+use provenant_records::{
+    CommandError, CommandResult, Outcome, RouteReadiness,
+    warning::{CONFIG_KEY_IGNORED, Warning, warn},
+};
 use provenant_routing::{
     AccessContext, BoundedModels, Catalogue, Fallback, ModelId, PacingPolicy, QuotaObservation,
     RouteChoice, RouteName, RoutePoolMember, RoutingContext, RoutingError,
@@ -456,8 +459,12 @@ pub(crate) fn task_exclusion_rules(
                 Err(EdgeError::Routing(RoutingError::UnknownExclusion { .. }))
                     if source == provenant_routing::ExclusionSource::Graph =>
                 {
-                    eprintln!(
-                        "warning: dropping unrecognised carried graph exclusion {selector:?}"
+                    warn(
+                        Warning::new(
+                            CONFIG_KEY_IGNORED,
+                            "dropping unrecognised carried graph exclusion",
+                        )
+                        .subject(format!("{selector:?}")),
                     );
                 }
                 Err(error) => return Err(error),
@@ -978,9 +985,6 @@ pub struct RoutePreview {
     /// Accounts withheld because their recorded offer list lacks the model.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub offered_exclusions: Vec<String>,
-    /// Pinned accounts attempted despite a recorded offer list lacking the model.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub offered_warnings: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub login_diagnostic: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

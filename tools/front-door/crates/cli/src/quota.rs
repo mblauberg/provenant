@@ -14,6 +14,7 @@ use provenant_quota::{
     schedule::{self, Detection, QuotaQuery, QuotaTick},
     *,
 };
+use provenant_records::warning::{CONFIG_MALFORMED, LIVE_RECORD_FORMAT_CHANGED, Warning, warn};
 use provenant_records::{CommandError, CommandResult, Outcome};
 use std::{
     ffi::OsStr,
@@ -1005,17 +1006,21 @@ fn older_readiness_version(bytes: &[u8]) -> Option<u64> {
 
 /// One note per process and account for a dropped older readiness file.
 fn note_dropped_readiness(adapter: &str, key: &str, version: u64) {
-    use std::io::Write;
     static NOTED: std::sync::Mutex<std::collections::BTreeSet<(String, String)>> =
         std::sync::Mutex::new(std::collections::BTreeSet::new());
     let first = NOTED
         .lock()
         .is_ok_and(|mut noted| noted.insert((adapter.to_owned(), key.to_owned())));
     if first {
-        let _ = writeln!(
-            io::stderr().lock(),
-            "Note: readiness for {adapter}/{key} is from an older release (schema {version}, now {}); dropped until the next observation",
-            provenant_quota::READINESS_SCHEMA_VERSION
+        warn(
+            Warning::new(
+                LIVE_RECORD_FORMAT_CHANGED,
+                format!(
+                    "readiness for {adapter}/{key} is from an older release (schema {version}, now {}); dropped until the next observation",
+                    provenant_quota::READINESS_SCHEMA_VERSION
+                ),
+            )
+            .subject(format!("{adapter}/{key}")),
         );
     }
 }
@@ -1101,11 +1106,10 @@ pub(crate) fn state_freshness(state: &Path) -> provenant_quota::FreshnessPolicy 
     match provenant_config::read_domain::<provenant_quota::Settings>(state, "quota") {
         Ok(settings) => provenant_quota::FreshnessPolicy::from_settings(settings.freshness),
         Err(error) => {
-            use std::io::Write;
-            let _ = writeln!(
-                io::stderr().lock(),
-                "Warning: quota freshness settings unavailable ({error}); using defaults"
-            );
+            warn(Warning::new(
+                CONFIG_MALFORMED,
+                format!("quota freshness settings unavailable ({error}); using defaults"),
+            ));
             provenant_quota::FreshnessPolicy::default()
         }
     }
@@ -1118,11 +1122,10 @@ fn catalogue_pools(roots: &Roots) -> impl Fn(&str, &str) -> Vec<String> {
     let catalogue = match crate::route::effective_catalogue(roots) {
         Ok(catalogue) => Some(catalogue),
         Err(error) => {
-            use std::io::Write;
-            let _ = writeln!(
-                io::stderr().lock(),
-                "Warning: model catalogue unavailable ({error}); model pools are not applied"
-            );
+            warn(Warning::new(
+                CONFIG_MALFORMED,
+                format!("model catalogue unavailable ({error}); model pools are not applied"),
+            ));
             None
         }
     };
@@ -1366,11 +1369,10 @@ fn write_intent_at(
     }
     // The account commit remains authoritative if derived publication fails.
     if let Err(error) = sync_readiness(state, intent, now) {
-        use std::io::Write;
-        let _ = writeln!(
-            io::stderr().lock(),
-            "Warning: could not sync quota readiness: {error}"
-        );
+        warn(Warning::new(
+            CONFIG_MALFORMED,
+            format!("could not sync quota readiness: {error}"),
+        ));
     }
     signal_quota(state);
     Ok(())
@@ -2437,11 +2439,10 @@ pub(crate) fn execute(
             &clock,
         )
     {
-        use std::io::Write;
-        let _ = writeln!(
-            io::stderr().lock(),
-            "Warning: could not deliver login expiry notice: {error}"
-        );
+        warn(Warning::new(
+            CONFIG_MALFORMED,
+            format!("could not deliver login expiry notice: {error}"),
+        ));
     }
     Ok(shown)
 }

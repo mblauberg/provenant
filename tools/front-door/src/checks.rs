@@ -9,7 +9,10 @@ use provenant_core::CancelToken;
 use provenant_os::exec::SystemExecutor;
 use provenant_os::fs;
 use provenant_records::Layer;
-use provenant_records::{CanonicalV1, CommandResult, Finding, Outcome, PathWire};
+use provenant_records::{
+    CanonicalV1, CommandResult, Finding, Outcome, PathWire,
+    warning::{CONFIG_MALFORMED, Warning, warn},
+};
 use std::{
     ffi::OsString,
     io::{self, Write},
@@ -438,14 +441,13 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
                     });
                 }
             }
-            let mut warnings = crate::pool_effort_warnings(&roots);
-            warnings.extend(provenant_config::port_declaration_warnings(
-                Some(&project),
-                roots.state.as_path(),
-            ));
+            for message in crate::pool_effort_warnings(&roots).into_iter().chain(
+                provenant_config::port_declaration_warnings(Some(&project), roots.state.as_path()),
+            ) {
+                warn(Warning::new(CONFIG_MALFORMED, message));
+            }
             Ok(provenant_cli::check::config_page(
                 inspection,
-                warnings,
                 ("config", selector),
                 &page,
             )?)
@@ -519,14 +521,16 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
                 ),
                 &page,
             )?;
-            result.warnings.extend(agent_checks.iter().filter_map(|check| {
+            for message in agent_checks.iter().filter_map(|check| {
                 check.warning.map(|reason| {
                     format!(
                         "{} PATH would make trusted_lane_toolchain fall back ({reason}); ensure the trusted rustup shim is on PATH when reinstalling the agent",
                         check.source
                     )
                 })
-            }));
+            }) {
+                warn(Warning::new(CONFIG_MALFORMED, message));
+            }
             let apps = crate::apps::dir(&targets.home);
             let login_item = crate::apps::stale_login_item(&apps);
             if login_item.exists() {
@@ -534,7 +538,7 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
                 // menu bar through the nested bundle: removing it by hand would
                 // leave no menu bar, so only the upgrade path is safe there.
                 let helper = crate::apps::app_path(&apps).join("Contents/MacOS/quota-menubar");
-                result.warnings.push(if helper.is_file() {
+                let message = if helper.is_file() {
                     format!(
                         "the old menu login item is still installed at {}; run `provenant upgrade` to remove its registration, or delete the bundle and bootout its `application.dev.provenant.menu.*` launchd label manually, so only the LaunchAgent starts the menu bar",
                         login_item.display()
@@ -544,7 +548,8 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
                         "the installed app predates the menu bar helper and still launches it from the old login item at {}; run `provenant upgrade` to install the current app, which then removes the login item",
                         login_item.display()
                     )
-                });
+                };
+                warn(Warning::new(CONFIG_MALFORMED, message));
             }
             Ok(result)
         }),

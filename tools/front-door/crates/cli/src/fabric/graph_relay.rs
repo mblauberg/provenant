@@ -15,6 +15,7 @@ use provenant_fabric_runtime::graph::{
     template::{Layer, TemplateLibrary},
 };
 use provenant_fabric_runtime::relay::{FacadeError, ServiceError};
+use provenant_records::warning::{CONFIG_MALFORMED, Warning, warn};
 use serde_json::{Value, json};
 
 fn refused(code: &str, message: impl Into<String>) -> ServiceError {
@@ -448,9 +449,12 @@ fn serve_authorised(
             ),
             Err(error) => {
                 let error = provenant_records::diagnostic::safe_text(&error.to_string());
-                eprintln!(
-                    "warning: graph admission policy unavailable ({error}); using compiled defaults"
-                );
+                warn(Warning::new(
+                    CONFIG_MALFORMED,
+                    format!(
+                        "graph admission policy unavailable ({error}); using compiled defaults"
+                    ),
+                ));
                 Default::default()
             }
         }

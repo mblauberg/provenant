@@ -1,4 +1,5 @@
 use super::*;
+use provenant_records::warning::{CONFIG_MALFORMED, Warning, warn};
 
 /// Bind declared lane capabilities to the provider's confinement profile.
 pub(in crate::run) fn apply_lane_capabilities(
@@ -408,9 +409,8 @@ pub(super) fn sandbox_mode(
             .map(|p| p.optional())
             .unwrap_or(&Default::default()),
     );
-    if let Some(warning) = &mode.warning {
-        use std::io::Write as _;
-        let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+    if let Some(message) = &mode.warning {
+        warn(Warning::new(CONFIG_MALFORMED, message.clone()));
     }
     mode
 }
@@ -902,11 +902,6 @@ fn credential_declarations(
     unique
 }
 
-fn report_credential_warning(message: &str) {
-    use std::io::Write;
-    let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
-}
-
 /// Inventory names and registration metadata only; credential contents are
 /// never needed to establish the mandatory boundary.
 pub(super) fn credential_roots(
@@ -927,14 +922,11 @@ pub(super) fn credential_roots(
                 receipt.access.as_str(),
                 receipt.source.as_str()
             );
-            if let Some(message) = policy
-                .check(
-                    "CREDENTIAL_ROOTS_OVERLAP_NONE",
-                    provenant_records::policy::Facts::violation(detail),
-                )
-                .message()
-            {
-                report_credential_warning(message);
+            if let provenant_records::policy::Effect::Warn(warning) = policy.check(
+                "CREDENTIAL_ROOTS_OVERLAP_NONE",
+                provenant_records::policy::Facts::violation(detail),
+            ) {
+                warn(warning);
             }
         }
     };
@@ -1162,14 +1154,11 @@ pub(super) fn credential_access_grant_refusal(
                     receipt.access.as_str(),
                     receipt.source.as_str()
                 );
-                if let Some(message) = policy
-                    .check(
-                        "CREDENTIAL_ROOTS_OVERLAP_NONE",
-                        provenant_records::policy::Facts::violation(detail),
-                    )
-                    .message()
-                {
-                    report_credential_warning(message);
+                if let provenant_records::policy::Effect::Warn(warning) = policy.check(
+                    "CREDENTIAL_ROOTS_OVERLAP_NONE",
+                    provenant_records::policy::Facts::violation(detail),
+                ) {
+                    warn(warning);
                 }
             }
         }
@@ -1217,14 +1206,11 @@ pub(super) fn warn_profile_credential_grants(
                 receipt.access.as_str(),
                 receipt.source.as_str()
             );
-            if let Some(message) = policy
-                .check(
-                    "CREDENTIAL_ROOTS_OVERLAP_NONE",
-                    provenant_records::policy::Facts::violation(detail),
-                )
-                .message()
-            {
-                report_credential_warning(message);
+            if let provenant_records::policy::Effect::Warn(warning) = policy.check(
+                "CREDENTIAL_ROOTS_OVERLAP_NONE",
+                provenant_records::policy::Facts::violation(detail),
+            ) {
+                warn(warning);
             }
         }
     }
@@ -1483,22 +1469,22 @@ fn source_admission_error(error: crate::run::SourceAdmissionError) -> SourceCwdE
 fn source_warning_messages(
     admission: &crate::run::SourceAdmission,
     policy: &provenant_records::policy::Policy,
-) -> Vec<String> {
+) -> Vec<Warning> {
     admission
         .warnings
         .iter()
         .filter_map(|warning| {
-            policy
-                .check(
-                    "CONFINEMENT_SOURCE_AGENT_CONFIG_NONE",
-                    provenant_records::policy::Facts::violation(format!(
-                        "source overlaps {} (source: {})",
-                        warning.path.display(),
-                        warning.source
-                    )),
-                )
-                .message()
-                .map(str::to_owned)
+            match policy.check(
+                "CONFINEMENT_SOURCE_AGENT_CONFIG_NONE",
+                provenant_records::policy::Facts::violation(format!(
+                    "source overlaps {} (source: {})",
+                    warning.path.display(),
+                    warning.source
+                )),
+            ) {
+                provenant_records::policy::Effect::Warn(warning) => Some(warning),
+                _ => None,
+            }
         })
         .collect()
 }
@@ -1508,7 +1494,6 @@ fn report_source_warnings(
     registry: &Registry<'_>,
     task: &run::TaskRequest,
 ) {
-    use std::io::Write;
     let project = task
         .profile
         .policy_project
@@ -1520,9 +1505,8 @@ fn report_source_warnings(
         .map_or_else(provenant_records::policy::Policy::default, |roots| {
             run::launch_policy(roots.state.as_path(), &project, task)
         });
-    let mut stderr = std::io::stderr().lock();
-    for message in source_warning_messages(admission, &policy) {
-        let _ = writeln!(stderr, "warning: {message}");
+    for warning in source_warning_messages(admission, &policy) {
+        warn(warning);
     }
 }
 
@@ -1924,7 +1908,6 @@ pub(in crate::run) fn read_only_source_ref(
 ) -> Option<crate::run::ReadOnlySourceRef> {
     use provenant_confinement::{GitRead, UtilityBudget, UtilityRuntime, run_read_utility};
     use provenant_os::exec::SystemExecutor;
-    use std::io::Write;
 
     let git = provenant_os::git::git_executable()?;
     let utility_home = host_git_home(state).ok()?;
@@ -1952,11 +1935,10 @@ pub(in crate::run) fn read_only_source_ref(
             let fallback = default_upstream(&executor, &repo, &utility, budget, &cancel)?;
             // The branch's own tracking configuration could not be resolved, so
             // the remote's default branch is only an advisory stand-in.
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: read-only source could not resolve this branch's configured upstream; using {} instead, which may not track this checkout",
-                fallback.1
-            );
+            warn(Warning::new(
+                CONFIG_MALFORMED,
+                format!("read-only source could not resolve this branch's configured upstream; using {} instead, which may not track this checkout", fallback.1),
+            ));
             Some(fallback)
         })?;
     let behind = commits_behind(&executor, &repo, &utility, budget, &cancel, head, commit)?;
@@ -2032,11 +2014,6 @@ fn current_branch(
         .map(str::to_owned)
 }
 
-fn warn_branch_config(detail: impl std::fmt::Display) {
-    use std::io::Write;
-    let _ = writeln!(std::io::stderr().lock(), "warning: {detail}");
-}
-
 /// One branch remote or merge value from the verified repository config.
 /// Missing values are normal; other failures are reported before falling back.
 fn branch_config_value(
@@ -2053,7 +2030,10 @@ fn branch_config_value(
     use provenant_os::exec::Termination;
 
     if validate_branch_config_key(key).is_err() {
-        warn_branch_config("read branch Git configuration rejected an invalid key");
+        warn(Warning::new(
+            CONFIG_MALFORMED,
+            "read branch Git configuration rejected an invalid key",
+        ));
         return None;
     }
     let context = provenant_os::git_config::ConfigContext {
@@ -2068,7 +2048,7 @@ fn branch_config_value(
     ) {
         Ok(out) => out,
         Err(error) => {
-            warn_branch_config(error.to_string());
+            warn(Warning::new(CONFIG_MALFORMED, error.to_string()));
             return None;
         }
     };
@@ -2076,8 +2056,9 @@ fn branch_config_value(
         Termination::Exit(0) => {}
         Termination::Exit(1) => return None,
         termination => {
-            warn_branch_config(format!(
-                "read branch Git configuration ended with {termination:?}"
+            warn(Warning::new(
+                CONFIG_MALFORMED,
+                format!("read branch Git configuration ended with {termination:?}"),
             ));
             return None;
         }
@@ -2085,7 +2066,10 @@ fn branch_config_value(
     let value = match std::str::from_utf8(&out.stdout.bytes) {
         Ok(value) => value.trim(),
         Err(error) => {
-            warn_branch_config(format!("parse branch Git configuration failed: {error}"));
+            warn(Warning::new(
+                CONFIG_MALFORMED,
+                format!("parse branch Git configuration failed: {error}"),
+            ));
             return None;
         }
     };

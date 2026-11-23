@@ -1,4 +1,5 @@
 use super::*;
+use provenant_records::warning::{CONFIG_MALFORMED, FORGE_CONTEXT_UNRESOLVED, Warning, warn};
 
 /// Resolve a provider or named command through the filtered requester PATH.
 pub(super) fn preparation_executable(
@@ -528,11 +529,10 @@ fn publish_preparation_login_failure(
     if let Err(error) =
         crate::quota::persist_preparation_login_failure(state, &account, reason, now)
     {
-        use std::io::Write;
-        let _ = writeln!(
-            std::io::stderr().lock(),
-            "warning: could not publish preparation login failure: {error}"
-        );
+        warn(Warning::new(
+            CONFIG_MALFORMED,
+            format!("could not publish preparation login failure: {error}"),
+        ));
     }
 }
 
@@ -870,12 +870,11 @@ fn prepare_writer_dependencies_with_policy(
             &dependency_preparation_warning(error.clone(), enabled, profile),
             4096,
         );
-        if let provenant_records::policy::Effect::Warn(message) = policy.check(
+        if let provenant_records::policy::Effect::Warn(warning) = policy.check(
             "PREPARATION_PREPARE_WRITER_DEPENDENCIES_NONE",
             provenant_records::policy::Facts::violation(detail),
         ) {
-            use std::io::Write;
-            let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+            warn(warning);
         }
     }
     result
@@ -3022,11 +3021,10 @@ pub(super) fn prepare_candidates_inner(
             )
         }
         Some(Err(error)) => {
-            use std::io::Write;
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: {ARGV_LIMIT_KEY} unavailable ({error}); using compiled default"
-            );
+            warn(Warning::new(
+                CONFIG_MALFORMED,
+                format!("{ARGV_LIMIT_KEY} unavailable ({error}); using compiled default"),
+            ));
             (
                 default_limit,
                 provenant_records::diagnostic::Layer::Default,
@@ -3143,10 +3141,10 @@ pub(super) fn prepare_candidates_inner(
         match publishing_executable(&locate) {
             Ok(gh) => Some(gh),
             Err(cause) => {
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: GitHub publishing unavailable: {cause}"
-                );
+                warn(Warning::new(
+                    FORGE_CONTEXT_UNRESOLVED,
+                    format!("GitHub publishing unavailable: {cause}"),
+                ));
                 None
             }
         }
@@ -3512,10 +3510,10 @@ pub(super) fn prepare_candidates_inner(
                                 &recovered,
                                 login_observed_at,
                             ) {
-                                let _ = writeln!(
-                                    std::io::stderr().lock(),
-                                    "warning: could not publish login recovery: {error}"
-                                );
+                                warn(Warning::new(
+                                    CONFIG_MALFORMED,
+                                    format!("could not publish login recovery: {error}"),
+                                ));
                             }
                             let interval = record
                                 .expires_unix_seconds
@@ -3982,15 +3980,19 @@ pub(super) fn prepare_candidates_inner(
                 }
             ) {
                 let diagnostic = run::ErrorKind::StaleReadiness.diagnostic();
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning [{}]: {}; next: {}",
-                    diagnostic.code,
-                    diagnostic
-                        .detail
-                        .as_deref()
-                        .unwrap_or("account readiness is stale"),
-                    diagnostic.next.as_deref().unwrap_or("re-probe the account")
+                warn(
+                    Warning::new(
+                        FORGE_CONTEXT_UNRESOLVED,
+                        format!(
+                            "[{}] {}",
+                            diagnostic.code,
+                            diagnostic
+                                .detail
+                                .as_deref()
+                                .unwrap_or("account readiness is stale")
+                        ),
+                    )
+                    .repair(diagnostic.next.as_deref().unwrap_or("re-probe the account")),
                 );
             }
         }
@@ -4748,11 +4750,11 @@ pub(super) fn prepare_candidates_inner(
                     lane_access.access.as_str(),
                     lane_access.source.as_str()
                 );
-                if let provenant_records::policy::Effect::Warn(message) = launch_policy.check(
+                if let provenant_records::policy::Effect::Warn(warning) = launch_policy.check(
                     "LAUNCH_NATIVE_AUTH_NONE",
                     provenant_records::policy::Facts::violation(detail),
                 ) {
-                    provider.launch_warnings.push(format!("warning: {message}"));
+                    warn(warning);
                 }
             }
         }
@@ -5126,9 +5128,12 @@ pub(super) fn prepare_candidates_inner(
         );
         let gh_permitted = github_auth_permitted(&plan, &spec.profile.spec);
         if publishing && !gh_permitted {
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: {label}: GitHub publishing credentials withheld by the access policy"
+            warn(
+                Warning::new(
+                    FORGE_CONTEXT_UNRESOLVED,
+                    "GitHub publishing credentials withheld by the access policy",
+                )
+                .subject(label),
             );
             gh_selection = super::gh_auth::Selection::new(
                 if sandbox.effective {
@@ -5160,16 +5165,13 @@ pub(super) fn prepare_candidates_inner(
                 ));
             }
             Some(Err(error)) => {
-                if let Some(message) = launch_policy
-                    .check(
-                        "PREPARATION_GITHUB_POLICY_NONE",
-                        provenant_records::policy::Facts::violation(format!(
-                            "{label}: GitHub policy unreadable, the gh wrapper applies no deny list: {error}"
-                        )),
-                    )
-                    .message()
-                {
-                    let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+                if let provenant_records::policy::Effect::Warn(warning) = launch_policy.check(
+                    "PREPARATION_GITHUB_POLICY_NONE",
+                    provenant_records::policy::Facts::violation(format!(
+                        "{label}: GitHub policy unreadable, the gh wrapper applies no deny list: {error}"
+                    )),
+                ) {
+                    warn(warning);
                 }
                 provenant_config::GithubPolicy::default()
             }
@@ -5199,7 +5201,9 @@ pub(super) fn prepare_candidates_inner(
             ) {
                 Ok(origin) => super::gh_auth::Delivery::Injected(origin),
                 Err(warning) => {
-                    let _ = writeln!(std::io::stderr().lock(), "warning: {label}: {warning}");
+                    warn(
+                        Warning::new(FORGE_CONTEXT_UNRESOLVED, warning).subject(label.to_string()),
+                    );
                     super::gh_auth::Delivery::None("login lookup failed".into())
                 }
             };
@@ -5226,16 +5230,13 @@ pub(super) fn prepare_candidates_inner(
             let mediated = match spec.configure_gh_shim(scratch, gh, &host_config.path, &gh_shim) {
                 Ok(()) => true,
                 Err(error) => {
-                    if let Some(message) = launch_policy
-                        .check(
-                            "PREPARATION_GH_SHIM_NONE",
-                            provenant_records::policy::Facts::violation(format!(
-                                "{label}: gh wrapper unavailable, gh runs uncounted: {error}"
-                            )),
-                        )
-                        .message()
-                    {
-                        let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+                    if let provenant_records::policy::Effect::Warn(warning) = launch_policy.check(
+                        "PREPARATION_GH_SHIM_NONE",
+                        provenant_records::policy::Facts::violation(format!(
+                            "{label}: gh wrapper unavailable, gh runs uncounted: {error}"
+                        )),
+                    ) {
+                        warn(warning);
                     }
                     false
                 }
@@ -5468,9 +5469,12 @@ pub(super) fn prepare_candidates_inner(
             spec.model_observation == provenant_records::ModelObservation::SessionDatabase
         }) {
             let message = opencode_access_message(&lane_access);
-            let _ = writeln!(std::io::stderr().lock(), "{message}");
+            warn(Warning::new(CONFIG_MALFORMED, message.clone()));
             for warning in spec.warnings.iter().chain(continuation_warning.iter()) {
-                let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+                let text = warning
+                    .strip_prefix("warning: ")
+                    .unwrap_or(warning.as_str());
+                warn(Warning::new(CONFIG_MALFORMED, text.to_string()));
             }
             provider.launch_warnings.push(message);
         }
@@ -5534,7 +5538,9 @@ pub(super) fn prepare_candidates_inner(
             ) {
                 Ok(origin) => super::gh_auth::Delivery::Injected(origin),
                 Err(warning) => {
-                    let _ = writeln!(std::io::stderr().lock(), "warning: {label}: {warning}");
+                    warn(
+                        Warning::new(FORGE_CONTEXT_UNRESOLVED, warning).subject(label.to_string()),
+                    );
                     super::gh_auth::Delivery::None("login lookup failed".into())
                 }
             };

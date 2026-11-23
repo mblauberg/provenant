@@ -2,6 +2,7 @@
 use provenant_config::{ConfigError, DomainConfig, DomainSection, FieldMetadata, SectionError};
 use provenant_core::DurationMicros;
 use provenant_fabric_runtime::coordination::{LOCAL_OBSERVATION_INTERVAL_KEY, ObservationSettings};
+use provenant_records::warning::{CONFIG_MALFORMED, Warning, warn};
 use serde::{Deserialize, Serialize};
 
 /// The configuration path every wait setting key starts with.
@@ -172,11 +173,12 @@ impl Settings {
             Ok(resolved) => Ok(Self::resolved(&resolved)),
             Err(error) => {
                 let reason = read_failure(error);
-                use std::io::Write;
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: wait settings use compiled defaults; configuration unavailable: {reason}"
-                );
+                warn(Warning::new(
+                    CONFIG_MALFORMED,
+                    format!(
+                        "wait settings use compiled defaults; configuration unavailable: {reason}"
+                    ),
+                ));
                 let profile = provenant_config::Profile::default();
                 Ok((
                     Self::default(),
@@ -232,11 +234,12 @@ impl Settings {
             .max_timeout_seconds
             .unwrap_or(provenant_core::MAX_LANE_RUNTIME_SECONDS);
         if requested > maximum {
-            use std::io::Write;
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: wait budget clamped to {maximum}s; {}",
-                origin.describe(MAX_TIMEOUT_KEY)
+            warn(
+                Warning::new(
+                    CONFIG_MALFORMED,
+                    format!("wait budget clamped to {maximum}s"),
+                )
+                .subject(origin.describe(MAX_TIMEOUT_KEY)),
             );
         }
         requested.min(maximum)
