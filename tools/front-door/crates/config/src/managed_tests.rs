@@ -445,9 +445,10 @@ fn uninstall_keeps_hook_siblings_and_groups_with_extra_keys() {
     )
     .unwrap();
     let foreign = serde_json::json!({"type": "command", "command": "herdr capture"});
+    // A user hook beside the owned leaf of a group the head install creates.
     bytes = crate::splice::set(
         &bytes,
-        &["hooks", "PreToolUse", "0", "hooks", "1"],
+        &["hooks", "PostToolUse", "0", "hooks", "1"],
         Some(&foreign),
     )
     .unwrap();
@@ -467,7 +468,7 @@ fn uninstall_keeps_hook_siblings_and_groups_with_extra_keys() {
     assert_eq!(
         settings["hooks"],
         serde_json::json!({
-            "PreToolUse": [{"hooks": [foreign]}],
+            "PostToolUse": [{"hooks": [foreign]}],
             "PreCompact": [{"hooks": [], "user": true}],
             "SessionStart": [sibling],
         })
@@ -1233,7 +1234,7 @@ fn inherited_hook_refresh_tracks_event_identity_and_removes_the_old_leaf() {
 
 /// Claude answer delivery moved from PreToolUse to PostToolUse. An upgrade
 /// removes the old owned leaf from settings it manages even when the receipt
-/// still records it.
+/// still records it, and registers the replacement.
 #[test]
 fn upgrade_removes_the_retired_claude_pre_tool_answer_hook() {
     let mut f = Fixture::new();
@@ -1251,8 +1252,97 @@ fn upgrade_removes_the_retired_claude_pre_tool_answer_hook() {
     let ctx = context(&clock, &cancel);
     install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
     let hook = f.targets.harnesses[0].hook_file.clone().unwrap();
+    let (retired, delivered, delivered_value) = seed_retired_claude_answer_hook(&f, &hook);
 
-    let legacy = HookRegistration {
+    install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+    let bytes = fs::read(&hook).unwrap();
+    let settings = String::from_utf8(bytes.clone()).unwrap();
+    assert!(!settings.contains("\"PreToolUse\""), "{settings}");
+    assert_eq!(
+        crate::hooks::get(&bytes, &retired).unwrap(),
+        None,
+        "{settings}"
+    );
+    assert_eq!(
+        crate::hooks::get(&bytes, &delivered).unwrap(),
+        Some(delivered_value),
+        "{settings}"
+    );
+    let receipt = read_receipt(&f.targets).unwrap().unwrap();
+    assert!(
+        receipt
+            .entries
+            .iter()
+            .all(|entry| entry.selector != retired),
+        "{receipt:?}"
+    );
+}
+
+/// The same upgrade without an explicit `--hooks on` keeps the recorded
+/// ownership: the retired leaf is removed and its replacement registered, so
+/// native answer delivery is never silently lost.
+#[test]
+fn upgrade_without_hooks_on_registers_the_replacement_claude_answer_hook() {
+    let mut f = Fixture::new();
+    f.targets.harnesses = Targets::new(
+        f.targets.roots.clone(),
+        &f.home,
+        &[Harness::Claude],
+        std::sync::Arc::new(provenant_records::policy::Policy::default()),
+    )
+    .harnesses;
+    f.targets.hooks = true;
+    f.targets.hook_specs = crate::hooks::registrations(&[Harness::Claude]);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let ctx = context(&clock, &cancel);
+    install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+    let hook = f.targets.harnesses[0].hook_file.clone().unwrap();
+    let (retired, delivered, delivered_value) = seed_retired_claude_answer_hook(&f, &hook);
+
+    f.targets.hooks = false; // Omission keeps the recorded ownership.
+    install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+    let bytes = fs::read(&hook).unwrap();
+    let settings = String::from_utf8(bytes.clone()).unwrap();
+    assert!(!settings.contains("\"PreToolUse\""), "{settings}");
+    assert_eq!(
+        crate::hooks::get(&bytes, &retired).unwrap(),
+        None,
+        "{settings}"
+    );
+    assert_eq!(
+        crate::hooks::get(&bytes, &delivered).unwrap(),
+        Some(delivered_value),
+        "{settings}"
+    );
+    let receipt = read_receipt(&f.targets).unwrap().unwrap();
+    assert!(
+        receipt
+            .entries
+            .iter()
+            .any(|entry| entry.selector == delivered),
+        "{receipt:?}"
+    );
+    assert!(
+        receipt
+            .entries
+            .iter()
+            .all(|entry| entry.selector != retired),
+        "{receipt:?}"
+    );
+}
+
+/// Rewrite a freshly installed Claude settings file and receipt into the shape
+/// an install from before the answer-delivery move left behind: the owned
+/// `PreToolUse` leaf present, the `PostToolUse` leaf absent. The settings JSON
+/// is written directly because the retired event no longer exists among the
+/// declared registrations. Returns the retired selector, the delivered
+/// selector and the delivered value.
+fn seed_retired_claude_answer_hook(
+    f: &Fixture,
+    hook: &Path,
+) -> (String, String, serde_json::Value) {
+    let retired = HookRegistration {
         harness: Harness::Claude,
         action: HookAction::PreToolUse,
         protocol: HookProtocol::CommandGroups {
@@ -1262,36 +1352,43 @@ fn upgrade_removes_the_retired_claude_pre_tool_answer_hook() {
         matcher: None,
         timeout_seconds: None,
     };
-    let value = crate::hooks::value(&legacy, &f.targets).unwrap();
-    let command = value["command"].as_str().unwrap();
-    let selector = crate::hooks::selector(&legacy, command).unwrap();
-    let bytes = crate::hooks::set(&fs::read(&hook).unwrap(), &selector, Some(&value)).unwrap();
-    fs::write(&hook, bytes).unwrap();
+    let retired_value = crate::hooks::value(&retired, &f.targets).unwrap();
+    let retired_selector =
+        crate::hooks::selector(&retired, retired_value["command"].as_str().unwrap()).unwrap();
+    let delivered = f
+        .targets
+        .hook_specs
+        .iter()
+        .find(|spec| spec.harness == Harness::Claude && spec.action == HookAction::PostToolUse)
+        .unwrap();
+    let delivered_value = crate::hooks::value(delivered, &f.targets).unwrap();
+    let delivered_selector =
+        crate::hooks::selector(delivered, delivered_value["command"].as_str().unwrap()).unwrap();
+
+    let mut settings: serde_json::Value = serde_json::from_slice(&fs::read(hook).unwrap()).unwrap();
+    settings["hooks"]["PreToolUse"] = serde_json::json!([{"hooks": [retired_value.clone()]}]);
+    settings["hooks"]
+        .as_object_mut()
+        .unwrap()
+        .remove("PostToolUse");
+    fs::write(hook, serde_json::to_vec(&settings).unwrap()).unwrap();
+
     let mut receipt = read_receipt(&f.targets).unwrap().unwrap();
+    receipt
+        .entries
+        .retain(|entry| entry.selector != delivered_selector);
     receipt.entries.push(OwnedEntry {
         extra: Default::default(),
-        path: AbsolutePath::new(&hook).unwrap(),
+        path: AbsolutePath::new(hook).unwrap(),
         harness: Some(Harness::Claude),
-        selector: selector.clone(),
+        selector: retired_selector.clone(),
         expected: OwnedValue::Selector {
             extra: Default::default(),
-            value,
+            value: retired_value,
         },
     });
     fs::write(f.receipt(), provenant_records::encode(&receipt).unwrap()).unwrap();
-
-    install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
-    let settings = fs::read_to_string(&hook).unwrap();
-    assert!(!settings.contains("\"PreToolUse\""), "{settings}");
-    assert!(settings.contains("\"PostToolUse\""), "{settings}");
-    let receipt = read_receipt(&f.targets).unwrap().unwrap();
-    assert!(
-        receipt
-            .entries
-            .iter()
-            .all(|entry| entry.selector != selector),
-        "{receipt:?}"
-    );
+    (retired_selector, delivered_selector, delivered_value)
 }
 
 #[test]

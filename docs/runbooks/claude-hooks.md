@@ -30,7 +30,9 @@ delivery deliberately runs on `PostToolUse`: Claude Code treats a failed
 `PreToolUse` hook as a refusal of the tool, while a `PostToolUse` failure cannot
 undo a call that already ran. `UserPromptSubmit` would block the prompt for the
 same reason. Install rewrites the hooks it manages, so an upgrade removes the
-old `PreToolUse` entry; foreign hooks on that event are left alone. Hook events
+old `PreToolUse` entry and registers the `PostToolUse` replacement under the
+ownership the receipt already records, with or without `--hooks on`; foreign
+hooks on either event are left alone. Hook events
 and per-harness decisions live in [`AdapterSpec`](../../tools/front-door/crates/records/src/adapters.rs):
 Claude uses `PostToolUse`, Codex keeps its declared `PreToolUse` mapping because
 no non-blocking alternative is verified for it, and Cursor, Antigravity and
