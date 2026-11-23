@@ -1,5 +1,56 @@
 use super::*;
 
+/// The worktree facts attached to a `status --json` lane row. The path stays
+/// inside the structured path envelope; the base is the owner's pinned commit.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct LaneWorktree {
+    pub path: provenant_records::StructuredPathWire,
+    pub base: String,
+}
+
+/// The Git common directory for a primary checkout or a linked worktree.
+fn worktree_common(project: &Path) -> Option<PathBuf> {
+    let dotgit = project.join(".git");
+    if dotgit.is_dir() {
+        return Some(dotgit);
+    }
+    let text = std::fs::read_to_string(&dotgit).ok()?;
+    let relative = text.lines().next()?.strip_prefix("gitdir: ")?.trim();
+    let gitdir = if Path::new(relative).is_absolute() {
+        PathBuf::from(relative)
+    } else {
+        project.join(relative)
+    };
+    gitdir.parent()?.parent().map(Path::to_path_buf)
+}
+
+/// Join each attempt to the checkout recorded in `provenant-owner.json`. A
+/// missing or unreadable index yields no facts; status never guesses a path.
+pub fn worktree_index(
+    project: &Path,
+) -> std::collections::BTreeMap<provenant_core::AttemptId, LaneWorktree> {
+    let Some(common) = worktree_common(project) else {
+        return std::collections::BTreeMap::new();
+    };
+    let Ok(owners) = provenant_confinement::worktrees::worktree_owner_index(&common) else {
+        return std::collections::BTreeMap::new();
+    };
+    owners
+        .into_iter()
+        .filter_map(|(path, owner)| {
+            let attempt = owner.attempt_id?;
+            let path = provenant_records::StructuredPathWire::from_path(&path).ok()?;
+            Some((
+                attempt,
+                LaneWorktree {
+                    path,
+                    base: owner.base,
+                },
+            ))
+        })
+        .collect()
+}
+
 fn full_wait_reason(reason: &str) -> String {
     reason.to_owned()
 }

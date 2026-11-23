@@ -198,6 +198,9 @@ pub fn branch_candidate(
         owner: Ok(None),
         primary: true,
         occupancy: Occupancy::Available,
+        lane: None,
+        attempt: None,
+        base: None,
     }
 }
 

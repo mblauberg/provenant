@@ -1787,6 +1787,7 @@ fn usage_verbs_keep_their_persisted_spelling() {
         "worktree create",
         "worktree doctor",
         "worktree list",
+        "worktree locate",
         "worktree remove",
         "worktree session-list",
     ]

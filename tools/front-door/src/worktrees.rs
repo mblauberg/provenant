@@ -8,14 +8,16 @@ use provenant_confinement::{
         WorktreeRemove,
     },
 };
-use provenant_core::{CancelToken, Clock, DurationMicros, GitOid, ProjectId, WaitBudget};
+use provenant_core::{
+    CancelToken, Clock, DurationMicros, GitOid, NameRefusal, ProjectId, WaitBudget, WallTime,
+};
 use provenant_os::{
     clock::SystemClock,
     exec::SystemExecutor,
-    fs::{Directory, FileKind, FsError},
+    fs::{Directory, FileKind, FsError, ledger::Ledger},
 };
 use provenant_records::{
-    CommandResult, Outcome,
+    CommandResult, Outcome, StructuredPathWire,
     custody::{
         LandedEvidence, LandingPredicate, LandingSource, RemovalRecord, Subject, SubjectKind,
     },
@@ -77,6 +79,8 @@ pub(crate) enum Error {
     DiskSpace(std::io::Error),
     #[error("invalid worktree removal scope")]
     InvalidScope,
+    #[error("worktree locate refused: {0}")]
+    Locate(NameRefusal),
     #[error("{0}")]
     Settlement(String),
 }
@@ -151,6 +155,9 @@ impl Error {
             Self::InvalidScope => {
                 "name a worktree or pass --all to `provenant worktree remove`"
             }
+            Self::Locate(_) => {
+                "run `provenant worktree list` to see the branches, lanes and attempts to locate"
+            }
             Self::Settlement(_) => "wait for the writer to settle, then retry the worktree command",
         }
     }
@@ -159,6 +166,7 @@ impl Error {
         match self {
             Self::Root(roots::RootError::Checkout | roots::RootError::State(_))
             | Self::InvalidScope
+            | Self::Locate(_)
             | Self::Worktree(
                 WorktreeError::InvalidRequest
                 | WorktreeError::AmbiguousName { .. }
@@ -198,13 +206,86 @@ impl Error {
     }
 }
 
+/// One durable row of `<state>/worktrees/removed.jsonl`. Field order is a
+/// persisted-format contract (`provenant.worktree-removed.v1`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct RemovedRecord {
+    pub schema: &'static str,
+    pub branch: String,
+    pub tip: GitOid,
+    pub path: StructuredPathWire,
+    pub at: WallTime,
+}
+
+const REMOVED_SCHEMA: &str = "provenant.worktree-removed.v1";
+
+/// Append one bounded record per removed checkout and return the rows so the
+/// command can print exactly what it recorded. A record is only written for a
+/// worktree with a known branch and path; the removal itself already succeeded.
+fn record_removals(
+    state: &Path,
+    outcome: &worktrees::RemoveOutcome,
+    clock: &dyn Clock,
+) -> Result<Vec<RemovedRecord>, Error> {
+    let Some(at) = clock.wall_now().ok() else {
+        return Ok(Vec::new());
+    };
+    let records: Vec<_> = outcome
+        .removed
+        .iter()
+        .filter_map(|info| {
+            let branch = info.branch.clone()?;
+            let path = StructuredPathWire::from_path(&info.path).ok()?;
+            Some(RemovedRecord {
+                schema: REMOVED_SCHEMA,
+                branch,
+                tip: info.head,
+                path,
+                at,
+            })
+        })
+        .collect();
+    if records.is_empty() {
+        return Ok(records);
+    }
+    let directory = state.join("worktrees");
+    std::fs::create_dir_all(&directory).map_err(Error::DiskSpace)?;
+    let directory = Directory::open_anchor(&directory).map_err(Error::Fs)?;
+    let name = OsStr::new("removed.jsonl");
+    let ledger = Ledger::new(&directory, name);
+    for record in &records {
+        let mut line = serde_json::to_vec(record).map_err(|_| Error::InvalidScope)?;
+        line.push(b'\n');
+        ledger.append(&line).map_err(Error::Fs)?;
+    }
+    Ok(records)
+}
+
+#[derive(Serialize)]
+struct RemovedData {
+    #[serde(flatten)]
+    outcome: worktrees::RemoveOutcome,
+    records: Vec<RemovedRecord>,
+}
+
 #[derive(Serialize)]
 #[serde(untagged)]
 enum Data {
     Created(Box<worktrees::WorktreeInfo>),
     Listed(Vec<worktrees::WorktreeInfo>),
+    Located(Located),
     Diagnosed(Box<worktrees::WorktreeDiagnosis>),
-    Removed(worktrees::RemoveOutcome),
+    Removed(RemovedData),
+}
+
+/// The envelope for `worktree locate`. The path stays inside the structured
+/// path envelope in JSON; human mode prints it alone for `cd "$(...)"`.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct Located {
+    pub path: StructuredPathWire,
+    pub branch: Option<String>,
+    pub lane: Option<String>,
+    pub base: Option<String>,
 }
 
 pub fn run(command: Worktree, globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
@@ -214,11 +295,15 @@ pub fn run(command: Worktree, globals: &Globals, workers: &dyn WorkerObserver) -
     let name = match &command {
         Worktree::Create { .. } => "worktree create",
         Worktree::List => "worktree list",
+        Worktree::Locate { .. } => "worktree locate",
         Worktree::Doctor { .. } => "worktree doctor",
         Worktree::SessionList => unreachable!(),
         Worktree::Remove(_) => "worktree remove",
     };
-    let read_only = matches!(command, Worktree::List | Worktree::Doctor { .. });
+    let read_only = matches!(
+        command,
+        Worktree::List | Worktree::Locate { .. } | Worktree::Doctor { .. }
+    );
     match execute(command, globals, workers) {
         Ok(data) => match serde_json::to_value(&data) {
             Ok(value) => {
@@ -228,6 +313,11 @@ pub fn run(command: Worktree, globals: &Globals, workers: &dyn WorkerObserver) -
                         text.push_str(&worktree_list_stranded_human(globals, workers));
                         text
                     }
+                    Data::Located(located) => located
+                        .path
+                        .to_path_buf()
+                        .map(|path| format!("{}\n", path.display()))
+                        .unwrap_or_else(|_| human(value)),
                     _ => human(value),
                 };
                 emit(
@@ -365,6 +455,18 @@ fn execute(
                     Data::Created(Box::new(info))
                 }
                 Worktree::List => Data::Listed(worktrees::list(context, cancel)?),
+                Worktree::Locate { query } => {
+                    let rows = worktrees::list(context, cancel)?;
+                    let found = worktrees::locate(&query, &rows).map_err(Error::Locate)?;
+                    let path = StructuredPathWire::from_path(&found.path)
+                        .map_err(|_| Error::InvalidScope)?;
+                    Data::Located(Located {
+                        path,
+                        branch: found.branch.clone(),
+                        lane: found.lane.clone(),
+                        base: found.base.clone(),
+                    })
+                }
                 Worktree::Doctor { path } => {
                     let snapshot =
                         crate::gc_support::lane_states(roots, context.binding.project_id(), cancel)
@@ -458,7 +560,11 @@ fn execute(
                     {
                         note_kept_unmerged();
                     }
-                    Data::Removed(removed)
+                    let records = record_removals(roots.state.as_path(), &removed, context.clock)?;
+                    Data::Removed(RemovedData {
+                        outcome: removed,
+                        records,
+                    })
                 }
             })
         },
@@ -4413,7 +4519,35 @@ mod human_tests {
             occupancy: worktrees::Occupancy::Observed { process: None },
             owner: Err("worktree registration was not observed".into()),
             primary: false,
+            lane: None,
+            attempt: None,
+            base: None,
         })
+    }
+
+    // Spec: docs/specs/next-batch.md#worktree-remove-records-the-tip
+    #[test]
+    fn removal_record_persists_schema_branch_tip_path_and_time() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("lane");
+        let outcome = worktrees::RemoveOutcome {
+            removed: vec![info(path.to_str().expect("utf8 path")).expect("worktree info")],
+            ..Default::default()
+        };
+        let records = record_removals(temp.path(), &outcome, &SystemClock::new()).expect("record");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].schema, "provenant.worktree-removed.v1");
+        let stored = std::fs::read_to_string(temp.path().join("worktrees/removed.jsonl"))
+            .expect("removed.jsonl");
+        let row: serde_json::Value = serde_json::from_str(stored.trim()).expect("record row");
+        assert_eq!(row["schema"], "provenant.worktree-removed.v1");
+        assert_eq!(row["branch"], "refs/heads/master");
+        assert_eq!(
+            row["tip"],
+            GitOid::parse(&"4a".repeat(20)).unwrap().to_string()
+        );
+        assert!(row["path"].is_object());
+        assert!(row["at"].is_string());
     }
 
     #[allow(dead_code)]
@@ -4896,6 +5030,9 @@ mod gc_preview_tests {
             occupancy: worktrees::Occupancy::Available,
             owner: Ok(None),
             primary: false,
+            lane: None,
+            attempt: None,
+            base: None,
         };
         let mut report = worktrees::WorktreeGcReport::default();
         report.worktrees.pruned_refs.push("topic".into());

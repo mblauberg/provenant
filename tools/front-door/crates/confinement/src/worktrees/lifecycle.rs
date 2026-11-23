@@ -419,7 +419,11 @@ fn list_impl(
             occupancy,
             owner,
             primary: is_primary,
-        };
+            lane: None,
+            attempt: None,
+            base: None,
+        }
+        .with_owner_identity(&owner);
         report(total, Some(&info));
         result.push(info);
     }
@@ -774,6 +778,9 @@ fn create_with_default(
         owner: Ok(None),
         primary: false,
         occupancy: combine_occupancy(&target, Occupancy::Available, writer),
+        lane: None,
+        attempt: None,
+        base: None,
     })
 }
 
@@ -1354,6 +1361,9 @@ pub(super) fn remove_tree_when_before_delete_locked(
         owner: Err("worktree registration was not observed".into()),
         primary: false,
         occupancy: Occupancy::Available,
+        lane: None,
+        attempt: None,
+        base: None,
     };
     let writer = locked.writer.take().ok_or(WorktreeError::UnknownWriter)?;
     Ok(RemovedTree {
@@ -1814,10 +1824,14 @@ pub(super) fn remove_merged_candidate(
                             branch: Some(branch.as_str().to_owned()),
                             head: tip,
                             dirty: WorktreeCondition::Clean,
-                            owner: Ok(owner),
+                            owner: Ok(owner.clone()),
                             primary: false,
                             occupancy: Occupancy::Available,
-                        };
+                            lane: None,
+                            attempt: None,
+                            base: None,
+                        }
+                        .with_owner_identity(&Ok(Some(owner)));
                         record_started = Some(super::gc::begin_worktree_retirement(
                             context, port, &lane, verified, decision, cancel,
                         )?);
@@ -2237,10 +2251,14 @@ fn remove_with_owner(
                                         .map(|branch| branch.as_str().to_owned()),
                                     head: tip,
                                     dirty: WorktreeCondition::Clean,
-                                    owner: Ok(owner),
+                                    owner: Ok(owner.clone()),
                                     primary: false,
                                     occupancy: Occupancy::Available,
-                                };
+                                    lane: None,
+                                    attempt: None,
+                                    base: None,
+                                }
+                                .with_owner_identity(&Ok(Some(owner)));
                                 retirement_record = Some(super::gc::begin_worktree_retirement(
                                     context, port, &lane, verified, decision, cancel,
                                 )?);

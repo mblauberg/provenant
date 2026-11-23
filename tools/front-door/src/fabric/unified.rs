@@ -994,6 +994,7 @@ pub(crate) fn enrich_status_rows_within(
     let call = provenant_run::Request { clock, cancel };
     let store = provenant_run::RunStore::open_read_only(&execution, &call).map_err(run_error)?;
     let lane_holders = provenant_os::admission::all_holders(context.roots.state.as_path());
+    let worktrees = provenant_cli::run::worktree_index(context.project_root.as_path());
     let local_prefix = format!("{}/", context.identity.host);
     let local_census = rows
         .iter()
@@ -1153,6 +1154,9 @@ pub(crate) fn enrich_status_rows_within(
         row.as_object_mut()
             .ok_or(FacadeError::StateCorrupt)?
             .extend(fields.as_object().ok_or(FacadeError::StateCorrupt)?.clone());
+        if let Some(worktree) = worktrees.get(&record.attempt_id) {
+            row["worktree"] = serde_json::to_value(worktree).unwrap_or(Value::Null);
+        }
         if row["head"].is_null() {
             row["head"] = retained_head;
         }

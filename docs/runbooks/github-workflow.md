@@ -34,9 +34,12 @@ closing keyword. Find the project item and the current Status options with
 
 Name the branch `<type>/<area>-<slug>` without an issue number or run
 vocabulary. `provenant worktree create BRANCH --base main` makes the worktree
-(see [worktrees](../worktrees.md)); to record the issue link on GitHub, create
-the branch first with `gh issue develop N --name BRANCH`. Lane publishing is in
-[lane delivery](lane-lifecycle.md#delivery).
+(see [worktrees](../worktrees.md)); use `provenant worktree locate BRANCH` (or a
+lane, attempt or PR number) to find its checkout instead of parsing raw
+`git worktree list` output. `provenant worktree remove BRANCH` records the
+removed tip and prunes the local branch once it is merged. To record the issue
+link on GitHub, create the branch first with `gh issue develop N --name BRANCH`.
+Lane publishing is in [lane delivery](lane-lifecycle.md#delivery).
 
 `gh pr create --body` bypasses [the template](../../.github/pull_request_template.md):
 fill a copy (evidence rows bound to the exact head, the independent-review block)
