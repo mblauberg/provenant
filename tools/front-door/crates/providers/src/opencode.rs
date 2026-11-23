@@ -801,7 +801,7 @@ pub fn stdout_error_diagnostic(
                 || message.contains("unknown variant")
                 || message.contains("modelnotfound")
                 || message.contains("variantnotfound")
-                || variant_unavailable(message)
+                || variant_unavailable(&message)
                 || ((message.contains("variant") || message.contains("effort"))
                     && (message.contains("not supported") || message.contains("not found")))
         });
