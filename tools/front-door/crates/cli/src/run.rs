@@ -2105,12 +2105,10 @@ fn load_price_sheet(
     let config = toml_edit::de::from_str::<provenant_telemetry::ConfiguredPrices>(&text)
         .map_err(|error| Fail::new(Status::Error, ErrorKind::Prices, error.to_string()))?;
     let project = edge.roots.checkout();
-    let key = provenant_config::project_key_for(project);
     let layered = provenant_telemetry::prices_overlay::load(
         edge.assets,
         edge.roots.state.as_path(),
         Some(project),
-        key.as_deref(),
     )
     .map_err(|error| Fail::new(Status::Error, ErrorKind::Prices, error.to_string()))?;
     Ok((config, layered.table))

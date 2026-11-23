@@ -98,12 +98,10 @@ pub(super) fn price_table(
     edge: &crate::run::Edge<'_>,
 ) -> Result<provenant_telemetry::PriceTable, Fail> {
     let project = edge.roots.checkout();
-    let key = provenant_config::project_key_for(project);
     provenant_telemetry::prices_overlay::load(
         edge.assets,
         edge.roots.state.as_path(),
         Some(project),
-        key.as_deref(),
     )
     .map(|layered| layered.table)
     .map_err(|error| Fail::new(Status::Error, ErrorKind::Prices, error.to_string()))

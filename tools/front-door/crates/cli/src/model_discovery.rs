@@ -68,13 +68,8 @@ pub(crate) fn effective(roots: &Roots) -> Result<Catalogue, RoutingError> {
         .collect();
     let bundled = Catalogue::bundled()?;
     let project = roots.checkout();
-    let key = provenant_config::project_key_for(project);
-    let (layers, warnings) = provenant_config::overlays::read_layers(
-        roots.state.as_path(),
-        Some(project),
-        key.as_deref(),
-        "catalogue",
-    );
+    let (layers, warnings) =
+        provenant_config::overlays::read_layers(roots.state.as_path(), Some(project), "catalogue");
     match bundled.clone().with_discovery(&snapshots) {
         Ok(catalogue) => Ok(catalogue.with_overlays(&layers, warnings)),
         Err(_) => {

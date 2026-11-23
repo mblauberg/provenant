@@ -739,15 +739,9 @@ pub(crate) fn load_graph_prices_layered(
     roots: &provenant_core::Roots,
 ) -> Result<provenant_telemetry::PriceTable, String> {
     let project = roots.checkout();
-    let key = provenant_config::project_key_for(project);
-    provenant_telemetry::prices_overlay::load(
-        assets,
-        roots.state.as_path(),
-        Some(project),
-        key.as_deref(),
-    )
-    .map(|layered| layered.table)
-    .map_err(|error| error.to_string())
+    provenant_telemetry::prices_overlay::load(assets, roots.state.as_path(), Some(project))
+        .map(|layered| layered.table)
+        .map_err(|error| error.to_string())
 }
 
 pub(crate) fn graph_attempt_usage(

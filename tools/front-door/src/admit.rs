@@ -310,7 +310,6 @@ pub fn run(class: &str, command: &[OsString], env: &[(OsString, OsString)]) -> i
                 class,
                 state_buf.as_deref().unwrap_or(Path::new("")),
                 None,
-                None,
             )
         });
 

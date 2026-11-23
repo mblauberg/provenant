@@ -44,6 +44,21 @@ A value that can normalise two ways is rejected at the wire boundary.
 - Why: two spellings let one record alias another.
 - Owner: `crates/core/src/`
 
+### Host-project state has one key
+
+Host-project state lives only in the ProjectId binding directory
+`<state>/projects/<ProjectId>`. The port layer, config overlays, admission
+classes and GitHub policy resolve that directory through
+`project_binding::host_project_dir` or `project_binding_dir`; the obsolete
+64-hex `project_key` directory is never read. Upgrade moves settings filed
+there with the `host-project-dirs` install migration: it moves a directory only
+when the binding directory is absent, and a conflict warns with both paths and
+leaves both in place.
+- Why: two directory keys split one project's settings and silently hide the
+  layer a user believes they configured.
+- Owner: `crates/config/src/project_binding.rs`, `crates/config/src/overlays.rs`,
+  `crates/config/src/admission.rs`, `src/install/migrations.rs`
+
 ### Wall time has one stated bound
 
 `WallTime::MAX` is the single greatest instant the wire accepts. A consumer that

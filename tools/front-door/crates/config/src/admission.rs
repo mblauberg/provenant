@@ -81,14 +81,12 @@ impl ResolvedAdmissionClass {
     /// Resolves the effective class configuration by layering:
     /// 1. Shipped defaults (`build` derives slots from cores/RAM; custom classes default to 1 slot)
     /// 2. Host `<state>/config.toml` (under `[admission.<class>]`)
-    /// 3. Host-project `<state>/projects/<project_key>/config.toml` (under `[admission.<class>]`)
+    /// 3. Host-project `<state>/projects/<ProjectId>/config.toml` (under `[admission.<class>]`)
     /// 4. Project `<project>/.provenant/config.toml` (under `[admission.<class>]`)
-    pub fn resolve(
-        class: &str,
-        state: &Path,
-        project: Option<&Path>,
-        project_key: Option<&str>,
-    ) -> Self {
+    ///
+    /// The host-project directory comes from [`crate::host_project_dir`], the
+    /// same binding resolver install and the other config layers use.
+    pub fn resolve(class: &str, state: &Path, project: Option<&Path>) -> Self {
         let is_build = class == DEFAULT_CLASS;
 
         // 1. Shipped default
@@ -139,10 +137,10 @@ impl ResolvedAdmissionClass {
         }
 
         // 3. Host-project configuration: a consumer repository can be
-        // configured entirely from host state. A missing key or file skips
-        // this layer silently.
-        if let Some(key) = project_key {
-            let path = state.join("projects").join(key).join("config.toml");
+        // configured entirely from host state. An unbound project or a missing
+        // file skips this layer silently.
+        if let Some(dir) = project.and_then(|project| crate::host_project_dir(state, project)) {
+            let path = dir.join("config.toml");
             if let Some(keyed_cfg) = read_class_from_file(&path, class) {
                 if let Some(s) = keyed_cfg.slots {
                     slots = s;
@@ -214,31 +212,23 @@ impl ResolvedAdmissionClass {
     pub fn resolve_all(
         state: &Path,
         project: Option<&Path>,
-        project_key: Option<&str>,
     ) -> BTreeMap<String, ResolvedAdmissionClass> {
         let mut classes = BTreeMap::new();
         classes.insert(
             DEFAULT_CLASS.to_string(),
-            Self::resolve(DEFAULT_CLASS, state, project, project_key),
+            Self::resolve(DEFAULT_CLASS, state, project),
         );
 
         for name in list_classes_in_file(&state.join("config.toml")) {
             if !classes.contains_key(&name) {
-                classes.insert(
-                    name.clone(),
-                    Self::resolve(&name, state, project, project_key),
-                );
+                classes.insert(name.clone(), Self::resolve(&name, state, project));
             }
         }
 
-        if let Some(key) = project_key {
-            let path = state.join("projects").join(key).join("config.toml");
-            for name in list_classes_in_file(&path) {
+        if let Some(dir) = project.and_then(|project| crate::host_project_dir(state, project)) {
+            for name in list_classes_in_file(&dir.join("config.toml")) {
                 if !classes.contains_key(&name) {
-                    classes.insert(
-                        name.clone(),
-                        Self::resolve(&name, state, project, project_key),
-                    );
+                    classes.insert(name.clone(), Self::resolve(&name, state, project));
                 }
             }
         }
@@ -246,10 +236,7 @@ impl ResolvedAdmissionClass {
         if let Some(project) = project {
             for name in list_classes_in_file(&project.join(".provenant").join("config.toml")) {
                 if !classes.contains_key(&name) {
-                    classes.insert(
-                        name.clone(),
-                        Self::resolve(&name, state, Some(project), project_key),
-                    );
+                    classes.insert(name.clone(), Self::resolve(&name, state, Some(project)));
                 }
             }
         }
@@ -290,7 +277,7 @@ mod tests {
     #[test]
     fn build_class_resolves_default_when_unconfigured() {
         let temp = tempfile::tempdir().unwrap();
-        let resolved = ResolvedAdmissionClass::resolve(DEFAULT_CLASS, temp.path(), None, None);
+        let resolved = ResolvedAdmissionClass::resolve(DEFAULT_CLASS, temp.path(), None);
         assert_eq!(resolved.name, "build");
         assert_eq!(resolved.slots_source, AdmissionSource::Default);
         assert_eq!(resolved.wait_seconds, DEFAULT_WAIT_SECONDS);
@@ -309,7 +296,7 @@ trim_action = "cargo clean"
 wait_seconds = 30
 "#;
         std::fs::write(temp.path().join("config.toml"), config_toml).unwrap();
-        let resolved = ResolvedAdmissionClass::resolve(DEFAULT_CLASS, temp.path(), None, None);
+        let resolved = ResolvedAdmissionClass::resolve(DEFAULT_CLASS, temp.path(), None);
         assert_eq!(resolved.slots, 8);
         assert_eq!(resolved.slots_source, AdmissionSource::Host);
         assert_eq!(resolved.memory_per_slot_bytes, Some(4 * 1024 * 1024 * 1024));
@@ -346,7 +333,7 @@ wait_seconds = 10
         .unwrap();
 
         let resolved =
-            ResolvedAdmissionClass::resolve("test", host_temp.path(), Some(proj_temp.path()), None);
+            ResolvedAdmissionClass::resolve("test", host_temp.path(), Some(proj_temp.path()));
         assert_eq!(resolved.name, "test");
         assert_eq!(resolved.slots, 2);
         assert_eq!(resolved.slots_source, AdmissionSource::Project);
@@ -363,19 +350,20 @@ schema_version = 1
 max_concurrent_builds = 3
 "#;
         std::fs::write(temp.path().join("config.toml"), config_toml).unwrap();
-        let resolved = ResolvedAdmissionClass::resolve(DEFAULT_CLASS, temp.path(), None, None);
+        let resolved = ResolvedAdmissionClass::resolve(DEFAULT_CLASS, temp.path(), None);
         let defaults_dir = tempfile::tempdir().unwrap();
-        let defaults =
-            ResolvedAdmissionClass::resolve(DEFAULT_CLASS, defaults_dir.path(), None, None);
+        let defaults = ResolvedAdmissionClass::resolve(DEFAULT_CLASS, defaults_dir.path(), None);
         assert_eq!(resolved.slots, defaults.slots);
         assert_eq!(resolved.slots_source, AdmissionSource::Default);
     }
 
+    /// Spec: docs/specs/state.md#host-project-state-has-one-key
     #[test]
     fn host_project_layer_order() {
         let temp = tempfile::tempdir().unwrap();
         let state = temp.path();
-        let key = "consumer-project";
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(project.join(".git")).unwrap();
         std::fs::write(
             state.join("config.toml"),
             r#"
@@ -386,10 +374,10 @@ memory_per_slot = "4 GiB"
 "#,
         )
         .unwrap();
-        let keyed = state.join("projects").join(key);
-        std::fs::create_dir_all(&keyed).unwrap();
+        let bound = crate::host_project_dir(state, &project).unwrap();
+        std::fs::create_dir_all(&bound).unwrap();
         std::fs::write(
-            keyed.join("config.toml"),
+            bound.join("config.toml"),
             r#"
 [admission.test]
 slots = 4
@@ -399,24 +387,32 @@ disk_floor = "10 GiB"
         )
         .unwrap();
 
-        // With no project layer, the keyed layer overrides the host layer.
-        let resolved = ResolvedAdmissionClass::resolve("test", state, None, Some(key));
+        // The obsolete sha256 key names a directory that is never read.
+        let canonical = std::fs::canonicalize(project.join(".git")).unwrap();
+        let old = state.join("projects").join(crate::project_key(&canonical));
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(
+            old.join("config.toml"),
+            "[admission.test]\nslots = 1\nwait_seconds = 99\n",
+        )
+        .unwrap();
+
+        // With no project layer, the binding layer overrides the host layer.
+        let resolved = ResolvedAdmissionClass::resolve("test", state, Some(&project));
         assert_eq!(resolved.slots, 4);
         assert_eq!(resolved.slots_source, AdmissionSource::HostProject);
         assert_eq!(resolved.wait_seconds, 20);
         assert_eq!(resolved.wait_seconds_source, AdmissionSource::HostProject);
 
-        // A project layer overrides the keyed layer per leaf; leaves the
-        // project does not set keep the keyed layer's value and source.
-        let project = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(project.path().join(".provenant")).unwrap();
+        // A project layer overrides the binding layer per leaf; leaves the
+        // project does not set keep the binding layer's value and source.
+        std::fs::create_dir_all(project.join(".provenant")).unwrap();
         std::fs::write(
-            project.path().join(".provenant").join("config.toml"),
+            project.join(".provenant").join("config.toml"),
             "[admission.test]\nslots = 2\n",
         )
         .unwrap();
-        let resolved =
-            ResolvedAdmissionClass::resolve("test", state, Some(project.path()), Some(key));
+        let resolved = ResolvedAdmissionClass::resolve("test", state, Some(&project));
         assert_eq!(resolved.slots, 2);
         assert_eq!(resolved.slots_source, AdmissionSource::Project);
         assert_eq!(resolved.wait_seconds, 20);
@@ -435,9 +431,10 @@ disk_floor = "10 GiB"
     fn host_project_absent_is_silent() {
         let temp = tempfile::tempdir().unwrap();
         let state = temp.path();
+        let project = temp.path().join("unbound");
         std::fs::write(state.join("config.toml"), "[admission.test]\nslots = 6\n").unwrap();
-        for key in [None, Some("missing")] {
-            let resolved = ResolvedAdmissionClass::resolve("test", state, None, key);
+        for project in [None, Some(project.as_path())] {
+            let resolved = ResolvedAdmissionClass::resolve("test", state, project);
             assert_eq!(resolved.slots, 6);
             assert_eq!(resolved.slots_source, AdmissionSource::Host);
         }
