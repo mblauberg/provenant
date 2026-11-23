@@ -382,9 +382,18 @@ pub struct Git {
 const MAX_METADATA_BYTES: u64 = 64 * 1024;
 
 impl Git {
-    /// Bind to a checkout. A linked worktree's `.git` file is followed through
-    /// its `gitdir:` pointer and its `commondir`, the same rules Git uses.
-    pub fn new(project: &Path) -> Result<Self, ForgeContextError> {
+    /// Bind to the checkout containing `path`, found the way Git discovers
+    /// it: the nearest ancestor holding `.git`, so a launch from a
+    /// subdirectory reads the same metadata as one from the toplevel. A linked
+    /// worktree's `.git` file is followed through its `gitdir:` pointer and its
+    /// `commondir`, the same rules Git uses.
+    pub fn new(path: &Path) -> Result<Self, ForgeContextError> {
+        let Some(project) = path.ancestors().find(|dir| dir.join(".git").exists()) else {
+            return Err(ForgeContextError::Io {
+                path: path.join(".git"),
+                source: io::Error::new(io::ErrorKind::NotFound, "no Git metadata"),
+            });
+        };
         let dot = project.join(".git");
         if dot.is_dir() {
             return Ok(Self {
@@ -637,6 +646,18 @@ mod tests {
     fn context(fixture: &Fixture, ports: &PortTable) -> Result<ForgeContext, ForgeContextError> {
         let config = Config::new(ports, Policy::default());
         ForgeContext::resolve(&config, &fixture.git())
+    }
+
+    /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    #[test]
+    fn a_subdirectory_binds_the_checkout_that_contains_it() {
+        let fixture = Fixture::new("[remote \"upstream\"]\n");
+        let nested = fixture.root.path().join("tools/front-door");
+        std::fs::create_dir_all(&nested).expect("nested");
+        let from_nested = Git::new(&nested).expect("discovered from a subdirectory");
+        assert_eq!(from_nested.remotes(), fixture.git().remotes());
+        let outside = tempfile::tempdir().expect("temp dir");
+        assert!(Git::new(outside.path()).is_err());
     }
 
     /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
