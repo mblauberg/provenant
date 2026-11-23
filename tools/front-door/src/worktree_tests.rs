@@ -300,7 +300,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "writer_dispatch_edits_a_linked_worktree",
             "shared_holders_both_launch_and_removal_refused_while_holder_is_live",
             "writer_settlement_merges_upstream_advance",
-            "writer_terminal_refuses_sequencer_state",
+            "writer_terminal_retains_sequencer_state",
             "writer_production_plan_denies_outside_writes",
             "writer_reconcile_keeps_unfinished_cherry_pick_and_releases",
             "recreated_worktree_accepts_writer_after_settlement",
@@ -410,8 +410,8 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 "writer_settlement_merges_upstream_advance" => {
                     writer_settlement_merges_upstream_advance()
                 }
-                "writer_terminal_refuses_sequencer_state" => {
-                    writer_terminal_refuses_sequencer_state()
+                "writer_terminal_retains_sequencer_state" => {
+                    writer_terminal_retains_sequencer_state()
                 }
                 "writer_production_plan_denies_outside_writes" => {
                     writer_production_plan_denies_outside_writes()
