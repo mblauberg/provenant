@@ -96,10 +96,17 @@ pub struct Config<'a> {
 
 impl<'a> Config<'a> {
     pub fn new(ports: &'a PortTable, policy: Policy) -> Self {
+        // A declared git.default_branch is the first answer ForgeContext asks
+        // for, ahead of the remote HEAD symref and the forge API. An empty
+        // declaration leaves those detections in place.
+        let default_branch = (!ports.git.default_branch.trim().is_empty()).then(|| Sourced {
+            value: ports.git.default_branch.trim().to_owned(),
+            source: port_source(ports, "git.default_branch", "default_branch"),
+        });
         Self {
             ports,
             policy: sourced_policy(policy),
-            default_branch: None,
+            default_branch,
             forge: &NO_FORGE_PROBE,
         }
     }
@@ -283,19 +290,22 @@ fn short_branch(branch: &str) -> &str {
 /// The layer of a declared port leaf, with an origin that names the file and
 /// key so an explanation can show exactly where the value came from.
 fn port_source(ports: &PortTable, leaf: &str, key: &str) -> Source {
+    // The layer walk records each declaration's exact file (or builtin) and
+    // dotted key. Read the winning candidate's own source so a host declaration
+    // and a host-project binding declaration remain distinguishable: the old
+    // reconstruction named both `ports.json#git.remote`, which hid the file
+    // that actually supplied the value.
+    if let Some(winner) = ports.sourced_leaf(leaf).last() {
+        return winner.source.clone();
+    }
     let layer = ports
         .provenance()
         .get(leaf)
         .copied()
         .unwrap_or(ports.git.source);
-    let origin = match layer {
-        Layer::Project => format!("{}#git.{key}", crate::ports::PORTS_CONFIG),
-        Layer::Host | Layer::HostProject => format!("ports.json#git.{key}"),
-        other => format!("{}#git.{key}", other.description()),
-    };
     Source {
         layer,
-        origin: Some(origin),
+        origin: Some(format!("{}#git.{key}", layer.description())),
     }
 }
 
@@ -702,6 +712,82 @@ mod tests {
             Some("refs/remotes/upstream/HEAD")
         );
         assert!(result.is_protected("trunk"));
+    }
+
+    /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    #[test]
+    fn a_declared_default_branch_wins_ahead_of_head_and_forge() {
+        let fixture = Fixture::new("[remote \"upstream\"]\n");
+        fixture.set_remote_head("upstream", "trunk");
+        let forge = FakeForge {
+            branch: Some("develop"),
+            protected: vec!["release"],
+        };
+        let mut ports = PortTable::builtin();
+        ports.git.default_branch = "declared".to_owned();
+        let mut config = Config::new(&ports, Policy::default());
+        config.forge = &forge;
+        let result = ForgeContext::resolve(&config, &fixture.git()).expect("resolve");
+        assert_eq!(result.default_branch.value, "declared");
+        assert!(
+            result
+                .default_branch
+                .source
+                .origin
+                .as_deref()
+                .is_some_and(|origin| origin.contains("git.default_branch")),
+            "{:?}",
+            result.default_branch.source
+        );
+        assert!(result.is_protected("declared"));
+    }
+
+    // Spec: docs/specs/state.md#every-setting-reports-its-layer
+    #[test]
+    fn declared_git_ports_report_the_exact_file_that_supplied_them() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let host = temp.path().join("host");
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&host).expect("host");
+        std::fs::create_dir_all(project.join(".git")).expect("git marker");
+        let binding = crate::host_project_dir(&host, &project).expect("binding");
+        std::fs::create_dir_all(&binding).expect("binding dir");
+        std::fs::write(
+            host.join("ports.json"),
+            r#"{"git":{"remote":"host-remote"}}"#,
+        )
+        .expect("host ports");
+        std::fs::write(
+            binding.join("ports.json"),
+            r#"{"git":{"remote":"binding-remote"}}"#,
+        )
+        .expect("binding ports");
+
+        let fixture = Fixture::new("[remote \"upstream\"]\n");
+        let ports = PortTable::read_for(Some(&project), &host).expect("ports");
+        let config = Config::new(&ports, Policy::default());
+        let winning = ForgeContext::remote(&config, &fixture.git()).expect("remote");
+        assert_eq!(winning.value, "binding-remote");
+        assert_eq!(winning.source.layer, Layer::HostProject);
+        let binding_origin = winning.source.origin.as_deref().expect("origin");
+        assert_eq!(
+            binding_origin,
+            format!("{}#git.remote", binding.join("ports.json").display())
+        );
+
+        // The same declaration at the host layer names the host file instead.
+        std::fs::remove_file(binding.join("ports.json")).expect("remove binding");
+        let ports = PortTable::read_for(Some(&project), &host).expect("ports");
+        let config = Config::new(&ports, Policy::default());
+        let winning = ForgeContext::remote(&config, &fixture.git()).expect("remote");
+        assert_eq!(winning.value, "host-remote");
+        assert_eq!(winning.source.layer, Layer::Host);
+        let host_origin = winning.source.origin.as_deref().expect("origin");
+        assert_eq!(
+            host_origin,
+            format!("{}#git.remote", host.join("ports.json").display())
+        );
+        assert_ne!(host_origin, binding_origin);
     }
 
     /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
