@@ -96,6 +96,10 @@ fn refusal_leaf(code: &str) -> Option<(&'static str, &'static str)> {
             "MERGE_NOT_ALLOWED",
             "resolve the pull request's mergeability problem, then rerun `provenant land`",
         )),
+        "REVIEW_REQUIRED" => Some((
+            "REVIEW_REQUIRED",
+            "obtain an approving review the ruleset accepts, or grant admin_publication when_review_unavailable in the host config, then rerun `provenant land`",
+        )),
         _ => None,
     }
 }
@@ -192,6 +196,28 @@ pub struct GhForge {
     reviews: std::collections::BTreeMap<u64, Vec<serde_json::Value>>,
 }
 impl GhForge {
+    /// Merge the pinned head, optionally with the owner's admin authority.
+    /// Only the review-requirement path in `publish` passes `admin: true`.
+    fn merge_inner(
+        &mut self,
+        number: u64,
+        head: &str,
+        method: MergeMethod,
+        admin: bool,
+    ) -> Result<String, LandingError> {
+        let pinned = object_id(head)?
+            .parse()
+            .map_err(|_| LandingError::Failed(format!("not a commit id: {head}")))?;
+        let sha = merge_with(&self.reader(), &number.to_string(), pinned, method, admin)
+            .map_err(mutation_failed)?;
+        sha.ok_or_else(|| {
+            LandingError::Failed(format!(
+                "GitHub merged #{number} by {} without naming the commit",
+                merge_label(method)
+            ))
+        })
+    }
+
     pub fn new(project: &Path, state: &Path) -> Self {
         Self {
             project: project.to_owned(),
@@ -804,17 +830,15 @@ impl Forge for GhForge {
         head: &str,
         method: MergeMethod,
     ) -> Result<String, LandingError> {
-        let pinned = object_id(head)?
-            .parse()
-            .map_err(|_| LandingError::Failed(format!("not a commit id: {head}")))?;
-        let sha = merge_with(&self.reader(), &number.to_string(), pinned, method)
-            .map_err(mutation_failed)?;
-        sha.ok_or_else(|| {
-            LandingError::Failed(format!(
-                "GitHub merged #{number} by {} without naming the commit",
-                merge_label(method)
-            ))
-        })
+        self.merge_inner(number, head, method, false)
+    }
+    fn merge_admin(
+        &mut self,
+        number: u64,
+        head: &str,
+        method: MergeMethod,
+    ) -> Result<String, LandingError> {
+        self.merge_inner(number, head, method, true)
     }
     fn merge_stack(
         &mut self,

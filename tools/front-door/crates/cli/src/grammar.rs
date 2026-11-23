@@ -143,9 +143,9 @@ pub enum Command {
         /// Apply the named landing risk tier
         #[arg(long, value_parser = parse_landing_tier)]
         tier: Option<String>,
-        /// Pin a reviewed head (any unambiguous object name) instead of the current PR head
+        /// Pin a reviewed head: SHA for one PR, or N=SHA for member N of a batch (repeatable)
         #[arg(long)]
-        head: Option<String>,
+        head: Vec<String>,
         /// Wait for this head's CI (default 1 hour; maximum 4 hours)
         #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "1h", catalog_duration())]
         wait: Option<u64>,

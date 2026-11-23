@@ -24,6 +24,10 @@ pub struct FakeForge {
     pub lose_merge_response_at: Option<u64>,
     pub hide_merge_commit_at: Option<u64>,
     pub refuse_merge: Option<u64>,
+    /// A 405 caused by a review requirement the owner cannot satisfy.
+    pub review_required_merge: Option<u64>,
+    /// Pull requests merged with the owner's admin authority.
+    pub admin_merges: Vec<u64>,
     pub fail_settle_write_on_refusal: bool,
     pub fail_merge: Option<u64>,
     pub fail_fetch_after_merge: Option<std::rc::Rc<std::cell::Cell<bool>>>,
@@ -140,6 +144,13 @@ impl Forge for FakeForge {
         if self.fail_merge == Some(number) {
             return Err(LandingError::Failed("transport unavailable".into()));
         }
+        if self.review_required_merge == Some(number) {
+            return Err(LandingError::RefusedWith {
+                cause: "REVIEW_REQUIRED",
+                message: format!("pull request #{number} is not mergeable: review required"),
+                repair: "obtain an approving review the ruleset accepts".into(),
+            });
+        }
         if self.refuse_merge == Some(number) {
             if self.fail_settle_write_on_refusal {
                 super::receipt::FAIL_SETTLE_WRITE.with(|flag| flag.set(true));
@@ -175,6 +186,17 @@ impl Forge for FakeForge {
             return Err(LandingError::Failed("lost response".into()));
         }
         Ok(landed)
+    }
+    fn merge_admin(
+        &mut self,
+        number: u64,
+        head: &str,
+        method: MergeMethod,
+    ) -> Result<String, LandingError> {
+        self.admin_merges.push(number);
+        // Admin authority answers a review-requirement refusal, so clear it.
+        self.review_required_merge = None;
+        self.merge(number, head, method)
     }
     fn merge_stack(
         &mut self,

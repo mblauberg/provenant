@@ -153,6 +153,8 @@ impl LandingFixture {
                 reason: "test".into(),
                 extra: Default::default(),
             },
+            publication: PublicationGrant::default(),
+            target_source: None,
             outcomes: BTreeMap::new(),
             split: Vec::new(),
             approved_to_landed: BTreeMap::from([("head".into(), "landed".into())]),
