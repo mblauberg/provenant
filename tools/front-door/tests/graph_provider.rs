@@ -16,6 +16,7 @@ use support::{Result, TestRig, code};
 
 // Medium: a real shell inherits the provider's lane environment and native
 // confinement. No network, provider login, compiler or sleeps are involved.
+#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn writer_shell_probe() -> Result<String> {
     let script = r#"set -eu
 for name in AGENTS.md CLAUDE.md GLOBAL-AGENTS.md; do
@@ -154,6 +155,7 @@ fn distinct_branch_writer_fixture(prompt: &str) -> Result<Option<String>> {
 const HANDOFF_SECRET: &str = "sk-abcdefghijklmnopqrstuvwx";
 
 #[cfg(target_os = "macos")]
+#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn agy_lease_fixture() -> Result {
     let args: Vec<_> = std::env::args().collect();
     if args.iter().any(|arg| arg == "--version") {
@@ -204,6 +206,7 @@ fn agy_lease_fixture() -> Result {
     Ok(())
 }
 
+#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn handoff_recovery_provider(prompt: &str, args: &[String], auth: &Value, session: &str) -> Result {
     let account = auth["tokens"]["account_id"]
         .as_str()
@@ -297,6 +300,7 @@ fn without_done(text: &str) -> &str {
     text.strip_suffix(DONE_FENCE).unwrap_or(text)
 }
 
+#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn fixture() -> Result {
     let args: Vec<_> = std::env::args().collect();
     if args.get(1).is_some_and(|v| v == "login") && args.get(2).is_some_and(|v| v == "status") {
@@ -6292,6 +6296,7 @@ fn discovered_exact_model_launch_has_no_catalogue_warning() -> Result {
     Ok(())
 }
 
+#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     #[cfg(target_os = "macos")]

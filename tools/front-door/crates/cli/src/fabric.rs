@@ -537,6 +537,7 @@ fn execute(
     Ok((value, false))
 }
 
+#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 pub fn run(
     cmd: Fabric,
     globals: &Globals,

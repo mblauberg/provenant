@@ -21,6 +21,7 @@ mod disk;
 mod disk_guard;
 mod fabric;
 mod notes;
+mod output;
 mod tick;
 mod tick_agent;
 mod tracker;
@@ -62,13 +63,18 @@ mod verify;
 #[cfg(test)]
 pub mod worktree_tests;
 mod worktrees;
-use provenant_cli::{Command, ParseOutcome, RenderError, RenderMode};
+use provenant_cli::{Command, ParseOutcome};
 use provenant_records::{CommandError, CommandResult, Outcome, VersionInfo};
 use roots::{Product, Workspace};
 use serde::Serialize;
 use std::{
     ffi::OsString,
     io::{self, Write},
+};
+
+pub(crate) use output::{
+    emit, emit_summarised, emit_unpublished, emit_with_writers, land_explanation,
+    render_unpublished,
 };
 
 /// Process-wide seams the entry point selects once. The trait lives in the CLI
@@ -113,247 +119,6 @@ fn human_inbox(
             globals,
         ),
     }
-}
-fn emit<T: Serialize>(
-    result: &CommandResult<T>,
-    globals: &provenant_cli::Globals,
-    human: &str,
-    read_only: bool,
-) -> u8 {
-    emit_summarised(result, globals, human, read_only, None)
-}
-/// `emit` for an owner that supplies its own compact view.
-pub(crate) fn emit_summarised<T: Serialize>(
-    result: &CommandResult<T>,
-    globals: &provenant_cli::Globals,
-    human: &str,
-    read_only: bool,
-    summary: Option<&provenant_cli::Summary>,
-) -> u8 {
-    emit_with_writers(
-        result,
-        globals,
-        &mut io::stdout().lock(),
-        &mut io::stderr().lock(),
-        human,
-        read_only,
-        summary,
-    )
-}
-
-/// The emission seam shared by production and targeted tests: a refusal's
-/// rendered bytes go to the supplied writers, so a test can drive the same
-/// `fail_with_cause` path instead of hand-building a `CommandResult`.
-pub(crate) fn emit_with_writers<T: Serialize, Wout: Write, Werr: Write>(
-    result: &CommandResult<T>,
-    globals: &provenant_cli::Globals,
-    stdout: &mut Wout,
-    stderr: &mut Werr,
-    human: &str,
-    read_only: bool,
-    summary: Option<&provenant_cli::Summary>,
-) -> u8 {
-    let explanation = if summary.is_none() && result.command == "land" {
-        serde_json::to_value(&result.data)
-            .ok()
-            .and_then(|data| land_explanation(&data, globals))
-    } else {
-        None
-    };
-    let summary = summary.or(explanation.as_ref());
-    let mode = if !globals.json && matches!(result.command.as_str(), "help" | "version") {
-        RenderMode::Human {
-            text: human,
-            read_only,
-            summary: None,
-        }
-    } else {
-        globals.render_mode(human, read_only, summary)
-    };
-    let rendered = provenant_cli::render_or_publish(
-        result,
-        mode,
-        stdout,
-        stderr,
-        |value| overflow::publish(value, globals),
-        // A published overflow keeps the result's status in its envelope, so
-        // the exit code matches it; only a real render/IO failure exits 3.
-        provenant_cli::OverflowPolicy::Proceed,
-    );
-    match rendered {
-        Ok(status) => provenant_cli::exit_status(&status),
-        Err(_) => {
-            let _ = io::stderr().write_all(b"provenant: IO: cannot write command result\n");
-            3
-        }
-    }
-}
-
-/// A policy explanation is a structured result; compact output names omitted rows.
-fn land_explanation(
-    data: &serde_json::Value,
-    globals: &provenant_cli::Globals,
-) -> Option<provenant_cli::Summary> {
-    let fields = data.get("fields")?.as_object()?;
-    let mut rows = Vec::new();
-    for (key, label) in [
-        ("gate.kind", "gate"),
-        ("gate.checks", "checks"),
-        ("gate.commands", "commands"),
-        ("approval_sources", "approval"),
-        ("approval_tier", "approval tier"),
-        ("approval_carry", "approval carry"),
-        ("local_gate.mode", "local gate"),
-        ("integration", "integration"),
-        ("publish", "publication"),
-        ("budget.advisory_micros", "budget advisory (millionths)"),
-        ("budget.cap_micros", "budget cap (millionths)"),
-    ] {
-        if let Some(field) = fields.get(key) {
-            let value = field.get("value")?;
-            let value = value
-                .as_str()
-                .map(str::to_owned)
-                .unwrap_or_else(|| value.to_string());
-            let source = field
-                .pointer("/source/layer")
-                .and_then(serde_json::Value::as_str)?;
-            rows.push(format!("{label}: {value} ({source})"));
-        }
-    }
-    if let Some(patience) = data.get("ci_patience_seconds") {
-        let source = data["ci_patience_source"].as_str()?;
-        rows.push(format!("CI patience: {patience}s ({source})"));
-    }
-    if let Some(warnings) = data["warnings"].as_array() {
-        rows.splice(
-            0..0,
-            warnings
-                .iter()
-                .filter_map(serde_json::Value::as_str)
-                .map(|warning| format!("warning: {warning}")),
-        );
-    }
-    let mut detail = String::from("provenant");
-    for (flag, path) in [
-        ("--state-dir", globals.state_dir.as_ref()),
-        ("--project", globals.project.as_ref()),
-    ] {
-        if let Some(path) = path {
-            detail.push_str(&format!(
-                " {flag} '{}'",
-                path.to_string_lossy().replace('\'', "'\\''")
-            ));
-        }
-    }
-    detail.push_str(" land --explain --json");
-    Some(provenant_cli::Summary::new(
-        "Landing policy",
-        rows,
-        Some(detail),
-    ))
-}
-/// `emit_summarised` for a result the caller narrows rather than reads from an
-/// artefact: an oversized result is bounded with a warning, never published, so
-/// no file is left in the results area on any path.
-fn emit_unpublished<T: Serialize>(
-    result: &CommandResult<T>,
-    globals: &provenant_cli::Globals,
-    human: &str,
-    read_only: bool,
-    summary: Option<&provenant_cli::Summary>,
-) -> u8 {
-    let rendered = render_unpublished(
-        result,
-        globals,
-        human,
-        read_only,
-        summary,
-        provenant_cli::MAX_RESULT_BYTES,
-        &mut io::stdout().lock(),
-        &mut io::stderr().lock(),
-    );
-    const REPAIR: &str = "narrow it with --since and --until";
-    match rendered {
-        Ok(omitted) => {
-            if omitted > 0 {
-                let _ = writeln!(
-                    io::stderr().lock(),
-                    "warning: [RESULT_TOO_LARGE] {} exceeds 1 MiB (source: COMMAND_RESULT_MAX_BYTES); showing a bounded view with {omitted} bytes omitted; {REPAIR}",
-                    result.command
-                );
-            }
-            provenant_cli::exit_status(&result.status)
-        }
-        Err(RenderError::TooLarge) => {
-            // JSON cannot be clipped mid-object: emit a bounded marker instead.
-            let omitted = serde_json::to_vec(result)
-                .map(|bytes| bytes.len().saturating_sub(provenant_cli::MAX_RESULT_BYTES))
-                .unwrap_or_default();
-            let _ = writeln!(
-                io::stderr().lock(),
-                "warning: [RESULT_TOO_LARGE] {} exceeds 1 MiB (source: COMMAND_RESULT_MAX_BYTES); showing a bounded view with {omitted} bytes omitted; {REPAIR}",
-                result.command
-            );
-            let marker = serde_json::json!({
-                "truncated": true,
-                "omitted_bytes": omitted,
-                "source": "COMMAND_RESULT_MAX_BYTES",
-                "repair": REPAIR,
-            });
-            let mut bounded = CommandResult::new(&result.command, result.status, marker);
-            // The marker replaces the oversized data, not the refusal. Keep the
-            // original typed error so an oversized failure still carries its
-            // code, repair and diagnostic, as the console and disk edges do.
-            bounded.error = result
-                .error
-                .as_ref()
-                .map(|error| provenant_cli::bounded_error(error, 512));
-            let _ = provenant_cli::render(&bounded, RenderMode::Json, &mut io::stdout().lock());
-            provenant_cli::exit_status(&result.status)
-        }
-        Err(_) => {
-            let _ = io::stderr().write_all(b"provenant: IO: cannot write command result\n");
-            3
-        }
-    }
-}
-/// Render a result within `limit`, bounding the human view with an explicit
-/// omitted-size marker when it is larger. Returns the bytes omitted from the
-/// owner's text (zero when the result fit).
-#[allow(clippy::too_many_arguments)]
-fn render_unpublished<T: Serialize>(
-    result: &CommandResult<T>,
-    globals: &provenant_cli::Globals,
-    human: &str,
-    read_only: bool,
-    summary: Option<&provenant_cli::Summary>,
-    limit: usize,
-    stdout: &mut impl Write,
-    stderr: &mut impl Write,
-) -> Result<usize, RenderError> {
-    let full_bytes = serde_json::to_vec(result)
-        .map(|bytes| bytes.len())
-        .unwrap_or(0);
-    // The size bounds the result, not its presentation: a compact view of an
-    // oversized result is still an oversized result.
-    let oversized = !globals.json && full_bytes > limit;
-    let clipped;
-    let mut omitted = 0;
-    let mode = if oversized {
-        let (text, count) = provenant_cli::clip_for_output(human, limit);
-        clipped = text;
-        omitted = count;
-        globals.render_mode(&clipped, read_only, summary)
-    } else {
-        globals.render_mode(human, read_only, summary)
-    };
-    if !globals.json && result.error.is_some() {
-        provenant_cli::render_within(result, mode, stderr, limit)?;
-    } else {
-        provenant_cli::render_within(result, mode, stdout, limit)?;
-    }
-    Ok(omitted)
 }
 /// Accounts by adapter, then the registered rows; none needs action.
 fn accounts_summary(settings: &provenant_providers::accounts::Settings) -> provenant_cli::Summary {
@@ -426,6 +191,7 @@ fn fail_with_repair(
 }
 /// `fail_with_repair` with a cause the operator needs to see, such as the
 /// bounded output of a failing `build.prepare` command.
+#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn fail_with_cause(
     command: &str,
     status: Outcome,
@@ -475,6 +241,7 @@ pub(crate) fn fail_with_cause_with_writers<Wout: Write, Werr: Write>(
 
 /// Emit an already-mapped refusal. Owners with a typed error use this with
 /// [`crate::worktrees::Error::command_error`] so the mapping lives in one place.
+#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 pub(crate) fn fail_with_command_error(
     command: &str,
     status: Outcome,
@@ -1499,6 +1266,9 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
         ParseOutcome::Version { globals } => ("version", globals),
     };
     let verb = verb.to_owned();
+    // One sink for the whole command: warnings raised while resolving roots or
+    // loading config reach it, and the guard restores the previous sink on exit.
+    let _command_sink = output::install_command_sink(globals.json);
     // A command admitted under an admission class runs directly under that slot:
     // it needs no roots, telemetry or result envelope, and ends with the command's exit code.
     if let ParseOutcome::Invocation(inv) = &parsed

@@ -1334,6 +1334,7 @@ pub(crate) fn positive_span_seconds(value: &str) -> Result<u64, &'static str> {
         .filter(|n| *n > 0)
         .ok_or("duration must be a positive span; run `provenant help` for examples")
 }
+#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 pub(crate) fn duration_seconds(value: &str) -> Result<u64, &'static str> {
     let seconds = positive_span_seconds(value)?;
     let maximum = provenant_core::MAX_LANE_RUNTIME_SECONDS;

@@ -14,4 +14,6 @@ disallowed-methods = [
   { path = "std::process::Command::new", reason = "Process creation belongs in os or supervisor custody boundaries." },
   { path = "std::env::remove_var", reason = "Pass environment explicitly to functions and child commands; process-wide mutation races with threads." },
   { path = "std::env::set_var", reason = "Pass environment explicitly to functions and child commands; process-wide mutation races with threads." },
+  { path = "std::io::stderr", reason = "Report warnings through records::warning::warn; the binary edge writes to stderr only in its output seam." },
+  { path = "std::io::stdout", reason = "Command output belongs to the binary edge's output seam; warnings go through records::warning." },
 ]

@@ -42,7 +42,7 @@ struct ConsoleOverview: Decodable, Equatable, Sendable {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         let envelope = try decoder.decode(Envelope.self, from: data)
-        guard envelope.schemaVersion == 1, envelope.command == "console overview", envelope.status == "ok",
+        guard envelope.schemaVersion == 2, envelope.command == "console overview", envelope.status == "ok",
               let overview = envelope.data else {
             throw DecodingError.dataCorrupted(.init(codingPath: [], debugDescription: "unexpected overview envelope"))
         }

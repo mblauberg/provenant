@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "command": "console board",
   "status": "ok",
   "data": {
@@ -733,5 +733,6 @@
     "snapshot": "sha256:69dffe883b1c10ac1aee3c8fbcb31bf51981f712326f476ba5428efb9b96267e",
     "truncated": true
   },
-  "error": null
+  "error": null,
+  "warnings": []
 }

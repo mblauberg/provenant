@@ -155,7 +155,7 @@ final class MenuTests: XCTestCase {
 
     func testOverviewLeadsWithThreeRequestsAndUsefulLabels() throws {
         let json = """
-        {"schema_version":1,"command":"console overview","status":"ok","data":{
+        {"schema_version":2,"command":"console overview","status":"ok","data":{
           "needs_you":[
             {"id":"1","title":"First","project_label":"Project","task_label":null,"created_at":"2026-01-01T00:00:00Z"},
             {"id":"2","title":"Second","project_label":null,"task_label":null},

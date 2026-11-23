@@ -38,6 +38,7 @@ fn error_envelope(command: &str, code: &str, message: &str, repair: &str) -> Res
         error: Some(provenant_records::CommandError::new(
             code, message, None, repair,
         )),
+        warnings: Vec::new(),
     };
     serde_json::to_value(result).map_err(|error| format!("error envelope: {error}"))
 }

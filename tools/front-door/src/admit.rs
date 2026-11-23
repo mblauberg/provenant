@@ -908,6 +908,7 @@ fn warn_readonly_sources(env: &[(OsString, OsString)]) {
     }
 }
 
+#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn say(message: &str) {
     let _ = writeln!(std::io::stderr().lock(), "provenant: {message}");
 }

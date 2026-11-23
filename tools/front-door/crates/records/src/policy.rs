@@ -197,6 +197,7 @@ impl Policy {
     /// Apply layers in increasing precedence: host, project, then dispatch.
     /// Boundary rules have no knob, so these overlays cannot grant authority.
     #[allow(clippy::print_stderr)]
+    #[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
     pub fn overlay(&mut self, values: &BTreeMap<String, Strength>, source: Source) {
         use std::io::Write;
         for (code, strength) in values {
@@ -279,6 +280,7 @@ impl Policy {
     /// strict mode the caller's configured stop is returned. Boundary rules use
     /// `boundary_error`, never this.
     #[allow(clippy::print_stderr, clippy::panic)]
+    #[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
     pub fn warn_or<E>(
         &self,
         code: &str,

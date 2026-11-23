@@ -72,6 +72,7 @@ fn ref_removal(
     })
 }
 
+#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn warn(outcome: &ArtefactOutcome) {
     if outcome.outcome == ArtefactState::Failed {
         use std::io::Write;

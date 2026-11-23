@@ -294,6 +294,7 @@ pub(super) fn continuation_for(
     )
 }
 
+#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 pub(super) fn continuation_for_policy(
     prior: &run::AttemptRecord,
     route: &ResolvedRoute,
@@ -641,6 +642,7 @@ impl StateCopyPolicy {
             origins: [provenant_records::diagnostic::SettingSource::ShippedDefault; 3],
         }
     }
+    #[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
     fn read(state_root: &Path, enforcement: &provenant_records::policy::Policy) -> Self {
         use provenant_records::diagnostic::SettingSource;
         match provenant_confinement::run_config::RunConfig::read_with_keys(state_root) {
@@ -905,6 +907,7 @@ pub(super) fn copy_state_within(
     .map_err(|error| error.to_string())
 }
 
+#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn copy_state_classified(
     from: &Path,
     to: &Path,
@@ -1270,6 +1273,7 @@ pub(super) fn before_open(_name: &std::ffi::OsStr) {
     });
 }
 
+#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn warn_link(budget: &Budget<'_>, kind: &str) {
     let source = budget
         .lane_access

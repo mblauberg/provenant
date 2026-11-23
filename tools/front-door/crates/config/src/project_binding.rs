@@ -917,6 +917,7 @@ fn project_directory_is_registered(registry: &Directory, entry: &OsStr) -> bool 
 
 /// One clear warning for an entry that cannot be a binding directory. The
 /// path is named so an operator can move or remove the stray entry.
+#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn warn_unrecognised_project(path: &Path) {
     use std::io::Write;
     let _ = writeln!(

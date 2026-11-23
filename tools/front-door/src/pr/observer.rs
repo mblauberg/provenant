@@ -473,6 +473,7 @@ impl<F: Forge, C: Clock> Observer<F, C> {
         clippy::disallowed_methods,
         reason = "optional cadence-history warning"
     )]
+    #[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
     fn with_settings(
         state: &Path,
         repository: &str,

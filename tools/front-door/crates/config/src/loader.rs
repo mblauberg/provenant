@@ -70,9 +70,7 @@ pub fn load_with_domains<R: Read, T: DeserializeOwned + Serialize>(
         .transpose()?;
     let inspection = inspect(text.as_deref(), sections)?;
     for warning in &inspection.snapshot.warnings {
-        if first_warning(roots.state.as_path(), text.as_deref(), warning) {
-            warn(&roots.state.as_path().join("config.toml"), warning);
-        }
+        warn_config(&roots.state.as_path().join("config.toml"), warning);
     }
     if let Some(error) = inspection.error {
         return Err(error);
@@ -111,45 +109,52 @@ pub fn config_show<T: DeserializeOwned + Serialize>(
     Ok(inspection.snapshot)
 }
 
-// A separate marker for each finding ensures different domain readers do not
-// consume each other's warnings. Creation is atomic across concurrent commands.
-fn first_warning(state: &Path, text: Option<&str>, warning: &Finding) -> bool {
-    first_warning_bytes(state, text.unwrap_or_default().as_bytes(), &warning.message)
+// Typed warnings replace the marker files. The binary's sink collapses repeats
+// by key within a command and remembers per-change keys in the state root, so
+// no `config-warning-*` file is written. Spec: docs/specs/cli.md#warnings-are-typed-values
+fn config_warning(path: &Path, finding: &Finding) -> provenant_records::Warning {
+    use provenant_records::warning::{CONFIG_KEY_IGNORED, CONFIG_MALFORMED};
+    let code = match finding.rule.as_str() {
+        "unknown_key" => CONFIG_KEY_IGNORED,
+        _ => CONFIG_MALFORMED,
+    };
+    provenant_records::Warning::new(code, finding.message.clone())
+        .subject(format!("{}:{}", path.display(), finding.line))
+        .repair("run `provenant check config --json` and correct the reported setting")
+        .once_per_change()
 }
 
-fn first_warning_bytes(state: &Path, text: &[u8], message: &str) -> bool {
+pub(crate) fn warn_config(path: &Path, finding: &Finding) {
     // The command edge reads settings for usage attribution before dispatching
-    // the hook. Suppress those advisories as well as the hook's own reads.
+    // the hook; those advisories are not the operator's to act on.
+    if is_answer_delivery_hook(std::env::args_os().skip(1)) {
+        return;
+    }
+    provenant_records::warning::warn(config_warning(path, finding));
+}
+
+pub(crate) fn warn_unknown_input_once(
+    _state: &Path,
+    _bytes: &[u8],
+    warning: &InputWarning,
+) -> bool {
     if is_answer_delivery_hook(std::env::args_os().skip(1)) {
         return false;
     }
-    let mut bytes = (text.len() as u64).to_be_bytes().to_vec();
-    bytes.extend_from_slice(text);
-    bytes.extend_from_slice(message.as_bytes());
-    let digest = provenant_records::CanonicalV1::file_digest(&bytes);
-    let name = format!("config-warning-{digest}");
-    let Ok(dir) = provenant_os::fs::Directory::open_anchor(state) else {
-        return true;
-    };
-    match dir.create_new(OsStr::new(&name)) {
-        Ok(_) => true,
-        Err(error) if error.is_exists() => false,
-        Err(_) => true,
-    }
-}
-
-pub(crate) fn warn_unknown_input_once(state: &Path, bytes: &[u8], warning: &InputWarning) -> bool {
-    let message = format!(
-        "{}: {}: unknown configuration key; ignored",
-        warning.source, warning.key
+    use provenant_records::warning::{CONFIG_KEY_IGNORED, Warning};
+    provenant_records::warning::warn(
+        Warning::new(
+            CONFIG_KEY_IGNORED,
+            format!(
+                "{}: {}: unknown configuration key; ignored",
+                warning.source, warning.key
+            ),
+        )
+        .subject(format!("{}: {}", warning.source, warning.key))
+        .repair("remove the unknown key from the host configuration")
+        .once_per_change(),
     );
-    if first_warning_bytes(state, bytes, &message) {
-        use std::io::Write;
-        let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
-        true
-    } else {
-        false
-    }
+    true
 }
 
 fn is_answer_delivery_hook(args: impl IntoIterator<Item = std::ffi::OsString>) -> bool {
@@ -516,6 +521,15 @@ fn inspect<T: DeserializeOwned + Serialize>(
         &mut issues,
         crate::RetentionSettings::validate,
     );
+    let mut warnings_item = user.remove("warnings");
+    let warning_dedup = recover_settings::<crate::WarningsSettings>(
+        &mut warnings_item,
+        "warnings",
+        &user_sites,
+        &user_origin,
+        &mut issues,
+        crate::WarningsSettings::validate,
+    );
     let mut worktrees_item = user.remove("worktrees");
     let worktrees = recover_settings::<crate::WorktreeSettings>(
         &mut worktrees_item,
@@ -754,6 +768,7 @@ fn inspect<T: DeserializeOwned + Serialize>(
     origins.insert("retention.chair_log_entries".into(), compiled.clone());
     origins.insert("retention.payload_cap_bytes".into(), compiled.clone());
     origins.insert("retention.chair_log_bytes".into(), compiled.clone());
+    origins.insert("warnings.dedup_retention_days".into(), compiled.clone());
     for provider in providers.keys() {
         for field in [
             "update",
@@ -781,6 +796,11 @@ fn inspect<T: DeserializeOwned + Serialize>(
     }
     if let Some(item) = &retention_item {
         walk_item(item, "retention", None, &mut |key, _, _| {
+            origins.insert(key.into(), user_origin.clone());
+        });
+    }
+    if let Some(item) = &warnings_item {
+        walk_item(item, "warnings", None, &mut |key, _, _| {
             origins.insert(key.into(), user_origin.clone());
         });
     }
@@ -944,6 +964,7 @@ fn inspect<T: DeserializeOwned + Serialize>(
         ("install", serde_json::to_value(&install)),
         ("gc", serde_json::to_value(&gc)),
         ("retention", serde_json::to_value(&retention)),
+        ("warnings", serde_json::to_value(&warning_dedup)),
         ("worktrees", serde_json::to_value(&worktrees)),
         ("providers", serde_json::to_value(&providers)),
         ("domains", serde_json::to_value(&domains)),
@@ -964,6 +985,7 @@ fn inspect<T: DeserializeOwned + Serialize>(
             install,
             gc,
             retention,
+            warning_dedup,
             worktrees,
             providers,
             knobs,
@@ -1024,17 +1046,6 @@ fn seed_origins(
         }
     }
 }
-fn warn(path: &Path, warning: &Finding) {
-    use std::io::Write;
-    let _ = writeln!(
-        std::io::stderr().lock(),
-        "warning: {}:{}: {}",
-        path.display(),
-        warning.line,
-        warning.message
-    );
-}
-
 /// Shared bounded reader for setting owners that cannot link the aggregate.
 pub(crate) fn read_settings<T: DeserializeOwned + Default>(
     state: &Path,
@@ -1131,9 +1142,7 @@ fn read_section<T: DeserializeOwned + Default>(
                         rejected: String::new(),
                     };
                     let finding = issue_finding(&issue).map_err(std::io::Error::other)?;
-                    if first_warning(state, Some(&text), &finding) {
-                        warn(&path, &finding);
-                    }
+                    warn_config(&path, &finding);
                 }
                 Err(_) => return Err(std::io::Error::other("invalid domain value")),
             }
@@ -1143,9 +1152,7 @@ fn read_section<T: DeserializeOwned + Default>(
     let value = recover_settings(&mut item, prefix, &sites, &origin, &mut issues, validate);
     for issue in &issues {
         let finding = issue_finding(issue).map_err(std::io::Error::other)?;
-        if first_warning(state, Some(&text), &finding) {
-            warn(&path, &finding);
-        }
+        warn_config(&path, &finding);
     }
     Ok((value, BTreeSet::new()))
 }
@@ -2673,64 +2680,42 @@ mod warning_tests {
     use crate::{DomainConfig, DomainSection};
 
     #[test]
-    fn warning_stamp_is_per_revision_and_finding() -> Result<(), Box<dyn std::error::Error>> {
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    fn config_findings_are_typed_per_change_warnings() -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_records::{Dedup, warning::CONFIG_KEY_IGNORED};
         let temp = tempfile::tempdir()?;
         let inputs = provenant_test_support::test_roots(temp.path())?;
         let roots = inputs.resolve(&provenant_test_support::IdentityPathResolver)?;
         let text = b"schema_version=1\n[knobs]\nunregistered.setting=1";
-        let config = load(&roots, Some(&text[..]))?;
-        let warning = config
-            .warnings
-            .iter()
-            .find(|warning| warning.rule == "unknown_key")
-            .ok_or("missing current unknown-key warning")?;
+        let (loaded, warnings) =
+            provenant_records::warning::capture(|| load(&roots, Some(&text[..])));
+        let config = loaded?;
         assert!(
-            warning
-                .path
-                .to_relative_path()
-                .unwrap()
-                .as_path()
-                .ends_with("config.toml")
+            config
+                .warnings
+                .iter()
+                .any(|finding| finding.rule == "unknown_key")
         );
-        assert!(warning.line > 0);
-        assert!(first_warning(
-            roots.state.as_path(),
-            Some("revision one"),
-            warning
-        ));
-        assert!(!first_warning(
-            roots.state.as_path(),
-            Some("revision one"),
-            warning
-        ));
-        assert!(first_warning(
-            roots.state.as_path(),
-            Some("revision two"),
-            warning
-        ));
+        assert!(
+            warnings.iter().any(|warning| {
+                warning.code.as_ref() == CONFIG_KEY_IGNORED.0
+                    && warning.dedup == Dedup::PerChange
+                    && warning.subject.as_deref().is_some_and(|subject| {
+                        subject.ends_with("config.toml:0") || subject.contains("config.toml:")
+                    })
+            }),
+            "{warnings:?}"
+        );
         let port_warning = InputWarning {
             source: "ports.json".into(),
             key: "verify.future_option".into(),
         };
-        assert!(warn_unknown_input_once(
-            roots.state.as_path(),
-            b"same source bytes",
-            &port_warning
-        ));
-        assert!(!warn_unknown_input_once(
-            roots.state.as_path(),
-            b"same source bytes",
-            &port_warning
-        ));
-        let project_warning = InputWarning {
-            source: "project/.provenant/ports.json".into(),
-            key: port_warning.key.clone(),
-        };
-        assert!(warn_unknown_input_once(
-            roots.state.as_path(),
-            b"same source bytes",
-            &project_warning
-        ));
+        let ((), warnings) = provenant_records::warning::capture(|| {
+            warn_unknown_input_once(roots.state.as_path(), b"same source bytes", &port_warning);
+        });
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].code.as_ref(), CONFIG_KEY_IGNORED.0);
+        assert_eq!(warnings[0].dedup, Dedup::PerChange);
         Ok(())
     }
 

@@ -163,7 +163,7 @@ final class InboxClientTests: XCTestCase {
         func output(_ json: String, status: Int32 = 1) -> CLI.Output {
             CLI.Output(status: status, signalled: false, timedOut: false, truncated: false, out: Data(json.utf8), err: "fallback")
         }
-        let failure = output(#"{"schema_version":1,"command":"console overview","status":"error","error":{"code":"broken","message":"Broken.","repair":"Repair it."}}"#)
+        let failure = output(#"{"schema_version":2,"command":"console overview","status":"error","error":{"code":"broken","message":"Broken.","repair":"Repair it."}}"#)
         XCTAssertThrowsError(try CLIClient.decode(failure, command: "console overview", as: InboxReceipt.self)) { error in
             XCTAssertEqual((error as? ClientError)?.message, "Broken. Repair it.")
         }

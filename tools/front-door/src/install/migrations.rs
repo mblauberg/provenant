@@ -18,7 +18,41 @@ use std::path::Path;
 
 /// Ordered steps for this release. Steps are deleted in the release after the
 /// one that ships them.
-const STEPS: &[&dyn Migration] = &[];
+const STEPS: &[&dyn Migration] = &[&RetireWarningMarkers];
+
+/// Warning dedup moved from per-finding marker files to `warnings.sqlite3`.
+/// Remove only the two retired marker prefixes; leave every other state file.
+struct RetireWarningMarkers;
+
+impl Migration for RetireWarningMarkers {
+    fn id(&self) -> &'static str {
+        "retire-warning-markers"
+    }
+
+    fn apply(&self, state_root: &Path) -> Result<MigrationReport, MigrationError> {
+        let mut report = MigrationReport::new(self.id());
+        let Ok(directory) = Directory::open_anchor(state_root) else {
+            return Ok(report);
+        };
+        let Ok(entries) = directory.entries() else {
+            return Ok(report);
+        };
+        for entry in entries {
+            let Ok(name) = entry else { continue };
+            if !name.to_str().is_some_and(|text| {
+                text.starts_with("config-warning-") || text.starts_with("root-warning-")
+            }) {
+                continue;
+            }
+            if directory.unlink(&name).is_ok() {
+                report
+                    .changed
+                    .push(state_root.join(&name).display().to_string());
+            }
+        }
+        Ok(report)
+    }
+}
 
 /// Run every pending step against the state root and return every recorded id.
 pub(super) fn run(state_root: &Path) -> Vec<String> {
@@ -244,6 +278,28 @@ mod tests {
         assert!(warnings.is_empty(), "{warnings:?}");
         let receipt = read_receipt(path).expect("read").expect("receipt");
         assert_eq!(receipt.migrations, ["first", "second"]);
+    }
+
+    #[test]
+    // Spec: docs/specs/state.md#format-changes-migrate-once-at-install
+    fn retiring_warning_markers_deletes_only_marker_files() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = root.path();
+        for name in [
+            "config-warning-abc",
+            "root-warning-def",
+            "config.toml",
+            "warnings.sqlite3",
+        ] {
+            std::fs::write(path.join(name), b"fixture\n").expect("write state file");
+        }
+        let step = super::RetireWarningMarkers;
+        let report = step.apply(path).expect("apply migration");
+        assert_eq!(report.changed.len(), 2);
+        assert!(!path.join("config-warning-abc").exists());
+        assert!(!path.join("root-warning-def").exists());
+        assert!(path.join("config.toml").exists());
+        assert!(path.join("warnings.sqlite3").exists());
     }
 
     #[test]

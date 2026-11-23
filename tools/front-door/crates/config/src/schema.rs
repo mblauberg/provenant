@@ -83,6 +83,7 @@ const RETENTION_FIELDS: &[FieldMetadata] = &[
     FieldMetadata::int("chair_log_bytes", 65_536, 1_073_741_824),
     FieldMetadata::int("payload_cap_bytes", 1_048_576, 1_125_899_906_842_624),
 ];
+const WARNINGS_FIELDS: &[FieldMetadata] = &[FieldMetadata::int("dedup_retention_days", 1, 3650)];
 const INSTALL_FIELDS: &[FieldMetadata] = &[
     FieldMetadata::new("bin_dir", "string"),
     FieldMetadata::new("targets.{harness}.home", "string"),
@@ -108,6 +109,7 @@ const CONFIG_FIELDS: &[(&str, &[FieldMetadata])] = &[
     ("gc", GC_FIELDS),
     ("worktrees", WORKTREE_FIELDS),
     ("retention", RETENTION_FIELDS),
+    ("warnings", WARNINGS_FIELDS),
     ("install", INSTALL_FIELDS),
     ("providers", PROVIDER_FIELDS),
 ];
@@ -124,6 +126,7 @@ fn owned(prefix: &str, document: DocumentMut) -> Result<Value, String> {
         "gc" => typed::<crate::GcSettings>(document),
         "worktrees" => typed::<crate::WorktreeSettings>(document),
         "retention" => typed::<crate::RetentionSettings>(document),
+        "warnings" => typed::<crate::WarningsSettings>(document),
         "install" => typed::<crate::InstallSettings>(document),
         "providers" => typed::<BTreeMap<String, crate::ProviderSettings>>(document),
         _ => Err(format!("{prefix} has no runtime type")),
@@ -426,6 +429,10 @@ pub fn schema<T: Serialize>(
             "retention" => (
                 serde_json::to_value(crate::RetentionSettings::default()),
                 serde_json::to_value(&config.retention),
+            ),
+            "warnings" => (
+                serde_json::to_value(crate::WarningsSettings::default()),
+                serde_json::to_value(&config.warning_dedup),
             ),
             "install" => (
                 serde_json::to_value(crate::InstallSettings::default()),

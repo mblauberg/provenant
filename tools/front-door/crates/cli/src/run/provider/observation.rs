@@ -766,6 +766,7 @@ pub(super) fn check_launch_prompt(
     Ok(())
 }
 
+#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 pub(super) fn launch_prompt(
     text: &str,
     paths: &run::LaunchPaths,

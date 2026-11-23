@@ -1113,6 +1113,7 @@ fn normalise_api_call(args: &[String]) -> Result<String> {
     Ok(operation.join(" "))
 }
 
+#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn fake_gh(args: &[String]) -> Result<u8> {
     let call = args.join(" ");
     // Real gh rejects JSON fields it does not have; so does this fake.
@@ -1578,6 +1579,7 @@ fn fake_gh(args: &[String]) -> Result<u8> {
     Ok(0)
 }
 
+#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.first().is_some_and(|arg| arg == "--forge-port") {

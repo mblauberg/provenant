@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "command": "console detail",
   "status": "ok",
   "data": {
@@ -107,5 +107,6 @@
       "missing": []
     }
   },
-  "error": null
+  "error": null,
+  "warnings": []
 }

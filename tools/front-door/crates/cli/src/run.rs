@@ -518,6 +518,7 @@ fn capacity_reason(reason: &str) -> bool {
         .is_some_and(|rest| rest.starts_with(": "))
 }
 
+#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn writer_gc_settings(
     state: &Path,
     policy: &provenant_records::policy::Policy,
@@ -567,6 +568,7 @@ fn disk_policy_refusal(error: DiskCheck) -> Box<run::PrepareRefusal> {
 }
 
 impl run::Providers for Registry<'_> {
+    #[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
     fn write_grant_limit(
         &self,
         policy: &provenant_records::policy::Policy,
@@ -616,6 +618,7 @@ impl run::Providers for Registry<'_> {
             task.build_heavy,
         ))
     }
+    #[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
     fn check_policy(&self, task: &run::TaskRequest) -> Result<(), Box<run::PrepareRefusal>> {
         let Some(writer) = &task.writer else {
             return Ok(());

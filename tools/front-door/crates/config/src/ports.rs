@@ -1270,6 +1270,7 @@ fn record_leaf_sources(
     }
 }
 
+#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn apply_layer(
     table: &mut serde_json::Value,
     provenance: &mut BTreeMap<String, PortSource>,
@@ -1647,6 +1648,7 @@ impl PortTable {
 
     /// Resolve only the project declaration over compiled defaults when no
     /// validated host state root is available to supply host-level ports.
+    #[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
     pub fn read_project_only(project: &Path) -> io::Result<Self> {
         let table = Self::read_layers(
             Some(project),
@@ -1679,6 +1681,7 @@ impl PortTable {
         })
     }
 
+    #[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
     fn read_for_inspection_with(
         project: Option<&Path>,
         host_state: &Path,
