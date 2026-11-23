@@ -3,12 +3,12 @@
 //!
 //! Writer-ness is the resolved graph's answer, so the base is resolved once by
 //! role before the launch identity is sealed. Read-only members of a writer
-//! graph (the plan node of `implement --plan`, review and gate nodes of a
-//! composite) read that base rather than the caller checkout's stale upstream;
+//! graph (the plan node of `implement --plan`, a composite's review agents) read
+//! that base; gates, decisions and landings take no execution binding rather than the caller checkout's stale upstream;
 //! only a writer that names no base at all falls back to the caller checkout.
 
 use provenant_cli::run::{ReadSourceChoice, read_only_source_ref};
-use provenant_fabric_runtime::graph::{AccessMode, GraphNode, SourceBinding};
+use provenant_fabric_runtime::graph::{AccessMode, GraphNode, NodeKind, SourceBinding};
 use provenant_records::Layer;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -172,7 +172,14 @@ pub(super) fn bind_writer_base_source(node: &mut GraphNode, commit: &str) {
     if node.source.is_some() {
         return;
     }
-    if node.access == AccessMode::ReadOnly
+    // Only an agent node executes, so only it takes an execution binding;
+    // graph validation refuses a source on a gate, decision or landing.
+    let agent = matches!(
+        node.kind,
+        None | Some(NodeKind::Task | NodeKind::Synthesise)
+    );
+    if agent
+        && node.access == AccessMode::ReadOnly
         && node.continues.is_none()
         && node.composite.is_none()
         && node.loop_body.is_none()
