@@ -8,9 +8,7 @@ mod interface;
 mod lane_read_tests;
 mod refusal_detail;
 mod review_subject;
-mod unified;
-#[cfg(test)]
-pub(crate) use unified::graph_status_next;
+pub(crate) mod unified;
 pub(crate) use unified::{
     GraphCommand, check_targets, command_fail, final_status_rows, graph_listing, read_lane_graph,
     read_status_rows, status_line, superseded_notice, superseding_handle, unified_graph_command,

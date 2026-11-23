@@ -1015,7 +1015,7 @@ mod tests {
             "state": "failed",
             "next": "provenant retry g",
         })];
-        let steps: Vec<NextStep> = crate::fabric::graph_status_next(&rows)
+        let steps: Vec<NextStep> = crate::fabric::unified::graph_status_next(&rows)
             .into_iter()
             .collect();
         assert!(
