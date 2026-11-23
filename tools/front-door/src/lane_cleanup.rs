@@ -25,6 +25,8 @@ use std::time::Duration;
 
 const REMOTE_READ: Duration = Duration::from_secs(30);
 const REMOTE_WRITE: Duration = Duration::from_secs(60);
+/// Reason reported when the local retirement scope excludes a branch from GC.
+const EXCLUDED_REASON: &str = "excluded by gc retirement scope";
 
 /// The policy one pass applies.
 #[derive(Clone, Copy)]
@@ -849,6 +851,7 @@ pub(crate) fn sweep_remote(
         &PortLookup(retirement),
         Some(retirement),
         None,
+        None,
         cancel,
     );
     outcomes.iter().for_each(warn);
@@ -865,6 +868,7 @@ fn remote_outcomes(
     sweep: &Sweep<'_>,
     lookup: &dyn RetirementLookup,
     retirement: Option<&dyn RetirementPort>,
+    scope: Option<&worktrees::LocalRetirementScope>,
     cached_base_refs: Option<&[worktrees::EvidenceRef]>,
     cancel: &CancelToken,
 ) -> Vec<ArtefactOutcome> {
@@ -891,6 +895,12 @@ fn remote_outcomes(
     let Ok(reference) = GitRefName::new(&record.reference) else {
         return vec![out(ArtefactState::Retained).with_reason("invalid_ref")];
     };
+    // `target` names the fetched default branch and covers the normal apply
+    // path. The scope adds the origin/HEAD and `main` fallback, so the default
+    // branch is still protected in dry-run and when `remote_default` failed.
+    if scope.is_some_and(|scope| !scope.permits(&reference)) {
+        return vec![out(ArtefactState::Retained).with_reason(EXCLUDED_REASON)];
+    }
     if target.is_some_and(|target| target.reference.as_ref() == Some(&reference)) {
         return vec![out(ArtefactState::Retained).with_reason("integration_ref")];
     }
@@ -1545,10 +1555,46 @@ pub(crate) fn collect(
             .as_ref()
             .is_some_and(|scope| scope.permits(reference))
     };
-    untracked_local.retain(|(reference, _)| local_candidate(reference));
+    // Excluded branches stay visible as Retained outcomes rather than dropping
+    // out of the preview silently.
+    let mut excluded_outcomes = Vec::new();
+    untracked_local.retain(|(reference, _)| {
+        if local_candidate(reference) {
+            true
+        } else {
+            excluded_outcomes.push(
+                ArtefactOutcome::new(
+                    Artefact::LocalBranch,
+                    reference.as_str(),
+                    ArtefactState::Retained,
+                )
+                .with_class(worktrees::ArtefactClass::Foreign)
+                .with_reason(EXCLUDED_REASON),
+            );
+            false
+        }
+    });
     created.retain(|record| {
-        record.endpoint != RefEndpoint::Local
+        if record.endpoint != RefEndpoint::Local
             || GitRefName::new(&record.reference).is_ok_and(|reference| local_candidate(&reference))
+        {
+            true
+        } else {
+            excluded_outcomes.push(
+                ArtefactOutcome::new(
+                    Artefact::LocalBranch,
+                    record.reference.clone(),
+                    ArtefactState::Retained,
+                )
+                .with_class(if record.origin == RefOrigin::Created {
+                    worktrees::ArtefactClass::Managed
+                } else {
+                    worktrees::ArtefactClass::Foreign
+                })
+                .with_reason(EXCLUDED_REASON),
+            );
+            false
+        }
     });
     let has_foreign = created.iter().any(|record| {
         record.origin != RefOrigin::Created
@@ -1602,6 +1648,7 @@ pub(crate) fn collect(
         }
     }
     let mut outcomes = observation_failures;
+    outcomes.extend(excluded_outcomes);
     outcomes.extend(adoption_failures);
     let patterns = sweep
         .settings
@@ -1644,6 +1691,7 @@ pub(crate) fn collect(
             sweep,
             lookup,
             retirement,
+            local_scope.as_ref(),
             cached_base_refs.as_deref(),
             cancel,
         ));
@@ -1748,6 +1796,7 @@ pub(crate) fn settle_integrated(
         sweep,
         &PortLookup(retirement),
         Some(retirement),
+        None,
         None,
         cancel,
     );
@@ -2103,18 +2152,140 @@ mod tests {
                 None,
                 cancel,
             );
+            // Excluded branches are still reported, as Retained with a reason,
+            // so a preview never hides why they were kept.
             for branch in ["main", "trunk", "lane/checked-out"] {
                 let name = format!("refs/heads/{branch}");
-                assert!(
-                    !outcomes.iter().any(|outcome| outcome.name == name),
-                    "{branch} must never be a GC candidate: {outcomes:?}"
+                let retained = outcomes
+                    .iter()
+                    .find(|outcome| outcome.name == name)
+                    .ok_or(worktrees::WorktreeError::InvalidRequest)?;
+                assert_eq!(
+                    retained.outcome,
+                    ArtefactState::Retained,
+                    "{branch}: {outcomes:?}"
                 );
+                assert_eq!(retained.reason.as_deref(), Some(EXCLUDED_REASON));
             }
             let would_remove = outcomes
                 .iter()
                 .find(|outcome| outcome.name == "refs/heads/lane/changed")
                 .ok_or(worktrees::WorktreeError::InvalidRequest)?;
             assert_eq!(would_remove.outcome, ArtefactState::WouldRemove);
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    #[test]
+    // Spec: docs/specs/supervisor.md#pruning-and-gc-need-proof
+    fn dry_run_keeps_a_remote_ledger_record_naming_the_default_branch()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_os::fixture::run_git;
+
+        let fixture = CleanupFixture::new()?;
+        // `origin/HEAD` names `trunk` as the default; no target is resolved in
+        // dry-run, so the scope is the only protection for the remote record.
+        run_git(
+            &fixture.project,
+            &[
+                "update-ref",
+                "refs/remotes/origin/trunk",
+                &fixture.landed.to_string(),
+            ],
+        )?;
+        run_git(
+            &fixture.project,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/trunk",
+            ],
+        )?;
+        fixture.with_context(|context, cancel| {
+            let ledger = RefLedger::for_context(context)?;
+            record_old_ref(
+                context,
+                &ledger,
+                fixture.endpoint(),
+                "trunk",
+                fixture.landed,
+                cancel,
+            )?;
+            let sweep = Sweep {
+                dry_run: true,
+                ..remote_fixture_sweep()
+            };
+            let outcomes = collect(context, None, &sweep, &EmptyRetirementLookup, None, cancel);
+            let retained = outcomes
+                .iter()
+                .find(|outcome| {
+                    outcome.artefact == Artefact::RemoteBranch && outcome.name == "refs/heads/trunk"
+                })
+                .ok_or(worktrees::WorktreeError::InvalidRequest)?;
+            assert_eq!(retained.outcome, ArtefactState::Retained, "{outcomes:?}");
+            assert_eq!(retained.reason.as_deref(), Some(EXCLUDED_REASON));
+            assert_eq!(retained.remote.as_deref(), Some("bound"));
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    #[test]
+    // Spec: docs/specs/supervisor.md#pruning-and-gc-need-proof
+    fn default_branch_remote_record_is_retained_when_remote_default_fails()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_os::fixture::run_git;
+
+        let fixture = CleanupFixture::new()?;
+        run_git(
+            &fixture.project,
+            &[
+                "update-ref",
+                "refs/remotes/origin/trunk",
+                &fixture.landed.to_string(),
+            ],
+        )?;
+        run_git(
+            &fixture.project,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/trunk",
+            ],
+        )?;
+        fixture.with_context(|context, cancel| {
+            let ledger = RefLedger::for_context(context)?;
+            let record = record_old_ref(
+                context,
+                &ledger,
+                fixture.endpoint(),
+                "trunk",
+                fixture.landed,
+                cancel,
+            )?;
+            let scope = worktrees::local_retirement_scope(context, None, cancel)?;
+            // No target models a failed `remote_default`; the scope still has
+            // to protect the remote record naming the default branch.
+            let outcomes = remote_outcomes(
+                context,
+                &ledger,
+                &record,
+                None,
+                &[],
+                &remote_fixture_sweep(),
+                &EmptyRetirementLookup,
+                None,
+                Some(&scope),
+                None,
+                cancel,
+            );
+            let retained = outcomes
+                .iter()
+                .find(|outcome| outcome.artefact == Artefact::RemoteBranch)
+                .ok_or(worktrees::WorktreeError::InvalidRequest)?;
+            assert_eq!(retained.outcome, ArtefactState::Retained, "{outcomes:?}");
+            assert_eq!(retained.reason.as_deref(), Some(EXCLUDED_REASON));
             Ok(())
         })?;
         Ok(())
