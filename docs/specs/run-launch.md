@@ -282,7 +282,10 @@ before the ref is read. `--source local` maps onto `checkout` and `--source upst
 default and the resolver agree: `config schema` reports `auto` when no knob is set.
 `bind_default_read_only_source` pins the graph's read-only nodes to the resolved commit, and the
 plan node of `implement --plan` binds to the launch's `--base` through the same resolver. A review
-range, an authored document and a writer launch keep resolving their own subject. The warning
+range, an authored document and a writer launch keep resolving their own subject. Writer-ness is
+the resolved graph's roles — a launch is a writer when a node that will run writes a worktree —
+not one launch input, and a writer's identity commit is its base (the `--branch` default when it
+names none). The warning
 names the ref, the commit and the layer that chose it; `read_source` on the launch result and the
 explain status names the same commit. Absent or unusable Git evidence stays advisory and never
 refuses the launch.
