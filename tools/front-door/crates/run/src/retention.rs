@@ -483,17 +483,9 @@ impl RunStore {
                             ..
                         }
                     ) && record.exit_evidence.is_none();
+                    // Settlement and custody are checked separately; every
+                    // attempt observes the same minimum scratch idle period.
                     let scratch_eligible = if let Some(policy) = scratch {
-                        let raw = crate::artifacts::read_sealed(
-                            &attempt,
-                            "request.json",
-                            crate::RECORD_LIMIT,
-                        )?
-                        .ok_or(RunError::Validation("scratch request unavailable"))?;
-                        let request: CanonicalRequest = crate::db::decode(&raw)?;
-                        // Settlement and custody are checked separately; every
-                        // attempt observes the same minimum scratch idle period.
-                        let _ = request;
                         !continuing
                             && age
                                 >= i64::try_from(policy.idle_seconds)
