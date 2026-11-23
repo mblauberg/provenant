@@ -497,12 +497,24 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
                     )
                 })
             }));
-            let login_item = crate::apps::stale_login_item(&crate::apps::dir(&home));
+            let apps = crate::apps::dir(&home);
+            let login_item = crate::apps::stale_login_item(&apps);
             if login_item.exists() {
-                result.warnings.push(format!(
-                    "the old menu login item is still installed at {}; run `provenant upgrade` to remove its registration, or delete the bundle and bootout its `application.dev.provenant.menu.*` launchd label manually, so only the LaunchAgent starts the menu bar",
-                    login_item.display()
-                ));
+                // An app without the Contents/MacOS helper still launches the
+                // menu bar through the nested bundle: removing it by hand would
+                // leave no menu bar, so only the upgrade path is safe there.
+                let helper = crate::apps::app_path(&apps).join("Contents/MacOS/quota-menubar");
+                result.warnings.push(if helper.is_file() {
+                    format!(
+                        "the old menu login item is still installed at {}; run `provenant upgrade` to remove its registration, or delete the bundle and bootout its `application.dev.provenant.menu.*` launchd label manually, so only the LaunchAgent starts the menu bar",
+                        login_item.display()
+                    )
+                } else {
+                    format!(
+                        "the installed app predates the menu bar helper and still launches it from the old login item at {}; run `provenant upgrade` to install the current app, which then removes the login item",
+                        login_item.display()
+                    )
+                });
             }
             Ok(result)
         }),
