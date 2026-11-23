@@ -1412,6 +1412,13 @@ pub fn dispatch(
     // One sink for the whole command: warnings raised while resolving roots or
     // loading config reach it, and the guard restores the previous sink on exit.
     let _command_sink = output::install_command_sink(globals.json);
+    // The CLI crate's command surfaces drain this sink through one shared seam
+    // so warnings raised while a command runs reach its envelope, not stderr.
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    {
+        let (take, remember, give_back) = output::command_warning_seam();
+        provenant_cli::install_command_warning_seam(take, remember, give_back);
+    }
     // Warnings raised by Clap's value parsers happened before the sink existed;
     // replay them now so they reach the same envelope as every other warning.
     output::replay_warnings(parse_warnings);

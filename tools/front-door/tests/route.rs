@@ -1047,12 +1047,22 @@ pools = { junior = [{ model = "codex/gpt-6-luna", weight = 101, effort = "high",
     )?;
     let out = rig.command(&["route", "list", "--pool", "junior", "--json"])?;
     assert_eq!(code(&out), 0);
-    let stderr = String::from_utf8_lossy(&out.stderr.bytes);
-    assert!(
-        stderr.contains("domains.routing.pools.junior") && stderr.contains("weight"),
-        "{stderr}"
-    );
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
     let recovered: Value = serde_json::from_slice(&out.stdout.bytes)?;
+    assert!(
+        recovered["warnings"]
+            .as_array()
+            .ok_or("warnings")?
+            .iter()
+            .any(
+                |warning| warning["message"].as_str().is_some_and(|message| {
+                    message.contains("domains.routing.pools.junior") && message.contains("weight")
+                })
+            ),
+        "{recovered}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr.bytes);
+    assert!(!stderr.contains("warning:"), "{stderr}");
     assert!(
         !recovered["data"]["pools"]["junior"]
             .as_array()

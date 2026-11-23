@@ -618,11 +618,10 @@ pub fn run(
     };
     let mode = globals.render_mode(&human, read_only, None);
     // Runtime pages/mutation receipts are bounded well below the ordinary cap.
-    match crate::render_or_publish(
-        &result,
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    match crate::render_command_result(
+        &mut result,
         mode,
-        &mut io::stdout().lock(),
-        &mut io::stderr().lock(),
         |value| context::publish(value, roots),
         crate::OverflowPolicy::Refuse,
     ) {

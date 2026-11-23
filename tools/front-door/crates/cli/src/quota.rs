@@ -3338,7 +3338,7 @@ pub fn run(
             Ok((data, human))
         }),
     };
-    let (envelope, human) = match result {
+    let (mut envelope, human) = match result {
         Ok((report, human)) => (CommandResult::new(name, Outcome::Ok, Some(report)), human),
         Err(error) => {
             let status = match &error {
@@ -3393,14 +3393,9 @@ pub fn run(
         matches!(command, Quota::Show(_) | Quota::History { .. }),
         summary.as_ref(),
     );
-    let outcome = crate::render_or_publish(
-        &envelope,
-        mode,
-        &mut io::stdout().lock(),
-        &mut io::stderr().lock(),
-        publish,
-        crate::OverflowPolicy::Refuse,
-    );
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    let outcome =
+        crate::render_command_result(&mut envelope, mode, publish, crate::OverflowPolicy::Refuse);
     outcome.map_or(3, |outcome| crate::exit_status(&outcome))
 }
 

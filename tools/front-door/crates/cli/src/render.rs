@@ -14,6 +14,75 @@ use thiserror::Error;
 /// compact output summarises it to one row.
 const ERROR_CAUSE_BYTES: usize = 4 * 1024;
 
+/// The binary edge owns the warning sink and the standard streams. A library
+/// command surface never writes a warning itself: it hands its finished result
+/// to the one seam below, which moves the warnings raised while the command ran
+/// onto the envelope before it is rendered. Under `--json` the sink holds them,
+/// so they travel in `envelope[warnings]` and none reaches stderr; in human
+/// mode the sink prints them as they arrive. A second install is ignored so a
+/// nested dispatch cannot replace the edge's seam.
+///
+/// Spec: docs/specs/cli.md#warnings-are-typed-values
+struct CommandWarningSeam {
+    take: fn() -> Vec<Warning>,
+    remember: fn(&[Warning]),
+    give_back: fn(Vec<Warning>),
+}
+
+static COMMAND_WARNING_SEAM: std::sync::OnceLock<CommandWarningSeam> = std::sync::OnceLock::new();
+
+/// Install the binary edge's drain for command warnings. Called once before any
+/// command is dispatched.
+///
+/// Spec: docs/specs/cli.md#warnings-are-typed-values
+pub fn install_command_warning_seam(
+    take: fn() -> Vec<Warning>,
+    remember: fn(&[Warning]),
+    give_back: fn(Vec<Warning>),
+) {
+    let _ = COMMAND_WARNING_SEAM.set(CommandWarningSeam {
+        take,
+        remember,
+        give_back,
+    });
+}
+
+/// The one emit path for a library command surface: move the command's held
+/// warnings onto its result before rendering, remember their per-change keys
+/// only after the envelope reached the reader, and hand them back to the edge
+/// on a write failure so its guard shows them on exit instead of swallowing
+/// them. Rendering and overflow policy stay with the existing seam.
+///
+/// Spec: docs/specs/cli.md#warnings-are-typed-values
+pub fn render_command_result<T: Serialize>(
+    result: &mut CommandResult<T>,
+    mode: RenderMode<'_>,
+    publish: impl FnOnce(&CommandResult<T>) -> io::Result<provenant_records::AbsolutePath>,
+    policy: OverflowPolicy,
+) -> Result<Outcome, RenderError> {
+    let warnings = COMMAND_WARNING_SEAM
+        .get()
+        .map(|seam| (seam.take)())
+        .unwrap_or_default();
+    result.warnings = warnings;
+    let rendered = render_or_publish(
+        result,
+        mode,
+        &mut io::stdout().lock(),
+        &mut io::stderr().lock(),
+        publish,
+        policy,
+    );
+    if let Some(seam) = COMMAND_WARNING_SEAM.get() {
+        if rendered.is_ok() {
+            (seam.remember)(&result.warnings);
+        } else {
+            (seam.give_back)(std::mem::take(&mut result.warnings));
+        }
+    }
+    rendered
+}
+
 /// The compact view an owner supplies for the default human output: a headline
 /// of counts, then the rows that need action first, and the one typed next
 /// command. The generic truncator is only a fallback for owners without one.

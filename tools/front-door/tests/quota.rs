@@ -36,6 +36,30 @@ fn fabric_and_quota_load_one_domain_config() -> Result {
 }
 
 #[test]
+// Spec: docs/specs/cli.md#warnings-are-typed-values
+fn show_carries_config_warnings_in_the_envelope_not_on_stderr() -> Result {
+    let rig = quota_rig()?;
+    std::fs::write(
+        rig.state.join("config.toml"),
+        "schema_version = 1\n[routing.pacing]\ncodex = \"spend\"\n",
+    )?;
+    let out = rig.command(&["quota", "show", "--json"])?;
+    assert_eq!(code(&out), 0);
+    let envelope: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
+    assert!(
+        envelope["warnings"]
+            .as_array()
+            .ok_or("warnings")?
+            .iter()
+            .any(|warning| warning["code"] == "CONFIG_KEY_IGNORED"),
+        "{envelope}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr.bytes);
+    assert!(!stderr.contains("warning:"), "{stderr}");
+    Ok(())
+}
+
+#[test]
 // Spec: docs/specs/routing.md#provider-model-discovery
 fn show_is_read_only_and_tick_publishes_partial_coverage() -> Result {
     let rig = quota_rig()?;
