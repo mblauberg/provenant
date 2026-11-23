@@ -804,7 +804,7 @@ fn corrupt_graph_listing_gives_a_working_retirement_command() -> Result {
             .any(|row| row["name"] == "healthy")
     );
     assert!(!listing.to_string().contains("PRIVATE_CONTENT_SENTINEL"));
-    // Spec: docs/specs/next-batch/briefs/w1-envelope.md -- under the v2 envelope
+    // Spec: docs/specs/cli.md#warnings-are-typed-values -- under the v2 envelope
     // typed warnings legitimately carry paths in their subject. The corrupt
     // record must not echo a host path into the command's data.
     assert!(

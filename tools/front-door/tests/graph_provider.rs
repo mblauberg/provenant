@@ -15,7 +15,7 @@ use std::{
 use support::{Result, TestRig, code};
 
 /// Under `--json` a typed warning lives in the command envelope, never on raw
-/// stderr. Spec: docs/specs/next-batch.md#seam-1-settings-and-warnings.
+/// stderr. Spec: docs/specs/cli.md#warnings-are-typed-values.
 fn envelope_warns(report: &Value, text: &str) -> bool {
     report["warnings"].as_array().is_some_and(|warnings| {
         warnings.iter().any(|warning| {
@@ -1574,7 +1574,7 @@ fn remote_only_writer_cli_starts_at_remote_tip() -> Result {
         report["data"]["checkpoint"]["nodes"][0]["new_worktree_base"], remote_tip,
         "recovery must retain the selected remote tip before provisioning"
     );
-    // Spec: docs/specs/next-batch.md#seam-1-settings-and-warnings -- under
+    // Spec: docs/specs/cli.md#warnings-are-typed-values -- under
     // --json warnings travel in the envelope, never on raw stderr.
     assert!(
         settled.launch_value["warnings"]
