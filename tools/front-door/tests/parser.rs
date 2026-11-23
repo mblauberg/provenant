@@ -248,7 +248,7 @@ fn ordinary_leaves_validate_roots_and_unbuilt_owners_refuse() -> Result {
         vec!["root"],
         vec!["config", "show"],
         vec!["config", "detect"],
-        vec!["config", "path", "--project"],
+        vec!["config", "path"],
         vec!["install", "--source", "/fixture", "--harness", "claude"],
         vec!["uninstall", "--harness", "claude"],
         vec!["route", "list"],
@@ -346,7 +346,7 @@ fn config_detection_and_project_path_are_inspectable() -> Result {
         value["data"]["tiers"]["0"][0]["argv"],
         serde_json::json!(["pnpm", "run", "lint"])
     );
-    let out = rig.command(&["config", "path", "--project", "--json"])?;
+    let out = rig.command(&["config", "path", ".", "--json"])?;
     assert_eq!(code(&out), 0, "{out:?}");
     let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
     let dir = provenant_config::host_project_dir(&rig.state, &rig.project)
