@@ -3,12 +3,17 @@
 //! the recreate target path refuse explicitly instead of building a remote
 //! name from an empty string.
 //! Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+#![allow(
+    dead_code,
+    unused_imports,
+    reason = "the custom worktree driver omits libtest functions"
+)]
 
 use std::{collections::BTreeMap, error::Error, path::PathBuf};
 
 use provenant_cli::fabric::Context;
 use provenant_confinement::worktrees::{Occupancy, WorkerObserver};
-use provenant_core::{HostId, RootInputs, WaitBudget};
+use provenant_core::{Clock, HostId, RootInputs, WaitBudget};
 use provenant_fabric_runtime::handoff::session::Tree;
 use provenant_os::clock::SystemClock;
 
@@ -54,7 +59,7 @@ impl RemoteLessSource {
         provenant_os::fixture::run_git(&project, &["commit", "-qm", "base"])?;
         let remotes = provenant_os::fixture::run_git(&project, &["remote"])?;
         assert!(
-            remotes.trim().is_empty(),
+            String::from_utf8_lossy(&remotes).trim().is_empty(),
             "fixture must have no remotes, saw {remotes:?}"
         );
 
