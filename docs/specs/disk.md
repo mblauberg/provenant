@@ -15,7 +15,7 @@ the procedure. Paths are relative to `tools/front-door/`.
 The state root also holds `warnings.sqlite3`, one STRICT `seen` table that remembers
 per-change warning keys (code, first and last seen time, count). Rows older than the
 host setting `warnings.dedup_retention_days` (default 30 days, shown with its source in
-`provenant config schema`) are pruned on each write. The retired `config-warning-*`
+`provenant config schema --all`, or with `provenant config show`) are pruned on each write. The retired `config-warning-*`
 and `root-warning-*` marker files are deleted by the `retire-warning-markers` install
 migration; nothing else in the state root is touched.
 - Why: dedup memory is bounded and survives a restart, without leaving a marker per

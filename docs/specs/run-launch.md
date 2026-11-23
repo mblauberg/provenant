@@ -272,12 +272,14 @@ proceeds, and records `effective=false` and the reason in the sandbox receipt.
 ## Inputs and resources
 
 The tree a read-only lane reads is the sourced `lanes.read_source` setting, resolved by one
-resolver, `read_only_source_ref`. `checkout` keeps the local checkout; `default_branch` pins the
-fetched default branch; any other value is an explicit Git ref; `lanes.read_source_fetch_first`
-fetches from the resolved remote before the ref is read. `--source local` maps onto `checkout`
-and `--source upstream` onto `default_branch` at the launch layer, so the flag wins over the
-host or project knob. Under the compiled default (no setting at that name) only a checkout behind
-its fetched upstream is pinned, as last fetched; a level or ahead checkout keeps its local tree.
+resolver, `read_only_source_ref`. `auto` (the registry default, also the empty value) pins only a
+checkout behind its fetched upstream, as last fetched; a level or ahead checkout keeps its local
+tree. `checkout` keeps the local checkout; `default_branch` pins the fetched default branch
+(remote HEAD, then the forge API), never this checkout's configured tracking upstream; any other
+value is an explicit Git ref; `lanes.read_source_fetch_first` fetches from the resolved remote
+before the ref is read. `--source local` maps onto `checkout` and `--source upstream` onto
+`default_branch` at the launch layer, so the flag wins over the host or project knob. The registry
+default and the resolver agree: `config schema` reports `auto` when no knob is set.
 `bind_default_read_only_source` pins the graph's read-only nodes to the resolved commit, and the
 plan node of `implement --plan` binds to the launch's `--base` through the same resolver. A review
 range, an authored document and a writer launch keep resolving their own subject. The warning

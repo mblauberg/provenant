@@ -1016,10 +1016,16 @@ pub(crate) fn await_ci<E>(
     }
 }
 
-/// The compiled, sourced retry family for readers that resolve no observer of
-/// their own (for example review subject selection).
-pub(crate) fn retry() -> retry::Retry {
-    retry::Retry::resolve(None, None, None, None, None, None, None, None)
+/// The sourced retry family for readers that resolve no observer of their own
+/// (for example review subject selection). The `ci.retry.*` knobs supply each
+/// value with its layer and origin; an unreadable config keeps the compiled
+/// defaults.
+/// Spec: docs/specs/cli.md#ci-observations
+pub(crate) fn retry(roots: &provenant_core::Roots) -> retry::Retry {
+    let knobs = provenant_config::read_knobs(roots)
+        .map(|config| config.knobs)
+        .unwrap_or_default();
+    retry::Retry::from_knobs(&knobs)
 }
 
 fn identity(body: Value) -> Value {

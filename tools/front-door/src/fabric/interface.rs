@@ -767,8 +767,9 @@ fn bind_review_warning(node: &mut provenant_fabric_runtime::graph::GraphNode, wa
 const LAUNCH_CONTROLS: [&str; 5] = ["access", "worktree", "branch", "base", "write_scope"];
 
 /// The `--source` flag is the launch layer of `lanes.read_source`. A host or
-/// project knob supplies the value and the fetch-first flag; the compiled
-/// default keeps the advisory pin of a checkout behind its fetched upstream.
+/// project knob supplies the value and the fetch-first flag; `auto` (including
+/// the compiled default) keeps the advisory pin of a checkout behind its
+/// fetched upstream.
 fn read_source_choice(
     input: &Value,
     config: &provenant_config::ResolvedConfig<provenant_cli::domains::Domains>,
@@ -778,10 +779,14 @@ fn read_source_choice(
 
     let mut choice = ReadSourceChoice::automatic();
     if let Some(knob) = config.knobs.get(ReadSourceChoice::KNOB) {
-        choice.value = if knob.source.layer == Layer::Default {
+        let value = knob.value.as_str().unwrap_or_default();
+        // `auto` is the registry name for the compiled default, so an explicit
+        // setting of it still resolves the advisory pin. config schema reports
+        // the same value as this resolver uses.
+        choice.value = if knob.source.layer == Layer::Default || value == "auto" {
             String::new()
         } else {
-            knob.value.as_str().unwrap_or_default().to_owned()
+            value.to_owned()
         };
         choice.layer = knob.source.layer;
         choice.origin = Some(format!("config.toml#{}", ReadSourceChoice::KNOB));
@@ -6374,6 +6379,80 @@ mod tests {
         assert_eq!(flag["read_source"]["source"], json!("launch"));
         let flag = submit(None, Some("local"))?;
         assert!(flag["document"]["nodes"][0]["source"].is_null());
+        Ok(())
+    }
+
+    /// An explicit `default_branch` pins the fetched default, not the current
+    /// branch's tracking upstream: a feature checkout must not read its own tip.
+    /// Spec: docs/specs/run-launch.md#inputs-and-resources
+    #[test]
+    fn default_branch_pins_the_forge_default_not_the_feature_upstream() -> Result {
+        let rig = TestRig::new()?;
+        let remote = rig.root.join("remote.git");
+        let remote = remote.to_str().ok_or("remote path")?;
+        git(&rig, &["init", "-q", "--bare", remote])?;
+        git(
+            &rig,
+            &["-C", remote, "symbolic-ref", "HEAD", "refs/heads/main"],
+        )?;
+        git(&rig, &["config", "user.name", "Test"])?;
+        git(&rig, &["config", "user.email", "test@example.invalid"])?;
+        std::fs::write(rig.project.join("file"), "one\n")?;
+        git(&rig, &["add", "file"])?;
+        git(&rig, &["commit", "-q", "-m", "one"])?;
+        git(&rig, &["branch", "-M", "main"])?;
+        git(&rig, &["remote", "add", "origin", remote])?;
+        git(&rig, &["push", "-q", "-u", "origin", "main"])?;
+        git(&rig, &["remote", "set-head", "origin", "main"])?;
+        let default = git(&rig, &["rev-parse", "HEAD"])?;
+        // The feature branch tracks origin/feature, a non-default upstream.
+        git(&rig, &["checkout", "-q", "-b", "feature"])?;
+        std::fs::write(rig.project.join("file"), "two\n")?;
+        git(&rig, &["add", "file"])?;
+        git(&rig, &["commit", "-q", "-m", "two"])?;
+        git(&rig, &["push", "-q", "-u", "origin", "feature"])?;
+        let feature = git(&rig, &["rev-parse", "HEAD"])?;
+        assert_ne!(feature, default, "the fixture needs two distinct tips");
+
+        let factory = factory(&rig)?;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
+        let submit = |knob: Option<&str>, source: Option<&str>| -> Result<Value> {
+            let mut config = "schema_version=1\n[gc]\nfree_floor='1B'\n".to_owned();
+            if let Some(knob) = knob {
+                config.push_str(&format!("[knobs]\nlanes.read_source='{knob}'\n"));
+            }
+            std::fs::write(rig.state.join("config.toml"), config)?;
+            let mut input =
+                json!({"op":"run","template":"task","brief":"Review the tree","explain":true});
+            if let Some(source) = source {
+                input["source"] = json!(source);
+            }
+            Ok(factory.graph_document(input, budget, &cancel)?)
+        };
+
+        for chosen in [
+            submit(Some("default_branch"), None)?,
+            submit(None, Some("upstream"))?,
+        ] {
+            let commit = chosen["document"]["nodes"][0]["source"]["commit"].clone();
+            assert_eq!(
+                commit,
+                json!(default),
+                "explicit default_branch must pin the fetched default: {chosen}"
+            );
+            assert_ne!(
+                commit,
+                json!(feature),
+                "the tracking upstream is not the default branch: {chosen}"
+            );
+        }
+        // With no source setting the advisory pin keeps this level checkout.
+        let automatic = submit(None, None)?;
+        assert!(
+            automatic["document"]["nodes"][0]["source"].is_null(),
+            "{automatic}"
+        );
         Ok(())
     }
 

@@ -90,7 +90,7 @@ impl Factory {
         cancel: &CancelToken,
         pull: impl Fn(u64) -> Result<PullSubject, FacadeError>,
     ) -> Result<Option<ReviewSubject>, FacadeError> {
-        let retry = crate::pr::observer::retry();
+        let retry = crate::pr::observer::retry(&self.context.roots);
         self.review_subject_with_wait(
             input,
             review,

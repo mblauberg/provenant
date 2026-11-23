@@ -444,7 +444,7 @@ fn read(
                 &forge_request(deadline, cancel, pr_read_timeout),
                 // Spec: docs/specs/cli.md#ci-observations — the PR path reads
                 // through the one observer and its one sourced retry family.
-                crate::pr::observer::retry().poll.value,
+                crate::pr::observer::retry(edge.roots).poll.value,
             ) {
                 Ok(line) => {
                     let mut line = gate_line(line, watch_head.as_deref());
