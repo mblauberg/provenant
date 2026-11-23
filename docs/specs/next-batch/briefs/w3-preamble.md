@@ -4,7 +4,7 @@ Issues: #3498 #3652. Wave 3 of the next batch; integration branch `batch/next`. 
 
 ## Outcome
 
-(#3498, #3652) Knob *lanes.brief_preamble*: a file path at host, project (`.provenant/`) and launch (`--preamble-file`) layers; layers concatenate in that order, each labelled with its source, through `PreambleExtras` in `crates/run/src/completion.rs`. A layer may scope itself to roles (writer, review, read-only). A missing file warns and the launch proceeds. Writers' preamble includes the project's declared no-build static checks (from the port table) to run before pushing. Register in `config/harness-knobs.json`; document in `skills/orchestrate/references/lanes.md`.
+(#3498, #3652) Knob *lanes.brief_preamble*: a file path at host, project (`.provenant/`) and launch (`--preamble-file`) layers; layers concatenate in that order, each labelled with its source, through `PreambleExtras` in `crates/run/src/completion.rs`. A layer may scope itself to roles (writer, review, read-only). A missing file warns and the launch proceeds. Writers' preamble includes the project's declared no-build static checks (from the port table) to run before pushing. Register in `config/harness-knobs.json`; document in `skills/orchestrate/SKILL.md`.
 
 ## Interface to honour
 
@@ -67,7 +67,7 @@ pub struct Merge<T> { pub winner: Option<Sourced<T>>, pub shadowed: Vec<Sourced<
 - `tools/front-door/crates/run/src/completion.rs`
 - `config/harness-knobs.json`
 - `tools/front-door/crates/config/src/knobs.rs`
-- `skills/orchestrate/references/lanes.md`
+- `skills/orchestrate/SKILL.md`
 
 ## Tests
 
@@ -75,7 +75,7 @@ Preamble test with all three layers: order and source labels; a role-scoped laye
 
 ## Docs
 
-`skills/orchestrate/references/lanes.md`.
+`skills/orchestrate/SKILL.md`.
 
 ## Release note
 

@@ -2,7 +2,7 @@
 use provenant_config::{self as config, Release, ReleaseSmoke};
 use provenant_core::CancelToken;
 use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
-use provenant_records::VersionInfo;
+use provenant_records::{VersionInfo, wire::ENVELOPE_VERSION};
 use serde::{Deserialize, de::DeserializeOwned};
 use std::{ffi::OsString, io, path::Path, time::Duration};
 
@@ -91,6 +91,26 @@ impl SystemSmoke {
         .map_err(|_| io::Error::other("release smoke output is not a valid result envelope"))
     }
 }
+
+/// Validate the identity envelope against the shape the CLI spec defines.
+/// Kept separate from the process invocation so a unit test can feed it the
+/// real serialised `CommandResult` and catch envelope drift.
+fn check_version_identity(version: &SmokeEnvelope<SmokeVersion>) -> io::Result<()> {
+    if version.schema_version != ENVELOPE_VERSION
+        || version.command != "version"
+        || version.status != "ok"
+        || version.error.is_some()
+        || version.data.package_version != env!("CARGO_PKG_VERSION")
+        || version.data.record_schema_version != 1
+        || version.data.config_schema_version != config::CONFIG_SCHEMA_VERSION
+    {
+        return Err(io::Error::other(
+            "release version identity envelope differs",
+        ));
+    }
+    Ok(())
+}
+
 impl SystemSmoke {
     /// Read the binary's own identity without relying on the packager's build stamp.
     pub(crate) fn identity(
@@ -99,18 +119,7 @@ impl SystemSmoke {
         cancel: &CancelToken,
     ) -> io::Result<VersionInfo> {
         let version = self.invoke::<SmokeVersion>(executable, &["--version", "--json"], cancel)?;
-        if version.schema_version != 1
-            || version.command != "version"
-            || version.status != "ok"
-            || version.error.is_some()
-            || version.data.package_version != env!("CARGO_PKG_VERSION")
-            || version.data.record_schema_version != 1
-            || version.data.config_schema_version != config::CONFIG_SCHEMA_VERSION
-        {
-            return Err(io::Error::other(
-                "release version identity envelope differs",
-            ));
-        }
+        check_version_identity(&version)?;
         let data = version.data;
         Ok(VersionInfo {
             extra: Default::default(),
@@ -130,7 +139,7 @@ impl ReleaseSmoke for SystemSmoke {
         let executable = release.source().join("bin/provenant");
         let identity = self.identity(&executable, cancel)?;
         let help = self.invoke::<serde_json::Value>(&executable, &["--help", "--json"], cancel)?;
-        if help.schema_version != 1
+        if help.schema_version != ENVELOPE_VERSION
             || help.command != "help"
             || help.status != "ok"
             || help.error.is_some()
@@ -139,5 +148,64 @@ impl ReleaseSmoke for SystemSmoke {
             return Err(io::Error::other("release help identity envelope differs"));
         }
         Ok(identity)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use provenant_records::{CommandResult, Outcome, SourceDigest};
+    use serde::Serialize;
+
+    /// Mirrors the `BuildIdentity` the version command emits: `package_version`
+    /// beside the flattened installation `VersionInfo`.
+    #[derive(Serialize)]
+    struct TestBuildIdentity {
+        package_version: &'static str,
+        #[serde(flatten)]
+        installation: VersionInfo,
+    }
+
+    fn serialised_identity() -> Vec<u8> {
+        let installation = VersionInfo {
+            extra: Default::default(),
+            source_digest: SourceDigest::from_bytes([0x11; 32]),
+            asset_digest: SourceDigest::from_bytes([0x22; 32]),
+            target: "x86_64-apple-darwin".to_owned(),
+            toolchain: "stable".to_owned(),
+            record_schema_version: 1,
+            config_schema_version: config::CONFIG_SCHEMA_VERSION,
+        };
+        let data = TestBuildIdentity {
+            package_version: env!("CARGO_PKG_VERSION"),
+            installation,
+        };
+        serde_json::to_vec(&CommandResult::new("version", Outcome::Ok, data))
+            .expect("serialise version envelope")
+    }
+
+    #[test]
+    // Spec: docs/specs/cli.md#one-bounded-envelope
+    fn version_identity_check_accepts_the_real_serialised_envelope() {
+        let bytes = serialised_identity();
+        let envelope: SmokeEnvelope<SmokeVersion> =
+            serde_json::from_slice(&bytes).expect("deserialise version envelope");
+        assert_eq!(envelope.schema_version, ENVELOPE_VERSION);
+        check_version_identity(&envelope).expect("the real envelope must pass the identity check");
+    }
+
+    #[test]
+    // Spec: docs/specs/cli.md#one-bounded-envelope
+    fn version_identity_check_still_rejects_a_foreign_envelope_version() {
+        let bytes = serialised_identity();
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("deserialise envelope value");
+        value["schema_version"] = serde_json::json!(ENVELOPE_VERSION + 1);
+        let envelope: SmokeEnvelope<SmokeVersion> =
+            serde_json::from_value(value).expect("deserialise tampered envelope");
+        assert!(
+            check_version_identity(&envelope).is_err(),
+            "a foreign envelope version must still be rejected"
+        );
     }
 }
