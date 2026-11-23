@@ -2294,6 +2294,76 @@ mod tests {
     }
 
     #[test]
+    // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    fn a_declared_protected_branch_is_excluded_from_retirement()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_os::fixture::run_git;
+
+        let fixture = CleanupFixture::new()?;
+        run_git(
+            &fixture.project,
+            &[
+                "symbolic-ref",
+                "refs/remotes/bound/HEAD",
+                "refs/remotes/bound/main",
+            ],
+        )?;
+        let mut ports = provenant_config::PortTable::builtin();
+        ports.git.protected = vec!["refs/heads/protected".to_owned()];
+        ports.git.source = provenant_records::Layer::Project;
+        std::fs::write(
+            fixture.project.join(provenant_config::PORTS_CONFIG),
+            serde_json::to_vec(&ports)?,
+        )?;
+        fixture.with_context(|context, cancel| {
+            let scope = worktrees::local_retirement_scope(context, None, cancel)?;
+            assert!(!scope.unresolved());
+            let protected = GitRefName::branch("protected").expect("branch");
+            let default = GitRefName::branch("main").expect("branch");
+            assert!(!scope.permits(&protected), "declared protected branch");
+            assert!(!scope.permits(&default), "default branch");
+            assert!(
+                scope.permits(&GitRefName::branch("lane/old").expect("branch")),
+                "ordinary branch"
+            );
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    #[test]
+    // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    fn an_unresolvable_forge_context_permits_no_retirement()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_os::fixture::run_git;
+
+        let fixture = CleanupFixture::new()?;
+        // No remote declaration and no remote-tracking refs: the one forge
+        // context cannot name a remote, so GC must fail closed.
+        run_git(&fixture.project, &["remote", "remove", "bound"])?;
+        std::fs::remove_dir_all(fixture.project.join(".git/refs/remotes"))?;
+        fixture.with_context(|context, cancel| {
+            let (scope, warnings) = provenant_records::capture(|| {
+                worktrees::local_retirement_scope(context, None, cancel)
+            });
+            let scope = scope?;
+            assert!(scope.unresolved(), "{warnings:?}");
+            assert!(
+                warnings
+                    .iter()
+                    .any(|warning| { warning.code.as_ref() == "FORGE_CONTEXT_UNRESOLVED" }),
+                "{warnings:?}"
+            );
+            for branch in ["main", "lane/old", "lane/changed"] {
+                let reference = GitRefName::branch(branch).expect("branch");
+                assert!(!scope.permits(&reference), "{branch} must not be retired");
+            }
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    #[test]
     fn cleanup_resolves_credentials_and_rejects_changed_endpoint()
     -> Result<(), Box<dyn std::error::Error>> {
         let fixture = CleanupFixture::new()?;

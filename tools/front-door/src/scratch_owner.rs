@@ -209,7 +209,8 @@ impl<'a> Owner<'a> {
     }
 
     /// Prove a no-PR branch's exact recorded tip is in the locally observed
-    /// origin default history. No ref is fetched or rewritten here.
+    /// default history of the one resolved forge remote. No ref is fetched or
+    /// rewritten here.
     fn local_default_contains(&self, project: &Path, branch: &str, head: GitOid) -> bool {
         let Ok(branch) = GitRefName::branch(branch) else {
             return false;
@@ -244,24 +245,18 @@ impl<'a> Owner<'a> {
             return false;
         }
 
-        let default = match crate::gc_support::host_git_with_stderr(
-            project,
-            &executor,
-            &["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
-            Duration::from_secs(5),
-            false,
-        ) {
-            Ok(output) if output.termination == Termination::Exit(0) => output,
-            _ => return false,
-        };
-        let Ok(default) = std::str::from_utf8(&default.stdout.bytes) else {
+        let Ok(ports) =
+            provenant_config::PortTable::read_for(Some(project), self.roots.state.as_path())
+        else {
             return false;
         };
-        let default = default.trim();
-        let Some(remote_name) = default.strip_prefix("refs/remotes/") else {
+        let Ok(forge) = provenant_config::resolve_for(project, &ports) else {
             return false;
         };
-        let Ok(default_ref) = GitRefName::remote_tracking(remote_name) else {
+        let Ok(default_ref) = GitRefName::remote_tracking(format!(
+            "{}/{}",
+            forge.remote.value, forge.default_branch.value
+        )) else {
             return false;
         };
         self.is_ancestor(project, head, default_ref.as_str())

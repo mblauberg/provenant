@@ -216,33 +216,46 @@ pub(crate) fn refresh_writer_tracking_ref(
     context: &WorktreeContext<'_>,
     branch: &str,
 ) -> Result<(), Error> {
-    refresh_branch(context.repo.root_path(), context.executor, branch)
-        .map_err(|_| Error::GcObservation("cannot refresh writer tracking ref"))
+    let forge = provenant_confinement::worktrees::forge_context(context)
+        .map_err(|_| Error::GcObservation("cannot resolve forge context"))?;
+    refresh_branch(
+        context.repo.root_path(),
+        context.executor,
+        &forge.remote.value,
+        branch,
+    )
+    .map_err(|_| Error::GcObservation("cannot refresh writer tracking ref"))
 }
 
-fn refresh_branch(repo: &Path, executor: &dyn Executor, branch: &str) -> Result<(), Error> {
+fn refresh_branch(
+    repo: &Path,
+    executor: &dyn Executor,
+    remote: &str,
+    branch: &str,
+) -> Result<(), Error> {
     provenant_confinement::repo::GitRefName::branch(branch)
         .map_err(|_| Error::GcObservation("invalid writer branch"))?;
     if branch == "HEAD" {
         return Err(Error::GcObservation("invalid writer branch"));
     }
-    let remote = host_git_config_with_cancel(
+    let key = format!("remote.{remote}.url");
+    let url = host_git_config_with_cancel(
         repo,
         executor,
-        provenant_os::git_config::Read::Get("remote.origin.url"),
-        "read origin URL",
+        provenant_os::git_config::Read::Get(&key),
+        "read remote URL",
         Some("remote URL"),
         Duration::from_secs(5),
         None,
     )?;
-    if remote.termination == Termination::Exit(1) {
+    if url.termination == Termination::Exit(1) {
         return Ok(());
     }
-    if remote.termination != Termination::Exit(0) {
-        return Err(Error::GcObservation("cannot read origin"));
+    if url.termination != Termination::Exit(0) {
+        return Err(Error::GcObservation("cannot read remote URL"));
     }
     let source = format!("refs/heads/{branch}");
-    let refspec = format!("+{source}:refs/remotes/origin/{branch}");
+    let refspec = format!("+{source}:refs/remotes/{remote}/{branch}");
     let fetched = host_git_with_stderr(
         repo,
         executor,
@@ -252,7 +265,7 @@ fn refresh_branch(repo: &Path, executor: &dyn Executor, branch: &str) -> Result<
             "--no-recurse-submodules",
             "--no-write-fetch-head",
             "--refmap=",
-            "origin",
+            remote,
             &refspec,
         ],
         Duration::from_secs(15),
@@ -285,23 +298,13 @@ pub(crate) fn fetch_default(
             None,
         )
     };
-    let remote = host_git_config_with_cancel(
-        context.repo.root_path(),
-        context.executor,
-        provenant_os::git_config::Read::Get("remote.origin.url"),
-        "read origin URL",
-        Some("remote URL"),
-        Duration::from_secs(5),
-        Some(cancel),
-    )?;
-    if remote.termination == Termination::Exit(1) {
-        return Ok(None);
-    }
-    if remote.termination != Termination::Exit(0) {
-        return Err(Error::GcObservation("cannot read origin"));
-    }
+    // The remote comes from the one resolved forge context, never a hard-coded
+    // `origin`; only the branch is advertised by the remote itself.
+    let forge = provenant_confinement::worktrees::forge_context(context)
+        .map_err(|_| Error::GcObservation("cannot resolve forge context"))?;
+    let remote = forge.remote.value.as_str();
     let advertised = run(
-        &["ls-remote", "--symref", "origin", "HEAD"],
+        &["ls-remote", "--symref", remote, "HEAD"],
         Duration::from_secs(60),
     )?;
     if advertised.termination != Termination::Exit(0) {
@@ -320,7 +323,7 @@ pub(crate) fn fetch_default(
         .ok_or(Error::GcObservation("upstream has no default branch"))?;
     provenant_confinement::repo::GitRefName::branch(branch)
         .map_err(|_| Error::GcObservation("invalid upstream default branch"))?;
-    let reference = format!("refs/remotes/origin/{branch}");
+    let reference = format!("refs/remotes/{remote}/{branch}");
     let refspec = format!("+refs/heads/{branch}:{reference}");
     let fetched = run(
         &[
@@ -329,7 +332,7 @@ pub(crate) fn fetch_default(
             "--no-recurse-submodules",
             "--no-write-fetch-head",
             "--refmap=",
-            "origin",
+            remote,
             &refspec,
         ],
         Duration::from_secs(60),
@@ -337,8 +340,9 @@ pub(crate) fn fetch_default(
     if fetched.termination != Termination::Exit(0) {
         return Err(Error::GcObservation("cannot fetch upstream default branch"));
     }
-    let name = provenant_confinement::repo::GitRefName::remote_tracking(format!("origin/{branch}"))
-        .map_err(|_| Error::GcObservation("invalid fetched upstream ref"))?;
+    let name =
+        provenant_confinement::repo::GitRefName::remote_tracking(format!("{remote}/{branch}"))
+            .map_err(|_| Error::GcObservation("invalid fetched upstream ref"))?;
     let oid = context.facts.resolve_commit(context, name, cancel)?;
     Ok(Some((reference, oid)))
 }
@@ -1061,10 +1065,10 @@ mod tests {
                 "HEAD:refs/heads/other/secret",
             ],
         )?;
-        refresh_branch(&repo, &executor, "lane/test")?;
+        refresh_branch(&repo, &executor, "origin", "lane/test")?;
         for invalid in ["a*b", "../x", "-x", "HEAD"] {
             assert!(
-                refresh_branch(&repo, &executor, invalid).is_err(),
+                refresh_branch(&repo, &executor, "origin", invalid).is_err(),
                 "{invalid}"
             );
         }
@@ -1078,7 +1082,7 @@ mod tests {
             &repo,
             &["update-ref", "-d", "refs/remotes/origin/lane/test"],
         )?;
-        refresh_branch(&repo, &executor, "lane/test")?;
+        refresh_branch(&repo, &executor, "origin", "lane/test")?;
         assert_eq!(
             git(&repo, &["rev-parse", "refs/remotes/origin/lane/test"])?,
             expected
@@ -1096,7 +1100,7 @@ mod tests {
             false,
         )?;
         assert_ne!(other.termination, Termination::Exit(0));
-        refresh_branch(&repo, &executor, "missing")?;
+        refresh_branch(&repo, &executor, "origin", "missing")?;
         git(
             &repo,
             &[
@@ -1109,7 +1113,7 @@ mod tests {
                     .ok_or("absent path")?,
             ],
         )?;
-        assert!(refresh_branch(&repo, &executor, "lane/test").is_err());
+        assert!(refresh_branch(&repo, &executor, "origin", "lane/test").is_err());
         Ok(())
     }
 

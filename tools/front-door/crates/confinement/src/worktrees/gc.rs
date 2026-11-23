@@ -7,6 +7,7 @@ use provenant_records::custody::{
     RemovalOutcome, RemovalRecord, RemovalUncertainty, RetirementDecision, RetirementRecord,
     RetirementStep, RetirementStepState, Subject, SubjectKind,
 };
+use provenant_records::warning::{self, FORGE_CONTEXT_UNRESOLVED, Warning};
 use std::collections::{BTreeSet, HashSet};
 
 /// One budget covers every output candidate in a preview. Applied collection
@@ -200,21 +201,26 @@ pub fn branch_candidate(
     }
 }
 
-/// The local branches one GC pass must never select for retirement: the
-/// default branch from the one resolved forge context, the branch named by the
-/// fetched upstream, and every branch a worktree has checked out. One filter
-/// serves both the ref ledger's records and the untracked-local observation.
+/// The local branches one GC pass must never select for retirement: every
+/// protected branch (the default branch among them) from the one resolved forge
+/// context, the branch named by the fetched upstream, and every branch a
+/// worktree has checked out. One filter serves both the ref ledger's records
+/// and the untracked-local observation.
 ///
 /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
 #[derive(Clone, Debug, Default)]
 pub struct LocalRetirementScope {
-    /// Default-branch names. No GC path may retire these, whether they are
+    /// Protected branch names. No GC path may retire these, whether they are
     /// local branches, remote ledger records or linked-worktree checkouts.
     defaults: BTreeSet<String>,
     /// Branches a worktree has checked out. Ledger candidates for these are
     /// retained; a linked worktree's own branch lives here too, so worktree
     /// retirement consults `is_default` instead of `permits`.
     checked_out: BTreeSet<String>,
+    /// The forge context could not be resolved. Without the one authoritative
+    /// remote/default/protected set no branch may be retired: an unresolved
+    /// default would otherwise let a landed main become a retirement candidate.
+    unresolved: bool,
 }
 
 impl LocalRetirementScope {
@@ -233,59 +239,100 @@ impl LocalRetirementScope {
         {
             defaults.insert(local);
         }
-        // The default branch comes from the one forge context, never from a
-        // hard-coded `origin/HEAD` or `main`. The declaration and the branch
-        // upstream both reach it through `ForgeContext::resolve`.
-        if let Some(project) = context.layout.project()
-            && let Ok(ports) = provenant_config::PortTable::read_project_only(project)
-            && let Ok(git) = provenant_config::ForgeGit::new(project)
-        {
-            let config = provenant_config::ForgeConfig::new(
-                &ports,
-                provenant_records::policy::Policy::default(),
-            );
-            if let Ok(forge) = provenant_config::ForgeContext::resolve(project, &config, &git) {
-                defaults.insert(format!("refs/heads/{}", forge.default_branch.value));
-            }
-        }
         let mut checked_out = BTreeSet::new();
         for entry in inventory {
             if entry.prunable {
                 continue;
             }
             if let Some(branch) = entry.branch.as_ref() {
-                checked_out.insert(branch.as_str().to_owned());
+                checked_out.insert(Self::head_ref(branch.as_str()));
+            }
+        }
+        let forge = match forge_context(context) {
+            Ok(forge) => forge,
+            Err(cause) => {
+                warning::warn(
+                    Warning::new(
+                        FORGE_CONTEXT_UNRESOLVED,
+                        format!("forge context unavailable ({cause}); no branch will be retired"),
+                    )
+                    .once_per_change(),
+                );
+                return Ok(Self {
+                    defaults,
+                    checked_out,
+                    unresolved: true,
+                });
+            }
+        };
+        // The one context supplies the remote, default branch and protected
+        // set. `is_protected` includes the default branch, so every branch it
+        // names is excluded on every retirement path.
+        defaults.insert(Self::head_ref(&forge.default_branch.value));
+        for branch in &forge.protected.value {
+            if forge.is_protected(branch) {
+                defaults.insert(Self::head_ref(branch));
             }
         }
         Ok(Self {
             defaults,
             checked_out,
+            unresolved: false,
         })
     }
 
-    /// Ledger records may name a branch by its short name; compare the full
-    /// `refs/heads/` form so both spellings are filtered alike.
-    fn full_name(reference: &GitRefName) -> String {
-        let name = reference.as_str();
-        if name.starts_with("refs/") {
-            name.to_owned()
+    /// Normalise a short, local or remote-tracking branch name to the local
+    /// `refs/heads/` form the ledger and worktree inventory both use.
+    fn head_ref(name: &str) -> String {
+        const HEADS: &str = "refs/heads/";
+        if let Some(rest) = name.strip_prefix(HEADS) {
+            format!("{HEADS}{rest}")
+        } else if let Some(rest) = name.strip_prefix("refs/remotes/") {
+            let branch = rest.split_once('/').map_or(rest, |(_, branch)| branch);
+            format!("{HEADS}{branch}")
         } else {
-            format!("refs/heads/{name}")
+            format!("{HEADS}{name}")
         }
     }
 
-    /// Whether this ref may be selected as a ledger retirement candidate.
+    /// Whether this ref may be selected as a ledger retirement candidate. An
+    /// unresolved context permits nothing.
     pub fn permits(&self, reference: &GitRefName) -> bool {
-        let name = Self::full_name(reference);
+        if self.unresolved {
+            return false;
+        }
+        let name = Self::head_ref(reference.as_str());
         !self.defaults.contains(&name) && !self.checked_out.contains(&name)
     }
 
-    /// Whether this ref names a default branch. A linked worktree checked out
-    /// on the default branch is never retired, even though its branch is also
-    /// in `checked_out`.
+    /// Whether this ref names a protected branch. A linked worktree checked out
+    /// on such a branch is never retired, even though its branch is also in
+    /// `checked_out`.
     pub fn is_default(&self, reference: &GitRefName) -> bool {
-        self.defaults.contains(&Self::full_name(reference))
+        self.defaults.contains(&Self::head_ref(reference.as_str()))
     }
+
+    /// Whether resolution failed, in which case no branch may be retired.
+    pub fn unresolved(&self) -> bool {
+        self.unresolved
+    }
+}
+
+/// The one forge context for a worktree command, resolved from the full port
+/// table (host declarations and project declarations together). A failure is
+/// returned with its cause so callers can warn and fail closed instead of
+/// guessing a remote or a default branch.
+pub fn forge_context(
+    context: &WorktreeContext<'_>,
+) -> Result<provenant_config::ForgeContext, String> {
+    let project = context
+        .layout
+        .project()
+        .ok_or_else(|| "the checkout has no project root".to_owned())?;
+    let state = context.host_state().map_err(|error| error.to_string())?;
+    let ports = provenant_config::PortTable::read_for(Some(project), &state)
+        .map_err(|error| error.to_string())?;
+    provenant_config::resolve_for(project, &ports).map_err(|error| error.to_string())
 }
 
 /// Read the exclusions a retirement candidate set must respect.
@@ -1551,10 +1598,11 @@ fn collect_impl(
                         tip,
                     })
             });
-    // One scope covers the default branch from the fetched upstream,
-    // `origin/HEAD` or the `main` fallback on every retirement path below. It
-    // derives from the inventory snapshot above, so a preview reports the same
-    // checked-out branches it read.
+    // One scope covers the protected set (default branch included) from the
+    // one resolved forge context, plus the fetched upstream and every
+    // checked-out branch, on every retirement path below. It derives from the
+    // inventory snapshot above, so a preview reports the same checked-out
+    // branches it read; an unresolved context retires nothing.
     let retirement_scope =
         LocalRetirementScope::from_inventory(context, integration.as_ref(), &entries, cancel)?;
     let patterns = policy.integration_patterns;
@@ -1682,7 +1730,13 @@ fn collect_impl(
                 row.detail = Some("excluded by gc.projects.keep_paths".into());
                 return Ok(());
             }
-            // A linked worktree checked out on the default branch is never
+            // Fail closed when the one forge context could not be resolved:
+            // no linked worktree may be retired without a known default set.
+            if retirement_scope.unresolved() {
+                row.detail = Some("forge context unavailable".into());
+                return Ok(());
+            }
+            // A linked worktree checked out on a protected branch is never
             // retired, even when the primary checkout sits elsewhere.
             if let Some(branch) = lane
                 .branch
@@ -1690,7 +1744,7 @@ fn collect_impl(
                 .and_then(|name| GitRefName::new(name).ok())
                 && retirement_scope.is_default(&branch)
             {
-                row.detail = Some("default branch is never retired".into());
+                row.detail = Some("protected branch is never retired".into());
                 return Ok(());
             }
             if lane.owner.is_err() {
