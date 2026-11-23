@@ -6,7 +6,7 @@ Observed first-hand with `opencode v2.3.2` on 2026-11-20; flags and environment 
 
 ## Run and stream
 
-- The adapter runs `opencode run --format json --print-logs --log-level info -m provider/model#variant`, adds `-s <id>` for a validated continuation and `--standalone` unless host access finds a running service. The prompt arrives on stdin and runs normally.
+- The adapter runs `opencode run --archived --format json --print-logs --log-level info -m provider/model#variant`, adds `-s <id>` for a validated continuation and `--standalone` unless host access finds a running service. `--archived` keeps lane sessions out of the owner's session lists. The prompt arrives on stdin and runs normally.
 - `-s <unknown id>` creates a session with that id, so only a recorded session id may be passed.
 - `run -w` creates a worktree under the OpenCode data dir and registers it in the primary repository. Lanes own their worktree and do not pass it.
 - Stdout is one JSON object per line with `type`, `timestamp` and `sessionID`: `step_start`, `text`, `reasoning`, `tool_use`, `step_finish`, `retry`, `error`. Text arrives as whole parts. `tool_use` is emitted when the call completes.
@@ -29,7 +29,6 @@ Not yet handled by the adapter, each tracked in the tracker:
 - A bad effort is not validated against the model's `variants[]` and `Variant unavailable` gets no guidance (#3707).
 - A `provider.internal` 5xx after retries is a generic error, not capacity (#3708).
 - Per-step usage and cost are dropped (#3709).
-- `--archived`, which keeps lane sessions out of the owner's session lists, is not passed (#3710).
 
 ## Credentials and readiness
 

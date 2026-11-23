@@ -254,6 +254,8 @@ fn prepare(
     let mut argv: Vec<OsString> = [
         input.executable.as_os_str(),
         "run".as_ref(),
+        // Lane sessions must not appear in the owner's OpenCode session lists.
+        "--archived".as_ref(),
         "--format".as_ref(),
         "json".as_ref(),
         // The server reports its own HTTP failures only in its log, and the
@@ -1627,6 +1629,47 @@ mod tests {
         assert!(shell.starts_with(&plan.permissions().private_state.as_ref().unwrap().path));
         let argv: Vec<_> = spec.argv.iter().map(|a| a.to_string_lossy()).collect();
         assert!(argv.iter().any(|a| a == "--print-logs"));
+    }
+
+    // Spec: docs/specs/run-launch.md#lane-access
+    #[test]
+    fn every_lane_launch_archives_its_session() -> Result<(), ProviderError> {
+        let route = crate::tests::route("opencode", "fixture-model");
+        let prompt = crate::Prompt::new("fixture".into());
+        for access in [Access::ReadOnly, Access::WorktreeWrite] {
+            let plan = crate::tests::fixture_access_plan(access, Some("login"), true);
+            for session in [Session::Fresh, Session::Resume] {
+                let continuation = (session == Session::Resume)
+                    .then(|| {
+                        crate::Continuation::retained(
+                            "opencode",
+                            "fixture-session",
+                            &route,
+                            "fixture",
+                        )
+                    })
+                    .transpose()?;
+                let mut input = crate::tests::fixture_input(
+                    &route,
+                    &plan,
+                    &prompt,
+                    std::path::Path::new("/fixture/repo"),
+                    None,
+                );
+                input.continuation = continuation.as_ref();
+                let spec = prepare(
+                    &input,
+                    access,
+                    session,
+                    OpenCode.stream(None, &provenant_records::policy::Policy::default())?,
+                )?;
+                assert!(
+                    spec.argv.iter().any(|arg| arg == "--archived"),
+                    "{access:?} {session:?}"
+                );
+            }
+        }
+        Ok(())
     }
 
     #[cfg(unix)]
