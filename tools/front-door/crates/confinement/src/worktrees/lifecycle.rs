@@ -423,7 +423,7 @@ fn list_impl(
             attempt: None,
             base: None,
         }
-        .with_owner_identity(&owner);
+        .with_owner_identity();
         report(total, Some(&info));
         result.push(info);
     }
@@ -1831,7 +1831,7 @@ pub(super) fn remove_merged_candidate(
                             attempt: None,
                             base: None,
                         }
-                        .with_owner_identity(&Ok(Some(owner)));
+                        .with_owner_identity();
                         record_started = Some(super::gc::begin_worktree_retirement(
                             context, port, &lane, verified, decision, cancel,
                         )?);
@@ -2258,7 +2258,7 @@ fn remove_with_owner(
                                     attempt: None,
                                     base: None,
                                 }
-                                .with_owner_identity(&Ok(Some(owner)));
+                                .with_owner_identity();
                                 retirement_record = Some(super::gc::begin_worktree_retirement(
                                     context, port, &lane, verified, decision, cancel,
                                 )?);

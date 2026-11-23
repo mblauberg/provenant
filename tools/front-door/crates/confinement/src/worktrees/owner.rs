@@ -617,7 +617,7 @@ pub fn prune_owned(
                 attempt: None,
                 base: None,
             }
-            .with_owner_identity(&Ok(Some(owner.clone())));
+            .with_owner_identity();
             let record = super::gc::begin_worktree_retirement(
                 context,
                 retirement,

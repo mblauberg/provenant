@@ -868,11 +868,8 @@ impl WorktreeInfo {
 
     /// Build the identity fields from an already-loaded owner record. Every
     /// constructor calls this so the projection cannot drift between rows.
-    pub(crate) fn with_owner_identity(
-        mut self,
-        owner: &Result<Option<WorktreeOwner>, String>,
-    ) -> Self {
-        let (lane, attempt, base) = owner_identity(owner);
+    pub(crate) fn with_owner_identity(mut self) -> Self {
+        let (lane, attempt, base) = owner_identity(&self.owner);
         self.lane = lane;
         self.attempt = attempt;
         self.base = base;
@@ -1291,7 +1288,7 @@ mod tests {
             branch: branch.to_owned(),
             base: "1".repeat(40),
             host: provenant_core::HostId::from_bytes([1; 16]),
-            created_at: WallTime::from_micros(1).unwrap(),
+            created_at: provenant_core::WallTime::from_micros(1).unwrap(),
             origin: WorktreeOrigin::Lane,
             label: lane.map(str::to_owned),
             reference: None,
@@ -1309,7 +1306,7 @@ mod tests {
             attempt: None,
             base: None,
         }
-        .with_owner_identity(&Ok(Some(owner)))
+        .with_owner_identity()
     }
 
     // Spec: docs/specs/next-batch.md#worktree-locate
