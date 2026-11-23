@@ -382,9 +382,14 @@ pub fn operation_policy(
 /// consumer of the remote, default branch or protected set goes through this
 /// so a declaration in either layer reaches all of them.
 pub fn resolve_for(project: &Path, ports: &PortTable) -> Result<ForgeContext, ForgeContextError> {
+    resolve_in(&Git::new(project)?, ports)
+}
+
+/// Resolve the one forge context from Git metadata the caller already bound,
+/// such as a bound bare repository's own directory ([`Git::bare`]).
+pub fn resolve_in(git: &Git, ports: &PortTable) -> Result<ForgeContext, ForgeContextError> {
     let config = Config::new(ports, Policy::default());
-    let git = Git::new(project)?;
-    ForgeContext::resolve(&config, &git)
+    ForgeContext::resolve(&config, git)
 }
 
 /// A bounded, read-only view of a checkout's Git metadata. It never runs a
@@ -437,6 +442,21 @@ impl Git {
         Err(ForgeContextError::Io {
             path: dot,
             source: io::Error::new(io::ErrorKind::NotFound, "no Git metadata"),
+        })
+    }
+
+    /// Bind to a bare repository's own Git directory. A bound bare project has
+    /// no checkout: its config, refs and remote HEAD live in that directory.
+    pub fn bare(common: &Path) -> Result<Self, ForgeContextError> {
+        if !common.join("HEAD").is_file() {
+            return Err(ForgeContextError::Io {
+                path: common.join("HEAD"),
+                source: io::Error::new(io::ErrorKind::NotFound, "no Git metadata"),
+            });
+        }
+        Ok(Self {
+            git_dir: common.to_path_buf(),
+            common_dir: common.to_path_buf(),
         })
     }
 
@@ -663,6 +683,29 @@ mod tests {
     fn context(fixture: &Fixture, ports: &PortTable) -> Result<ForgeContext, ForgeContextError> {
         let config = Config::new(ports, Policy::default());
         ForgeContext::resolve(&config, &fixture.git())
+    }
+
+    /// A bound bare repository has no checkout; its own directory supplies the
+    /// remote and the remote HEAD, so GC can resolve the protected set.
+    /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    #[test]
+    fn a_bare_repository_resolves_from_its_own_directory() {
+        let bare = tempfile::tempdir().expect("temp dir");
+        let dir = bare.path();
+        std::fs::write(dir.join("HEAD"), "ref: refs/heads/main\n").expect("HEAD");
+        std::fs::write(dir.join("config"), "[core]\n\tbare = true\n").expect("config");
+        std::fs::create_dir_all(dir.join("refs/remotes/origin")).expect("refs");
+        std::fs::write(
+            dir.join("refs/remotes/origin/HEAD"),
+            "ref: refs/heads/main\n",
+        )
+        .expect("remote HEAD");
+        let git = Git::bare(dir).expect("bare binds");
+        let context = resolve_in(&git, &PortTable::builtin()).expect("resolve");
+        assert_eq!(context.remote.value, "origin");
+        assert_eq!(context.default_branch.value, "main");
+        let empty = tempfile::tempdir().expect("temp dir");
+        assert!(Git::bare(empty.path()).is_err());
     }
 
     /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command

@@ -382,15 +382,20 @@ impl LocalRetirementScope {
 pub fn forge_context(
     context: &WorktreeContext<'_>,
 ) -> Result<provenant_config::ForgeContext, ForgeContextFailure> {
-    let project = context.layout.project().ok_or_else(|| {
-        ForgeContextFailure::Unavailable("the checkout has no project root".into())
-    })?;
     let state = context
         .host_state()
         .map_err(|error| ForgeContextFailure::Unavailable(error.to_string()))?;
-    let ports = provenant_config::PortTable::read_for(Some(project), &state)
+    let ports = provenant_config::PortTable::read_for(context.layout.project(), &state)
         .map_err(|error| ForgeContextFailure::Unavailable(error.to_string()))?;
-    provenant_config::resolve_for(project, &ports).map_err(ForgeContextFailure::Refusal)
+    // A bound bare repository has no checkout; its layout root is the common
+    // Git directory, which holds the remote and its HEAD.
+    // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    let git = match context.layout.project() {
+        Some(project) => provenant_config::ForgeGit::new(project),
+        None => provenant_config::ForgeGit::bare(context.layout.root()),
+    }
+    .map_err(ForgeContextFailure::Refusal)?;
+    provenant_config::resolve_in(&git, &ports).map_err(ForgeContextFailure::Refusal)
 }
 
 /// The one remote for a worktree command. No checkout is assumed to call its
