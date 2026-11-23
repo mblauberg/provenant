@@ -4,6 +4,7 @@
 //! reproduces host-wide build slots. Host and project configurations can override
 //! `build` or declare custom classes (such as `test`, `browser`, `heavy`).
 use crate::gc::{LaneBuildSettings, parse_cache_size};
+use provenant_records::{Layer, Precedence};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -11,25 +12,15 @@ use std::path::Path;
 pub const DEFAULT_CLASS: &str = "build";
 pub const DEFAULT_WAIT_SECONDS: u64 = 15;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AdmissionSource {
-    Default,
-    Host,
-    HostProject,
-    Project,
-}
-
-impl AdmissionSource {
-    pub fn description(&self) -> &'static str {
-        match self {
-            Self::Default => "default",
-            Self::Host => "host",
-            Self::HostProject => "host_project",
-            Self::Project => "project",
-        }
-    }
-}
+/// The admission family's layers, lowest first. Host-project state is host
+/// state bound to one project, so it outranks the host's own file.
+/// Spec: docs/specs/state.md#every-setting-reports-its-layer
+pub const ADMISSION_PRECEDENCE: Precedence = Precedence(&[
+    Layer::Default,
+    Layer::Host,
+    Layer::HostProject,
+    Layer::Project,
+]);
 
 /// Raw parsed TOML configuration for one admission class.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,15 +57,15 @@ impl AdmissionClassConfig {
 pub struct ResolvedAdmissionClass {
     pub name: String,
     pub slots: u64,
-    pub slots_source: AdmissionSource,
+    pub slots_source: Layer,
     pub memory_per_slot_bytes: Option<u64>,
-    pub memory_per_slot_source: Option<AdmissionSource>,
+    pub memory_per_slot_source: Option<Layer>,
     pub disk_floor_bytes: Option<u64>,
-    pub disk_floor_source: Option<AdmissionSource>,
+    pub disk_floor_source: Option<Layer>,
     pub trim_action: Option<String>,
-    pub trim_action_source: Option<AdmissionSource>,
+    pub trim_action_source: Option<Layer>,
     pub wait_seconds: u64,
-    pub wait_seconds_source: AdmissionSource,
+    pub wait_seconds_source: Layer,
 }
 
 impl ResolvedAdmissionClass {
@@ -97,10 +88,10 @@ impl ResolvedAdmissionClass {
         let (mut slots, mut slots_source) = if is_build {
             (
                 host_build_settings.automatic_build_limit(total_ram),
-                AdmissionSource::Default,
+                Layer::Default,
             )
         } else {
-            (1, AdmissionSource::Default)
+            (1, Layer::Default)
         };
 
         let mut memory_bytes = None;
@@ -110,29 +101,29 @@ impl ResolvedAdmissionClass {
         let mut trim = None;
         let mut trim_source = None;
         let mut wait = DEFAULT_WAIT_SECONDS;
-        let mut wait_source = AdmissionSource::Default;
+        let mut wait_source = Layer::Default;
 
         // 2. Host configuration: `<state>/config.toml` [admission.<class>]
         if let Some(host_cfg) = read_class_from_file(&state.join("config.toml"), class) {
             if let Some(s) = host_cfg.slots {
                 slots = s;
-                slots_source = AdmissionSource::Host;
+                slots_source = Layer::Host;
             }
             if let Some(bytes) = host_cfg.memory_per_slot_bytes() {
                 memory_bytes = Some(bytes);
-                memory_source = Some(AdmissionSource::Host);
+                memory_source = Some(Layer::Host);
             }
             if let Some(bytes) = host_cfg.disk_floor_bytes() {
                 disk_bytes = Some(bytes);
-                disk_source = Some(AdmissionSource::Host);
+                disk_source = Some(Layer::Host);
             }
             if let Some(action) = host_cfg.trim_action {
                 trim = Some(action);
-                trim_source = Some(AdmissionSource::Host);
+                trim_source = Some(Layer::Host);
             }
             if let Some(w) = host_cfg.wait_seconds {
                 wait = w;
-                wait_source = AdmissionSource::Host;
+                wait_source = Layer::Host;
             }
         }
 
@@ -144,23 +135,23 @@ impl ResolvedAdmissionClass {
             if let Some(keyed_cfg) = read_class_from_file(&path, class) {
                 if let Some(s) = keyed_cfg.slots {
                     slots = s;
-                    slots_source = AdmissionSource::HostProject;
+                    slots_source = Layer::HostProject;
                 }
                 if let Some(bytes) = keyed_cfg.memory_per_slot_bytes() {
                     memory_bytes = Some(bytes);
-                    memory_source = Some(AdmissionSource::HostProject);
+                    memory_source = Some(Layer::HostProject);
                 }
                 if let Some(bytes) = keyed_cfg.disk_floor_bytes() {
                     disk_bytes = Some(bytes);
-                    disk_source = Some(AdmissionSource::HostProject);
+                    disk_source = Some(Layer::HostProject);
                 }
                 if let Some(action) = keyed_cfg.trim_action {
                     trim = Some(action);
-                    trim_source = Some(AdmissionSource::HostProject);
+                    trim_source = Some(Layer::HostProject);
                 }
                 if let Some(w) = keyed_cfg.wait_seconds {
                     wait = w;
-                    wait_source = AdmissionSource::HostProject;
+                    wait_source = Layer::HostProject;
                 }
             }
         }
@@ -171,23 +162,23 @@ impl ResolvedAdmissionClass {
             if let Some(proj_cfg) = read_class_from_file(&project_config_path, class) {
                 if let Some(s) = proj_cfg.slots {
                     slots = s;
-                    slots_source = AdmissionSource::Project;
+                    slots_source = Layer::Project;
                 }
                 if let Some(bytes) = proj_cfg.memory_per_slot_bytes() {
                     memory_bytes = Some(bytes);
-                    memory_source = Some(AdmissionSource::Project);
+                    memory_source = Some(Layer::Project);
                 }
                 if let Some(bytes) = proj_cfg.disk_floor_bytes() {
                     disk_bytes = Some(bytes);
-                    disk_source = Some(AdmissionSource::Project);
+                    disk_source = Some(Layer::Project);
                 }
                 if let Some(action) = proj_cfg.trim_action {
                     trim = Some(action);
-                    trim_source = Some(AdmissionSource::Project);
+                    trim_source = Some(Layer::Project);
                 }
                 if let Some(w) = proj_cfg.wait_seconds {
                     wait = w;
-                    wait_source = AdmissionSource::Project;
+                    wait_source = Layer::Project;
                 }
             }
         }
@@ -279,9 +270,9 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let resolved = ResolvedAdmissionClass::resolve(DEFAULT_CLASS, temp.path(), None);
         assert_eq!(resolved.name, "build");
-        assert_eq!(resolved.slots_source, AdmissionSource::Default);
+        assert_eq!(resolved.slots_source, Layer::Default);
         assert_eq!(resolved.wait_seconds, DEFAULT_WAIT_SECONDS);
-        assert_eq!(resolved.wait_seconds_source, AdmissionSource::Default);
+        assert_eq!(resolved.wait_seconds_source, Layer::Default);
     }
 
     #[test]
@@ -298,15 +289,15 @@ wait_seconds = 30
         std::fs::write(temp.path().join("config.toml"), config_toml).unwrap();
         let resolved = ResolvedAdmissionClass::resolve(DEFAULT_CLASS, temp.path(), None);
         assert_eq!(resolved.slots, 8);
-        assert_eq!(resolved.slots_source, AdmissionSource::Host);
+        assert_eq!(resolved.slots_source, Layer::Host);
         assert_eq!(resolved.memory_per_slot_bytes, Some(4 * 1024 * 1024 * 1024));
-        assert_eq!(resolved.memory_per_slot_source, Some(AdmissionSource::Host));
+        assert_eq!(resolved.memory_per_slot_source, Some(Layer::Host));
         assert_eq!(resolved.disk_floor_bytes, Some(10 * 1024 * 1024 * 1024));
-        assert_eq!(resolved.disk_floor_source, Some(AdmissionSource::Host));
+        assert_eq!(resolved.disk_floor_source, Some(Layer::Host));
         assert_eq!(resolved.trim_action.as_deref(), Some("cargo clean"));
-        assert_eq!(resolved.trim_action_source, Some(AdmissionSource::Host));
+        assert_eq!(resolved.trim_action_source, Some(Layer::Host));
         assert_eq!(resolved.wait_seconds, 30);
-        assert_eq!(resolved.wait_seconds_source, AdmissionSource::Host);
+        assert_eq!(resolved.wait_seconds_source, Layer::Host);
     }
 
     #[test]
@@ -336,9 +327,9 @@ wait_seconds = 10
             ResolvedAdmissionClass::resolve("test", host_temp.path(), Some(proj_temp.path()));
         assert_eq!(resolved.name, "test");
         assert_eq!(resolved.slots, 2);
-        assert_eq!(resolved.slots_source, AdmissionSource::Project);
+        assert_eq!(resolved.slots_source, Layer::Project);
         assert_eq!(resolved.wait_seconds, 10);
-        assert_eq!(resolved.wait_seconds_source, AdmissionSource::Project);
+        assert_eq!(resolved.wait_seconds_source, Layer::Project);
     }
 
     #[test]
@@ -354,7 +345,7 @@ max_concurrent_builds = 3
         let defaults_dir = tempfile::tempdir().unwrap();
         let defaults = ResolvedAdmissionClass::resolve(DEFAULT_CLASS, defaults_dir.path(), None);
         assert_eq!(resolved.slots, defaults.slots);
-        assert_eq!(resolved.slots_source, AdmissionSource::Default);
+        assert_eq!(resolved.slots_source, Layer::Default);
     }
 
     /// Spec: docs/specs/state.md#host-project-state-has-one-key
@@ -400,9 +391,9 @@ disk_floor = "10 GiB"
         // With no project layer, the binding layer overrides the host layer.
         let resolved = ResolvedAdmissionClass::resolve("test", state, Some(&project));
         assert_eq!(resolved.slots, 4);
-        assert_eq!(resolved.slots_source, AdmissionSource::HostProject);
+        assert_eq!(resolved.slots_source, Layer::HostProject);
         assert_eq!(resolved.wait_seconds, 20);
-        assert_eq!(resolved.wait_seconds_source, AdmissionSource::HostProject);
+        assert_eq!(resolved.wait_seconds_source, Layer::HostProject);
 
         // A project layer overrides the binding layer per leaf; leaves the
         // project does not set keep the binding layer's value and source.
@@ -414,17 +405,14 @@ disk_floor = "10 GiB"
         .unwrap();
         let resolved = ResolvedAdmissionClass::resolve("test", state, Some(&project));
         assert_eq!(resolved.slots, 2);
-        assert_eq!(resolved.slots_source, AdmissionSource::Project);
+        assert_eq!(resolved.slots_source, Layer::Project);
         assert_eq!(resolved.wait_seconds, 20);
-        assert_eq!(resolved.wait_seconds_source, AdmissionSource::HostProject);
+        assert_eq!(resolved.wait_seconds_source, Layer::HostProject);
         assert_eq!(resolved.memory_per_slot_bytes, Some(4 * 1024 * 1024 * 1024));
-        assert_eq!(resolved.memory_per_slot_source, Some(AdmissionSource::Host));
+        assert_eq!(resolved.memory_per_slot_source, Some(Layer::Host));
         assert_eq!(resolved.disk_floor_bytes, Some(10 * 1024 * 1024 * 1024));
-        assert_eq!(
-            resolved.disk_floor_source,
-            Some(AdmissionSource::HostProject)
-        );
-        assert_eq!(AdmissionSource::HostProject.description(), "host_project");
+        assert_eq!(resolved.disk_floor_source, Some(Layer::HostProject));
+        assert_eq!(Layer::HostProject.description(), "host_project");
     }
 
     #[test]
@@ -436,7 +424,38 @@ disk_floor = "10 GiB"
         for project in [None, Some(project.as_path())] {
             let resolved = ResolvedAdmissionClass::resolve("test", state, project);
             assert_eq!(resolved.slots, 6);
-            assert_eq!(resolved.slots_source, AdmissionSource::Host);
+            assert_eq!(resolved.slots_source, Layer::Host);
         }
+    }
+
+    /// Spec: docs/specs/state.md#every-setting-reports-its-layer
+    #[test]
+    fn every_admission_layer_set_picks_the_project_and_shadows_the_rest() {
+        use provenant_records::{Source, Sourced};
+
+        let candidates = ADMISSION_PRECEDENCE.0.iter().copied().map(|layer| Sourced {
+            value: layer.as_str(),
+            source: Source {
+                layer,
+                origin: None,
+            },
+        });
+        let merge = ADMISSION_PRECEDENCE.merge(candidates);
+        assert_eq!(
+            merge
+                .winner
+                .as_ref()
+                .map(|candidate| candidate.source.layer),
+            Some(Layer::Project)
+        );
+        assert_eq!(
+            merge
+                .shadowed
+                .iter()
+                .map(|candidate| candidate.source.layer)
+                .collect::<Vec<_>>(),
+            [Layer::Default, Layer::Host, Layer::HostProject]
+        );
+        assert!(merge.ignored.is_empty());
     }
 }

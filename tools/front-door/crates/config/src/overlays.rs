@@ -13,45 +13,27 @@
 //! A single invalid entry does not refuse the whole overlay. Each owner skips
 //! the entry and records an [`OverlayWarning`] naming the layer and the reason.
 
+use provenant_records::{Layer, Precedence};
 use serde::Serialize;
 use std::{fmt, path::Path};
 
-/// The layer that supplied one fact. Host-project configuration is host state
-/// bound to a project, so it reports as `host` to owners.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OverlaySource {
-    Bundled,
-    Host,
-    Project,
-}
-
-impl OverlaySource {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Bundled => "bundled",
-            Self::Host => "host",
-            Self::Project => "project",
-        }
-    }
-}
-
-impl fmt::Display for OverlaySource {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
+/// The overlay family's layers, lowest first. The bundled asset is the base;
+/// host and project configuration replace its entries. Host-project state is
+/// host state bound to a project, so it reports as the host layer to owners.
+/// Spec: docs/specs/state.md#every-setting-reports-its-layer
+pub const OVERLAY_PRECEDENCE: Precedence =
+    Precedence(&[Layer::Default, Layer::Host, Layer::Project]);
 
 /// One skipped entry, with the layer and the reason for skipping it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct OverlayWarning {
-    pub source: OverlaySource,
+    pub source: Layer,
     pub key: String,
     pub reason: String,
 }
 
 impl OverlayWarning {
-    pub fn new(source: OverlaySource, key: impl Into<String>, reason: impl Into<String>) -> Self {
+    pub fn new(source: Layer, key: impl Into<String>, reason: impl Into<String>) -> Self {
         Self {
             source,
             key: key.into(),
@@ -73,7 +55,7 @@ impl fmt::Display for OverlayWarning {
 /// One layer's config text plus the source to attribute its entries to.
 #[derive(Debug, Clone)]
 pub struct OverlayLayer {
-    pub source: OverlaySource,
+    pub source: Layer,
     pub text: String,
 }
 
@@ -86,13 +68,13 @@ pub fn read_layers(
     project: Option<&Path>,
     name: &str,
 ) -> (Vec<OverlayLayer>, Vec<OverlayWarning>) {
-    let mut paths = vec![(OverlaySource::Host, state.join("config.toml"))];
+    let mut paths = vec![(Layer::Host, state.join("config.toml"))];
     if let Some(dir) = project.and_then(|project| crate::host_project_dir(state, project)) {
-        paths.push((OverlaySource::Host, dir.join("config.toml")));
+        paths.push((Layer::Host, dir.join("config.toml")));
     }
     if let Some(project) = project {
         paths.push((
-            OverlaySource::Project,
+            Layer::Project,
             project.join(".provenant").join("config.toml"),
         ));
     }
@@ -161,8 +143,39 @@ mod tests {
         let (layers, warnings) = read_layers(&state, Some(&project), "catalogue");
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(layers.len(), 1, "{layers:?}");
-        assert_eq!(layers[0].source, OverlaySource::Host);
+        assert_eq!(layers[0].source, Layer::Host);
         assert!(layers[0].text.contains("from-binding"), "{:?}", layers[0]);
         assert!(!layers[0].text.contains("from-old-key"), "{:?}", layers[0]);
+    }
+
+    /// Spec: docs/specs/state.md#every-setting-reports-its-layer
+    #[test]
+    fn every_overlay_layer_set_picks_the_project_and_shadows_the_rest() {
+        use provenant_records::{Source, Sourced};
+
+        let candidates = OVERLAY_PRECEDENCE.0.iter().copied().map(|layer| Sourced {
+            value: layer.as_str(),
+            source: Source {
+                layer,
+                origin: None,
+            },
+        });
+        let merge = OVERLAY_PRECEDENCE.merge(candidates);
+        assert_eq!(
+            merge
+                .winner
+                .as_ref()
+                .map(|candidate| candidate.source.layer),
+            Some(Layer::Project)
+        );
+        assert_eq!(
+            merge
+                .shadowed
+                .iter()
+                .map(|candidate| candidate.source.layer)
+                .collect::<Vec<_>>(),
+            [Layer::Default, Layer::Host]
+        );
+        assert!(merge.ignored.is_empty());
     }
 }

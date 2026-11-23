@@ -7,9 +7,8 @@
 //! it, and the setting's source appears beside its value. No setting here is
 //! strict: an unknown value warns with the layer that supplied it and keeps the
 //! documented default, so a typo never silently chooses a policy.
-use crate::{KnobSource, KnobValue};
 use provenant_records::warning::{CONFIG_MALFORMED, Warning, warn};
-use provenant_records::{Layer, run::HarnessProfile};
+use provenant_records::{Layer, Source, Sourced, run::HarnessProfile};
 use serde_json::Value;
 use std::{collections::BTreeMap, fmt};
 
@@ -198,14 +197,15 @@ fn profile_text<'a>(profile: &'a HarnessProfile, name: &str) -> Option<&'a str> 
     profile.knobs.get(name).and_then(Value::as_str)
 }
 
-fn knob_text<'a>(knobs: &'a BTreeMap<String, KnobValue>, name: &str) -> Option<&'a str> {
+fn knob_text<'a>(knobs: &'a BTreeMap<String, Sourced<Value>>, name: &str) -> Option<&'a str> {
     knobs.get(name).and_then(|knob| knob.value.as_str())
 }
 
-fn knob_limit_source(source: KnobSource) -> Layer {
+fn knob_limit_source(source: Layer) -> Layer {
     match source {
-        KnobSource::Default => Layer::Default,
-        KnobSource::Profile | KnobSource::Override => Layer::Host,
+        // A preset and a host `[knobs]` entry both count as host configuration.
+        Layer::Profile | Layer::Host => Layer::Host,
+        other => other,
     }
 }
 
@@ -244,11 +244,11 @@ impl LaneHistory {
 
     /// Resolve from effective host configuration, as the pre-push hook reads
     /// it. Presets and `[knobs]` both count as the host layer.
-    pub fn from_knobs(knobs: &BTreeMap<String, KnobValue>) -> Self {
+    pub fn from_knobs(knobs: &BTreeMap<String, Sourced<Value>>) -> Self {
         let source = |name: &str| {
             knobs
                 .get(name)
-                .map_or(Layer::Default, |knob| knob_limit_source(knob.source))
+                .map_or(Layer::Default, |knob| knob_limit_source(knob.source.layer))
         };
         Self {
             rebase: resolve_setting(REBASE, knob_text(knobs, REBASE), source(REBASE), rebase),
@@ -348,9 +348,12 @@ mod tests {
     fn host_knobs_report_the_host_layer() {
         let knobs = BTreeMap::from([(
             CONFLICT_MARKERS.to_owned(),
-            KnobValue {
+            Sourced {
                 value: Value::from("refuse"),
-                source: KnobSource::Override,
+                source: Source {
+                    layer: Layer::Host,
+                    origin: None,
+                },
             },
         )]);
         let history = LaneHistory::from_knobs(&knobs);
@@ -391,9 +394,12 @@ mod tests {
         // reports the default layer, never the layer that typed it.
         let knobs = BTreeMap::from([(
             REBASE.to_owned(),
-            KnobValue {
+            Sourced {
                 value: Value::from("alloww"),
-                source: KnobSource::Override,
+                source: Source {
+                    layer: Layer::Host,
+                    origin: None,
+                },
             },
         )]);
         let history = LaneHistory::from_knobs(&knobs);

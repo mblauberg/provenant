@@ -1459,7 +1459,6 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
     }
 
     fn launch_retry_policy(&self) -> provenant_fabric_runtime::graph::LaunchRetryPolicy {
-        use provenant_config::KnobSource;
         let mut policy = provenant_fabric_runtime::graph::LaunchRetryPolicy::default();
         let config = match provenant_cli::config_reads::read_for(&self.factory.context.roots, "run")
         {
@@ -1476,12 +1475,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             if let Some(value) = knob.value.as_u64().and_then(|n| u8::try_from(n).ok()) {
                 policy.limit = value;
             }
-            policy.limit_source = match knob.source {
-                KnobSource::Default => "default",
-                KnobSource::Profile => "profile",
-                KnobSource::Override => "override",
-            }
-            .into();
+            policy.limit_source = knob.source.layer.as_str().into();
         }
         if let Some(value) = config
             .knobs

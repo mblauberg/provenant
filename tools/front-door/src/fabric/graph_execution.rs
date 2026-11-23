@@ -43,18 +43,13 @@ use serde_json::Value;
 fn writer_dirty_setting(
     factory: &super::Factory,
 ) -> provenant_run::writer_dirty::ResolvedWriterDirty {
-    use provenant_config::KnobSource;
     let (value, source) = match provenant_cli::config_reads::read_for(&factory.context.roots, "run")
     {
         Ok(config) => match config.knobs.get(provenant_run::writer_dirty::KNOB) {
-            Some(knob) => {
-                let source = match knob.source {
-                    KnobSource::Default => "default",
-                    KnobSource::Profile => "host",
-                    KnobSource::Override => "launch",
-                };
-                (knob.value.as_str().map(str::to_owned), source.to_owned())
-            }
+            Some(knob) => (
+                knob.value.as_str().map(str::to_owned),
+                knob.source.layer.as_str().to_owned(),
+            ),
             None => (None, "default".to_owned()),
         },
         Err(error) => {

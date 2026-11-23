@@ -7,7 +7,7 @@
 
 pub mod admission;
 pub use admission::{
-    AdmissionClassConfig, AdmissionSource, DEFAULT_CLASS, DEFAULT_WAIT_SECONDS,
+    ADMISSION_PRECEDENCE, AdmissionClassConfig, DEFAULT_CLASS, DEFAULT_WAIT_SECONDS,
     ResolvedAdmissionClass,
 };
 mod account_sync;
@@ -43,7 +43,7 @@ mod managed;
 pub use harness::{InstallSettings, TargetSettings, apply_install_config_with_domains};
 pub const NATIVE_CAPABILITY_UNAVAILABLE: &str = "native_capability_unavailable";
 pub mod overlays;
-pub use overlays::{OverlayLayer, OverlaySource, OverlayWarning};
+pub use overlays::{OVERLAY_PRECEDENCE, OverlayLayer, OverlayWarning};
 pub mod policy;
 mod presets;
 mod providers;
@@ -101,7 +101,7 @@ pub use domains::{
 };
 pub use edit::{EditOptions, Edited, edit_config, revision_of, show};
 pub use history::{FieldChange, HistoryEntry, HistoryLimits, history};
-pub use knobs::{KnobEdit, KnobSource, KnobValue, knob_source};
+pub use knobs::{KNOB_PRECEDENCE, KnobEdit, knob_source};
 pub use lane_history::{
     CONFLICT_MARKERS, DEFAULT_BRANCH_REWRITE, DefaultBranchRewrite, HistoryEffect, HistoryValue,
     LaneHistory, REBASE, Rebase, Setting, UNROOTED_TIP,
@@ -117,10 +117,10 @@ pub use project_binding::{
     registered_gc_project_selection, registered_gc_project_selection_with_progress,
     registered_gc_projects, registered_projects, retire_vanished_projects, transient_location,
 };
-pub use provenant_records::Finding;
+pub use provenant_records::{Finding, Layer};
 pub use schema::{
-    DEDICATED_COMMANDS, DeclaredEnum, Layer, Schema, SchemaField, apply_edit, apply_patch,
-    declared_enums, dedicated_command, probe_field, schema,
+    DEDICATED_COMMANDS, DeclaredEnum, SCHEMA_PRECEDENCE, Schema, SchemaField, apply_edit,
+    apply_patch, declared_enums, dedicated_command, probe_field, schema,
 };
 
 use serde::Serialize;
@@ -298,7 +298,7 @@ pub struct ResolvedConfig<D = NoDomains> {
     pub worktrees: WorktreeSettings,
     pub providers: BTreeMap<String, ProviderSettings>,
     /// Effective knobs with the layer that set each; not part of `origins`.
-    pub knobs: BTreeMap<String, KnobValue>,
+    pub knobs: BTreeMap<String, provenant_records::Sourced<serde_json::Value>>,
     pub origins: BTreeMap<String, Origin>,
     /// Per-change warning memory. Skipped from the serialised config because
     /// `warnings` above is already the key for ignored-setting findings; the

@@ -1348,8 +1348,8 @@ fn discovery_tick_respects_eligibility_knob_and_deadline() -> Result {
         false
     );
     assert_eq!(
-        shown["data"]["knobs"]["quota.model_discovery"]["source"],
-        "override"
+        shown["data"]["knobs"]["quota.model_discovery"]["layer"],
+        "host"
     );
     assert_eq!(
         code(&rig.command(&["quota", "tick", "--power", "ac", "--json"])?),

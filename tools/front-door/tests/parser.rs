@@ -611,7 +611,7 @@ fn config_set_reports_only_the_changed_effective_setting() -> Result {
     assert_eq!(result["data"]["key"], key);
     assert_eq!(result["data"]["previous"], before["data"]["knobs"][key]);
     assert_eq!(result["data"]["effective"]["value"], 300000);
-    assert!(result["data"]["effective"]["source"].is_string());
+    assert!(result["data"]["effective"]["layer"].is_string());
     assert!(result["data"].get("domains").is_none());
     Ok(())
 }
