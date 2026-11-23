@@ -10,7 +10,7 @@ use provenant_os::clock::SystemClock;
 use provenant_providers::{OutcomeStatus, ProviderEvent, REGISTRY};
 use provenant_records::{
     CommandError, CommandResult, Outcome as Status, UsageSource,
-    warning::{CONFIG_MALFORMED, Warning, warn},
+    warning::{Warning, warn},
 };
 use provenant_routing::{Fallback, ModelId, RouteChoice, RouteName};
 use provenant_run as run;
@@ -2402,7 +2402,7 @@ fn report_config_notices(events: &[ProviderEvent], stderr: &[u8], scan_stderr: b
         if seen.insert(key.clone()) {
             warn(
                 Warning::new(
-                    CONFIG_MALFORMED,
+                    provenant_records::warning::CONFIG_DEPRECATION,
                     format!(
                         "provider config deprecation ({source}): {}",
                         crate::bounded_text(&key, 512)

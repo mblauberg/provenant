@@ -134,8 +134,8 @@ pub const DEFAULT_BRANCH_REWRITTEN: WarningCode = WarningCode("DEFAULT_BRANCH_RE
 pub const CONFLICT_MARKERS_PUSHED: WarningCode = WarningCode("CONFLICT_MARKERS_PUSHED");
 /// Advisory: custody of a fabric subject changed and was recorded.
 pub const CUSTODY_CHANGED: WarningCode = WarningCode("CUSTODY_CHANGED");
-/// Advisory: a fabric subject is held by another actor.
-pub const CUSTODY_HELD_ADVISORY: WarningCode = WarningCode("CUSTODY_HELD_ADVISORY");
+/// A fabric subject is held by another actor; the observation is advisory.
+pub const CUSTODY_HELD: WarningCode = WarningCode("CUSTODY_HELD");
 /// A field matched a credential shape; matched bytes are never reported.
 pub const SECRET_SHAPE_IN_FIELD: WarningCode = WarningCode("SECRET_SHAPE_IN_FIELD");
 /// Graph observation indexing was deferred; the checkpoint is still stored.
@@ -148,10 +148,10 @@ pub const MEMORY_FLOOR_LOW: WarningCode = WarningCode("MEMORY_FLOOR_LOW");
 pub const BUILD_SLOT_UNAVAILABLE: WarningCode = WarningCode("BUILD_SLOT_UNAVAILABLE");
 /// A lane-port block was unavailable for a build job.
 pub const BUILD_PORT_UNAVAILABLE: WarningCode = WarningCode("BUILD_PORT_UNAVAILABLE");
-/// A build ledger diagnostic that does not change admission.
-pub const BUILD_LEDGER_DIAGNOSTIC: WarningCode = WarningCode("BUILD_LEDGER_DIAGNOSTIC");
-/// A delivery transport advisory for a host-configured Git transport.
-pub const DELIVERY_TRANSPORT_ADVISORY: WarningCode = WarningCode("DELIVERY_TRANSPORT_ADVISORY");
+/// A build ledger note was raised for the operator.
+pub const BUILD_LEDGER_NOTE: WarningCode = WarningCode("BUILD_LEDGER_NOTE");
+/// A host-configured Git transport was unavailable; a fallback applied.
+pub const DELIVERY_TRANSPORT_FALLBACK: WarningCode = WarningCode("DELIVERY_TRANSPORT_FALLBACK");
 /// A private Git directory was retained after a refused import.
 pub const PRIVATE_GIT_RETAINED: WarningCode = WarningCode("PRIVATE_GIT_RETAINED");
 /// The primary checkout could not be checked for stray lane work.
@@ -164,14 +164,13 @@ pub const SANDBOX_UNAVAILABLE: WarningCode = WarningCode("SANDBOX_UNAVAILABLE");
 pub const LANE_PRIORITY_FALLBACK: WarningCode = WarningCode("LANE_PRIORITY_FALLBACK");
 /// Run settings were unavailable; a shipped default was used.
 pub const RUN_SETTINGS_UNAVAILABLE: WarningCode = WarningCode("RUN_SETTINGS_UNAVAILABLE");
-/// A PR contribution could not be fully attributed.
-pub const PR_CONTRIBUTION_WARNING: WarningCode = WarningCode("PR_CONTRIBUTION_WARNING");
-/// A settlement diagnostic that does not change the terminal outcome.
-pub const SETTLEMENT_DIAGNOSTIC: WarningCode = WarningCode("SETTLEMENT_DIAGNOSTIC");
-/// A policy advisory; the policy rule is carried in the subject.
-pub const POLICY_ADVISORY: WarningCode = WarningCode("POLICY_ADVISORY");
-/// A tool-state diagnostic retained as settlement bookkeeping.
-pub const TOOL_STATE_DIAGNOSTIC: WarningCode = WarningCode("TOOL_STATE_DIAGNOSTIC");
+/// A PR contribution could not be bound to its author.
+pub const PR_CONTRIBUTION_BINDING_FAILED: WarningCode =
+    WarningCode("PR_CONTRIBUTION_BINDING_FAILED");
+/// Writer fence listing failed; the settlement outcome is unchanged.
+pub const WRITER_FENCE_LIST_FAILED: WarningCode = WarningCode("WRITER_FENCE_LIST_FAILED");
+/// A lane tool-state commit was refused by policy; settlement continues.
+pub const TOOL_STATE_COMMIT_FAILED: WarningCode = WarningCode("TOOL_STATE_COMMIT_FAILED");
 /// An admission receipt is visible but its durability is unconfirmed.
 pub const ADMISSION_RECEIPT_UNCONFIRMED: WarningCode = WarningCode("ADMISSION_RECEIPT_UNCONFIRMED");
 /// Repository admission release is pending or failed; reconcile retries it.
@@ -180,22 +179,24 @@ pub const ADMISSION_RELEASE_PENDING: WarningCode = WarningCode("ADMISSION_RELEAS
 pub const REPOSITORY_ADMISSION_SKIPPED: WarningCode = WarningCode("REPOSITORY_ADMISSION_SKIPPED");
 /// A run-store path had its permissions tightened to a private mode.
 pub const RUN_STORE_MODE_TIGHTENED: WarningCode = WarningCode("RUN_STORE_MODE_TIGHTENED");
-/// A lane's Git history is not rooted where publication expected.
-pub const LANE_HISTORY_WARNING: WarningCode = WarningCode("LANE_HISTORY_WARNING");
+/// A lane's Git history needed a publication adjustment.
+pub const LANE_HISTORY_PUBLICATION_ADJUSTED: WarningCode =
+    WarningCode("LANE_HISTORY_PUBLICATION_ADJUSTED");
 /// A lane Git import reported bounded advice on stderr.
-pub const LANE_GIT_IMPORT_ADVICE: WarningCode = WarningCode("LANE_GIT_IMPORT_ADVICE");
-/// Native index synchronisation was advisory and did not fail settlement.
-pub const NATIVE_INDEX_ADVISORY: WarningCode = WarningCode("NATIVE_INDEX_ADVISORY");
+pub const LANE_GIT_IMPORT_STDERR: WarningCode = WarningCode("LANE_GIT_IMPORT_STDERR");
+/// Native index synchronisation failed; settlement proceeds.
+pub const NATIVE_INDEX_SYNC_FAILED: WarningCode = WarningCode("NATIVE_INDEX_SYNC_FAILED");
 /// A lane handoff was accepted with an advisory parse notice.
-pub const HANDOFF_ADVISORY: WarningCode = WarningCode("HANDOFF_ADVISORY");
+pub const HANDOFF_PARSE_NOTICE: WarningCode = WarningCode("HANDOFF_PARSE_NOTICE");
 /// A build slot custody publication failed before spawn.
-pub const BUILD_SLOT_SETUP_WARNING: WarningCode = WarningCode("BUILD_SLOT_SETUP_WARNING");
-/// A build directory GC diagnostic preserved its targets.
-pub const BUILD_DIR_GC_ADVISORY: WarningCode = WarningCode("BUILD_DIR_GC_ADVISORY");
-/// A delivery Git refresh advisory left the lane usable.
-pub const DELIVERY_REFRESH_ADVISORY: WarningCode = WarningCode("DELIVERY_REFRESH_ADVISORY");
-/// A base fetch advisory left the launch to continue or retry.
-pub const BASE_FETCH_ADVISORY: WarningCode = WarningCode("BASE_FETCH_ADVISORY");
+pub const BUILD_SLOT_CUSTODY_UNPUBLISHED: WarningCode =
+    WarningCode("BUILD_SLOT_CUSTODY_UNPUBLISHED");
+/// A build-directory GC pass kept its targets.
+pub const BUILD_DIR_GC_TARGET_RETAINED: WarningCode = WarningCode("BUILD_DIR_GC_TARGET_RETAINED");
+/// A delivery Git refresh failed; the lane stays usable.
+pub const DELIVERY_REFRESH_FAILED: WarningCode = WarningCode("DELIVERY_REFRESH_FAILED");
+/// A base fetch hit a lock or transient error; the launch retries or continues.
+pub const BASE_FETCH_FALLBACK: WarningCode = WarningCode("BASE_FETCH_FALLBACK");
 /// Stop publication was unavailable; custody was retained.
 pub const STOP_PUBLICATION_UNAVAILABLE: WarningCode = WarningCode("STOP_PUBLICATION_UNAVAILABLE");
 /// Stopped work remains unpushed in the primary checkout.
@@ -204,6 +205,113 @@ pub const WRITER_UNPUSHED_WORK: WarningCode = WarningCode("WRITER_UNPUSHED_WORK"
 pub const PRIMARY_POSITION_UNRECORDED: WarningCode = WarningCode("PRIMARY_POSITION_UNRECORDED");
 /// A stored admission lease row was malformed and skipped.
 pub const ADMISSION_RECORD_MALFORMED: WarningCode = WarningCode("ADMISSION_RECORD_MALFORMED");
+
+// Event-specific codes added when the warning slices named each site.
+/// An advisory finding supplied by a subsystem was reported to the operator.
+pub const ADVISORY_FINDING: WarningCode = WarningCode("ADVISORY_FINDING");
+/// A wait budget exceeded its maximum and was clamped.
+pub const WAIT_BUDGET_CLAMPED: WarningCode = WarningCode("WAIT_BUDGET_CLAMPED");
+/// The model catalogue could not be read; a bundled or empty catalogue applied.
+pub const MODEL_CATALOGUE_UNAVAILABLE: WarningCode = WarningCode("MODEL_CATALOGUE_UNAVAILABLE");
+/// Quota readiness could not be synchronised with its stored record.
+pub const QUOTA_READINESS_UNSYNCED: WarningCode = WarningCode("QUOTA_READINESS_UNSYNCED");
+/// A login failure or recovery record could not be published.
+pub const LOGIN_RECORD_UNRETAINED: WarningCode = WarningCode("LOGIN_RECORD_UNRETAINED");
+/// A configured key uses a deprecated spelling.
+pub const CONFIG_DEPRECATION: WarningCode = WarningCode("CONFIG_DEPRECATION");
+/// A recorded launch access profile could not be read or applied.
+pub const LAUNCH_ACCESS_PROFILE: WarningCode = WarningCode("LAUNCH_ACCESS_PROFILE");
+/// A garbage-collection pass could not be scheduled; a later pass retries.
+pub const GC_SCHEDULE_FAILED: WarningCode = WarningCode("GC_SCHEDULE_FAILED");
+/// Disk space could not be observed; the disk-floor check was skipped.
+pub const DISK_OBSERVATION_UNAVAILABLE: WarningCode = WarningCode("DISK_OBSERVATION_UNAVAILABLE");
+/// A stored steer restart pacing record was invalid and ignored.
+pub const STEER_PACING_RECORD_INVALID: WarningCode = WarningCode("STEER_PACING_RECORD_INVALID");
+/// A requested sandbox mode was overridden by the access profile.
+pub const SANDBOX_MODE_OVERRIDDEN: WarningCode = WarningCode("SANDBOX_MODE_OVERRIDDEN");
+/// A configured upstream or verify base could not be resolved.
+pub const UPSTREAM_UNRESOLVED: WarningCode = WarningCode("UPSTREAM_UNRESOLVED");
+/// A branch Git configuration value could not be read or parsed.
+pub const BRANCH_CONFIG_UNREADABLE: WarningCode = WarningCode("BRANCH_CONFIG_UNREADABLE");
+/// A notes cursor acknowledgement failed; a page may replay.
+pub const NOTES_CURSOR_UNACKNOWLEDGED: WarningCode = WarningCode("NOTES_CURSOR_UNACKNOWLEDGED");
+/// A PR journal could not be read; reconciliation covers the gap.
+pub const PR_JOURNAL_UNAVAILABLE: WarningCode = WarningCode("PR_JOURNAL_UNAVAILABLE");
+/// A build context, Git binding or repository was unavailable; build ran locally.
+pub const BUILD_CONTEXT_UNAVAILABLE: WarningCode = WarningCode("BUILD_CONTEXT_UNAVAILABLE");
+/// A chair switch proceeded on stale or unavailable quota.
+pub const CHAIR_SWITCH_QUOTA_STALE: WarningCode = WarningCode("CHAIR_SWITCH_QUOTA_STALE");
+/// Note observation indexing failed and will retry.
+pub const NOTE_OBSERVATION_DEFERRED: WarningCode = WarningCode("NOTE_OBSERVATION_DEFERRED");
+/// A GC sweep lease could not be released.
+pub const GC_SWEEP_LEASE_UNRELEASED: WarningCode = WarningCode("GC_SWEEP_LEASE_UNRELEASED");
+/// A GC sweep cursor could not be persisted.
+pub const GC_SWEEP_CURSOR_UNWRITTEN: WarningCode = WarningCode("GC_SWEEP_CURSOR_UNWRITTEN");
+/// Admission slots could not be read; the command proceeds without them.
+pub const ADMISSION_SLOTS_UNAVAILABLE: WarningCode = WarningCode("ADMISSION_SLOTS_UNAVAILABLE");
+/// A command-line value looks malformed and deserves a second look.
+pub const ARGUMENT_VALUE_SUSPECT: WarningCode = WarningCode("ARGUMENT_VALUE_SUSPECT");
+/// A private check directory could not be cleaned.
+pub const PRIVATE_CHECK_DIR_UNCLEAN: WarningCode = WarningCode("PRIVATE_CHECK_DIR_UNCLEAN");
+/// A project or its roots could not be resolved for a hook.
+pub const PROJECT_UNAVAILABLE: WarningCode = WarningCode("PROJECT_UNAVAILABLE");
+/// A check or local gate could not be run.
+pub const CHECK_UNAVAILABLE: WarningCode = WarningCode("CHECK_UNAVAILABLE");
+/// Import pins could not be collected for a project.
+pub const IMPORT_PIN_COLLECTION_FAILED: WarningCode = WarningCode("IMPORT_PIN_COLLECTION_FAILED");
+/// Settled lane worktrees could not be collected.
+pub const SETTLED_LANE_COLLECTION_FAILED: WarningCode =
+    WarningCode("SETTLED_LANE_COLLECTION_FAILED");
+/// Verification could not run and was skipped.
+pub const VERIFY_UNAVAILABLE: WarningCode = WarningCode("VERIFY_UNAVAILABLE");
+/// The affected-path selection could not be computed.
+pub const AFFECTED_SELECTION_UNAVAILABLE: WarningCode =
+    WarningCode("AFFECTED_SELECTION_UNAVAILABLE");
+/// A temporary checkout could not be removed.
+pub const TEMP_CHECKOUT_RETAINED: WarningCode = WarningCode("TEMP_CHECKOUT_RETAINED");
+/// A smoke-test scratch project binding could not be removed.
+pub const SMOKE_BINDING_RETAINED: WarningCode = WarningCode("SMOKE_BINDING_RETAINED");
+/// A build ledger rotated and some rotation entries expired.
+pub const BUILD_LEDGER_ROTATED: WarningCode = WarningCode("BUILD_LEDGER_ROTATED");
+/// The recent CI duration cache was unavailable; a slower cadence applied.
+pub const CI_DURATION_CACHE_UNAVAILABLE: WarningCode = WarningCode("CI_DURATION_CACHE_UNAVAILABLE");
+/// An approval carry receipt could not be opened or parsed.
+pub const APPROVAL_RECEIPT_UNREADABLE: WarningCode = WarningCode("APPROVAL_RECEIPT_UNREADABLE");
+/// A preflight check failed but the launch continues in place.
+pub const PREFLIGHT_CONTINUE_IN_PLACE: WarningCode = WarningCode("PREFLIGHT_CONTINUE_IN_PLACE");
+/// A refusal notice could not be delivered.
+pub const REFUSAL_NOTICE_UNDELIVERED: WarningCode = WarningCode("REFUSAL_NOTICE_UNDELIVERED");
+/// A private cache could not be released after collection.
+pub const PRIVATE_CACHE_RELEASE_FAILED: WarningCode = WarningCode("PRIVATE_CACHE_RELEASE_FAILED");
+/// A steer restart was staggered to avoid a collision.
+pub const STEER_RESTART_STAGGERED: WarningCode = WarningCode("STEER_RESTART_STAGGERED");
+/// A repository worktree inventory could not be read.
+pub const WORKTREE_INVENTORY_UNAVAILABLE: WarningCode =
+    WarningCode("WORKTREE_INVENTORY_UNAVAILABLE");
+/// An account does not offer the requested model.
+pub const ACCOUNT_OFFER_MISMATCH: WarningCode = WarningCode("ACCOUNT_OFFER_MISMATCH");
+/// A stored account readiness record is stale.
+pub const ACCOUNT_READINESS_STALE: WarningCode = WarningCode("ACCOUNT_READINESS_STALE");
+/// An account identity could not be verified; usage is attributed as unknown.
+pub const ACCOUNT_IDENTITY_UNVERIFIED: WarningCode = WarningCode("ACCOUNT_IDENTITY_UNVERIFIED");
+/// A GitHub login could not be injected from the host environment.
+pub const GH_LOGIN_UNAVAILABLE: WarningCode = WarningCode("GH_LOGIN_UNAVAILABLE");
+/// GitHub publishing could not be configured.
+pub const GH_PUBLISHING_UNAVAILABLE: WarningCode = WarningCode("GH_PUBLISHING_UNAVAILABLE");
+/// GitHub publishing credentials were withheld by the access policy.
+pub const GH_CREDENTIALS_WITHHELD: WarningCode = WarningCode("GH_CREDENTIALS_WITHHELD");
+/// A GitHub read was skipped because the rate limit was reached.
+pub const GH_RATE_LIMITED: WarningCode = WarningCode("GH_RATE_LIMITED");
+/// Actions runs could not be read for a commit.
+pub const ACTIONS_RUNS_UNAVAILABLE: WarningCode = WarningCode("ACTIONS_RUNS_UNAVAILABLE");
+/// A remote fetch failed; the current integration resolution was used.
+pub const REMOTE_FETCH_FAILED: WarningCode = WarningCode("REMOTE_FETCH_FAILED");
+/// Forge discovery failed; local journal sources continue.
+pub const FORGE_DISCOVERY_UNAVAILABLE: WarningCode = WarningCode("FORGE_DISCOVERY_UNAVAILABLE");
+/// A configured forge source could not be resolved.
+pub const FORGE_SOURCE_UNRESOLVED: WarningCode = WarningCode("FORGE_SOURCE_UNRESOLVED");
+/// A forge forwarder was unavailable; reconciliation continued.
+pub const FORWARDER_UNAVAILABLE: WarningCode = WarningCode("FORWARDER_UNAVAILABLE");
 
 impl Warning {
     /// A warning with no subject, source or repair.
@@ -419,68 +527,10 @@ mod tests {
         assert!(first.key().starts_with("sha256:"));
     }
 
-    /// Spec: docs/specs/cli.md#warnings-are-typed-values
-    #[test]
-    fn the_library_crate_codes_are_upper_snake() {
-        for code in [
-            super::CREDENTIAL_INVENTORY_INCOMPLETE,
-            super::HOST_INVENTORY_INCOMPLETE,
-            super::UNREADABLE_PROCESS_CENSUS,
-            super::DEFAULT_BASE_FALLBACK,
-            super::WORKTREE_SETUP_INCOMPLETE,
-            super::CACHE_REMOVAL_FAILED,
-            super::DEFAULT_BRANCH_REWRITTEN,
-            super::CONFLICT_MARKERS_PUSHED,
-            super::CUSTODY_CHANGED,
-            super::CUSTODY_HELD_ADVISORY,
-            super::SECRET_SHAPE_IN_FIELD,
-            super::GRAPH_OBSERVATION_DEFERRED,
-            super::RESOURCE_PROBE_FAILED,
-            super::MEMORY_FLOOR_LOW,
-            super::BUILD_SLOT_UNAVAILABLE,
-            super::BUILD_PORT_UNAVAILABLE,
-            super::BUILD_LEDGER_DIAGNOSTIC,
-            super::DELIVERY_TRANSPORT_ADVISORY,
-            super::PRIVATE_GIT_RETAINED,
-            super::STRAY_WORK_CHECK_FAILED,
-            super::STRAY_LANE_WORK,
-            super::SANDBOX_UNAVAILABLE,
-            super::LANE_PRIORITY_FALLBACK,
-            super::RUN_SETTINGS_UNAVAILABLE,
-            super::PR_CONTRIBUTION_WARNING,
-            super::SETTLEMENT_DIAGNOSTIC,
-            super::POLICY_ADVISORY,
-            super::TOOL_STATE_DIAGNOSTIC,
-            super::ADMISSION_RECEIPT_UNCONFIRMED,
-            super::ADMISSION_RELEASE_PENDING,
-            super::REPOSITORY_ADMISSION_SKIPPED,
-            super::RUN_STORE_MODE_TIGHTENED,
-            super::LANE_HISTORY_WARNING,
-            super::LANE_GIT_IMPORT_ADVICE,
-            super::NATIVE_INDEX_ADVISORY,
-            super::HANDOFF_ADVISORY,
-            super::BUILD_SLOT_SETUP_WARNING,
-            super::BUILD_DIR_GC_ADVISORY,
-            super::DELIVERY_REFRESH_ADVISORY,
-            super::BASE_FETCH_ADVISORY,
-            super::STOP_PUBLICATION_UNAVAILABLE,
-            super::WRITER_UNPUSHED_WORK,
-            super::PRIMARY_POSITION_UNRECORDED,
-            super::ADMISSION_RECORD_MALFORMED,
-        ] {
-            let name = code.as_str();
-            assert!(
-                !name.is_empty()
-                    && name
-                        .bytes()
-                        .all(|byte| byte.is_ascii_uppercase() || byte == b'_'),
-                "{name}"
-            );
-        }
-    }
-
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
     #[test]
     fn the_catalogue_codes_are_upper_snake() {
+        // Lists exactly the declared consts; adding or removing one must update this list.
         for code in [
             super::CONFIG_KEY_IGNORED,
             super::CONFIG_MALFORMED,
@@ -492,8 +542,8 @@ mod tests {
             super::LIVE_RECORD_FORMAT_CHANGED,
             super::MIGRATION_STEP_FAILED,
             super::STATE_ROOT_OVERLAP,
-            super::RESULT_TOO_LARGE,
             super::FORGE_CONTEXT_UNRESOLVED,
+            super::RESULT_TOO_LARGE,
             super::GIT_OPERATION_RETAINED,
             super::ANSWER_DELIVERY_SKIPPED,
             super::ANSWER_DELIVERY_RETAINED,
@@ -511,6 +561,100 @@ mod tests {
             super::ACCOUNT_SWITCH_RECONCILE_FAILED,
             super::CHANGE_SIGNAL_UNPUBLISHED,
             super::PROCESS_BUDGET_PROBE_FAILED,
+            super::CREDENTIAL_INVENTORY_INCOMPLETE,
+            super::HOST_INVENTORY_INCOMPLETE,
+            super::UNREADABLE_PROCESS_CENSUS,
+            super::DEFAULT_BASE_FALLBACK,
+            super::WORKTREE_SETUP_INCOMPLETE,
+            super::CACHE_REMOVAL_FAILED,
+            super::DEFAULT_BRANCH_REWRITTEN,
+            super::CONFLICT_MARKERS_PUSHED,
+            super::CUSTODY_CHANGED,
+            super::CUSTODY_HELD,
+            super::SECRET_SHAPE_IN_FIELD,
+            super::GRAPH_OBSERVATION_DEFERRED,
+            super::RESOURCE_PROBE_FAILED,
+            super::MEMORY_FLOOR_LOW,
+            super::BUILD_SLOT_UNAVAILABLE,
+            super::BUILD_PORT_UNAVAILABLE,
+            super::BUILD_LEDGER_NOTE,
+            super::DELIVERY_TRANSPORT_FALLBACK,
+            super::PRIVATE_GIT_RETAINED,
+            super::STRAY_WORK_CHECK_FAILED,
+            super::STRAY_LANE_WORK,
+            super::SANDBOX_UNAVAILABLE,
+            super::LANE_PRIORITY_FALLBACK,
+            super::RUN_SETTINGS_UNAVAILABLE,
+            super::PR_CONTRIBUTION_BINDING_FAILED,
+            super::WRITER_FENCE_LIST_FAILED,
+            super::TOOL_STATE_COMMIT_FAILED,
+            super::ADMISSION_RECEIPT_UNCONFIRMED,
+            super::ADMISSION_RELEASE_PENDING,
+            super::REPOSITORY_ADMISSION_SKIPPED,
+            super::RUN_STORE_MODE_TIGHTENED,
+            super::LANE_HISTORY_PUBLICATION_ADJUSTED,
+            super::LANE_GIT_IMPORT_STDERR,
+            super::NATIVE_INDEX_SYNC_FAILED,
+            super::HANDOFF_PARSE_NOTICE,
+            super::BUILD_SLOT_CUSTODY_UNPUBLISHED,
+            super::BUILD_DIR_GC_TARGET_RETAINED,
+            super::DELIVERY_REFRESH_FAILED,
+            super::BASE_FETCH_FALLBACK,
+            super::STOP_PUBLICATION_UNAVAILABLE,
+            super::WRITER_UNPUSHED_WORK,
+            super::PRIMARY_POSITION_UNRECORDED,
+            super::ADMISSION_RECORD_MALFORMED,
+            super::ADVISORY_FINDING,
+            super::WAIT_BUDGET_CLAMPED,
+            super::MODEL_CATALOGUE_UNAVAILABLE,
+            super::QUOTA_READINESS_UNSYNCED,
+            super::LOGIN_RECORD_UNRETAINED,
+            super::CONFIG_DEPRECATION,
+            super::LAUNCH_ACCESS_PROFILE,
+            super::GC_SCHEDULE_FAILED,
+            super::DISK_OBSERVATION_UNAVAILABLE,
+            super::STEER_PACING_RECORD_INVALID,
+            super::SANDBOX_MODE_OVERRIDDEN,
+            super::UPSTREAM_UNRESOLVED,
+            super::BRANCH_CONFIG_UNREADABLE,
+            super::NOTES_CURSOR_UNACKNOWLEDGED,
+            super::PR_JOURNAL_UNAVAILABLE,
+            super::BUILD_CONTEXT_UNAVAILABLE,
+            super::CHAIR_SWITCH_QUOTA_STALE,
+            super::NOTE_OBSERVATION_DEFERRED,
+            super::GC_SWEEP_LEASE_UNRELEASED,
+            super::GC_SWEEP_CURSOR_UNWRITTEN,
+            super::ADMISSION_SLOTS_UNAVAILABLE,
+            super::ARGUMENT_VALUE_SUSPECT,
+            super::PRIVATE_CHECK_DIR_UNCLEAN,
+            super::PROJECT_UNAVAILABLE,
+            super::CHECK_UNAVAILABLE,
+            super::IMPORT_PIN_COLLECTION_FAILED,
+            super::SETTLED_LANE_COLLECTION_FAILED,
+            super::VERIFY_UNAVAILABLE,
+            super::AFFECTED_SELECTION_UNAVAILABLE,
+            super::TEMP_CHECKOUT_RETAINED,
+            super::SMOKE_BINDING_RETAINED,
+            super::BUILD_LEDGER_ROTATED,
+            super::CI_DURATION_CACHE_UNAVAILABLE,
+            super::APPROVAL_RECEIPT_UNREADABLE,
+            super::PREFLIGHT_CONTINUE_IN_PLACE,
+            super::REFUSAL_NOTICE_UNDELIVERED,
+            super::PRIVATE_CACHE_RELEASE_FAILED,
+            super::STEER_RESTART_STAGGERED,
+            super::WORKTREE_INVENTORY_UNAVAILABLE,
+            super::ACCOUNT_OFFER_MISMATCH,
+            super::ACCOUNT_READINESS_STALE,
+            super::ACCOUNT_IDENTITY_UNVERIFIED,
+            super::GH_LOGIN_UNAVAILABLE,
+            super::GH_PUBLISHING_UNAVAILABLE,
+            super::GH_CREDENTIALS_WITHHELD,
+            super::GH_RATE_LIMITED,
+            super::ACTIONS_RUNS_UNAVAILABLE,
+            super::REMOTE_FETCH_FAILED,
+            super::FORGE_DISCOVERY_UNAVAILABLE,
+            super::FORGE_SOURCE_UNRESOLVED,
+            super::FORWARDER_UNAVAILABLE,
         ] {
             let name = code.as_str();
             assert!(

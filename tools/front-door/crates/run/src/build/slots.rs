@@ -550,10 +550,10 @@ pub fn execute_staged(
     // Custody is published before the child exists. The inherited lease below
     // keeps the slot occupied even if this process dies before `on_spawn`.
     mark_intent(&staged.paths.job, &owned_job.owner).map_err(|error| {
-        use provenant_records::warning::{BUILD_SLOT_SETUP_WARNING, Warning, warn};
+        use provenant_records::warning::{BUILD_SLOT_CUSTODY_UNPUBLISHED, Warning, warn};
         // Spec: docs/specs/cli.md#warnings-are-typed-values
         warn(Warning::new(
-            BUILD_SLOT_SETUP_WARNING,
+            BUILD_SLOT_CUSTODY_UNPUBLISHED,
             format!("cannot publish slot custody before spawn: {error}"),
         ));
         Exception::PoolUnavailable

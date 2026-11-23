@@ -14,7 +14,7 @@ use provenant_quota::{
     schedule::{self, Detection, QuotaQuery, QuotaTick},
     *,
 };
-use provenant_records::warning::{CONFIG_MALFORMED, LIVE_RECORD_FORMAT_CHANGED, Warning, warn};
+use provenant_records::warning::{LIVE_RECORD_FORMAT_CHANGED, Warning, warn};
 use provenant_records::{CommandError, CommandResult, Outcome};
 use std::{
     ffi::OsStr,
@@ -1107,7 +1107,7 @@ pub(crate) fn state_freshness(state: &Path) -> provenant_quota::FreshnessPolicy 
         Ok(settings) => provenant_quota::FreshnessPolicy::from_settings(settings.freshness),
         Err(error) => {
             warn(Warning::new(
-                CONFIG_MALFORMED,
+                provenant_records::warning::CONFIG_UNAVAILABLE,
                 format!("quota freshness settings unavailable ({error}); using defaults"),
             ));
             provenant_quota::FreshnessPolicy::default()
@@ -1123,7 +1123,7 @@ fn catalogue_pools(roots: &Roots) -> impl Fn(&str, &str) -> Vec<String> {
         Ok(catalogue) => Some(catalogue),
         Err(error) => {
             warn(Warning::new(
-                CONFIG_MALFORMED,
+                provenant_records::warning::MODEL_CATALOGUE_UNAVAILABLE,
                 format!("model catalogue unavailable ({error}); model pools are not applied"),
             ));
             None
@@ -1370,7 +1370,7 @@ fn write_intent_at(
     // The account commit remains authoritative if derived publication fails.
     if let Err(error) = sync_readiness(state, intent, now) {
         warn(Warning::new(
-            CONFIG_MALFORMED,
+            provenant_records::warning::QUOTA_READINESS_UNSYNCED,
             format!("could not sync quota readiness: {error}"),
         ));
     }
@@ -2440,7 +2440,7 @@ pub(crate) fn execute(
         )
     {
         warn(Warning::new(
-            CONFIG_MALFORMED,
+            provenant_records::warning::LOGIN_RECORD_UNRETAINED,
             format!("could not deliver login expiry notice: {error}"),
         ));
     }

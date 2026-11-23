@@ -1,7 +1,5 @@
 use super::*;
-use provenant_records::warning::{
-    BRANCH_BEHIND_BASE, CONFIG_MALFORMED, SETTING_LAYER_IGNORED, Warning, warn,
-};
+use provenant_records::warning::{BRANCH_BEHIND_BASE, SETTING_LAYER_IGNORED, Warning, warn};
 
 pub(crate) struct BoundGraphOwner<'a> {
     /// Active node's sealed launch allowance, independent of settlement observation.
@@ -336,8 +334,11 @@ impl BoundGraphOwner<'_> {
             .is_err()
         {
             warn(
-                Warning::new(CONFIG_MALFORMED, "refusal notice could not be delivered")
-                    .repair("run `provenant reconcile`"),
+                Warning::new(
+                    provenant_records::warning::REFUSAL_NOTICE_UNDELIVERED,
+                    "refusal notice could not be delivered",
+                )
+                .repair("run `provenant reconcile`"),
             );
         }
     }
@@ -1441,7 +1442,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 let error = provenant_records::diagnostic::safe_text(&error.to_string());
                 warn(
                     Warning::new(
-                        CONFIG_MALFORMED,
+                        provenant_records::warning::CONFIG_UNAVAILABLE,
                         format!(
                             "full config unavailable ({error}); using the owner's resolved policy"
                         ),
@@ -1465,7 +1466,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             Ok(config) => config,
             Err(error) => {
                 warn(Warning::new(
-                    CONFIG_MALFORMED,
+                    provenant_records::warning::CONFIG_UNAVAILABLE,
                     format!("graph launch retry settings unavailable: {error}; using defaults"),
                 ));
                 return policy;
@@ -1645,7 +1646,10 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             )
             .map_err(git_facts::repository_fact_error)?;
             for warning in warnings {
-                warn(Warning::new(CONFIG_MALFORMED, warning.clone()));
+                warn(Warning::new(
+                    provenant_records::warning::ADVISORY_FINDING,
+                    warning.clone(),
+                ));
                 self.launch_warnings.push(warning);
             }
             return Ok(Some(base.to_string()));
@@ -3342,7 +3346,10 @@ impl BoundGraphOwner<'_> {
                 &exclude,
                 &self.factory.context.roots,
             ) {
-                warn(Warning::new(CONFIG_MALFORMED, warning.clone()));
+                warn(Warning::new(
+                    provenant_records::warning::ADVISORY_FINDING,
+                    warning.clone(),
+                ));
                 self.launch_warnings.push(warning);
             }
         }
@@ -3617,7 +3624,13 @@ impl BoundGraphOwner<'_> {
                 "model {} is not in the catalogue; the provider will check it",
                 model.as_str()
             );
-            warn(Warning::new(CONFIG_MALFORMED, warning.clone()).subject(model.as_str()));
+            warn(
+                Warning::new(
+                    provenant_records::warning::ADVISORY_FINDING,
+                    warning.clone(),
+                )
+                .subject(model.as_str()),
+            );
             self.launch_warnings.push(warning);
         }
         let receipt = owner.submit_with_access(

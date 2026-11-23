@@ -1750,7 +1750,7 @@ impl BinaryRunOwner<'_> {
         {
             provenant_records::warning::warn(
                 provenant_records::warning::Warning::new(
-                    provenant_records::warning::CONFIG_MALFORMED,
+                    provenant_records::warning::REFUSAL_NOTICE_UNDELIVERED,
                     "refusal notice could not be delivered; inspect the chair binding and notice configuration",
                 )
                 .repair("run `provenant reconcile`"),

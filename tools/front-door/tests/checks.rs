@@ -235,7 +235,7 @@ fn check_install_smokes_a_staged_binary_with_private_home_and_keeps_scan_status(
     assert!(
         envelope["warnings"].as_array().is_some_and(|warnings| {
             warnings.iter().any(|warning| {
-                warning["code"] == "CONFIG_MALFORMED"
+                warning["code"] == "PRIVATE_CHECK_DIR_UNCLEAN"
                     && warning["message"]
                         .as_str()
                         .is_some_and(|message| message.contains("private check directory"))

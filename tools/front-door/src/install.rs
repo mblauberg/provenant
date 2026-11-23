@@ -15,8 +15,7 @@ use provenant_os::fs::Directory;
 use provenant_records::{
     CommandError, CommandResult, Harness, Outcome,
     warning::{
-        CONFIG_MALFORMED, GIT_OPERATION_RETAINED, LIVE_RECORD_FORMAT_CHANGED, STATE_ROOT_OVERLAP,
-        Warning, warn,
+        GIT_OPERATION_RETAINED, LIVE_RECORD_FORMAT_CHANGED, STATE_ROOT_OVERLAP, Warning, warn,
     },
 };
 use serde::Serialize;
@@ -2485,7 +2484,13 @@ fn report_smoke_cleanup<T>(
         return outcome;
     };
     let warning = format!("smoke scratch project binding was not removed: {error}");
-    warn(Warning::new(CONFIG_MALFORMED, warning.clone()).once_per_change());
+    warn(
+        Warning::new(
+            provenant_records::warning::SMOKE_BINDING_RETAINED,
+            warning.clone(),
+        )
+        .once_per_change(),
+    );
     match outcome {
         Ok(output) => Ok(output),
         Err(error) => Err(format!("{error}\n{warning}")),

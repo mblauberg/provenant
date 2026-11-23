@@ -1,5 +1,5 @@
 use super::*;
-use provenant_records::warning::{CONFIG_MALFORMED, Warning, warn};
+use provenant_records::warning::{Warning, warn};
 
 /// Bind declared lane capabilities to the provider's confinement profile.
 pub(in crate::run) fn apply_lane_capabilities(
@@ -410,7 +410,10 @@ pub(super) fn sandbox_mode(
             .unwrap_or(&Default::default()),
     );
     if let Some(message) = &mode.warning {
-        warn(Warning::new(CONFIG_MALFORMED, message.clone()));
+        warn(Warning::new(
+            provenant_records::warning::SANDBOX_MODE_OVERRIDDEN,
+            message.clone(),
+        ));
     }
     mode
 }
@@ -1936,7 +1939,7 @@ pub(in crate::run) fn read_only_source_ref(
             // The branch's own tracking configuration could not be resolved, so
             // the remote's default branch is only an advisory stand-in.
             warn(Warning::new(
-                CONFIG_MALFORMED,
+                provenant_records::warning::UPSTREAM_UNRESOLVED,
                 format!("read-only source could not resolve this branch's configured upstream; using {} instead, which may not track this checkout", fallback.1),
             ));
             Some(fallback)
@@ -2031,7 +2034,7 @@ fn branch_config_value(
 
     if validate_branch_config_key(key).is_err() {
         warn(Warning::new(
-            CONFIG_MALFORMED,
+            provenant_records::warning::BRANCH_CONFIG_UNREADABLE,
             "read branch Git configuration rejected an invalid key",
         ));
         return None;
@@ -2048,7 +2051,10 @@ fn branch_config_value(
     ) {
         Ok(out) => out,
         Err(error) => {
-            warn(Warning::new(CONFIG_MALFORMED, error.to_string()));
+            warn(Warning::new(
+                provenant_records::warning::BRANCH_CONFIG_UNREADABLE,
+                error.to_string(),
+            ));
             return None;
         }
     };
@@ -2057,7 +2063,7 @@ fn branch_config_value(
         Termination::Exit(1) => return None,
         termination => {
             warn(Warning::new(
-                CONFIG_MALFORMED,
+                provenant_records::warning::BRANCH_CONFIG_UNREADABLE,
                 format!("read branch Git configuration ended with {termination:?}"),
             ));
             return None;
@@ -2067,7 +2073,7 @@ fn branch_config_value(
         Ok(value) => value.trim(),
         Err(error) => {
             warn(Warning::new(
-                CONFIG_MALFORMED,
+                provenant_records::warning::BRANCH_CONFIG_UNREADABLE,
                 format!("parse branch Git configuration failed: {error}"),
             ));
             return None;

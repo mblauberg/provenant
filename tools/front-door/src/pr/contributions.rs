@@ -207,7 +207,7 @@ pub(super) fn warn(number: Option<u64>, error: &dyn std::fmt::Display) {
     let label = number.map_or_else(|| "N".into(), |number| number.to_string());
     provenant_records::warning::warn(
         provenant_records::warning::Warning::new(
-            provenant_records::warning::CONFIG_MALFORMED,
+            provenant_records::warning::PR_CONTRIBUTION_BINDING_FAILED,
             format!("PR contribution binding failed: {error}"),
         )
         .subject(label.clone())

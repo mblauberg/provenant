@@ -108,7 +108,7 @@ pub fn run(command: Notes, globals: &Globals) -> u8 {
             && let Err(error) = execute(Input::Ack { reader, scope, seq })
         {
             provenant_records::warning::warn(provenant_records::warning::Warning::new(
-                provenant_records::warning::CONFIG_MALFORMED,
+                provenant_records::warning::NOTES_CURSOR_UNACKNOWLEDGED,
                 format!(
                     "output succeeded but cursor acknowledgement failed; the page may replay: {error}"
                 ),

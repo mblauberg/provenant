@@ -274,7 +274,7 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
     );
     let warnings = warnings(&opened)?;
     assert!(warnings.iter().any(|warning| {
-        warning["code"] == "CONFIG_MALFORMED"
+        warning["code"] == "PR_CONTRIBUTION_BINDING_FAILED"
             && warning["repair"]
                 .as_str()
                 .is_some_and(|repair| repair.contains("provenant pr contributions 1668 --bind"))
@@ -364,7 +364,7 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
         String::from_utf8_lossy(&output.stdout.bytes)
     );
     assert!(self::warnings(&output)?.iter().any(|warning| {
-        warning["code"] == "CONFIG_MALFORMED"
+        warning["code"] == "PR_CONTRIBUTION_BINDING_FAILED"
             && warning["message"]
                 .as_str()
                 .is_some_and(|message| message.contains("no open contribution binding"))
@@ -659,7 +659,7 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
     let fallback = bind_cli("1675")?;
     assert_eq!(code(&fallback), 0);
     assert!(self::warnings(&fallback)?.iter().any(|warning| {
-        warning["code"] == "CONFIG_MALFORMED"
+        warning["code"] == "PR_CONTRIBUTION_BINDING_FAILED"
             && warning["message"]
                 .as_str()
                 .is_some_and(|message| message.contains("stale binding sweep failed"))
@@ -761,7 +761,7 @@ pub(crate) fn pr_contribution_land_warns_when_binding_fails() -> Result {
         String::from_utf8_lossy(&landed.stdout.bytes)
     );
     assert!(warnings(&landed)?.iter().any(|warning| {
-        warning["code"] == "CONFIG_MALFORMED"
+        warning["code"] == "PR_CONTRIBUTION_BINDING_FAILED"
             && warning["message"]
                 .as_str()
                 .is_some_and(|message| message.contains("no open contribution binding"))

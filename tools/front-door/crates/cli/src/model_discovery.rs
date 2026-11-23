@@ -3,7 +3,7 @@ use provenant_core::Roots;
 use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
 use provenant_records::{
     AdapterSpec, ModelListingFormat,
-    warning::{CONFIG_MALFORMED, Warning, warn},
+    warning::{Warning, warn},
 };
 use provenant_routing::{Catalogue, DiscoverySnapshot, RoutingError};
 use std::{ffi::OsString, time::Duration};
@@ -73,7 +73,7 @@ pub(crate) fn effective(roots: &Roots) -> Result<Catalogue, RoutingError> {
         Ok(catalogue) => Ok(catalogue.with_overlays(&layers, warnings)),
         Err(_) => {
             warn(Warning::new(
-                CONFIG_MALFORMED,
+                provenant_records::warning::MODEL_CATALOGUE_UNAVAILABLE,
                 "invalid provider model discovery cache; using bundled catalogue",
             ));
             Ok(bundled.with_overlays(&layers, warnings))

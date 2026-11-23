@@ -109,7 +109,7 @@ impl Reader<'_> {
                 let (_, reset) = rate_delay(&headers, Duration::from_secs(60));
                 provenant_records::warning::warn(
                     provenant_records::warning::Warning::new(
-                        provenant_records::warning::FORGE_CONTEXT_UNRESOLVED,
+                        provenant_records::warning::GH_RATE_LIMITED,
                         format!("GitHub rate limit; skipped this read; reset {reset}"),
                     )
                     .once_per_change(),

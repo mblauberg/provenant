@@ -53,10 +53,10 @@ impl crate::RunStore {
                     8192,
                 );
             }
-            use provenant_records::warning::{PR_CONTRIBUTION_WARNING, Warning, warn};
+            use provenant_records::warning::{PR_CONTRIBUTION_BINDING_FAILED, Warning, warn};
             // Spec: docs/specs/cli.md#warnings-are-typed-values
             warn(
-                Warning::new(PR_CONTRIBUTION_WARNING, message.trim().to_owned())
+                Warning::new(PR_CONTRIBUTION_BINDING_FAILED, message.trim().to_owned())
                     .subject(format!("attempt {attempt}")),
             );
         }

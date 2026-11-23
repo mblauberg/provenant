@@ -1760,7 +1760,7 @@ pub(super) fn gc_reports_settled_lane_store_error_and_continues() -> Result {
     // Spec: docs/specs/cli.md#warnings-are-typed-values
     assert!(
         warnings.iter().any(|warning| {
-            warning["code"] == "CONFIG_MALFORMED"
+            warning["code"] == "SETTLED_LANE_COLLECTION_FAILED"
                 && warning["message"]
                     .as_str()
                     .is_some_and(|message| message.contains("settled lane collection failed"))

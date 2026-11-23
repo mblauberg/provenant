@@ -3948,10 +3948,11 @@ impl WriterLaunch {
             let rendered = format!("policy: {message}");
             #[cfg(test)]
             TOOL_STATE_WARNINGS.with(|warnings| warnings.borrow_mut().push(rendered.clone()));
-            use provenant_records::warning::{TOOL_STATE_DIAGNOSTIC, Warning, warn};
+            use provenant_records::warning::{TOOL_STATE_COMMIT_FAILED, Warning, warn};
             // Spec: docs/specs/cli.md#warnings-are-typed-values
             warn(
-                Warning::new(TOOL_STATE_DIAGNOSTIC, rendered).subject("LANE_TOOL_STATE_COMMITTED"),
+                Warning::new(TOOL_STATE_COMMIT_FAILED, rendered)
+                    .subject("LANE_TOOL_STATE_COMMITTED"),
             );
         }
         // A failure to inspect the diff never blocks settlement. A block here
@@ -4212,10 +4213,12 @@ impl WriterLaunch {
                 // is raised here; both are recorded with the same text so the
                 // record agrees with what the operator was told.
                 if !matches!(ancestor, crate::objects::Ancestor::Unrooted) {
-                    use provenant_records::warning::{LANE_HISTORY_WARNING, Warning, warn};
+                    use provenant_records::warning::{
+                        LANE_HISTORY_PUBLICATION_ADJUSTED, Warning, warn,
+                    };
                     // Spec: docs/specs/cli.md#warnings-are-typed-values
                     warn(
-                        Warning::new(LANE_HISTORY_WARNING, warning.clone())
+                        Warning::new(LANE_HISTORY_PUBLICATION_ADJUSTED, warning.clone())
                             .subject(self.branch.as_str().to_owned()),
                     );
                 }
@@ -4571,9 +4574,9 @@ impl WriterLaunch {
         fallback: GitOid,
     ) {
         let warn = |message: String| {
-            use provenant_records::warning::{NATIVE_INDEX_ADVISORY, Warning};
+            use provenant_records::warning::{NATIVE_INDEX_SYNC_FAILED, Warning};
             // Spec: docs/specs/cli.md#warnings-are-typed-values
-            provenant_records::warning::warn(Warning::new(NATIVE_INDEX_ADVISORY, message));
+            provenant_records::warning::warn(Warning::new(NATIVE_INDEX_SYNC_FAILED, message));
         };
         match crate::objects::sync_native_index(self.worktree.repo(), fallback) {
             crate::objects::IndexSync::Deferred => {}

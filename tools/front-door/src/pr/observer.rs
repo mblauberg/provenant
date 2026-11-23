@@ -485,7 +485,7 @@ impl<F: Forge, C: Clock> Observer<F, C> {
             None => {
                 provenant_records::warning::warn(
                     provenant_records::warning::Warning::new(
-                        provenant_records::warning::CONFIG_MALFORMED,
+                        provenant_records::warning::CI_DURATION_CACHE_UNAVAILABLE,
                         "recent CI duration cache unavailable; using slower observation cadence",
                     )
                     .subject(repository),

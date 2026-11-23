@@ -165,10 +165,10 @@ pub(crate) fn execute_bounded(
     }
     let non_advice_stderr = strip_git_advice(&output.stderr.bytes);
     if !non_advice_stderr.is_empty() {
-        use provenant_records::warning::{LANE_GIT_IMPORT_ADVICE, Warning, warn};
+        use provenant_records::warning::{LANE_GIT_IMPORT_STDERR, Warning, warn};
         // Spec: docs/specs/cli.md#warnings-are-typed-values
         warn(Warning::new(
-            LANE_GIT_IMPORT_ADVICE,
+            LANE_GIT_IMPORT_STDERR,
             format!(
                 "lane Git import: {}",
                 String::from_utf8_lossy(&non_advice_stderr).trim_end()
@@ -922,11 +922,13 @@ pub(crate) fn publish_branch(
                 let warning = Ancestor::Unrooted
                     .warning(branch, base, head)
                     .ok_or_else(invalid)?;
-                use provenant_records::warning::{LANE_HISTORY_WARNING, Warning, warn};
+                use provenant_records::warning::{
+                    LANE_HISTORY_PUBLICATION_ADJUSTED, Warning, warn,
+                };
                 // Spec: docs/specs/cli.md#warnings-are-typed-values
                 warn(
                     Warning::new(
-                        LANE_HISTORY_WARNING,
+                        LANE_HISTORY_PUBLICATION_ADJUSTED,
                         format!(
                             "{warning}; {}; set {UNROOTED_TIP} to refuse to stop instead",
                             history.unrooted_tip.setting(UNROOTED_TIP),
@@ -981,11 +983,11 @@ pub(crate) fn publish_branch(
         }
     };
     if merged {
-        use provenant_records::warning::{LANE_HISTORY_WARNING, Warning, warn};
+        use provenant_records::warning::{LANE_HISTORY_PUBLICATION_ADJUSTED, Warning, warn};
         // Spec: docs/specs/cli.md#warnings-are-typed-values
         warn(
             Warning::new(
-                LANE_HISTORY_WARNING,
+                LANE_HISTORY_PUBLICATION_ADJUSTED,
                 format!(
                     "lane history on {branch} diverged from the host branch; published a host merge of {head} and {current} as {target}; {}; set {REBASE} to refuse to retain the lane's private history instead",
                     history.rebase.setting(REBASE),

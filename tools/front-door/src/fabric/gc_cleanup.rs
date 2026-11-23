@@ -412,7 +412,7 @@ fn release_settled_cache(
     ) {
         provenant_records::warning::warn(
             provenant_records::warning::Warning::new(
-                provenant_records::warning::CONFIG_MALFORMED,
+                provenant_records::warning::PRIVATE_CACHE_RELEASE_FAILED,
                 format!(
                     "private cache release for {}: {error}",
                     writer.worktree.display()
@@ -576,7 +576,7 @@ pub(crate) fn collect_unsettled(
             if let Err(error) = collected {
                 provenant_records::warning::warn(
                     provenant_records::warning::Warning::new(
-                        provenant_records::warning::CONFIG_MALFORMED,
+                        provenant_records::warning::SETTLED_LANE_COLLECTION_FAILED,
                         format!(
                             "settled lane collection failed for {}: {error}",
                             worktree.display()

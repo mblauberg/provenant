@@ -575,8 +575,8 @@ impl TargetProtection {
 /// Every GC protection diagnostic is advisory: a failed observation preserves
 /// targets rather than deleting them. Spec: docs/specs/cli.md#warnings-are-typed-values
 fn gc_warning(message: impl Into<String>) {
-    use provenant_records::warning::{BUILD_DIR_GC_ADVISORY, Warning, warn};
-    warn(Warning::new(BUILD_DIR_GC_ADVISORY, message.into()));
+    use provenant_records::warning::{BUILD_DIR_GC_TARGET_RETAINED, Warning, warn};
+    warn(Warning::new(BUILD_DIR_GC_TARGET_RETAINED, message.into()));
 }
 
 /// Snapshot live writer custody across every registered project for launch

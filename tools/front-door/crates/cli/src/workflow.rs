@@ -11,7 +11,7 @@ use provenant_core::{
 use provenant_os::clock::SystemClock;
 use provenant_records::{
     CommandError, CommandResult, Outcome,
-    warning::{CONFIG_KEY_IGNORED, CONFIG_MALFORMED, Warning, warn},
+    warning::{CONFIG_KEY_IGNORED, Warning, warn},
     workflow::*,
 };
 use provenant_run::{AttemptReader, ExecutionContext, Request, RunStore};
@@ -338,7 +338,10 @@ fn report_input_warnings(warnings: Vec<provenant_records::InputWarning>) {
 /// An advisory collected by an owner travels through the typed warning seam;
 /// it is no longer duplicated into the command's data payload.
 fn report_text_warning(message: impl Into<String>) {
-    warn(Warning::new(CONFIG_MALFORMED, message));
+    warn(Warning::new(
+        provenant_records::warning::ADVISORY_FINDING,
+        message,
+    ));
 }
 
 struct Edge {
@@ -1503,7 +1506,7 @@ mod tests {
         assert_eq!(warnings.len(), 1);
         assert_eq!(
             warnings[0].code.as_ref(),
-            provenant_records::warning::CONFIG_MALFORMED.as_str()
+            provenant_records::warning::ADVISORY_FINDING.as_str()
         );
     }
 

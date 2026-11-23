@@ -887,14 +887,14 @@ pub(crate) fn wait_line_observed(
         Ok(Some(active)) => line.active_workflows = Some(active),
         Ok(None) => provenant_records::warning::warn(
             provenant_records::warning::Warning::new(
-                provenant_records::warning::FORGE_CONTEXT_UNRESOLVED,
+                provenant_records::warning::ACTIONS_RUNS_UNAVAILABLE,
                 "Actions runs unavailable for this head (no runs found); using observed checks only",
             )
             .subject(line.head.clone()),
         ),
         Err(error) => provenant_records::warning::warn(
             provenant_records::warning::Warning::new(
-                provenant_records::warning::FORGE_CONTEXT_UNRESOLVED,
+                provenant_records::warning::ACTIONS_RUNS_UNAVAILABLE,
                 format!("Actions runs unavailable for this head ({error}); using observed checks only"),
             )
             .subject(line.head.clone()),

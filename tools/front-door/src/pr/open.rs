@@ -106,7 +106,7 @@ fn default_branch(state: &Path, project: &Path) -> Result<String> {
     if let Some(branch) = git.remote_head(&remote) {
         provenant_records::warning::warn(
             provenant_records::Warning::new(
-                provenant_records::warning::FORGE_CONTEXT_UNRESOLVED,
+                provenant_records::warning::DEFAULT_BASE_FALLBACK,
                 format!("the forge did not name a default branch for {remote}; using the local remote HEAD symref"),
             )
             .once_per_change(),

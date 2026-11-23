@@ -218,7 +218,7 @@ fn check_disk_and_trim(
                 provenant_os::fs::available_bytes_at(root).map_err(|e| e.to_string())?;
             if free_after < floor {
                 warn(Warning::new(
-                    CONFIG_MALFORMED,
+                    provenant_records::warning::DISK_FLOOR_LOW,
                     format!("available disk ({free_after} B) remains below floor ({floor} B)"),
                 ));
             }
@@ -255,7 +255,7 @@ fn check_memory_and_trim(memory_limit: Option<u64>, trim_action: Option<&str>, c
     };
     let Some(rss) = sample_rss_bytes() else {
         warn(Warning::new(
-            CONFIG_MALFORMED,
+            provenant_records::warning::RESOURCE_PROBE_FAILED,
             format!(
                 "class '{class}' sets a memory limit but no process-tree sample is available; limit not checked"
             ),
@@ -277,7 +277,7 @@ fn check_memory_and_trim(memory_limit: Option<u64>, trim_action: Option<&str>, c
             && rss_after > limit
         {
             warn(Warning::new(
-                CONFIG_MALFORMED,
+                provenant_records::warning::MEMORY_FLOOR_LOW,
                 format!(
                     "process resident memory ({rss_after} B) exceeds class '{class}' limit ({limit} B)"
                 ),
@@ -359,7 +359,7 @@ pub fn run(class: &str, command: &[OsString], env: &[(OsString, OsString)]) -> i
             Ok(context) => context,
             Err(error) => {
                 warn(Warning::new(
-                    CONFIG_MALFORMED,
+                    provenant_records::warning::BUILD_CONTEXT_UNAVAILABLE,
                     format!("build context unavailable: {error}; running command locally"),
                 ));
                 let code = execute_and_forward(program, args, &env);
@@ -591,7 +591,10 @@ fn run_build_job(
     };
     let resolved_priority = context.port.priority_for(priority_class);
     for warning in &resolved_priority.warnings {
-        warn(Warning::new(CONFIG_MALFORMED, warning.clone()));
+        warn(Warning::new(
+            provenant_records::warning::ADVISORY_FINDING,
+            warning.clone(),
+        ));
     }
     let priority = match resolved_priority.value {
         provenant_config::BuildPriority::Interactive => Priority::Interactive,
@@ -615,7 +618,7 @@ fn run_build_job(
     };
     let git = context.git.clone().unwrap_or_else(|| {
         warn(Warning::new(
-            CONFIG_MALFORMED,
+            provenant_records::warning::BUILD_CONTEXT_UNAVAILABLE,
             "build Git binding is unavailable; slot snapshotting will fall back locally",
         ));
         let git_dir = context.worktree.join(".git");
@@ -674,7 +677,10 @@ fn run_build_job(
     let code = match provenant_run::build::run(job, &run_context) {
         Ok(result) => {
             for warning in &result.outcome.warnings {
-                warn(Warning::new(CONFIG_MALFORMED, warning.clone()));
+                warn(Warning::new(
+                    provenant_records::warning::ADVISORY_FINDING,
+                    warning.clone(),
+                ));
             }
             if let Some(exit) = result.outcome.exit {
                 exit.code
@@ -735,7 +741,7 @@ pub(crate) fn host_build_context(
     let project = resolved_project.unwrap_or_else(|| cwd.clone());
     if !is_repository {
         warn(Warning::new(
-            CONFIG_MALFORMED,
+            provenant_records::warning::BUILD_CONTEXT_UNAVAILABLE,
             "Git repository is unavailable; build will run locally",
         ));
     }
@@ -779,7 +785,7 @@ pub(crate) fn host_build_context(
                 Ok(table) => table,
                 Err(inspection_error) => {
                     warn(Warning::new(
-                        CONFIG_MALFORMED,
+                        provenant_records::warning::CONFIG_UNAVAILABLE,
                         format!(
                             "build ports unavailable: {inspection_error}; using builtin build configuration"
                         ),
@@ -814,7 +820,7 @@ pub(crate) fn host_build_context(
     };
     if is_repository && !table.verify.base.trim().is_empty() && verify_base.is_none() {
         warn(Warning::new(
-            CONFIG_MALFORMED,
+            provenant_records::warning::UPSTREAM_UNRESOLVED,
             format!(
                 "verify.base {:?} could not be resolved; build context has no verify base",
                 table.verify.base

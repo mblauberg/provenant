@@ -60,7 +60,7 @@ fn writer_dirty_setting(
         Err(error) => {
             let safe = provenant_records::diagnostic::safe_text(&error.to_string());
             provenant_records::warning::warn(provenant_records::warning::Warning::new(
-                provenant_records::warning::CONFIG_MALFORMED,
+                provenant_records::warning::CONFIG_UNAVAILABLE,
                 format!("writer dirty setting unavailable ({safe}); using default refuse"),
             ));
             (None, "default".to_owned())
@@ -182,7 +182,7 @@ fn preflight_writer_worktrees(
             Preflight::ContinueInPlace(warning) => {
                 provenant_records::warning::warn(
                     provenant_records::warning::Warning::new(
-                        provenant_records::warning::CONFIG_MALFORMED,
+                        provenant_records::warning::PREFLIGHT_CONTINUE_IN_PLACE,
                         warning.clone(),
                     )
                     .subject(path.to_owned()),

@@ -217,7 +217,7 @@ pub fn run(command: Tracker, globals: &Globals) -> u8 {
             let source = resolved.roots.state.as_path().join("ports.json");
             provenant_records::warning::warn(
                 provenant_records::warning::Warning::new(
-                    provenant_records::warning::CONFIG_MALFORMED,
+                    provenant_records::warning::CONFIG_UNAVAILABLE,
                     format!("cannot read tracker port: {error}; using compiled defaults"),
                 )
                 .subject(source.display().to_string())

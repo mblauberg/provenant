@@ -115,7 +115,7 @@ pub(crate) fn lease_with_policy(
     owner: &LeaseOwner,
     configured: LaneCaps,
     policy: &provenant_records::policy::Policy,
-) -> Result<(Option<WallTime>, Vec<String>)> {
+) -> Result<(Option<WallTime>, Vec<provenant_records::warning::Warning>)> {
     let (project, class) = (ticket.project_id, ticket.lane_class);
     let id = ticket.attempt_id.to_string();
     immediate(db, request, |tx| {
@@ -152,7 +152,7 @@ pub(crate) fn lease_with_policy(
                 Facts::violation(format!("active={}, limit={}", hit.active, hit.limit)),
             ) {
                 Effect::Proceed => {}
-                Effect::Warn(warning) => warnings.push(warning.message),
+                Effect::Warn(warning) => warnings.push(warning),
                 Effect::Refuse(_) | Effect::Stop(_) => {
                     return Err(RunError::Admission(AdmissionError::LaneCap {
                         active: hit.active,
