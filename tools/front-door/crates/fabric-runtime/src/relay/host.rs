@@ -1090,6 +1090,7 @@ mod tests {
             let limits = Default::default();
             let resolvers = Default::default();
             let context = patch::PatchContext {
+                catalogue: None,
                 library: &library,
                 resolvers: &resolvers,
                 limits: &limits,

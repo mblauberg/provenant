@@ -157,6 +157,34 @@ remains a Git boundary.
 - Why: a graph that starts must be able to finish within its bounds.
 - Owner: `crates/fabric-runtime/src/graph.rs`
 
+### One model spelling per route
+
+A route carries one spelling of its model: the full catalogue id
+`ADAPTER/ID`, such as `opencode/opencode/deepseek-v4.1-flash-free`. The host
+entry point that holds the effective catalogue decides that spelling once:
+submit, run edit/patch (in patch preparation, before a candidate is built) and
+tier lowering from configuration. The canonicaliser is pure and idempotent — a
+declared id that already names the route adapter is returned byte-for-byte
+(warning with `ROUTE_MODEL_NOT_CATALOGUED` when the effective catalogue does not
+know it), never prefixed again; only a bare or short `NAMESPACE/NAME` is
+resolved by catalogue match, a single unique namespaced candidate, or an
+adapter-prefixed spelling with that warning. Applying it to a stored id again
+changes nothing. Plan fallbacks and patch-added or replaced nodes are
+canonicalised on that same pass; exact-model tiers and batch items emit the
+full id at production. Admission reads the stored ids verbatim and never
+rewrites them, so launch, retry, advance and relay leave the spelling alone.
+Nothing downstream splits, prefixes or re-derives the stored id: preparation,
+successor deduplication and prior-model exclusions parse it directly. This is
+what lets a batch route match `run implement --model` and a declared route
+equal to a ladder hand-off appear once among successors.
+- Why: a model id may itself contain `/`, so re-parsing a stored id silently
+  changes which model runs.
+- Owner: `crates/routing/src/catalog.rs`,
+  `crates/fabric-runtime/src/graph/canonical.rs`,
+  `crates/fabric-runtime/src/graph/patch.rs`,
+  `crates/cli/src/fabric/graph_relay.rs`, `src/fabric/interface.rs`,
+  `crates/fabric-runtime/src/graph/next_step.rs`
+
 ### Bundled template declarations
 
 The shared `TemplateLibrary` parses and structurally checks every bundled

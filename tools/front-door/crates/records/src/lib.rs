@@ -40,6 +40,7 @@ mod source;
 pub mod telemetry_context;
 mod trace;
 pub mod usage_identity;
+pub mod warning;
 
 pub use artifact_ref::ArtifactRef;
 pub use attempt_fact::{

@@ -513,6 +513,7 @@ fn settled_source_consumer_keeps_composite_export_when_member_retries() {
     let resolvers = Default::default();
     let limits = plans::generous();
     let context = patch::PatchContext {
+        catalogue: None,
         library: &library,
         resolvers: &resolvers,
 

@@ -483,6 +483,7 @@ fn quota_stopped_task_and_composite_member_keep_the_same_lineage() -> Result {
                 &id,
                 &patch,
                 &PatchContext {
+                    catalogue: None,
                     library: &library,
                     resolvers: &Default::default(),
                     journal: None,

@@ -1162,6 +1162,7 @@ fn fragment(
     json: &str,
     limits: &crate::config::GraphLimits,
     worktree_layout: &provenant_config::WorktreeLayoutPort,
+    catalogue: Option<&provenant_routing::Catalogue>,
     safe_reason: &mut PlanFailureFact,
 ) -> Result<Expansion, String> {
     let default_spec = PlanSpec {
@@ -1213,6 +1214,7 @@ fn fragment(
     let mut resolvers = source.template_resolvers.clone();
     resolvers.extend(spec.resolvers.clone());
     let context = super::patch::PatchContext {
+        catalogue,
         library: &library,
         resolvers: &resolvers,
 
@@ -1714,6 +1716,7 @@ pub(super) fn settle(
     limits: &crate::config::GraphLimits,
     worktree_layout: &provenant_config::WorktreeLayoutPort,
     policy: &provenant_records::policy::Policy,
+    catalogue: Option<&provenant_routing::Catalogue>,
 ) -> Option<(
     GraphDocument,
     PlannedGraph,
@@ -1878,6 +1881,7 @@ pub(super) fn settle(
                 &json,
                 limits,
                 worktree_layout,
+                catalogue,
                 &mut safe_reason,
             )
         })

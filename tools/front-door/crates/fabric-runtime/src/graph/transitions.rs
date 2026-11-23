@@ -1374,6 +1374,7 @@ pub(super) fn redraw_quota_alias(
         &node.id,
         None,
         &patch::PatchContext {
+            catalogue: None,
             library: &library,
             resolvers: &resolvers,
             limits,

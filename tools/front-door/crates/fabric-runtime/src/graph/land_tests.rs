@@ -1403,6 +1403,7 @@ fn a_replaced_gate_accepting_rejection_never_lands() {
             ..Default::default()
         },
         &patch::PatchContext {
+            catalogue: None,
             library: &library,
             resolvers: &resolvers,
 

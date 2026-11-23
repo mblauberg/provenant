@@ -4199,6 +4199,7 @@ mod provisioned_writer_submission_tests {
                     "writer",
                     None,
                     &graph::patch::PatchContext {
+                        catalogue: None,
                         library: &graph::template::TemplateLibrary::bundled(),
                         resolvers: &Default::default(),
 

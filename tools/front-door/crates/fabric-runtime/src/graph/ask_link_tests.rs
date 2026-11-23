@@ -218,6 +218,7 @@ fn retry_node(document: &GraphDocument, checkpoint: &mut GraphCheckpoint, id: &s
         id,
         None,
         &patch::PatchContext {
+            catalogue: None,
             library: &template::TemplateLibrary::bundled(),
             resolvers: &Default::default(),
 

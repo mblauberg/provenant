@@ -1181,6 +1181,105 @@ fn every_bundled_template_is_listed_and_compiles_with_its_declared_parameters() 
     Ok(())
 }
 
+// Spec: docs/specs/routing.md#exact-selection-no-inference
+#[test]
+fn batch_item_exact_model_matches_run_model_route() -> Result {
+    let rig = GraphProject::new()?;
+    let model = "opencode/opencode/hy4-flash-free";
+    let worktree = rig.project.to_str().ok_or("worktree path")?;
+    let integration_branch = "batch/exact-model-route";
+    let document = rig.document(&json!({
+        "schema_version": support::GRAPH_DOCUMENT_SCHEMA_VERSION,
+        "graph_id": "batch-exact-model-route",
+        "integration_branch": integration_branch,
+        "nodes": [{
+            "id": "batch",
+            "use": "batch",
+            "with": {
+                "worktree": worktree,
+                "write_scope": ["."],
+                // The bundled batch expands a repair loop whose writer delivers
+                // to `integrate:<integration_branch>`. It must name the same
+                // branch as the document or loop expansion refuses the graph.
+                "integration_branch": integration_branch,
+                "items": [{"id": "slice", "brief": "tiny slice", "model": model}]
+            }
+        }]
+    }))?;
+    let (_, batch) = rig.run(&[
+        "run",
+        "--file",
+        document.to_str().ok_or("document path")?,
+        "--explain",
+    ])?;
+    assert!(batch["error"].is_null(), "{batch}");
+    let members = batch["data"]["document"]["nodes"][0]["composite"]["nodes"]
+        .as_array()
+        .ok_or_else(|| format!("batch composite nodes: {batch}"))?;
+    // The compiled batch is a composite of `slices`, `review` and `repair`.
+    // The item slices live one level below, inside the `slices` composite.
+    let slice = members
+        .iter()
+        .find(|node| node["id"] == "slices")
+        .and_then(|node| node["composite"]["nodes"].as_array())
+        .and_then(|nodes| nodes.iter().find(|node| node["id"] == "slice"))
+        .ok_or_else(|| format!("batch slice node: {batch}"))?;
+
+    let (_, direct) = rig.run(&[
+        "run",
+        "implement",
+        "tiny slice",
+        "--model",
+        model,
+        "--worktree",
+        worktree,
+        "--write-scope",
+        ".",
+        "--explain",
+    ])?;
+    assert!(direct["error"].is_null(), "{direct}");
+    let direct_route = &direct["data"]["document"]["nodes"][0]["route"];
+    assert_eq!(
+        slice["route"], *direct_route,
+        "batch: {batch} direct: {direct}"
+    );
+    assert_eq!(slice["route"]["adapter"], "opencode");
+    assert_eq!(slice["route"]["model"], model);
+    Ok(())
+}
+
+// Spec: docs/specs/fabric.md#one-model-spelling-per-route
+#[test]
+fn node_route_table_reaches_explain_with_one_full_model_spelling() -> Result {
+    let rig = GraphProject::new()?;
+    let full = "opencode/opencode/hy4-flash-free";
+    let document = rig.document(&json!({
+        "schema_version": support::GRAPH_DOCUMENT_SCHEMA_VERSION,
+        "graph_id": "node-exact-model-route",
+        "nodes": [
+            {"id":"exact","prompt":"inspect","access":"read_only",
+             "route":{"adapter":"opencode","model":full}},
+            {"id":"relative","prompt":"inspect","access":"read_only",
+             "route":{"adapter":"opencode","model":"opencode/hy4-flash-free"}},
+        ]
+    }))?;
+    let (_, explained) = rig.run(&[
+        "run",
+        "--file",
+        document.to_str().ok_or("document path")?,
+        "--explain",
+    ])?;
+    assert!(explained["error"].is_null(), "{explained}");
+    let nodes = explained["data"]["document"]["nodes"]
+        .as_array()
+        .ok_or_else(|| format!("explained nodes: {explained}"))?;
+    for node in nodes {
+        assert_eq!(node["route"]["adapter"], "opencode", "{node}");
+        assert_eq!(node["route"]["model"], full, "{node}");
+    }
+    Ok(())
+}
+
 #[test]
 fn batch_launch_provisions_planned_slice_worktrees_and_explains_same_admission() -> Result {
     let mut rig = GraphProject::new()?;

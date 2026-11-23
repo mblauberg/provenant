@@ -150,8 +150,8 @@ use provenant_routing as ladder;
 const HOST_NATIVE: &str = "host-native";
 
 /// Where a depleted stop goes: routes to restart on.
-struct Successor {
-    routes: Vec<GraphRoute>,
+pub(super) struct Successor {
+    pub(super) routes: Vec<GraphRoute>,
     /// What the ladder chose, when it handed the work off.
     choice: Option<patch::LadderChoice>,
 }
@@ -169,13 +169,27 @@ fn graph_target(route: &GraphRoute) -> Option<ladder::Target> {
         (Some(adapter), Some(model), _) => Some(ladder::Target::Route {
             model: provenant_routing::ModelId::parse(model)
                 .ok()
-                .filter(|id| id.adapter() == adapter)
-                .or_else(|| {
-                    provenant_routing::ModelId::parse(&format!("{adapter}/{model}")).ok()
-                })?,
+                .filter(|id| id.adapter() == adapter)?,
             account: route.account.clone(),
         }),
         _ => None,
+    }
+}
+
+/// Whether two routes name the same model. One spelling is fixed at graph
+/// admission, so parsing the stored id is the only comparison needed; a route
+/// that already names the ladder's choice is not offered a second time.
+/// Spec: docs/specs/fabric.md#one-model-spelling-per-route
+fn same_model(left: &GraphRoute, right: &GraphRoute) -> bool {
+    let parsed = |route: &GraphRoute| {
+        route
+            .model
+            .as_deref()
+            .and_then(|model| provenant_routing::ModelId::parse(model).ok())
+    };
+    match (parsed(left), parsed(right)) {
+        (Some(left), Some(right)) => left == right,
+        _ => left == right,
     }
 }
 
@@ -194,7 +208,7 @@ fn target_route(target: &ladder::Target, effort: Option<String>) -> GraphRoute {
             extra: Default::default(),
             adapter: Some(model.adapter().to_owned()),
             name: None,
-            model: Some(model.model().to_owned()),
+            model: Some(model.as_str().to_owned()),
             alias: None,
             effort,
             account: account.clone(),
@@ -226,7 +240,7 @@ fn target_route(target: &ladder::Target, effort: Option<String>) -> GraphRoute {
 /// A hand-off restarts on the agent it names; the chair gets no route.
 /// Nothing the node already ran is offered
 /// again. A host without routing facts keeps the node's declared routes.
-fn depletion_successor(
+pub(super) fn depletion_successor(
     node: &PlannedNode,
     progress: &NodeProgress,
     cause: StopCause,
@@ -341,7 +355,7 @@ fn depletion_successor(
             routes.extend(
                 restart_routes(node, progress)
                     .into_iter()
-                    .filter(|route| *route != first)
+                    .filter(|route| !same_model(route, &first))
                     .filter(|route| {
                         pinned_account.is_none_or(|pin| {
                             route
@@ -670,6 +684,7 @@ pub(super) fn settle_stop(
         restart,
         detail.as_deref(),
         &PatchContext {
+            catalogue: None,
             library: &TemplateLibrary::bundled(),
             resolvers: &Default::default(),
 

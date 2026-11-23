@@ -264,6 +264,7 @@ pub(super) fn correct_verdict(
         &node.id,
         &brief,
         &PatchContext {
+            catalogue: None,
             library: &TemplateLibrary::bundled(),
             resolvers: &Default::default(),
             limits,

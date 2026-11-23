@@ -1180,7 +1180,17 @@ pub fn resolve_review_family(
     required_family: Option<&str>,
     exclude: &[String],
 ) -> Result<String, String> {
-    let (_, lowered) = crate::fabric::graph_relay::tier_route("review", tier, None, true)?;
+    // Lower with the same effective catalogue the host uses at submit; surface
+    // any uncatalogued-model warning instead of discarding it.
+    let catalogue = crate::model_discovery::effective(roots).ok();
+    let (_, lowered, warnings) =
+        crate::fabric::graph_relay::tier_route("review", tier, None, true, catalogue.as_ref())?;
+    for warning in warnings {
+        let _ = std::io::Write::write_all(
+            &mut std::io::stderr().lock(),
+            format!("warning: {warning}\n").as_bytes(),
+        );
+    }
     let routes: Vec<_> = lowered
         .as_array()
         .map_or_else(|| vec![&lowered], |items| items.iter().collect());
@@ -1191,18 +1201,11 @@ pub fn resolve_review_family(
             {
                 RouteChoice::NamedRoute(RouteName::parse(name).map_err(|error| error.to_string())?)
             } else {
-                let adapter = route
-                    .get("adapter")
-                    .and_then(serde_json::Value::as_str)
-                    .ok_or("missing route adapter")?;
                 let model = route
                     .get("model")
                     .and_then(serde_json::Value::as_str)
                     .ok_or("missing route model")?;
-                RouteChoice::Model(
-                    ModelId::parse(&format!("{adapter}/{model}"))
-                        .map_err(|error| error.to_string())?,
-                )
+                RouteChoice::Model(ModelId::parse(model).map_err(|error| error.to_string())?)
             };
             let request = provenant_routing::RouteRequest {
                 intent: provenant_routing::RouteIntent {
