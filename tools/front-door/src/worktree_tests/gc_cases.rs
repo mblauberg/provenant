@@ -267,17 +267,8 @@ pub(super) fn gc_collects_bound_bare_worktrees() -> Result {
             ],
         )
         .map_err(|error| format!("add bare checkout: {error}"))?;
-        // Name a default branch so GC does not fail closed on this fixture.
-        git(
-            &rig,
-            &[
-                "--git-dir",
-                bare.to_str().ok_or("path")?,
-                "symbolic-ref",
-                "refs/remotes/origin/HEAD",
-                "refs/heads/main",
-            ],
-        )?;
+        // A clone --bare has `remote.origin.url` but no remote-tracking refs:
+        // GC's fetch must record the advertised default itself.
         rig.project = linked;
         let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
         inputs.state_dir = Some(rig.state.clone());

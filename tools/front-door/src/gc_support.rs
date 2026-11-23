@@ -219,18 +219,22 @@ fn host_git_with_tail(
 /// a real resolution failure and stays an error.
 fn forge_remote(context: &WorktreeContext<'_>) -> Result<Option<String>, Error> {
     let invalid = || Error::GcObservation("cannot resolve forge context");
-    // A bound bare repository's layout is host-only: no checkout, so no remote
-    // to compare against. That is an absence, as in the confinement twin.
-    // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
-    let Some(project) = context.layout.project() else {
-        return Ok(None);
-    };
     let state = context.host_state().map_err(|_| invalid())?;
-    let ports =
-        provenant_config::PortTable::read_for(Some(project), &state).map_err(|_| invalid())?;
-    let policy = provenant_config::operation_policy(&state, project, &ports);
+    let project = context.layout.project();
+    let ports = provenant_config::PortTable::read_for(project, &state).map_err(|_| invalid())?;
+    // A bound bare repository has no checkout; its layout root is the common
+    // Git directory, which holds the remote (a `git clone --bare` keeps
+    // `remote.origin.url`). Bind it there, as the confinement retirement scope
+    // does, so the fetch below records the default that scope resolves.
+    // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    let root = project.unwrap_or_else(|| context.layout.root());
+    let policy = provenant_config::operation_policy(&state, root, &ports);
     let config = provenant_config::ForgeConfig::new(&ports, (*policy).clone());
-    let git = provenant_config::ForgeGit::new(project).map_err(|_| invalid())?;
+    let git = match project {
+        Some(project) => provenant_config::ForgeGit::new(project),
+        None => provenant_config::ForgeGit::bare(root),
+    }
+    .map_err(|_| invalid())?;
     // Keep the typed refusal: its remotes and close matches reach the
     // warning and its repair, instead of the circular collection message.
     // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
@@ -306,7 +310,9 @@ fn refresh_branch(
 }
 
 /// Fetch the remote's actual default branch, independently of local main or a
-/// stale remote HEAD symref. Only this branch's remote-tracking ref is updated.
+/// stale remote HEAD symref. Only this branch's remote-tracking ref is updated,
+/// and the remote's HEAD symref is pointed at it so the forge context resolves
+/// the advertised default.
 pub(crate) fn fetch_default(
     context: &WorktreeContext<'_>,
     cancel: &CancelToken,
@@ -1049,6 +1055,14 @@ mod tests {
         assert_eq!(
             result.1,
             GitOid::parse(std::str::from_utf8(&actual)?.trim())?
+        );
+        // The forge context reads the default from the remote's HEAD symref,
+        // which the explicit-refspec fetch does not write on its own.
+        let head =
+            provenant_os::fixture::run_git(&repo, &["symbolic-ref", "refs/remotes/origin/HEAD"])?;
+        assert_eq!(
+            std::str::from_utf8(&head)?.trim(),
+            "refs/remotes/origin/main"
         );
         Ok(())
     }
