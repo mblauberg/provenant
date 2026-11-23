@@ -1300,13 +1300,13 @@ fn batch_integrated_slice_starts_its_after_dependent() {
     };
     let mut journal = MemoryJournal::default();
     let run = advance(&document, &mut owner, &mut journal).unwrap();
-    let node = |id: &str, checkpoint: &GraphCheckpoint| {
+    fn node<'a>(id: &str, checkpoint: &'a GraphCheckpoint) -> &'a crate::graph::model::NodeProgress {
         checkpoint
             .nodes
             .iter()
             .find(|n| n.id == format!("slices--{id}"))
             .unwrap()
-    };
+    }
     assert_eq!(node("first", &run.checkpoint).state, NodeState::Running);
     assert_eq!(node("second", &run.checkpoint).state, NodeState::Pending);
     assert_eq!(
