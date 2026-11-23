@@ -510,12 +510,26 @@ pub fn config_page(
     result.warnings = warnings;
     Ok(result)
 }
+/// Roots supplied by the caller for rendering install findings. Inspection
+/// targets come from the receipt's recorded roots, never from this home.
+#[derive(Debug, Clone)]
+pub struct CheckContext {
+    pub home: PathBuf,
+    pub state: PathBuf,
+}
+impl CheckContext {
+    pub fn new(home: &Path, state: &Path) -> Self {
+        Self {
+            home: home.to_path_buf(),
+            state: state.to_path_buf(),
+        }
+    }
+}
 /// `accounts` names the registered directories, so a finding inside one says
 /// which account drifted and how `accounts sync` repairs it.
 pub fn install_page(
     inspection: provenant_config::InstallInspection,
-    home: &Path,
-    state: &Path,
+    context: &CheckContext,
     accounts: &[provenant_config::AccountHome],
     selector: impl Serialize,
     page: &Page,
@@ -542,9 +556,9 @@ pub fn install_page(
             continue;
         }
         let path = finding.path.to_path_buf()?;
-        let (prefix, relative) = if let Ok(p) = path.strip_prefix(state) {
+        let (prefix, relative) = if let Ok(p) = path.strip_prefix(context.state.as_path()) {
             ("state", p)
-        } else if let Ok(p) = path.strip_prefix(home) {
+        } else if let Ok(p) = path.strip_prefix(context.home.as_path()) {
             ("home", p)
         } else {
             (
@@ -663,8 +677,7 @@ mod tests {
                 };
                 let page = install_page(
                     inspection,
-                    Path::new("/fixture"),
-                    Path::new("/fixture/state"),
+                    &CheckContext::new(Path::new("/fixture"), Path::new("/fixture/state")),
                     &[],
                     "native-capabilities",
                     &Page {

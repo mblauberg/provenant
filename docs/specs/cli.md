@@ -311,6 +311,16 @@ Release checks inspect the artifact to be distributed as well as Git evidence.
 - Why: an inspection must not change its subject or certify an uninspected
   artifact.
 
+### Check install uses recorded roots
+
+`check install` builds its targets from the roots recorded in the install
+receipt, including the state root named by the installed release tree. A
+caller whose `HOME` is a lane account directory therefore checks the host
+installation and reports no findings when it is healthy.
+
+- Why: a lane's private `HOME` must not make a healthy host install look broken.
+- Owner: `tools/front-door/src/checks.rs`, `tools/front-door/crates/config/src/managed.rs`, `tools/front-door/crates/cli/src/check/mod.rs`
+
 ### Release symlinks
 
 A release symlink is portable only when its relative target stays inside the

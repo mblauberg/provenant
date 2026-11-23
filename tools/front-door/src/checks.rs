@@ -245,6 +245,24 @@ fn installed_agent_toolchain_checks(
     }
     Ok(checks)
 }
+/// A lane's HOME and PROVENANT_STATE_DIR name the lane's own stores. An
+/// installed release tree names the host state root that owns the receipt.
+fn install_roots(
+    roots: &provenant_core::Roots,
+    assets: &Path,
+) -> Result<provenant_core::Roots, Error> {
+    let is_release = assets
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| provenant_records::SourceDigest::parse(name).is_ok())
+        && assets
+            .parent()
+            .is_some_and(|parent| parent.file_name() == Some(std::ffi::OsStr::new("releases")));
+    if is_release && let Some(state) = assets.parent().and_then(Path::parent) {
+        return Ok(roots::state_candidate(roots, state.to_path_buf())?);
+    }
+    Ok(roots.clone())
+}
 pub fn run(
     check: Check,
     globals: &Globals,
@@ -432,6 +450,7 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
             )?)
         }
         Inspectable::Install { source, page } => private_home(|private| {
+            let install_roots = install_roots(&roots, &assets)?;
             let smoke = crate::release_smoke::SystemSmoke::new(Some(private))?;
             let cancel = CancelToken::new();
             let release = source
@@ -447,23 +466,27 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
                     Release::read(&path, env!("PROVENANT_TARGET_TRIPLE"))
                 })
                 .transpose()?;
-            let mut targets = Targets::new(
-                roots.clone(),
-                &home,
-                &[],
-                // Install inspection has no project binding.
-                std::sync::Arc::new(provenant_config::policy::read(
-                    roots.state.as_path(),
-                    "",
-                    &Default::default(),
-                )),
-            );
+            // Install inspection has no project binding. When a receipt exists
+            // its recorded roots replace every path derived from the caller's
+            // home; without one the caller's home only supplies the fallback
+            // that lets `inspect_install` report `missing_receipt`.
+            let policy = std::sync::Arc::new(provenant_config::policy::read(
+                install_roots.state.as_path(),
+                "",
+                &Default::default(),
+            ));
+            let mut targets = match Targets::for_receipt(install_roots.clone(), policy.clone()) {
+                Ok(Some(targets)) => targets,
+                Ok(None) | Err(_) => Targets::new(install_roots.clone(), &home, &[], policy),
+            };
             // A configuration defect is `check config`'s finding. It must not
             // stop this check, which then has no registered accounts to compare.
-            if let Ok(config) = provenant_cli::config_reads::read_for(&roots, "check install") {
+            if let Ok(config) =
+                provenant_cli::config_reads::read_for(&install_roots, "check install")
+            {
                 targets.accounts = provenant_cli::accounts::homes(&config.domains.accounts);
                 targets.shared_settings =
-                    crate::install::shared_settings(&config.domains.accounts, &home)
+                    crate::install::shared_settings(&config.domains.accounts, &targets.home)
                         .ok()
                         .flatten();
             }
@@ -474,12 +497,18 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
                 &smoke,
                 &cancel,
             )?;
-            let agent_checks =
-                installed_agent_toolchain_checks(&home, &project, roots.state.as_path())?;
+            let agent_checks = installed_agent_toolchain_checks(
+                &targets.home,
+                &project,
+                install_roots.state.as_path(),
+            )?;
+            let context = provenant_cli::check::CheckContext::new(
+                &targets.home,
+                install_roots.state.as_path(),
+            );
             let mut result = provenant_cli::check::install_page(
                 inspection,
-                &home,
-                roots.state.as_path(),
+                &context,
                 &targets.accounts,
                 (
                     "install",
@@ -497,7 +526,7 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
                     )
                 })
             }));
-            let apps = crate::apps::dir(&home);
+            let apps = crate::apps::dir(&targets.home);
             let login_item = crate::apps::stale_login_item(&apps);
             if login_item.exists() {
                 // An app without the Contents/MacOS helper still launches the
