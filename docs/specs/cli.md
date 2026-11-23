@@ -115,10 +115,12 @@ prints `warning: <message>` and its repair to stderr as each warning arrives and
 collapses repeats by key. Per-change keys are remembered in the state root, so a
 warning shows once until its key changes. The envelope also always carries a
 `next` array of suggested commands: each value has an `argv` array of literal
-arguments and a `why` sentence. The binary edge renders these once for human
-output through the one command formatter, which omits `--state-dir` and
-`--project` when they equal what the caller's environment resolves by default;
-JSON keeps the argv arrays so consumers never scrape a printed line.
+arguments and a `why` sentence stating the reason from the state the owner
+holds. The binary edge renders these once for human output through the one
+command formatter, after the body in both full and compact views, which omits
+`--state-dir` and `--project` when they equal what the caller's environment
+resolves by default; JSON keeps the argv arrays so consumers never scrape a
+printed line.
 - Why: a script branches on the exit code, and an operator must see that output
   was bounded rather than mistake a clipped view for the whole result. A consumer
   must be able to read warnings and next steps without scraping stderr or human
