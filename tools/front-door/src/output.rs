@@ -47,18 +47,6 @@ pub(crate) fn command_prefix(globals: &provenant_cli::Globals, cwd: &Path) -> Co
     )
 }
 
-/// Render the envelope's next-step data as human lines. This is the only place
-/// a `next` argv becomes text; JSON carries the arrays instead. Each line carries
-/// the step's `why` sentence and its one rendered command, so the human view and
-/// the JSON array are two views of the same typed value.
-fn next_text(steps: &[NextStep], globals: &provenant_cli::Globals) -> String {
-    if steps.is_empty() || globals.json {
-        return String::new();
-    }
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    provenant_cli::next_steps_text(steps, &command_prefix(globals, &cwd))
-}
-
 /// The command's sink, installed once before any path can raise a warning.
 static COMMAND_SINK: RwLock<Option<Arc<CommandSink>>> = RwLock::new(None);
 /// Set as soon as the state root is known, before root and config warnings fire.
@@ -335,56 +323,42 @@ pub(crate) fn emit_with_writers<T: Serialize, Wout: Write, Werr: Write>(
     } else {
         Cow::Borrowed(result.next.as_slice())
     };
-    let next = next_text(&steps, globals);
-    let human_text: Cow<str> = if next.is_empty() {
-        Cow::Borrowed(human)
-    } else {
-        Cow::Owned(format!("{human}{next}"))
-    };
     let summary = summary.or(explanation.as_ref().map(|(summary, _)| summary));
     let mode = if !globals.json && matches!(result.command.as_str(), "help" | "version") {
         RenderMode::Human {
-            text: human_text.as_ref(),
+            text: human,
             read_only,
             summary: None,
         }
     } else {
-        globals.render_mode(human_text.as_ref(), read_only, summary)
+        globals.render_mode(human, read_only, summary)
+    };
+    // Build one resolved envelope carrying the steps the owner chose (or the
+    // land explanation's step) so JSON and human mode read the same next array.
+    // The one renderer turns that array into human lines after the summary, so
+    // a compact view never drops the line JSON carries.
+    let resolved = CommandResult {
+        schema_version: result.schema_version,
+        command: result.command.clone(),
+        status: result.status,
+        data: &result.data,
+        error: result.error.clone(),
+        warnings: warnings.clone(),
+        next: steps.to_vec(),
     };
     // JSON prints nothing to stderr: the sink held every warning, and this is
     // the only place they reach the consumer. Serialising `T` to a Value lets
     // an owner keep its own data type while the envelope gains one field.
-    let rendered = if matches!(mode, RenderMode::Json) {
-        let data = serde_json::to_value(&result.data).unwrap_or(Value::Null);
-        let json_result = CommandResult {
-            schema_version: result.schema_version,
-            command: result.command.clone(),
-            status: result.status,
-            data,
-            error: result.error.clone(),
-            warnings: warnings.clone(),
-            next: steps.to_vec(),
-        };
-        provenant_cli::render_or_publish(
-            &json_result,
-            mode,
-            stdout,
-            stderr,
-            |value| overflow::publish(value, globals),
-            // A published overflow keeps the result's status in its envelope,
-            // so the exit code matches it; only a real render/IO failure exits 3.
-            OverflowPolicy::Proceed,
-        )
-    } else {
-        provenant_cli::render_or_publish(
-            result,
-            mode,
-            stdout,
-            stderr,
-            |value| overflow::publish(value, globals),
-            OverflowPolicy::Proceed,
-        )
-    };
+    let rendered = provenant_cli::render_or_publish(
+        &resolved,
+        mode,
+        stdout,
+        stderr,
+        |value| overflow::publish(value, globals),
+        // A published overflow keeps the result's status in its envelope,
+        // so the exit code matches it; only a real render/IO failure exits 3.
+        OverflowPolicy::Proceed,
+    );
     match rendered {
         Ok(status) => {
             // The envelope reached the reader: its warnings are now delivered,
@@ -490,12 +464,6 @@ fn emit_unpublished_with_writers<T: Serialize, Wout: Write, Werr: Write>(
     // Drain the held warnings first. They travel in the JSON envelope (or reach
     // stderr on the human path) before any per-change key is remembered.
     let warnings = take_warnings();
-    let next = next_text(&result.next, globals);
-    let human_text: Cow<str> = if next.is_empty() {
-        Cow::Borrowed(human)
-    } else {
-        Cow::Owned(format!("{human}{next}"))
-    };
     // Build the envelope once so the overflow measurement and the bounded
     // marker describe the bytes actually attempted, including these warnings.
     // Measuring the bare result instead reports 0 omitted bytes when the
@@ -518,7 +486,7 @@ fn emit_unpublished_with_writers<T: Serialize, Wout: Write, Werr: Write>(
         Some(envelope) => render_unpublished(
             envelope,
             globals,
-            human_text.as_ref(),
+            human,
             read_only,
             summary,
             provenant_cli::MAX_RESULT_BYTES,
@@ -528,7 +496,7 @@ fn emit_unpublished_with_writers<T: Serialize, Wout: Write, Werr: Write>(
         None => render_unpublished(
             result,
             globals,
-            human_text.as_ref(),
+            human,
             read_only,
             summary,
             provenant_cli::MAX_RESULT_BYTES,
@@ -916,7 +884,7 @@ mod tests {
             "run",
             vec![NextStep::from_args(
                 &["provenant", "wait", "review-1"],
-                "follow this run",
+                "the run is still running",
             )],
         );
     }

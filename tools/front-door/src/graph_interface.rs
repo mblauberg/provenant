@@ -220,14 +220,16 @@ fn run_human(
     announced: bool,
 ) -> (String, provenant_records::command_result::NextStep) {
     let graph = data["checkpoint"]["graph_id"].as_str().unwrap_or_default();
-    let rest = match data["status"].as_str() {
-        Some("complete" | "cancelled") => format!("output {graph}"),
-        Some("paused") => format!("status {graph}"),
-        _ => format!("wait {graph}"),
+    // The reason comes from the run's own status: a copied command is useful
+    // only when the reader knows which state made it the next step.
+    let (rest, why) = match data["status"].as_str() {
+        Some("complete" | "cancelled") => (format!("output {graph}"), "the run is complete"),
+        Some("paused") => (format!("status {graph}"), "the run is paused"),
+        _ => (format!("wait {graph}"), "the run is still running"),
     };
     let next = provenant_records::command_result::NextStep::from_command(
         &format!("provenant {rest}"),
-        "follow this run",
+        why,
     );
     let status = data["status"].as_str().unwrap_or("pending");
     let document = input.get("document");
@@ -1397,10 +1399,18 @@ mod tests {
             .map(|n| json!({"id":format!("n{n}"), "state":"failed", "advance_error_code":"preparation_refused",
                 "advance_error":"x".repeat(1000), "attempts":[]}))
             .collect();
-        for (status, command) in [
-            ("pending", "provenant wait review-1"),
-            ("complete", "provenant output review-1"),
-            ("paused", "provenant status review-1"),
+        for (status, command, why) in [
+            (
+                "pending",
+                "provenant wait review-1",
+                "the run is still running",
+            ),
+            (
+                "complete",
+                "provenant output review-1",
+                "the run is complete",
+            ),
+            ("paused", "provenant status review-1", "the run is paused"),
         ] {
             let data =
                 json!({"status":status, "checkpoint":{"graph_id":"review-1", "nodes":nodes}});
@@ -1411,14 +1421,16 @@ mod tests {
                     "{human}"
                 );
                 // The suggested command is a typed step; the edge renders the
-                // human line from the same argv it puts on the JSON envelope.
+                // human line from the same argv and state-derived why it puts
+                // on the JSON envelope.
                 assert_eq!(step.argv, command.split_whitespace().collect::<Vec<_>>());
+                assert_eq!(step.why, why);
                 assert_eq!(
                     provenant_cli::next_steps_text(
                         &[step],
                         &provenant_workflow::session::CommandPrefix::default()
                     ),
-                    format!("next: {command}\n")
+                    format!("next: {why}; {command}\n")
                 );
                 assert!(!human.lines().any(|line| line.starts_with("next:")));
                 assert!(

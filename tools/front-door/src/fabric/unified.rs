@@ -631,6 +631,26 @@ pub(crate) fn render_graph_status(rows: &[Value]) -> String {
     human
 }
 
+/// Why the status read suggests its one command, from the row the owner
+/// already selected. A copied command is only useful when the reader knows the
+/// state that made it the next step.
+fn status_step_why(row: &Value) -> &'static str {
+    match row["state"].as_str() {
+        Some("failed" | "blocked" | "unresolved" | "unreadable") => "the graph failed",
+        Some("paused") => "the graph needs input",
+        Some("complete" | "succeeded" | "terminal")
+            if row["outcome"]
+                .as_str()
+                .is_some_and(|outcome| outcome != "succeeded") =>
+        {
+            "the graph did not succeed"
+        }
+        Some("complete" | "succeeded" | "terminal") => "the graph is complete",
+        Some("pending" | "running" | "starting") => "the graph is still running",
+        _ => "the graph needs attention",
+    }
+}
+
 /// The one suggested command a graph status read offers, as a typed step. The
 /// row projection already owns the command text; this only turns it into the
 /// value the JSON envelope carries and the edge renders once.
@@ -656,16 +676,15 @@ pub(crate) fn graph_status_next(
     } else {
         nodes
     };
-    let command = graphs
+    let chosen = graphs
         .iter()
         .copied()
         .chain(lines.iter().copied())
-        .min_by_key(|row| priority(row))
-        .map(|row| plain(&row["next"]))
-        .unwrap_or_default();
-    (!command.is_empty()).then(|| {
-        provenant_records::command_result::NextStep::from_command(&command, "act on this graph")
-    })
+        .min_by_key(|row| priority(row));
+    let command = chosen.map(|row| plain(&row["next"])).unwrap_or_default();
+    let why = chosen.map(status_step_why).unwrap_or_default();
+    (!command.is_empty())
+        .then(|| provenant_records::command_result::NextStep::from_command(&command, why))
 }
 
 fn plain(value: &Value) -> String {
@@ -5765,7 +5784,7 @@ mod tests {
                 &[step],
                 &provenant_workflow::session::CommandPrefix::default()
             ),
-            "next: provenant retry g/parent\n"
+            "next: the graph failed; provenant retry g/parent\n"
         );
         // Per-state omission counts are checked at the CLI boundary; do not
         // pin the human omission sentence here.
@@ -5913,7 +5932,7 @@ mod tests {
                 &[step],
                 &provenant_workflow::session::CommandPrefix::default()
             ),
-            "next: provenant output g\n"
+            "next: the graph is complete; provenant output g\n"
         );
     }
 

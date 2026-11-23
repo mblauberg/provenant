@@ -65,57 +65,16 @@ pub fn render_command_result<T: Serialize>(
 ) -> Result<Outcome, RenderError> {
     let seam = COMMAND_SEAM.get();
     result.warnings = seam.map(|seam| (seam.take)()).unwrap_or_default();
-    // The library edge renders the envelope's typed next steps from the same
-    // array JSON carries. Surfaces here pass their argv literally, so the plain
-    // prefix is the one formatter their commands need.
-    let next = next_steps_text(&result.next, &CommandPrefix::default());
+    // The one renderer (`render_within`) turns the envelope's typed next steps
+    // into human lines for both human and compact modes, so a compact summary
+    // cannot drop the line the JSON array carries.
     // Without an installed edge (a library caller or a test) there is no
     // reader, so the rendered bytes go nowhere rather than to process streams.
     let (mut out, mut err): Streams = match seam {
         Some(seam) => (seam.streams)(),
         None => (Box::new(io::sink()), Box::new(io::sink())),
     };
-    let rendered = match mode {
-        RenderMode::Json => render_or_publish(result, mode, &mut out, &mut err, publish, policy),
-        RenderMode::Human {
-            text,
-            read_only,
-            summary,
-        } => {
-            let human = format!("{text}{next}");
-            render_or_publish(
-                result,
-                RenderMode::Human {
-                    text: &human,
-                    read_only,
-                    summary,
-                },
-                &mut out,
-                &mut err,
-                publish,
-                policy,
-            )
-        }
-        RenderMode::Compact {
-            text,
-            read_only,
-            summary,
-        } => {
-            let human = format!("{text}{next}");
-            render_or_publish(
-                result,
-                RenderMode::Compact {
-                    text: &human,
-                    read_only,
-                    summary,
-                },
-                &mut out,
-                &mut err,
-                publish,
-                policy,
-            )
-        }
-    };
+    let rendered = render_or_publish(result, mode, &mut out, &mut err, publish, policy);
     drop((out, err));
     if let Some(seam) = seam {
         if rendered.is_ok() {
@@ -543,13 +502,28 @@ pub fn render_within<T: Serialize>(
                     ));
                     text
                 }
-                None => match mode {
-                    RenderMode::Compact { text, summary, .. } => {
-                        compact_text(&result.command, text, summary)
-                    }
-                    RenderMode::Human { text, .. } => text.to_owned(),
-                    RenderMode::Json => String::new(),
-                },
+                None => {
+                    let body = match mode {
+                        RenderMode::Compact { text, summary, .. } => {
+                            compact_text(&result.command, text, summary)
+                        }
+                        RenderMode::Human { text, .. } => text.to_owned(),
+                        RenderMode::Json => String::new(),
+                    };
+                    // The envelope's typed next steps become human lines here,
+                    // after the compact summary, so a summarised view never
+                    // drops the command the JSON array still carries. The one
+                    // formatter derives both the why and the command from the
+                    // same typed value.
+                    // Spec: docs/specs/cli.md#one-bounded-envelope-clipped-with-a-warning
+                    let next = match mode {
+                        RenderMode::Json => String::new(),
+                        RenderMode::Human { .. } | RenderMode::Compact { .. } => {
+                            next_steps_text(&result.next, &CommandPrefix::default())
+                        }
+                    };
+                    format!("{body}{next}")
+                }
             };
             buffer
                 .write_all(text.as_bytes())
@@ -706,6 +680,34 @@ mod tests {
         assert_eq!(
             String::from_utf8(bytes)?,
             "3 lanes: 1 failed, 2 running\naaaa failed\nbbbb running\n"
+        );
+        Ok(())
+    }
+    #[test]
+    // Spec: docs/specs/cli.md#one-bounded-envelope-clipped-with-a-warning
+    fn compact_renders_the_envelope_next_after_the_summary()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let summary = Summary::new("wait mode: all", vec!["peer pending".into()]);
+        let result =
+            CommandResult::new("wait", Outcome::Waiting, ()).with_next(vec![NextStep::from_args(
+                &["provenant", "wait", "peer"],
+                "peer still running at timeout",
+            )]);
+        let mut bytes = Vec::new();
+        render(
+            &result,
+            RenderMode::Compact {
+                text: "peer pending\n",
+                read_only: true,
+                summary: Some(&summary),
+            },
+            &mut bytes,
+        )?;
+        // The summary renderer owns only the headline and rows. The one edge
+        // appends the typed next line, so a compact view keeps what JSON carries.
+        assert_eq!(
+            String::from_utf8(bytes)?,
+            "wait mode: all\npeer pending\nnext: peer still running at timeout; provenant wait peer\n"
         );
         Ok(())
     }
