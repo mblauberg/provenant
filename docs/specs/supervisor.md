@@ -345,7 +345,7 @@ skills, discover tool dependencies and credential aliases, and report omissions
 in one warning. Cargo registry and Git sources are writable unless
 `domains.fabric.lanes.cargo_source_writes` is off; Cargo credentials are denied
 under isolated access. Package caches the host later runs unconfined (pnpm, npm,
-Node) stay read-only; build output uses private lane caches.
+Node) stay read-only; a read-only lane's build output stays in attempt scratch and a writer lane gets no Cargo target.
 - Why: native lanes use ordinary tools and login state; sandboxed lanes keep
   source sharing explicit and build output isolated.
 

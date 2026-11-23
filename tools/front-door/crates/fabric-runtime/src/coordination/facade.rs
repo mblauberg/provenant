@@ -331,6 +331,8 @@ pub enum InvalidInputDetail {
     CutoverFindings(String),
     Schema,
     UnresolvableBase(String),
+    /// A launch input check that is not tied to one document field.
+    InputReason(String),
     Field(String),
     FieldDecode {
         field: String,
@@ -362,6 +364,7 @@ impl InvalidInputDetail {
             Self::GraphReason(text)
             | Self::CutoverFindings(text)
             | Self::UnresolvableBase(text)
+            | Self::InputReason(text)
             | Self::Field(text)
             | Self::FieldTitle(text)
             | Self::Configuration(text) => vec![text],
@@ -402,6 +405,7 @@ impl InvalidInputDetail {
             Self::TemplateInvalid => Some("invalid input field `templates`: template could not be loaded or validated".into()),
             Self::Schema => Some("graph document schema_version is invalid".into()),
             Self::UnresolvableBase(name) => Some(format!("unresolvable base `{name}`")),
+            Self::InputReason(reason) => Some(reason.clone()),
             Self::InputUnreadable => {
                 Some("input file is unreadable or is not a regular file".into())
             }
@@ -428,6 +432,16 @@ fn retry_node_suggestion_keeps_names() -> Result<(), Box<dyn std::error::Error>>
     };
     assert!(detail.safe_text().unwrap().contains("graph name/node[1]"));
     Ok(())
+}
+
+fn worktree_missing_message(path: Option<&str>, node: Option<&str>) -> String {
+    let subject = match (node, path) {
+        (Some(node), Some(path)) => format!("node {node}: local worktree {path}"),
+        (Some(node), None) => format!("node {node}: local worktree"),
+        (None, Some(path)) => format!("local worktree {path}"),
+        (None, None) => "local worktree".to_owned(),
+    };
+    format!("{subject} does not exist; create it with `provenant worktree create`")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error, Serialize, Deserialize)]
@@ -576,8 +590,13 @@ pub enum FacadeError {
     UnknownHost,
     #[error("peer placement requires a read-only attempt without a local worktree")]
     WorktreeNotApplicable,
-    #[error("local worktree does not exist; create it with `provenant worktree create`")]
-    WorktreeMissing,
+    #[error("{}", worktree_missing_message(path.as_deref(), node.as_deref()))]
+    WorktreeMissing {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        node: Option<String>,
+    },
     #[error(
         "worktree {path:?} is not registered with Provenant; create a writer with `provenant worktree create <new-branch> --base <branch>`"
     )]
@@ -1151,6 +1170,11 @@ impl FacadeError {
             }
             Self::WriterLockBusy => projected = projected.detail(self.to_string()).next("wait for the writer lock holder to finish, then retry"),
             Self::WriterUnknown | Self::WorktreeUnregistered { .. } => projected = projected.next("inspect worktree registration and custody before selecting a checkout with --worktree"),
+            Self::WorktreeMissing { path, node } => {
+                projected = projected
+                    .detail(worktree_missing_message(path.as_deref(), node.as_deref()))
+                    .next("create the checkout with `provenant worktree create`, or correct the node's worktree path");
+            }
             Self::ConfinementRefused { resource: Some(fact) } => projected = fact.project(projected),
             Self::ConfinementRefused { resource: None } => projected = projected.next("inspect the requested access and confinement policy"),
             Self::WriterLeaseHeld {
@@ -1252,7 +1276,7 @@ impl FacadeError {
             Self::DispatchUnobserved { .. } => "dispatch_unobserved",
             Self::HostDeliveryStage { .. } => "io",
             Self::HostDeliveryLimit { .. } => "io",
-            Self::WorktreeMissing => "worktree_missing",
+            Self::WorktreeMissing { .. } => "worktree_missing",
             Self::WorktreeUnregistered { .. } => "worktree_unregistered",
             Self::BaseUnreachable | Self::BaseFetchFailed { .. } => "base_unreachable",
             Self::BranchExists => "branch_exists",
@@ -1314,6 +1338,18 @@ impl FacadeError {
     pub fn invalid(detail: InvalidInputDetail) -> Self {
         Self::InvalidInput {
             detail: Some(detail),
+        }
+    }
+
+    /// Name the graph node whose launch hit this error, when it is a worktree
+    /// selection failure that does not yet carry one.
+    pub fn with_node(self, node: impl Into<String>) -> Self {
+        match self {
+            Self::WorktreeMissing { path, node: None } => Self::WorktreeMissing {
+                path,
+                node: Some(node.into()),
+            },
+            other => other,
         }
     }
 
@@ -2055,6 +2091,28 @@ mod diagnostic_tests {
                 serde_json::from_value(serde_json::to_value(&refusal).unwrap()).unwrap();
             assert_eq!(received, refusal, "{field} survives the wire");
         }
+    }
+
+    #[test]
+    fn worktree_missing_names_path_and_node_on_message_diagnostic_and_wire() {
+        let path = "/repo/.worktrees/graph-task--slices--one";
+        let error = FacadeError::WorktreeMissing {
+            path: Some(path.into()),
+            node: None,
+        }
+        .with_node("task--slices--one");
+        assert!(error.to_string().contains(path), "{error}");
+        assert!(error.to_string().contains("task--slices--one"), "{error}");
+        let diagnostic = error.diagnostic();
+        let detail = diagnostic.detail.clone().unwrap_or_default();
+        assert!(detail.contains(path), "{detail}");
+        assert!(detail.contains("task--slices--one"), "{detail}");
+        let wire = serde_json::to_value(&error).unwrap();
+        assert_eq!(wire["code"], "worktree_missing");
+        assert_eq!(wire["path"], path);
+        assert_eq!(wire["node"], "task--slices--one");
+        let received: FacadeError = serde_json::from_value(wire).unwrap();
+        assert_eq!(received, error);
     }
 
     #[test]

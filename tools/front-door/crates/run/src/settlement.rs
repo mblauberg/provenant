@@ -260,6 +260,29 @@ pub fn diagnostic_for(
     )
 }
 
+/// A custody-path refusal needs a different remedy from a busy lock. The
+/// stalled reason carries it so the owner knows what to fix before retrying;
+/// a broad file mode is repaired during settlement and never stalls here.
+fn custody_path_remedy(reason: &str) -> Option<&'static str> {
+    let detail = reason
+        .split_once("is not private or contained: ")
+        .map(|(_, detail)| detail)
+        .or_else(|| {
+            reason
+                .contains("symlink or link loop refused")
+                .then_some("symlink")
+        })?;
+    match detail {
+        "symlink" => Some(
+            "replace the symlink at the named path with a regular file, then run `provenant reconcile <lane>`",
+        ),
+        "outside the root" => Some(
+            "move the named file back inside its attempt directory, then run `provenant reconcile <lane>`",
+        ),
+        _ => None,
+    }
+}
+
 fn diagnostic(journal: &Journal, now_ms: Option<u64>) -> Option<String> {
     let reason = journal.blocking_reason.as_deref()?;
     if journal.recovery_failures >= LIMIT {
@@ -278,6 +301,10 @@ fn diagnostic(journal: &Journal, now_ms: Option<u64>) -> Option<String> {
         .filter(|_| journal.retry_after_ms > 0)
         .map(|now| now.saturating_sub(journal.retry_after_ms));
     if let Some(elapsed) = elapsed.filter(|elapsed| *elapsed >= STALLED_RETRY_MS) {
+        let reason = match custody_path_remedy(reason) {
+            Some(remedy) => format!("{reason}; {remedy}"),
+            None => reason.to_owned(),
+        };
         return Some(format!(
             "settlement retry stalled for {}s: {reason}",
             elapsed / 1000
@@ -2558,6 +2585,36 @@ mod tests {
             .is_none()
         );
         Ok(())
+    }
+
+    // Spec: docs/specs/run-settlement.md#settlement
+    #[test]
+    fn stalled_custody_path_reasons_name_the_remedy() {
+        let mut journal = Journal::new(scope());
+        journal.retry_after_ms = 1;
+        for (cause, remedy) in [
+            (
+                "custody I/O failed: run-store path attempts/one/result.md is not private or contained: symlink",
+                "replace the symlink at the named path",
+            ),
+            (
+                "custody I/O failed: run-store path attempts/one/result.md is not private or contained: outside the root",
+                "move the named file back inside its attempt directory",
+            ),
+            (
+                "custody I/O failed: symlink or link loop refused for \"attempts/one/result.md\"",
+                "replace the symlink at the named path",
+            ),
+        ] {
+            journal.record_blocking(cause.to_owned(), 0);
+            let status = diagnostic(&journal, Some(1 + STALLED_RETRY_MS)).expect("stalled reason");
+            assert!(status.contains("retry stalled"), "{status}");
+            assert!(status.contains(cause), "{status}");
+            assert!(status.contains(remedy), "{status}");
+        }
+        journal.record_blocking("custody reattach failed".to_owned(), 0);
+        let status = diagnostic(&journal, Some(1 + STALLED_RETRY_MS)).expect("stalled reason");
+        assert!(!status.contains("replace the symlink"), "{status}");
     }
 
     // Spec: docs/specs/run-settlement.md#settlement

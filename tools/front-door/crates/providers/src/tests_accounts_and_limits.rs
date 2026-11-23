@@ -383,20 +383,16 @@ fn claude_writer_shell_has_private_config_and_rust_tools() -> Result<(), Provide
     );
     assert!(!launch.profile.spec.confinement.keychain_permitted());
     assert!(launch.profile.spec.authentication.is_empty());
-    for (key, value) in [
-        (
-            "CARGO_TARGET_DIR",
-            "/fixture/home/Library/Caches/provenant-lane-cargo/fixture/target",
-        ),
-        (
-            "CARGO_BUILD_BUILD_DIR",
-            "/fixture/home/Library/Caches/provenant-lane-cargo/fixture/target",
-        ),
-        ("GIT_CONFIG_GLOBAL", "/fixture/scratch/gitconfig"),
-    ] {
+    assert!(
+        launch
+            .env
+            .iter()
+            .any(|(key, value)| key == "GIT_CONFIG_GLOBAL" && value == "/fixture/scratch/gitconfig")
+    );
+    for key in ["CARGO_TARGET_DIR", "CARGO_BUILD_BUILD_DIR"] {
         assert!(
-            launch.env.iter().any(|(k, v)| k == key && v == value),
-            "{key}"
+            launch.env.iter().all(|(name, _)| name != key),
+            "a writer launch must not export {key}"
         );
     }
     assert!(
@@ -409,7 +405,7 @@ fn claude_writer_shell_has_private_config_and_rust_tools() -> Result<(), Provide
     for path in [
         "/fixture/home/.cargo/bin",
         "/fixture/home/.rustup/toolchains",
-        "/fixture/home/Library/Caches/provenant-lane-cargo/fixture",
+        "/fixture/scratch",
     ] {
         assert!(
             launch

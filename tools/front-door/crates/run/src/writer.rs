@@ -1596,14 +1596,12 @@ pub struct LaunchConfinement {
     pub plan: ConfinedPlan,
     pub profile: ProviderProfile,
     pub writer: Option<WriterLaunch>,
-    /// Canonical host home; the writer's lane cargo cache derives from it.
+    /// Canonical host home.
     pub home: PathBuf,
     /// Resolved once by the host, reused after all late environment additions.
     pub cargo_home: provenant_confinement::cargo::CargoHome,
-    /// Host state root used for run state and live target custody.
+    /// Host state root used for run state.
     pub state_root: PathBuf,
-    /// Root context used to refresh live Cargo target custody at eviction.
-    pub roots: Option<provenant_core::Roots>,
     /// Whether the lane runs under the compiled sandbox profile. Without it
     /// the plan still prepares writer directories and records access, but the
     /// provider starts directly, like the same CLI started by hand.
@@ -1611,10 +1609,6 @@ pub struct LaunchConfinement {
     /// Bound once before sealing launch evidence; compilation uses this exact
     /// probed backend under writer custody, without a second selection.
     pub backend: Option<BoundSandboxBackend>,
-    /// Host/profile Cargo cache budget resolved before the lane starts.
-    pub cargo_cache_budget: Option<provenant_config::CargoCacheBudget>,
-    /// Live lane target owners observed before launch eviction.
-    pub cargo_target_protection: crate::build_dir_gc::TargetProtection,
 }
 /// A probed backend and the limits whose sources were sealed with it.
 pub struct BoundSandboxBackend {
@@ -1691,82 +1685,6 @@ fn launch_resource_limits(
 }
 
 impl LaunchConfinement {
-    /// Reclaim least-recently-used unheld profiles before the lane starts.
-    /// Failure is advisory: a lane starts and the effective limit/source are
-    /// reported.
-    pub(crate) fn enforce_cargo_cache_budget(&self) {
-        let Some(budget) = &self.cargo_cache_budget else {
-            return;
-        };
-        if self.writer.is_none() {
-            return;
-        }
-        let current_worktree = self.writer.as_ref().map(|writer| writer.worktree.path());
-        let current_common_dir = self
-            .writer
-            .as_ref()
-            .map(|writer| writer.worktree.repo().common_git_dir());
-        let mut refresh_protection = || {
-            self.roots.as_ref().map_or_else(
-                || self.cargo_target_protection.clone(),
-                |roots| {
-                    crate::build_dir_gc::target_protection_for_launch(
-                        roots,
-                        current_worktree,
-                        current_common_dir,
-                    )
-                },
-            )
-        };
-        let result = crate::build_dir_gc::collect_with_protection_refresh(
-            &self.state_root,
-            &self.home,
-            crate::build_dir_gc::Limits {
-                max_bytes: budget.bytes,
-                free_floor: 0,
-                grace_seconds: 0,
-                idle_seconds: 0,
-                target_idle_seconds: None,
-            },
-            false,
-            budget,
-            &self.cargo_target_protection,
-            &mut refresh_protection,
-        );
-        let report = match result {
-            Ok(report) => report,
-            Err(error) => {
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: Cargo cache budget {} bytes (setting {}; source: {}) could not be enforced: {error}; launch continues",
-                    budget.bytes,
-                    budget.setting,
-                    budget.source.as_str(),
-                );
-                return;
-            }
-        };
-        for warning in &report.warnings {
-            let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
-        }
-        for error in &report.errors {
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: Cargo cache collection: {error}"
-            );
-        }
-        if report.cache_bytes > budget.bytes {
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: Cargo targets remain over budget: {} / {} bytes (setting {}; source: {}); launch continues",
-                report.cache_bytes,
-                budget.bytes,
-                budget.setting,
-                budget.source.as_str(),
-            );
-        }
-    }
-
     /// Resolve backend availability once. The caller must reject an unavailable
     /// backend whenever this launch selected an effective confinement profile;
     /// only an already-selected trusted route bypasses backend binding.
@@ -1849,28 +1767,28 @@ impl LaunchConfinement {
         )
     }
     /// Apply the host-resolved Cargo home and source policy to the lane
-    /// environment. Cargo paths stay in the lane's private cache; no build
-    /// output is provisioned or copied into it here.
+    /// environment. A read-only lane builds in attempt scratch; a writer lane
+    /// gets no build target, so Cargo's own worktree default applies.
     pub(crate) fn prepare_cargo_environment(&self, environment: &mut Vec<(OsString, OsString)>) {
-        let private_cache = match &self.plan.permissions().mode {
-            AccessMode::WorktreeWrite(authority) => &authority.cargo_cache().path,
-            AccessMode::ReadOnly => &self.plan.permissions().scratch.path,
-        };
-        self.cargo_home
-            .lane_cargo_environment(&self.home, private_cache, environment);
-        if matches!(&self.plan.permissions().mode, AccessMode::WorktreeWrite(_)) {
-            environment
-                .retain(|(key, _)| key != provenant_core::consumer_env::LANE_CARGO_LINT_TARGET);
-            environment.push((
-                provenant_core::consumer_env::LANE_CARGO_LINT_TARGET.into(),
-                private_cache.join("target-lint").into_os_string(),
-            ));
+        match &self.plan.permissions().mode {
+            AccessMode::WorktreeWrite(_) => {
+                self.cargo_home
+                    .lane_cargo_environment(&self.home, environment);
+            }
+            AccessMode::ReadOnly => {
+                let target = self.plan.permissions().scratch.path.join("target");
+                self.cargo_home.lane_cargo_environment_with_target(
+                    &self.home,
+                    &target,
+                    environment,
+                );
+            }
         }
         self.cargo_home
             .source_environment(self.plan.permissions().network, environment);
     }
-    /// Run holds writer custody here: create the derived ref parents and the
-    /// private lane cache, before they are anchored or used unsandboxed.
+    /// Run holds writer custody here: create the derived ref parents and shared
+    /// Git state, before they are anchored or used unsandboxed.
     pub(crate) fn prepare_writer_directories(&self) -> Result<()> {
         if let (Some(writer), AccessMode::WorktreeWrite(authority)) =
             (&self.writer, &self.plan.permissions().mode)

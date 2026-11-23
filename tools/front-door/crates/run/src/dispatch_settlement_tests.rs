@@ -853,15 +853,11 @@ fn incomplete_identity_evidence_preserves_settlement_failures() -> TestResult {
             let context = context(temp.path())?;
             let store = RunStore::open(&context, &call)?;
             let mut run = input();
-            let mut settings = provenant_config::policy::Settings::default();
-            settings
-                .projects
-                .entry(context.project_id.to_string())
-                .or_default()
-                .rules
+            run.request
+                .task
+                .profile
+                .policy_overrides
                 .insert("PROVIDER_IDENTITY_EVIDENCE_INCOMPLETE".into(), strength);
-            run.request.task.profile.launch_policy =
-                Some(settings.resolve(&context.project_id.to_string(), &Default::default()));
             let id = run.attempt_id;
             store.create(&run, &call)?;
             store.mark_starting(

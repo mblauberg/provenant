@@ -821,7 +821,6 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
                 cargo_home: provenant_confinement::cargo::CargoHome::resolve(&self.home, |_| None)
                     .unwrap(),
                 state_root: self.state.clone(),
-                roots: None,
                 // The test's fake handoff never starts a provider. Keep the
                 // writer revalidation path independent of native backend
                 // availability on hosts without macOS sandbox support.
@@ -832,8 +831,6 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
                     None,
                 ),
                 backend: None,
-                cargo_cache_budget: None,
-                cargo_target_protection: Default::default(),
             });
             Ok(prepared)
         }

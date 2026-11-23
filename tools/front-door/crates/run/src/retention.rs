@@ -483,17 +483,9 @@ impl RunStore {
                             ..
                         }
                     ) && record.exit_evidence.is_none();
+                    // Settlement and custody are checked separately; every
+                    // attempt observes the same minimum scratch idle period.
                     let scratch_eligible = if let Some(policy) = scratch {
-                        let raw = crate::artifacts::read_sealed(
-                            &attempt,
-                            "request.json",
-                            crate::RECORD_LIMIT,
-                        )?
-                        .ok_or(RunError::Validation("scratch request unavailable"))?;
-                        let request: CanonicalRequest = crate::db::decode(&raw)?;
-                        // Settlement and custody are checked separately; every
-                        // attempt observes the same minimum scratch idle period.
-                        let _ = request;
                         !continuing
                             && age
                                 >= i64::try_from(policy.idle_seconds)
@@ -715,7 +707,9 @@ impl RunStore {
                         report.interrupted_at = Some(attempt_path);
                         return Ok(report);
                     }
-                    record_issue(&mut report, path, &error);
+                    // This closure can fail before provider state is touched, so
+                    // name the attempt row that failed to read, not a child path.
+                    record_issue(&mut report, attempt_path, &error);
                 }
             }
         }
@@ -2358,6 +2352,327 @@ mod tests {
 
     fn logs_retention_days() -> u64 {
         provenant_config::RetentionSettings::default().logs_days
+    }
+
+    #[test]
+    fn a_base_twelve_attempt_keeps_its_retired_policy_as_an_extra_and_drops_a_lane_cache_grant()
+    -> TestResult {
+        let (_temp, context, store, input, _attempt) = seeded()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        withdraw(&store, &input, &call)?;
+        let stored: Vec<u8> = store.db.query_row(
+            "SELECT record FROM attempts WHERE id=?1",
+            [input.attempt_id.to_string()],
+            |row| row.get(0),
+        )?;
+        let rule = |boundary: &str| {
+            serde_json::json!({
+                "code": format!("LEGACY_{boundary}"),
+                "boundary": boundary,
+                "strength": "refuse",
+                "knob": null,
+                "justification": "pre-rename boundary",
+                "site": "fixture",
+                "threshold": null,
+                "refusable": false,
+                "source": "dispatch"
+            })
+        };
+        let mut legacy: serde_json::Value = serde_json::from_slice(&stored)?;
+        legacy["schema_version"] = 2.into();
+        legacy["profile"] = serde_json::json!({
+            "name": "rigorous",
+            "knobs": {},
+            "overrides": [],
+            "launch_policy": {"rules": [rule("git_isolation"), rule("data_integrity")]}
+        });
+        legacy["write_grants"] = serde_json::json!([
+            {
+                "source": "lane_cache",
+                "path": {"relative_to_root": {
+                    "encoding": "utf8",
+                    "path": "Library/Caches/provenant-lane-cargo/fixture"
+                }},
+                "scope": "subtree"
+            },
+            {
+                "source": "scratch",
+                "path": {"relative_to_root": {
+                    "encoding": "utf8",
+                    "path": "attempt-scratch"
+                }},
+                "scope": "subtree"
+            }
+        ]);
+        // A terminal attempt is immutable to ordinary writers; the migration
+        // lifts the trigger inside its own transaction.
+        store
+            .db
+            .execute_batch("DROP TRIGGER immutable_terminal_update")?;
+        store.db.execute(
+            "UPDATE attempts SET record=?1 WHERE id=?2",
+            rusqlite::params![serde_json::to_vec(&legacy)?, input.attempt_id.to_string()],
+        )?;
+        store.db.execute_batch(
+            "CREATE TRIGGER immutable_terminal_update
+             BEFORE UPDATE OF rowid,oid,_rowid_,sequence,id,project,graph,node,attempt,digest,actor,operation,number,continues,refused,revision,terminal,record,sealed,repository,head ON attempts
+             WHEN OLD.terminal=1
+             BEGIN SELECT RAISE(ABORT,'terminal attempt is immutable'); END;
+             PRAGMA user_version=12;",
+        )?;
+        drop(store);
+
+        let store = RunStore::open(&context, &call)?;
+        assert_eq!(provenant_sqlite::stored_version(&store.db)?, 13);
+        let record = store.record(input.attempt_id, &call)?;
+        // The current type reads the retired snapshot as an extra field, so
+        // the migration leaves it in place; the sealed request keeps the
+        // authoritative copy.
+        let policy = record
+            .profile
+            .extra
+            .get("launch_policy")
+            .ok_or("retained launch policy")?;
+        assert_eq!(policy["rules"][0]["boundary"], "git_isolation");
+        assert_eq!(policy["rules"][1]["boundary"], "data_integrity");
+        assert_eq!(record.write_grants.len(), 1);
+        assert!(matches!(
+            record.write_grants[0].source,
+            WriteSource::Scratch
+        ));
+        let report = sweep(&store, &context, 7, DAY_MICROS, false, &call)?;
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        Ok(())
+    }
+
+    fn seal_base_twelve_row(
+        store: &RunStore,
+        id: AttemptId,
+        record: &serde_json::Value,
+    ) -> TestResult {
+        // A terminal attempt is immutable to ordinary writers; the migration
+        // lifts the trigger inside its own transaction.
+        store
+            .db
+            .execute_batch("DROP TRIGGER immutable_terminal_update")?;
+        store.db.execute(
+            "UPDATE attempts SET record=?1 WHERE id=?2",
+            rusqlite::params![serde_json::to_vec(record)?, id.to_string()],
+        )?;
+        store.db.execute_batch(
+            "CREATE TRIGGER immutable_terminal_update
+             BEFORE UPDATE OF rowid,oid,_rowid_,sequence,id,project,graph,node,attempt,digest,actor,operation,number,continues,refused,revision,terminal,record,sealed,repository,head ON attempts
+             WHEN OLD.terminal=1
+             BEGIN SELECT RAISE(ABORT,'terminal attempt is immutable'); END;
+             PRAGMA user_version=12;",
+        )?;
+        Ok(())
+    }
+
+    fn insert_base_twelve_record(
+        store: &RunStore,
+        source: AttemptId,
+        id: AttemptId,
+        offset: i64,
+        record: &serde_json::Value,
+    ) -> TestResult {
+        // Each inserted row needs its own attempt key: (project, graph, node,
+        // attempt) is unique.
+        store.db.execute(
+            "INSERT INTO attempts (id,project,graph,node,attempt,digest,actor,operation,number,operation_record,revision,terminal,record) SELECT ?1,project,graph,node,attempt+?4,digest,actor,operation,number+?4,operation_record,revision,1,?2 FROM attempts WHERE id=?3",
+            rusqlite::params![id.to_string(), serde_json::to_vec(record)?, source.to_string(), offset],
+        )?;
+        Ok(())
+    }
+
+    fn base_twelve_record(
+        store: &RunStore,
+        id: AttemptId,
+    ) -> std::result::Result<serde_json::Value, Box<dyn std::error::Error>> {
+        let stored: Vec<u8> = store.db.query_row(
+            "SELECT record FROM attempts WHERE id=?1",
+            [id.to_string()],
+            |row| row.get(0),
+        )?;
+        Ok(serde_json::from_slice(&stored)?)
+    }
+
+    fn stored_record_after_migration(
+        context: &ExecutionContext,
+        call: &Request<'_>,
+        id: AttemptId,
+    ) -> std::result::Result<serde_json::Value, Box<dyn std::error::Error>> {
+        let store = RunStore::open(context, call)?;
+        assert_eq!(provenant_sqlite::stored_version(&store.db)?, 13);
+        let stored: Vec<u8> = store.db.query_row(
+            "SELECT record FROM attempts WHERE id=?1",
+            [id.to_string()],
+            |row| row.get(0),
+        )?;
+        Ok(serde_json::from_slice(&stored)?)
+    }
+
+    #[test]
+    fn base_twelve_migration_does_not_add_an_absent_write_grant_list() -> TestResult {
+        let (_temp, context, store, input, _attempt) = seeded()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        withdraw(&store, &input, &call)?;
+        let mut legacy = base_twelve_record(&store, input.attempt_id)?;
+        legacy["schema_version"] = 2.into();
+        legacy["profile"] = serde_json::json!({
+            "name": "rigorous",
+            "knobs": {},
+            "overrides": [],
+            "launch_policy": {"rules": []}
+        });
+        legacy
+            .as_object_mut()
+            .ok_or("attempt record")?
+            .remove("write_grants");
+        legacy["future_attempt_field"] = serde_json::json!({"kept":true});
+        seal_base_twelve_row(&store, input.attempt_id, &legacy)?;
+        drop(store);
+
+        let migrated = stored_record_after_migration(&context, &call, input.attempt_id)?;
+        assert!(migrated.get("write_grants").is_none());
+        // The retired snapshot decodes as an extra field, so the rewrite leaves
+        // it byte-identical rather than treating it as unreadable.
+        assert_eq!(
+            migrated["profile"]["launch_policy"],
+            serde_json::json!({"rules": []})
+        );
+        assert_eq!(
+            migrated["future_attempt_field"],
+            serde_json::json!({"kept":true})
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn base_twelve_migration_keeps_grants_it_did_not_retire() -> TestResult {
+        let (_temp, context, store, input, _attempt) = seeded()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        withdraw(&store, &input, &call)?;
+        let mut legacy = base_twelve_record(&store, input.attempt_id)?;
+        legacy["schema_version"] = 2.into();
+        legacy["profile"] = serde_json::json!({
+            "name": "rigorous",
+            "knobs": {},
+            "overrides": [],
+            "launch_policy": {"rules": []}
+        });
+        legacy["write_grants"] = serde_json::json!([
+            {
+                "path": {"relative_to_root": {
+                    "encoding": "utf8",
+                    "path": "attempt-scratch"
+                }},
+                "scope": "subtree"
+            },
+            {
+                "source": "scratch",
+                "path": {"relative_to_root": {
+                    "encoding": "utf8",
+                    "path": "attempt-scratch"
+                }},
+                "scope": "subtree"
+            },
+            {
+                "source": "lane_cache",
+                "path": {"relative_to_root": {
+                    "encoding": "utf8",
+                    "path": "Library/Caches/provenant-lane-cargo/fixture"
+                }},
+                "scope": "subtree"
+            }
+        ]);
+        seal_base_twelve_row(&store, input.attempt_id, &legacy)?;
+        drop(store);
+
+        let migrated = stored_record_after_migration(&context, &call, input.attempt_id)?;
+        let grants = migrated["write_grants"].as_array().ok_or("write grants")?;
+        assert_eq!(grants.len(), 2);
+        assert!(grants.iter().all(|grant| grant["source"] != "lane_cache"));
+        assert!(grants.iter().any(|grant| grant.get("source").is_none()));
+        assert!(grants.iter().any(|grant| grant["source"] == "scratch"));
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_attempt_record_does_not_abort_the_base_twelve_migration() -> TestResult {
+        let (_temp, context, store, input, _attempt) = seeded()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        withdraw(&store, &input, &call)?;
+        let broken = AttemptId::from_bytes([9; 16]);
+        store.db.execute(
+            "INSERT INTO attempts (id,project,graph,node,attempt,digest,actor,operation,number,operation_record,revision,terminal,record) SELECT ?1,project,graph,node,attempt+1000,digest,actor,operation,number+1,operation_record,revision,1,?2 FROM attempts WHERE id=?3",
+            rusqlite::params![broken.to_string(), b"{malformed JSON".as_slice(), input.attempt_id.to_string()],
+        )?;
+        // Valid JSON with the wrong shape must also skip the grant walk instead
+        // of aborting the migration.
+        let mut shaped = base_twelve_record(&store, input.attempt_id)?;
+        shaped["schema_version"] = 2.into();
+        let string_grants = AttemptId::from_bytes([10; 16]);
+        let mut string_record = shaped.clone();
+        string_record["write_grants"] = serde_json::json!("abc");
+        insert_base_twelve_record(
+            &store,
+            input.attempt_id,
+            string_grants,
+            1001,
+            &string_record,
+        )?;
+        let array_grants = AttemptId::from_bytes([11; 16]);
+        let mut array_record = shaped;
+        array_record["write_grants"] = serde_json::json!(["abc"]);
+        insert_base_twelve_record(&store, input.attempt_id, array_grants, 1002, &array_record)?;
+        store.db.execute_batch("PRAGMA user_version=12;")?;
+        drop(store);
+
+        let store = RunStore::open(&context, &call)?;
+        assert_eq!(provenant_sqlite::stored_version(&store.db)?, 13);
+        assert!(store.record(input.attempt_id, &call).is_ok());
+        assert!(store.record(broken, &call).is_err());
+        assert!(store.record(string_grants, &call).is_err());
+        assert!(store.record(array_grants, &call).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn an_undecodable_attempt_names_the_attempt_row_not_provider_state() -> TestResult {
+        let (_temp, context, store, input, _attempt) = seeded()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        withdraw(&store, &input, &call)?;
+        // A terminal row is immutable, so insert a second terminal row whose
+        // record cannot decode. It keeps the retention row shape GC reads.
+        let broken = AttemptId::from_bytes([9; 16]);
+        store.db.execute(
+            "INSERT INTO attempts (id,project,graph,node,attempt,digest,actor,operation,number,operation_record,revision,terminal,record) SELECT ?1,project,graph,node,attempt+1000,digest,actor,operation,number+1,operation_record,revision,1,?2 FROM attempts WHERE id=?3",
+            rusqlite::params![broken.to_string(), b"{}".as_slice(), input.attempt_id.to_string()],
+        )?;
+        let attempt = context
+            .state_root
+            .as_path()
+            .join(format!("attempts/{broken}"));
+        let report = sweep(&store, &context, 7, DAY_MICROS, false, &call)?;
+        assert!(!report.errors.is_empty(), "{report:?}");
+        assert!(
+            report.errors.iter().all(|issue| issue.path == attempt),
+            "{report:?}"
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .all(|issue| !issue.path.ends_with("provider-state")),
+            "{report:?}"
+        );
+        Ok(())
     }
 
     fn logs_retention_age() -> i64 {

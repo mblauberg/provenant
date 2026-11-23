@@ -1,6 +1,6 @@
 //! Settlement snapshots of the shared handoff, independent of provider history.
 use crate::{
-    artifacts::{read_sealed, seal},
+    artifacts::{read_sealed, read_settled, seal},
     *,
 };
 use provenant_os::fs::Directory;
@@ -166,7 +166,8 @@ impl RunStore {
             Err(error) if error.is_not_found() => return Ok(Ok(None)),
             Err(error) => return Err(error.into()),
         };
-        let Some(bytes) = read_sealed(&candidate, "handoff.json", HANDOFF_BYTES as u64)? else {
+        let Some(bytes) = read_settled(&candidate, AttemptFile::Handoff, HANDOFF_BYTES as u64)?
+        else {
             return Ok(Ok(None));
         };
         Ok(Handoff::from_json(&bytes).map(Some))
@@ -219,24 +220,20 @@ fn validate_handoff(handoff: &Handoff) -> Result<Handoff> {
 const HANDOFF_RECORD_BYTES: usize = HANDOFF_BYTES * 4;
 
 fn read_snapshot(attempt: &Directory) -> Result<Option<HandoffResult>> {
-    read_sealed(
-        attempt,
-        AttemptFile::Handoff.name(),
-        HANDOFF_RECORD_BYTES as u64,
-    )?
-    .map(|bytes| {
-        let handoff: HandoffResult = serde_json::from_slice(&bytes)
-            .map_err(|_| RunError::Validation("handoff snapshot unreadable"))?;
-        Ok(match handoff {
-            Ok(Some(handoff)) => Handoff::from_json(
-                &serde_json::to_vec(&handoff)
-                    .map_err(|_| RunError::Validation("handoff encoding"))?,
-            )
-            .map(Some),
-            other => other,
+    read_settled(attempt, AttemptFile::Handoff, HANDOFF_RECORD_BYTES as u64)?
+        .map(|bytes| {
+            let handoff: HandoffResult = serde_json::from_slice(&bytes)
+                .map_err(|_| RunError::Validation("handoff snapshot unreadable"))?;
+            Ok(match handoff {
+                Ok(Some(handoff)) => Handoff::from_json(
+                    &serde_json::to_vec(&handoff)
+                        .map_err(|_| RunError::Validation("handoff encoding"))?,
+                )
+                .map(Some),
+                other => other,
+            })
         })
-    })
-    .transpose()
+        .transpose()
 }
 
 /// The verification and slot-wait rules every writer lane is told. A writer's `cargo` commands
@@ -304,7 +301,6 @@ pub struct PreambleExtras {
     pub location: Option<LaneLocation>,
     pub verification: Option<crate::VerificationResolution>,
     pub build_cap: Option<BuildCap>,
-    pub cargo_cache_budget: Option<provenant_config::CargoCacheBudget>,
 }
 
 /// Format an applied route without repeating a provider already on the model.
@@ -424,25 +420,13 @@ pub fn lane_preamble_with(
                 .as_ref()
                 .map(crate::VerificationResolution::paragraph)
                 .unwrap_or_else(|| crate::verification::CHECK_PARAGRAPH.to_string());
-            let cargo_cache_budget = extras
-                .cargo_cache_budget
-                .as_ref()
-                .map(|budget| {
-                    format!(
-                        "Cargo cache budget: {} bytes (setting {}; source: {}; lanes.cargo_cache_max).\n",
-                        budget.bytes,
-                        budget.setting,
-                        budget.source.as_str(),
-                    )
-                })
-                .unwrap_or_default();
             let location = extras
                 .location
                 .as_ref()
                 .map(LaneLocation::preamble)
                 .unwrap_or_default();
             format!(
-                "{location}{verification}{cargo_cache_budget}In a shared worktree, commit only your own paths with `git commit -- <paths>`; coordinate overlapping edits with the owning lane.\n{}{}{budget}{PULL_REQUEST_GUIDANCE}",
+                "{location}{verification}In a shared worktree, commit only your own paths with `git commit -- <paths>`; coordinate overlapping edits with the owning lane.\n{}{}{budget}{PULL_REQUEST_GUIDANCE}",
                 slot_guidance(extras.build_cap),
                 scope.preamble()
             )
@@ -472,6 +456,7 @@ mod tests {
     use super::*;
     use crate::tests::{call, clock, context, exit, input, publication, seal_observation};
     use provenant_records::AbsolutePath;
+    use std::os::unix::fs::PermissionsExt;
     type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
     /// Invariant: the preamble teaches the statuses from the text the routing
@@ -780,7 +765,78 @@ mod tests {
                 .handoff?,
             Some(expected.clone())
         );
+        // The provider's progress handoff is a settlement input too, so the
+        // same class rule repairs a broad mode instead of stalling recovery.
+        std::fs::set_permissions(
+            candidate.current_path()?.join(AttemptFile::Handoff.name()),
+            std::fs::Permissions::from_mode(0o644),
+        )?;
+        crate::artifacts::PRIVATE_MODE_REPAIRS.with(|warnings| warnings.borrow_mut().clear());
+        assert_eq!(
+            store.progress_handoff(&attempt, &record)??,
+            Some(expected.clone())
+        );
+        let warnings =
+            crate::artifacts::PRIVATE_MODE_REPAIRS.with(|warnings| warnings.borrow().clone());
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains(
+                &candidate
+                    .anchored_path()
+                    .join(AttemptFile::Handoff.name())
+                    .display()
+                    .to_string()
+            ),
+            "warning must name the repaired progress handoff: {warnings:?}"
+        );
+        assert_eq!(
+            candidate
+                .metadata_at(OsStr::new(AttemptFile::Handoff.name()), false)?
+                .mode
+                & 0o077,
+            0
+        );
         assert_eq!(store.handoff(&record)??, Some(expected));
+        Ok(())
+    }
+
+    #[test]
+    fn settlement_repairs_a_broad_handoff_snapshot_and_warns() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let clock = clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let input = input();
+        store.create(&input, &call)?;
+        let record = store.record(input.attempt_id, &call)?;
+        let attempt = store.attempt_dir(record.attempt_id, false)?;
+        let bytes = snapshot("done");
+        let expected = Handoff::from_json(&bytes)?;
+        seal(
+            &attempt,
+            AttemptFile::Handoff.name(),
+            &serde_json::to_vec(&Ok::<_, HandoffError>(Some(expected.clone())))?,
+            HANDOFF_RECORD_BYTES as u64,
+        )?;
+        let path = attempt.current_path()?.join(AttemptFile::Handoff.name());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))?;
+        crate::artifacts::PRIVATE_MODE_REPAIRS.with(|warnings| warnings.borrow_mut().clear());
+        assert_eq!(store.handoff(&record)??, Some(expected));
+        let warnings =
+            crate::artifacts::PRIVATE_MODE_REPAIRS.with(|warnings| warnings.borrow().clone());
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains(AttemptFile::Handoff.name()),
+            "warning must name the repaired handoff: {warnings:?}"
+        );
+        assert!(
+            warnings[0].contains("0644"),
+            "warning must name the old mode: {warnings:?}"
+        );
+        let after = attempt.metadata_at(OsStr::new(AttemptFile::Handoff.name()), false)?;
+        assert_eq!(after.mode & 0o077, 0);
+        assert_eq!(PathCheck::file(after), None);
         Ok(())
     }
 

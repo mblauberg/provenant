@@ -522,10 +522,43 @@ fn fixture_cli() -> Command {
     command
 }
 
+/// Native provider custody (the guardian that accepts a provider hand-off and
+/// spawns it) is macOS-only. Elsewhere a launch reaches preparation and stops
+/// at the platform boundary, so admission fixtures assert that boundary rather
+/// than a provider process that cannot exist.
+const PROVIDER_CUSTODY: bool = cfg!(target_os = "macos");
+
+/// A fake `codex` executable: it answers the version and login probes, then
+/// holds the lane open until the test releases it. The provider's working
+/// directory is the writer checkout, so `fixture-release` is per slice.
+const CODEX_FIXTURE: &str = r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  printf 'codex-cli 0.159.0\n'
+  exit 0
+fi
+if [ "$1" = "auth" ] || [ "$1" = "login" ]; then
+  printf '{"loggedIn":true,"email":"fixture@example.test"}\n'
+  exit 0
+fi
+/bin/cat >/dev/null
+printf 'started\n' > fixture-started
+i=0
+while [ "$i" -lt 200 ]; do
+  if [ -f fixture-release ]; then
+    exit 7
+  fi
+  i=$((i + 1))
+  /bin/sleep 0.05
+done
+exit 7
+"#;
+
 struct GraphProject {
     temp: tempfile::TempDir,
     root: PathBuf,
     project: PathBuf,
+    /// Extra environment for runs that need an isolated provider home.
+    env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
 }
 impl GraphProject {
     fn new() -> Result<Self> {
@@ -549,10 +582,44 @@ impl GraphProject {
             temp,
             root,
             project,
+            env: Vec::new(),
         })
     }
     fn state(&self) -> PathBuf {
         self.temp.path().join("state")
+    }
+    /// A runnable Codex lane: an isolated login home and a fake `codex` first
+    /// on PATH. The route is a real, catalogued model, so admission is not
+    /// decided by a placeholder adapter.
+    fn enable_codex_fixture(&mut self) -> Result {
+        use std::os::unix::fs::PermissionsExt;
+        let home = self.temp.path().join("home");
+        let codex_home = home.join(".codex");
+        let bin = self.temp.path().join("provider/bin");
+        for path in [&home, &codex_home, &bin] {
+            std::fs::create_dir_all(path)?;
+        }
+        std::fs::write(
+            codex_home.join("auth.json"),
+            br#"{"tokens":{"account_id":"fixture-one"}}"#,
+        )?;
+        let executable = bin.join("codex");
+        std::fs::write(&executable, CODEX_FIXTURE)?;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
+        provenant_os::fixture::private_state_dir(&self.state())?;
+        std::fs::write(
+            self.state().join("config.toml"),
+            "schema_version=1\n[gc]\nfree_floor='1B'\n",
+        )?;
+        self.env = vec![
+            ("HOME".into(), home.into_os_string()),
+            ("CODEX_HOME".into(), codex_home.into_os_string()),
+            (
+                "PATH".into(),
+                format!("{}:/usr/bin:/bin", bin.display()).into(),
+            ),
+        ];
+        Ok(())
     }
     fn enable_secret_redaction(&self) -> Result {
         use std::os::unix::fs::PermissionsExt;
@@ -572,6 +639,9 @@ impl GraphProject {
             .env("XDG_CONFIG_HOME", self.temp.path().join("config"))
             .args(["--json", "--state-dir"])
             .arg(self.state());
+        for (key, value) in &self.env {
+            command.env(key, value);
+        }
         command
     }
     fn run(&self, args: &[&str]) -> Result<(Output, Value)> {
@@ -589,6 +659,9 @@ impl GraphProject {
             .env("XDG_CONFIG_HOME", self.temp.path().join("config"))
             .args(["--state-dir"])
             .arg(self.state());
+        for (key, value) in &self.env {
+            command.env(key, value);
+        }
         command
     }
     fn document(&self, document: &Value) -> Result<PathBuf> {
@@ -623,6 +696,76 @@ fn graph_records(path: &Path) -> std::io::Result<Vec<PathBuf>> {
         }
     }
     Ok(found)
+}
+
+/// Attempt rows in the run journal, so a read-only preview can prove it
+/// admitted none. A missing database, or one without the table yet, holds none.
+fn attempt_records(state: &Path) -> Result<i64> {
+    let database = state.join("run.sqlite3");
+    if !database.exists() {
+        return Ok(0);
+    }
+    let connection = rusqlite::Connection::open(&database)?;
+    let table: i64 = connection.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='attempts'",
+        [],
+        |row| row.get(0),
+    )?;
+    if table == 0 {
+        return Ok(0);
+    }
+    Ok(connection.query_row("SELECT count(*) FROM attempts", [], |row| row.get(0))?)
+}
+
+/// A command's terminal record. `wait` emits progress events before its final
+/// envelope, so only the last non-empty line is the command result.
+fn last_record(output: &Output) -> Result<Value> {
+    let text = std::str::from_utf8(&output.stdout)?;
+    let line = text
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .ok_or("command produced no record")?;
+    Ok(serde_json::from_str(line)?)
+}
+
+/// A launch must admit the graph its explanation admitted. Where native
+/// provider custody exists the process must also start. Elsewhere the attempt
+/// ends at that platform boundary after the host bound and provisioned its
+/// slices; a route or worktree refusal is still a failure on every host.
+fn assert_launch_admitted(launch: &Output, launched: &Value) -> Result {
+    if PROVIDER_CUSTODY {
+        assert!(
+            launch.status.success(),
+            "launch was refused after explain admitted the same input: {launched}"
+        );
+        return Ok(());
+    }
+    let rendered = launched.to_string();
+    for refusal in [
+        "unknown_adapter",
+        "route_resolution_refused",
+        "worktree_missing",
+        "invalid_input",
+    ] {
+        assert!(
+            !rendered.contains(refusal),
+            "launch was refused after explain admitted the same input ({refusal}): {launched}"
+        );
+    }
+    assert!(
+        launched["error"].is_null(),
+        "launch envelope refused admission: {launched}"
+    );
+    assert!(
+        launched["data"]["checkpoint"]["graph_id"].is_string(),
+        "launch admitted no graph: {launched}"
+    );
+    assert!(
+        rendered.contains("unsupported_platform"),
+        "launch did not reach the provider-custody boundary after admission: {launched}"
+    );
+    Ok(())
 }
 
 #[test]
@@ -1035,6 +1178,411 @@ fn every_bundled_template_is_listed_and_compiles_with_its_declared_parameters() 
             "explanation must not create a worktree: {row}"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn batch_launch_provisions_planned_slice_worktrees_and_explains_same_admission() -> Result {
+    let mut rig = GraphProject::new()?;
+    rig.enable_codex_fixture()?;
+    let document = rig.document(&json!({
+        "schema_version": support::GRAPH_DOCUMENT_SCHEMA_VERSION,
+        "graph_id": "batch-provision",
+        "integration_branch": "batch/integration",
+        "nodes": [
+            {
+                "id": "task--slices--alpha",
+                "prompt": "implement alpha",
+                "access": "worktree_write",
+                "worktree": ".worktrees/batch-provision-task--slices--alpha",
+                "write_scope": ["."],
+                "delivery": "integrate:batch/integration",
+                "provision_worktree": true,
+                "route": {"adapter": "codex", "model": "codex/gpt-6-luna"},
+            },
+            {
+                "id": "task--slices--beta",
+                "prompt": "implement beta",
+                "access": "worktree_write",
+                "worktree": ".worktrees/batch-provision-task--slices--beta",
+                "write_scope": ["."],
+                "delivery": "integrate:batch/integration",
+                "provision_worktree": true,
+                "route": {"adapter": "codex", "model": "codex/gpt-6-luna"},
+            },
+        ],
+    }))?;
+    let document = document.to_str().ok_or("document path")?;
+    let (explained_output, explained) = rig.run(&["run", "--file", document, "--explain"])?;
+    assert!(explained_output.status.success(), "{explained}");
+    let managed = rig.project.join(".worktrees");
+    assert!(
+        !managed.exists() || std::fs::read_dir(&managed)?.next().is_none(),
+        "explain must not create managed worktrees: {explained}"
+    );
+    // Explain is a reader: it must not journal the graph execution or admit an
+    // attempt for the input it previews.
+    assert!(
+        graph_records(&rig.state())?.is_empty(),
+        "explain allocated a graph execution record: {explained}"
+    );
+    assert_eq!(
+        attempt_records(&rig.state())?,
+        0,
+        "explain allocated an attempt record: {explained}"
+    );
+
+    let (launch, launched) = rig.run(&["run", "--file", document])?;
+    assert_launch_admitted(&launch, &launched)?;
+    let graph = launched["data"]["checkpoint"]["graph_id"]
+        .as_str()
+        .ok_or_else(|| format!("launch must admit the graph explain admitted: {launched}"))?
+        .to_owned();
+    if PROVIDER_CUSTODY {
+        // The fake providers hold each lane open until released, so the launch
+        // returns while both slices are running rather than after they settle.
+        for slice in ["alpha", "beta"] {
+            let release = rig.project.join(format!(
+                ".worktrees/batch-provision-task--slices--{slice}/fixture-release"
+            ));
+            std::fs::write(&release, b"release")
+                .map_err(|error| format!("release fixture slice {}: {error}", release.display()))?;
+        }
+    }
+    let wait_output = rig
+        .command()
+        .args(["wait", &graph, "--timeout", "15s"])
+        .output()?;
+    let waited = last_record(&wait_output)?;
+    assert_eq!(
+        waited["data"]["timed_out"].as_bool(),
+        Some(false),
+        "wait did not settle the graph the launch admitted: {waited}"
+    );
+    let settle = waited["data"]["targets"]
+        .as_array()
+        .and_then(|targets| {
+            targets
+                .iter()
+                .find(|target| target["target"] == graph.as_str())
+        })
+        .and_then(|target| target["settle"].as_str())
+        .ok_or_else(|| format!("wait did not report {graph}: {waited}"))?;
+    let expected_exit = match settle {
+        "succeeded" => 0,
+        "unsuccessful" => 1,
+        "needs_input" => 5,
+        other => return Err(format!("unexpected wait settle {other}: {waited}").into()),
+    };
+    assert_eq!(
+        wait_output.status.code(),
+        Some(expected_exit),
+        "wait exit disagrees with settle {settle}: {waited}"
+    );
+    let checkpoint_path = graph_records(&rig.state())?
+        .into_iter()
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| *name == *format!("graph-{graph}.json"))
+        })
+        .ok_or("checkpoint file")?;
+    let stored: Value = serde_json::from_slice(&std::fs::read(checkpoint_path)?)?;
+    let slices: Vec<_> = stored["checkpoint"]["nodes"]
+        .as_array()
+        .ok_or("checkpoint nodes")?
+        .iter()
+        .filter(|node| {
+            node["id"]
+                .as_str()
+                .is_some_and(|id| id.contains("task--slices--"))
+        })
+        .collect();
+    assert_eq!(slices.len(), 2, "both batch slices must start: {stored}");
+    let mut provisioned = std::collections::BTreeSet::new();
+    for slice in slices {
+        let binding = slice["writer_binding"]
+            .as_object()
+            .ok_or_else(|| format!("slice was not bound: {slice}"))?;
+        let path = binding["worktree"].as_str().ok_or("bound worktree")?;
+        assert!(
+            Path::new(path).is_dir(),
+            "host did not provision planned slice worktree {path}: {slice}"
+        );
+        provisioned.insert(path.to_owned());
+    }
+    assert_eq!(provisioned.len(), 2, "each slice owns a distinct worktree");
+    if PROVIDER_CUSTODY {
+        for path in &provisioned {
+            assert!(
+                Path::new(path.as_str()).join("fixture-started").is_file(),
+                "fixture provider did not run in the slice it was bound to: {path}"
+            );
+        }
+    }
+
+    // The negative case keeps the dead-guard's intent: a refusal is reported
+    // with the same code by explain and launch, so a passing explanation is
+    // checked against a refusal and not only against an admission.
+    let missing = rig.document(&json!({
+        "schema_version": support::GRAPH_DOCUMENT_SCHEMA_VERSION,
+        "graph_id": "batch-missing-writer",
+        "nodes": [{
+            "id": "writer",
+            "prompt": "write the change",
+            "access": "worktree_write",
+            "worktree": ".worktrees/batch-missing-writer",
+            "write_scope": ["."],
+            "delivery": "push",
+            "route": {"adapter": "codex", "model": "codex/gpt-6-luna"},
+        }],
+    }))?;
+    let missing = missing.to_str().ok_or("document path")?;
+    let (missing_explain_output, missing_explain) =
+        rig.run(&["run", "--file", missing, "--explain"])?;
+    assert!(
+        !missing_explain_output.status.success(),
+        "{missing_explain}"
+    );
+    assert_eq!(
+        missing_explain["error"]["code"], "worktree_missing",
+        "{missing_explain}"
+    );
+    let (missing_launch_output, missing_launch) = rig.run(&["run", "--file", missing])?;
+    assert!(!missing_launch_output.status.success(), "{missing_launch}");
+    assert_eq!(
+        missing_launch["error"]["code"], missing_explain["error"]["code"],
+        "{missing_launch}"
+    );
+    Ok(())
+}
+
+#[test]
+fn explain_refuses_a_writer_on_the_integration_branch_like_launch() -> Result {
+    let rig = GraphProject::new()?;
+    let writer = rig.project.join(".worktrees/integration-writer");
+    let output = provenant_os::fixture::git_command()
+        .current_dir(&rig.project)
+        .args([
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "batch/integration",
+            writer.to_str().ok_or("writer path")?,
+        ])
+        .output()?;
+    assert!(output.status.success(), "{output:?}");
+    let document = rig.document(&json!({
+        "schema_version": support::GRAPH_DOCUMENT_SCHEMA_VERSION,
+        "graph_id": "explain-integration-parity",
+        "integration_branch": "batch/integration",
+        "nodes": [{
+            "id": "writer",
+            "prompt": "write the change",
+            "access": "worktree_write",
+            "worktree": ".worktrees/integration-writer",
+            "write_scope": ["."],
+            "delivery": "integrate:batch/integration",
+            "route": {"adapter": "fixture", "model": "fixture/model"},
+        }],
+    }))?;
+    let document = document.to_str().ok_or("document path")?;
+    let (explained_output, explained) = rig.run(&["run", "--file", document, "--explain"])?;
+    assert!(!explained_output.status.success(), "{explained}");
+    let explained_cause = explained["error"]["message"]
+        .as_str()
+        .or_else(|| explained["error"]["cause"].as_str())
+        .unwrap_or_default();
+    assert!(
+        explained_cause.contains("on the integration branch batch/integration"),
+        "{explained}"
+    );
+    let (launch_output, launched) = rig.run(&["run", "--file", document])?;
+    assert!(!launch_output.status.success(), "{launched}");
+    let launch_cause = launched["error"]["message"]
+        .as_str()
+        .or_else(|| launched["error"]["cause"].as_str())
+        .unwrap_or_default();
+    assert!(
+        launch_cause.contains("on the integration branch batch/integration"),
+        "{launched}"
+    );
+    Ok(())
+}
+
+// Spec: docs/specs/run-launch.md#writer-binding
+#[test]
+fn explain_previews_a_new_writer_without_creating_its_checkout() -> Result {
+    let mut rig = GraphProject::new()?;
+    rig.enable_codex_fixture()?;
+    // Push delivery needs a remote; a local bare repository stands in for it.
+    let remote = rig.temp.path().join("origin.git");
+    for args in [
+        vec![
+            "init",
+            "-q",
+            "--bare",
+            remote.to_str().ok_or("remote path")?,
+        ],
+        vec![
+            "-C",
+            rig.project.to_str().ok_or("project path")?,
+            "remote",
+            "add",
+            "origin",
+            remote.to_str().ok_or("remote path")?,
+        ],
+    ] {
+        let output = provenant_os::fixture::git_command().args(args).output()?;
+        assert!(output.status.success(), "{output:?}");
+    }
+    let checkout = rig.project.join(".worktrees/explain-new-writer");
+    let document = rig.document(&json!({
+        "schema_version": support::GRAPH_DOCUMENT_SCHEMA_VERSION,
+        "graph_id": "explain-new-writer",
+        "nodes": [{
+            "id": "writer",
+            "prompt": "write the change",
+            "access": "worktree_write",
+            "worktree": ".worktrees/explain-new-writer",
+            "write_scope": ["."],
+            "delivery": "push",
+            "attempt": {"new_worktree": {"branch": "explain-new-writer", "base": "HEAD"}},
+            "route": {"adapter": "codex", "model": "codex/gpt-6-luna"},
+        }],
+    }))?;
+    let document = document.to_str().ok_or("document path")?;
+    // The checkout does not exist yet; explain admits the node from its
+    // declared branch rather than resolving a writer Git home for it.
+    let (explained_output, explained) = rig.run(&["run", "--file", document, "--explain"])?;
+    assert!(
+        explained_output.status.success(),
+        "explain must preview a declared new worktree: {explained}"
+    );
+    assert!(
+        !checkout.exists(),
+        "explain created the writer checkout: {explained}"
+    );
+
+    let (launch, launched) = rig.run(&["run", "--file", document])?;
+    assert_launch_admitted(&launch, &launched)?;
+    let graph = launched["data"]["checkpoint"]["graph_id"]
+        .as_str()
+        .ok_or_else(|| {
+            format!("launch must admit the writer explain previewed: {launch:?}; {launched}")
+        })?
+        .to_owned();
+    if PROVIDER_CUSTODY {
+        // The fake provider holds the lane open until released, so the launch
+        // returns with the writer running rather than already settled.
+        std::fs::write(checkout.join("fixture-release"), b"release")?;
+    }
+    let wait_output = rig
+        .command()
+        .args(["wait", &graph, "--timeout", "15s"])
+        .output()?;
+    let waited = last_record(&wait_output)?;
+    assert_eq!(
+        waited["data"]["timed_out"].as_bool(),
+        Some(false),
+        "wait did not settle the writer graph: {waited}"
+    );
+    assert!(
+        checkout.is_dir(),
+        "launch did not provision the checkout it previewed: {waited}"
+    );
+    if PROVIDER_CUSTODY {
+        assert!(
+            checkout.join("fixture-started").is_file(),
+            "fixture provider did not run in the previewed checkout: {waited}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn missing_writer_checkout_error_names_its_path_and_node() -> Result {
+    let rig = GraphProject::new()?;
+    let document = rig.document(&json!({
+        "schema_version": support::GRAPH_DOCUMENT_SCHEMA_VERSION,
+        "graph_id": "missing-writer",
+        "nodes": [{
+            "id": "slice",
+            "prompt": "write the change",
+            "access": "worktree_write",
+            "worktree": ".worktrees/missing-slice",
+            "write_scope": ["."],
+            "delivery": "push",
+            "route": {"adapter": "fixture", "model": "fixture/model"},
+        }],
+    }))?;
+    let (output, reply) = rig.run(&["run", "--file", document.to_str().ok_or("path")?])?;
+    assert!(!output.status.success(), "{reply}");
+    let rendered = reply.to_string();
+    assert!(rendered.contains(".worktrees/missing-slice"), "{reply}");
+    assert!(rendered.contains("node slice"), "{reply}");
+    assert_eq!(reply["error"]["code"], "worktree_missing", "{reply}");
+    Ok(())
+}
+
+#[test]
+fn relative_worktree_path_from_a_linked_checkout_uses_the_project_root() -> Result {
+    let rig = GraphProject::new()?;
+    let tracked_path = rig.project.join(".worktrees/writer");
+    let invoker = rig.project.join(".worktrees/invoker");
+    for (branch, path) in [("writer-branch", &tracked_path), ("invoker", &invoker)] {
+        let output = provenant_os::fixture::git_command()
+            .current_dir(&rig.project)
+            .args([
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                branch,
+                path.to_str().ok_or("worktree path")?,
+            ])
+            .output()?;
+        assert!(output.status.success(), "{output:?}");
+    }
+    let tracked = std::fs::canonicalize(&tracked_path)?;
+    let output = rig
+        .command()
+        .current_dir(&invoker)
+        .args([
+            "run",
+            "task",
+            "fixture writer",
+            "--mode",
+            "worktree-write",
+            "--worktree",
+            ".worktrees/writer",
+            "--model",
+            "fixture/model",
+        ])
+        .output()?;
+    let launched: Value =
+        serde_json::from_slice(&output.stdout).map_err(|error| format!("{error}: {output:?}"))?;
+    let graph = launched["data"]["checkpoint"]["graph_id"]
+        .as_str()
+        .ok_or_else(|| format!("graph id: {launched}"))?;
+    let checkpoint_path = graph_records(&rig.state())?
+        .into_iter()
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| *name == *format!("graph-{graph}.json"))
+        })
+        .ok_or("checkpoint file")?;
+    let stored: Value = serde_json::from_slice(&std::fs::read(checkpoint_path)?)?;
+    let binding = stored["checkpoint"]["nodes"]
+        .as_array()
+        .and_then(|nodes| nodes.first())
+        .and_then(|node| node["writer_binding"]["worktree"].as_str())
+        .ok_or_else(|| format!("writer binding: {stored}"))?;
+    assert_eq!(binding, tracked.to_str().ok_or("tracked path")?);
+    assert!(
+        !invoker.join(".worktrees/writer").exists(),
+        "relative writer path was nested under the linked checkout"
+    );
     Ok(())
 }
 

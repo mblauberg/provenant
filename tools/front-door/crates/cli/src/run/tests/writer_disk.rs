@@ -236,7 +236,6 @@ fn writer_disk_check_follows_the_declared_disk_floor_policy() -> Result<(), Stri
                 &policy,
                 Path::new("/state"),
                 Path::new("/tree"),
-                Path::new("/home"),
                 |_| Ok(free),
             );
             assert_eq!(
@@ -258,16 +257,13 @@ fn writer_requires_critical_space_on_every_output_volume() -> Result<(), String>
     };
     let state = Path::new("/state");
     let worktree = Path::new("/worktree");
-    let home = Path::new("/home");
-    let cache = home.join("Library/Caches/provenant-lane-cargo");
-    for low in [worktree, state, cache.as_path()] {
+    for low in [worktree, state] {
         let mut observed = Vec::new();
         let result = check_writer_disk_with(
             &settings,
             &disk_policy(provenant_records::policy::Strength::Refuse),
             state,
             worktree,
-            home,
             |path| {
                 observed.push(path.to_path_buf());
                 Ok(if path == low { 99 } else { 1000 })
@@ -286,7 +282,6 @@ fn writer_requires_critical_space_on_every_output_volume() -> Result<(), String>
         &disk_policy(provenant_records::policy::Strength::Refuse),
         state,
         worktree,
-        home,
         |_| Ok(100),
     )?;
     Ok(())
@@ -299,7 +294,6 @@ fn writer_disk_default_floor_names_its_source() -> Result<(), String> {
     let error = check_writer_disk_with(
         &settings,
         &disk_policy(provenant_records::policy::Strength::Refuse),
-        directory.path(),
         directory.path(),
         directory.path(),
         |_| Ok(0),
@@ -328,7 +322,6 @@ fn writer_disk_observation_failure_warns_and_continues() -> Result<(), String> {
         &disk_policy(provenant_records::policy::Strength::Refuse),
         Path::new("/state"),
         Path::new("/worktree"),
-        Path::new("/home"),
         |_| Err("Not a directory".into()),
     );
     result.map_err(String::from)
@@ -362,7 +355,6 @@ fn writer_schedules_background_gc_below_free_floor() -> Result<(), String> {
             &policy,
             Path::new("/state"),
             Path::new("/tree"),
-            Path::new("/home"),
             |_| {
                 samples.set(samples.get() + 1);
                 Ok(free)
@@ -373,7 +365,7 @@ fn writer_schedules_background_gc_below_free_floor() -> Result<(), String> {
             },
         );
 
-        assert_eq!(samples.get(), 3, "free={free}, schedule={schedule_enabled}");
+        assert_eq!(samples.get(), 2, "free={free}, schedule={schedule_enabled}");
         assert_eq!(
             calls.get(),
             expected_calls,
@@ -436,7 +428,6 @@ fn writer_disk_policy_refusal_keeps_disk_facts_and_safe_recovery() -> Result<(),
         &disk_policy(provenant_records::policy::Strength::Refuse),
         Path::new("/state"),
         Path::new("/worktree"),
-        Path::new("/home"),
         |_| Ok(99),
     )
     .err()

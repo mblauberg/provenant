@@ -157,7 +157,9 @@ fn bind_child_directory(
 }
 
 /// Explicit writer checkouts carry their own repository, while their attempt
-/// remains attributed to the parent graph's project.
+/// remains attributed to the parent graph's project. Relative paths resolve
+/// from the project's primary root, never the invoking checkout, so a launch
+/// from a linked worktree selects the same managed worktree.
 fn selected_writer_project(
     factory: &Factory,
     path: &str,
@@ -166,7 +168,7 @@ fn selected_writer_project(
     let selected = if given.is_absolute() {
         given.to_path_buf()
     } else {
-        factory.cwd.join(given)
+        factory.context.project_root.join(given)
     };
     if !selected
         .try_exists()
@@ -2564,8 +2566,9 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 return Err(stored_graph_refusal(&record)?);
             }
         }
-        let result =
-            self.observe_or_start_inner(key, node, route, access, worktree, replay, Some(&refusal));
+        let result = self
+            .observe_or_start_inner(key, node, route, access, worktree, replay, Some(&refusal))
+            .map_err(|error| error.with_node(key.node_id.as_str()));
         if replay.stored_ref.is_none()
             && let Err(error) = &result
             && matches!(
@@ -2579,7 +2582,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     | FacadeError::ProviderStateExpired
                     | FacadeError::LaneDepth
                     | FacadeError::LaneCoordinationRefused
-                    | FacadeError::WorktreeMissing
+                    | FacadeError::WorktreeMissing { .. }
                     | FacadeError::WorktreeUnregistered { .. }
                     | FacadeError::WorktreeNotApplicable
                     | FacadeError::BaseUnreachable
@@ -4202,9 +4205,15 @@ pub(crate) fn graph_capability_overrides(
 }
 
 /// A graph route's exact model in `ADAPTER/ID` form.
+/// Canonicalise `provider/model` from the adapter and the model spelling a
+/// route carries. The adapter is the provider segment; a model that already
+/// starts with it is canonical, while a provider-relative id such as
+/// `opencode-go/<model>` still needs the adapter prefix.
 pub(crate) fn exact_model(adapter: Option<&str>, model: &str) -> String {
     match adapter {
-        Some(adapter) if !model.contains('/') => format!("{adapter}/{model}"),
+        Some(adapter) if !adapter.is_empty() && !model.starts_with(&format!("{adapter}/")) => {
+            format!("{adapter}/{model}")
+        }
         _ => model.to_owned(),
     }
 }
@@ -4223,6 +4232,11 @@ fn retry_prior_model_uses_canonical_adapter_id() {
     assert_eq!(
         canonical_prior_model(Some("claude"), Some("claude/claude-sonnet-5-5")).as_deref(),
         Some("claude/claude-sonnet-5-5")
+    );
+    // A provider-relative model keeps its upstream group and gains the adapter.
+    assert_eq!(
+        canonical_prior_model(Some("opencode"), Some("opencode-go/hy4-flash-free")).as_deref(),
+        Some("opencode/opencode-go/hy4-flash-free")
     );
     assert_eq!(canonical_prior_model(None, None), None);
 }

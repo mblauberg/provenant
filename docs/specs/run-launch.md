@@ -78,8 +78,11 @@ observation cannot substitute for the original free locks or positive non-occupa
 A launch is uncertain only once its reservation may record a handoff. A host that cannot hold
 provider custody refuses before that point: the attempt ends with `unsupported_platform` and
 its custody is withdrawn. A launch cancelled or refused before it spawns records `never_spawned`
-on every host.
-- Why: a launch that cannot start must not look like a lost lane.
+on every host. Admission and provisioning precede that boundary, so a graph may be admitted and
+its planned worktrees created on such a host; the platform refusal is neither an admission nor a
+route refusal.
+- Why: a launch that cannot start must not look like a lost lane, and a missing custody backend
+  must not hide whether the graph itself was admissible.
 
 Permanent pre-admission refusals are durable outcomes of their operation: replay returns the
 refusal without preparing again, and a failure to store it is not acknowledged as success.
@@ -113,10 +116,28 @@ superseded and print the newer handle as the next step; they never redirect sile
 the invoking checkout. The launch owner resolves and checkpoints `REF` before any Git effect,
 creates the worktree from that commit and binds it by source identity and head, identically from
 a primary checkout, a linked worktree, a separate Git directory or a bare linked checkout. An
-existing clean worktree at the exact checkpointed head is rebound; a different branch, head or
-unclean tree is refused with the named cause.
+existing clean worktree at the exact checkpointed head, including one a chair pre-created with
+`provenant worktree create`, is rebound; a different branch, head or unclean tree is refused with
+the named cause. Relative `--worktree` and graph writer paths resolve from the project's primary
+root, so a launch from a linked worktree of the same repository selects the same managed
+checkouts as the primary checkout. A host-planned writer (`provision_worktree` with no attempt
+`new_worktree`) is skipped by the pre-attempt integration-target check: it has no branch until
+provisioning, and provisioning verifies the exact branch and head.
 - Why: an owned writer must land in one project-owned location wherever the launch ran, and a
   failed bind must not leave a half-made worktree.
+
+`run --explain` runs the same pre-attempt admission checks as a launch, in read-only form:
+graph exclusions, the submission snapshot, the refusal of host-authored writer-preflight
+fields, protected delivery targets and every declared writer branch, read from an existing
+checkout or from the node's `new_worktree` declaration. It allocates no graph execution,
+attempt record or writer checkout, and its `source_admission` rows report a proposed worktree
+without registering it. The dirty-worktree preflight and its WIP commit stay launch-only:
+they inspect and may write each existing writer checkout, so explain neither runs nor previews
+them. An explanation that passes therefore passes the same admission gates, and the launch can
+still refuse at its dirty-writer preflight before proceeding to writer provisioning and
+provider preparation.
+- Why: an explanation must not pass where the launch's own admission would refuse it, and it
+  must not write or claim a result it never observed.
 
 Every writer lane's prompt opens its host preamble with one `Lane location` paragraph built once
 by `lane_preamble_with`: the absolute bound worktree path, branch and base commit, and that the
@@ -154,6 +175,10 @@ Immutable boundary refusals use `boundary_error`. Heuristic scanners offer no st
 `policy.<CODE>` knobs are in `config/harness-knobs.json`. A write scope lists expected files: a
 writer edits another file when the fix needs it and lists it in its handoff, and only a strict
 `WRITE_SCOPE` policy refuses that, before publication, retaining private work.
+Policy is dispatch state: a request seals its knobs, overrides and project key,
+not a resolved policy table. Each launch and continuation resolves the host,
+project and dispatch layers afresh, so a project policy change applies to the
+next continuation while immutable boundary refusals never depend on a snapshot.
 - Why: advisory checks must not become accidental authority boundaries.
 
 Every provider lane has its native tool and shell surface; read-only mode constrains filesystem

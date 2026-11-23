@@ -11,6 +11,20 @@ pub struct Schema {
     /// advances only with the root major, never as an independent minor count.
     pub version: i64,
     pub steps: &'static [Step],
+    /// One-shot rewrites from an older base version. A writable open applies
+    /// them in order and records the new base; a reader refuses until then.
+    pub migrations: &'static [Migration],
+}
+
+/// A one-shot rewrite of stored rows between two base versions. Unlike an
+/// additive step it changes data, runs once, and raises `user_version` to `to`.
+#[derive(Clone, Copy, Debug)]
+pub struct Migration {
+    pub from: i64,
+    pub to: i64,
+    /// SQL executed inside the writable-open transaction. It must not set
+    /// `user_version`; the opener records `to` after it succeeds.
+    pub sql: &'static str,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -43,9 +57,11 @@ pub const RESET_CODE: &str = "STATE_RESET_REQUIRED";
 #[derive(Debug)]
 pub enum VersionError {
     Refused { found: i64, expected: i64 },
+    MigrationRequired { found: i64, expected: i64 },
     MissingBaseTable { table: String },
     MissingStep { minor: u32, object: String },
     InvalidStep { minor: u32, reason: &'static str },
+    InvalidMigration { from: i64, reason: &'static str },
     Sqlite(rusqlite::Error),
 }
 
@@ -55,6 +71,10 @@ impl std::fmt::Display for VersionError {
             Self::Refused { found, expected } => write!(
                 f,
                 "{RESET_CODE}: store base version {found} is not {expected}; use a fresh state root"
+            ),
+            Self::MigrationRequired { found, expected } => write!(
+                f,
+                "store base version {found} needs a writable open to migrate to {expected}"
             ),
             Self::MissingBaseTable { table } => {
                 write!(f, "{RESET_CODE}: store is missing known base table {table}")
@@ -66,6 +86,10 @@ impl std::fmt::Display for VersionError {
             Self::InvalidStep { minor, reason } => write!(
                 f,
                 "invalid additive schema step from minor {minor}: {reason}"
+            ),
+            Self::InvalidMigration { from, reason } => write!(
+                f,
+                "invalid data migration from base version {from}: {reason}"
             ),
             Self::Sqlite(error) => error.fmt(f),
         }
@@ -105,43 +129,100 @@ fn object_exists(db: &Connection, kind: &str, name: &str) -> rusqlite::Result<bo
     )
 }
 
-/// Detect freshness and validate known base tables without applying any steps.
-fn is_fresh(db: &Connection, schema: Schema) -> Result<bool, VersionError> {
+/// What a store's `user_version` says about the path to the current base.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StoreState {
+    /// No schema yet; a writable open creates the base.
+    Fresh,
+    /// The current base is present.
+    Current,
+    /// An older base with a declared migration path to the current one.
+    Upgrade(i64),
+}
+
+/// The one-shot migrations from `found` to the current base, in order.
+fn upgrade_path(schema: Schema, found: i64) -> Result<Vec<&'static Migration>, VersionError> {
+    let migrations: &'static [Migration] = schema.migrations;
+    let mut path = Vec::new();
+    let mut version = found;
+    while version != schema.version {
+        let Some(migration) = migrations
+            .iter()
+            .find(|migration| migration.from == version)
+        else {
+            return Err(VersionError::Refused {
+                found,
+                expected: schema.version,
+            });
+        };
+        if migration.to <= migration.from || path.len() >= migrations.len() {
+            return Err(VersionError::InvalidMigration {
+                from: migration.from,
+                reason: "a migration must advance without looping",
+            });
+        }
+        version = migration.to;
+        path.push(migration);
+    }
+    Ok(path)
+}
+
+/// Detect freshness and validate known base tables without applying anything.
+/// A read-only open refuses an older base because only a writable open migrates.
+fn inspect(db: &Connection, schema: Schema, writable: bool) -> Result<StoreState, VersionError> {
     let (version, has_schema): (i64, bool) = db.query_row(
         "SELECT (SELECT user_version FROM pragma_user_version), EXISTS(SELECT 1 FROM sqlite_schema)",
         [], |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
     if version == 0 && !has_schema {
-        return Ok(true);
+        return Ok(StoreState::Fresh);
     }
-    if version != schema.version {
-        return Err(VersionError::Refused {
+    let state = if version == schema.version {
+        StoreState::Current
+    } else if writable {
+        upgrade_path(schema, version)?;
+        StoreState::Upgrade(version)
+    } else {
+        // An older base with a declared path needs a writable open; any other
+        // version is refused exactly as before.
+        upgrade_path(schema, version)?;
+        return Err(VersionError::MigrationRequired {
             found: version,
             expected: schema.version,
         });
-    }
+    };
     for table in base_tables(schema)? {
         if !object_exists(db, "table", &table)? {
             return Err(VersionError::MissingBaseTable { table });
         }
     }
-    Ok(false)
+    Ok(state)
 }
 
 /// Writable-open preflight, before changing journal mode. Checks only the
-/// format and base; `ensure_schema` applies any missing additive objects.
+/// format and base; `ensure_schema` applies any migrations and missing steps.
 pub fn check_format(db: &Connection, schema: Schema) -> Result<(), VersionError> {
-    is_fresh(db, schema).map(drop)
+    inspect(db, schema, true).map(drop)
 }
 
-/// Read-only validation: the store must have its base and every known step.
-/// Unknown same-major objects are ignored; only a writable open creates a base.
+/// Read-only validation: the store must have its current base and every known
+/// step. Unknown same-major objects are ignored; only a writable open creates a
+/// base or applies a migration.
 pub fn check_version(db: &Connection, schema: Schema) -> Result<(), VersionError> {
-    if is_fresh(db, schema)? {
-        return Err(VersionError::Refused {
-            found: 0,
-            expected: schema.version,
-        });
+    match inspect(db, schema, false)? {
+        StoreState::Fresh => {
+            return Err(VersionError::Refused {
+                found: 0,
+                expected: schema.version,
+            });
+        }
+        StoreState::Current => {}
+        StoreState::Upgrade(found) => {
+            return Err(VersionError::MigrationRequired {
+                found,
+                expected: schema.version,
+            });
+        }
     }
     for step in schema.steps {
         if step.missing(db)? {
@@ -262,11 +343,12 @@ fn quote(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
-/// Create the base and missing steps atomically. A fully current store takes
-/// no write lock. Concurrent openers re-check after acquiring the writer lock.
+/// Create the base, apply one-shot migrations to an older base, and add missing
+/// steps atomically. A fully current store takes no write lock. Concurrent
+/// openers re-check after acquiring the writer lock.
 pub fn ensure_schema(db: &Connection, schema: Schema) -> Result<(), VersionError> {
-    let fresh = is_fresh(db, schema)?;
-    if !fresh {
+    let state = inspect(db, schema, true)?;
+    if state == StoreState::Current {
         let mut missing = false;
         for step in schema.steps {
             missing |= step.missing(db)?;
@@ -276,8 +358,15 @@ pub fn ensure_schema(db: &Connection, schema: Schema) -> Result<(), VersionError
         }
     }
     let tx = rusqlite::Transaction::new_unchecked(db, rusqlite::TransactionBehavior::Immediate)?;
-    if is_fresh(&tx, schema)? {
-        tx.execute_batch(schema.sql)?;
+    match inspect(&tx, schema, true)? {
+        StoreState::Fresh => tx.execute_batch(schema.sql)?,
+        StoreState::Current => {}
+        StoreState::Upgrade(found) => {
+            for migration in upgrade_path(schema, found)? {
+                tx.execute_batch(migration.sql)?;
+                tx.pragma_update(None, "user_version", migration.to)?;
+            }
+        }
     }
     for step in schema.steps {
         if step.missing(&tx)? {
@@ -301,8 +390,39 @@ pub fn validate_steps(schema: Schema) -> Result<(), VersionError> {
             reason: "steps must be ordered by release minor",
         });
     }
+    for (index, migration) in schema.migrations.iter().enumerate() {
+        if migration.from >= migration.to {
+            return Err(VersionError::InvalidMigration {
+                from: migration.from,
+                reason: "a migration must advance to a later version",
+            });
+        }
+        if migration.to > schema.version {
+            return Err(VersionError::InvalidMigration {
+                from: migration.from,
+                reason: "a migration target is newer than the base",
+            });
+        }
+        if schema.migrations[..index]
+            .iter()
+            .any(|prior| prior.from == migration.from)
+        {
+            return Err(VersionError::InvalidMigration {
+                from: migration.from,
+                reason: "migration source versions must be unique",
+            });
+        }
+    }
+    for migration in schema.migrations {
+        upgrade_path(schema, migration.from)?;
+    }
     let db = Connection::open_in_memory()?;
     db.execute_batch(schema.sql)?;
+    // A writable open runs migrations before steps. Validating them against
+    // empty rows exercises the same order and SQL.
+    for migration in schema.migrations {
+        db.execute_batch(migration.sql)?;
+    }
     // Validate every declaration, even if a table/index already exists in the
     // base. Existence may skip work at open, never declaration validation.
     for step in schema.steps {

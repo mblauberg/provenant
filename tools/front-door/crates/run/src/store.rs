@@ -1,5 +1,5 @@
 use crate::{
-    artifacts::{artifact_path, read_sealed, seal},
+    artifacts::{artifact_path, read_sealed, read_settled, seal},
     db::{bytes, decode, sql_int},
     *,
 };
@@ -585,8 +585,8 @@ impl RunStore {
         {
             return Err(RunError::TerminalRecoveryRequired);
         }
-        let raw = read_sealed(&dir, AttemptFile::Result.name(), RESULT_LIMIT)?
-            .ok_or(RunError::Nonterminal)?;
+        let raw =
+            read_settled(&dir, AttemptFile::Result, RESULT_LIMIT)?.ok_or(RunError::Nonterminal)?;
         let text = std::str::from_utf8(&raw)
             .map_err(|_| RunError::Validation("sealed result is not UTF-8"))?;
         let publication = TerminalPublication {
@@ -1815,8 +1815,7 @@ impl RunStore {
             }
             Some(_) => {}
             None => {
-                if let Some(saved) =
-                    read_sealed(&attempt_dir, AttemptFile::Result.name(), RESULT_LIMIT)?
+                if let Some(saved) = read_settled(&attempt_dir, AttemptFile::Result, RESULT_LIMIT)?
                     && saved != publication.result.as_bytes()
                 {
                     let name = format!(

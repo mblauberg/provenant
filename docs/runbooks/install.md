@@ -133,7 +133,7 @@ read-only and safe on real state.
 
 Only for `--source` installs and candidate releases. Build outside a Fabric lane
 into a fresh absolute output directory outside every checkout (its parent must
-exist), and never use a lane cache for a host build.
+exist), and never build into an attempt's scratch.
 
 ```sh
 cd tools/front-door

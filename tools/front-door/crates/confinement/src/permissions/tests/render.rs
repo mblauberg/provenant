@@ -196,10 +196,6 @@ fn writer_programs_keep_filesystem_and_credential_boundaries() -> Result<(), Per
             path: "/fixture/home/Library/Application Support/provenant/worktree-git/fixture".into(),
             scope: PathScope::Subtree,
         },
-        cargo_cache: PathGrant {
-            path: "/fixture/cache".into(),
-            scope: PathScope::Subtree,
-        },
     }));
     profile.spec.confinement = profile.spec.confinement.clone().without_keychain();
     let worktree = WorktreeWriteGrants::from_paths(
@@ -260,10 +256,6 @@ fn shared_git_state_writes_are_scoped_and_host_owned_paths_stay_read_only()
         git_grants_digest: [0; 32],
         publishing: false,
         common_git_dir: "/fixture/repo/.git".into(),
-        cargo_cache: PathGrant {
-            path: "/fixture/cache".into(),
-            scope: PathScope::Subtree,
-        },
         git_state: PathGrant {
             path: state.clone(),
             scope: PathScope::Subtree,
@@ -2118,7 +2110,6 @@ fn host_writer_roots_inside_protected_checkouts_render_as_exceptions() -> Result
             path: "/fixture/home/Library/Application Support/provenant/worktree-git/fixture".into(),
             scope: PathScope::Subtree,
         },
-        cargo_cache: subtree("/fixture/cache"),
     }));
     plan.write_roots = vec![locks, target];
     let worktree = WorktreeWriteGrants::from_paths(

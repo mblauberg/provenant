@@ -883,7 +883,7 @@ mod reboot_tests {
 
     #[test]
     // Spec: docs/specs/run-settlement.md#continuation
-    fn resume_policy_uses_the_sealed_project_override() -> TestResult {
+    fn resume_policy_uses_current_project_configuration() -> TestResult {
         use provenant_records::policy::{Source, Strength};
         let temp = tempfile::tempdir()?;
         let clock = crate::tests::clock();
@@ -892,19 +892,15 @@ mod reboot_tests {
         let context = crate::tests::context(temp.path())?;
         let store = RunStore::open(&context, &call)?;
         let mut run = crate::tests::input();
-        let mut settings = provenant_config::policy::Settings::default();
-        settings
-            .projects
-            .entry(context.project_id.to_string())
-            .or_default()
-            .rules
-            .insert("WRITE_SCOPE".into(), Strength::Refuse);
-        run.request.task.profile.launch_policy =
-            Some(settings.resolve(&context.project_id.to_string(), &Default::default()));
         crate::tests::rekey(&mut run);
         store.create(&run, &call)?;
-        // No project configuration is installed in the resumed host state.
-        // The sealed project decision must still be the one resume carries.
+        std::fs::write(
+            context.state_root.as_path().join("config.toml"),
+            format!(
+                "schema_version = 1\nprofile = 'economy'\n[domains.policy.projects.\"{}\".rules]\nWRITE_SCOPE = 'refuse'\n",
+                context.project_id,
+            ),
+        )?;
         let policy = store.resume_policy(run.attempt_id, &call)?;
         assert_eq!(policy.rule("WRITE_SCOPE").rule.strength, Strength::Refuse);
         assert_eq!(policy.rule("WRITE_SCOPE").source, Source::Project);
@@ -913,7 +909,7 @@ mod reboot_tests {
 
     #[test]
     // Spec: docs/specs/run-settlement.md#continuation
-    fn resume_preserves_sealed_policy_after_project_config_changes() -> TestResult {
+    fn resume_re_resolves_policy_from_current_project_configuration() -> TestResult {
         use provenant_records::policy::{Source, Strength};
         let temp = tempfile::tempdir()?;
         let clock = crate::tests::clock();
@@ -921,16 +917,7 @@ mod reboot_tests {
         let call = crate::tests::call(&clock, &cancel);
         let context = crate::tests::context(temp.path())?;
         let store = RunStore::open(&context, &call)?;
-        let mut run = crate::tests::input();
-        let mut settings = provenant_config::policy::Settings::default();
-        settings
-            .projects
-            .entry(context.project_id.to_string())
-            .or_default()
-            .rules
-            .insert("WRITE_SCOPE".into(), Strength::Refuse);
-        run.request.task.profile.launch_policy =
-            Some(settings.resolve(&context.project_id.to_string(), &Default::default()));
+        let run = crate::tests::input();
         store.create(&run, &call)?;
         store.withdraw(
             run.attempt_id,
@@ -967,7 +954,7 @@ mod reboot_tests {
         };
         store.resume(&next, &call)?;
         let policy = store.resume_policy(next.attempt_id, &call)?;
-        assert_eq!(policy.rule("WRITE_SCOPE").rule.strength, Strength::Refuse);
+        assert_eq!(policy.rule("WRITE_SCOPE").rule.strength, Strength::Warn);
         assert_eq!(policy.rule("WRITE_SCOPE").source, Source::Project);
         Ok(())
     }

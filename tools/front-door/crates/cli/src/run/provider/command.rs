@@ -445,11 +445,8 @@ pub(super) fn prepare_command(
             home,
             cargo_home,
             state_root: roots.state.as_path().to_owned(),
-            roots: Some(roots.clone()),
             sandbox,
             backend: None,
-            cargo_cache_budget: None,
-            cargo_target_protection: Default::default(),
         }),
     })
 }

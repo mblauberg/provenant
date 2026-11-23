@@ -450,7 +450,7 @@ pub(super) fn create_list_and_remove_a_managed_worktree() -> Result {
     );
     assert_eq!(
         fs::read(orphan.join("artifact"))?,
-        b"lane build output",
+        b"legacy lane build output",
         "removing one worktree must preserve other orphaned caches"
     );
     assert_eq!(
