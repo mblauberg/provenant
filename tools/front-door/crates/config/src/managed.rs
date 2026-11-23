@@ -529,13 +529,17 @@ fn recorded_home(receipt: &InstallReceipt, state_root: &Path) -> Result<PathBuf,
         for path in recorded.into_iter().flatten() {
             paths.push(path.to_path_buf()?);
         }
-        let base = target
-            .harness
-            .spec()
-            .install
-            .map_or(0, |install| Path::new(install.home).components().count());
-        if let Some(home) = target.skills_dir.to_path_buf()?.ancestors().nth(base + 1) {
-            candidates.push(home.to_path_buf());
+        // A harness directory proposes a home only at its default location:
+        // an overridden one (`CODEX_HOME` and the like) can live anywhere, and
+        // its ancestor is not the user's home.
+        if let Some(install) = target.harness.spec().install {
+            let skills = target.skills_dir.to_path_buf()?;
+            let base = Path::new(install.home).components().count();
+            if let Some(home) = skills.ancestors().nth(base + 1)
+                && skills.parent() == Some(home.join(install.home).as_path())
+            {
+                candidates.push(home.to_path_buf());
+            }
         }
     }
     if bin_dir.ends_with(Path::new(".local/bin"))
