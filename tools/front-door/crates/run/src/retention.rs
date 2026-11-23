@@ -2676,7 +2676,10 @@ mod tests {
     }
 
     /// Build a real current route receipt, then return its v2.8.2 wire shape.
-    fn legacy_route(source: &str, sandbox_source: &str) -> TestResult {
+    fn legacy_route(
+        source: &str,
+        sandbox_source: &str,
+    ) -> std::result::Result<serde_json::Value, Box<dyn std::error::Error>> {
         let lane = LaneAccessReceipt {
             access: LaneAccess::Isolated,
             source: Layer::Route,
