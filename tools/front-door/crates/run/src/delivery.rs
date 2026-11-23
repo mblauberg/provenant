@@ -826,6 +826,24 @@ impl HostDeliveryContext {
         let branch = target.strip_prefix("origin/").unwrap_or(target);
         Self::check_delivery_branch(project, branch)
     }
+    /// The same protected-target rule without reading host state, for
+    /// `run --explain` and other read-only admission previews.
+    pub fn validate_integration_target_read_only(project: &Path, target: &str) -> Result<()> {
+        let branch = target.strip_prefix("origin/").unwrap_or(target);
+        let writer = WriterRequest {
+            extra: Default::default(),
+            custody_project: None,
+            project: project.into(),
+            worktree: project.into(),
+        };
+        let mut host = Self::capture();
+        host.host_environment_without_host_state(&writer)?;
+        host.tools = Some(HostTools {
+            git: host.executable("git", &writer)?,
+            gh: None,
+        });
+        host.refuse_protected_target(&writer, branch, Stage::Prepare)
+    }
     /// A publication ref is distinct from a PR's base, which may be protected.
     pub fn check_delivery_branch(project: &Path, target: &str) -> Result<()> {
         Self::capture().check_delivery_branch_with_facts(project, target)
@@ -1796,18 +1814,35 @@ impl HostDeliveryContext {
         Ok(())
     }
     fn host_environment(&mut self, writer: &WriterRequest) -> Result<()> {
+        self.host_environment_with(writer, true)
+    }
+    fn host_environment_without_host_state(&mut self, writer: &WriterRequest) -> Result<()> {
+        self.host_environment_with(writer, false)
+    }
+    fn host_environment_with(
+        &mut self,
+        writer: &WriterRequest,
+        use_host_state: bool,
+    ) -> Result<()> {
         // A host lane reads the host's own Git configuration and uses ordinary
         // transport. Its worktree and the primary checkout it was linked from
         // are its own, not another lane's writable area, whether or not the
         // lane is sandboxed; sandboxing still confines the lane's writes.
         self.trusted_worktree = (!self.isolated()).then(|| writer.worktree.clone());
-        let host_state = self.host_state().ok_or_else(|| {
-            prepare_error(DeliveryPrepareStep::LaneRoots, "host state root unknown")
-        })?;
-        self.lane_roots =
+        self.lane_roots = if use_host_state {
+            let host_state = self.host_state().ok_or_else(|| {
+                prepare_error(DeliveryPrepareStep::LaneRoots, "host state root unknown")
+            })?;
             provenant_confinement::transport::LaneRoots::project(&writer.project, &host_state)
                 .map_err(|error| prepare_error(DeliveryPrepareStep::LaneRoots, error))?
-                .into_paths();
+                .into_paths()
+        } else {
+            // Read-only previews have no validated host state, so project-only
+            // port declarations decide the lane roots.
+            provenant_confinement::transport::LaneRoots::project_without_host_state(&writer.project)
+                .map_err(|error| prepare_error(DeliveryPrepareStep::LaneRoots, error))?
+                .into_paths()
+        };
         if writer.worktree != writer.project {
             self.lane_roots.push(writer.worktree.clone());
         }

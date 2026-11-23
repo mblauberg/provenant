@@ -887,6 +887,9 @@ impl RunError {
                     .next("reduce the prompt input before retrying")
                     .fact(DiagnosticFact::PromptLimit { limit: *limit });
             }
+            Self::Input { kind: _, message } => {
+                diagnostic = diagnostic.detail(provenant_core::bounded_line(message, 4096));
+            }
             Self::Confinement(PermissionError::CredentialGrant { path, access }) => {
                 let access = match *access {
                     "read" => "read",

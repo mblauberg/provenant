@@ -173,8 +173,12 @@ compile time naming the IDs. `max_parallel` (default
 caps concurrency, and queued slices show `waiting` with reason `cap` or `after`. A
 dependent slice starts from the current integration head after its
 prerequisites integrate, an independent one from the graph's pinned base, and
-each integrates into `integration_branch` as it settles. A merge conflict pauses
-only that slice (`blocked`, with conflicting files) and the rest keep running.
+each integrates into `integration_branch` as it settles. A slice whose worktree
+the host has only planned is not yet on any branch, so pre-attempt admission
+skips its delivery-target comparison and provisioning verifies the checkout it
+creates. A merge conflict pauses only that slice (`blocked`, with conflicting
+files) and the rest keep running. `run --explain` runs the same admission checks,
+so its preview cannot pass where the launch's admission refuses.
 - Why: single writers start without an implicit planning stage, and batches need
   per-slice routing, ordering and bounded concurrency with isolated conflicts.
 - Owner: `src/fabric/interface.rs`, `src/graph_interface.rs`,

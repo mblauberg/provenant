@@ -1168,7 +1168,7 @@ pub fn facade_outcome(error: &FacadeError) -> (Outcome, provenant_run::ErrorKind
         | FacadeError::DispatchUnobserved { .. }
         | FacadeError::HostDeliveryStage { .. }
         | FacadeError::HostDeliveryLimit { .. } => (Outcome::Error, ErrorKind::Io),
-        FacadeError::WorktreeMissing => (Outcome::Invalid, ErrorKind::WorktreeMissing),
+        FacadeError::WorktreeMissing { .. } => (Outcome::Invalid, ErrorKind::WorktreeMissing),
         FacadeError::WorktreeUnregistered { .. } => {
             (Outcome::Refused, ErrorKind::WorktreeUnregistered)
         }

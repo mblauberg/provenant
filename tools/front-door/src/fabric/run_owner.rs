@@ -495,6 +495,23 @@ pub(crate) fn run_error(error: provenant_run::RunError) -> FacadeError {
             ),
         );
     }
+    if let provenant_run::RunError::WorktreeMissing(path) = &error {
+        return FacadeError::WorktreeMissing {
+            path: Some(path.to_string_lossy().into_owned()),
+            node: None,
+        };
+    }
+    if let provenant_run::RunError::Input {
+        kind: provenant_run::ErrorKind::Invalid,
+        message,
+    } = &error
+    {
+        return FacadeError::invalid(
+            provenant_fabric_runtime::coordination::facade::InvalidInputDetail::InputReason(
+                provenant_core::bounded_line(message, 4096),
+            ),
+        );
+    }
     if let provenant_run::RunError::Writer(
         provenant_confinement::worktrees::WorktreeError::WriterBusy { holder },
     ) = &error
@@ -643,8 +660,26 @@ pub(crate) fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
             operation,
             path: None,
         },
+        Some(error @ FacadeError::InvalidInput { detail: None }) => {
+            with_run_detail(error, fail.projection.as_deref())
+        }
         Some(detail) => detail,
-        None => with_run_detail(facade_error_for_kind(fail.kind), fail.projection.as_deref()),
+        None => {
+            let error =
+                with_run_detail(facade_error_for_kind(fail.kind), fail.projection.as_deref());
+            match error {
+                // A host-authored launch-input refusal always names its reason;
+                // an unnamed `invalid input` is a defect.
+                FacadeError::InvalidInput { detail: None } if !fail.message.is_empty() => {
+                    FacadeError::invalid(
+                        provenant_fabric_runtime::coordination::facade::InvalidInputDetail::InputReason(
+                            provenant_core::bounded_line(&fail.message, 4096),
+                        ),
+                    )
+                }
+                other => other,
+            }
+        }
     }
 }
 /// Keep a refusal's local diagnostic text when only its kind survives to the
@@ -668,6 +703,9 @@ fn with_run_detail(
             detail: Some(detail),
             resource,
         },
+        FacadeError::InvalidInput { detail: None } => FacadeError::invalid(
+            provenant_fabric_runtime::coordination::facade::InvalidInputDetail::InputReason(detail),
+        ),
         other => other,
     }
 }
@@ -820,7 +858,10 @@ pub(crate) fn facade_error_for_kind(kind: provenant_run::ErrorKind) -> FacadeErr
         E::Invalid => FacadeError::InvalidInput { detail: None },
         E::WorktreeNotApplicable => FacadeError::WorktreeNotApplicable,
         E::UnknownHost => FacadeError::UnknownHost,
-        E::WorktreeMissing => FacadeError::WorktreeMissing,
+        E::WorktreeMissing => FacadeError::WorktreeMissing {
+            path: None,
+            node: None,
+        },
         E::NotFound => FacadeError::NotFound,
         E::Conflict => FacadeError::Conflict,
         E::OperationConflict => FacadeError::OperationConflict,
