@@ -1730,7 +1730,15 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert_eq!(stderr.matches("warning: retry admission").count(), 1);
+        // Each retry admission that skips the oversized credential emits one
+        // typed warning. Collapsing repeats is the command sink's job, and this
+        // fixture has no sink, so the child's two admissions print twice.
+        assert_eq!(
+            stderr
+                .matches("warning: retry admission skipped out-of-bounds ambient credentials")
+                .count(),
+            2
+        );
         assert!(!stderr.contains(&oversized));
         assert!(!stderr.contains(NAME));
         assert!(!stderr.contains('\u{1b}'));

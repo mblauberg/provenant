@@ -628,27 +628,27 @@ fn attempt_record_enum_names_are_a_deliberate_contract() -> TestResult {
         &[
             (
                 "disk",
-                json!({"kind": "disk", "free": 1, "floor": 2, "origin": "configuration"}),
+                json!({"kind": "disk", "free": 1, "floor": 2, "origin": "host"}),
             ),
             (
                 "argv_prompt_limit",
-                json!({"kind": "argv_prompt_limit", "limit": 1, "origin": "shipped_default"}),
+                json!({"kind": "argv_prompt_limit", "limit": 1, "origin": "default"}),
             ),
             (
                 "continuation_copy",
-                json!({"kind": "continuation_copy", "limit": 1, "setting": "bytes", "origin": "configuration", "available_bytes": null}),
+                json!({"kind": "continuation_copy", "limit": 1, "setting": "bytes", "origin": "host", "available_bytes": null}),
             ),
             (
                 "write_grant_limit",
-                json!({"kind": "write_grant_limit", "limit": 1, "origin": "configuration"}),
+                json!({"kind": "write_grant_limit", "limit": 1, "origin": "host"}),
             ),
             (
                 "grant_limit",
-                json!({"kind": "grant_limit", "limit": 1, "origin": "configuration"}),
+                json!({"kind": "grant_limit", "limit": 1, "origin": "host"}),
             ),
             (
                 "profile_limit",
-                json!({"kind": "profile_limit", "bytes": 1, "limit": 2, "origin": "configuration"}),
+                json!({"kind": "profile_limit", "bytes": 1, "limit": 2, "origin": "host"}),
             ),
             (
                 "dependency_preparation",
@@ -656,19 +656,19 @@ fn attempt_record_enum_names_are_a_deliberate_contract() -> TestResult {
             ),
             (
                 "lane_ports",
-                json!({"kind": "lane_ports", "blocks": 1, "origin": "configuration"}),
+                json!({"kind": "lane_ports", "blocks": 1, "origin": "host"}),
             ),
             (
                 "pacing_reserve",
-                json!({"kind": "pacing_reserve", "percent": 1, "setting": "account", "origin": "configuration", "account": "a", "window": "w", "setting_path": "p"}),
+                json!({"kind": "pacing_reserve", "percent": 1, "setting": "account", "origin": "host", "account": "a", "window": "w", "setting_path": "p"}),
             ),
             (
                 "memory_pressure",
-                json!({"kind": "memory_pressure", "level": "warning", "threshold": "critical", "origin": "configuration"}),
+                json!({"kind": "memory_pressure", "level": "warning", "threshold": "critical", "origin": "host"}),
             ),
             (
                 "lane_cap",
-                json!({"kind": "lane_cap", "active": 1, "limit": 2, "lane_limit": "host_total", "origin": "configuration"}),
+                json!({"kind": "lane_cap", "active": 1, "limit": 2, "lane_limit": "host_total", "origin": "host"}),
             ),
             (
                 "processes",

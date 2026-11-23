@@ -1517,11 +1517,15 @@ mod tests {
     // Spec: docs/specs/telemetry.md#usage-merges-by-declared-semantics
     #[test]
     fn step_finish_reports_keyed_usage_and_provider_cost() {
-        let raw = concat!(
-            "{\"type\":\"step_finish\",\"sessionID\":\"ses_x\",\"part\":{\"id\":\"step-1\",\"reason\":\"tool-calls\",\"tokens\":{\"input\":9276,\"output\":3,\"reasoning\":0,\"cache\":{\"read\":1792,\"write\":0}},\"cost\":0.5}}\n",
-            "{\"type\":\"step_finish\",\"sessionID\":\"ses_x\",\"part\":{\"id\":\"step-2\",\"reason\":\"stop\",\"tokens\":{\"input\":10,\"output\":4},\"cost\":0.25}}\n",
-        );
-        let events = decode(raw.as_bytes()).unwrap();
+        let frames = [
+            r#"{"type":"step_finish","sessionID":"ses_x","part":{"id":"step-1","reason":"tool-calls","tokens":{"input":9276,"output":3,"reasoning":0,"cache":{"read":1792,"write":0}},"cost":0.5}}"#,
+            r#"{"type":"step_finish","sessionID":"ses_x","part":{"id":"step-2","reason":"stop","tokens":{"input":10,"output":4},"cost":0.25}}"#,
+        ];
+        // The adapter decodes one line at a time; StreamState splits the lines.
+        let events: Vec<_> = frames
+            .iter()
+            .flat_map(|frame| decode(frame.as_bytes()).unwrap())
+            .collect();
         let reports: Vec<_> = events
             .iter()
             .filter_map(|event| match event {
@@ -2897,8 +2901,12 @@ if /bin/mv "$1/handoff.json" "$2/handoff.json" 2>/dev/null; then exit 93; fi
         let mut stream = OpenCode
             .stream(None, &provenant_records::policy::Policy::default())
             .unwrap();
-        let raw = br#"{"type":"error","sessionID":"ses_variant","error":{"type":"provider.no-route","message":"Variant unavailable for opencode/hy4-flash-free: bogus"}}"#;
-        let events = OpenCode.observe(&mut stream, raw).unwrap();
+        // observe() decodes complete lines; an unterminated frame stays pending.
+        let raw = concat!(
+            r#"{"type":"error","sessionID":"ses_variant","error":{"type":"provider.no-route","message":"Variant unavailable for opencode/hy4-flash-free: bogus"}}"#,
+            "\n",
+        );
+        let events = OpenCode.observe(&mut stream, raw.as_bytes()).unwrap();
         assert!(events.contains(&E::Refusal), "{events:?}");
         assert!(
             !events

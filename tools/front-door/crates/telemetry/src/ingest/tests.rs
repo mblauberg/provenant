@@ -1067,6 +1067,8 @@ fn persisted_ingest_shapes_retain_additive_fields() {
         "session": "session",
         "message": "message",
         "source": "lane",
+        // Every ingest row carries its typed usage source explicitly.
+        "usage_source": "ingest",
         "reply": reply
     });
     row["future_row"] = serde_json::json!(3);

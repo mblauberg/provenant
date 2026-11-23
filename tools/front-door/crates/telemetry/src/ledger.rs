@@ -321,6 +321,16 @@ pub fn read(state: &Path) -> Result<Ledger, LedgerError> {
         if entry == "." || entry == ".." {
             continue;
         }
+        // The v3→v4 migration's sidecar is ledger-owned: its unmapped lines
+        // were already reported by the migration, and the segment still holds
+        // the originals. It is not a stray file.
+        let sidecar = entry
+            .to_str()
+            .and_then(|name| name.strip_suffix(".v3-unmapped"))
+            .is_some_and(segments::is_segment);
+        if sidecar {
+            continue;
+        }
         match entry.to_str().filter(|name| segments::is_segment(name)) {
             Some(name) => names.push(name.to_owned()),
             None => ledger.unrecognised.push(Unrecognised {
