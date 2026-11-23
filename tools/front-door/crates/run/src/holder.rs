@@ -4263,7 +4263,7 @@ mod budget_result_tests {
 
         let temp = tempfile::tempdir()?;
         let execution = context(temp.path())?;
-        let (test_clock, cancel) = clock();
+        let (test_clock, cancel) = (clock(), CancelToken::new());
         let request = call(&test_clock, &cancel);
         let store = RunStore::open(&execution, &request)?;
         let mut run = input();

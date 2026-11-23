@@ -568,6 +568,7 @@ fn serve_authorised(
             return Err(outside());
         }
         let chair_call = provenant_fabric_runtime::chairs::Request { clock, cancel };
+        #[allow(clippy::disallowed_methods)] // Native read-only store open deadline.
         let deadline = std::time::Instant::now()
             + std::time::Duration::from_micros(budget.remaining(clock.mono_now()).as_micros());
         let index = provenant_fabric_runtime::chairs::ChairIndex::open_read_only(
