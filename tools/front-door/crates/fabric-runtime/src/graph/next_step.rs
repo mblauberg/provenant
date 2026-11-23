@@ -169,10 +169,7 @@ fn graph_target(route: &GraphRoute) -> Option<ladder::Target> {
         (Some(adapter), Some(model), _) => Some(ladder::Target::Route {
             model: provenant_routing::ModelId::parse(model)
                 .ok()
-                .filter(|id| id.adapter() == adapter)
-                .or_else(|| {
-                    provenant_routing::ModelId::parse(&format!("{adapter}/{model}")).ok()
-                })?,
+                .filter(|id| id.adapter() == adapter)?,
             account: route.account.clone(),
         }),
         _ => None,
@@ -194,7 +191,7 @@ fn target_route(target: &ladder::Target, effort: Option<String>) -> GraphRoute {
             extra: Default::default(),
             adapter: Some(model.adapter().to_owned()),
             name: None,
-            model: Some(model.model().to_owned()),
+            model: Some(model.as_str().to_owned()),
             alias: None,
             effort,
             account: account.clone(),

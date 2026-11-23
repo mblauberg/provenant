@@ -1181,6 +1181,64 @@ fn every_bundled_template_is_listed_and_compiles_with_its_declared_parameters() 
     Ok(())
 }
 
+// Spec: docs/specs/routing.md#exact-selection-no-inference
+#[test]
+fn batch_item_exact_model_matches_run_model_route() -> Result {
+    let rig = GraphProject::new()?;
+    let model = "opencode/opencode/hy4-flash-free";
+    let worktree = rig.project.to_str().ok_or("worktree path")?;
+    let document = rig.document(&json!({
+        "schema_version": support::GRAPH_DOCUMENT_SCHEMA_VERSION,
+        "graph_id": "batch-exact-model-route",
+        "integration_branch": "batch/exact-model-route",
+        "nodes": [{
+            "id": "batch",
+            "use": "batch",
+            "with": {
+                "worktree": worktree,
+                "write_scope": ["."],
+                "items": [{"id": "slice", "brief": "tiny slice", "model": model}]
+            }
+        }]
+    }))?;
+    let (_, batch) = rig.run(&[
+        "run",
+        "--file",
+        document.to_str().ok_or("document path")?,
+        "--explain",
+    ])?;
+    assert!(batch["error"].is_null(), "{batch}");
+    let slices = batch["data"]["document"]["nodes"][0]["composite"]["nodes"]
+        .as_array()
+        .ok_or_else(|| format!("batch composite nodes: {batch}"))?;
+    let slice = slices
+        .iter()
+        .find(|node| node["id"].as_str().is_some_and(|id| id.contains("slice")))
+        .ok_or_else(|| format!("batch slice node: {batch}"))?;
+
+    let (_, direct) = rig.run(&[
+        "run",
+        "implement",
+        "tiny slice",
+        "--model",
+        model,
+        "--worktree",
+        worktree,
+        "--write-scope",
+        ".",
+        "--explain",
+    ])?;
+    assert!(direct["error"].is_null(), "{direct}");
+    let direct_route = &direct["data"]["document"]["nodes"][0]["route"];
+    assert_eq!(
+        slice["route"], *direct_route,
+        "batch: {batch} direct: {direct}"
+    );
+    assert_eq!(slice["route"]["adapter"], "opencode");
+    assert_eq!(slice["route"]["model"], model);
+    Ok(())
+}
+
 #[test]
 fn batch_launch_provisions_planned_slice_worktrees_and_explains_same_admission() -> Result {
     let mut rig = GraphProject::new()?;

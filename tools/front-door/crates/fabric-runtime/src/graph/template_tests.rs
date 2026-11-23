@@ -1821,7 +1821,7 @@ fn batch_per_item_routing_route_vs_model() {
         .unwrap();
     assert_eq!(
         model_node.route.as_ref().unwrap().model.as_deref(),
-        Some("claude-3-5-sonnet")
+        Some("anthropic/claude-3-5-sonnet")
     );
     assert_eq!(
         model_node.route.as_ref().unwrap().adapter.as_deref(),
