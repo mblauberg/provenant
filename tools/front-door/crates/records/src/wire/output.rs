@@ -227,6 +227,10 @@ fn with_lane(mut schema: Value) -> Value {
         properties.insert("selected".into(), any());
         properties.insert("planner_fallback".into(), any());
         properties.insert("host".into(), string());
+        // The output seam attaches one result projection to every lane-backed
+        // reply. It is a typed object (or null when serialization fails), so it
+        // is accepted as an unconstrained member of the closed output schemas.
+        properties.insert("result_projection".into(), any());
     }
     if let (Some(required), Some(lane_required)) = (
         schema["required"].as_array_mut(),

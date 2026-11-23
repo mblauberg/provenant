@@ -863,10 +863,18 @@ pub(crate) fn owner_identity(
 ) -> (Option<String>, Option<AttemptId>, Option<String>) {
     match owner {
         Ok(Some(owner)) => (
-            owner
-                .label
-                .clone()
-                .or_else(|| owner.branch.rsplit('/').next().map(str::to_owned)),
+            owner.label.clone().or_else(|| {
+                // The short branch is the whole name; truncation to its last
+                // path segment would lose the namespace of a branch such as
+                // `feature/topic`. Strip only a leading ref prefix.
+                Some(
+                    owner
+                        .branch
+                        .strip_prefix("refs/heads/")
+                        .unwrap_or(&owner.branch)
+                        .to_owned(),
+                )
+            }),
             owner.attempt_id,
             Some(owner.base.clone()),
         ),
@@ -1352,10 +1360,12 @@ mod tests {
             locate("3810", &rows).map(|row| &row.path),
             Ok(&rows[1].path)
         );
-        assert_eq!(
-            locate("pr-3810", &rows).map(|row| &row.path),
-            Ok(&rows[1].path)
-        );
+        // A PR number is a bare number (optionally `#`-prefixed). `pr-3810`
+        // is not a recognised query kind, so it refuses and ranks the branch
+        // that carries the number as a close match rather than resolving it.
+        let refusal = locate("pr-3810", &rows).expect_err("hyphenated PR must refuse");
+        assert_eq!(refusal.kind, NameKind("worktree"));
+        assert!(refusal.candidates.iter().any(|name| name == "pr/3810"));
         let refusal = locate("featur/topic", &rows).expect_err("typo must refuse");
         assert_eq!(refusal.kind, NameKind("worktree"));
         assert!(!refusal.candidates.is_empty());
