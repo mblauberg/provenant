@@ -75,7 +75,7 @@ Unheld dirty tree: adopted with a WIP commit and the warning; held dirty tree: r
 
 ## Docs
 
-Update the `lanes.writer_dirty` entry in `skills/orchestrate/references/lanes.md`.
+Update the `lanes.writer_dirty` entry in `skills/orchestrate/SKILL.md`.
 
 ## Release note
 
