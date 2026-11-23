@@ -8,7 +8,7 @@
 //! strict: an unknown value warns with the layer that supplied it and keeps the
 //! documented default, so a typo never silently chooses a policy.
 use provenant_records::warning::{CONFIG_MALFORMED, Warning, warn};
-use provenant_records::{Layer, Source, Sourced, run::HarnessProfile};
+use provenant_records::{Layer, Sourced, run::HarnessProfile};
 use serde_json::Value;
 use std::{collections::BTreeMap, fmt};
 
@@ -295,6 +295,7 @@ impl fmt::Display for DefaultBranchRewrite {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use provenant_records::Source;
 
     #[test]
     fn defaults_allow_rebasing_and_warn_about_unusual_history() {

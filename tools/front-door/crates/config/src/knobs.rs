@@ -450,6 +450,9 @@ pub(crate) struct KnobProblem {
     pub(crate) rule: &'static str,
 }
 
+/// Each knob with the layer that set it, plus the problems found on the way.
+type ResolvedKnobs = (BTreeMap<String, Sourced<Value>>, Vec<KnobProblem>);
+
 /// Registry default, then the profile preset, then the user's `[knobs]`.
 /// An unknown name or an invalid value is ignored and reported; it never
 /// refuses. A strict knob takes its restrictive value instead of the default,
@@ -458,7 +461,7 @@ pub(crate) fn resolve(
     profile: Profile,
     overrides: Option<&dyn TableLike>,
     malformed_table: bool,
-) -> Result<(BTreeMap<String, Sourced<Value>>, Vec<KnobProblem>), ConfigError> {
+) -> Result<ResolvedKnobs, ConfigError> {
     let registry = registry()?;
     let preset = registry.presets.get(profile_name(profile));
     let mut knobs = BTreeMap::new();
