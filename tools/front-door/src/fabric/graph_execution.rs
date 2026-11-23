@@ -37,6 +37,78 @@ impl super::Factory {
 use super::*;
 use serde_json::Value;
 
+/// Graph admission fixes one spelling of every route's model: the full
+/// catalogue id `ADAPTER/ID`. A model already spelled as a full id with a
+/// matching adapter stays; a provider-relative id gains its adapter; an
+/// unknown id keeps `ADAPTER/MODEL` and warns with close catalogue matches.
+/// Spec: docs/specs/fabric.md#one-model-spelling-per-route
+pub(super) fn canonicalise_route_models(
+    document: &mut provenant_fabric_runtime::graph::GraphDocument,
+    catalogue: Option<&provenant_routing::Catalogue>,
+) -> Vec<String> {
+    fn route_model(
+        route: &mut provenant_fabric_runtime::graph::GraphRoute,
+        catalogue: Option<&provenant_routing::Catalogue>,
+    ) -> Option<String> {
+        use provenant_routing::ModelId;
+        let adapter = route.adapter.as_deref()?;
+        let model = route.model.as_deref()?;
+        if adapter.is_empty() || model.is_empty() {
+            return None;
+        }
+        // A full id already names its adapter; never split or re-derive it.
+        if ModelId::parse(model).is_ok_and(|id| id.adapter() == adapter) {
+            return None;
+        }
+        let full = format!("{adapter}/{model}");
+        let parsed = ModelId::parse(&full).ok();
+        let catalogued = catalogue
+            .is_none_or(|known| parsed.as_ref().is_some_and(|id| known.model(id).is_some()));
+        let warning = (!catalogued).then(|| {
+            let subject = format!("{adapter}/{model}");
+            let repair = parsed
+                .as_ref()
+                .and_then(|id| catalogue.map(|known| known.nearest_models(id)))
+                .filter(|near| !near.is_empty())
+                .map_or_else(
+                    || "check `provenant route list` for catalogued model ids".to_owned(),
+                    |near| format!("did you mean {}?", near.join(", ")),
+                );
+            format!("route {subject} is not in the catalogue; {repair}")
+        });
+        route.model = Some(full);
+        warning
+    }
+
+    fn nodes(
+        nodes: &mut [provenant_fabric_runtime::graph::GraphNode],
+        catalogue: Option<&provenant_routing::Catalogue>,
+        warnings: &mut Vec<String>,
+    ) {
+        for node in nodes {
+            for route in node
+                .route
+                .iter_mut()
+                .chain(node.routes.iter_mut().flatten())
+            {
+                if let Some(warning) = route_model(route, catalogue) {
+                    warnings.push(warning);
+                }
+            }
+            if let Some(composite) = node.composite.as_mut() {
+                nodes(&mut composite.nodes, catalogue, warnings);
+            }
+            if let Some(loop_body) = node.loop_body.as_mut() {
+                nodes(&mut loop_body.body, catalogue, warnings);
+            }
+        }
+    }
+
+    let mut warnings = Vec::new();
+    nodes(&mut document.nodes, catalogue, &mut warnings);
+    warnings
+}
+
 /// The effective writer-dirty setting and the layer that set it, read once at
 /// graph submission. An unreadable host config is advisory: warn and use the
 /// compiled default (`refuse`) rather than refusing to observe the setting.

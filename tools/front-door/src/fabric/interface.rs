@@ -2296,6 +2296,14 @@ impl Factory {
                 bind_review_warning(node, warning);
             }
         }
+        // One model spelling per route is decided here, the compile gate both
+        // launch and explain share, before the document is sealed or replayed.
+        // Spec: docs/specs/fabric.md#one-model-spelling-per-route
+        let catalogue = provenant_cli::route::effective_catalogue(&self.context.roots).ok();
+        input_warnings.extend(super::graph_execution::canonicalise_route_models(
+            &mut document,
+            catalogue.as_ref(),
+        ));
         document.set_replay_digest(&digest);
         // Explain is read-only and still shows the compiled submission. For a
         // launch, the host performs writer preflight before sealing the patch.

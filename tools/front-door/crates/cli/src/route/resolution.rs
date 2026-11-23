@@ -1191,18 +1191,11 @@ pub fn resolve_review_family(
             {
                 RouteChoice::NamedRoute(RouteName::parse(name).map_err(|error| error.to_string())?)
             } else {
-                let adapter = route
-                    .get("adapter")
-                    .and_then(serde_json::Value::as_str)
-                    .ok_or("missing route adapter")?;
                 let model = route
                     .get("model")
                     .and_then(serde_json::Value::as_str)
                     .ok_or("missing route model")?;
-                RouteChoice::Model(
-                    ModelId::parse(&format!("{adapter}/{model}"))
-                        .map_err(|error| error.to_string())?,
-                )
+                RouteChoice::Model(ModelId::parse(model).map_err(|error| error.to_string())?)
             };
             let request = provenant_routing::RouteRequest {
                 intent: provenant_routing::RouteIntent {

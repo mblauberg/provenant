@@ -1248,6 +1248,38 @@ fn batch_item_exact_model_matches_run_model_route() -> Result {
     Ok(())
 }
 
+// Spec: docs/specs/fabric.md#one-model-spelling-per-route
+#[test]
+fn node_route_table_reaches_explain_with_one_full_model_spelling() -> Result {
+    let rig = GraphProject::new()?;
+    let full = "opencode/opencode/hy4-flash-free";
+    let document = rig.document(&json!({
+        "schema_version": support::GRAPH_DOCUMENT_SCHEMA_VERSION,
+        "graph_id": "node-exact-model-route",
+        "nodes": [
+            {"id":"exact","prompt":"inspect","access":"read_only",
+             "route":{"adapter":"opencode","model":full}},
+            {"id":"relative","prompt":"inspect","access":"read_only",
+             "route":{"adapter":"opencode","model":"opencode/hy4-flash-free"}},
+        ]
+    }))?;
+    let (_, explained) = rig.run(&[
+        "run",
+        "--file",
+        document.to_str().ok_or("document path")?,
+        "--explain",
+    ])?;
+    assert!(explained["error"].is_null(), "{explained}");
+    let nodes = explained["data"]["document"]["nodes"]
+        .as_array()
+        .ok_or_else(|| format!("explained nodes: {explained}"))?;
+    for node in nodes {
+        assert_eq!(node["route"]["adapter"], "opencode", "{node}");
+        assert_eq!(node["route"]["model"], full, "{node}");
+    }
+    Ok(())
+}
+
 #[test]
 fn batch_launch_provisions_planned_slice_worktrees_and_explains_same_admission() -> Result {
     let mut rig = GraphProject::new()?;

@@ -157,6 +157,24 @@ remains a Git boundary.
 - Why: a graph that starts must be able to finish within its bounds.
 - Owner: `crates/fabric-runtime/src/graph.rs`
 
+### One model spelling per route
+
+A route carries one spelling of its model: the full catalogue id
+`ADAPTER/ID`, such as `opencode/opencode/deepseek-v4.1-flash-free`. Graph
+admission decides it once from the adapter and the declared model — a full id
+whose adapter matches stays, a provider-relative id gains its adapter, and an
+uncatalogued id keeps `ADAPTER/MODEL` with a warning naming close catalogue
+matches. Exact-model tiers and batch items emit the full id at production.
+Nothing downstream splits, prefixes or re-derives the stored id: preparation,
+successor deduplication and prior-model exclusions parse it directly. This is
+what lets a batch route match `run implement --model` and a declared route
+equal to a ladder hand-off appear once among successors.
+- Why: a model id may itself contain `/`, so re-parsing a stored id silently
+  changes which model runs.
+- Owner: `src/fabric/graph_execution.rs`,
+  `crates/cli/src/fabric/graph_relay.rs`,
+  `crates/fabric-runtime/src/graph/next_step.rs`
+
 ### Bundled template declarations
 
 The shared `TemplateLibrary` parses and structurally checks every bundled

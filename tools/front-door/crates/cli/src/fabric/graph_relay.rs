@@ -1440,11 +1440,15 @@ pub fn tier_route(
     }
     let mut route = match tier {
         Value::String(name) if !name.is_empty() => {
-            if let Some((adapter, model)) = name.split_once('/') {
-                let (model, embedded_effort) = model
+            if name.contains('/') {
+                // An exact tier is one full catalogue id. The model id itself
+                // may contain '/', so only parse it once and keep its spelling.
+                let (text, embedded_effort) = name
                     .split_once('@')
-                    .map_or((model, None), |(model, effort)| (model, Some(effort)));
-                if adapter.is_empty() || model.is_empty() || embedded_effort == Some("") {
+                    .map_or((name.as_str(), None), |(text, effort)| (text, Some(effort)));
+                let model = provenant_routing::ModelId::parse(text)
+                    .map_err(|_| format!("node {id}: invalid exact-model tier {name}"))?;
+                if embedded_effort == Some("") {
                     return Err(format!("node {id}: invalid exact-model tier {name}"));
                 }
                 if embedded_effort.is_some() && effort.is_some() {
@@ -1452,7 +1456,7 @@ pub fn tier_route(
                         "node {id}: exact-model tier and effort both specify effort"
                     ));
                 }
-                let mut route = json!({"adapter":adapter,"model":model});
+                let mut route = json!({"adapter":model.adapter(),"model":model.as_str()});
                 if let Some(embedded_effort) = embedded_effort {
                     route["effort"] = json!(embedded_effort);
                 }
@@ -2591,6 +2595,17 @@ mod tests {
             .unwrap();
         assert_eq!(node.prompt, "Repository brief");
         assert!(library.resolve("task").is_ok());
+    }
+
+    // Spec: docs/specs/fabric.md#one-model-spelling-per-route
+    #[test]
+    fn exact_model_tier_lowers_to_its_full_catalogue_id() {
+        let id = "opencode/opencode/deepseek-v4.1-flash-free";
+        let (key, route) = tier_route("review", &json!(format!("{id}@low")), None, true).unwrap();
+        assert_eq!(key, "route");
+        assert_eq!(route["adapter"], "opencode");
+        assert_eq!(route["model"], id);
+        assert_eq!(route["effort"], "low");
     }
 }
 
