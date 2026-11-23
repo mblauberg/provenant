@@ -124,7 +124,6 @@ app='Provenant Console.app'
 app_backup=
 old_app_inode=
 agent_temp=
-app=
 agent=
 service=
 app_agent_stopped=false
