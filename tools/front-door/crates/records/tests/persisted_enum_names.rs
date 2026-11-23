@@ -660,7 +660,7 @@ fn attempt_record_enum_names_are_a_deliberate_contract() -> TestResult {
             ),
             (
                 "pacing_reserve",
-                json!({"kind": "pacing_reserve", "percent": 1, "setting": "account", "origin": "host", "account": "a", "window": "w", "setting_path": "p"}),
+                json!({"kind": "pacing_reserve", "percent": 1, "setting": "account", "origin": "configuration", "account": "a", "window": "w", "setting_path": "p"}),
             ),
             (
                 "memory_pressure",

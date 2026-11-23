@@ -164,12 +164,12 @@ A route carries one spelling of its model: the full catalogue id
 entry point that holds the effective catalogue decides that spelling once:
 submit, run edit/patch (in patch preparation, before a candidate is built) and
 tier lowering from configuration. The canonicaliser is pure and idempotent — a
-declared id that already names the route adapter is returned byte-for-byte
-(warning with `ROUTE_MODEL_NOT_CATALOGUED` when the effective catalogue does not
-know it), never prefixed again; only a bare or short `NAMESPACE/NAME` is
-resolved by catalogue match, a single unique namespaced candidate, or an
-adapter-prefixed spelling with that warning. Applying it to a stored id again
-changes nothing. Plan fallbacks and patch-added or replaced nodes are
+declared full id whose model segment already includes its provider is returned
+byte-for-byte (warning with `ROUTE_MODEL_NOT_CATALOGUED` when the effective
+catalogue does not know it), never prefixed again; only a bare or short
+`NAMESPACE/NAME` is resolved by catalogue match, a single unique namespaced
+candidate, or an adapter-prefixed spelling with that warning. Applying it to a
+stored id again changes nothing. Plan fallbacks and patch-added or replaced nodes are
 canonicalised on that same pass; exact-model tiers and batch items emit the
 full id at production. Admission reads the stored ids verbatim and never
 rewrites them, so launch, retry, advance and relay leave the spelling alone.
