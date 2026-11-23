@@ -22,6 +22,7 @@ fn main() -> ExitCode {
 /// Protocol used only by the generated Git wrapper. Exit 1 means the setting
 /// is absent; every operational failure is distinct so the wrapper can avoid
 /// retrying a command when it cannot establish whether hooks are configured.
+#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn git_hooks_path_helper(arguments: Vec<OsString>) -> ExitCode {
     use provenant_os::exec::Executor;
 
@@ -89,6 +90,7 @@ fn git_hooks_path_helper(arguments: Vec<OsString>) -> ExitCode {
     }
 }
 
+#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn git_hooks_path_error() -> ExitCode {
     let _ = std::io::stderr()
         .lock()

@@ -454,6 +454,7 @@ pub(crate) fn collect_owned_worktree(
 /// applied sweep records exact removal evidence in the same receipt before
 /// mutation, then lifts confirmed removals into its report.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 pub(crate) fn collect_unsettled(
     roots: &provenant_core::Roots,
     home: &Path,

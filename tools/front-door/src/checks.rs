@@ -694,6 +694,7 @@ fn disposition_name(disposition: PortCommandDisposition) -> &'static str {
     }
 }
 
+#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn private_home<T>(operation: impl FnOnce(&Path) -> Result<T, Error>) -> Result<T, Error> {
     let temp = fs::canonicalize(&std::env::temp_dir()).map_err(io::Error::from)?;
     let anchor = provenant_os::fs::Directory::open_anchor(&temp)?;

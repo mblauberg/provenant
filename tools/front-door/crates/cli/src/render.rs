@@ -350,6 +350,7 @@ pub fn render_within<T: Serialize>(
         status: result.status,
         data: &result.data,
         error,
+        warnings: result.warnings.clone(),
     };
     let mut buffer = Buffer {
         bytes: Vec::new(),
@@ -1095,6 +1096,7 @@ pub fn render_or_publish<T: Serialize>(
             status: result.status,
             data: &result.data,
             error: None,
+            warnings: Vec::new(),
         };
         (|| {
             let mut receipt_bytes = Vec::new();

@@ -44,6 +44,7 @@ fn state_root(globals: &Globals, cwd: &Path) -> Result<PathBuf, Error> {
     Ok(resolved.roots.state.as_path().to_path_buf())
 }
 
+#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn fail(hook: &str, error: &dyn std::fmt::Display) -> u8 {
     let _ = writeln!(
         io::stderr().lock(),
@@ -53,6 +54,7 @@ fn fail(hook: &str, error: &dyn std::fmt::Display) -> u8 {
     2
 }
 
+#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn abstain(hook: &str, reason: &dyn std::fmt::Display) -> u8 {
     let _ = writeln!(
         io::stderr().lock(),
@@ -67,6 +69,7 @@ fn abstain(hook: &str, reason: &dyn std::fmt::Display) -> u8 {
 /// the tree is known clean and idle (create) or is confirmed removed (remove);
 /// a tree the hook only hoped to adopt is never claimed as adopted. Dirty trees
 /// and trees with a live writer stay refused by `fail`.
+#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn warn_adopt(hook: &str, reason: &dyn std::fmt::Display) {
     let _ = writeln!(
         io::stderr().lock(),

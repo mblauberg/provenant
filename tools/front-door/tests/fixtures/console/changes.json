@@ -1,4 +1,5 @@
 {
+  "warnings": [],
   "command": "console changes",
   "data": {
     "changed": {
@@ -21,6 +22,6 @@
     "schema_version": 2
   },
   "error": null,
-  "schema_version": 1,
+  "schema_version": 2,
   "status": "ok"
 }

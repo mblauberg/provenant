@@ -68,6 +68,8 @@ pub const WORKTREE_ADOPTED_DIRTY: WarningCode = WarningCode("WORKTREE_ADOPTED_DI
 pub const LIVE_RECORD_FORMAT_CHANGED: WarningCode = WarningCode("LIVE_RECORD_FORMAT_CHANGED");
 /// One install-time migration step failed; the install continues.
 pub const MIGRATION_STEP_FAILED: WarningCode = WarningCode("MIGRATION_STEP_FAILED");
+/// The state root overlaps a location the product treats as advisory.
+pub const STATE_ROOT_OVERLAP: WarningCode = WarningCode("STATE_ROOT_OVERLAP");
 
 impl Warning {
     /// A warning with no subject, source or repair.
@@ -295,6 +297,7 @@ mod tests {
             super::WORKTREE_ADOPTED_DIRTY,
             super::LIVE_RECORD_FORMAT_CHANGED,
             super::MIGRATION_STEP_FAILED,
+            super::STATE_ROOT_OVERLAP,
         ] {
             let name = code.as_str();
             assert!(

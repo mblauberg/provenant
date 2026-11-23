@@ -7,13 +7,36 @@ public struct CommandError: Decodable, Equatable, Sendable {
     public let repair: String?
 }
 
-/// The `{schema_version, command, status, data, error}` envelope every `--json` command prints.
+/// A typed warning carried at the envelope's top level in version 2.
+public struct Warning: Decodable, Equatable, Sendable {
+    public let code: String
+    public let message: String
+    public let subject: String?
+    public let repair: String?
+}
+
+/// The `{schema_version, command, status, data, error, warnings}` envelope every `--json` command prints.
 public struct Envelope<Payload: Decodable & Sendable>: Decodable, Sendable {
     public let schemaVersion: UInt64
     public let command: String
     public let status: String
     public let data: Payload?
     public let error: CommandError?
+    public let warnings: [Warning]
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion, command, status, data, error, warnings
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try values.decode(UInt64.self, forKey: .schemaVersion)
+        command = try values.decode(String.self, forKey: .command)
+        status = try values.decode(String.self, forKey: .status)
+        data = try values.decodeIfPresent(Payload.self, forKey: .data)
+        error = try values.decodeIfPresent(CommandError.self, forKey: .error)
+        warnings = try values.decodeIfPresent([Warning].self, forKey: .warnings) ?? []
+    }
 
     public static func decode(_ bytes: Data) throws -> Envelope {
         let decoder = JSONDecoder()
@@ -66,7 +89,7 @@ public final class CLIClient: @unchecked Sendable {
     public init(limit: Double = 30, runner: @escaping Runner) { self.runner = runner; self.limit = limit }
 
     /// Runs `arguments` plus `--json` and decodes the envelope, which must name `command` (such as "console board")
-    /// at envelope version 1. Error envelopes throw `ClientError.command`, whether or not the CLI exited cleanly.
+    /// at envelope version 2. Error envelopes throw `ClientError.command`, whether or not the CLI exited cleanly.
     /// `limit` overrides the client's time limit for this call, for a call that legitimately waits on peers.
     public func call<Payload: Decodable & Sendable>(_ arguments: [String], command: String, limit: Double? = nil,
                                                     as _: Payload.Type = Payload.self) async throws -> Payload {
@@ -87,7 +110,7 @@ public final class CLIClient: @unchecked Sendable {
         if run.timedOut { throw ClientError.timedOut }
         if run.signalled { throw ClientError.signalled(run.status) }
         if let command, let header = try? JSONDecoder().decode(Header.self, from: run.out),
-           header.schemaVersion != 1 || header.command != command {
+           header.schemaVersion != 2 || header.command != command {
             // The CLI answers an argument it cannot parse with a `parse` error envelope, such as an old CLI that
             // does not know a flag. Surface it as the command error it is.
             if header.schemaVersion == 1, header.command == "parse",
@@ -103,7 +126,7 @@ public final class CLIClient: @unchecked Sendable {
             }
             throw ClientError.malformed(Self.describe(error))
         }
-        if let command, (envelope.schemaVersion != 1 || envelope.command != command) {
+        if let command, (envelope.schemaVersion != 2 || envelope.command != command) {
             throw ClientError.malformed("unexpected command envelope")
         }
         if let error = envelope.error { throw ClientError.command(error) }

@@ -215,6 +215,7 @@ pub fn configure_fake_forge_ports(state: &Path, project: &Path, executable: &Pat
     clippy::disallowed_methods,
     reason = "the fake forge port re-executes this test binary as its fixture gh"
 )]
+#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 pub fn fake_forge_port(args: &[String]) -> Result<u8> {
     use std::{
         io::{self, Write},

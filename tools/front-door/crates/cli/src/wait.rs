@@ -167,6 +167,7 @@ fn read_failure(error: ConfigError) -> String {
 
 impl Settings {
     /// The one resolution of `[domains.wait]` for every waiter.
+    #[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
     pub fn resolve(roots: &provenant_core::Roots) -> Result<(Self, Origin), ConfigError> {
         match crate::config_reads::read_for(roots, "wait") {
             Ok(resolved) => Ok(Self::resolved(&resolved)),
@@ -227,6 +228,7 @@ impl Settings {
         self.bounded(requested, origin)
     }
 
+    #[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
     fn bounded(&self, requested: u64, origin: &Origin) -> u64 {
         let maximum = self
             .max_timeout_seconds

@@ -74,6 +74,7 @@ impl<'a> Failure<'a> {
     }
 }
 
+#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 pub(crate) fn diagnostic(message: &str) {
     let _ = writeln!(
         std::io::stderr().lock(),

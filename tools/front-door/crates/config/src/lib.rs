@@ -74,10 +74,12 @@ pub mod repository_files;
 mod repository_policy;
 pub use repository_policy::{REPOSITORY_CONFIG, RepositoryPolicy, read_declaration, read_land};
 mod retention;
+mod warning;
 mod worktrees;
 pub use worktrees::{ProjectWorktreeSettings, WorktreeSettings, WorktreeSetup};
 pub mod shared_settings;
 pub use retention::{ProjectRetentionSettings, RetentionSettings};
+pub use warning::{WarningsSettings, warnings_dedup_retention_days};
 #[cfg(test)]
 mod edit_tests;
 mod splice;
@@ -293,6 +295,11 @@ pub struct ResolvedConfig<D = NoDomains> {
     /// Effective knobs with the layer that set each; not part of `origins`.
     pub knobs: BTreeMap<String, KnobValue>,
     pub origins: BTreeMap<String, Origin>,
+    /// Per-change warning memory. Skipped from the serialised config because
+    /// `warnings` above is already the key for ignored-setting findings; the
+    /// effective value and its source are published by `config schema`.
+    #[serde(skip_serializing)]
+    pub warning_dedup: WarningsSettings,
     /// Every ignored user setting, ordered by source location.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<Finding>,

@@ -113,6 +113,7 @@ pub fn lane_access(
 }
 
 /// Emit an advisory for an unsupported capability without granting it.
+#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 pub fn warn_ignored_capability(origin: &str, name: &str) {
     use std::io::Write;
     let _ = writeln!(
@@ -132,6 +133,7 @@ pub(super) enum AccessError {
     WorktreeOverlap(PathBuf),
 }
 
+#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 pub(super) fn lane_access_checked(
     access: &crate::Access,
     state_root: &Path,

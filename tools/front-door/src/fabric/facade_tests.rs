@@ -874,6 +874,7 @@ pub(crate) mod peer_tests {
 
     const HOST_TEST_CEILING: std::time::Duration = std::time::Duration::from_secs(120);
 
+    #[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
     pub(crate) fn host_test(name: &str) -> Result<bool, Box<dyn std::error::Error>> {
         if !provenant_cli::fabric::in_lane() {
             return Ok(false);

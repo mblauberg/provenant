@@ -260,6 +260,7 @@ fn run_human(data: &Value, input: &Value, announced: bool) -> String {
     }
 }
 
+#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn invoke(
     command: &str,
     input: Result<Value, Box<provenant_records::diagnostic::Diagnostic>>,
@@ -532,6 +533,7 @@ pub(crate) fn local_branch_action(factory: &fabric::Factory, branch: &str) -> Op
         .next
 }
 #[allow(clippy::print_stderr)]
+#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 pub(crate) fn run(
     request: GraphRunArgs,
     globals: &Globals,

@@ -119,6 +119,7 @@ provenant-cli = { workspace = true }
 provenant-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+rusqlite = { workspace = true }
 serde_path_to_error = { workspace = true }
 serde-saphyr = { workspace = true }
 toml_edit = { workspace = true }

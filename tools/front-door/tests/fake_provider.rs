@@ -6,6 +6,7 @@ use std::{
 };
 use support::{Result, TestRig, code};
 
+#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn scenario(name: &str) -> Result<u8> {
     match name {
         "exec" => {
@@ -347,6 +348,7 @@ fn account_placement() -> Result {
     rig.assert_v1_root_untouched()
 }
 
+#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     let result = if args.is_empty() || args[0].as_encoded_bytes().starts_with(b"--") {

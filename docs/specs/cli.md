@@ -109,9 +109,14 @@ that cannot publish a result carries a bounded marker in `data` (`truncated`,
 `omitted_bytes`, `source`, `repair`) with a warning, beside the result's typed
 error. Paged reads bind the cursor to the input, terminal text escapes control
 sequences, unknown facts stay unknown, and `--json` always preserves the envelope.
-
+The envelope is version 2: it always carries a `warnings` array (empty when the
+command raised none). Under `--json` no warning is written to stderr; human mode
+prints `warning: <message>` and its repair to stderr as each warning arrives and
+collapses repeats by key. Per-change keys are remembered in the state root, so a
+warning shows once until its key changes.
 - Why: a script branches on the exit code, and an operator must see that output
-  was bounded rather than mistake a clipped view for the whole result.
+  was bounded rather than mistake a clipped view for the whole result. A consumer
+  must be able to read warnings without scraping stderr.
 
 ### Each refusal has a stable code
 

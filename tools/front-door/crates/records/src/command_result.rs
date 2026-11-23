@@ -1,5 +1,6 @@
-//! Version-one command transport facts, shared by CLI edges.
+//! Version-two command transport facts, shared by CLI edges.
 
+use crate::warning::Warning;
 use crate::wire::ENVELOPE_VERSION;
 use serde::{Deserialize, Serialize};
 
@@ -91,6 +92,10 @@ pub struct CommandResult<T> {
     pub status: Outcome,
     pub data: T,
     pub error: Option<CommandError>,
+    /// Every warning raised while running the command. Always on the wire:
+    /// under `--json` nothing is printed to stderr, so this is the only place
+    /// a consumer can see them. Spec: docs/specs/cli.md#warnings-are-typed-values
+    pub warnings: Vec<Warning>,
 }
 impl<T> CommandResult<T> {
     pub fn new(command: impl Into<String>, status: Outcome, data: T) -> Self {
@@ -100,6 +105,7 @@ impl<T> CommandResult<T> {
             status,
             data,
             error: None,
+            warnings: Vec::new(),
         }
     }
 }

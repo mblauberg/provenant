@@ -1513,6 +1513,7 @@ impl Factory {
         })
     }
 
+    #[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
     fn confine_node(&self, node: &mut Value) -> Result<(), FacadeError> {
         let worktrees = match crate::graph_support::project_worktrees(&self.cwd) {
             crate::graph_support::ProjectWorktrees::Registered(paths) => paths,
@@ -7633,6 +7634,7 @@ mod tests {
 }
 
 /// Prints a launch warning for the operator; a warning never blocks a launch.
+#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 pub(super) fn warn_operator(warning: impl std::fmt::Display) {
     use std::io::Write;
     let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");

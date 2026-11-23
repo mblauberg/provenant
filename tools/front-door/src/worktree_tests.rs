@@ -145,6 +145,7 @@ impl crate::Process for Fixture {
 
 /// The worktree driver's entry. Its children re-enter it as the fake
 /// provider or as the command edge with fixture seams.
+#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 pub fn main() -> std::process::ExitCode {
     use std::process::ExitCode;
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
@@ -257,6 +258,7 @@ pub fn main() -> std::process::ExitCode {
 
 /// The lane probe's socket step: `sun_path` on Darwin holds 103 bytes and a
 /// terminator, so a lane `TMPDIR` that is too long fails here.
+#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn bind_socket(args: &[std::ffi::OsString]) -> Result {
     use std::os::unix::net::{UnixListener, UnixStream};
     let path = Path::new(args.get(1).ok_or("socket path")?);
@@ -1275,6 +1277,7 @@ impl Drop for ReleaseOnDrop {
 /// Test-only child entry point. The parent launch test invokes the same binary
 /// under the real supervisor and confinement plan; production builds have no
 /// route to this fixture.
+#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 pub(crate) fn provider(args: &[OsString]) -> Result {
     if args.first().map(OsString::as_os_str) != Some(std::ffi::OsStr::new("--writer-provider")) {
         return Err("writer provider fixture switch missing".into());

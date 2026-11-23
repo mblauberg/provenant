@@ -11,7 +11,7 @@ final class ReportTests: XCTestCase {
 
     @MainActor func testPartialCoverageAppearsInMenuRow() throws {
         let json = #"""
-        {"schema_version":1,"command":"quota show","status":"ok","error":null,"data":{
+        {"schema_version":2,"command":"quota show","status":"ok","error":null,"data":{
          "schema_version":1,"generated_unix_seconds":1899680400,
          "accounts":[{"account":{"adapter":"codex","account_key":"a","label":"A"},"status":"available","refreshing":false,
          "snapshot":{"windows":[{"pool":"primary","used_basis_points":2456,"resets_unix_seconds":1899698400}],"details":{"coverage":"partial"}}}],
@@ -38,7 +38,7 @@ final class ReportTests: XCTestCase {
     func testSnapshotDetailsFromRustEnvelope() throws {
         let json = #"""
         {
-          "schema_version": 1, "command": "quota show", "status": "ok", "error": null,
+          "schema_version": 2, "command": "quota show", "status": "ok", "error": null,
           "data": {
             "schema_version": 1, "generated_unix_seconds": 1899680400,
             "accounts": [{
@@ -151,7 +151,7 @@ final class ReportTests: XCTestCase {
         // The versioned quota show envelope and snapshot fields owned by the Rust CLI.
         let json = #"""
         {
-          "schema_version": 1, "command": "quota show", "status": "ok", "error": null,
+          "schema_version": 2, "command": "quota show", "status": "ok", "error": null,
           "data": {
             "schema_version": 1, "generated_unix_seconds": 1899680400,
             "accounts": [{
@@ -199,7 +199,7 @@ final class ReportTests: XCTestCase {
         let repairField = repair.map { #""repair": "\#($0)","# } ?? ""
         return #"""
         {
-          "schema_version": 1, "command": "quota show", "status": "ok", "error": null,
+          "schema_version": 2, "command": "quota show", "status": "ok", "error": null,
           "data": {
             "schema_version": 1, "generated_unix_seconds": 1793577600,
             "accounts": [{
@@ -251,7 +251,7 @@ final class ReportTests: XCTestCase {
     func testRefusalResetDecodesAndAppearsOnTheMenuBarRow() throws {
         let json = #"""
         {
-          "schema_version": 1, "command": "quota show", "status": "ok", "error": null,
+          "schema_version": 2, "command": "quota show", "status": "ok", "error": null,
           "data": {
             "schema_version": 1, "generated_unix_seconds": 1793577600,
             "accounts": [{

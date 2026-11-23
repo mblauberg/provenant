@@ -1324,6 +1324,7 @@ fn preflight_error(
     }
 }
 
+#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
     use crate::roots::{Product, Workspace};
     let mode = WaitMode::from_command(&command);
@@ -2324,6 +2325,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
     )
 }
 
+#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn write_line(line: &str) -> std::io::Result<()> {
     use std::io::Write;
     let mut stdout = std::io::stdout().lock();

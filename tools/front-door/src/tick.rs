@@ -393,6 +393,7 @@ fn settle_gc_run(
 
 /// Detached daily collection uses the existing collector and its custody. Its
 /// durable result replaces discarded detached-process stdout and stderr.
+#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 pub(crate) fn gc_worker(globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
         if provenant_cli::fabric::in_lane() {
@@ -491,6 +492,7 @@ fn spawn_build_maintain(state: &Path, home: &Path, project: &Path) -> Result<(),
 /// Run build-slot GC and queue one detached maintenance job per recently used
 /// project after a completed collection. Every failure is a warning: host
 /// hygiene never fails the tick.
+#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn schedule_build_hygiene(resolved: &crate::roots::Resolved) -> Vec<String> {
     use provenant_run::build::hygiene;
     let state = resolved.roots.state.as_path();

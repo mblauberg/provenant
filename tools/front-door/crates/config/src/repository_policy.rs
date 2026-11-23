@@ -110,6 +110,7 @@ fn collect_unknown_inline_toml_keys(
     }
 }
 
+#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn warn_project_config(warnings: &[provenant_records::InputWarning]) {
     use std::io::Write;
     for warning in warnings {

@@ -882,6 +882,7 @@ fn normalise_repo_api_argument(argument: &str) -> String {
 }
 
 /// The fake `gh` the driver re-enters as: a passing, unchanged pull request.
+#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 pub(crate) fn fake_gh(args: &[String]) -> Result<u8> {
     let call = args.join(" ");
     // Real gh rejects JSON fields it does not have; so does this fake.

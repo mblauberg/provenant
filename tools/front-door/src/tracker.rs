@@ -188,6 +188,7 @@ fn human(report: &Report) -> String {
     text
 }
 
+#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 pub fn run(command: Tracker, globals: &Globals) -> u8 {
     let Tracker::Lint {
         numbers,

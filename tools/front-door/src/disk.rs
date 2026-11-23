@@ -8,6 +8,7 @@ use provenant_records::{CommandError, CommandResult, Outcome};
 use provenant_run::{ExecutionContext, Request, RunStore};
 use std::{io, path::Path, time::Duration};
 
+#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 pub fn run(globals: &Globals) -> u8 {
     let mut result = match collect(globals) {
         Ok(report) => CommandResult::new("disk report", Outcome::Ok, Some(report)),

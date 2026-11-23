@@ -53,6 +53,7 @@ fn budget(clock: &SystemClock) -> Result<WaitBudget> {
     Ok(WaitBudget::cli(clock.mono_now(), 5)?)
 }
 
+#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn capture(root: &Path, churn: bool) -> Result {
     let root = std::fs::canonicalize(root)?;
     let home = root.join("home");

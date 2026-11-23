@@ -44,6 +44,7 @@ fn fail(message: impl std::fmt::Display) -> Fail {
 /// record the claimed start so the following restart is spaced behind it. Call
 /// this before handing a steered successor to the launch lock. Returns the wait
 /// actually applied in microseconds. `spacing_ms == 0` disables staggering.
+#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 pub fn pace_steer_restart(
     state: &Path,
     spacing_ms: u64,
