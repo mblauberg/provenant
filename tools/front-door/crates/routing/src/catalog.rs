@@ -3180,7 +3180,7 @@ mod tests {
         );
         assert_eq!(full, "opencode/opencode/uncatalogued-fixture-model");
         let warning = warning.expect("an uncatalogued full id must warn");
-        assert_eq!(warning.code, ROUTE_MODEL_NOT_CATALOGUED);
+        assert_eq!(warning.code, ROUTE_MODEL_NOT_CATALOGUED.as_str());
         assert!(warning.message.contains("uncatalogued-fixture-model"));
         Ok(())
     }

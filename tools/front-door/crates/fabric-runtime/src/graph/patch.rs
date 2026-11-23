@@ -1747,11 +1747,7 @@ pub(super) fn prepare(
     let mut model_warnings = Vec::new();
     super::canonicalise_route_nodes(&mut nodes, context.catalogue, &mut model_warnings);
     super::canonicalise_route_nodes(&mut replaced, context.catalogue, &mut model_warnings);
-    warnings.extend(
-        model_warnings
-            .into_iter()
-            .map(|warning| warning.to_string()),
-    );
+    warnings.extend(model_warnings.into_iter().map(|warning| warning.message));
     // Every node a lane or planner adds or replaces names it, whatever the
     // author wrote, so the graph owner can apply that lane's sandbox floor.
     if let Some(parent) = parent {
