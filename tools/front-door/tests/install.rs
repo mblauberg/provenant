@@ -2155,12 +2155,32 @@ fn upgrade_unregisters_the_old_menu_login_item_and_keeps_one_launch_path() -> Re
             ]
         );
     }
-    // With no refreshed app, install still removes a leftover bundle from the kept app.
+    // With no refreshed app, install still removes a leftover bundle from a kept
+    // app that already runs the helper: its agent no longer points into it.
     rig.set_env("PROVENANT_TEST_MISSING_APPS", "1");
     fs::create_dir_all(&stale)?;
     let (_, older_value) = rig.upgrade(&[])?;
     assert_eq!(older_value["data"][0]["success"], true, "{older_value}");
     assert!(!stale.exists());
+    Ok(())
+}
+
+#[test]
+fn upgrade_without_a_refreshed_app_keeps_the_login_item_when_the_app_has_no_helper() -> Result {
+    let mut rig = UpgradeRig::new()?;
+    // No new app asset and an app that predates Contents/MacOS: its LaunchAgent
+    // may still point into the nested bundle, so that bundle must stay launchable.
+    rig.set_env("PROVENANT_TEST_MISSING_APPS", "1");
+    rig.set_env("PROVENANT_TEST_MENU_LOGIN_ITEM", "1");
+    let stale = rig.installed_app.join(STALE_LOGIN_ITEM);
+    fs::create_dir_all(&stale)?;
+    let (_, value) = rig.upgrade(&[])?;
+    assert_eq!(value["data"][0]["host"], "local", "{value}");
+    assert_eq!(value["data"][0]["success"], true, "{value}");
+    assert!(stale.exists());
+    assert!(!rig.installed_app.join(MENU_EXECUTABLE).exists());
+    // Neither the bundle nor its launchd registration may be touched.
+    assert!(!rig.launch_log.exists());
     Ok(())
 }
 
@@ -2178,7 +2198,10 @@ fn check_install_warns_on_a_leftover_menu_login_item() -> Result {
         "--json",
     ])?;
     assert_eq!(code(&installed), 0, "{installed:?}");
-    let stale = rig.home.join("Applications").join(STALE_LOGIN_ITEM);
+    let stale = rig
+        .home
+        .join("Applications/Provenant Console.app")
+        .join(STALE_LOGIN_ITEM);
     fs::create_dir_all(&stale)?;
     let (status, checked) = run_json(&rig, &["check", "install"])?;
     assert_eq!(status, 0, "{checked}");

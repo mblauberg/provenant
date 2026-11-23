@@ -93,10 +93,13 @@ Release packages carry a separate signed asset,
 checksum, installs `Provenant Console.app` into `~/Applications`, migrates the
 `dev.provenant.quota-menubar` LaunchAgent to the helper at
 `Contents/MacOS/quota-menubar` and restarts it when it was running. The LaunchAgent
-is the only launch path: install also removes the old nested login-item app and
-its launchd registration, and warns when it cannot. `provenant check install`
-warns while one remains. A new helper replaces a live older instance at startup,
-so the upgraded binary takes over from the old process. `provenant upgrade` and `provenant install`
+is the only launch path: once the installed app already runs that helper, install
+also removes the old nested login-item app and its launchd registration, and
+warns when it cannot. A kept app that predates the helper may still be launched
+through the nested bundle, so install leaves it in place and `provenant check
+install` warns (it never refuses) while a leftover remains. A new helper replaces
+a live older instance at startup, so the upgraded binary takes over from the old
+process. `provenant upgrade` and `provenant install`
 report the installed app's `CFBundleShortVersionString`; when it trails the CLI
 they say `app is behind CLI`, and `provenant hosts doctor` repeats that advisory.
 A source build (`--source`) has no signed app asset, so install and upgrade warn

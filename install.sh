@@ -497,6 +497,14 @@ if [ -n "$app_stage" ]; then
         app_stage=
     fi
 elif [ -e "$apps_dir/$app" ]; then
+    # A kept app is cleaned only when it already runs the helper from
+    # Contents/MacOS: the agent is rewritten to that path together with such an
+    # app, so the nested login item is no longer the only launch path. An older
+    # app may still be launched through the nested bundle; leave it in place and
+    # let `provenant check install` warn instead of orphaning the menu bar.
+    if [ -x "$apps_dir/$app/$helper_executable" ]; then
+        clean_menu_login_item
+    fi
     [ "$quiet_app" = true ] || printf '%s\n' "app: $apps_dir/$app ($(app_version "$apps_dir/$app")); not refreshed"
 fi
 if "$guided"; then
