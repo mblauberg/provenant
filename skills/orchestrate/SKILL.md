@@ -11,6 +11,16 @@ flavours such as `review.correctness`. `provenant help --all` lists commands
 and options; `provenant run --explain` shows a compiled graph without starting
 work. Check its authority, write scope and gates before submitting it.
 
+## One accountable chair
+
+One accountable chair owns coordination; native execution stays within its
+assigned authority and never becomes a second chair or a parallel owner of the
+same work. Only the chair holds the user, the boundaries, merge and release.
+This rule names no lane shape: a lane that launches children coordinates only
+its own subtree, with authority narrowed from its parent, and a native sub-agent
+never re-plans or re-delegates the parent's whole assignment. The sections below
+describe how the chair exercises that authority, not ways to divide it.
+
 ## Divide the work
 
 The global rules own when and how to delegate. Any lane may launch child lanes.

@@ -67,11 +67,13 @@ and CI checks.
 
 ## Quick start
 
-After installation, run `provenant help` to explore the CLI and
-`provenant help COMMAND` for a command's options. Ask your coding-agent session
-to delegate a bounded task, or use the CLI directly. Start with a task whose
-output you can review: a lane invokes a real agent under the authority you
-provide.
+**Start here:** the [one-page quickstart](docs/quickstart.md) gives one runnable
+sequence: install, `provenant check install`, register an account, a first
+read-only lane and a first writer. After installation, run `provenant help` to
+explore the CLI and `provenant help COMMAND` for a command's options. Ask your
+coding-agent session to delegate a bounded task, or use the CLI directly. Start
+with a task whose output you can review: a lane invokes a real agent under the
+authority you provide.
 
 Use `provenant status` to inspect work and its outcome. The
 [architecture](docs/ARCHITECTURE.md) explains the lifecycle and boundaries;
