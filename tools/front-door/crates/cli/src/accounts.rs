@@ -219,6 +219,11 @@ impl HeadlineArg {
 pub enum Accounts {
     /// List registered accounts
     List,
+    /// Print one registered account by entry id or unique label
+    Show {
+        /// Entry id or unique label of the account
+        name: String,
+    },
     /// Register an account for an adapter
     Register {
         /// Account label
@@ -380,6 +385,15 @@ fn execute_inner(
         })?
         .domains
         .accounts;
+    if let Accounts::Show { name } = command {
+        let id = resolve_typed(&settings, name).map_err(|(cause, message)| {
+            *kind = cause;
+            message
+        })?;
+        let mut shown = settings.clone();
+        shown.entries.retain(|entry, _| entry == &id);
+        return Ok(shown);
+    }
     if let Accounts::Set {
         account,
         display_name,

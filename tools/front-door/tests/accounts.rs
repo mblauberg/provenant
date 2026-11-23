@@ -371,6 +371,29 @@ fn register_writes_typed_quota_options_to_state_config() -> Result {
 }
 
 #[test]
+fn show_prints_one_account_and_refuses_an_unknown_label() -> Result {
+    let rig = TestRig::new()?;
+    support::register_account(&rig, "codex", "alpha", "k1", &rig.root)?;
+    support::register_account(&rig, "opencode", "beta", "k2", &rig.root)?;
+    let shown = rig.command(&["accounts", "show", "beta", "--json"])?;
+    assert_eq!(
+        code(&shown),
+        0,
+        "{}",
+        String::from_utf8_lossy(&shown.stderr.bytes)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&shown.stdout.bytes)?;
+    let entries = value["data"]["entries"].as_object().ok_or("entries")?;
+    assert_eq!(entries.len(), 1);
+    assert!(entries.contains_key("opencode-beta"));
+    let unknown = rig.command(&["accounts", "show", "nonesuch", "--json"])?;
+    assert_ne!(code(&unknown), 0);
+    let value: serde_json::Value = serde_json::from_slice(&unknown.stdout.bytes)?;
+    assert_eq!(value["error"]["code"], "UNKNOWN_ACCOUNT");
+    Ok(())
+}
+
+#[test]
 fn set_writes_clears_and_resolves_by_id_and_label() -> Result {
     let rig = TestRig::new()?;
     support::register_account(&rig, "codex", "alpha", "k1", &rig.root)?;

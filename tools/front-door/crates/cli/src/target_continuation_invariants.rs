@@ -120,7 +120,7 @@ fn continuation_handles_keep_their_admitted_work_identity_across_reload() {
             (&owner.successor, "host/wrap-up"),
         ] {
             let target = Target::parse(&work.to_string()).unwrap();
-            let resolved = resolve(&target, Want::Attempt { settled: false }, |_| {
+            let resolved = resolve(&target, Want::Attempt { settled: false }, &[], |_| {
                 Ok::<_, Infallible>(Some(checkpoint.clone()))
             })
             .unwrap();
@@ -144,7 +144,7 @@ fn continuation_handles_keep_their_admitted_work_identity_across_reload() {
     let mut projected = journal.0.unwrap();
     projected.nodes[0].previous_attempts.clear();
     let target = Target::parse(&owner.successor.to_string()).unwrap();
-    let resolved = resolve(&target, Want::Attempt { settled: true }, |_| {
+    let resolved = resolve(&target, Want::Attempt { settled: true }, &[], |_| {
         Ok::<_, Infallible>(Some(projected.clone()))
     })
     .unwrap();

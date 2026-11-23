@@ -12,6 +12,19 @@ fn unknown_adapter_lists_close_matches() {
 }
 
 #[test]
+// Spec: docs/specs/cli.md#every-name-refusal-lists-close-matches
+fn adapter_candidates_rank_a_one_edit_typo_and_drop_an_unrelated_name() {
+    assert_eq!(
+        adapter_candidates("opencod").first().map(String::as_str),
+        Some("opencode")
+    );
+    assert!(adapter_candidates("zzzzzz").is_empty());
+    let hint = close_matches_hint(&adapter_candidates("opencod"));
+    assert!(hint.contains("close matches: opencode"), "{hint}");
+    assert!(close_matches_hint(&[]).is_empty());
+}
+
+#[test]
 fn table_driven_weighted_pools_record_effort_readiness_roll_and_seed()
 -> Result<(), Box<dyn std::error::Error>> {
     let access = [

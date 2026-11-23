@@ -366,6 +366,7 @@ pub enum InboxCommand {
         operation_id: Option<OperationId>,
     },
     /// Record consumption by the exact owning chair session and actor
+    #[command(visible_alias = "ack")]
     Acknowledge {
         id: RequestRef,
         /// Owner host label or host ID
