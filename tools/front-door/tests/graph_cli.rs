@@ -522,10 +522,43 @@ fn fixture_cli() -> Command {
     command
 }
 
+/// Native provider custody (the guardian that accepts a provider hand-off and
+/// spawns it) is macOS-only. Elsewhere a launch reaches preparation and stops
+/// at the platform boundary, so admission fixtures assert that boundary rather
+/// than a provider process that cannot exist.
+const PROVIDER_CUSTODY: bool = cfg!(target_os = "macos");
+
+/// A fake `codex` executable: it answers the version and login probes, then
+/// holds the lane open until the test releases it. The provider's working
+/// directory is the writer checkout, so `fixture-release` is per slice.
+const CODEX_FIXTURE: &str = r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  printf 'codex-cli 0.159.0\n'
+  exit 0
+fi
+if [ "$1" = "auth" ] || [ "$1" = "login" ]; then
+  printf '{"loggedIn":true,"email":"fixture@example.test"}\n'
+  exit 0
+fi
+/bin/cat >/dev/null
+printf 'started\n' > fixture-started
+i=0
+while [ "$i" -lt 200 ]; do
+  if [ -f fixture-release ]; then
+    exit 7
+  fi
+  i=$((i + 1))
+  /bin/sleep 0.05
+done
+exit 7
+"#;
+
 struct GraphProject {
     temp: tempfile::TempDir,
     root: PathBuf,
     project: PathBuf,
+    /// Extra environment for runs that need an isolated provider home.
+    env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
 }
 impl GraphProject {
     fn new() -> Result<Self> {
@@ -549,10 +582,44 @@ impl GraphProject {
             temp,
             root,
             project,
+            env: Vec::new(),
         })
     }
     fn state(&self) -> PathBuf {
         self.temp.path().join("state")
+    }
+    /// A runnable Codex lane: an isolated login home and a fake `codex` first
+    /// on PATH. The route is a real, catalogued model, so admission is not
+    /// decided by a placeholder adapter.
+    fn enable_codex_fixture(&mut self) -> Result {
+        use std::os::unix::fs::PermissionsExt;
+        let home = self.temp.path().join("home");
+        let codex_home = home.join(".codex");
+        let bin = self.temp.path().join("provider/bin");
+        for path in [&home, &codex_home, &bin] {
+            std::fs::create_dir_all(path)?;
+        }
+        std::fs::write(
+            codex_home.join("auth.json"),
+            br#"{"tokens":{"account_id":"fixture-one"}}"#,
+        )?;
+        let executable = bin.join("codex");
+        std::fs::write(&executable, CODEX_FIXTURE)?;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
+        provenant_os::fixture::private_state_dir(&self.state())?;
+        std::fs::write(
+            self.state().join("config.toml"),
+            "schema_version=1\n[gc]\nfree_floor='1B'\n",
+        )?;
+        self.env = vec![
+            ("HOME".into(), home.into_os_string()),
+            ("CODEX_HOME".into(), codex_home.into_os_string()),
+            (
+                "PATH".into(),
+                format!("{}:/usr/bin:/bin", bin.display()).into(),
+            ),
+        ];
+        Ok(())
     }
     fn enable_secret_redaction(&self) -> Result {
         use std::os::unix::fs::PermissionsExt;
@@ -572,6 +639,9 @@ impl GraphProject {
             .env("XDG_CONFIG_HOME", self.temp.path().join("config"))
             .args(["--json", "--state-dir"])
             .arg(self.state());
+        for (key, value) in &self.env {
+            command.env(key, value);
+        }
         command
     }
     fn run(&self, args: &[&str]) -> Result<(Output, Value)> {
@@ -589,6 +659,9 @@ impl GraphProject {
             .env("XDG_CONFIG_HOME", self.temp.path().join("config"))
             .args(["--state-dir"])
             .arg(self.state());
+        for (key, value) in &self.env {
+            command.env(key, value);
+        }
         command
     }
     fn document(&self, document: &Value) -> Result<PathBuf> {
@@ -654,6 +727,45 @@ fn last_record(output: &Output) -> Result<Value> {
         .find(|line| !line.trim().is_empty())
         .ok_or("command produced no record")?;
     Ok(serde_json::from_str(line)?)
+}
+
+/// A launch must admit the graph its explanation admitted. Where native
+/// provider custody exists the process must also start. Elsewhere the attempt
+/// ends at that platform boundary after the host bound and provisioned its
+/// slices; a route or worktree refusal is still a failure on every host.
+fn assert_launch_admitted(launch: &Output, launched: &Value) -> Result {
+    if PROVIDER_CUSTODY {
+        assert!(
+            launch.status.success(),
+            "launch was refused after explain admitted the same input: {launched}"
+        );
+        return Ok(());
+    }
+    let rendered = launched.to_string();
+    for refusal in [
+        "unknown_adapter",
+        "route_resolution_refused",
+        "worktree_missing",
+        "invalid_input",
+    ] {
+        assert!(
+            !rendered.contains(refusal),
+            "launch was refused after explain admitted the same input ({refusal}): {launched}"
+        );
+    }
+    assert!(
+        launched["error"].is_null(),
+        "launch envelope refused admission: {launched}"
+    );
+    assert!(
+        launched["data"]["checkpoint"]["graph_id"].is_string(),
+        "launch admitted no graph: {launched}"
+    );
+    assert!(
+        rendered.contains("unsupported_platform"),
+        "launch did not reach the provider-custody boundary after admission: {launched}"
+    );
+    Ok(())
 }
 
 #[test]
@@ -1071,7 +1183,8 @@ fn every_bundled_template_is_listed_and_compiles_with_its_declared_parameters() 
 
 #[test]
 fn batch_launch_provisions_planned_slice_worktrees_and_explains_same_admission() -> Result {
-    let rig = GraphProject::new()?;
+    let mut rig = GraphProject::new()?;
+    rig.enable_codex_fixture()?;
     let document = rig.document(&json!({
         "schema_version": support::GRAPH_DOCUMENT_SCHEMA_VERSION,
         "graph_id": "batch-provision",
@@ -1085,7 +1198,7 @@ fn batch_launch_provisions_planned_slice_worktrees_and_explains_same_admission()
                 "write_scope": ["."],
                 "delivery": "integrate:batch/integration",
                 "provision_worktree": true,
-                "route": {"adapter": "fixture", "model": "fixture/model"},
+                "route": {"adapter": "codex", "model": "codex/gpt-6-luna"},
             },
             {
                 "id": "task--slices--beta",
@@ -1095,7 +1208,7 @@ fn batch_launch_provisions_planned_slice_worktrees_and_explains_same_admission()
                 "write_scope": ["."],
                 "delivery": "integrate:batch/integration",
                 "provision_worktree": true,
-                "route": {"adapter": "fixture", "model": "fixture/model"},
+                "route": {"adapter": "codex", "model": "codex/gpt-6-luna"},
             },
         ],
     }))?;
@@ -1120,14 +1233,22 @@ fn batch_launch_provisions_planned_slice_worktrees_and_explains_same_admission()
     );
 
     let (launch, launched) = rig.run(&["run", "--file", document])?;
-    assert!(
-        launch.status.success(),
-        "launch was refused after explain admitted the same input: {launched}"
-    );
+    assert_launch_admitted(&launch, &launched)?;
     let graph = launched["data"]["checkpoint"]["graph_id"]
         .as_str()
         .ok_or_else(|| format!("launch must admit the graph explain admitted: {launched}"))?
         .to_owned();
+    if PROVIDER_CUSTODY {
+        // The fake providers hold each lane open until released, so the launch
+        // returns while both slices are running rather than after they settle.
+        for slice in ["alpha", "beta"] {
+            let release = rig.project.join(format!(
+                ".worktrees/batch-provision-task--slices--{slice}/fixture-release"
+            ));
+            std::fs::write(&release, b"release")
+                .map_err(|error| format!("release fixture slice {}: {error}", release.display()))?;
+        }
+    }
     let wait_output = rig
         .command()
         .args(["wait", &graph, "--timeout", "15s"])
@@ -1190,6 +1311,14 @@ fn batch_launch_provisions_planned_slice_worktrees_and_explains_same_admission()
         provisioned.insert(path.to_owned());
     }
     assert_eq!(provisioned.len(), 2, "each slice owns a distinct worktree");
+    if PROVIDER_CUSTODY {
+        for path in &provisioned {
+            assert!(
+                Path::new(path.as_str()).join("fixture-started").is_file(),
+                "fixture provider did not run in the slice it was bound to: {path}"
+            );
+        }
+    }
 
     // The negative case keeps the dead-guard's intent: a refusal is reported
     // with the same code by explain and launch, so a passing explanation is
@@ -1204,7 +1333,7 @@ fn batch_launch_provisions_planned_slice_worktrees_and_explains_same_admission()
             "worktree": ".worktrees/batch-missing-writer",
             "write_scope": ["."],
             "delivery": "push",
-            "route": {"adapter": "fixture", "model": "fixture/model"},
+            "route": {"adapter": "codex", "model": "codex/gpt-6-luna"},
         }],
     }))?;
     let missing = missing.to_str().ok_or("document path")?;
@@ -1284,7 +1413,8 @@ fn explain_refuses_a_writer_on_the_integration_branch_like_launch() -> Result {
 // Spec: docs/specs/run-launch.md#writer-binding
 #[test]
 fn explain_previews_a_new_writer_without_creating_its_checkout() -> Result {
-    let rig = GraphProject::new()?;
+    let mut rig = GraphProject::new()?;
+    rig.enable_codex_fixture()?;
     let checkout = rig.project.join(".worktrees/explain-new-writer");
     let document = rig.document(&json!({
         "schema_version": support::GRAPH_DOCUMENT_SCHEMA_VERSION,
@@ -1297,7 +1427,7 @@ fn explain_previews_a_new_writer_without_creating_its_checkout() -> Result {
             "write_scope": ["."],
             "delivery": "push",
             "attempt": {"new_worktree": {"branch": "topic/explain-new-writer", "base": "HEAD"}},
-            "route": {"adapter": "fixture", "model": "fixture/model"},
+            "route": {"adapter": "codex", "model": "codex/gpt-6-luna"},
         }],
     }))?;
     let document = document.to_str().ok_or("document path")?;
@@ -1314,12 +1444,18 @@ fn explain_previews_a_new_writer_without_creating_its_checkout() -> Result {
     );
 
     let (launch, launched) = rig.run(&["run", "--file", document])?;
+    assert_launch_admitted(&launch, &launched)?;
     let graph = launched["data"]["checkpoint"]["graph_id"]
         .as_str()
         .ok_or_else(|| {
             format!("launch must admit the writer explain previewed: {launch:?}; {launched}")
         })?
         .to_owned();
+    if PROVIDER_CUSTODY {
+        // The fake provider holds the lane open until released, so the launch
+        // returns with the writer running rather than already settled.
+        std::fs::write(checkout.join("fixture-release"), b"release")?;
+    }
     let wait_output = rig
         .command()
         .args(["wait", &graph, "--timeout", "15s"])
@@ -1334,6 +1470,12 @@ fn explain_previews_a_new_writer_without_creating_its_checkout() -> Result {
         checkout.is_dir(),
         "launch did not provision the checkout it previewed: {waited}"
     );
+    if PROVIDER_CUSTODY {
+        assert!(
+            checkout.join("fixture-started").is_file(),
+            "fixture provider did not run in the previewed checkout: {waited}"
+        );
+    }
     Ok(())
 }
 

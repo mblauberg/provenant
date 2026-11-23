@@ -76,8 +76,11 @@ observation cannot substitute for the original free locks or positive non-occupa
 A launch is uncertain only once its reservation may record a handoff. A host that cannot hold
 provider custody refuses before that point: the attempt ends with `unsupported_platform` and
 its custody is withdrawn. A launch cancelled or refused before it spawns records `never_spawned`
-on every host.
-- Why: a launch that cannot start must not look like a lost lane.
+on every host. Admission and provisioning precede that boundary, so a graph may be admitted and
+its planned worktrees created on such a host; the platform refusal is neither an admission nor a
+route refusal.
+- Why: a launch that cannot start must not look like a lost lane, and a missing custody backend
+  must not hide whether the graph itself was admissible.
 
 Permanent pre-admission refusals are durable outcomes of their operation: replay returns the
 refusal without preparing again, and a failure to store it is not acknowledged as success.
