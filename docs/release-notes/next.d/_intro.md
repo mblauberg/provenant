@@ -1,0 +1,3 @@
+Provenant 2.8.2 lets a lane rebase or merge its own branch under sourced `lanes.history.*` settings, settles lanes whose result files have loose modes, and admits batch documents without pre-created slice worktrees. It also stops creating lane Cargo caches, ends the gc decode errors from retired record fields, and moves Claude answer delivery to `PostToolUse`.
+
+From this release on, `provenant upgrade --verify` verifies with the installed binary (#3799). An upgrade from 2.8.1 still runs 2.8.1's verifier, so run `provenant upgrade --verify` once more after upgrading to check the install with 2.8.2's own verifier.
