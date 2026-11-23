@@ -493,6 +493,17 @@ fn format_conflicts(files: &[String]) -> String {
     }
 }
 
+/// The facts of a publication refused because its tip descends from no
+/// history the host knows. Boxed inside [`RunError`] so the cause does not
+/// enlarge every CLI result that carries the error.
+#[derive(Debug)]
+pub struct LaneTipRefusal {
+    pub tip: provenant_core::GitOid,
+    pub base: provenant_core::GitOid,
+    pub launch_ref: Option<String>,
+    pub setting: String,
+}
+
 #[derive(Debug, Error)]
 pub enum RunError {
     #[error("abandonment refused: {0}")]
@@ -669,15 +680,13 @@ pub enum RunError {
         setting: String,
     },
     #[error(
-        "lane tip {tip} descends from none of: its launch base {base}, the origin default branch, {}, any pushed remote-tracking branch, or the host lane branch; {setting}; set it to warn or off to publish, or push the branch it was rebased onto",
-        .launch_ref.as_deref().map_or_else(|| "its launch ref".to_owned(), |name| format!("its launch ref {name}"))
+        "lane tip {} descends from none of: its launch base {}, the origin default branch, {}, any pushed remote-tracking branch, or the host lane branch; {}; set it to warn or off to publish, or push the branch it was rebased onto",
+        .0.tip,
+        .0.base,
+        .0.launch_ref.as_deref().map_or_else(|| "its launch ref".to_owned(), |name| format!("its launch ref {name}")),
+        .0.setting
     )]
-    LaneTipUnrooted {
-        tip: provenant_core::GitOid,
-        base: provenant_core::GitOid,
-        launch_ref: Option<String>,
-        setting: String,
-    },
+    LaneTipUnrooted(Box<LaneTipRefusal>),
     #[error("invalid Git base {0:?}: expected a resolvable commit reference")]
     InvalidBase(String),
     #[error(
@@ -819,7 +828,7 @@ impl RunError {
         matches!(
             self,
             Self::ObjectImportLimit(_)
-                | Self::LaneTipUnrooted { .. }
+                | Self::LaneTipUnrooted(..)
                 | Self::PublicationDiverged { .. }
                 | Self::PublicationConflict { .. }
         )
@@ -830,7 +839,7 @@ impl RunError {
     pub(crate) fn is_publication_refusal(&self) -> bool {
         matches!(
             self,
-            Self::LaneTipUnrooted { .. }
+            Self::LaneTipUnrooted(..)
                 | Self::PublicationDiverged { .. }
                 | Self::PublicationConflict { .. }
         )

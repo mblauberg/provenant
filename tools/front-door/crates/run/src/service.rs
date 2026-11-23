@@ -937,7 +937,7 @@ impl From<&RunError> for ErrorKind {
             RunError::RetainedWriterImport { .. } => Self::RetainedWriterImport,
             RunError::GitUnavailable => Self::Git,
             RunError::ObjectImportLimit(_) => Self::ObjectImportLimit,
-            RunError::LaneTipUnrooted { .. } => Self::LaneTipUnrooted,
+            RunError::LaneTipUnrooted(_) => Self::LaneTipUnrooted,
             RunError::PublicationDiverged { .. } | RunError::PublicationConflict { .. } => {
                 Self::Conflict
             }

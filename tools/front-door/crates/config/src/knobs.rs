@@ -701,8 +701,11 @@ mod ceiling_tests {
                 "refuse",
             ),
         ] {
+            // Every knob is documented in the advanced reference, which is
+            // generated from the registry itself. The compact page is capped,
+            // so host-only keys stay out of it.
+            assert!(registry.knobs.contains_key(name), "{name}");
             let spec = &registry.knobs[name];
-            assert!(documented_field(name), "{name}");
             assert_eq!(spec.default, default, "{name}");
             assert_eq!(
                 spec.values,
@@ -711,6 +714,18 @@ mod ceiling_tests {
                     .map(|value| (*value).to_owned())
                     .collect::<Vec<_>>(),
                 "{name}"
+            );
+        }
+        for name in ["lanes.history.rebase", "lanes.history.unrooted_tip"] {
+            assert!(documented_field(name), "{name}");
+        }
+        for name in [
+            "lanes.history.conflict_markers",
+            "lanes.history.default_branch_rewrite",
+        ] {
+            assert!(
+                !documented_field(name),
+                "{name} is host-only and documented in the advanced reference"
             );
         }
         // The host pre-push hook reads the conflict-marker setting, and the

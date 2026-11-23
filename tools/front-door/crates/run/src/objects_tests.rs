@@ -878,26 +878,42 @@ fn private_commits_survive_a_losing_host_settlement_cas() -> TestResult {
         Some(&second_source.objects),
         second_head,
     )?;
-    assert!(
-        super::publish_branch(
-            &fixture.git,
-            fixture.worktree.repo(),
-            super::BranchPublication {
-                branch: "refs/heads/lane",
-                base: fixture.base,
-                launch_ref: None,
-                head: second_head,
-                attempt: AttemptId::from_bytes([2; 16]),
-                history: LaneHistory::default(),
-            },
-        )
-        .is_err()
-    );
-
+    // The host branch moved after the second writer prepared at the same base,
+    // so its settlement CAS loses. The default rebase setting publishes the
+    // sibling histories as a host merge: both private commits stay reachable.
+    let published = super::publish_branch(
+        &fixture.git,
+        fixture.worktree.repo(),
+        super::BranchPublication {
+            branch: "refs/heads/lane",
+            base: fixture.base,
+            launch_ref: None,
+            head: second_head,
+            attempt: AttemptId::from_bytes([2; 16]),
+            history: LaneHistory::default(),
+        },
+    )?;
+    assert_eq!(published.previous, first_head);
     assert_eq!(
         super::resolve_ref(&fixture.git, fixture.worktree.repo(), "refs/heads/lane")?,
-        first_head
+        published.tip
     );
+    let parents = git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &[
+            "rev-list",
+            "--parents",
+            "-n",
+            "1",
+            &published.tip.to_string(),
+        ],
+    )?;
+    let parents = String::from_utf8_lossy(&parents.stdout);
+    assert!(parents.contains(&first_head.to_string()), "{parents}");
+    assert!(parents.contains(&second_head.to_string()), "{parents}");
     assert_eq!(
         super::private_tip(&second_source, "refs/heads/lane")?,
         second_head
@@ -1261,10 +1277,12 @@ fn shared_branch_publication_compares_base_merges_divergence_and_is_idempotent()
     // A lane may still configure the old retain-and-refuse outcome. It is a
     // configured stop for its own branch, typed and final for settlement.
     update_ref(&fixture, "refs/heads/lane", divergent)?;
-    let mut refuse = LaneHistory::default();
-    refuse.rebase = provenant_config::Setting {
-        value: provenant_config::Rebase::Refuse,
-        source: provenant_records::LimitSource::Project,
+    let refuse = LaneHistory {
+        rebase: provenant_config::Setting {
+            value: provenant_config::Rebase::Refuse,
+            source: provenant_records::LimitSource::Project,
+        },
+        ..LaneHistory::default()
     };
     let refusal = super::publish_branch(
         &fixture.git,
@@ -1318,7 +1336,7 @@ fn a_divergent_publication_that_conflicts_names_the_files_and_retains_the_branch
             None,
             &["write-tree"],
         )?)?;
-        Ok(oid(git(
+        oid(git(
             &fixture.git,
             &fixture.home,
             &fixture.project,
@@ -1331,7 +1349,7 @@ fn a_divergent_publication_that_conflicts_names_the_files_and_retains_the_branch
                 "-m",
                 message,
             ],
-        )?)?)
+        )?)
     };
     let host = commit_with("host side\n", "host update")?;
     let lane = commit_with("lane side\n", "lane update")?;
@@ -2872,13 +2890,12 @@ fn unrooted_history_warns_by_default_and_each_configured_value_decides() -> Test
         Some(&Directory::open_anchor(&fixture.source)?),
         orphan,
     )?;
-    let history = |value| {
-        let mut history = LaneHistory::default();
-        history.unrooted_tip = Setting {
+    let history = |value| LaneHistory {
+        unrooted_tip: Setting {
             value,
             source: LimitSource::Project,
-        };
-        history
+        },
+        ..LaneHistory::default()
     };
     let refusal = super::publish_branch(
         &fixture.git,
@@ -2894,21 +2911,21 @@ fn unrooted_history_warns_by_default_and_each_configured_value_decides() -> Test
     );
     assert!(matches!(
         refusal,
-        Err(crate::RunError::LaneTipUnrooted {
-            tip,
-            base,
-            launch_ref: None,
-            ref setting,
-        }) if tip == orphan
-            && base == prior
-            && setting.contains("lanes.history.unrooted_tip = refuse")
-            && setting.contains("source: project")
+        Err(crate::RunError::LaneTipUnrooted(ref cause))
+            if cause.tip == orphan
+                && cause.base == prior
+                && cause.launch_ref.is_none()
+                && cause.setting.contains("lanes.history.unrooted_tip = refuse")
+                && cause.setting.contains("source: project")
     ));
     assert_eq!(
         super::resolve_ref(&fixture.git, fixture.worktree.repo(), "refs/heads/lane")?,
         prior
     );
     for value in [HistoryEffect::Warn, HistoryEffect::Off] {
+        // Each value is judged from the same prior tip; otherwise the previous
+        // iteration's published tip would count as the known host lane branch.
+        update_ref(&fixture, "refs/heads/lane", prior)?;
         let ancestor = super::publish_branch(
             &fixture.git,
             fixture.worktree.repo(),
@@ -3136,10 +3153,12 @@ fn unrooted_tip_refuses_only_under_its_refuse_setting() -> TestResult {
         None,
         &["commit-tree", &tree.to_string(), "-m", "orphan"],
     )?)?;
-    let mut history = LaneHistory::default();
-    history.unrooted_tip = Setting {
-        value: HistoryEffect::Refuse,
-        source: LimitSource::Host,
+    let history = LaneHistory {
+        unrooted_tip: Setting {
+            value: HistoryEffect::Refuse,
+            source: LimitSource::Host,
+        },
+        ..LaneHistory::default()
     };
     let error = super::publish_branch(
         &fixture.git,
@@ -3310,10 +3329,12 @@ fn publication_accepts_a_rebase_onto_the_launch_ref() -> TestResult {
     // stops it, while the default warns and publishes it with recovery for
     // displaced work.
     update_ref(&fixture, "refs/heads/lane", lane_base)?;
-    let mut refuse = LaneHistory::default();
-    refuse.unrooted_tip = provenant_config::Setting {
-        value: provenant_config::HistoryEffect::Refuse,
-        source: provenant_records::LimitSource::Project,
+    let refuse = LaneHistory {
+        unrooted_tip: provenant_config::Setting {
+            value: provenant_config::HistoryEffect::Refuse,
+            source: provenant_records::LimitSource::Project,
+        },
+        ..LaneHistory::default()
     };
     let refusal = super::publish_branch(
         &fixture.git,
@@ -3329,8 +3350,8 @@ fn publication_accepts_a_rebase_onto_the_launch_ref() -> TestResult {
     );
     assert!(matches!(
         refusal,
-        Err(crate::RunError::LaneTipUnrooted { tip, base, launch_ref: None, .. })
-            if tip == rebased && base == lane_base
+        Err(crate::RunError::LaneTipUnrooted(ref cause))
+            if cause.tip == rebased && cause.base == lane_base && cause.launch_ref.is_none()
     ));
     assert_eq!(
         super::resolve_ref(&fixture.git, fixture.worktree.repo(), "refs/heads/lane")?,

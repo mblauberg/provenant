@@ -1,5 +1,5 @@
 //! Import lane objects through Git's quarantined receive path.
-use crate::{AdmissionError, Result, RunError};
+use crate::{AdmissionError, LaneTipRefusal, Result, RunError};
 use provenant_config::{HistoryEffect, LaneHistory, REBASE, Rebase, UNROOTED_TIP};
 use provenant_confinement::{
     repo::VerifiedRepo,
@@ -840,12 +840,12 @@ pub(crate) fn publish_branch(
                     );
                 }
                 HistoryEffect::Refuse => {
-                    return Err(RunError::LaneTipUnrooted {
+                    return Err(RunError::LaneTipUnrooted(Box::new(LaneTipRefusal {
                         tip: target,
                         base,
                         launch_ref: launch_ref.map(str::to_owned),
                         setting: history.unrooted_tip.setting(UNROOTED_TIP),
-                    });
+                    })));
                 }
             }
             Ancestor::Unrooted
