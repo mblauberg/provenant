@@ -55,6 +55,9 @@ pub struct Upgrade {
     /// Run the bundled smoke graph after upgrading
     #[arg(long)]
     pub verify: bool,
+    /// Run only the installed binary's post-upgrade verification (installer use only)
+    #[arg(long, hide = true, requires = "verify")]
+    pub verify_only: bool,
     /// Show the smoke graph without upgrading or launching it (requires --verify)
     #[arg(long, requires = "verify")]
     pub dry_run: bool,

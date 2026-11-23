@@ -1534,6 +1534,9 @@ fn apply_install(
     if let Ok(outcome) = &result
         && !outcome.dry_run
     {
+        // The seeding feature is gone; a state root left by an older release
+        // still pays for its seeds until install retires them once.
+        let _ = retire_cargo_target_seeds(&state);
         // A just-installed release is immutable, but old copies can be
         // removed once no process is executing them. An incomplete process
         // census cannot prove that safe, so retention fails closed.
@@ -1684,6 +1687,63 @@ fn prune_release_directories(
         }
     }
     Ok(())
+}
+
+const RETIRED_CARGO_TARGET_SEEDS: &str = "cargo-target-seeds";
+
+/// Sum the bytes of a retired tree without following links out of the state
+/// root. An unreadable entry contributes zero; removal never depends on it.
+fn retired_tree_bytes(path: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return 0;
+    };
+    entries
+        .filter_map(Result::ok)
+        .map(|entry| match std::fs::symlink_metadata(entry.path()) {
+            Ok(metadata) if metadata.is_dir() => retired_tree_bytes(&entry.path()),
+            Ok(metadata) => metadata.len(),
+            Err(_) => 0,
+        })
+        .sum()
+}
+
+/// Remove the directory left by the retired seeding feature, reporting its
+/// path and size. A missing directory is the normal case and stays silent.
+fn retire_cargo_target_seeds(state: &Path) -> Option<String> {
+    let path = state.join(RETIRED_CARGO_TARGET_SEEDS);
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            let message = format!(
+                "warning: could not inspect retired cargo target seeds at {}: {error}",
+                path.display()
+            );
+            let _ = writeln!(io::stderr().lock(), "{message}");
+            return Some(message);
+        }
+    };
+    if !metadata.is_dir() {
+        let message = format!(
+            "warning: retired cargo target seeds at {} is not a directory; left untouched",
+            path.display()
+        );
+        let _ = writeln!(io::stderr().lock(), "{message}");
+        return Some(message);
+    }
+    let bytes = retired_tree_bytes(&path);
+    let message = match std::fs::remove_dir_all(&path) {
+        Ok(()) => format!(
+            "removed retired cargo target seeds at {} ({bytes} bytes)",
+            path.display()
+        ),
+        Err(error) => format!(
+            "warning: could not remove retired cargo target seeds at {}: {error}",
+            path.display()
+        ),
+    };
+    let _ = writeln!(io::stderr().lock(), "{message}");
+    Some(message)
 }
 
 #[cfg(test)]
@@ -2094,6 +2154,13 @@ fn runner_for_verify(targets: &provenant_config::Targets) -> Result<UpgradeRunne
     })
 }
 
+/// The binary the install published, not the process that started the upgrade.
+/// Every verify child names this path, so a fix to the verifier ships with the
+/// release that installs it instead of waiting for the following upgrade.
+fn installed_destination(targets: &provenant_config::Targets) -> PathBuf {
+    targets.bin_dir.join(provenant_config::STABLE_BINARY_NAME)
+}
+
 fn verify_smoke(
     targets: &provenant_config::Targets,
     args: &cli::Upgrade,
@@ -2101,11 +2168,75 @@ fn verify_smoke(
     let runner = runner_for_verify(targets)?;
     verify_smoke_with(
         &runner,
-        &targets.bin_dir.join("provenant"),
+        &installed_destination(targets),
         targets.roots.state.as_path(),
         &std::env::temp_dir(),
         args,
     )
+}
+
+/// Re-exec the installed binary so its own verifier drives the smoke graph,
+/// wait, status and cleanup. The runner is injected so a test can name the
+/// program the verify invocation actually used.
+fn verify_installed_smoke(
+    runner: &UpgradeRunner,
+    environment: &Resolved,
+    targets: &provenant_config::Targets,
+    args: &cli::Upgrade,
+) -> Result<String, String> {
+    let program = installed_destination(targets);
+    let mut argv = vec![
+        program.into_os_string(),
+        "--state-dir".into(),
+        environment.roots.state.as_path().as_os_str().to_owned(),
+        "--project".into(),
+        environment.project.as_os_str().to_owned(),
+        "upgrade".into(),
+        "--verify".into(),
+        "--verify-only".into(),
+    ];
+    if let Some(host) = &args.host {
+        argv.extend(["--host".into(), host.clone().into()]);
+    }
+    if let Some(route) = &args.route {
+        argv.extend(["--route".into(), route.clone().into()]);
+    }
+    for setting in &args.set {
+        argv.extend(["--set".into(), setting.clone().into()]);
+    }
+    let output = runner.execute(&argv, None, 1_048_576, 3700)?;
+    Ok(String::from_utf8_lossy(&output).into_owned())
+}
+
+/// The installed binary's own verify phase. It never installs or downloads;
+/// it reports the version that actually ran verification.
+fn run_verify_only(
+    targets: &provenant_config::Targets,
+    args: &cli::Upgrade,
+    globals: &cli::Globals,
+) -> u8 {
+    let result = verify_smoke(targets, args);
+    let version = env!("CARGO_PKG_VERSION");
+    match result {
+        Ok(output) => super::emit(
+            &CommandResult::new(
+                "upgrade",
+                Outcome::Ok,
+                serde_json::json!({"verify": "installed", "version": version, "output": output}),
+            ),
+            globals,
+            &format!("verified by provenant {version} (installed binary):\n{output}"),
+            false,
+        ),
+        Err(error) => super::fail(
+            "upgrade",
+            Outcome::Error,
+            "UPGRADE_VERIFY",
+            &error,
+            "inspect the reported smoke failure, resolve it, then rerun `upgrade --verify`",
+            globals,
+        ),
+    }
 }
 
 fn smoke_git(runner: &UpgradeRunner, project: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
@@ -2408,10 +2539,13 @@ struct HostUpgrade {
 }
 
 pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
-    let (_, targets) = match selected_targets(globals, &[]) {
+    let (environment, targets) = match selected_targets(globals, &[]) {
         Ok(value) => value,
         Err(error) => return edge_error("upgrade", error, globals),
     };
+    if args.verify_only {
+        return run_verify_only(&targets, &args, globals);
+    }
     if args.dry_run {
         let runner = match runner_for_verify(&targets) {
             Ok(runner) => runner,
@@ -2697,7 +2831,10 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
         ),
         Ok(mut hosts) => {
             if args.verify && hosts.iter().all(|host| host.success) {
-                match verify_smoke(&targets, &args) {
+                let verified = runner_for_verify(&targets).and_then(|runner| {
+                    verify_installed_smoke(&runner, &environment, &targets, &args)
+                });
+                match verified {
                     Ok(output) => hosts.push(HostUpgrade {
                         host: "smoke".into(),
                         success: true,
@@ -3107,6 +3244,115 @@ mod tests {
         Ok(())
     }
 
+    // Spec: docs/specs/state.md#releases-are-immutable
+    #[test]
+    fn verify_execs_the_installed_binary() -> Result<(), Box<dyn std::error::Error>> {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let home = root.join("home");
+        let project = root.join("project");
+        let state = root.join("state");
+        for directory in [&home, &project, &state] {
+            std::fs::create_dir(directory)?;
+        }
+        provenant_os::fixture::private_state_dir(&state)?;
+        let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
+        inputs.state_dir = Some(state.clone());
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let environment = Resolved {
+            assets: root.join("assets"),
+            home: home.clone(),
+            project: project.clone(),
+            roots,
+            claude_config: None,
+            codex_home: None,
+        };
+        let mut targets = provenant_config::Targets::new(
+            environment.roots.clone(),
+            &home,
+            &[],
+            std::sync::Arc::new(provenant_records::policy::Policy::default()),
+        );
+        targets.bin_dir = root.join("bin");
+        std::fs::create_dir(&targets.bin_dir)?;
+        let program = installed_destination(&targets);
+        let calls = root.join("verify-calls");
+        std::fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$0\" >> '{}'\nprintf '%s\\n' \"$*\" >> '{}'\n",
+                calls.display(),
+                calls.display()
+            ),
+        )?;
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))?;
+        let runner = UpgradeRunner {
+            executor: provenant_os::exec::SystemExecutor::new(1)?,
+            environment: std::env::vars_os().collect(),
+            cwd: home,
+        };
+
+        verify_installed_smoke(
+            &runner,
+            &environment,
+            &targets,
+            &cli::Upgrade {
+                yes: false,
+                from_source: None,
+                hosts: "all".into(),
+                verify: true,
+                verify_only: false,
+                dry_run: false,
+                host: None,
+                route: None,
+                set: Vec::new(),
+            },
+        )?;
+
+        let calls = std::fs::read_to_string(calls)?;
+        let lines: Vec<_> = calls.lines().collect();
+        assert_eq!(lines.len(), 2, "{calls}");
+        assert_eq!(lines[0], program.to_str().ok_or("program path")?, "{calls}");
+        assert!(
+            lines[1].contains("upgrade --verify --verify-only"),
+            "{calls}"
+        );
+        Ok(())
+    }
+
+    // Spec: docs/specs/state.md#managed-install
+    #[test]
+    fn install_retires_the_cargo_target_seed_directory_once()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::*;
+
+        let temp = tempfile::tempdir()?;
+        let state = temp.path().join("state");
+        assert!(
+            retire_cargo_target_seeds(&state).is_none(),
+            "a root with no retired directory is silent"
+        );
+        std::fs::create_dir(&state)?;
+        assert!(retire_cargo_target_seeds(&state).is_none());
+
+        let seeds = state.join(RETIRED_CARGO_TARGET_SEEDS);
+        std::fs::create_dir_all(seeds.join("rustc"))?;
+        std::fs::write(seeds.join("rustc/seed"), vec![b'x'; 2048])?;
+        let report = retire_cargo_target_seeds(&state).expect("removal reports path and size");
+        assert!(!seeds.exists(), "the retired directory is gone");
+        assert!(report.contains(&seeds.display().to_string()), "{report}");
+        assert!(report.contains("2048 bytes"), "{report}");
+        assert!(
+            retire_cargo_target_seeds(&state).is_none(),
+            "the directory is reported once"
+        );
+        Ok(())
+    }
+
+    // Spec: docs/specs/supervisor.md#tick-driven-settlement
     #[test]
     fn smoke_cleanup_forgets_the_scratch_project_binding() -> Result<(), Box<dyn std::error::Error>>
     {
@@ -3131,6 +3377,9 @@ mod tests {
         let scratch = crate::scratch_dir::ScratchDir::new_in(&link, "provenant-smoke-project-")?;
         provenant_os::fixture::run_git(scratch.path(), &["init", "-q"])?;
         std::fs::write(scratch.path().join("fixture.txt"), b"smoke fixture\n")?;
+        // The warning #3812 saw comes from a scratch fixture's ports.json. It
+        // must not be reachable through the host registry after cleanup.
+        std::fs::write(scratch.path().join("ports.json"), b"not a port table\n")?;
         provenant_os::fixture::run_git(scratch.path(), &["add", "fixture.txt"])?;
         provenant_os::fixture::run_git(scratch.path(), &["commit", "-qm", "smoke fixture"])?;
 
@@ -3171,6 +3420,13 @@ mod tests {
         forget_smoke_binding(roots.state.as_path(), resolved).map_err(std::io::Error::other)?;
         assert!(!record.exists(), "{} survived cleanup", record.display());
         assert!(provenant_config::lookup_project(&roots, &discovered.location)?.is_none());
+        let registered = provenant_config::registered_projects(&roots)?;
+        assert!(
+            registered
+                .iter()
+                .all(|binding| !binding.common_dir().starts_with(&root)),
+            "tick must not find a scratch fixture in the host registry: {registered:?}"
+        );
         // A second cleanup is not an error: the smoke run may have created none.
         forget_smoke_binding(roots.state.as_path(), resolved).map_err(std::io::Error::other)?;
         Ok(())
@@ -3249,6 +3505,7 @@ mod tests {
                 from_source: None,
                 hosts: "all".into(),
                 verify: true,
+                verify_only: false,
                 dry_run: false,
                 host: None,
                 route: None,
@@ -3311,6 +3568,7 @@ mod tests {
                 from_source: None,
                 hosts: "all".into(),
                 verify: true,
+                verify_only: false,
                 dry_run: false,
                 host: None,
                 route: None,
@@ -3358,6 +3616,7 @@ mod tests {
                 from_source: None,
                 hosts: "all".into(),
                 verify: true,
+                verify_only: false,
                 dry_run: false,
                 host: None,
                 route: None,
@@ -3411,6 +3670,7 @@ mod tests {
                 from_source: None,
                 hosts: "all".into(),
                 verify: true,
+                verify_only: false,
                 dry_run: true,
                 host: None,
                 route: None,
@@ -3463,6 +3723,7 @@ mod tests {
                 from_source: None,
                 hosts: "all".into(),
                 verify: true,
+                verify_only: false,
                 dry_run: true,
                 host: None,
                 route: None,
