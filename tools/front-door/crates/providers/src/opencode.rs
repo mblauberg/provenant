@@ -729,6 +729,13 @@ fn failure_diagnostic(stderr: &[u8]) -> Option<String> {
     ))
 }
 
+/// A variant the model does not offer is a route configuration refusal, not a
+/// model outage: the provider's own name for it is `"Variant unavailable"`.
+/// Spec: docs/specs/routing.md#exact-selection-no-inference
+fn variant_unavailable(message: &str) -> bool {
+    message.to_ascii_lowercase().contains("variant unavailable")
+}
+
 /// Parse the error envelope, projecting identifiers and the requested route,
 /// never arbitrary provider messages or response bodies.
 pub fn stdout_error_diagnostic(
@@ -794,6 +801,7 @@ pub fn stdout_error_diagnostic(
                 || message.contains("unknown variant")
                 || message.contains("modelnotfound")
                 || message.contains("variantnotfound")
+                || variant_unavailable(message)
                 || ((message.contains("variant") || message.contains("effort"))
                     && (message.contains("not supported") || message.contains("not found")))
         });
@@ -1222,6 +1230,11 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
                     error.retry_after_ms.or(retry_after_ms),
                     is_free_kind,
                 )
+            } else if error.message.as_deref().is_some_and(variant_unavailable) {
+                // A variant the model does not offer is a route refusal. The
+                // diagnostic names the variants to fix the route; treating it
+                // as a model outage would send settlement down the wrong path.
+                E::Refusal
             } else if error.kind == "provider.no-route" {
                 // OpenCode 2.2.0 maps ModelUnavailableError to this type.
                 E::ModelUnavailable {
@@ -2875,6 +2888,52 @@ if /bin/mv "$1/handoff.json" "$2/handoff.json" 2>/dev/null; then exit 93; fi
                 .state_writes
                 .iter()
                 .all(|grant| grant.path.starts_with("/fixture/state/data/opencode"))
+        );
+    }
+
+    // Spec: docs/specs/routing.md#exact-selection-no-inference
+    #[test]
+    fn variant_unavailable_is_a_typed_route_refusal() {
+        let mut stream = OpenCode
+            .stream(None, &provenant_records::policy::Policy::default())
+            .unwrap();
+        let raw = br#"{"type":"error","sessionID":"ses_variant","error":{"type":"provider.no-route","message":"Variant unavailable for opencode/hy4-flash-free: bogus"}}"#;
+        let events = OpenCode.observe(&mut stream, raw).unwrap();
+        assert!(events.contains(&E::Refusal), "{events:?}");
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, E::ModelUnavailable { .. })),
+            "{events:?}"
+        );
+        let outcome = OpenCode
+            .finish(
+                stream,
+                crate::ExitObservation {
+                    code: Some(1),
+                    timed_out: false,
+                },
+            )
+            .unwrap();
+        assert_eq!(outcome.status(), crate::OutcomeStatus::Refused);
+    }
+
+    // Spec: docs/specs/routing.md#exact-selection-no-inference
+    #[test]
+    fn variant_unavailable_gets_route_guidance_and_invalid_reference_still_does() {
+        let raw = br#"{"type":"error","error":{"type":"provider.no-route","message":"Variant unavailable for opencode/hy4-flash-free: bogus"}}"#;
+        let note = stdout_error_diagnostic(raw, Some("opencode/hy4-flash-free"), Some("bogus"))
+            .expect("variant refusal has a diagnostic");
+        assert!(
+            note.contains("choose a supported model and variant"),
+            "{note}"
+        );
+        let raw = br#"{"type":"error","error":{"type":"unknown","message":"Invalid model reference: foo"}}"#;
+        let note =
+            stdout_error_diagnostic(raw, None, None).expect("invalid reference has a diagnostic");
+        assert!(
+            note.contains("choose a supported model and variant"),
+            "{note}"
         );
     }
 }

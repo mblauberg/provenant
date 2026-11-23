@@ -2131,7 +2131,13 @@ fn admissible<'c>(
     }) {
         let support = match entry {
             Some(row) if row.efforts.is_empty() => "this model takes no effort".to_owned(),
-            Some(row) => format!("supported efforts: {}", row.efforts.join(", ")),
+            Some(row) => context
+                .catalogue
+                .variant_refusal(model, effort)
+                .map_or_else(
+                    || format!("supported efforts: {}", row.efforts.join(", ")),
+                    |refusal| refusal.to_string(),
+                ),
             None => {
                 let nearest = context.catalogue.nearest_models(model);
                 if nearest.is_empty() {
@@ -2346,6 +2352,36 @@ fn account_load(
     }
 }
 
+/// A model's declared variants are authoritative. An effort outside them is a
+/// route misconfiguration: refuse it here, before an adapter's drop can hide
+/// the request and the launch reaches the provider.
+/// Spec: docs/specs/routing.md#exact-selection-no-inference
+fn check_declared_effort(
+    model: &ModelId,
+    effort: Option<&str>,
+    context: &ValidatedContext<'_>,
+) -> Result<(), RoutingError> {
+    let Some(effort) = effort else { return Ok(()) };
+    let Some(entry) = context.catalogue.model(model) else {
+        return Ok(());
+    };
+    if entry.efforts.is_empty() || entry.efforts.iter().any(|variant| variant == effort) {
+        return Ok(());
+    }
+    let support = context
+        .catalogue
+        .variant_refusal(model, effort)
+        .map_or_else(
+            || format!("supported efforts: {}", entry.efforts.join(", ")),
+            |refusal| refusal.to_string(),
+        );
+    Err(RoutingError::UnsupportedEffort {
+        model: model.as_str().to_owned(),
+        effort: effort.to_owned(),
+        support,
+    })
+}
+
 /// Normalise only valid, catalogued controls for adapters declaring this policy.
 /// Unknown models and invalid controls retain the usual explicit error.
 fn normalised_effort<'e>(
@@ -2373,6 +2409,7 @@ fn candidate(
     intent: RouteIntent,
     for_pool: bool,
 ) -> Result<RouteAlternative, RoutingError> {
+    check_declared_effort(model, effort, context)?;
     let (effort, dropped_effort) = normalised_effort(model, effort, context);
     let entry = admissible(model, effort, context)?;
     #[cfg(test)]
@@ -4126,5 +4163,67 @@ mod weight_precedence_tests {
             WEIGHT_PRECEDENCE.0,
             &[Layer::Default, Layer::Host, Layer::Project]
         );
+    }
+}
+
+#[cfg(test)]
+mod variant_tests {
+    use super::*;
+
+    // Spec: docs/specs/routing.md#exact-selection-no-inference
+    #[test]
+    fn an_unavailable_effort_refuses_at_resolve_with_close_variants()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let catalogue = Catalogue::bundled()?;
+        let model = ModelId::parse("opencode/opencode/hy4-flash-free")?;
+        // Variants published by the server, recorded in the bundled catalogue
+        // (docs/research/opencode-interface.md#errors).
+        assert!(
+            catalogue
+                .model(&model)
+                .is_some_and(|row| row.efforts.iter().any(|variant| variant == "high"))
+        );
+        let config = RoutingConfig::default();
+        let now = provenant_core::WallTime::from_unix_seconds(1).unwrap();
+        let context = RoutingContext {
+            policy_account_hint: None,
+            selection_evidence: None,
+            choice_context: None,
+            catalogue: &catalogue,
+            config: &config,
+            registry: provenant_providers::REGISTRY,
+            availability: &[],
+            quota: &[],
+            capacity_cooldowns: &[],
+            accounts: &[],
+            quota_policies: &[],
+            readiness: None,
+            launch_specs: None,
+            access: &[],
+            now,
+            host: "test-host",
+        };
+        let request = RouteRequest {
+            intent: Default::default(),
+            choice: RouteChoice::Model(model.clone()),
+            effort: Some("hig".into()),
+            confidential: false,
+            fallback: Fallback::None,
+        };
+        let error = resolve(&request, &context).expect_err("unknown variant must refuse");
+        match error {
+            RoutingError::UnsupportedEffort {
+                model: refused,
+                effort,
+                support,
+            } => {
+                assert_eq!(refused, model.as_str());
+                assert_eq!(effort, "hig");
+                assert!(support.contains("unknown variant `hig`"), "{support}");
+                assert!(support.contains("close matches: high"), "{support}");
+            }
+            other => panic!("unexpected routing error {}", other.code()),
+        }
+        Ok(())
     }
 }
