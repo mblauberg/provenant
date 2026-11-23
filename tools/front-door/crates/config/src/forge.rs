@@ -805,7 +805,8 @@ mod tests {
     #[test]
     fn an_absent_remote_is_none_and_never_an_empty_name() {
         let fixture = Fixture::new("");
-        let config = Config::new(&PortTable::builtin(), Policy::default());
+        let ports = PortTable::builtin();
+        let config = Config::new(&ports, Policy::default());
         assert_eq!(
             ForgeContext::remote_if_any(&config, &fixture.git()).expect("absence"),
             None
