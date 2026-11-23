@@ -365,6 +365,32 @@ fn malformed_graph_refuses_unlisted_outputs_without_disclosing_prompt() -> Resul
     Ok(())
 }
 
+// Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
+#[test]
+fn invalid_plan_refusal_names_its_node_and_validator_reason() -> Result {
+    let rig = GraphProject::new()?;
+    let path = rig.document(&json!({
+        "schema_version": support::GRAPH_DOCUMENT_SCHEMA_VERSION,
+        "graph_id": "invalid-plan-reason",
+        "nodes": [{
+            "id": "reader", "prompt": "read", "access": "read_only",
+            "route": {"alias": "senior"}, "deadline_seconds": 0
+        }]
+    }))?;
+    let (output, refusal) =
+        rig.run(&["run", "--file", path.to_str().ok_or("path")?, "--explain"])?;
+    assert!(!output.status.success(), "{refusal}");
+    assert_eq!(refusal["error"]["code"], "dispatch_refused", "{refusal}");
+    let wire = refusal.to_string();
+    assert!(wire.contains("node reader"), "{wire}");
+    assert!(wire.contains("deadline_seconds must be positive"), "{wire}");
+    assert!(
+        wire.contains("fix the named graph node and validator reason, then retry"),
+        "{wire}"
+    );
+    Ok(())
+}
+
 #[test]
 fn existing_git_worktree_with_spaces_has_a_followable_branch_remedy() -> Result {
     let rig = GraphProject::new()?;
@@ -2468,6 +2494,52 @@ fn bundled_smoke_binds_branch_and_worktree_controls_to_its_write_node() -> Resul
             .is_some_and(|path| Path::new(path).is_absolute() && path.ends_with("elsewhere")),
         "{write}"
     );
+    Ok(())
+}
+
+/// `--route` takes what `run implement --model` takes: an alias or an exact
+/// model. The smoke graph is the upgrade verification path, so it must compile
+/// with a short or full catalogue id and carry one canonical spelling.
+// Spec: docs/specs/routing.md#launch-route-and-role-tiers
+#[test]
+fn smoke_explains_with_an_exact_model_route() -> Result {
+    fn leaves(nodes: &[Value], out: &mut Vec<Value>) {
+        for node in nodes {
+            if let Some(children) = node["composite"]["nodes"].as_array() {
+                leaves(children, out);
+            } else if let Some(body) = node["loop"]["body"].as_array() {
+                leaves(body, out);
+            } else {
+                out.push(node.clone());
+            }
+        }
+    }
+    let rig = GraphProject::new()?;
+    for (tier, expected) in [
+        (
+            "opencode/opencode/deepseek-v4.1-flash-free",
+            "opencode/opencode/deepseek-v4.1-flash-free",
+        ),
+        (
+            "opencode/hy4-flash-free",
+            "opencode/opencode/hy4-flash-free",
+        ),
+    ] {
+        let (output, explained) = rig.run(&["run", "smoke", "--explain", "--route", tier])?;
+        assert!(output.status.success(), "{tier}: {explained}");
+        let nodes = explained["data"]["document"]["nodes"][0]["composite"]["nodes"]
+            .as_array()
+            .ok_or_else(|| format!("smoke nodes: {explained}"))?;
+        let mut routed = Vec::new();
+        leaves(nodes, &mut routed);
+        routed.retain(|node| !node["route"].is_null());
+        assert!(!routed.is_empty(), "{tier}: {explained}");
+        for node in &routed {
+            assert_eq!(node["route"]["adapter"], "opencode", "{tier}: {node}");
+            assert_eq!(node["route"]["model"], expected, "{tier}: {node}");
+            assert!(node["route"]["alias"].is_null(), "{tier}: {node}");
+        }
+    }
     Ok(())
 }
 

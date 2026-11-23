@@ -389,9 +389,15 @@ operator wrote is echoed.
 ## Launch route and role tiers
 
 A role-specific route applies to matching graph nodes; other nodes keep their
-template selection. Template defaults are data.
+template selection. Template defaults are data. `--route` takes one tier for
+every node, a `role=tier` map, or an exact model as `ADAPTER/ID` — the same
+value `run implement --model` accepts. An exact model lowers to an adapter and
+model route, and the host entry point canonicalises its spelling once against
+the effective catalogue, as it does for batch items; a tier name stays an
+alias. The bundled smoke graph accepts the same values as any other template.
 
-- Why: callers can choose a route by role without editing a template.
+- Why: callers can choose a route by role without editing a template, and a
+  model pin must not be mistaken for an alias by graph admission.
 
 ## Nested lanes
 

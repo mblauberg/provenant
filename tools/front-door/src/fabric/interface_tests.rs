@@ -21,6 +21,27 @@ fn tier_override_preserves_leaf_family_constraints() {
 }
 
 #[test]
+fn an_exact_model_route_tier_lowers_to_an_adapter_and_model_route() {
+    use provenant_fabric_runtime::graph::GraphNode;
+    for tier in [
+        "opencode/opencode/deepseek-v4.1-flash-free",
+        "opencode/hy4-flash-free",
+    ] {
+        let choice = super::RouteChoice::parse(&json!(tier)).unwrap();
+        let mut node: GraphNode = serde_json::from_value(json!({
+            "id":"read", "access":"read_only", "prompt":"p",
+            "route":{"alias":"junior"}
+        }))
+        .unwrap();
+        super::override_tier(&mut node, &choice);
+        let route = node.route.unwrap();
+        assert_eq!(route.adapter.as_deref(), Some("opencode"), "{tier}");
+        assert_eq!(route.model.as_deref(), Some(tier), "{tier}");
+        assert_eq!(route.alias, None, "{tier}");
+    }
+}
+
+#[test]
 fn a_role_map_sets_each_node_to_its_role_tier_or_keeps_the_default() {
     use provenant_fabric_runtime::graph::GraphNode;
     let node = |fields: Value| -> GraphNode {

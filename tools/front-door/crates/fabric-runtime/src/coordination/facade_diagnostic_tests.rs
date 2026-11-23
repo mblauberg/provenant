@@ -413,6 +413,29 @@ fn graph_plan_refusal_retains_token_shaped_node_identifier_as_metadata() {
     assert!(detail.contains("writer worktree"));
 }
 
+// Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
+#[test]
+fn graph_plan_admission_names_the_node_and_validator_reason() {
+    let reason = "node read: route alias must be an identifier; exact models require an adapter or --model";
+    let error = FacadeError::graph_admission(crate::graph::AdmissionError::Plan(reason.into()));
+    let diagnostic = error.diagnostic();
+    assert_eq!(diagnostic.code, "dispatch_refused");
+    assert_eq!(diagnostic.detail.as_deref(), Some(reason));
+    assert_eq!(
+        diagnostic.next.as_deref(),
+        Some("fix the named graph node and validator reason, then retry")
+    );
+    let fact = match &error {
+        FacadeError::DispatchRefused {
+            fact: Some(fact), ..
+        } => fact,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(fact, &super::DispatchRefusalFact::GraphPlan);
+    let wire = serde_json::to_value(&error).unwrap();
+    assert_eq!(wire["reason"], serde_json::json!(reason));
+}
+
 #[test]
 fn detached_writer_refusal_keeps_its_typed_cause_across_transport() {
     let error = FacadeError::DispatchRefused {

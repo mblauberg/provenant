@@ -1705,8 +1705,11 @@ impl Factory {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .into(),
+            // The compiled launch already carries an exact model route. Keeping
+            // it as a tier here would let relay child controls replace it with
+            // an alias, which cannot hold a model id.
             tier: match &route {
-                Some(RouteChoice::Alias(alias)) => Some(alias.clone()),
+                Some(RouteChoice::Alias(alias)) if !alias.contains('/') => Some(alias.clone()),
                 _ => None,
             },
             timeout_seconds: None,
@@ -3881,6 +3884,19 @@ fn route_role(node: &provenant_fabric_runtime::graph::GraphNode) -> &'static str
     }
 }
 
+/// Lower a `--route` tier to the node route it selects. A full or short
+/// `ADAPTER/ID` becomes an adapter and model route; a pool name stays an alias.
+/// The host entry point canonicalises the model spelling once, so this keeps the
+/// declared id verbatim. Spec: docs/specs/fabric.md#one-model-spelling-per-route
+fn route_for_tier(tier: &str) -> Value {
+    match crate::graph_support::tier_route("route", &json!(tier), None, false, None) {
+        Ok((_, route, _)) => route,
+        // A malformed value stays a tier so graph admission names its node and
+        // validator reason instead of failing this early without that context.
+        Err(_) => json!({"alias": tier}),
+    }
+}
+
 fn override_tier(node: &mut provenant_fabric_runtime::graph::GraphNode, choice: &RouteChoice) {
     if let Some(composite) = &mut node.composite {
         for child in &mut composite.nodes {
@@ -3900,7 +3916,7 @@ fn override_tier(node: &mut provenant_fabric_runtime::graph::GraphNode, choice: 
     ) && let Some(alias) = choice.tier_for(route_role(node))
     {
         let Ok(route) = serde_json::from_value::<provenant_fabric_runtime::graph::GraphRoute>(
-            json!({"alias": alias}),
+            route_for_tier(alias),
         ) else {
             return;
         };

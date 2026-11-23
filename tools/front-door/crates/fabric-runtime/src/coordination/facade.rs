@@ -917,8 +917,8 @@ impl FacadeError {
     pub fn graph_candidate(error: crate::graph::CandidateError) -> Self {
         use crate::graph::CandidateError;
         match error {
-            CandidateError::Plan => {
-                Self::graph_admission(crate::graph::AdmissionError::Plan(String::new()))
+            CandidateError::Plan(reason) => {
+                Self::graph_admission(crate::graph::AdmissionError::Plan(reason))
             }
             CandidateError::CloudPlacementRemoved => {
                 Self::invalid(InvalidInputDetail::CloudPlacementRemoved)
@@ -972,6 +972,22 @@ impl FacadeError {
     /// Retain the typed admission stage while keeping its original refusal text.
     pub fn graph_admission(error: crate::graph::AdmissionError) -> Self {
         use crate::graph::AdmissionError;
+        // A plan rejection already names the node and the validator reason.
+        // Keep that text rather than flattening it to a generic topology
+        // refusal, so the repair text can be followed. Spec:
+        // docs/specs/fabric.md#graph-admission-and-refusal-causes
+        let plan_reason = match &error {
+            AdmissionError::Plan(reason)
+                if !reason.is_empty()
+                    && reason
+                        .strip_prefix("node ")
+                        .and_then(|reason| reason.strip_suffix(": writer worktree"))
+                        .is_none() =>
+            {
+                Some(reason.clone())
+            }
+            _ => None,
+        };
         let fact = match &error {
             AdmissionError::CloudPlacementRemoved => {
                 return Self::invalid(InvalidInputDetail::CloudPlacementRemoved);
@@ -1000,7 +1016,7 @@ impl FacadeError {
             }
         };
         Self::DispatchRefused {
-            reason: match &fact {
+            reason: plan_reason.unwrap_or_else(|| match &fact {
                 DispatchRefusalFact::GraphStructuralLimit(limit) => limit.to_string(),
                 DispatchRefusalFact::GraphCycle { node } => {
                     format!("node {node}: dependency cycle")
@@ -1021,7 +1037,7 @@ impl FacadeError {
                     "graph composite or loop expansion is invalid".into()
                 }
                 _ => "graph plan schema or topology is invalid".into(),
-            },
+            }),
             disk: None,
             fact: Some(fact),
         }
