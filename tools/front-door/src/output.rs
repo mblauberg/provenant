@@ -149,16 +149,32 @@ fn remember_for_change(warning: &Warning) {
     }
 }
 
-/// Take the warnings collected for the current command's envelope. Per-change
-/// keys are remembered here, when the warnings enter the envelope the reader
-/// sees, and on the human path in `CommandSink::display`.
+/// Take the warnings collected for the current command's envelope. Taking only
+/// moves them out of the sink. A per-change key is remembered once the reader
+/// has the envelope (`remember_warnings`) or once the guard shows the warning on
+/// a path that never emits — never before it has been delivered.
 fn take_warnings() -> Vec<Warning> {
     let sink = COMMAND_SINK.read().expect("output sink lock").clone();
-    let warnings = sink.map(|sink| sink.take_held()).unwrap_or_default();
-    for warning in &warnings {
+    sink.map(|sink| sink.take_held()).unwrap_or_default()
+}
+
+/// Remember a batch of per-change keys after their envelope reached the reader.
+/// An undelivered warning must not be marked seen just because it was drained.
+fn remember_warnings(warnings: &[Warning]) {
+    for warning in warnings {
         remember_for_change(warning);
     }
-    warnings
+}
+
+/// Return warnings to the sink when no envelope reached the reader, so the
+/// guard shows them on exit (and remembers them then) instead of swallowing
+/// them or remembering an undelivered warning here.
+fn return_warnings(warnings: Vec<Warning>) {
+    let sink = COMMAND_SINK.read().expect("output sink lock").clone();
+    if let Some(sink) = sink {
+        let mut state = sink.state.lock().expect("output sink lock");
+        state.warnings.extend(warnings);
+    }
 }
 
 pub(crate) fn emit<T: Serialize>(
@@ -254,8 +270,16 @@ pub(crate) fn emit_with_writers<T: Serialize, Wout: Write, Werr: Write>(
         )
     };
     match rendered {
-        Ok(status) => provenant_cli::exit_status(&status),
+        Ok(status) => {
+            // The envelope reached the reader: its warnings are now delivered,
+            // so their per-change keys may be remembered.
+            remember_warnings(&warnings);
+            provenant_cli::exit_status(&status)
+        }
         Err(_) => {
+            // No envelope was written. Hand the warnings back to the guard,
+            // which shows them on exit and remembers them only once shown.
+            return_warnings(warnings);
             let _ = io::stderr().write_all(b"provenant: IO: cannot write command result\n");
             3
         }
@@ -352,33 +376,29 @@ fn emit_unpublished_with_writers<T: Serialize, Wout: Write, Werr: Write>(
     stderr: &mut Werr,
 ) -> u8 {
     const REPAIR: &str = "narrow it with --since and --until";
-    // Under --json the cap notice must travel in the envelope: raising it
-    // before the drain puts it beside the command's other warnings. In human
-    // mode the sink prints it as soon as the render reports omitted bytes.
-    let over_cap = if globals.json {
-        let omitted = serde_json::to_vec(result)
-            .map(|bytes| bytes.len().saturating_sub(provenant_cli::MAX_RESULT_BYTES))
-            .unwrap_or_default();
-        if omitted > 0 {
-            warning::warn(too_large_warning(&result.command, omitted, REPAIR));
-        }
-        Some(omitted)
-    } else {
-        None
-    };
+    // Drain the held warnings first. They travel in the JSON envelope (or reach
+    // stderr on the human path) before any per-change key is remembered.
     let warnings = take_warnings();
-    let rendered = if globals.json {
+    // Build the envelope once so the overflow measurement and the bounded
+    // marker describe the bytes actually attempted, including these warnings.
+    // Measuring the bare result instead reports 0 omitted bytes when the
+    // warnings are what pushed the envelope past the cap.
+    let envelope = if globals.json {
         let data = serde_json::to_value(&result.data).unwrap_or(Value::Null);
-        let json_result = CommandResult {
+        Some(CommandResult {
             schema_version: result.schema_version,
             command: result.command.clone(),
             status: result.status,
             data,
             error: result.error.clone(),
             warnings: warnings.clone(),
-        };
-        render_unpublished(
-            &json_result,
+        })
+    } else {
+        None
+    };
+    let rendered = match envelope.as_ref() {
+        Some(envelope) => render_unpublished(
+            envelope,
             globals,
             human,
             read_only,
@@ -386,9 +406,8 @@ fn emit_unpublished_with_writers<T: Serialize, Wout: Write, Werr: Write>(
             provenant_cli::MAX_RESULT_BYTES,
             &mut *stdout,
             &mut *stderr,
-        )
-    } else {
-        render_unpublished(
+        ),
+        None => render_unpublished(
             result,
             globals,
             human,
@@ -397,22 +416,28 @@ fn emit_unpublished_with_writers<T: Serialize, Wout: Write, Werr: Write>(
             provenant_cli::MAX_RESULT_BYTES,
             &mut *stdout,
             &mut *stderr,
-        )
+        ),
     };
     match rendered {
         Ok(omitted) => {
             if !globals.json && omitted > 0 {
+                // Human mode: the sink prints this as it arrives and remembers it.
                 warning::warn(too_large_warning(&result.command, omitted, REPAIR));
             }
+            remember_warnings(&warnings);
             provenant_cli::exit_status(&result.status)
         }
         Err(RenderError::TooLarge) => {
             // JSON cannot be clipped mid-object: emit a bounded marker instead.
-            let omitted = over_cap.unwrap_or_else(|| {
-                serde_json::to_vec(result)
-                    .map(|bytes| bytes.len().saturating_sub(provenant_cli::MAX_RESULT_BYTES))
-                    .unwrap_or_default()
-            });
+            let omitted = envelope
+                .as_ref()
+                .and_then(|envelope| serde_json::to_vec(envelope).ok())
+                .map(|bytes| bytes.len().saturating_sub(provenant_cli::MAX_RESULT_BYTES))
+                .unwrap_or_else(|| {
+                    serde_json::to_vec(result)
+                        .map(|bytes| bytes.len().saturating_sub(provenant_cli::MAX_RESULT_BYTES))
+                        .unwrap_or_default()
+                });
             let marker = json!({
                 "truncated": true,
                 "omitted_bytes": omitted,
@@ -441,10 +466,16 @@ fn emit_unpublished_with_writers<T: Serialize, Wout: Write, Werr: Write>(
                     .warnings
                     .push(too_large_warning(&result.command, omitted, REPAIR));
             }
-            let _ = provenant_cli::render(&bounded, RenderMode::Json, &mut *stdout);
+            let written = provenant_cli::render(&bounded, RenderMode::Json, &mut *stdout);
+            if written.is_ok() {
+                remember_warnings(&bounded.warnings);
+            } else {
+                return_warnings(bounded.warnings);
+            }
             provenant_cli::exit_status(&result.status)
         }
         Err(_) => {
+            return_warnings(warnings);
             let _ = stderr.write_all(b"provenant: IO: cannot write command result\n");
             3
         }
@@ -760,8 +791,55 @@ mod tests {
     }
 
     #[test]
+    // Spec: docs/specs/cli.md#one-bounded-envelope
+    fn omitted_bytes_measure_the_envelope_not_the_bare_result() {
+        let _lock = TEST_LOCK.lock().expect("test lock");
+        let _sink = install_command_sink(true);
+        // Size the bare result just under the cap so a modest held warning is
+        // what pushes the envelope over it. The marker and its warning must
+        // report that overflow, not "0 bytes omitted".
+        let empty = CommandResult::new("fixture", Outcome::Ok, String::new());
+        let overhead = serde_json::to_vec(&empty).expect("encode").len();
+        let data = "x".repeat(provenant_cli::MAX_RESULT_BYTES - overhead - 256);
+        let result = CommandResult::new("fixture", Outcome::Ok, data);
+        assert!(
+            serde_json::to_vec(&result).expect("encode").len() < provenant_cli::MAX_RESULT_BYTES,
+            "the bare result fits"
+        );
+        warning::warn(Warning::new(WarningCode("TEST"), "w".repeat(512)));
+        let globals = provenant_cli::Globals {
+            json: true,
+            ..Default::default()
+        };
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let status =
+            emit_unpublished_with_writers(&result, &globals, "", false, None, &mut out, &mut err);
+        assert_eq!(status, 0);
+        assert!(err.is_empty(), "{}", String::from_utf8_lossy(&err));
+        let envelope: Value = serde_json::from_slice(&out).expect("bounded marker envelope");
+        let omitted = envelope["data"]["omitted_bytes"]
+            .as_u64()
+            .expect("omitted_bytes") as usize;
+        assert!(omitted > 0, "the envelope overflowed: {envelope}");
+        assert!(
+            envelope["warnings"]
+                .as_array()
+                .expect("warnings")
+                .iter()
+                .any(|warning| {
+                    warning["code"] == RESULT_TOO_LARGE.as_str()
+                        && warning["message"].as_str().is_some_and(|message| {
+                            message.contains(&format!("{omitted} bytes omitted"))
+                        })
+                }),
+            "the warning reports the same honest count as the marker: {envelope}"
+        );
+    }
+
+    #[test]
     // Spec: docs/specs/cli.md#warnings-are-typed-values
-    fn a_per_change_warning_is_remembered_only_after_display() {
+    fn a_per_change_warning_is_remembered_only_after_a_successful_write() {
         with_root(|root| {
             set_state_root(root);
             let warning = Warning::new(NAME_CASE_FOLDED, "folded `Reader` to `reader`")
@@ -772,15 +850,68 @@ mod tests {
             warning::warn(warning);
             assert!(
                 !dedup::was_seen(root, &key),
-                "a warning held for the envelope is not remembered before display"
+                "a warning held for the envelope is not remembered before it is shown"
             );
-            let taken = take_warnings();
-            assert_eq!(taken.len(), 1);
+            let result = CommandResult::new("fixture", Outcome::Ok, json!({"ok": true}));
+            let globals = provenant_cli::Globals {
+                json: true,
+                ..Default::default()
+            };
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            assert_eq!(
+                emit_with_writers(&result, &globals, &mut out, &mut err, "", false, None),
+                0
+            );
             assert!(
                 dedup::was_seen(root, &key),
-                "entering the envelope shows the warning and remembers its key"
+                "delivering the warning in the envelope remembers its key"
             );
+            assert!(err.is_empty(), "{}", String::from_utf8_lossy(&err));
         });
+    }
+
+    #[test]
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    fn a_failed_write_does_not_remember_an_undelivered_warning() {
+        with_root(|root| {
+            set_state_root(root);
+            let warning = Warning::new(NAME_CASE_FOLDED, "folded `Writer` to `writer`")
+                .subject("writer-bad")
+                .once_per_change();
+            let key = warning.key();
+            let sink = install_command_sink(true);
+            warning::warn(warning);
+            let result = CommandResult::new("fixture", Outcome::Ok, json!({"ok": true}));
+            let globals = provenant_cli::Globals {
+                json: true,
+                ..Default::default()
+            };
+            let mut out = BrokenWriter;
+            let mut err = Vec::new();
+            assert_eq!(
+                emit_with_writers(&result, &globals, &mut out, &mut err, "", false, None),
+                3
+            );
+            assert!(
+                !dedup::was_seen(root, &key),
+                "a warning no envelope delivered is not remembered on an IO failure"
+            );
+            // The guard shows the returned warning on exit and remembers it then.
+            drop(sink);
+        });
+    }
+
+    /// A writer that always fails, driving `emit_with_writers` into its exit-3
+    /// arm while keeping the test inside the in-process emission seam.
+    struct BrokenWriter;
+    impl Write for BrokenWriter {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::ErrorKind::BrokenPipe.into())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
     }
 
     #[test]
