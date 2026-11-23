@@ -5916,7 +5916,9 @@ fn graph_settlement_records_a_failed_advance_for_status() -> Result {
     let error = status["data"]["rows"][0]["reason"]
         .as_str()
         .ok_or("advance error")?;
-    let human = rig.command(&["status", "broken"])?;
+    // The bounded view clips a long reason (a missing worktree names its
+    // path); `--full` must show the whole of it.
+    let human = rig.command(&["status", "broken", "--full"])?;
     assert!(
         String::from_utf8_lossy(&human.stdout.bytes).contains(error),
         "{}",
