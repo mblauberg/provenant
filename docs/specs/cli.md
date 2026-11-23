@@ -30,6 +30,18 @@ refuse exactly the values of its declared syntax.
 
 - Why: an action must address the intended work.
 
+## Every name refusal lists close matches
+
+Models, adapters, templates, knobs and graph names share one close-match ranker
+(`core::names`). An unknown name refuses with its close matches carried in the
+typed error, never in prose alone, and a caller never recomputes them. A name
+that differs only by case is folded to lower case and reported with the
+`NAME_CASE_FOLDED` warning instead of being refused; no secret value is echoed in
+a refusal.
+
+- Why: a person can correct a typo from the error they see, and a name typed
+  with capitals is the same name.
+
 ## Parsing
 
 Help and version inspection need no project state. Paths keep their native

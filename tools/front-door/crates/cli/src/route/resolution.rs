@@ -1359,7 +1359,9 @@ pub fn resolve_review_family(
                         if accounts.is_empty() {
                             return provenant_records::AdapterSpec::get(&selected.adapter)
                                 .map(|adapter| adapter.family.to_owned())
-                                .ok_or_else(|| RoutingError::UnknownAdapter.into());
+                                .ok_or_else(|| {
+                                    RoutingError::unknown_adapter(&selected.adapter).into()
+                                });
                         }
                         refusals.push(format!("{}: {}", model.as_str(), accounts.join("; ")));
                         excluded.push(model);

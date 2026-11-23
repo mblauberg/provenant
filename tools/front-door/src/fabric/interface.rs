@@ -1272,12 +1272,9 @@ impl Factory {
                 let name = value.as_str().ok_or_else(|| {
                     FacadeError::invalid(InvalidInputDetail::Field("name".into()))
                 })?;
-                if let Some(fault) =
-                    provenant_fabric_runtime::graph::template::graph_name_fault(name)
-                {
-                    return Err(graph_input_reason(fault));
-                }
-                Some(name.to_owned())
+                let folded = provenant_fabric_runtime::graph::template::fold_graph_name(name)
+                    .map_err(graph_input_reason)?;
+                Some(folded)
             }
             None => None,
         };
@@ -1904,12 +1901,9 @@ impl Factory {
         });
         let (base, named) = match requested {
             Some(name) => {
-                if let Some(fault) =
-                    provenant_fabric_runtime::graph::template::graph_name_fault(name)
-                {
-                    return Err(graph_input_reason(fault));
-                }
-                (name.to_owned(), true)
+                let folded = provenant_fabric_runtime::graph::template::fold_graph_name(name)
+                    .map_err(graph_input_reason)?;
+                (folded, true)
             }
             None if template_name == "lane-document" => ("graph".to_owned(), false),
             None => (
@@ -6968,7 +6962,7 @@ mod tests {
         )?;
         let compiled = &response["document"];
         assert!(compiled["graph_id"].as_str().is_some_and(|id| {
-            provenant_fabric_runtime::graph::template::graph_name_fault(id).is_none()
+            provenant_fabric_runtime::graph::template::fold_graph_name(id).is_ok()
         }));
         // Compare declarations after decoding: empty default fields may be omitted on the wire.
         let document: GraphDocument = serde_json::from_value(compiled.clone())?;

@@ -88,17 +88,22 @@ fn bare_name_offered_by_several_providers_names_each_candidate()
 }
 
 #[test]
-fn bare_name_no_provider_offers_is_unknown() -> Result<(), Box<dyn std::error::Error>> {
+// Spec: docs/specs/cli.md#every-name-refusal-lists-close-matches
+fn bare_name_no_provider_offers_is_unknown_with_close_matches()
+-> Result<(), Box<dyn std::error::Error>> {
     let catalogue = synthetic_catalogue()?;
-    assert_eq!(
-        catalogue.resolve_bare_model("no-such-model"),
-        Err(BareModelError::Unknown)
-    );
-    // A provider-qualified name never resolves as a bare name.
-    assert_eq!(
-        catalogue.resolve_bare_model("alpha/unique-model"),
-        Err(BareModelError::Unknown)
-    );
+    let candidates = match catalogue.resolve_bare_model("uniqye-model") {
+        Err(BareModelError::Unknown { candidates }) => candidates,
+        other => panic!("expected Unknown, got {other:?}"),
+    };
+    assert_eq!(candidates.first().map(String::as_str), Some("unique-model"));
+    // A provider-qualified name never resolves as a bare name and has no
+    // candidate: the namespace is deliberate, not a typo.
+    let candidates = match catalogue.resolve_bare_model("alpha/unique-model") {
+        Err(BareModelError::Unknown { candidates }) => candidates,
+        other => panic!("expected Unknown, got {other:?}"),
+    };
+    assert!(candidates.is_empty());
     Ok(())
 }
 

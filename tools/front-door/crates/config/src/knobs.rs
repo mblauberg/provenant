@@ -268,38 +268,37 @@ fn spec<'a>(registry: &'a Registry, name: &str) -> Result<&'a Spec, ConfigError>
         .ok_or_else(|| unknown(registry, name))
 }
 fn unknown(registry: &Registry, name: &str) -> ConfigError {
+    // The refusal carries the close matches, so callers never compute them.
+    let candidates = match provenant_core::resolve(&KnobCatalogue(registry), name) {
+        Ok(_) => Vec::new(),
+        Err(refusal) => refusal.candidates,
+    };
     ConfigError::UnknownKnob {
         name: name.into(),
-        close: nearest(name, registry.knobs.keys().map(String::as_str)),
+        close: candidates,
     }
 }
-/// The names closest to `name` by edit distance (or containment), nearest first.
+/// The names closest to `name`, ranked by the shared ranker.
 pub(crate) fn nearest<'a>(name: &str, known: impl Iterator<Item = &'a str>) -> Vec<String> {
-    let mut near: Vec<(usize, &str)> = known
-        .filter(|known| known.contains(name) || name.contains(known) || distance(known, name) <= 3)
-        .map(|known| (distance(known, name), known))
-        .collect();
-    near.sort();
-    near.into_iter()
-        .take(3)
-        .map(|(_, known)| known.to_owned())
+    provenant_core::close_matches(name, known)
+        .into_iter()
+        .map(str::to_owned)
         .collect()
 }
-fn distance(a: &str, b: &str) -> usize {
-    let b: Vec<char> = b.chars().collect();
-    let mut row: Vec<usize> = (0..=b.len()).collect();
-    for (i, x) in a.chars().enumerate() {
-        let mut diagonal = row[0];
-        row[0] = i + 1;
-        for (j, y) in b.iter().enumerate() {
-            let above = row[j + 1];
-            row[j + 1] = (above + 1)
-                .min(row[j] + 1)
-                .min(diagonal + usize::from(x != *y));
-            diagonal = above;
-        }
+/// Knob names resolved through the shared name machinery.
+struct KnobCatalogue<'a>(&'a Registry);
+
+impl provenant_core::Catalogue for KnobCatalogue<'_> {
+    type Item = ();
+    const KIND: provenant_core::NameKind = provenant_core::NameKind("knob");
+
+    fn names(&self) -> Vec<String> {
+        self.0.knobs.keys().cloned().collect()
     }
-    row[b.len()]
+
+    fn lookup(&self, canonical: &str) -> Option<Self::Item> {
+        self.0.knobs.contains_key(canonical).then_some(())
+    }
 }
 
 /// Check a value against the knob's type, range, enum values and nullability.
@@ -777,6 +776,31 @@ mod policy_action_tests {
                 .collect();
             assert_eq!(actual, expected, "{}", rule.code);
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod name_tests {
+    use super::*;
+
+    #[test]
+    // Spec: docs/specs/cli.md#every-name-refusal-lists-close-matches
+    fn a_one_edit_knob_typo_ranks_first_and_carries_candidates() {
+        let registry = registry().unwrap();
+        let matches = nearest(
+            "chair.switch_account",
+            registry.knobs.keys().map(String::as_str),
+        );
+        assert_eq!(
+            matches.first().map(String::as_str),
+            Some("chair.switch_accounts")
+        );
+        let ConfigError::UnknownKnob { close, .. } = unknown(&registry, "chair.switch_account")
+        else {
+            panic!("unknown knob");
+        };
+        assert!(close.iter().any(|name| name == "chair.switch_accounts"));
     }
 }
 

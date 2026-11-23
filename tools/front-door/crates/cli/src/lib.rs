@@ -1,6 +1,5 @@
 //! Pure argument parsing, help and bounded result rendering. No owner execution.
 #![forbid(unsafe_code)]
-use provenant_core::edit_distance;
 pub mod accounts;
 pub mod brief;
 pub mod check;
@@ -375,16 +374,16 @@ fn usage_suggestion(error: &clap::Error, argv: &[OsString]) -> Option<String> {
             .map(|child| child.get_name().to_owned())
             .collect()
     };
-    let candidate = candidates
-        .into_iter()
-        .map(|name| (edit_distance(&rejected, &name), name))
-        .filter(|(distance, _)| (1..=2).contains(distance))
-        .min()?;
-    Some(if flag.is_some() {
-        candidate.1
-    } else {
-        format!("{path} {}", candidate.1)
-    })
+    let suggested = provenant_core::close_matches(&rejected, candidates.iter().map(String::as_str))
+        .first()
+        .map(|name| {
+            if flag.is_some() {
+                (*name).to_owned()
+            } else {
+                format!("{path} {name}")
+            }
+        })?;
+    Some(suggested)
 }
 /// Follow the subcommand words in `argv` (skipping option values) down the
 /// command model, stopping at `stop` when given. Returns the deepest command
@@ -3028,7 +3027,6 @@ mod tests {
         }
         let graph_refused = [
             "",
-            "Fix",
             "1fix",
             "fix-",
             "fix--login",

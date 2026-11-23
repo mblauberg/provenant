@@ -65,21 +65,21 @@ impl Target {
             if head.contains('#') {
                 return Err(TargetError::AttemptWithoutNode);
             }
-            check_name(head)?;
+            let name = parse_name(head)?;
             return Ok(Target {
-                name: head.to_owned(),
+                name,
                 node: None,
                 attempt: None,
             });
         };
-        check_name(head)?;
+        let name = parse_name(head)?;
         let (node, attempt) = match node_part.split_once('#') {
             Some((node, attempt)) => (node, Some(parse_attempt(attempt)?)),
             None => (node_part, None),
         };
         check_node(node)?;
         Ok(Target {
-            name: head.to_owned(),
+            name,
             node: Some(node.to_owned()),
             attempt,
         })
@@ -107,26 +107,40 @@ impl fmt::Display for Target {
     }
 }
 
-fn check_name(name: &str) -> Result<(), TargetError> {
-    let Some(first) = name.bytes().next() else {
+/// Parse a graph name, folding capitals to lower case with a warning. The
+/// shared `valid_name` owns the character rules; graph names additionally keep
+/// single hyphens only.
+fn parse_name(name: &str) -> Result<String, TargetError> {
+    if name.is_empty() {
         return Err(TargetError::Empty);
-    };
-    if !first.is_ascii_lowercase() {
-        return Err(TargetError::NameStart);
-    }
-    if !name
-        .bytes()
-        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-    {
-        return Err(TargetError::NameCharacter);
     }
     if name.len() > NAME_BYTES {
         return Err(TargetError::NameTooLong);
     }
-    if name.ends_with('-') || name.contains("--") {
+    if !name
+        .chars()
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic())
+    {
+        return Err(TargetError::NameStart);
+    }
+    let (folded, changed) = provenant_core::valid_name(name).ok_or(TargetError::NameCharacter)?;
+    if folded.contains('_') {
+        return Err(TargetError::NameCharacter);
+    }
+    if folded.contains("--") || folded.ends_with('-') {
         return Err(TargetError::NameHyphen);
     }
-    Ok(())
+    if changed {
+        provenant_records::warning::warn(
+            provenant_records::warning::Warning::new(
+                provenant_records::warning::NAME_CASE_FOLDED,
+                format!("folded `{name}` to `{folded}`"),
+            )
+            .subject(folded.clone()),
+        );
+    }
+    Ok(folded)
 }
 
 fn check_node(node: &str) -> Result<(), TargetError> {
@@ -459,6 +473,22 @@ mod continuation_invariants;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use provenant_records::warning::{NAME_CASE_FOLDED, capture};
+
+    #[test]
+    // Spec: docs/specs/cli.md#every-name-refusal-lists-close-matches
+    fn capitalised_names_fold_and_warn() {
+        let (parsed, warnings) = capture(|| Target::parse("Fix-Login/writer#2").unwrap());
+        assert_eq!(parsed.name, "fix-login");
+        assert_eq!(parsed.node.as_deref(), Some("writer"));
+        assert_eq!(parsed.attempt, NonZeroU32::new(2));
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.code.as_ref() == NAME_CASE_FOLDED.0),
+            "{warnings:?}"
+        );
+    }
 
     fn target(name: &str, node: Option<&str>, attempt: Option<u32>) -> Target {
         Target {
@@ -527,12 +557,10 @@ mod tests {
     fn refuses_each_fault() {
         let cases = [
             ("", TargetError::Empty),
-            ("Fix", TargetError::NameStart),
             ("1fix", TargetError::NameStart),
             ("-fix", TargetError::NameStart),
             ("42", TargetError::NameStart),
             ("fix_login", TargetError::NameCharacter),
-            ("fixLogin", TargetError::NameCharacter),
             ("fix login", TargetError::NameCharacter),
             ("fix.login", TargetError::NameCharacter),
             ("fix-", TargetError::NameHyphen),
@@ -569,9 +597,7 @@ mod tests {
             "face-lift",
             "abcdef0123456789abcdef0123456789",
         ] {
-            assert!(
-                provenant_fabric_runtime::graph::template::graph_name_fault(spelling).is_none()
-            );
+            assert!(provenant_fabric_runtime::graph::template::fold_graph_name(spelling).is_ok());
             for suffix in ["", "/writer", "/writer#2"] {
                 let target = format!("{spelling}{suffix}");
                 let parsed = Target::parse(&target).unwrap();

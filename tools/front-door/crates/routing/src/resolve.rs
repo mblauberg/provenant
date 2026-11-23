@@ -230,12 +230,10 @@ pub fn list(
     context: &RoutingContext<'_>,
 ) -> Result<RouteList, RoutingError> {
     let context = &ValidatedContext::new(context)?;
-    if query
-        .adapter
-        .as_ref()
-        .is_some_and(|id| !context.registry.iter().any(|r| r.adapter.id() == id))
+    if let Some(adapter) = query.adapter.as_ref()
+        && !context.registry.iter().any(|r| r.adapter.id() == adapter)
     {
-        return Err(RoutingError::UnknownAdapter);
+        return Err(RoutingError::unknown_adapter(adapter));
     }
     if query
         .pool
@@ -2102,7 +2100,7 @@ fn admissible<'c>(
         .registry
         .iter()
         .find(|r| r.adapter.id() == model.adapter())
-        .ok_or(RoutingError::UnknownAdapter)?;
+        .ok_or_else(|| RoutingError::unknown_adapter(model.adapter()))?;
     let entry = context.catalogue.model(model);
     // Backstop for uncatalogued models; catalogued ones record their own efforts.
     if let Some(effort) = effort

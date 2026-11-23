@@ -227,7 +227,7 @@ pub(super) fn set_pool(roots: &Roots, request: &RouteSet) -> Result<(), EdgeErro
         .iter()
         .any(|provider| provider.adapter.id() == model.adapter())
     {
-        return Err(RoutingError::UnknownAdapter.into());
+        return Err(RoutingError::unknown_adapter(model.adapter()).into());
     }
     let mut members = match effective_members(roots, &request.pool) {
         Ok(members) => members,
@@ -304,7 +304,7 @@ pub(super) fn known_provider(id: &str) -> Result<(), EdgeError> {
     if REGISTRY.iter().any(|provider| provider.adapter.id() == id) {
         Ok(())
     } else {
-        Err(RoutingError::UnknownAdapter.into())
+        Err(RoutingError::unknown_adapter(id).into())
     }
 }
 
