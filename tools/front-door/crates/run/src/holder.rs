@@ -7,6 +7,7 @@ use crate::{
 };
 use provenant_core::{ActorId, AttemptId, CancelToken, Clock, OperationId, ProjectId, RootInputs};
 use provenant_os::{clock::SystemClock, exec::Termination, fs::Directory};
+#[cfg(test)]
 use provenant_records::Tokens;
 use provenant_supervisor::{
     custody::{self, CustodyError, ExitObservation},

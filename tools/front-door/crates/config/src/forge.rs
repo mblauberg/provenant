@@ -117,11 +117,7 @@ pub struct ForgeContext {
 impl ForgeContext {
     /// Resolve the context for one command. Detection that finds nothing is a
     /// refusal listing the remotes or branches it saw, with close matches.
-    pub fn resolve(
-        project: &Project,
-        config: &Config<'_>,
-        git: &Git,
-    ) -> Result<Self, ForgeContextError> {
+    pub fn resolve(config: &Config<'_>, git: &Git) -> Result<Self, ForgeContextError> {
         let remote = Self::remote(config, git)?;
         let default_branch = Self::resolve_default_branch(config, git, &remote.value)?;
         let protected = Self::resolve_protected(config, &default_branch.value);
@@ -154,7 +150,7 @@ impl ForgeContext {
         if !declared.is_empty() {
             return Ok(Sourced {
                 value: declared.to_owned(),
-                source: port_source(&config.ports, "git.remote", "remote"),
+                source: port_source(config.ports, "git.remote", "remote"),
             });
         }
         if let Some((branch, remote)) = git.upstream_remote() {
@@ -245,7 +241,7 @@ impl ForgeContext {
             value.dedup();
             return Sourced {
                 value,
-                source: port_source(&config.ports, "git.protected", "protected"),
+                source: port_source(config.ports, "git.protected", "protected"),
             };
         }
         let mut set = BTreeSet::new();
@@ -291,7 +287,7 @@ fn port_source(ports: &PortTable, leaf: &str, key: &str) -> Source {
         .provenance()
         .get(leaf)
         .copied()
-        .unwrap_or_else(|| ports.git.source);
+        .unwrap_or(ports.git.source);
     let origin = match layer {
         Layer::Project => format!("{}#git.{key}", crate::ports::PORTS_CONFIG),
         Layer::Host | Layer::HostProject => format!("ports.json#git.{key}"),
@@ -362,7 +358,7 @@ pub fn operation_policy(
 pub fn resolve_for(project: &Path, ports: &PortTable) -> Result<ForgeContext, ForgeContextError> {
     let config = Config::new(ports, Policy::default());
     let git = Git::new(project)?;
-    ForgeContext::resolve(project, &config, &git)
+    ForgeContext::resolve(&config, &git)
 }
 
 /// A bounded, read-only view of a checkout's Git metadata. It never runs a
@@ -499,7 +495,7 @@ fn resolve_path(base: &Path, value: &str) -> PathBuf {
 
 fn read_bounded(path: &Path) -> Result<String, ForgeContextError> {
     use io::Read;
-    let mut file = std::fs::File::open(path).map_err(|source| ForgeContextError::Io {
+    let file = std::fs::File::open(path).map_err(|source| ForgeContextError::Io {
         path: path.to_owned(),
         source,
     })?;
@@ -630,7 +626,7 @@ mod tests {
 
     fn context(fixture: &Fixture, ports: &PortTable) -> Result<ForgeContext, ForgeContextError> {
         let config = Config::new(ports, Policy::default());
-        ForgeContext::resolve(fixture.root.path(), &config, &fixture.git())
+        ForgeContext::resolve(&config, &fixture.git())
     }
 
     /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
@@ -720,8 +716,7 @@ mod tests {
             default_branch: None,
             forge: &forge,
         };
-        let result =
-            ForgeContext::resolve(fixture.root.path(), &config, &fixture.git()).expect("resolve");
+        let result = ForgeContext::resolve(&config, &fixture.git()).expect("resolve");
         assert_eq!(result.default_branch.value, "develop");
         assert_eq!(
             result.default_branch.source.origin.as_deref(),
@@ -780,8 +775,7 @@ mod tests {
         let policy = settings.resolve("project", &BTreeMap::new());
         let ports = PortTable::builtin();
         let config = Config::new(&ports, policy);
-        let result =
-            ForgeContext::resolve(fixture.root.path(), &config, &fixture.git()).expect("resolve");
+        let result = ForgeContext::resolve(&config, &fixture.git()).expect("resolve");
         assert_eq!(result.policy.source.layer, Layer::Project);
         assert_eq!(
             result.policy.value.rules[0].rule.code,
@@ -815,8 +809,7 @@ mod tests {
         );
         let ports = PortTable::builtin();
         let config = Config::new(&ports, settings.resolve("project", &BTreeMap::new()));
-        let context =
-            ForgeContext::resolve(fixture.root.path(), &config, &fixture.git()).expect("resolve");
+        let context = ForgeContext::resolve(&config, &fixture.git()).expect("resolve");
         let adapter = crate::ports::Adapter::new(
             ports.forge.clone(),
             "forge",
