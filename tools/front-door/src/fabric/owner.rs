@@ -1,5 +1,7 @@
 use super::*;
-use std::io::Write as _;
+use provenant_records::warning::{
+    BRANCH_BEHIND_BASE, CONFIG_MALFORMED, SETTING_LAYER_IGNORED, Warning, warn,
+};
 
 pub(crate) struct BoundGraphOwner<'a> {
     /// Active node's sealed launch allowance, independent of settlement observation.
@@ -333,9 +335,9 @@ impl BoundGraphOwner<'_> {
         if crate::settlement::post_operation_refusal(operation, &self.factory.context, store, call)
             .is_err()
         {
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "refusal notice could not be delivered; run `provenant reconcile`"
+            warn(
+                Warning::new(CONFIG_MALFORMED, "refusal notice could not be delivered")
+                    .repair("run `provenant reconcile`"),
             );
         }
     }
@@ -1437,9 +1439,14 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             ),
             Err(error) => {
                 let error = provenant_records::diagnostic::safe_text(&error.to_string());
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: full config unavailable ({error}); using the owner's resolved policy"
+                warn(
+                    Warning::new(
+                        CONFIG_MALFORMED,
+                        format!(
+                            "full config unavailable ({error}); using the owner's resolved policy"
+                        ),
+                    )
+                    .subject(project.clone()),
                 );
                 provenant_config::policy::read(
                     self.factory.context.roots.state.as_path(),
@@ -1457,11 +1464,10 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         {
             Ok(config) => config,
             Err(error) => {
-                use std::io::Write;
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: graph launch retry settings unavailable: {error}; using defaults"
-                );
+                warn(Warning::new(
+                    CONFIG_MALFORMED,
+                    format!("graph launch retry settings unavailable: {error}; using defaults"),
+                ));
                 return policy;
             }
         };
@@ -1612,7 +1618,11 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 let warning = format!(
                     "ignoring --base {reference} for --branch {branch}; using remote tip {tip}"
                 );
-                let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+                warn(
+                    Warning::new(BRANCH_BEHIND_BASE, warning.clone())
+                        .subject(branch.clone())
+                        .repair(format!("use --base {tip}")),
+                );
                 self.launch_warnings.push(warning);
             }
             return Ok(Some(tip.to_string()));
@@ -1635,7 +1645,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             )
             .map_err(git_facts::repository_fact_error)?;
             for warning in warnings {
-                let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+                warn(Warning::new(CONFIG_MALFORMED, warning.clone()));
                 self.launch_warnings.push(warning);
             }
             return Ok(Some(base.to_string()));
@@ -2941,7 +2951,7 @@ impl BoundGraphOwner<'_> {
             (None, None)
         };
         if let Some(warning) = repin_warning.take() {
-            let _ = writeln!(std::io::stderr().lock(), "{warning}");
+            warn(Warning::new(BRANCH_BEHIND_BASE, warning.clone()));
             submission_prompt.push_str("\n\n");
             submission_prompt.push_str(&warning);
         }
@@ -3332,7 +3342,7 @@ impl BoundGraphOwner<'_> {
                 &exclude,
                 &self.factory.context.roots,
             ) {
-                let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+                warn(Warning::new(CONFIG_MALFORMED, warning.clone()));
                 self.launch_warnings.push(warning);
             }
         }
@@ -3566,7 +3576,7 @@ impl BoundGraphOwner<'_> {
                     .unwrap_or(self.factory.context.selected_project()),
             )
         {
-            let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+            warn(Warning::new(SETTING_LAYER_IGNORED, warning.clone()));
             self.launch_warnings.push(warning);
         }
         if !accepted {
@@ -3607,7 +3617,7 @@ impl BoundGraphOwner<'_> {
                 "model {} is not in the catalogue; the provider will check it",
                 model.as_str()
             );
-            let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+            warn(Warning::new(CONFIG_MALFORMED, warning.clone()).subject(model.as_str()));
             self.launch_warnings.push(warning);
         }
         let receipt = owner.submit_with_access(

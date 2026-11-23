@@ -10,6 +10,13 @@ use std::{
 
 const NUMBER: &str = "1668";
 
+/// Typed warnings carried by a JSON envelope.
+/// Spec: docs/specs/cli.md#warnings-are-typed-values
+fn warnings(output: &provenant_os::exec::ExecOutcome) -> Result<Vec<serde_json::Value>> {
+    let value = json(output)?;
+    Ok(value["warnings"].as_array().cloned().unwrap_or_default())
+}
+
 pub(crate) fn pr_contribution_unbound_project() -> Result {
     let landing = landing()?;
     let unbound = landing.rig.root.join("unbound");
@@ -265,9 +272,13 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
         "{}",
         String::from_utf8_lossy(&opened.stdout.bytes)
     );
-    let warning = String::from_utf8(opened.stderr.bytes)?;
-    assert!(warning.contains("warning:"));
-    assert!(warning.contains("provenant pr contributions 1668 --bind"));
+    let warnings = warnings(&opened)?;
+    assert!(warnings.iter().any(|warning| {
+        warning["code"] == "CONFIG_MALFORMED"
+            && warning["repair"]
+                .as_str()
+                .is_some_and(|repair| repair.contains("provenant pr contributions 1668 --bind"))
+    }));
     let closed_view = fs::read(landing.rig.project.join("view.json"))?;
     let mut open_view: serde_json::Value = serde_json::from_slice(&closed_view)?;
     open_view["state"] = serde_json::json!("OPEN");
@@ -352,7 +363,12 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
         "{}",
         String::from_utf8_lossy(&output.stdout.bytes)
     );
-    assert!(String::from_utf8_lossy(&output.stderr.bytes).contains("no open contribution binding"));
+    assert!(warnings(&output)?.iter().any(|warning| {
+        warning["code"] == "CONFIG_MALFORMED"
+            && warning["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("no open contribution binding"))
+    }));
     let landed = json(&output)?;
     let projected = landed["data"]["lanes"]
         .as_array()
@@ -642,7 +658,12 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
     // A failed gh sweep warns and retains the previous sharing behaviour.
     let fallback = bind_cli("1675")?;
     assert_eq!(code(&fallback), 0);
-    assert!(String::from_utf8_lossy(&fallback.stderr.bytes).contains("stale binding sweep failed"));
+    assert!(warnings(&fallback)?.iter().any(|warning| {
+        warning["code"] == "CONFIG_MALFORMED"
+            && warning["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("stale binding sweep failed"))
+    }));
     assert_eq!(
         links
             .open_bindings(context.project_id, "feat", &call)?
@@ -739,7 +760,12 @@ pub(crate) fn pr_contribution_land_warns_when_binding_fails() -> Result {
         "{}",
         String::from_utf8_lossy(&landed.stdout.bytes)
     );
-    assert!(String::from_utf8_lossy(&landed.stderr.bytes).contains("no open contribution binding"));
+    assert!(warnings(&landed)?.iter().any(|warning| {
+        warning["code"] == "CONFIG_MALFORMED"
+            && warning["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("no open contribution binding"))
+    }));
     let calls = fs::read_to_string(unbound_landing.rig.project.join("gh-calls"))?;
     assert!(
         !calls
@@ -882,6 +908,10 @@ fn normalise_repo_api_argument(argument: &str) -> String {
 }
 
 /// The fake `gh` the driver re-enters as: a passing, unchanged pull request.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "fake gh child writes the forge API protocol to stdout"
+)]
 pub(crate) fn fake_gh(args: &[String]) -> Result<u8> {
     let call = args.join(" ");
     // Real gh rejects JSON fields it does not have; so does this fake.

@@ -8,7 +8,11 @@ use provenant_confinement::{
 use provenant_core::{CancelToken, Clock, GitOid, WaitBudget};
 use provenant_fabric_store::{Page, Store};
 use provenant_os::{clock::SystemClock, exec::SystemExecutor, sys::hook_io};
-use provenant_records::{Harness, HookAction, HookProtocol, inbox::*};
+use provenant_records::{
+    Harness, HookAction, HookProtocol,
+    inbox::*,
+    warning::{CONFIG_MALFORMED, Warning, warn},
+};
 use provenant_workflow::session::{CommandPrefix, HookEvent, HostSessionId};
 use serde::Deserialize;
 use std::{
@@ -1209,9 +1213,15 @@ fn push_history(roots: &provenant_core::Roots) -> provenant_config::LaneHistory 
     match provenant_cli::config_reads::show_for(roots, "hook") {
         Ok(read) => provenant_config::LaneHistory::from_knobs(&read.knobs),
         Err(error) => {
-            diagnostic(&format!(
-                "pre-push: warning: policy settings unavailable ({error}); using compiled defaults"
-            ));
+            warn(
+                Warning::new(
+                    CONFIG_MALFORMED,
+                    format!(
+                        "pre-push: policy settings unavailable ({error}); using compiled defaults"
+                    ),
+                )
+                .once_per_change(),
+            );
             provenant_config::LaneHistory::default()
         }
     }
@@ -1285,7 +1295,10 @@ fn pre_push(remote: &str, globals: &Globals, deadline: Instant) -> Result<(), Er
     let project = match crate::roots::selected_project(globals.project.as_deref(), true) {
         Ok(project) => project,
         Err(error) => {
-            diagnostic(&format!("pre-push: warning: project unavailable: {error}"));
+            warn(Warning::new(
+                CONFIG_MALFORMED,
+                format!("pre-push: project unavailable: {error}"),
+            ));
             return Ok(());
         }
     };
@@ -1296,8 +1309,9 @@ fn pre_push(remote: &str, globals: &Globals, deadline: Instant) -> Result<(), Er
     ) {
         Ok(resolved) => resolved,
         Err(error) => {
-            diagnostic(&format!(
-                "pre-push: warning: project roots unavailable: {error}"
+            warn(Warning::new(
+                CONFIG_MALFORMED,
+                format!("pre-push: project roots unavailable: {error}"),
             ));
             return Ok(());
         }
@@ -1328,7 +1342,10 @@ fn pre_push(remote: &str, globals: &Globals, deadline: Instant) -> Result<(), Er
                     // Missing evidence and an unrecognised push are advisory;
                     // only the default-branch gate and a configured refuse stop
                     // the Git operation.
-                    diagnostic(&format!("pre-push: warning: {refusal}"));
+                    warn(Warning::new(
+                        CONFIG_MALFORMED,
+                        format!("pre-push: {refusal}"),
+                    ));
                     Ok(())
                 }
             }
@@ -1341,7 +1358,10 @@ fn pre_push(remote: &str, globals: &Globals, deadline: Instant) -> Result<(), Er
         if boundary_refusal {
             return Err(error);
         }
-        diagnostic(&format!("pre-push: warning: check unavailable: {error}"));
+        warn(Warning::new(
+            CONFIG_MALFORMED,
+            format!("pre-push: check unavailable: {error}"),
+        ));
         return Ok(());
     }
     if let Some(settings) = local_gate_settings(globals, &project)? {
@@ -1429,8 +1449,9 @@ fn run_local_gate(
     let executor = match SystemExecutor::new(1) {
         Ok(executor) => executor,
         Err(error) if settings.mode == LocalGateMode::Warn => {
-            diagnostic(&format!(
-                "pre-push: warning: local gate unavailable: {error}"
+            warn(Warning::new(
+                CONFIG_MALFORMED,
+                format!("pre-push: local gate unavailable: {error}"),
             ));
             return Ok(());
         }
@@ -1482,7 +1503,10 @@ fn run_local_gate_with(
             if settings.mode == LocalGateMode::Enforce {
                 return Err(message.into());
             }
-            diagnostic(&format!("pre-push: warning: {message}"));
+            warn(Warning::new(
+                CONFIG_MALFORMED,
+                format!("pre-push: {message}"),
+            ));
         }
     }
     Ok(())

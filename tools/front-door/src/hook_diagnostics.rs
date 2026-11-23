@@ -74,6 +74,8 @@ impl<'a> Failure<'a> {
     }
 }
 
+// Hook diagnostics are the hook wire's stderr protocol, not warning records.
+#[allow(clippy::disallowed_methods)]
 pub(crate) fn diagnostic(message: &str) {
     let _ = writeln!(
         std::io::stderr().lock(),

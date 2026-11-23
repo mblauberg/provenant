@@ -21,6 +21,7 @@ use provenant_records::custody::{
     RemovalOutcome, RemovalRecord, RemovalUncertainty, RetirementDecision, RetirementRecord,
     RetirementStep, RetirementStepState,
 };
+use provenant_records::warning::{self, GIT_OPERATION_RETAINED, Warning};
 use std::time::Duration;
 
 const REMOTE_READ: Duration = Duration::from_secs(30);
@@ -72,16 +73,16 @@ fn ref_removal(
     })
 }
 
-fn warn(outcome: &ArtefactOutcome) {
-    if outcome.outcome == ArtefactState::Failed {
-        use std::io::Write;
-        let _ = writeln!(
-            std::io::stderr().lock(),
-            "warning: could not remove {}: {}; it is retained",
+fn removal_warning(outcome: &ArtefactOutcome) -> Warning {
+    Warning::new(
+        GIT_OPERATION_RETAINED,
+        format!(
+            "could not remove {}: {}; it is retained",
             outcome.name,
             outcome.reason.as_deref().unwrap_or("unknown error")
-        );
-    }
+        ),
+    )
+    .subject(outcome.name.clone())
 }
 
 /// Reuse the durable owner for this exact RefLedger generation, or write its
@@ -434,7 +435,9 @@ pub(crate) fn sweep_local(
         None,
         cancel,
     );
-    warn(&outcome);
+    if outcome.outcome == ArtefactState::Failed {
+        warning::warn(removal_warning(&outcome));
+    }
     outcome
 }
 
@@ -1721,7 +1724,9 @@ pub(crate) fn collect(
                 cached_base_refs.as_deref(),
                 cancel,
             );
-            warn(&outcome);
+            if outcome.outcome == ArtefactState::Failed {
+                warning::warn(removal_warning(&outcome));
+            }
             outcomes.push(outcome);
         }
     }
@@ -1738,7 +1743,9 @@ pub(crate) fn collect(
                 cached_base_refs.as_deref(),
                 cancel,
             );
-            warn(&outcome);
+            if outcome.outcome == ArtefactState::Failed {
+                warning::warn(removal_warning(&outcome));
+            }
             outcomes.push(outcome);
         }
     }

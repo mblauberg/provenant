@@ -1668,10 +1668,16 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                 .ok()?;
                 let local = local_branch_tip(edge.cwd, &reported.branch)?;
                 (local != reported.sha).then(|| {
-                    crate::event_delivery::warn(&format!(
-                        "#{number}: local tip {local} differs from GitHub head {}; waiting for the local tip",
-                        reported.sha
-                    ));
+                    provenant_records::warning::warn(
+                        provenant_records::warning::Warning::new(
+                            provenant_records::warning::BRANCH_BEHIND_BASE,
+                            format!(
+                                "#{number}: local tip {local} differs from GitHub head {}; waiting for the local tip",
+                                reported.sha
+                            ),
+                        )
+                        .subject(reported.branch.clone()),
+                    );
                     local
                 })
             });
@@ -2020,9 +2026,13 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                 let mut event_reader = match setup {
                     Ok(journal) => Some(journal),
                     Err(error) => {
-                        crate::event_delivery::warn(&format!(
-                            "PR journal unavailable; reconciling after gaps: {error}"
-                        ));
+                        provenant_records::warning::warn(
+                            provenant_records::warning::Warning::new(
+                                provenant_records::warning::CONFIG_MALFORMED,
+                                format!("PR journal unavailable; reconciling after gaps: {error}"),
+                            )
+                            .subject(repository.clone()),
+                        );
                         None
                     }
                 };

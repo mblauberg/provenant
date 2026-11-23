@@ -309,6 +309,10 @@ pub(crate) fn writer_dispatch_creates_no_lane_cache_and_narrow_provider_state() 
 }
 
 /// Invoked as `codex exec ...` by the real Registry, inside the compiled profile.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "fake provider child emits its JSON protocol on stdout"
+)]
 pub(crate) fn provider() -> Result {
     let mut prompt = String::new();
     std::io::stdin().read_to_string(&mut prompt)?;

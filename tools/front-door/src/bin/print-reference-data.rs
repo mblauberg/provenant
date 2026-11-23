@@ -1,6 +1,10 @@
 //! Machine-readable owners for scripts/generate-reference; not an installed binary.
 use std::io::Write as _;
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "stdout is the machine-readable reference-data protocol consumed by scripts/generate-reference"
+)]
 fn main() -> std::process::ExitCode {
     provenant::commands::install();
     let policy: Vec<_> = provenant_records::policy::table()

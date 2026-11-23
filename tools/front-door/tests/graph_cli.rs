@@ -3159,13 +3159,18 @@ fn shape_and_exact_retry_credential_warnings_allow_retry() -> Result {
         output.status.success(),
         "exact credential retry must proceed: {reply}"
     );
-    let warning = String::from_utf8_lossy(&output.stderr);
+    let warnings = reply["warnings"].as_array().ok_or("warning envelope")?;
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
     assert!(
-        warning.contains("declared credential value rule"),
-        "{warning}"
+        warnings.iter().any(|warning| {
+            warning["message"].as_str().is_some_and(|message| {
+                message.contains("declared credential value rule")
+                    && message.contains("matching a known credential")
+            })
+        }),
+        "{reply}"
     );
-    assert!(warning.contains("matching a known credential"), "{warning}");
-    assert!(!warning.contains(credential));
+    assert!(!warnings.to_string().contains(credential));
     let after_credential = snapshot()?;
     assert_ne!(after_credential, after_shape);
 

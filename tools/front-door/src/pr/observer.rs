@@ -484,9 +484,12 @@ impl<F: Forge, C: Clock> Observer<F, C> {
         let history = match cached_run_history(&dir) {
             Some(history) => history,
             None => {
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: recent CI duration cache unavailable; using slower observation cadence"
+                provenant_records::warning::warn(
+                    provenant_records::warning::Warning::new(
+                        provenant_records::warning::CONFIG_MALFORMED,
+                        "recent CI duration cache unavailable; using slower observation cadence",
+                    )
+                    .subject(repository),
                 );
                 Vec::new()
             }

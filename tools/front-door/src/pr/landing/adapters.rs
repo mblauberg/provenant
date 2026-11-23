@@ -824,6 +824,10 @@ impl Forge for GhForge {
     ) -> Result<String, LandingError> {
         GhForge::merge_stack(self, number, head, method)
     }
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "forge probe output goes to stderr at the landing boundary"
+    )]
     fn may_push_directly(&mut self, branch: &str) -> Result<bool, LandingError> {
         let verdict = (|| -> Result<(), String> {
             let encoded = encode_branch(branch);
@@ -1075,6 +1079,10 @@ impl<'a> GitRepo<'a> {
 }
 
 impl Repo for GitRepo<'_> {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "forge subprocess output goes to stderr at the landing boundary"
+    )]
     fn publish_command(
         &mut self,
         command: &provenant_records::landing::RepositoryCommand,
@@ -1616,6 +1624,10 @@ struct CheckObservation {
     next_interval: Option<Duration>,
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "forge probe output goes to stderr at the landing boundary"
+)]
 fn observe_checks_with(
     candidate: &Candidate,
     definition: &GateDefinition,
@@ -1633,11 +1645,15 @@ fn observe_checks_with(
         let observed = match observation.checks {
             // A rate limit skips this poll; the bound still ends the wait.
             Err(LandingError::RateLimited(message)) if elapsed < timeout => {
-                use std::io::Write;
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: candidate {} check read skipped: {message}",
-                    candidate.commit
+                provenant_records::warning::warn(
+                    provenant_records::warning::Warning::new(
+                        provenant_records::warning::FORGE_CONTEXT_UNRESOLVED,
+                        format!(
+                            "candidate {} check read skipped: {message}",
+                            candidate.commit
+                        ),
+                    )
+                    .subject(candidate.commit.clone()),
                 );
                 let pause = poll.min(timeout.saturating_sub(elapsed));
                 sleep(pause);
@@ -1746,6 +1762,10 @@ impl AlarmSink for ChairAlarms {
     fn set_project_path(&mut self, path: &Path) {
         self.project = path.to_owned();
     }
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "alarm progress goes to stderr at the landing boundary"
+    )]
     fn post(&mut self, alarm: &Alarm) -> Result<(), LandingError> {
         let text = alarm_text(alarm);
         let _ = writeln!(std::io::stderr().lock(), "{text}");

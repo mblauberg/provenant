@@ -107,11 +107,12 @@ pub fn run(command: Notes, globals: &Globals) -> u8 {
             && let Some(((reader, scope), seq)) = ack.zip(next)
             && let Err(error) = execute(Input::Ack { reader, scope, seq })
         {
-            use std::io::Write;
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "notes: output succeeded but cursor acknowledgement failed; the page may replay: {error}"
-            );
+            provenant_records::warning::warn(provenant_records::warning::Warning::new(
+                provenant_records::warning::CONFIG_MALFORMED,
+                format!(
+                    "output succeeded but cursor acknowledgement failed; the page may replay: {error}"
+                ),
+            ));
             return Ok(3);
         }
         Ok(status)

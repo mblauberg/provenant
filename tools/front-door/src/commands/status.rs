@@ -13,6 +13,10 @@ pub static DOMAIN: Domain = Domain {
     }],
 };
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "renders command output to stdout for the caller"
+)]
 fn run(inv: &Call) -> Result<Outcome, CommandError> {
     let globals = inv.globals;
     let process = inv.process;

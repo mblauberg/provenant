@@ -539,6 +539,8 @@ fn open_source(globals: &Globals) -> Result<Source, Refusal> {
     })
 }
 
+// The writer advisory is part of the handoff hook's stderr protocol.
+#[allow(clippy::disallowed_methods)]
 fn execute(
     args: &Handoff,
     globals: &Globals,

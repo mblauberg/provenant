@@ -44,7 +44,6 @@ fn writer_dirty_setting(
     factory: &super::Factory,
 ) -> provenant_run::writer_dirty::ResolvedWriterDirty {
     use provenant_config::KnobSource;
-    use std::io::Write;
     let (value, source) = match provenant_cli::config_reads::read_for(&factory.context.roots, "run")
     {
         Ok(config) => match config.knobs.get(provenant_run::writer_dirty::KNOB) {
@@ -60,10 +59,10 @@ fn writer_dirty_setting(
         },
         Err(error) => {
             let safe = provenant_records::diagnostic::safe_text(&error.to_string());
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: writer dirty setting unavailable ({safe}); using default refuse"
-            );
+            provenant_records::warning::warn(provenant_records::warning::Warning::new(
+                provenant_records::warning::CONFIG_MALFORMED,
+                format!("writer dirty setting unavailable ({safe}); using default refuse"),
+            ));
             (None, "default".to_owned())
         }
     };
@@ -81,7 +80,6 @@ fn preflight_writer_worktrees(
 ) -> Result<Vec<(String, String, String)>, FacadeError> {
     use provenant_fabric_runtime::graph::AccessMode;
     use provenant_run::writer_dirty::{self, Preflight};
-    use std::io::Write;
     let resolved = writer_dirty_setting(factory);
     let git =
         provenant_os::git::git_executable().ok_or_else(|| FacadeError::io("git for preflight"))?;
@@ -145,10 +143,15 @@ fn preflight_writer_worktrees(
         // files. Skip the dirty check for this path and say why.
         let attached = writer.attached_lanes().map_err(run_error)?;
         if !attached.is_empty() {
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: worktree {path} is in use by {}; skipping the dirty-worktree preflight for it",
-                attached.join(", ")
+            provenant_records::warning::warn(
+                provenant_records::warning::Warning::new(
+                    provenant_records::warning::WORKTREE_ADOPTED_DIRTY,
+                    format!(
+                        "worktree {path} is in use by {}; skipping the dirty-worktree preflight for it",
+                        attached.join(", ")
+                    ),
+                )
+                .subject(path.display().to_string()),
             );
             outcomes.insert(path.to_owned(), (None, None));
             continue;
@@ -177,7 +180,13 @@ fn preflight_writer_worktrees(
                 outcomes.insert(path.to_owned(), (None, None));
             }
             Preflight::ContinueInPlace(warning) => {
-                let _ = writeln!(std::io::stderr().lock(), "{warning}");
+                provenant_records::warning::warn(
+                    provenant_records::warning::Warning::new(
+                        provenant_records::warning::CONFIG_MALFORMED,
+                        warning.clone(),
+                    )
+                    .subject(path.display().to_string()),
+                );
                 outcomes.insert(path.to_owned(), (None, Some(warning)));
             }
         }

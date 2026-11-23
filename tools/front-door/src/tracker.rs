@@ -214,12 +214,14 @@ pub fn run(command: Tracker, globals: &Globals) -> u8 {
     let ports = match PortTable::read_for(Some(&root), resolved.roots.state.as_path()) {
         Ok(ports) => ports,
         Err(error) => {
-            use std::io::Write;
             let source = resolved.roots.state.as_path().join("ports.json");
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: [PORT_CONFIG] cannot read tracker port: {error} (source: {}); using compiled defaults",
-                source.display()
+            provenant_records::warning::warn(
+                provenant_records::warning::Warning::new(
+                    provenant_records::warning::CONFIG_MALFORMED,
+                    format!("cannot read tracker port: {error}; using compiled defaults"),
+                )
+                .subject(source.display().to_string())
+                .once_per_change(),
             );
             PortTable::builtin()
         }

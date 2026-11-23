@@ -11,7 +11,6 @@ use provenant_records::{CommandResult, Outcome};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
-    io::Write,
     path::{Path, PathBuf},
     time::{Duration, UNIX_EPOCH},
 };
@@ -440,7 +439,13 @@ pub(crate) fn gc_worker(globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
         )?;
         // Build-slot GC and prewarm follow a collection that finished its work.
         for warning in schedule_build_hygiene(&resolved) {
-            let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+            provenant_records::warning::warn(
+                provenant_records::warning::Warning::new(
+                    provenant_records::warning::CONFIG_MALFORMED,
+                    warning,
+                )
+                .once_per_change(),
+            );
         }
         failed.map_or(Ok(()), |error| Err(error.into()))
     })();
@@ -529,10 +534,15 @@ fn schedule_build_hygiene(resolved: &crate::roots::Resolved) -> Vec<String> {
     });
     let mut warnings = report.warnings;
     if report.rotated_ledgers > 0 {
-        let _ = writeln!(
-            std::io::stderr().lock(),
-            "build ledger rotated; {} rotation(s) expired",
-            report.expired_ledgers
+        provenant_records::warning::warn(
+            provenant_records::warning::Warning::new(
+                provenant_records::warning::CONFIG_MALFORMED,
+                format!(
+                    "build ledger rotated; {} rotation(s) expired",
+                    report.expired_ledgers
+                ),
+            )
+            .once_per_change(),
         );
     }
     for (path, key) in projects.iter().take(8) {
