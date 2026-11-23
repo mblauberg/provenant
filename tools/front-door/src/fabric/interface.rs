@@ -2148,6 +2148,7 @@ impl Factory {
                 lane_document,
                 route.as_ref(),
                 &context,
+                review_launch,
                 &mut input_warnings,
             )?)
         } else {
@@ -2638,6 +2639,7 @@ impl Factory {
         lane_document: Option<&Value>,
         route: Option<&RouteChoice>,
         context: &PatchContext<'_>,
+        review_launch: bool,
         input_warnings: &mut Vec<String>,
     ) -> Result<TemplateLaunch, FacadeError> {
         let mut node = match lane_document {
