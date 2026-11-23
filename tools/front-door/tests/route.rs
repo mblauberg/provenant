@@ -807,7 +807,7 @@ fn pacing_profile_account_labels_resolve_and_unknown_names_fail() -> Result {
 }
 
 #[test]
-fn pacing_profiles_warn_on_unknown_keys_and_list_accounts() -> Result {
+fn pacing_profiles_warn_on_unknown_keys_and_refuse_unknown_accounts() -> Result {
     let rig = rig()?;
     fs::create_dir_all(&rig.state)?;
     fs::write(
@@ -815,7 +815,7 @@ fn pacing_profiles_warn_on_unknown_keys_and_list_accounts() -> Result {
         "schema_version=1\n[domains.routing.pacing.accounts.pro]\nwindow=['five_hour']\n",
     )?;
     // The misspelt key is tuning, so it warns and is ignored; the profile
-    // still names an unregistered account, which refuses and lists choices.
+    // still names an unregistered account, which refuses with one name refusal.
     let out = rig.command(&["route", "list", "--json"])?;
     assert_eq!(code(&out), 2);
     let stderr = String::from_utf8_lossy(&out.stderr.bytes);
@@ -826,8 +826,9 @@ fn pacing_profiles_warn_on_unknown_keys_and_list_accounts() -> Result {
     );
     let output: Value = serde_json::from_slice(&out.stdout.bytes)?;
     let message = output["error"]["message"].as_str().ok_or("config error")?;
+    // Spec: docs/specs/routing.md#account-references
     assert!(
-        message.contains("unknown account `pro`") && message.contains("valid accounts"),
+        message.contains("unknown account `pro`") && !message.contains("valid accounts"),
         "{message}"
     );
     Ok(())
