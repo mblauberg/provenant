@@ -3072,10 +3072,22 @@ mod tests {
     fn canonical_route_model_resolves_a_relative_opencode_id()
     -> Result<(), Box<dyn std::error::Error>> {
         let catalogue = Catalogue::bundled()?;
-        let (full, warning) =
-            super::canonical_route_model("opencode", "opencode/hy4-flash-free", Some(&catalogue));
-        assert_eq!(full, "opencode/opencode/hy4-flash-free");
+        let (full, warning) = super::canonical_route_model(
+            "opencode",
+            "opencode/glm-5.3-flash-free",
+            Some(&catalogue),
+        );
+        assert_eq!(full, "opencode/opencode/glm-5.3-flash-free");
         assert!(warning.is_none(), "{warning:?}");
+        // A short form two providers serve is ambiguous: it is kept as
+        // declared and warns, never silently bound to one provider.
+        let (kept, warning) =
+            super::canonical_route_model("opencode", "opencode/hy4-flash-free", Some(&catalogue));
+        assert_eq!(kept, "opencode/hy4-flash-free");
+        assert_eq!(
+            warning.map(|warning| warning.code),
+            Some(ROUTE_MODEL_NOT_CATALOGUED)
+        );
         // A bare relative model with a non-namespaced adapter becomes a full
         // id (parseable downstream) and warns, rather than staying bare.
         let (full, warning) =
