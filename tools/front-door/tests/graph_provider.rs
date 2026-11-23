@@ -4840,6 +4840,24 @@ fn nested_writer_ignores_outer_lane_git() -> Result {
     Ok(())
 }
 
+/// Name the origin's default branch the way a clone records it. These fixtures
+/// add a remote without fetching, and the forge context has no compiled
+/// main/master fallback.
+/// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+fn declare_origin_head(rig: &TestRig, git: &std::path::Path) -> Result {
+    let branch = rig.execute(git, &["symbolic-ref", "--short", "HEAD"], None)?;
+    assert_eq!(code(&branch), 0, "{branch:?}");
+    let branch = String::from_utf8(branch.stdout.bytes.clone())?;
+    let target = format!("refs/remotes/origin/{}", branch.trim());
+    let out = rig.execute(
+        git,
+        &["symbolic-ref", "refs/remotes/origin/HEAD", &target],
+        None,
+    )?;
+    assert_eq!(code(&out), 0, "{out:?}");
+    Ok(())
+}
+
 fn nested_writer_fixture_child() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
@@ -4867,6 +4885,7 @@ fn nested_writer_fixture_child() -> Result {
         let out = rig.execute(&git, &args, None)?;
         assert_eq!(code(&out), 0, "{out:?}");
     }
+    declare_origin_head(&rig, &git)?;
     let document = rig.project.join("nested-graph.json");
     fs::write(
         &document,
@@ -5286,6 +5305,7 @@ fn light_graph_delivers_and_applies_preset_per_node() -> Result {
         let out = rig.execute(&git, &args, None)?;
         assert_eq!(code(&out), 0, "{out:?}");
     }
+    declare_origin_head(&rig, &git)?;
     let route = json!({"adapter":"codex","model":"gpt-6-luna","effort":"low"});
     let document = rig.project.join("light-graph.json");
     fs::write(
@@ -5649,7 +5669,9 @@ fn writer_shell_edits_instructions_and_keeps_private_logs(adapter: &str) -> Resu
         for name in ["AGENTS.md", "CLAUDE.md", "GLOBAL-AGENTS.md"] {
             assert!(paths.contains(&tree.join(name)), "{paths:?}");
         }
-        let human = rig.command(&["output", "shell-evidence/writer#1"])?;
+        // Changed files are host-fact narration, shown by the full view.
+        // Spec: docs/specs/lane-contracts.md#result-projection
+        let human = rig.command(&["output", "shell-evidence/writer#1", "--full"])?;
         let human = String::from_utf8_lossy(&human.stdout.bytes);
         assert!(
             human.contains(&tree.join("AGENTS.md").display().to_string()),
