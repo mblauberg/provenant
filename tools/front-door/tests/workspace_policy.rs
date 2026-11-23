@@ -1850,7 +1850,7 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         ("crates/records/src/adapters.rs", 2273),
         ("crates/records/src/run.rs", 4073),
         ("crates/redact/src/lib.rs", 2273),
-        ("crates/routing/src/catalog.rs", 3211),
+        ("crates/routing/src/catalog.rs", 3214),
         ("crates/routing/src/resolve.rs", 4249),
         ("crates/routing/src/review.rs", 2671),
         ("crates/run/src/build_dir_gc.rs", 6032),

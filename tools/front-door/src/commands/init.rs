@@ -50,7 +50,9 @@ fn resolve_project(
         crate::roots::Workspace::Checkout,
         crate::roots::Product::Optional,
     )?;
-    let layout = crate::roots::project_layout(&context.roots, &context.project)?;
+    // Read-only: init must work on a host with no state yet, so it resolves the
+    // layout without allocating a project binding.
+    let layout = crate::roots::project_layout_read_only(&context.roots, &context.project)?;
     context.project = layout
         .project()
         .ok_or("verified project layout has no primary checkout")?
@@ -311,8 +313,10 @@ mod tests {
         let state = root.path().join("state");
         fs::create_dir_all(&state).expect("state");
 
+        // An unused state directory: init runs before any host state exists.
         let globals = provenant_cli::Globals {
             project: Some(subdir.clone()),
+            state_dir: Some(root.path().join("fresh-state")),
             ..Default::default()
         };
         let context = resolve_project(&globals).expect("checkout from a subdirectory");
@@ -366,8 +370,10 @@ mod tests {
             "ref: refs/heads/trunk\n",
         );
 
+        // An unused state directory: init runs before any host state exists.
         let globals = provenant_cli::Globals {
             project: Some(linked.clone()),
+            state_dir: Some(root.path().join("fresh-state")),
             ..Default::default()
         };
         let context = resolve_project(&globals).expect("primary from a linked worktree");
