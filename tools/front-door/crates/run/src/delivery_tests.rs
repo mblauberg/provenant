@@ -201,8 +201,11 @@ impl OriginFixture {
             project: self.project.clone(),
             worktree: self.project.clone(),
         };
-        HostDeliveryContext::new(environment)
-            .refresh_origin_with(&writer, &self.project.join(".git"))?;
+        HostDeliveryContext::new(environment).refresh_origin_with(
+            &writer,
+            &self.project.join(".git"),
+            "origin",
+        )?;
         Ok(())
     }
 }
@@ -283,19 +286,30 @@ impl PrepareFixture {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
     }
     fn prepare(&self) -> Result<HostDeliveryContext> {
+        self.prepare_with_forge(&crate::forge_for("origin", "", &[]))
+    }
+    /// Prepare with the owner's resolved forge context, as a launched command
+    /// does. Tests that assert protection must pass the context they resolved
+    /// rather than rely on a second discovery.
+    /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    fn prepare_with_forge(
+        &self,
+        forge: &provenant_config::ForgeContext,
+    ) -> Result<HostDeliveryContext> {
         // Production passes the state root explicitly, so a broken captured
         // HOME is reported by its own environment check.
         HostDeliveryContext::new(self.environment.clone())
             .with_lane_access(
                 Some(provenant_records::LaneAccessReceipt {
                     access: provenant_records::LaneAccess::Isolated,
-                    source: provenant_records::LaneAccessSource::Launch,
+                    source: provenant_records::Layer::Launch,
                     key: "lanes.access".into(),
                     extra: Default::default(),
                 }),
                 Some(true),
             )
             .with_host_state(&self.root.join("state"))
+            .with_forge(forge)
             .prepare(&self.writer, &self.request)
     }
     pub(crate) fn lane_git(
@@ -305,6 +319,25 @@ impl PrepareFixture {
         let mut command = vec!["-C", self.writer.worktree.to_str().ok_or("lane")?];
         command.extend_from_slice(args);
         self.git(&command)
+    }
+    /// Run Git in the primary checkout and return its trimmed stdout.
+    pub(crate) fn git_text(
+        &self,
+        args: &[&str],
+    ) -> std::result::Result<String, Box<dyn std::error::Error>> {
+        let git = provenant_os::git::git_executable().ok_or("git executable")?;
+        let output = provenant_os::fixture::git_command_at(&git)
+            .env_clear()
+            .envs(self.environment.iter().map(|(key, value)| (key, value)))
+            .current_dir(&self.writer.project)
+            .args(args)
+            .output()?;
+        if !output.status.success() {
+            return Err(
+                format!("git {args:?}: {}", String::from_utf8_lossy(&output.stderr)).into(),
+            );
+        }
+        Ok(String::from_utf8(output.stdout)?.trim().to_owned())
     }
     pub(crate) fn commit(
         &self,
@@ -512,9 +545,11 @@ impl PrepareFixture {
                 format!("{tip}\n"),
             )?;
         }
-        // Publication reads the sealed request for its launch base ref.
+        // Publication reads the sealed request for its launch base ref; the
+        // delivery destination is one of the refs a host operation may not move.
         let mut request = tests::input().request;
         request.task.base_ref = base_ref.map(str::to_owned);
+        request.task.deliver = Some(self.request.clone());
         crate::artifacts::seal(
             &attempt,
             "request.json",

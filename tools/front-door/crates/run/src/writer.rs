@@ -57,6 +57,9 @@ thread_local! {
     /// the process-wide stderr stream without racing other tests.
     pub(crate) static TOOL_STATE_WARNINGS: std::cell::RefCell<Vec<String>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    /// The rendered lane Git-operation settlement warning, for the same reason.
+    pub(crate) static GIT_OPERATION_WARNINGS: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 fn error<E: std::fmt::Display>(
@@ -346,6 +349,26 @@ pub(crate) struct StopWorkPolicy<'a> {
     pub writer: &'a provenant_records::run::WriterRequest,
     pub route: Option<&'a provenant_records::run::RouteRecord>,
     pub publish_granted: bool,
+}
+
+/// The remote a stopped writer's summary and stop-publication recovery must
+/// use. A checkout without a remote has no tracking branch, so an empty remote
+/// is an absence rather than a guess.
+/// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+fn terminal_forge_remote(state: &Path, project: &Path) -> String {
+    let Ok(ports) = provenant_config::PortTable::read_for(Some(project), state) else {
+        return String::new();
+    };
+    let policy = provenant_config::operation_policy(state, project, &ports);
+    let config = provenant_config::ForgeConfig::new(&ports, (*policy).clone());
+    let Ok(git) = provenant_config::ForgeGit::new(project) else {
+        return String::new();
+    };
+    provenant_config::ForgeContext::remote_if_any(&config, &git)
+        .ok()
+        .flatten()
+        .map(|remote| remote.value)
+        .unwrap_or_default()
 }
 
 /// The result of comparing a retry's worktree head with its pinned commit.
@@ -650,22 +673,22 @@ impl WriterLaunch {
         status_paths(&output)
     }
 
-    fn ahead_of_remote(&self, git: &Path, head: GitOid) -> Result<Option<u64>> {
+    fn ahead_of_remote(&self, git: &Path, head: GitOid, remote: &str) -> Result<Option<u64>> {
         let branch = self
             .branch
             .as_str()
             .strip_prefix("refs/heads/")
             .ok_or(RunError::Validation("writer needs a local branch"))?;
-        let upstream = format!("refs/remotes/origin/{branch}");
+        let upstream = format!("refs/remotes/{remote}/{branch}");
         let revision = match crate::objects::resolve_ref(git, self.worktree.repo(), &upstream) {
             Ok(base) => vec![format!("{base}..{head}").into()],
             // A new lane branch has no remote counterpart. Count commits not
-            // reachable from any recorded origin ref rather than losing the
+            // reachable from any recorded remote ref rather than losing the
             // evidence for the most common stopped-writer case.
             Err(_) => vec![
                 head.to_string().into(),
                 "--not".into(),
-                "--remotes=origin".into(),
+                format!("--remotes={remote}").into(),
             ],
         };
         let mut args = vec!["rev-list".into(), "--count".into()];
@@ -694,18 +717,8 @@ impl WriterLaunch {
         let source = crate::objects::bound_source(attempt)?
             .ok_or(RunError::Validation("clean point needs private Git state"))?;
         let index_dir = &source.refs;
-        for name in [
-            "MERGE_HEAD",
-            "CHERRY_PICK_HEAD",
-            "REVERT_HEAD",
-            "rebase-merge",
-            "rebase-apply",
-        ] {
-            match index_dir.metadata_at(OsStr::new(name), false) {
-                Ok(_) => return Ok(false),
-                Err(error) if error.is_not_found() => {}
-                Err(error) => return Err(error.into()),
-            }
+        if worktrees::incomplete_git_operation(index_dir, None)?.is_some() {
+            return Ok(false);
         }
         index_dir.read_stable(OsStr::new("index"), 64 * 1024 * 1024)?;
         let index = index_dir.current_path()?.join("index");
@@ -856,18 +869,8 @@ impl WriterLaunch {
         let tip = crate::objects::private_tip(&source, self.branch.as_str())?;
         // Never stage away conflict stages or finish an in-progress Git
         // operation on the lane's behalf. Its state stays private for recovery.
-        for (name, operation) in [
-            ("MERGE_HEAD", "merge"),
-            ("CHERRY_PICK_HEAD", "cherry-pick"),
-            ("REVERT_HEAD", "revert"),
-            ("rebase-merge", "rebase"),
-            ("rebase-apply", "rebase"),
-        ] {
-            match source.refs.metadata_at(OsStr::new(name), false) {
-                Ok(_) => return Ok(BudgetCommit::note(in_progress_note(operation))),
-                Err(error) if error.is_not_found() => {}
-                Err(error) => return Err(error.into()),
-            }
+        if let Some(operation) = worktrees::incomplete_git_operation(&source.refs, None)? {
+            return Ok(BudgetCommit::note(in_progress_note(operation.label)));
         }
         let objects = crate::objects::prepare_budget_objects(&source.objects, repo)?;
         // Reuse stable, no-follow reading before passing the index path to Git.
@@ -1148,6 +1151,91 @@ fn budget_commit_message(paths: &[String]) -> String {
     message
 }
 
+/// The delivery destination a host operation must not move. An unreadable or
+/// undecodable sealed request is a refusal, not a reason to drop the destination
+/// and let a host operation on it warn instead of refusing.
+fn sealed_delivery_destination(attempt: &Directory) -> Result<Option<String>> {
+    let Some(raw) = crate::artifacts::read_sealed(attempt, "request.json", crate::RECORD_LIMIT)?
+    else {
+        return Ok(None);
+    };
+    let request: crate::CanonicalRequest = crate::db::decode(&raw)?;
+    Ok(request.task.deliver.map(|deliver| {
+        let branch = deliver.branch;
+        if branch.starts_with("refs/") {
+            branch
+        } else {
+            format!("refs/heads/{branch}")
+        }
+    }))
+}
+
+/// The path named by a retained-operation warning. A Git directory whose path
+/// can no longer be resolved must never fail settlement while building a
+/// warning; the warning names an unknown path instead.
+fn warning_path<E>(path: std::result::Result<PathBuf, E>) -> PathBuf {
+    path.unwrap_or_else(|_| PathBuf::from("an unknown path"))
+}
+
+/// Name an unfinished operation in one lane Git directory without touching it.
+/// The warning names the commit HEAD denotes, symbolic or detached, and the
+/// directory that retains the operation, so a person can resume it there.
+/// Building a warning never fails settlement: an unborn or unreadable HEAD, a
+/// non-UTF-8 HEAD or a ref that cannot be resolved all degrade to "unknown".
+fn lane_git_operation_warning(
+    directory: &Directory,
+    path: &Path,
+    resolve: impl FnOnce(&str) -> Result<GitOid>,
+) -> Option<String> {
+    let operation = match worktrees::incomplete_git_operation(directory, None) {
+        Ok(Some(operation)) => operation,
+        _ => return None,
+    };
+    let commit = (|| {
+        let raw = directory.read_stable(OsStr::new("HEAD"), 1024).ok()?;
+        let head = std::str::from_utf8(&raw).ok()?.trim();
+        match head.strip_prefix("ref: ") {
+            Some(reference) => resolve(reference).ok(),
+            None => GitOid::parse(head).ok(),
+        }
+    })()
+    .map(|oid| oid.to_string())
+    .unwrap_or_else(|| "unknown".to_owned());
+    Some(format!(
+        "writer left an unfinished {} at commit {commit}; the in-progress state is retained in {} and is not reset or cleaned by settlement; the lane's committed tip is published",
+        operation.label,
+        path.display()
+    ))
+}
+
+/// Record a settlement warning once: a resume whose sealed terminal record
+/// already holds it must not emit or append it again.
+fn record_git_operation_warning(warnings: &mut Vec<String>, message: String) {
+    if !warnings.contains(&message) {
+        warnings.push(message.clone());
+        emit_git_operation_warning(message);
+    }
+}
+
+fn emit_git_operation_warning(message: String) {
+    #[cfg(test)]
+    GIT_OPERATION_WARNINGS.with(|warnings| warnings.borrow_mut().push(message.clone()));
+    use provenant_records::warning::{GIT_OPERATION_RETAINED, Warning, warn};
+    warn(Warning::new(GIT_OPERATION_RETAINED, message).subject("lane Git operation retained"));
+}
+
+/// Whether a terminal check stopped only because an operation is unfinished.
+/// Any other failure keeps its cause instead of reading as unfinished work.
+fn git_operation_pending(
+    result: std::result::Result<(), worktrees::WorktreeError>,
+) -> Result<bool> {
+    match result {
+        Ok(()) => Ok(false),
+        Err(worktrees::WorktreeError::GitOperationInProgress) => Ok(true),
+        Err(error) => Err(error.into()),
+    }
+}
+
 /// The settlement note for a budget stop that left an in-progress operation
 /// uncommitted.
 fn in_progress_note(operation: &str) -> &'static str {
@@ -1155,7 +1243,10 @@ fn in_progress_note(operation: &str) -> &'static str {
         "merge" => "budget commit skipped: in-progress merge preserved in attempt-private Git",
         "cherry-pick" => "budget commit skipped: in-progress cherry-pick left uncommitted",
         "revert" => "budget commit skipped: in-progress revert left uncommitted",
-        _ => "budget commit skipped: in-progress rebase left uncommitted",
+        "rebase" => "budget commit skipped: in-progress rebase left uncommitted",
+        "sequencer" => "budget commit skipped: in-progress sequencer left uncommitted",
+        "bisect" => "budget commit skipped: in-progress bisect left uncommitted",
+        _ => "budget commit skipped: in-progress Git operation left uncommitted",
     }
 }
 
@@ -1618,8 +1709,8 @@ pub struct BoundSandboxBackend {
 
 struct ResolvedLaunchLimits {
     limits: ProfileLimits,
-    grant_origin: provenant_records::diagnostic::SettingSource,
-    profile_origin: provenant_records::diagnostic::SettingSource,
+    grant_origin: provenant_records::diagnostic::Layer,
+    profile_origin: provenant_records::diagnostic::Layer,
 }
 
 impl ResolvedLaunchLimits {
@@ -1648,9 +1739,9 @@ fn launch_resource_limits(
         Ok((config, keys)) => {
             let origin = |key: &str| {
                 if keys.contains(key) {
-                    provenant_records::diagnostic::SettingSource::Configuration
+                    provenant_records::diagnostic::Layer::Host
                 } else {
-                    provenant_records::diagnostic::SettingSource::ShippedDefault
+                    provenant_records::diagnostic::Layer::Default
                 }
             };
             ResolvedLaunchLimits {
@@ -1673,12 +1764,17 @@ fn launch_resource_limits(
                     defaults.grant_limit, defaults.profile_limit_bytes
                 )),
             ) {
-                let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+                use provenant_records::warning::warn;
+                // Spec: docs/specs/cli.md#warnings-are-typed-values
+                warn(
+                    message
+                        .once_per_change(),
+                );
             }
             ResolvedLaunchLimits {
                 limits: defaults,
-                grant_origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
-                profile_origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
+                grant_origin: provenant_records::diagnostic::Layer::Default,
+                profile_origin: provenant_records::diagnostic::Layer::Default,
             }
         }
     }
@@ -1850,7 +1946,7 @@ impl LaunchConfinement {
 fn isolated_lane_access_receipt() -> provenant_records::LaneAccessReceipt {
     provenant_records::LaneAccessReceipt {
         access: provenant_records::LaneAccess::Isolated,
-        source: provenant_records::LaneAccessSource::Default,
+        source: provenant_records::Layer::Default,
         key: "lanes.access".into(),
         extra: Default::default(),
     }
@@ -1877,6 +1973,30 @@ fn prepare_writer_git(
     let executor =
         SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
     let project = writer.executor_root.clone();
+    // The one remote for this writer preparation, resolved by the owner and
+    // passed to every Git path check and refresh below. No checkout is assumed
+    // to call it `origin`; a checkout with no remote simply has none to fetch.
+    // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    let ports =
+        provenant_config::PortTable::read_for(Some(project.as_path()), state).map_err(|error| {
+            RunError::Input {
+                kind: crate::ErrorKind::Invalid,
+                message: error.to_string(),
+            }
+        })?;
+    let config = provenant_config::ForgeConfig::new(&ports, (*policy).clone());
+    let git = provenant_config::ForgeGit::new(&project).map_err(|error| RunError::Input {
+        kind: crate::ErrorKind::Invalid,
+        message: error.to_string(),
+    })?;
+    let remote = provenant_config::ForgeContext::remote_if_any(&config, &git)
+        .map_err(|error| RunError::Input {
+            kind: crate::ErrorKind::Invalid,
+            message: error.to_string(),
+        })?
+        .map(|remote| remote.value)
+        .unwrap_or_default();
+    let remote = remote.as_str();
     let path = writer.worktree.path().to_path_buf();
     // Git replaces config atomically. Open a verified snapshot and reopen after
     // fetch so a sibling's completed config update is observed coherently.
@@ -1907,7 +2027,11 @@ fn prepare_writer_git(
         ));
     }
     writer.worktree = refreshed;
-    verify_writer_git_paths(writer.worktree.repo().common_git_dir(), &writer.branch)?;
+    verify_writer_git_paths(
+        writer.worktree.repo().common_git_dir(),
+        &writer.branch,
+        remote,
+    )?;
     if let Some((authority, credentials)) = authority {
         prepare_writer_directories(
             &writer.worktree,
@@ -1929,7 +2053,7 @@ fn prepare_writer_git(
             project: project.clone(),
             worktree: path.clone(),
         },
-        repo.private_git_dir(),
+        (repo.private_git_dir(), remote),
         state,
         cancel,
         &writer.facts,
@@ -2096,18 +2220,19 @@ fn prepare_writer_git(
 
 // These exact paths are writable by the lane. Check them before host Git can
 // follow a planted link, including during fetch and reflog updates.
-pub(super) fn verify_writer_git_paths(common: &Path, branch: &GitRefName) -> Result<()> {
+pub(super) fn verify_writer_git_paths(
+    common: &Path,
+    branch: &GitRefName,
+    remote: &str,
+) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
     let suffix = branch
         .as_str()
         .strip_prefix("refs/heads/")
         .ok_or(RunError::Validation("writer branch is not a local branch"))?;
-    for prefix in [
-        "refs/heads",
-        "logs/refs/heads",
-        "refs/remotes/origin",
-        "logs/refs/remotes/origin",
-    ] {
+    let tracking = format!("refs/remotes/{remote}");
+    let tracking_log = format!("logs/refs/remotes/{remote}");
+    for prefix in ["refs/heads", "logs/refs/heads", &tracking, &tracking_log] {
         for name in [suffix.to_owned(), format!("{suffix}.lock")] {
             let relative = Path::new(prefix).join(name);
             let path = common.join(&relative);
@@ -2415,6 +2540,23 @@ mod cargo_setup_tests {
             .status()?;
         assert!(status.success());
         Ok(true)
+    }
+
+    #[test]
+    fn terminal_forge_remote_follows_the_checkout_not_a_compiled_origin() {
+        let fixture = WriterFixture::new().unwrap();
+        fixture
+            .run_git(&[
+                "remote",
+                "add",
+                "upstream",
+                fixture.root.join("upstream.git").to_str().unwrap(),
+            ])
+            .unwrap();
+        assert_eq!(
+            terminal_forge_remote(&fixture.state, &fixture.project),
+            "upstream"
+        );
     }
 
     fn oid(digit: char) -> GitOid {
@@ -3145,6 +3287,15 @@ mod cargo_setup_tests {
             return Ok(());
         }
         let fixture = WriterFixture::new()?;
+        // The tracked reflog path now follows the resolved forge remote, so
+        // declare the sole remote that makes that path origin's.
+        // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+        fixture.run_git(&[
+            "remote",
+            "add",
+            "origin",
+            fixture.project.to_str().ok_or("project path")?,
+        ])?;
         let lane = fixture.add_worktree("chore/x", "lane")?;
         let mut writer = fixture.prepare(&lane)?;
         let target = fixture.root.join("reflog-target");
@@ -3782,8 +3933,9 @@ impl WriterLaunch {
                     ),
                 },
             );
-            if let Some(message) = effect.message() {
-                let _ = writeln!(std::io::stderr().lock(), "policy: {message}");
+            if let provenant_records::policy::Effect::Warn(warning) = &effect {
+                // Spec: docs/specs/cli.md#warnings-are-typed-values
+                provenant_records::warning::warn(warning.clone());
             }
             if effect.blocks() {
                 return Err(RunError::Validation("WRITE_SCOPE: strict scope policy"));
@@ -3835,8 +3987,9 @@ impl WriterLaunch {
             })?,
             provenant_records::run::TERMINAL_RECORD_LIMIT,
         )?;
-        if let Some(message) = effect.message() {
-            let _ = writeln!(std::io::stderr().lock(), "policy: {message}");
+        if let provenant_records::policy::Effect::Warn(warning) = &effect {
+            // Spec: docs/specs/cli.md#warnings-are-typed-values
+            provenant_records::warning::warn(warning.clone());
         }
         if effect.blocks() {
             return Err(RunError::Validation("WRITE_SCOPE: strict scope policy"));
@@ -3870,7 +4023,12 @@ impl WriterLaunch {
             let rendered = format!("policy: {message}");
             #[cfg(test)]
             TOOL_STATE_WARNINGS.with(|warnings| warnings.borrow_mut().push(rendered.clone()));
-            let _ = writeln!(std::io::stderr().lock(), "{rendered}");
+            use provenant_records::warning::{TOOL_STATE_COMMIT_FAILED, Warning, warn};
+            // Spec: docs/specs/cli.md#warnings-are-typed-values
+            warn(
+                Warning::new(TOOL_STATE_COMMIT_FAILED, rendered)
+                    .subject("LANE_TOOL_STATE_COMMITTED"),
+            );
         }
         // A failure to inspect the diff never blocks settlement. A block here
         // can only come from a user-selected strict setting, so honour it.
@@ -3930,15 +4088,80 @@ impl WriterLaunch {
         // hash-checked. Do this before ancestry checks.
         let source = crate::objects::bound_source(attempt)?;
         let git_executable = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
-        let head = self
-            .worktree
-            .repo()
-            .private_dir()
-            .read_stable(OsStr::new("HEAD"), 1024)?;
-        if std::str::from_utf8(&head).map(str::trim).ok()
-            != Some(format!("ref: {}", self.branch.as_str()).as_str())
+        // Decide before import and publication, and again on a resume whose
+        // phase is already Publish or Record. Only a host operation that touches
+        // a ref settlement moves (or settlement writing that very checkout)
+        // refuses; every other operation, including the lane's own in its
+        // private Git or candidate common directory, is named and left intact
+        // while the committed tip is published.
+        let repo = self.worktree.repo();
+        let delivery_destination = sealed_delivery_destination(attempt)?;
+        let mut moved_refs = vec![self.branch.as_str()];
+        if let Some(destination) = delivery_destination.as_deref() {
+            moved_refs.push(destination);
+        }
+        let mut warning_messages = Vec::new();
+        match worktrees::check_host_checkout_terminal(repo, self.branch.as_str(), &moved_refs)? {
+            Some(operation) if operation.blocks => {
+                return Err(worktrees::WorktreeError::GitOperationInProgress.into());
+            }
+            Some(operation) => {
+                let path = if repo.is_primary_checkout() {
+                    repo.private_git_dir().to_path_buf()
+                } else {
+                    warning_path(repo.common_dir().current_path())
+                };
+                warning_messages.push(format!(
+                    "host checkout retains an unfinished {} on {}; settlement publishes the lane and leaves the state intact in {}",
+                    operation.marker.label,
+                    operation.reference.as_deref().unwrap_or("an unknown ref"),
+                    path.display()
+                ));
+            }
+            None => {}
+        }
+        let mut lane_operation = false;
+        if let Some(warning) =
+            lane_git_operation_warning(repo.private_dir(), repo.private_git_dir(), |reference| {
+                crate::objects::resolve_ref(&git_executable, repo, reference)
+            })
         {
+            lane_operation = true;
+            warning_messages.push(warning);
+        }
+        let candidate_path = source
+            .as_ref()
+            .map(|source| warning_path(source.refs.current_path()))
+            .unwrap_or_else(|| PathBuf::from("an unknown path"));
+        if let Some(source) = &source
+            && let Some(warning) =
+                lane_git_operation_warning(&source.refs, &candidate_path, |reference| {
+                    crate::objects::private_tip(source, reference)
+                })
+        {
+            lane_operation = true;
+            warning_messages.push(warning);
+        }
+        let head = repo.private_dir().read_stable(OsStr::new("HEAD"), 1024)?;
+        let head = std::str::from_utf8(&head).map(str::trim).unwrap_or("");
+        let on_lane_branch = head == format!("ref: {}", self.branch.as_str()).as_str();
+        // A rebase detaches HEAD while it replays commits. Allow that only when
+        // the rebase's head-name is this lane's branch; any other HEAD (a
+        // conflicted merge on main, a random detach, an unborn HEAD) still has
+        // to name the lane branch.
+        let detached_under_lane_rebase = GitOid::parse(head).is_ok()
+            && worktrees::rebase_operation_ref(repo.private_dir()).as_deref()
+                == Some(self.branch.as_str());
+        if !on_lane_branch && !detached_under_lane_rebase {
             return Err(RunError::WriterHeadNotLaneBranch);
+        }
+        let mut warnings: Vec<String> =
+            crate::artifacts::read_sealed(attempt, "writer-terminal.json", crate::RECORD_LIMIT)?
+                .and_then(|raw| crate::db::decode::<WriterTerminal>(&raw).ok())
+                .map(|saved| saved.warnings)
+                .unwrap_or_default();
+        for warning in warning_messages {
+            record_git_operation_warning(&mut warnings, warning);
         }
         if budget_stop
             && settlement.head().is_none()
@@ -3993,8 +4216,9 @@ impl WriterLaunch {
             if effect.blocks() {
                 return Err(error);
             }
-            if let Some(message) = effect.message() {
-                let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+            if let provenant_records::policy::Effect::Warn(warning) = &effect {
+                // Spec: docs/specs/cli.md#warnings-are-typed-values
+                provenant_records::warning::warn(warning.clone());
             }
         }
         self.report_tool_state_paths(work_base, verified_tip, source.as_ref(), enforcement)?;
@@ -4064,7 +4288,14 @@ impl WriterLaunch {
                 // is raised here; both are recorded with the same text so the
                 // record agrees with what the operator was told.
                 if !matches!(ancestor, crate::objects::Ancestor::Unrooted) {
-                    let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+                    use provenant_records::warning::{
+                        LANE_HISTORY_PUBLICATION_ADJUSTED, Warning, warn,
+                    };
+                    // Spec: docs/specs/cli.md#warnings-are-typed-values
+                    warn(
+                        Warning::new(LANE_HISTORY_PUBLICATION_ADJUSTED, warning.clone())
+                            .subject(self.branch.as_str().to_owned()),
+                    );
                 }
                 let _ = attempt
                     .atomic_write(
@@ -4099,10 +4330,12 @@ impl WriterLaunch {
                 }
                 None => false,
             };
-            if at_published_tip {
+            // An unfinished lane operation owns the checkout's files and index
+            // until a person resumes it; convergence would overwrite that.
+            if at_published_tip && !lane_operation {
                 self.advance_files(attempt, published.tip)?;
             }
-            if source.is_some() {
+            if source.is_some() && !lane_operation {
                 // Every settlement and resume runs this: it advances from the
                 // recorded commit to the branch tip, whichever lane moved it,
                 // and does nothing when the index already follows the tip.
@@ -4181,10 +4414,8 @@ impl WriterLaunch {
             return Err(RunError::WriterHeadNotLaneBranch);
         }
 
-        // The host checkout must not be left mid-operation: settlement
-        // advances its files and index. A lane's own unfinished operation
-        // stays in its private Git, which never reaches the host.
-        worktrees::check_writer_terminal(self.worktree.repo())?;
+        // The Git-operation decision already ran before import and publication;
+        // reaching here leaves the host checkout's state unchanged.
         // The remote ref and dirty census can change after the first pass.
         // Once sealed, this attempt's summary is immutable even if its effect
         // receipt transaction failed. Reuse it after revalidating the pinned head.
@@ -4202,6 +4433,19 @@ impl WriterLaunch {
             }
             return Ok(());
         }
+        // A non-origin checkout must count and recover against its own remote.
+        // The sealed stop binding carries the resolved remote; recovery has no
+        // binding yet, so resolve the same identity from the port table.
+        // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+        let stop_remote = work
+            .as_ref()
+            .and_then(|policy| policy.publish)
+            .and_then(|host| {
+                host.stop_publish_remote()
+                    .or_else(|| host.delivery_remote())
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| terminal_forge_remote(state, self.worktree.repo().root_path()));
         let stop_work = work.map(|policy| {
             use provenant_records::run::StopWorkPush;
             let dirty_paths = self
@@ -4209,7 +4453,7 @@ impl WriterLaunch {
                 .ok()
                 .and_then(|paths| u64::try_from(paths.len()).ok());
             let ahead = self
-                .ahead_of_remote(&git_executable, verified_tip)
+                .ahead_of_remote(&git_executable, verified_tip, &stop_remote)
                 .ok()
                 .flatten();
             let recovered = if policy.publish.is_none() && policy.publish_granted {
@@ -4219,9 +4463,12 @@ impl WriterLaunch {
                         .as_str()
                         .strip_prefix("refs/heads/")
                         .ok_or(RunError::Validation("writer needs a local branch"))?;
-                    let request =
-                        crate::HostDeliveryContext::destination(crate::DeliveryMode::Push, branch)?
-                            .ok_or(RunError::Validation("stop publication destination missing"))?;
+                    let request = crate::HostDeliveryContext::destination(
+                        crate::DeliveryMode::Push,
+                        branch,
+                        &crate::forge_for(&stop_remote, "", &[]),
+                    )?
+                    .ok_or(RunError::Validation("stop publication destination missing"))?;
                     crate::HostDeliveryContext::capture()
                         .with_lane_access(
                             policy.route.and_then(|route| route.lane_access.clone()),
@@ -4243,10 +4490,12 @@ impl WriterLaunch {
                         )
                 })()
                 .map_err(|error| {
-                    let _ = writeln!(
-                        std::io::stderr().lock(),
-                        "warning: stopped work remains unpushed: {error}"
-                    );
+                    use provenant_records::warning::{WRITER_UNPUSHED_WORK, Warning, warn};
+                    // Spec: docs/specs/cli.md#warnings-are-typed-values
+                    warn(Warning::new(
+                        WRITER_UNPUSHED_WORK,
+                        format!("stopped work remains unpushed: {error}"),
+                    ));
                     error
                 })
                 .ok()
@@ -4283,10 +4532,12 @@ impl WriterLaunch {
                 ) {
                     Ok(()) => StopWorkPush::Pushed,
                     Err(error) => {
-                        let _ = writeln!(
-                            std::io::stderr().lock(),
-                            "warning: stopped work remains unpushed: {error}"
-                        );
+                        use provenant_records::warning::{WRITER_UNPUSHED_WORK, Warning, warn};
+                        // Spec: docs/specs/cli.md#warnings-are-typed-values
+                        warn(Warning::new(
+                            WRITER_UNPUSHED_WORK,
+                            format!("stopped work remains unpushed: {error}"),
+                        ));
                         StopWorkPush::Failed
                     }
                 }
@@ -4312,6 +4563,7 @@ impl WriterLaunch {
                 // Attribute only the head pinned for this attempt's settlement.
                 head: verified_tip,
                 stop_work,
+                warnings,
             })?,
             crate::RECORD_LIMIT,
         )?;
@@ -4332,10 +4584,23 @@ impl WriterLaunch {
             let repo = self.worktree.repo();
             let branch = self.branch.as_str();
             let tip = crate::objects::private_tip(&source, branch)?;
-            let held = crate::objects::resolve_ref(&git, repo, branch)?;
             let location = format!(
                 "the lane's work is commit {tip} on branch {branch}, retained in its private Git"
             );
+            // Restoring files must not converge over an unfinished operation:
+            // the checkout may hold its resolution while the marker sits in
+            // either the native or the candidate Git.
+            if git_operation_pending(worktrees::check_writer_terminal(repo))?
+                || git_operation_pending(worktrees::check_git_operation_terminal(
+                    &source.refs,
+                    None,
+                ))?
+            {
+                return Ok(format!(
+                    "worktree left intact; an unfinished Git operation is retained in the lane's Git; {location}"
+                ));
+            }
+            let held = crate::objects::resolve_ref(&git, repo, branch)?;
             let bases = launch_bases(attempt, self.base)?;
             if tip == bases.work || held != bases.host {
                 return Ok(String::new());
@@ -4400,7 +4665,9 @@ impl WriterLaunch {
         fallback: GitOid,
     ) {
         let warn = |message: String| {
-            let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+            use provenant_records::warning::{NATIVE_INDEX_SYNC_FAILED, Warning};
+            // Spec: docs/specs/cli.md#warnings-are-typed-values
+            provenant_records::warning::warn(Warning::new(NATIVE_INDEX_SYNC_FAILED, message));
         };
         match crate::objects::sync_native_index(self.worktree.repo(), fallback) {
             crate::objects::IndexSync::Deferred => {}
@@ -4522,10 +4789,12 @@ impl WriterLaunch {
             crate::artifacts::seal(attempt, PRIMARY_PIN, &bytes, crate::RECORD_LIMIT)
         });
         if let Err(error) = sealed {
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: could not record the primary checkout position: {error}"
-            );
+            use provenant_records::warning::{PRIMARY_POSITION_UNRECORDED, Warning, warn};
+            // Spec: docs/specs/cli.md#warnings-are-typed-values
+            warn(Warning::new(
+                PRIMARY_POSITION_UNRECORDED,
+                format!("could not record the primary checkout position: {error}"),
+            ));
         }
     }
 
@@ -4675,6 +4944,9 @@ pub(crate) struct WriterTerminal {
     pub head: GitOid,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_work: Option<provenant_records::run::StopWorkSummary>,
+    /// Settlement warnings recorded once, so a resume does not re-emit them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 #[derive(serde::Serialize)]
 struct WriterManifest {
@@ -4996,7 +5268,7 @@ mod launch_resource_limit_tests {
         assert_eq!(limits.limits.grant_limit, defaults.grant_limit);
         assert_eq!(
             limits.grant_origin,
-            provenant_records::diagnostic::SettingSource::ShippedDefault
+            provenant_records::diagnostic::Layer::Default
         );
         assert_eq!(
             limits.limits.profile_limit_bytes,
@@ -5004,7 +5276,7 @@ mod launch_resource_limit_tests {
         );
         assert_eq!(
             limits.profile_origin,
-            provenant_records::diagnostic::SettingSource::ShippedDefault
+            provenant_records::diagnostic::Layer::Default
         );
         std::fs::write(
             state.path().join("config.toml"),
@@ -5013,11 +5285,11 @@ mod launch_resource_limit_tests {
         let explicit_default = launch_resource_limits(state.path(), &policy);
         assert_eq!(
             explicit_default.grant_origin,
-            provenant_records::diagnostic::SettingSource::Configuration
+            provenant_records::diagnostic::Layer::Host
         );
         assert_eq!(
             explicit_default.profile_origin,
-            provenant_records::diagnostic::SettingSource::ShippedDefault
+            provenant_records::diagnostic::Layer::Default
         );
         std::fs::write(
             state.path().join("config.toml"),
@@ -5027,12 +5299,12 @@ mod launch_resource_limit_tests {
         assert_eq!(configured.limits.grant_limit, 256);
         assert_eq!(
             configured.grant_origin,
-            provenant_records::diagnostic::SettingSource::Configuration
+            provenant_records::diagnostic::Layer::Host
         );
         assert_eq!(configured.limits.profile_limit_bytes, 1048576);
         assert_eq!(
             configured.profile_origin,
-            provenant_records::diagnostic::SettingSource::Configuration
+            provenant_records::diagnostic::Layer::Host
         );
         let unrelated = configured
             .annotate(provenant_confinement::permissions::PermissionError::ProtectedOverlap);
@@ -5041,5 +5313,113 @@ mod launch_resource_limit_tests {
             provenant_confinement::permissions::PermissionError::ProtectedOverlap
         ));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod git_operation_warning_tests {
+    use super::*;
+
+    fn directory_with(head: &[u8]) -> tempfile::TempDir {
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            temp.path().join("MERGE_HEAD"),
+            format!("{}\n", "a".repeat(40)),
+        )
+        .expect("merge marker");
+        std::fs::write(temp.path().join("HEAD"), head).expect("HEAD");
+        temp
+    }
+
+    #[test]
+    fn non_utf8_head_degrades_to_unknown_commit() {
+        let temp = directory_with(&[0xff, 0xfe, 0x80]);
+        let directory = Directory::open_anchor(temp.path()).expect("directory");
+        let warning = lane_git_operation_warning(&directory, Path::new("git-common"), |_| {
+            Err(RunError::Validation("unresolvable"))
+        })
+        .expect("a warning is still produced");
+        assert!(warning.contains("commit unknown"), "{warning}");
+        assert!(warning.contains("merge"), "{warning}");
+    }
+
+    #[test]
+    fn unresolvable_symbolic_ref_degrades_to_unknown_commit() {
+        let temp = directory_with(b"ref: refs/heads/lane\n");
+        let directory = Directory::open_anchor(temp.path()).expect("directory");
+        let warning = lane_git_operation_warning(&directory, Path::new("git-common"), |_| {
+            Err(RunError::Validation("unborn branch"))
+        })
+        .expect("a warning is still produced");
+        assert!(warning.contains("commit unknown"), "{warning}");
+    }
+
+    #[test]
+    fn undecodable_request_refuses_instead_of_dropping_the_destination() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let attempt = Directory::open_anchor(temp.path()).expect("directory");
+        crate::artifacts::seal(&attempt, "request.json", b"not json", crate::RECORD_LIMIT)
+            .expect("seal undecodable request");
+        assert!(
+            sealed_delivery_destination(&attempt).is_err(),
+            "an undecodable sealed request must refuse, not drop the destination into a warning"
+        );
+    }
+
+    #[test]
+    fn sealed_destination_is_namespaced_or_absent() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let attempt = Directory::open_anchor(temp.path()).expect("directory");
+        assert!(
+            sealed_delivery_destination(&attempt)
+                .expect("a missing request has no destination")
+                .is_none()
+        );
+        let mut request = crate::tests::input().request;
+        request.task.deliver = Some(provenant_records::run::WriterDeliveryRequest {
+            extra: Default::default(),
+            mode: Default::default(),
+            remote: "origin".into(),
+            branch: "published/lane".into(),
+            open_pr: false,
+            fast_forward_only: false,
+        });
+        crate::artifacts::seal(
+            &attempt,
+            "request.json",
+            &crate::db::bytes(&request).expect("encode request"),
+            crate::RECORD_LIMIT,
+        )
+        .expect("seal request");
+        assert_eq!(
+            sealed_delivery_destination(&attempt).expect("destination"),
+            Some("refs/heads/published/lane".to_owned())
+        );
+    }
+
+    #[test]
+    fn an_unresolvable_warning_path_degrades_to_unknown() {
+        assert_eq!(
+            warning_path(Err::<PathBuf, _>("path gone")),
+            PathBuf::from("an unknown path")
+        );
+        let known = PathBuf::from("/git/common");
+        assert_eq!(warning_path(Ok::<_, &str>(known.clone())), known);
+    }
+
+    #[test]
+    fn warning_is_recorded_once_and_uses_the_catalogued_code() {
+        GIT_OPERATION_WARNINGS.with(|warnings| warnings.borrow_mut().clear());
+        let ((), captured) = provenant_records::warning::capture(|| {
+            let mut warnings = Vec::new();
+            let message = "a retained operation".to_owned();
+            record_git_operation_warning(&mut warnings, message.clone());
+            record_git_operation_warning(&mut warnings, message.clone());
+            assert_eq!(warnings, vec![message]);
+        });
+        assert_eq!(captured.len(), 1, "{captured:?}");
+        assert_eq!(captured[0].code.as_ref(), "GIT_OPERATION_RETAINED");
+        let emitted = GIT_OPERATION_WARNINGS.with(|warnings| warnings.borrow().clone());
+        assert_eq!(emitted.len(), 1, "{emitted:?}");
     }
 }

@@ -1,5 +1,8 @@
 //! Strict run-store records. Facts are constructed only after store validation.
-use crate::{CanonicalError, CanonicalV1, FileDigest, LimitSource, PathWire};
+pub use crate::Layer;
+use crate::{
+    CanonicalError, CanonicalV1, Cost, FileDigest, PathWire, Precedence, Tokens, UsageSource,
+};
 use provenant_core::{
     ActorId, AttemptId, DeliveryId, Digest, GitOid, OperationId, ProjectId, WallTime,
 };
@@ -81,7 +84,7 @@ pub struct HarnessProfile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admitted_by: Option<String>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub knob_sources: std::collections::BTreeMap<String, LimitSource>,
+    pub knob_sources: std::collections::BTreeMap<String, Layer>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget_wrap_up: Option<BudgetWrapUp>,
     /// Dispatch-level policy overrides after typed validation.
@@ -116,7 +119,7 @@ impl HarnessProfile {
 pub struct WorkContext {
     /// Sources of writer budget fields, retained by graph compilation.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub budget_sources: std::collections::BTreeMap<String, crate::LimitSource>,
+    pub budget_sources: std::collections::BTreeMap<String, crate::Layer>,
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -394,36 +397,23 @@ impl LaneAccess {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LaneAccessSource {
-    Default,
-    Host,
-    Project,
-    Template,
-    Tier,
-    Launch,
-    RoutePolicy,
-}
-
-impl LaneAccessSource {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Default => "default",
-            Self::Host => "host",
-            Self::Project => "project",
-            Self::Template => "template",
-            Self::Tier => "tier",
-            Self::Launch => "launch",
-            Self::RoutePolicy => "route_policy",
-        }
-    }
-}
+/// The layers lane access accepts, lowest first. The resolved route's policy
+/// outranks the launch inputs that selected it.
+/// Spec: docs/specs/state.md#every-setting-reports-its-layer
+pub const LANE_ACCESS_PRECEDENCE: Precedence = Precedence(&[
+    Layer::Default,
+    Layer::Host,
+    Layer::Project,
+    Layer::Tier,
+    Layer::Template,
+    Layer::Route,
+    Layer::Launch,
+]);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaneAccessReceipt {
     pub access: LaneAccess,
-    pub source: LaneAccessSource,
+    pub source: Layer,
     pub key: String,
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
@@ -818,16 +808,21 @@ pub enum AccountSource {
     Automatic,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// The layers a sandbox mode accepts, lowest first. A knob's actual layer
+/// replaces the old `knob` spelling (Spec: docs/specs/state.md#every-setting-reports-its-layer).
+pub const SANDBOX_PRECEDENCE: Precedence =
+    Precedence(&[Layer::Default, Layer::Host, Layer::Route, Layer::Parent]);
+
+/// Why a sandbox cap was imposed. A cap explains *what* limits the lane, not
+/// *where a value came from*, so it stays beside the layer instead of being
+/// folded into it (Spec: docs/specs/state.md#every-setting-reports-its-layer).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SandboxSourceReceipt {
-    Parent,
-    Route,
+pub enum SandboxConstraint {
+    /// Explicit network or path denials require kernel enforcement.
     Restriction,
+    /// The host platform does not implement sandbox confinement.
     Platform,
-    Knob,
-    #[default]
-    Default,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -837,7 +832,10 @@ pub struct SandboxModeReceipt {
     pub requested: bool,
     #[serde(default)]
     pub effective: bool,
-    pub source: SandboxSourceReceipt,
+    pub source: Layer,
+    /// A cap from a restriction or the platform, kept apart from provenance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub constraint: Option<SandboxConstraint>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
     #[serde(flatten)]
@@ -860,7 +858,7 @@ pub struct SandboxAdmissionReceipt {
     pub boundary: crate::diagnostic::BoundaryClass,
     pub strength: SandboxFloorStrength,
     pub knob: String,
-    pub source: crate::LimitSource,
+    pub source: crate::Layer,
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
 }
@@ -1104,7 +1102,7 @@ pub struct CiScopeReceipt {
     #[serde(default)]
     pub value: String,
     #[serde(default)]
-    pub source: crate::LimitSource,
+    pub source: crate::Layer,
     #[serde(default)]
     pub key: String,
     #[serde(flatten)]
@@ -1168,17 +1166,17 @@ impl From<RouteRecord> for crate::RouteFact {
     }
 }
 impl UsageRecord {
-    /// Fresh tokens the writer token budget counts: uncached input, cache
-    /// writes and output (including reasoning). Cache reads are excluded
-    /// because each call re-reads the whole context, so counting them would
-    /// exhaust the budget on rereads instead of new work. `None` means the
-    /// provider reported none of these categories, which is not zero.
+    /// Fresh tokens the writer token budget counts: input with cache reads
+    /// removed, cache writes and output (including reasoning). Cache reads are
+    /// excluded because each call re-reads the whole context, so counting them
+    /// would exhaust the budget on rereads instead of new work. `None` means
+    /// the provider reported none of these categories, which is not zero.
     pub fn fresh_tokens(&self) -> Option<u64> {
         [
-            self.uncached_input,
-            self.cache_write,
-            self.output_excluding_reasoning,
-            self.reasoning,
+            self.tokens.input,
+            self.tokens.cache_write,
+            self.tokens.output,
+            self.tokens.reasoning,
         ]
         .into_iter()
         .try_fold(None, |sum: Option<u64>, part| match part {
@@ -1189,33 +1187,40 @@ impl UsageRecord {
     }
 
     /// Input the provider reported, including cached reads and writes. This
-    /// is the provider's own cumulative input figure, not the budget's unit;
-    /// it is reported beside the counted figure so the units cannot be
-    /// confused. `None` when the provider reported no input categories.
+    /// is the provider's own input figure, not the budget's unit; it is
+    /// reported beside the counted figure so the units cannot be confused.
+    /// `None` when the provider reported no input categories.
     pub fn input_including_cache(&self) -> Option<u64> {
-        [self.uncached_input, self.cache_read, self.cache_write]
-            .into_iter()
-            .try_fold(None, |sum: Option<u64>, part| match part {
-                Some(n) => Some(Some(sum.unwrap_or(0).saturating_add(n))),
-                None => Some(sum),
-            })
-            .flatten()
+        [
+            self.tokens.input,
+            self.tokens.cache_read,
+            self.tokens.cache_write,
+        ]
+        .into_iter()
+        .try_fold(None, |sum: Option<u64>, part| match part {
+            Some(n) => Some(Some(sum.unwrap_or(0).saturating_add(n))),
+            None => Some(sum),
+        })
+        .flatten()
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// One attempt's usage, in the shared token and cost shape. Buckets stay
+/// absent until a provider states them; the source is typed, never a guessed
+/// string. `extra` keeps forward-compatible fields, not usage semantics.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UsageRecord {
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
-    pub uncached_input: Option<u64>,
-    pub cache_read: Option<u64>,
-    pub cache_write: Option<u64>,
-    /// The long-TTL part of `cache_write`, where the provider splits writes.
+    /// Token buckets as merged by the adapter's declared semantics.
     #[serde(default)]
-    pub cache_write_1h: Option<u64>,
-    pub output_excluding_reasoning: Option<u64>,
-    pub reasoning: Option<u64>,
-    pub source: Option<String>,
+    pub tokens: Tokens,
+    /// A stated or priced cost, when the adapter observed one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<Cost>,
+    /// Where this record was observed.
+    #[serde(default = "UsageRecord::default_source")]
+    pub source: UsageSource,
     pub context_basis_points: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub per_attempt: Option<bool>,
@@ -1223,6 +1228,34 @@ pub struct UsageRecord {
     pub session_total: Option<Box<UsageRecord>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gh_invocations: Option<GhInvocationReceipt>,
+    /// Why an adapter that should report usage did not: evidence beside the
+    /// typed source, never a substitute for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub absence_reason: Option<String>,
+}
+
+impl Default for UsageRecord {
+    fn default() -> Self {
+        Self {
+            extra: crate::ExtraFields::new(),
+            tokens: Tokens::default(),
+            cost: None,
+            source: Self::default_source(),
+            context_basis_points: None,
+            per_attempt: None,
+            session_total: None,
+            gh_invocations: None,
+            absence_reason: None,
+        }
+    }
+}
+
+impl UsageRecord {
+    /// An unmarked record is one the provider stream reported. Callers that
+    /// observe usage elsewhere set the typed source explicitly.
+    fn default_source() -> UsageSource {
+        UsageSource::Stream
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1231,7 +1264,7 @@ pub struct GhInvocationReceipt {
     #[serde(default)]
     pub count: u64,
     pub budget: Option<u64>,
-    pub source: Option<crate::LimitSource>,
+    pub source: Option<crate::Layer>,
     #[serde(default)]
     pub over_budget: bool,
     #[serde(flatten)]
@@ -1240,12 +1273,12 @@ pub struct GhInvocationReceipt {
 impl From<UsageRecord> for crate::Usage {
     fn from(u: UsageRecord) -> Self {
         Self {
-            uncached_input: u.uncached_input,
-            cache_read: u.cache_read,
-            cache_write: u.cache_write,
-            cache_write_1h: u.cache_write_1h,
-            output_excluding_reasoning: u.output_excluding_reasoning,
-            reasoning: u.reasoning,
+            uncached_input: u.tokens.input,
+            cache_read: u.tokens.cache_read,
+            cache_write: u.tokens.cache_write,
+            cache_write_1h: u.tokens.cache_write_1h,
+            output_excluding_reasoning: u.tokens.output,
+            reasoning: u.tokens.reasoning,
         }
     }
 }
@@ -2610,6 +2643,9 @@ pub struct AttemptRecord {
     /// Host summary of committed and dirty writer work after a stop.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_work: Option<StopWorkSummary>,
+    /// Settlement warnings recorded once in the writer terminal record.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
     pub verified_owner: Option<ActorId>,
     pub session: Option<String>,
     pub queued_at: WallTime,
@@ -2796,11 +2832,7 @@ impl AttemptRecord {
 fn sandbox_floors_children(sandbox: Option<&SandboxModeReceipt>) -> bool {
     sandbox.is_some_and(|sandbox| {
         sandbox.effective
-            && (sandbox.requested
-                || matches!(
-                    sandbox.source,
-                    SandboxSourceReceipt::Parent | SandboxSourceReceipt::Route
-                ))
+            && (sandbox.requested || matches!(sandbox.source, Layer::Parent | Layer::Route))
     })
 }
 /// Sealed launch classification, shared by local, peer and recovered attempts.
@@ -2952,7 +2984,7 @@ impl RepositoryAdmissionPhase {
 pub struct RepositoryAdmissionBinding {
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
-    pub source: crate::PortSource,
+    pub source: crate::Layer,
     pub command: crate::PortCommand,
     pub command_digest: FileDigest,
     pub lease_epoch: u64,
@@ -2965,7 +2997,7 @@ impl<'de> Deserialize<'de> for RepositoryAdmissionBinding {
         struct Wire {
             #[serde(flatten)]
             extra: crate::ExtraFields,
-            source: crate::PortSource,
+            source: crate::Layer,
             command: crate::PortCommand,
             command_digest: FileDigest,
             lease_epoch: u64,
@@ -2990,7 +3022,7 @@ impl<'de> Deserialize<'de> for RepositoryAdmissionBinding {
 }
 
 impl RepositoryAdmissionBinding {
-    pub fn new(source: crate::PortSource, command: &crate::PortCommand) -> Self {
+    pub fn new(source: crate::Layer, command: &crate::PortCommand) -> Self {
         Self {
             extra: Default::default(),
             source,
@@ -3194,12 +3226,13 @@ mod tests {
                 "digest":CanonicalV1::file_digest(b"fixture"),"bytes":7,"complete":true,"redacted":false}
         }))?;
         assert!(!record.floors_children());
-        let mut floors = |source: SandboxSourceReceipt, requested: bool, effective: bool| {
+        let mut floors = |source: Layer, requested: bool, effective: bool| {
             record.applied_route = Some(RouteRecord {
                 sandbox: Some(SandboxModeReceipt {
                     requested,
                     effective,
                     source,
+                    constraint: None,
                     warning: None,
                     extra: Default::default(),
                 }),
@@ -3208,12 +3241,10 @@ mod tests {
             record.floors_children()
         };
         for (source, parent_derived) in [
-            (SandboxSourceReceipt::Route, true),
-            (SandboxSourceReceipt::Parent, true),
-            (SandboxSourceReceipt::Knob, false),
-            (SandboxSourceReceipt::Platform, false),
-            (SandboxSourceReceipt::Restriction, false),
-            (SandboxSourceReceipt::Default, false),
+            (Layer::Route, true),
+            (Layer::Parent, true),
+            (Layer::Host, false), // a knob's actual layer
+            (Layer::Default, false),
         ] {
             for requested in [false, true] {
                 for effective in [false, true] {
@@ -3222,8 +3253,59 @@ mod tests {
                 }
             }
         }
-        assert!(!floors(SandboxSourceReceipt::Default, false, false));
+        assert!(!floors(Layer::Default, false, false));
+        // A platform or restriction cap is not a source and never floors children.
+        for constraint in [SandboxConstraint::Platform, SandboxConstraint::Restriction] {
+            record.applied_route = Some(RouteRecord {
+                sandbox: Some(SandboxModeReceipt {
+                    requested: false,
+                    effective: true,
+                    source: Layer::Host,
+                    constraint: Some(constraint),
+                    warning: None,
+                    extra: Default::default(),
+                }),
+                ..Default::default()
+            });
+            assert!(!record.floors_children());
+        }
         Ok(())
+    }
+
+    /// Spec: docs/specs/state.md#every-setting-reports-its-layer
+    #[test]
+    fn lane_access_and_sandbox_precedence_preserve_the_documented_order() {
+        use crate::{Source, Sourced};
+        fn candidate(layer: Layer) -> Sourced<&'static str> {
+            Sourced {
+                value: layer.as_str(),
+                source: Source {
+                    layer,
+                    origin: None,
+                },
+            }
+        }
+        let access =
+            LANE_ACCESS_PRECEDENCE.merge(LANE_ACCESS_PRECEDENCE.0.iter().copied().map(candidate));
+        assert_eq!(
+            access.winner.as_ref().map(|winner| winner.value),
+            Some("launch")
+        );
+        assert_eq!(access.shadowed.len(), LANE_ACCESS_PRECEDENCE.0.len() - 1);
+        assert!(access.ignored.is_empty());
+
+        let sandbox = SANDBOX_PRECEDENCE.merge(SANDBOX_PRECEDENCE.0.iter().copied().map(candidate));
+        assert_eq!(
+            sandbox.winner.as_ref().map(|winner| winner.value),
+            Some("parent")
+        );
+        assert_eq!(sandbox.shadowed.len(), SANDBOX_PRECEDENCE.0.len() - 1);
+        // A knob's host layer is listed; a route-policy layer unknown to a
+        // family would be reported as ignored, not silently ranked.
+        assert_eq!(
+            crate::diagnostic::PRESSURE_PRECEDENCE.0,
+            &[Layer::Default, Layer::Host]
+        );
     }
 
     #[test]
@@ -3449,7 +3531,7 @@ mod tests {
     {
         let value = serde_json::json!({
             "per_attempt":true,
-            "session_total":{"uncached_input":12,"future_nested":true},
+            "session_total":{"tokens":{"input":12},"future_nested":true},
             "gh_invocations":{"count":4,"budget":3,"source":"launch","over_budget":true},
             "future":true
         });
@@ -3459,7 +3541,7 @@ mod tests {
             usage
                 .session_total
                 .as_deref()
-                .and_then(|total| total.uncached_input),
+                .and_then(|total| total.tokens.input),
             Some(12)
         );
         assert_eq!(
@@ -3553,7 +3635,7 @@ mod tests {
             confidential: true,
             parent_sandboxed: true,
             admitted_by: Some("parent".into()),
-            knob_sources: [("lanes.ci_scope".into(), LimitSource::Launch)].into(),
+            knob_sources: [("lanes.ci_scope".into(), Layer::Launch)].into(),
             budget_wrap_up: Some(BudgetWrapUp { remaining: 17 }),
             policy_overrides: [("WRITE_SCOPE".into(), crate::policy::Strength::Warn)].into(),
             policy_project: Some(ProjectId::from_bytes([7; 16])),
@@ -3755,7 +3837,7 @@ mod tests {
                 other: crate::ExitDisposition::Refused,
             },
         };
-        let binding = RepositoryAdmissionBinding::new(crate::PortSource::Project, &command);
+        let binding = RepositoryAdmissionBinding::new(crate::Layer::Project, &command);
         let wire = serde_json::to_value(&binding).unwrap();
         let bytes = serde_json::to_vec(&wire).unwrap();
         let decoded: RepositoryAdmissionBinding =
@@ -3809,7 +3891,7 @@ mod tests {
             "argv":["admission-check"],
             "exit_codes":{"success":[0],"unknown":[],"other":"refused"}
         }))?;
-        let binding = RepositoryAdmissionBinding::new(crate::PortSource::Project, &command);
+        let binding = RepositoryAdmissionBinding::new(crate::Layer::Project, &command);
         let field_values = [
             (
                 "stop_work",

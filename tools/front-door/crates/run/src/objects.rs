@@ -12,7 +12,7 @@ use provenant_os::{
 };
 use std::{
     ffi::{OsStr, OsString},
-    io::{Read, Write as _},
+    io::Read,
     path::Path,
     time::Duration,
 };
@@ -165,12 +165,15 @@ pub(crate) fn execute_bounded(
     }
     let non_advice_stderr = strip_git_advice(&output.stderr.bytes);
     if !non_advice_stderr.is_empty() {
-        use std::io::Write as _;
-        let _ = writeln!(
-            std::io::stderr().lock(),
-            "warning: lane Git import: {}",
-            String::from_utf8_lossy(&non_advice_stderr).trim_end()
-        );
+        use provenant_records::warning::{LANE_GIT_IMPORT_STDERR, Warning, warn};
+        // Spec: docs/specs/cli.md#warnings-are-typed-values
+        warn(Warning::new(
+            LANE_GIT_IMPORT_STDERR,
+            format!(
+                "lane Git import: {}",
+                String::from_utf8_lossy(&non_advice_stderr).trim_end()
+            ),
+        ));
     }
     Ok(output.stdout.bytes)
 }
@@ -919,10 +922,19 @@ pub(crate) fn publish_branch(
                 let warning = Ancestor::Unrooted
                     .warning(branch, base, head)
                     .ok_or_else(invalid)?;
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: {warning}; {}; set {UNROOTED_TIP} to refuse to stop instead",
-                    history.unrooted_tip.setting(UNROOTED_TIP),
+                use provenant_records::warning::{
+                    LANE_HISTORY_PUBLICATION_ADJUSTED, Warning, warn,
+                };
+                // Spec: docs/specs/cli.md#warnings-are-typed-values
+                warn(
+                    Warning::new(
+                        LANE_HISTORY_PUBLICATION_ADJUSTED,
+                        format!(
+                            "{warning}; {}; set {UNROOTED_TIP} to refuse to stop instead",
+                            history.unrooted_tip.setting(UNROOTED_TIP),
+                        ),
+                    )
+                    .subject(branch.to_owned()),
                 );
             }
             HistoryEffect::Refuse => {
@@ -971,10 +983,17 @@ pub(crate) fn publish_branch(
         }
     };
     if merged {
-        let _ = writeln!(
-            std::io::stderr().lock(),
-            "warning: lane history on {branch} diverged from the host branch; published a host merge of {head} and {current} as {target}; {}; set {REBASE} to refuse to retain the lane's private history instead",
-            history.rebase.setting(REBASE),
+        use provenant_records::warning::{LANE_HISTORY_PUBLICATION_ADJUSTED, Warning, warn};
+        // Spec: docs/specs/cli.md#warnings-are-typed-values
+        warn(
+            Warning::new(
+                LANE_HISTORY_PUBLICATION_ADJUSTED,
+                format!(
+                    "lane history on {branch} diverged from the host branch; published a host merge of {head} and {current} as {target}; {}; set {REBASE} to refuse to retain the lane's private history instead",
+                    history.rebase.setting(REBASE),
+                ),
+            )
+            .subject(branch.to_owned()),
         );
     }
     // The ancestor the publication established is the one judged on the lane

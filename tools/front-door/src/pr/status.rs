@@ -885,12 +885,20 @@ pub(crate) fn wait_line_observed(
     let mut line = poll_line(&mut observer, number, None, request, max_age)?.0;
     match observer.active_workflows(&line.head, max_age, request) {
         Ok(Some(active)) => line.active_workflows = Some(active),
-        Ok(None) => crate::event_delivery::warn_once(
-            "Actions runs unavailable for this head (no runs found); using observed checks only",
+        Ok(None) => provenant_records::warning::warn(
+            provenant_records::warning::Warning::new(
+                provenant_records::warning::ACTIONS_RUNS_UNAVAILABLE,
+                "Actions runs unavailable for this head (no runs found); using observed checks only",
+            )
+            .subject(line.head.clone()),
         ),
-        Err(error) => crate::event_delivery::warn_once(&format!(
-            "Actions runs unavailable for this head ({error}); using observed checks only"
-        )),
+        Err(error) => provenant_records::warning::warn(
+            provenant_records::warning::Warning::new(
+                provenant_records::warning::ACTIONS_RUNS_UNAVAILABLE,
+                format!("Actions runs unavailable for this head ({error}); using observed checks only"),
+            )
+            .subject(line.head.clone()),
+        ),
     }
     Ok(line)
 }
@@ -1212,14 +1220,14 @@ pub(super) fn run(numbers: Vec<u64>, globals: &Globals) -> u8 {
                     text
                 })
                 .collect();
-            let summary = summarise(&lines);
+            let (summary, next) = summarise(&lines);
             let outcome = if !lines.is_empty() && lines.iter().all(|line| line.error.is_some()) {
                 Outcome::Unavailable
             } else {
                 Outcome::Ok
             };
             emit_summarised(
-                &CommandResult::new(LEAF, outcome, lines),
+                &CommandResult::new(LEAF, outcome, lines).with_next(vec![next]),
                 globals,
                 &text,
                 true,
@@ -1239,7 +1247,12 @@ pub(super) fn run(numbers: Vec<u64>, globals: &Globals) -> u8 {
 
 /// Counts by state, action rows first (failing, review, pending,
 /// unavailable), then one typed next command.
-fn summarise(lines: &[Line]) -> provenant_cli::Summary {
+fn summarise(
+    lines: &[Line],
+) -> (
+    provenant_cli::Summary,
+    provenant_records::command_result::NextStep,
+) {
     let order = ["failing", "review_required", "pending", "unavailable"];
     let counts: Vec<(&str, usize)> = [
         "failing",
@@ -1281,19 +1294,17 @@ fn summarise(lines: &[Line]) -> provenant_cli::Summary {
         })
         .collect();
     let quiet = lines.len() - action.len();
-    let next = match action.first() {
+    let command = match action.first() {
         Some(line) if line.class() == "failing" => {
-            Some(format!("provenant ci failures pr {}", line.number))
+            format!("provenant ci failures pr {}", line.number)
         }
-        Some(line) if line.class() == "pending" => {
-            Some(format!("provenant wait --pr {}", line.number))
-        }
-        Some(line) => Some(format!("provenant pr status {} --full", line.number)),
+        Some(line) if line.class() == "pending" => format!("provenant wait --pr {}", line.number),
+        Some(line) => format!("provenant pr status {} --full", line.number),
         None => lines
             .iter()
             .find(|line| line.display_class() == "ready")
             .map(|line| format!("provenant land {} --wait", line.number))
-            .or_else(|| Some("provenant status".to_owned())),
+            .unwrap_or_else(|| "provenant status".to_owned()),
     };
     let mut headline = format!(
         "{} PRs: {}",
@@ -1303,7 +1314,16 @@ fn summarise(lines: &[Line]) -> provenant_cli::Summary {
     if quiet > 0 && !action.is_empty() {
         headline.push_str(&format!(" ({quiet} need nothing)"));
     }
-    provenant_cli::Summary::new(headline, rows, next)
+    let why = match command.as_str() {
+        command if command.starts_with("provenant ci failures") => "inspect the failing checks",
+        command if command.starts_with("provenant wait") => "wait for the pending PR",
+        command if command.starts_with("provenant land") => "land the ready PR",
+        _ => "review the remaining PRs",
+    };
+    (
+        provenant_cli::Summary::new(headline, rows),
+        provenant_records::command_result::NextStep::from_command(&command, why),
+    )
 }
 
 #[cfg(test)]
@@ -1502,7 +1522,7 @@ mod tests {
         let json = serde_json::to_value(&member).unwrap();
         assert_eq!(json["batch"]["number"], 9);
         assert_eq!(json["batch"]["head"], "batch-head");
-        let summary = super::summarise(&[member]);
+        let (summary, _) = super::summarise(&[member]);
         assert_eq!(summary.lines[0], "1 PRs: 1 failing");
         assert_eq!(summary.lines.len(), 2, "the real failure is an action row");
         assert!(summary.lines[1].contains("fail=1 names=real-failure"));
@@ -1703,7 +1723,7 @@ mod tests {
         let unavailable = row(2, "b", Some("HTTP 502"));
         let action_rows = vec![failing.text(), unavailable.text()];
         let lines = vec![row(1, "a", None), failing, unavailable];
-        let summary = super::summarise(&lines);
+        let (summary, _) = super::summarise(&lines);
         assert_eq!(&summary.lines[1..], action_rows);
         assert_eq!(summary.omitted, 0);
     }

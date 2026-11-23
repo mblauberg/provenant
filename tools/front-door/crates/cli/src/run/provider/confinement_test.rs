@@ -339,7 +339,7 @@ fn unresolvable_registered_store_names_its_account() -> Result<(), Box<dyn std::
         .expect_err("dangling store must refuse");
     assert!(error.contains("claude/work"), "{error}");
     assert!(error.contains("provenant-lane-token"), "{error}");
-    let receipt = provenant_records::LaneAccessReceipt { access: provenant_records::LaneAccess::Host, source: provenant_records::LaneAccessSource::Default, key: "lanes.access".into(), extra: Default::default() };
+    let receipt = provenant_records::LaneAccessReceipt { access: provenant_records::LaneAccess::Host, source: provenant_records::Layer::Default, key: "lanes.access".into(), extra: Default::default() };
     assert!(credential_roots(&Registry::default(), &home, &settings, &[&account], Some(&receipt), &provenant_records::policy::Policy::default()).is_ok());
     Ok(())
 }
@@ -523,7 +523,7 @@ fn alternate_sources_inside_builtin_stores_keep_only_actual_launch_carveouts()
         for sandboxed in [false, true] {
             let mandatory = provenant_confinement::permissions::MandatoryRoots::for_host_with_scratch_mode(
                 &host_roots, &home, &project, &base.join("scratch"), &roots, &[], &[], sandboxed,
-                provenant_records::LaneAccessReceipt { access: provenant_records::LaneAccess::Isolated, source: provenant_records::LaneAccessSource::Default, key: "lanes.access".into(), extra: Default::default() },
+                provenant_records::LaneAccessReceipt { access: provenant_records::LaneAccess::Isolated, source: provenant_records::Layer::Default, key: "lanes.access".into(), extra: Default::default() },
             )?;
             assert!(!mandatory.credential_roots().refuses(&project, CredentialScope::Subtree, true));
             assert!(!mandatory.credential_roots().refuses(&ordinary, CredentialScope::Exact, true));
@@ -687,7 +687,7 @@ fn shared_store_refuses_declared_files_in_lane_roots_and_names_the_origin()
 fn isolated_credential_roots(
     registry: &Registry<'_>, home: &Path, settings: &provenant_providers::accounts::Settings, lane_roots: &[&Path],
 ) -> Result<provenant_core::CredentialRoots, String> {
-    let receipt = provenant_records::LaneAccessReceipt { access: provenant_records::LaneAccess::Isolated, source: provenant_records::LaneAccessSource::Default, key: "lanes.access".into(), extra: Default::default() };
+    let receipt = provenant_records::LaneAccessReceipt { access: provenant_records::LaneAccess::Isolated, source: provenant_records::Layer::Default, key: "lanes.access".into(), extra: Default::default() };
     credential_roots(registry, home, settings, lane_roots, Some(&receipt), &provenant_records::policy::Policy::default())
 }
 
@@ -699,7 +699,7 @@ fn credential_grant_admission_follows_resolved_access() {
     let credential = home.join(".ssh");
     let given = home.join("project/../.ssh");
     let given_display = given.display().to_string();
-    let mut receipt = provenant_records::LaneAccessReceipt { access: provenant_records::LaneAccess::Isolated, source: provenant_records::LaneAccessSource::Default, key: "lanes.access".into(), extra: Default::default() };
+    let mut receipt = provenant_records::LaneAccessReceipt { access: provenant_records::LaneAccess::Isolated, source: provenant_records::Layer::Default, key: "lanes.access".into(), extra: Default::default() };
     for (read, attach) in [(true, false), (false, false), (true, true)] {
         request.read_roots.clear(); request.write_roots.clear(); request.attachments.clear();
         if attach { request.attachments.push(credential.clone()); } else if read { request.read_roots.push(credential.clone()); } else { request.write_roots.push(credential.clone()); }

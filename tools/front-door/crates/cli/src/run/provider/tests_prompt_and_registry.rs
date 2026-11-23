@@ -59,7 +59,7 @@ fn launch_prompt_refuses_invalid_input_before_account_resolution()
                 &attempt,
                 adapter,
                 65_536,
-                provenant_records::diagnostic::SettingSource::ShippedDefault,
+                provenant_records::diagnostic::Layer::Default,
                 &provenant_records::policy::Policy::default(),
             )?;
             assert_eq!(prompt.text(), full);
@@ -681,10 +681,7 @@ fn registry_provider_resolves_prepares_and_reports_quota(
 ) -> Result<(), Box<dyn std::error::Error>> {
     use provenant_core::{AttemptId, CancelToken, Digest, OperationId};
     use provenant_os::exec::SystemExecutor;
-    use provenant_providers::{
-        Adapter, Continuation, ExitObservation, LaunchSpec, PrepareInput, ProviderError,
-        ProviderEvent, ProviderOutcome, RouteProvenance, StreamState, VerifiedLineage,
-    };
+    use provenant_providers::{Adapter, Continuation, ExitObservation, LaunchSpec, PrepareInput, ProviderError, ProviderEvent, ProviderOutcome, RouteProvenance, StreamState, VerifiedLineage, };
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 
     struct Fixture(&'static str);

@@ -1,12 +1,49 @@
 //! One host-owned subject for review selection, evidence and provider launch.
 use super::*;
+use crate::pr::observer::Observer;
 use serde::Deserialize;
 use serde_json::Value;
 use std::time::Duration;
 
-/// Bounded re-read when `--head` disagrees with the forge just after a push.
-const HEAD_REREAD_ATTEMPTS: usize = 4;
-const HEAD_REREAD_DELAY: Duration = Duration::from_millis(250);
+/// Read one pull request's subject through the one CI observation transport.
+/// No caller shells out to `gh` for this: the observer selects the forge port,
+/// shares the cache and honours the same rate-limit hold-off as every waiter.
+fn observed_pull(
+    state: &std::path::Path,
+    project: &std::path::Path,
+    number: u64,
+    request: &provenant_config::ports::Request,
+) -> Result<PullSubject, FacadeError> {
+    let repository = crate::pr::observer::repository_for_project(state, project, request)
+        .map_err(|error| graph_subject_error(error.to_string()))?;
+    let mut observer = Observer::open(state, project, &repository, request)
+        .map_err(|error| graph_subject_error(error.to_string()))?;
+    let resource = observer
+        .resource(&format!("pulls/{number}"), Duration::ZERO, request)
+        .map_err(|error| graph_subject_error(error.to_string()))?;
+    pull_subject(&resource)
+}
+
+/// The REST pull resource is the same shape the landing adapter observes.
+fn pull_subject(value: &Value) -> Result<PullSubject, FacadeError> {
+    let field = |pointer: &str| -> Result<&str, FacadeError> {
+        value
+            .pointer(pointer)
+            .and_then(Value::as_str)
+            .ok_or_else(|| graph_subject_error(format!("pull resource has no {pointer}")))
+    };
+    let oid = |pointer: &str| -> Result<provenant_core::GitOid, FacadeError> {
+        provenant_core::GitOid::parse(field(pointer)?)
+            .map_err(|_| graph_subject_error(format!("invalid {pointer}")))
+    };
+    Ok(PullSubject {
+        base_ref_oid: oid("/base/sha")?,
+        base_ref_name: field("/base/ref")?.to_owned(),
+        head_ref_oid: oid("/head/sha")?,
+        head_ref_name: value["head"]["ref"].as_str().map(str::to_owned),
+        url: field("/html_url")?.to_owned(),
+    })
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -35,25 +72,14 @@ impl Factory {
         cancel: &CancelToken,
     ) -> Result<Option<ReviewSubject>, FacadeError> {
         self.review_subject_with(input, review, cancel, |number| {
-            let bytes = crate::pr::forge_execute(
+            let request =
+                provenant_config::ports::Request::within(std::time::Duration::from_secs(60));
+            observed_pull(
                 self.context.roots.state.as_path(),
-                &self.cwd,
-                &[
-                    "gh",
-                    "pr",
-                    "view",
-                    &number.to_string(),
-                    "--json",
-                    "baseRefOid,baseRefName,headRefOid,headRefName,url",
-                ],
-                &provenant_config::ports::Request::within(std::time::Duration::from_secs(60)),
-                false,
-                None,
+                &self.context.project_root,
+                number,
+                &request,
             )
-            .and_then(crate::pr::successful)
-            .map_err(|error| graph_subject_error(error.to_string()))?;
-            serde_json::from_slice(&bytes)
-                .map_err(|_| graph_subject_error("invalid PR subject metadata"))
         })
     }
 
@@ -64,13 +90,14 @@ impl Factory {
         cancel: &CancelToken,
         pull: impl Fn(u64) -> Result<PullSubject, FacadeError>,
     ) -> Result<Option<ReviewSubject>, FacadeError> {
+        let retry = crate::pr::observer::retry(&self.context.roots);
         self.review_subject_with_wait(
             input,
             review,
             cancel,
             pull,
-            HEAD_REREAD_ATTEMPTS,
-            HEAD_REREAD_DELAY,
+            retry.head_attempts.value,
+            retry.head_delay.value,
         )
     }
 

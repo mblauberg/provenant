@@ -30,6 +30,18 @@ use std::fs;
 
 use std::os::unix::fs::PermissionsExt;
 
+/// Give a bare fixture the one forge context a retirement needs: a sole remote
+/// named by its HEAD symref, so fail-closed protection does not retain every
+/// candidate. Tests of unresolved contexts deliberately omit this call.
+pub(super) fn declare_forge_default(fixture: &Fixture) -> Result<(), Box<dyn Error>> {
+    fixture.run(&[
+        "symbolic-ref",
+        "refs/remotes/origin/HEAD",
+        "refs/heads/main",
+    ])?;
+    Ok(())
+}
+
 pub(super) fn worktree_subject_matches_path(
     subject: &provenant_records::custody::Subject,
     path: &Path,
@@ -857,6 +869,7 @@ pub(super) fn gc_foreign_without_state_holds_writer_through_final_recheck_and_re
     ] {
         let refuse = !matches!(scenario, "remove" | "detached-unique");
         let fixture = Fixture::new()?;
+        declare_forge_default(&fixture)?;
         let test_context = TestContext::new(&fixture)?;
         let mut context = test_context.context();
         let clock = provenant_core::TestClock::new(
@@ -972,6 +985,7 @@ pub(super) fn gc_foreign_without_state_holds_writer_through_final_recheck_and_re
 
 fn merge_proof_scenario() -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;
+    declare_forge_default(&fixture)?;
     let test_context = TestContext::new(&fixture)?;
     let context = test_context.context();
     let new_lane = |name: &str| -> Result<WorktreeInfo, Box<dyn Error>> {
@@ -1195,6 +1209,77 @@ fn creation_uses_a_nested_project_worktree_layout() -> Result<(), Box<dyn Error>
     )?;
     assert_eq!(created.path, expected_path,);
     assert!(created.path.join(".git").exists());
+    Ok(())
+}
+
+// Spec: docs/specs/state.md#one-sourced-port-table
+#[test]
+fn sibling_directory_root_is_used_by_create_list_and_gc_preview() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    declare_forge_default(&fixture)?;
+    fs::create_dir_all(fixture.root.join(".provenant"))?;
+    let parent = fixture.root.parent().ok_or("fixture has a parent")?;
+    let name = format!(
+        "outside-{}",
+        fixture
+            .root
+            .file_name()
+            .ok_or("fixture has a name")?
+            .to_string_lossy()
+    );
+    let outside = parent.join(&name);
+    fs::create_dir(&outside)?;
+
+    let mut ports = provenant_config::PortTable::builtin();
+    ports.worktree_layout.roots = vec![PathBuf::from(format!("../{name}"))];
+    ports.worktree_layout.default = PathBuf::from(format!("../{name}/<branch>"));
+    fs::write(
+        fixture.root.join(provenant_config::PORTS_CONFIG),
+        serde_json::to_vec(&ports)?,
+    )?;
+
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let created = create(
+        &context,
+        WorktreeCreate {
+            branch: "outside-root".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    let expected = canonicalize(&outside)?.join("outside-root");
+    assert_eq!(created.path, expected);
+    assert!(created.path.join(".git").exists());
+
+    // List and the GC inventory both find the worktree under the declared root.
+    let listed = list(&context, &cancel())?;
+    assert!(listed.iter().any(|lane| lane.path == created.path));
+    let lanes = list_for_gc_preview(&context, &cancel())?;
+    assert!(lanes.iter().any(|lane| lane.path == created.path));
+    let report = collect(
+        &context,
+        &lanes,
+        &WorktreeGcPolicy {
+            upstream: None,
+            terminal: &|_| true,
+            no_live_lanes: &|_| true,
+            regenerable: &[],
+            keep: &[],
+            written_before_ns: i128::MAX,
+            dry_run: true,
+            include_foreign: false,
+            retirement_port: None,
+            retirement_feeds: None,
+            mode: CollectionMode::Worktrees,
+            proof: None,
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
+        },
+        &cancel(),
+    )?;
+    assert!(report.candidates.iter().any(|row| row.path == created.path));
     Ok(())
 }
 

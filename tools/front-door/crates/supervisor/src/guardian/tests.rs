@@ -1770,27 +1770,25 @@ fn darwin_settlement_requires_complete_absence_of_members_and_recorded_escapes()
 
 #[test]
 fn disk_admission_projects_typed_resource_figures() {
-    use provenant_records::diagnostic::{ResourceFact, SettingSource};
+    use provenant_records::diagnostic::{Layer, ResourceFact};
     let error = super::AdmissionError::Disk {
         free: 99,
         floor: 100,
-        origin: SettingSource::Configuration,
+        origin: Layer::Host,
     };
     assert_eq!(
         error.resource_fact(),
         Some(ResourceFact::Disk {
             free: 99,
             floor: 100,
-            origin: SettingSource::Configuration,
+            origin: Layer::Host,
         })
     );
 }
 
 #[test]
 fn admission_setting_names_follow_each_typed_cause() {
-    use provenant_records::diagnostic::{
-        LaneLimit, PressureLevel, PressureThreshold, SettingSource,
-    };
+    use provenant_records::diagnostic::{LaneLimit, Layer, PressureLevel, PressureThreshold};
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum AdmissionCause {
         Clock,
@@ -1824,19 +1822,19 @@ fn admission_setting_names_follow_each_typed_cause() {
             AdmissionCause::Disk => AdmissionError::Disk {
                 free: 1,
                 floor: 2,
-                origin: SettingSource::Configuration,
+                origin: Layer::Host,
             },
             AdmissionCause::MemoryPressure => AdmissionError::MemoryPressure {
                 level: PressureLevel::Critical,
                 threshold: PressureThreshold::Critical,
-                origin: SettingSource::ShippedDefault,
+                origin: Layer::Default,
             },
             AdmissionCause::Processes => AdmissionError::Processes { used: 2, limit: 1 },
             AdmissionCause::LaneCap => AdmissionError::LaneCap {
                 active: 2,
                 limit: 1,
                 kind: LaneLimit::ProjectWriters,
-                origin: SettingSource::Configuration,
+                origin: Layer::Host,
             },
         }
     }

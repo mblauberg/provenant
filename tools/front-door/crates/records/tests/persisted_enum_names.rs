@@ -3,28 +3,27 @@
 //! changes stored bytes, so this test pins the current names: the old name must
 //! stop decoding, and that failure is the signal to add a migration.
 use provenant_records::{
-    RouteExclusionReason, RouteReadiness,
+    Layer, RouteExclusionReason, RouteReadiness, SandboxConstraint,
     diagnostic::{
         BoundaryClass, ConfinementGuard, ContinuationCopyLimit, ContinuationField,
         ContinuationIssue, ContinuationRule, LaneLimit, PacingReserveSetting, PacingSettingSource,
         PlanFailure, PortSettingSource, PressureLevel, PressureThreshold, ResourceFact,
-        SettingSource,
     },
     handoff::{BlockedOn, HandoffStatus, SpecConcernStatus, WriteScopeReport},
-    limit::{BudgetAction, LimitSource, LimitStrength},
+    limit::{BudgetAction, LimitStrength},
     policy::{Boundary, Source, Strength},
-    ports::{ExitDisposition, PortSource},
+    ports::ExitDisposition,
     route_selection::{
         Capability, ExclusionSource, PacingPolicy, PriorSource, SelectionRule, WeightSource,
         Workload,
     },
     run::{
         AccountSource, AttemptState, CancellationDisposition, CauseSource, ChildWait,
-        EffectDisposition, LaneAccess, LaneAccessSource, OriginReceipt, Outcome, PartialSignal,
-        PathScope, PreparationFailure, RepositoryAdmissionPhase, RequestedRoute,
-        SandboxFloorStrength, SandboxSourceReceipt, SettlementEffect, SettlementReason, SkipKind,
-        StopWorkPush, StopWorkTrigger, TerminalCause, TerminalEvidence, UserSkillsMode,
-        WriteGrantLimitOrigin, WriteSource, WriterDeliveryStage, WriterDeliveryState,
+        EffectDisposition, LaneAccess, OriginReceipt, Outcome, PartialSignal, PathScope,
+        PreparationFailure, RepositoryAdmissionPhase, RequestedRoute, SandboxFloorStrength,
+        SettlementEffect, SettlementReason, SkipKind, StopWorkPush, StopWorkTrigger, TerminalCause,
+        TerminalEvidence, UserSkillsMode, WriteGrantLimitOrigin, WriteSource, WriterDeliveryStage,
+        WriterDeliveryState,
     },
     stop::StopCause,
 };
@@ -115,6 +114,25 @@ fn retired_enum_names_are_not_silently_accepted() {
 }
 
 #[test]
+fn retired_source_spellings_are_not_silently_accepted() {
+    // Spec: docs/specs/state.md#every-setting-reports-its-layer
+    for retired in [
+        "builtin",
+        "route_policy",
+        "configuration",
+        "shipped_default",
+        "knob",
+        "restriction",
+        "platform",
+    ] {
+        assert!(
+            serde_json::from_value::<Layer>(json!(retired)).is_err(),
+            "Layer still accepts retired {retired}"
+        );
+    }
+}
+
+#[test]
 fn attempt_record_enum_names_are_a_deliberate_contract() -> TestResult {
     // The policy vocabulary this defect changed.
     assert_unit_names::<Boundary>(
@@ -148,8 +166,8 @@ fn attempt_record_enum_names_are_a_deliberate_contract() -> TestResult {
         ],
     )?;
     assert_unit_names::<PathScope>("PathScope", &["exact", "subtree"])?;
-    assert_unit_names::<LimitSource>(
-        "LimitSource",
+    assert_unit_names::<Layer>(
+        "Layer",
         &["default", "host", "project", "template", "tier", "launch"],
     )?;
     assert_unit_names::<LimitStrength>("LimitStrength", &["default", "ceiling", "advisory"])?;
@@ -357,31 +375,16 @@ fn attempt_record_enum_names_are_a_deliberate_contract() -> TestResult {
         ],
     )?;
     assert_unit_names::<LaneAccess>("LaneAccess", &["host", "isolated"])?;
-    assert_unit_names::<LaneAccessSource>(
-        "LaneAccessSource",
+    assert_unit_names::<Layer>(
+        "Layer (lane access)",
         &[
-            "default",
-            "host",
-            "project",
-            "template",
-            "tier",
-            "launch",
-            "route_policy",
+            "default", "host", "project", "tier", "template", "route", "launch",
         ],
     )?;
     assert_unit_names::<UserSkillsMode>("UserSkillsMode", &["discover", "off"])?;
     assert_unit_names::<AccountSource>("AccountSource", &["continuation", "pin", "automatic"])?;
-    assert_unit_names::<SandboxSourceReceipt>(
-        "SandboxSourceReceipt",
-        &[
-            "parent",
-            "route",
-            "restriction",
-            "platform",
-            "knob",
-            "default",
-        ],
-    )?;
+    assert_unit_names::<Layer>("Layer (sandbox)", &["default", "host", "route", "parent"])?;
+    assert_unit_names::<SandboxConstraint>("SandboxConstraint", &["restriction", "platform"])?;
     assert_unit_names::<SandboxFloorStrength>("SandboxFloorStrength", &["off", "warn", "strict"])?;
     assert_unit_names::<WriteGrantLimitOrigin>(
         "WriteGrantLimitOrigin",
@@ -391,9 +394,9 @@ fn attempt_record_enum_names_are_a_deliberate_contract() -> TestResult {
         "RepositoryAdmissionPhase",
         &["acquire_pending", "acquired", "release_pending", "released"],
     )?;
-    assert_unit_names::<PortSource>(
-        "PortSource",
-        &["builtin", "detected", "host", "host_project", "project"],
+    assert_unit_names::<Layer>(
+        "Layer (ports)",
+        &["default", "detected", "host", "host_project", "project"],
     )?;
     assert_unit_names::<ExitDisposition>("ExitDisposition", &["refused", "unknown"])?;
     assert_unit_names::<SkipKind>(
@@ -625,27 +628,27 @@ fn attempt_record_enum_names_are_a_deliberate_contract() -> TestResult {
         &[
             (
                 "disk",
-                json!({"kind": "disk", "free": 1, "floor": 2, "origin": "configuration"}),
+                json!({"kind": "disk", "free": 1, "floor": 2, "origin": "host"}),
             ),
             (
                 "argv_prompt_limit",
-                json!({"kind": "argv_prompt_limit", "limit": 1, "origin": "shipped_default"}),
+                json!({"kind": "argv_prompt_limit", "limit": 1, "origin": "default"}),
             ),
             (
                 "continuation_copy",
-                json!({"kind": "continuation_copy", "limit": 1, "setting": "bytes", "origin": "configuration", "available_bytes": null}),
+                json!({"kind": "continuation_copy", "limit": 1, "setting": "bytes", "origin": "host", "available_bytes": null}),
             ),
             (
                 "write_grant_limit",
-                json!({"kind": "write_grant_limit", "limit": 1, "origin": "configuration"}),
+                json!({"kind": "write_grant_limit", "limit": 1, "origin": "host"}),
             ),
             (
                 "grant_limit",
-                json!({"kind": "grant_limit", "limit": 1, "origin": "configuration"}),
+                json!({"kind": "grant_limit", "limit": 1, "origin": "host"}),
             ),
             (
                 "profile_limit",
-                json!({"kind": "profile_limit", "bytes": 1, "limit": 2, "origin": "configuration"}),
+                json!({"kind": "profile_limit", "bytes": 1, "limit": 2, "origin": "host"}),
             ),
             (
                 "dependency_preparation",
@@ -661,11 +664,11 @@ fn attempt_record_enum_names_are_a_deliberate_contract() -> TestResult {
             ),
             (
                 "memory_pressure",
-                json!({"kind": "memory_pressure", "level": "warning", "threshold": "critical", "origin": "configuration"}),
+                json!({"kind": "memory_pressure", "level": "warning", "threshold": "critical", "origin": "host"}),
             ),
             (
                 "lane_cap",
-                json!({"kind": "lane_cap", "active": 1, "limit": 2, "lane_limit": "host_total", "origin": "configuration"}),
+                json!({"kind": "lane_cap", "active": 1, "limit": 2, "lane_limit": "host_total", "origin": "host"}),
             ),
             (
                 "processes",
@@ -675,7 +678,7 @@ fn attempt_record_enum_names_are_a_deliberate_contract() -> TestResult {
     )?;
 
     // Diagnostic limits nested in ResourceFact.
-    assert_unit_names::<SettingSource>("SettingSource", &["configuration", "shipped_default"])?;
+    assert_unit_names::<Layer>("Layer (setting)", &["default", "host"])?;
     assert_unit_names::<PressureLevel>("PressureLevel", &["normal", "warning", "critical"])?;
     assert_unit_names::<PressureThreshold>("PressureThreshold", &["warning", "critical", "never"])?;
     assert_unit_names::<LaneLimit>(

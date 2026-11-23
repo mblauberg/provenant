@@ -507,7 +507,7 @@ fn command_write_is_refused_before_preparing_a_worktree() -> TestResult {
         saved
             .refusal
             .as_ref()
-            .map(|diagnostic| diagnostic.code.as_str()),
+            .map(|diagnostic| diagnostic.code.as_ref()),
         Some(ErrorKind::Unsupported.code())
     );
     assert!(!store.has_runs(&call)?);
@@ -641,7 +641,7 @@ fn preflight_refusal_replays_and_rejects_changed_inputs() -> TestResult {
             .unwrap_err();
         fn code(error: &RunError) -> Option<&str> {
             match error {
-                RunError::RecordedRefusal(diagnostic) => Some(diagnostic.code.as_str()),
+                RunError::RecordedRefusal(diagnostic) => Some(diagnostic.code.as_ref()),
                 _ => None,
             }
         }
@@ -871,7 +871,7 @@ fn each_refusal_has_its_own_stable_code() {
             RunError::Admission(AdmissionError::Disk {
                 free: 1,
                 floor: 2,
-                origin: provenant_records::diagnostic::SettingSource::Configuration,
+                origin: provenant_records::diagnostic::Layer::Host,
             }),
             "DISK_FLOOR",
         ),
@@ -879,7 +879,7 @@ fn each_refusal_has_its_own_stable_code() {
             RunError::Admission(AdmissionError::MemoryPressure {
                 level: provenant_records::diagnostic::PressureLevel::Critical,
                 threshold: provenant_records::diagnostic::PressureThreshold::Critical,
-                origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
+                origin: provenant_records::diagnostic::Layer::Default,
             }),
             "MEMORY_PRESSURE",
         ),
@@ -888,7 +888,7 @@ fn each_refusal_has_its_own_stable_code() {
                 active: 3,
                 limit: 3,
                 kind: provenant_records::diagnostic::LaneLimit::HostWriters,
-                origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
+                origin: provenant_records::diagnostic::Layer::Default,
             }),
             "LANE_CAP",
         ),

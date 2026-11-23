@@ -704,7 +704,7 @@ fn detached_children_do_not_gate_their_parents_dependants() {
     let mut library = template::TemplateLibrary::bundled();
     library
         .insert_toml(
-            template::Layer::Repository,
+            template::Layer::Project,
             "branch",
             "nodes = [{id = 'leaf', use = 'task'}]",
         )
@@ -2039,7 +2039,7 @@ fn composite_child_preserves_compiled_review_metadata() {
     let mut library = template::TemplateLibrary::bundled();
     library
         .insert_toml(
-            template::Layer::Repository,
+            template::Layer::Project,
             "checks",
             r#"
 nodes = [{id = "lens", use = "review", with = {lens = "tests"}}]

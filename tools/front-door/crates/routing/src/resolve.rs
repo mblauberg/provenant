@@ -6,8 +6,9 @@ use provenant_records::route_selection::{
     OutcomePrior, PriorSource, RouteDiagnostics, SelectionRule, WeightSource,
 };
 use provenant_records::{
-    RouteAlternative, RouteAlternatives, RouteConfidentiality, RouteEligibility, RouteExclusion,
-    RouteExclusionReason, RouteReadiness, RouteSelectionCandidate, RouteSelectionReceipt,
+    Layer, Precedence, RouteAlternative, RouteAlternatives, RouteConfidentiality, RouteEligibility,
+    RouteExclusion, RouteExclusionReason, RouteReadiness, RouteSelectionCandidate,
+    RouteSelectionReceipt,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -172,43 +173,48 @@ pub struct AccountPacingView {
     pub profile: Option<PacingProfile>,
     pub expires: Option<provenant_core::WallTime>,
 }
-/// The configuration layer a pool weight was set in. Bundled weights come
+/// The layers a pool weight can come from, lowest first. Bundled weights come
 /// from the shipped catalogue; the others come from an owner's configuration
 /// at host or project scope. Distinct from `RoutePoolMemberView::source`,
 /// which names the model's own provenance at pool granularity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub enum WeightLayer {
-    #[serde(rename = "bundled")]
-    Bundled,
-    #[serde(rename = "host config")]
-    HostConfig,
-    #[serde(rename = "project config")]
-    ProjectConfig,
-}
-impl WeightLayer {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Bundled => "bundled",
-            Self::HostConfig => "host config",
-            Self::ProjectConfig => "project config",
-        }
-    }
-}
+/// Spec: docs/specs/state.md#every-setting-reports-its-layer
+pub const WEIGHT_PRECEDENCE: Precedence =
+    Precedence(&[Layer::Default, Layer::Host, Layer::Project]);
 /// A pool defined in configuration overrides the whole bundled pool, so all of
 /// its weights share the layer recorded for that pool. Compiled defaults carry
 /// no pools; a project-scoped origin is reported as such when present.
-fn pool_weight_layer(config: &crate::RoutingConfig, name: &str) -> WeightLayer {
-    if !config.pools.contains_key(name) {
-        return WeightLayer::Bundled;
+fn pool_weight_layer(config: &crate::RoutingConfig, name: &str) -> Layer {
+    use provenant_records::{Source, Sourced, warn_ignored};
+    let mut candidates = vec![Sourced {
+        value: (),
+        source: Source {
+            layer: Layer::Default,
+            origin: None,
+        },
+    }];
+    if config.pools.contains_key(name) {
+        let layer = match config
+            .preference_sources
+            .get(&format!("domains.routing.pools.{name}"))
+            .map(String::as_str)
+        {
+            Some("project") => Layer::Project,
+            _ => Layer::Host,
+        };
+        candidates.push(Sourced {
+            value: (),
+            source: Source {
+                layer,
+                origin: None,
+            },
+        });
     }
-    match config
-        .preference_sources
-        .get(&format!("domains.routing.pools.{name}"))
-        .map(String::as_str)
-    {
-        Some("project") => WeightLayer::ProjectConfig,
-        _ => WeightLayer::HostConfig,
-    }
+    let merge = WEIGHT_PRECEDENCE.merge(candidates);
+    warn_ignored(&merge.ignored, "pool weight");
+    merge
+        .winner
+        .map(|winner| winner.source.layer)
+        .unwrap_or(Layer::Default)
 }
 #[derive(Debug, Serialize)]
 pub struct RoutePoolMemberView {
@@ -219,7 +225,7 @@ pub struct RoutePoolMemberView {
     /// Layer that supplied this member's weight.
     pub weight_source: String,
     pub weight: u8,
-    pub weight_layer: WeightLayer,
+    pub weight_layer: Layer,
     pub effort: Option<String>,
     pub efforts: Vec<String>,
     pub free: bool,
@@ -230,12 +236,10 @@ pub fn list(
     context: &RoutingContext<'_>,
 ) -> Result<RouteList, RoutingError> {
     let context = &ValidatedContext::new(context)?;
-    if query
-        .adapter
-        .as_ref()
-        .is_some_and(|id| !context.registry.iter().any(|r| r.adapter.id() == id))
+    if let Some(adapter) = query.adapter.as_ref()
+        && !context.registry.iter().any(|r| r.adapter.id() == adapter)
     {
-        return Err(RoutingError::UnknownAdapter);
+        return Err(RoutingError::unknown_adapter(adapter));
     }
     if query
         .pool
@@ -2102,7 +2106,7 @@ fn admissible<'c>(
         .registry
         .iter()
         .find(|r| r.adapter.id() == model.adapter())
-        .ok_or(RoutingError::UnknownAdapter)?;
+        .ok_or_else(|| RoutingError::unknown_adapter(model.adapter()))?;
     let entry = context.catalogue.model(model);
     // Backstop for uncatalogued models; catalogued ones record their own efforts.
     if let Some(effort) = effort
@@ -2147,7 +2151,13 @@ fn admissible<'c>(
     }) {
         let support = match entry {
             Some(row) if row.efforts.is_empty() => "this model takes no effort".to_owned(),
-            Some(row) => format!("supported efforts: {}", row.efforts.join(", ")),
+            Some(row) => context
+                .catalogue
+                .variant_refusal(model, effort)
+                .map_or_else(
+                    || format!("supported efforts: {}", row.efforts.join(", ")),
+                    |refusal| refusal.to_string(),
+                ),
             None => {
                 let nearest = context.catalogue.nearest_models(model);
                 if nearest.is_empty() {
@@ -2362,6 +2372,36 @@ fn account_load(
     }
 }
 
+/// A model's declared variants are authoritative. An effort outside them is a
+/// route misconfiguration: refuse it here, before an adapter's drop can hide
+/// the request and the launch reaches the provider.
+/// Spec: docs/specs/routing.md#exact-selection-no-inference
+fn check_declared_effort(
+    model: &ModelId,
+    effort: Option<&str>,
+    context: &ValidatedContext<'_>,
+) -> Result<(), RoutingError> {
+    let Some(effort) = effort else { return Ok(()) };
+    let Some(entry) = context.catalogue.model(model) else {
+        return Ok(());
+    };
+    if entry.efforts.is_empty() || entry.efforts.iter().any(|variant| variant == effort) {
+        return Ok(());
+    }
+    let support = context
+        .catalogue
+        .variant_refusal(model, effort)
+        .map_or_else(
+            || format!("supported efforts: {}", entry.efforts.join(", ")),
+            |refusal| refusal.to_string(),
+        );
+    Err(RoutingError::UnsupportedEffort {
+        model: model.as_str().to_owned(),
+        effort: effort.to_owned(),
+        support,
+    })
+}
+
 /// Normalise only valid, catalogued controls for adapters declaring this policy.
 /// Unknown models and invalid controls retain the usual explicit error.
 fn normalised_effort<'e>(
@@ -2389,6 +2429,7 @@ fn candidate(
     intent: RouteIntent,
     for_pool: bool,
 ) -> Result<RouteAlternative, RoutingError> {
+    check_declared_effort(model, effort, context)?;
     let (effort, dropped_effort) = normalised_effort(model, effort, context);
     let entry = admissible(model, effort, context)?;
     #[cfg(test)]
@@ -4129,4 +4170,80 @@ fn spent_windows_reset(
         latest = latest.max(Some(reset));
     }
     latest
+}
+
+#[cfg(test)]
+mod weight_precedence_tests {
+    use super::*;
+
+    /// Spec: docs/specs/state.md#every-setting-reports-its-layer
+    #[test]
+    fn pool_weights_rank_default_then_host_then_project() {
+        assert_eq!(
+            WEIGHT_PRECEDENCE.0,
+            &[Layer::Default, Layer::Host, Layer::Project]
+        );
+    }
+}
+
+#[cfg(test)]
+mod variant_tests {
+    use super::*;
+
+    // Spec: docs/specs/routing.md#exact-selection-no-inference
+    #[test]
+    fn an_unavailable_effort_refuses_at_resolve_with_close_variants()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let catalogue = Catalogue::bundled()?;
+        let model = ModelId::parse("opencode/opencode/hy4-flash-free")?;
+        // Variants published by the server, recorded in the bundled catalogue
+        // (docs/research/opencode-interface.md#errors).
+        assert!(
+            catalogue
+                .model(&model)
+                .is_some_and(|row| row.efforts.iter().any(|variant| variant == "high"))
+        );
+        let config = RoutingConfig::default();
+        let now = provenant_core::WallTime::from_unix_seconds(1).unwrap();
+        let context = RoutingContext {
+            policy_account_hint: None,
+            selection_evidence: None,
+            choice_context: None,
+            catalogue: &catalogue,
+            config: &config,
+            registry: provenant_providers::REGISTRY,
+            availability: &[],
+            quota: &[],
+            capacity_cooldowns: &[],
+            accounts: &[],
+            quota_policies: &[],
+            readiness: None,
+            launch_specs: None,
+            access: &[],
+            now,
+            host: "test-host",
+        };
+        let request = RouteRequest {
+            intent: Default::default(),
+            choice: RouteChoice::Model(model.clone()),
+            effort: Some("hig".into()),
+            confidential: false,
+            fallback: Fallback::None,
+        };
+        let error = resolve(&request, &context).expect_err("unknown variant must refuse");
+        match error {
+            RoutingError::UnsupportedEffort {
+                model: refused,
+                effort,
+                support,
+            } => {
+                assert_eq!(refused, model.as_str());
+                assert_eq!(effort, "hig");
+                assert!(support.contains("unknown variant `hig`"), "{support}");
+                assert!(support.contains("close matches: high"), "{support}");
+            }
+            other => panic!("unexpected routing error {}", other.code()),
+        }
+        Ok(())
+    }
 }

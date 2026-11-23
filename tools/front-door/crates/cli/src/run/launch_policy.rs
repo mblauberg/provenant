@@ -1,5 +1,6 @@
 use super::*;
 use provenant_config::{REPOSITORY_CONFIG, RepositoryPolicy};
+use provenant_records::warning::Warning;
 
 /// Classify once on the admitting host, before local/peer routing. Replays
 /// retain the sealed classification even if files or repository policy change.
@@ -19,9 +20,10 @@ pub fn seal_launch_policy(
     {
         attempt.confidential |= sealed.confidential;
         if sealed.repository_config.is_some() && !checkout.join(REPOSITORY_CONFIG).is_file() {
-            policy_warning(
+            warn(Warning::new(
+                provenant_records::warning::LAUNCH_ACCESS_PROFILE,
                 "recorded repository launch policy is missing; retaining sealed classification",
-            );
+            ));
         }
         return Ok(());
     }
@@ -88,11 +90,6 @@ pub fn seal_launch_policy(
     attempt.launch_policy = Some(sealed);
     attempt.policy_sealed = true;
     Ok(())
-}
-
-fn policy_warning(message: &str) {
-    use std::io::Write;
-    let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
 }
 
 /// Observe the reviewed range, staged/unstaged edits and untracked paths.

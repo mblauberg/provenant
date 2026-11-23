@@ -2,7 +2,7 @@
 use crate::metadata::CatalogueArg;
 use clap::Subcommand;
 
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Ci {
     /// Extract failing test names, panics and error lines from failed CI jobs
     #[command(add = crate::metadata::CoreCommand(11, "provenant ci failures pr 1947"))]
@@ -21,7 +21,7 @@ pub enum Ci {
     },
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum FailureTarget {
     /// Failing jobs of a pull request's checks
     Pr {

@@ -99,22 +99,24 @@ pub(super) fn read(roots: &Roots, id: &str) -> Result<Value, Error> {
         );
     };
     let key = &record.key;
-    let usage = serde_json::to_value(record.effective_usage()).map_err(|_| Error::Encode)?;
-    let names = [
-        "uncached_input",
-        "cache_read",
-        "cache_write",
-        "output_excluding_reasoning",
-        "reasoning",
-    ];
-    let known: Vec<_> = names
-        .iter()
-        .filter(|name| !usage[**name].is_null())
-        .collect();
-    let missing: Vec<_> = names
-        .iter()
-        .filter(|name| usage[**name].is_null())
-        .collect();
+    let effective = record.effective_usage();
+    let usage = serde_json::to_value(&effective).map_err(|_| Error::Encode)?;
+    let tokens = &effective.tokens;
+    let mut known = Vec::new();
+    let mut missing = Vec::new();
+    for (name, count) in [
+        ("input", tokens.input),
+        ("cache_read", tokens.cache_read),
+        ("cache_write", tokens.cache_write),
+        ("output", tokens.output),
+        ("reasoning", tokens.reasoning),
+    ] {
+        if count.is_some() {
+            known.push(name)
+        } else {
+            missing.push(name)
+        }
+    }
     let artifact = |name: &str, item: Option<&provenant_run::ArtifactRecord>| {
         item.map(|item| {
             let present = item.path.to_relative_path().ok().is_some_and(|path| {

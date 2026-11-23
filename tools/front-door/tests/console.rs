@@ -14,10 +14,21 @@ fn cli(rig: &TestRig, args: &[&str]) -> Result<Value> {
         String::from_utf8_lossy(&output.stderr.bytes)
     );
     let envelope: Value = serde_json::from_slice(&output.stdout.bytes)?;
-    assert_eq!(envelope["schema_version"], 1);
+    // Spec: docs/specs/cli.md#one-bounded-envelope-clipped-with-a-warning
+    assert_eq!(
+        envelope["schema_version"],
+        provenant_records::wire::ENVELOPE_VERSION
+    );
     assert_eq!(envelope["status"], "ok");
     assert!(envelope["error"].is_null());
-    for key in ["schema_version", "command", "status", "data", "error"] {
+    for key in [
+        "schema_version",
+        "command",
+        "status",
+        "data",
+        "error",
+        "warnings",
+    ] {
         assert!(envelope.get(key).is_some(), "{key}");
     }
     Ok(envelope)

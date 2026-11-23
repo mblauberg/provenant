@@ -48,13 +48,15 @@ impl TrackerPort {
     }
 
     fn issue(&mut self, root: &Path, number: u64, timeout: Duration) -> Result<Issue, String> {
+        let ports = provenant_config::PortTable::read_for(Some(root), &self.state)
+            .map_err(|error| error.to_string())?;
+        let policy = provenant_config::operation_policy(&self.state, root, &ports);
         let mut forge = provenant_config::ForgePort::new(
             self.port.clone(),
             "tracker",
             root,
             &self.state,
-            // TODO(#3371 seam): caller owner supplies the operation-scoped policy.
-            std::sync::Arc::new(provenant_records::policy::Policy::default()),
+            policy,
         )
         .map_err(|error| error.to_string())?;
         let response = forge
@@ -212,12 +214,14 @@ pub fn run(command: Tracker, globals: &Globals) -> u8 {
     let ports = match PortTable::read_for(Some(&root), resolved.roots.state.as_path()) {
         Ok(ports) => ports,
         Err(error) => {
-            use std::io::Write;
             let source = resolved.roots.state.as_path().join("ports.json");
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: [PORT_CONFIG] cannot read tracker port: {error} (source: {}); using compiled defaults",
-                source.display()
+            provenant_records::warning::warn(
+                provenant_records::warning::Warning::new(
+                    provenant_records::warning::CONFIG_UNAVAILABLE,
+                    format!("cannot read tracker port: {error}; using compiled defaults"),
+                )
+                .subject(source.display().to_string())
+                .once_per_change(),
             );
             PortTable::builtin()
         }

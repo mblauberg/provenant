@@ -33,6 +33,15 @@ each slice its own worktree and integrates slices as they settle (see the
 routing-and-templates runbook for `after` ordering and `max_parallel`). Name
 disjoint write scopes for parallel writers.
 
+`lanes.writer_dirty` decides how a launch treats uncommitted edits already in
+an existing worktree. By default (`wip_commit`) an unheld tree's edits are
+committed as a local WIP commit and reported with *WORKTREE_ADOPTED_DIRTY*
+naming the commit; `refuse` stops the submission before a node spends tokens,
+and `continue_in_place` keeps the edits and warns. A tree another lane holds is
+always refused (boundary 2), whatever the value. The effective value and its
+source are named in each refusal and warning; override per run with `--knob
+lanes.writer_dirty=refuse`.
+
 Inside a lane, `provenant run TEMPLATE` adds a child node to the calling graph
 and `--name` names it. Attached children are cancelled when their parent
 settles; `wait` collects them first, and `--detached` lets one outlive its
@@ -42,6 +51,27 @@ parent.
 and key; Provenant keeps no lifecycle for it. `cloud collect KEY` adds a
 worktree holding the branch it pushed, which then goes through review like any
 other.
+
+## Brief preamble
+
+Standing lane rules go in a layered `lanes.brief_preamble` file, not in each
+brief. The knob names a file at the host layer (`<state>/config.toml`) and at
+the project layer (`.provenant/config.toml`) under `[knobs]`; `provenant run
+--preamble-file PATH` adds the launch layer. The three layers concatenate in
+host, project, launch order and each is labelled with its source in every lane
+preamble, so briefs carry only the task. A file scoped to one role starts with
+`<!-- provenant-roles: writer, review, read-only -->` on its first line and is
+shown only to those roles; a file with no such header applies to all. A missing
+or unreadable file warns with its layer and the launch proceeds. Cargo target,
+CI scope and verification lines keep their own knobs and are not repeated in
+the preamble file.
+
+A project may declare cheap `verify.static_checks` entries in its port table
+(`.provenant/ports.json`): each has an `argv`, a repository-relative `cwd` and a
+`timeout_seconds` cap. The writer preamble names them with their source and
+tells the writer to run them before pushing. They need no build. A failure is
+reported in the handoff, does not refuse the push, and CI still gates the
+merge. With no declaration, no static-check text is added.
 
 ## Wait and recover
 

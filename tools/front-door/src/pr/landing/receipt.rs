@@ -11,6 +11,10 @@ pub struct ApprovalCarryReceipt {
     pub current_head: String,
     pub base_head: String,
     pub kind: provenant_cli::domains::ApprovalCarry,
+    /// The layer and key that declared the format command, when this carry was
+    /// a format carry. Named so a reader can tell configured from detected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format_source: Option<provenant_records::Source>,
     #[serde(default)]
     pub extra: provenant_records::ExtraFields,
 }
@@ -91,9 +95,15 @@ pub fn read_latest_approval_carry(
         let file = match std::fs::File::open(entry.path()) {
             Ok(file) => file,
             Err(error) => {
-                eprintln!(
-                    "warning: failed to open approval carry receipt {}: {error}",
-                    entry.path().display()
+                provenant_records::warning::warn(
+                    provenant_records::warning::Warning::new(
+                        provenant_records::warning::APPROVAL_RECEIPT_UNREADABLE,
+                        format!(
+                            "failed to open approval carry receipt {}: {error}",
+                            entry.path().display()
+                        ),
+                    )
+                    .subject(entry.path().display().to_string()),
                 );
                 continue;
             }
@@ -102,9 +112,15 @@ pub fn read_latest_approval_carry(
             match provenant_records::decode(file, provenant_records::Limits::default()) {
                 Ok(receipt) => receipt,
                 Err(error) => {
-                    eprintln!(
-                        "warning: corrupt approval carry receipt in {}: {error}",
-                        entry.path().display()
+                    provenant_records::warning::warn(
+                        provenant_records::warning::Warning::new(
+                            provenant_records::warning::APPROVAL_RECEIPT_UNREADABLE,
+                            format!(
+                                "corrupt approval carry receipt in {}: {error}",
+                                entry.path().display()
+                            ),
+                        )
+                        .subject(entry.path().display().to_string()),
                     );
                     continue;
                 }
@@ -713,6 +729,7 @@ pub(crate) mod tests {
             current_head: "bbbb".into(),
             base_head: "cccc".into(),
             kind: provenant_cli::domains::ApprovalCarry::CleanMerge,
+            format_source: None,
             extra: Default::default(),
         };
         write_approval_carry(dir.path(), &valid)?;

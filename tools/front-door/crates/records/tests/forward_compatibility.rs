@@ -263,7 +263,6 @@ cases! {
     requested_named_preserves_digest: run::RequestedRoute => requested_route();
     requested_review_preserves_digest: run::RequestedRoute => json!({"kind":"review","name":"senior","effort":null,"excluded_families":[],"distinct_families":false});
     route_record_preserves_digest: run::RouteRecord => route_record();
-    usage_record_preserves_digest: run::UsageRecord => json!({});
     operation_record_preserves_digest: run::OperationRecord => json!({"schema_version":1,"project_id":ID,"actor_id":ID,"operation_id":"operation","kind":"dispatch","request_digest":digest(),"state":"accepted"});
     refused_operation_preserves_digest: run::OperationRecord => json!({"schema_version":1,"project_id":ID,"actor_id":ID,"operation_id":"operation","kind":"dispatch","request_digest":digest(),"state":"refused","refusal":{"code":"REFUSED","detail":"not admitted"},"worktree":"lane-branch","refused_at":NOW,"refusal_chair":{"host":ID,"actor":ID}});
     queued_state_preserves_digest: run::AttemptState => json!({"state":"queued"});
@@ -341,6 +340,14 @@ fn attempt_record_preserves_digest() -> TestResult {
     add_future_fields(&mut value);
     value["key"] = key;
     assert_preserved::<run::AttemptRecord>("run-attempt", value)
+}
+
+// Spec: docs/specs/state.md#strict-bounded-records
+#[test]
+fn usage_record_preserves_digest() -> TestResult {
+    let mut value = normalise::<run::UsageRecord>(json!({}))?;
+    add_future_fields(&mut value);
+    assert_preserved::<run::UsageRecord>("usage_record_preserves_digest", value)
 }
 
 #[test]
@@ -571,10 +578,10 @@ fn stored_records_decode_with_a_future_field() -> TestResult {
 
 #[test]
 fn lane_access_receipt_round_trips_and_old_route_defaults_to_host() {
-    use provenant_records::{LaneAccess, LaneAccessReceipt, LaneAccessSource, ResolvedRoute};
+    use provenant_records::{LaneAccess, LaneAccessReceipt, Layer, ResolvedRoute};
     let receipt = LaneAccessReceipt {
         access: LaneAccess::Isolated,
-        source: LaneAccessSource::RoutePolicy,
+        source: Layer::Route,
         key: "defaults.lane.access".into(),
         extra: Default::default(),
     };

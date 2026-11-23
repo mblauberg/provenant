@@ -7,7 +7,7 @@
 //! passed. The host's risk-tier policy decides whether it lands at once or
 //! asks the chair, who lands by hand; the record keeps who or what authorised it.
 use super::*;
-use crate::config::{LandChoice, LandPolicy, LandSource};
+use crate::config::{LandChoice, LandPolicy};
 use provenant_core::review_cover::Reviewed;
 use provenant_records::run::DeliveryMode;
 use provenant_records::workflow::{ReviewVerdict, RiskTier};
@@ -45,7 +45,7 @@ pub struct LandRecord {
     pub extra: provenant_records::ExtraFields,
     pub tier: RiskTier,
     pub policy: LandPolicy,
-    pub policy_source: LandSource,
+    pub policy_source: Layer,
     pub branch: String,
     pub head: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -564,12 +564,8 @@ pub(super) fn parse(ask_id: &str, node_id: &str) -> Option<(u64, u64)> {
 /// is refused.
 const MAX_LAND_SEQUENCE: u64 = 1_000;
 
-fn source_name(source: LandSource) -> &'static str {
-    match source {
-        LandSource::Default => "default",
-        LandSource::Config => "host config",
-        LandSource::Project => "project config",
-    }
+fn source_name(source: Layer) -> &'static str {
+    source.as_str()
 }
 
 fn tier_name(tier: RiskTier) -> &'static str {

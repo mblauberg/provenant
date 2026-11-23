@@ -5,20 +5,19 @@
 //! nothing here copies a rule.
 use crate::{
     ConfigError, DomainSections, FieldMetadata, KnobEdit, Origin, ResolvedConfig,
-    knobs::{Kind, KnobSource, registry},
+    knobs::{Kind, registry},
 };
+use provenant_records::{Layer, Precedence};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use toml_edit::{DocumentMut, Item};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Layer {
-    Default,
-    Profile,
-    User,
-}
+/// The editable field family's layers, lowest first. A user edit in the host
+/// config file outranks a profile preset.
+/// Spec: docs/specs/state.md#every-setting-reports-its-layer
+pub const SCHEMA_PRECEDENCE: Precedence =
+    Precedence(&[Layer::Default, Layer::Profile, Layer::Host]);
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SchemaField {
@@ -83,6 +82,7 @@ const RETENTION_FIELDS: &[FieldMetadata] = &[
     FieldMetadata::int("chair_log_bytes", 65_536, 1_073_741_824),
     FieldMetadata::int("payload_cap_bytes", 1_048_576, 1_125_899_906_842_624),
 ];
+const WARNINGS_FIELDS: &[FieldMetadata] = &[FieldMetadata::int("dedup_retention_days", 1, 3650)];
 const INSTALL_FIELDS: &[FieldMetadata] = &[
     FieldMetadata::new("bin_dir", "string"),
     FieldMetadata::new("targets.{harness}.home", "string"),
@@ -108,6 +108,7 @@ const CONFIG_FIELDS: &[(&str, &[FieldMetadata])] = &[
     ("gc", GC_FIELDS),
     ("worktrees", WORKTREE_FIELDS),
     ("retention", RETENTION_FIELDS),
+    ("warnings", WARNINGS_FIELDS),
     ("install", INSTALL_FIELDS),
     ("providers", PROVIDER_FIELDS),
 ];
@@ -124,6 +125,7 @@ fn owned(prefix: &str, document: DocumentMut) -> Result<Value, String> {
         "gc" => typed::<crate::GcSettings>(document),
         "worktrees" => typed::<crate::WorktreeSettings>(document),
         "retention" => typed::<crate::RetentionSettings>(document),
+        "warnings" => typed::<crate::WarningsSettings>(document),
         "install" => typed::<crate::InstallSettings>(document),
         "providers" => typed::<BTreeMap<String, crate::ProviderSettings>>(document),
         _ => Err(format!("{prefix} has no runtime type")),
@@ -235,9 +237,9 @@ pub fn probe_field<T>(sections: &DomainSections<T>, path: &str, value: &Value) -
         .collect()
 }
 
-fn user(origin: Option<&Origin>) -> Layer {
+fn origin_layer(origin: Option<&Origin>) -> Layer {
     match origin {
-        Some(Origin::User { .. }) => Layer::User,
+        Some(Origin::User { .. }) => Layer::Host,
         _ => Layer::Default,
     }
 }
@@ -344,7 +346,7 @@ fn push_fields(
             values,
             default,
             value,
-            source: user(origins.get(path)),
+            source: origin_layer(origins.get(path)),
             restart_required,
         });
     }
@@ -382,7 +384,7 @@ pub fn schema<T: Serialize>(
         values: registry.presets.keys().cloned().collect(),
         default: Value::from(crate::Profile::default().as_str()),
         value: Value::from(config.profile.as_str()),
-        source: user(config.origins.get("profile")),
+        source: origin_layer(config.origins.get("profile")),
         restart_required: false,
     }];
     for (name, spec) in &registry.knobs {
@@ -391,6 +393,7 @@ pub fn schema<T: Serialize>(
             path: name.clone(),
             kind: match spec.kind {
                 Kind::Bool => "bool",
+                Kind::String => "string",
                 Kind::StringList => "string_list",
                 Kind::CensusIgnoreList => "census_ignore_list",
                 Kind::Enum => "enum",
@@ -405,11 +408,7 @@ pub fn schema<T: Serialize>(
             values: spec.values.clone(),
             default: spec.default.clone(),
             value: knob.map_or(spec.default.clone(), |k| k.value.clone()),
-            source: match knob.map(|k| k.source) {
-                Some(KnobSource::Override) => Layer::User,
-                Some(KnobSource::Profile) => Layer::Profile,
-                _ => Layer::Default,
-            },
+            source: knob.map_or(Layer::Default, |k| k.source.layer),
             restart_required: false,
         });
     }
@@ -426,6 +425,10 @@ pub fn schema<T: Serialize>(
             "retention" => (
                 serde_json::to_value(crate::RetentionSettings::default()),
                 serde_json::to_value(&config.retention),
+            ),
+            "warnings" => (
+                serde_json::to_value(crate::WarningsSettings::default()),
+                serde_json::to_value(&config.warning_dedup),
             ),
             "install" => (
                 serde_json::to_value(crate::InstallSettings::default()),
@@ -656,4 +659,43 @@ fn to_toml(value: &Value) -> Option<toml_edit::Value> {
         }
         Value::Null => return None,
     })
+}
+
+#[cfg(test)]
+mod precedence_tests {
+    use super::*;
+    use provenant_records::{Source, Sourced};
+
+    fn field(layer: Layer) -> Sourced<&'static str> {
+        Sourced {
+            value: layer.as_str(),
+            source: Source {
+                layer,
+                origin: None,
+            },
+        }
+    }
+
+    /// Spec: docs/specs/state.md#every-setting-reports-its-layer
+    #[test]
+    fn every_field_layer_set_picks_the_host_and_shadows_the_rest() {
+        let candidates = SCHEMA_PRECEDENCE.0.iter().copied().map(field);
+        let merge = SCHEMA_PRECEDENCE.merge(candidates);
+        assert_eq!(
+            merge
+                .winner
+                .as_ref()
+                .map(|candidate| candidate.source.layer),
+            Some(Layer::Host)
+        );
+        assert_eq!(
+            merge
+                .shadowed
+                .iter()
+                .map(|candidate| candidate.source.layer)
+                .collect::<Vec<_>>(),
+            [Layer::Default, Layer::Profile]
+        );
+        assert!(merge.ignored.is_empty());
+    }
 }

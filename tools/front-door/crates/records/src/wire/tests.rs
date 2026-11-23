@@ -8,6 +8,7 @@ fn row() -> LaneRow {
     LaneRow {
         git_import_failure: None,
         stop_work: None,
+        warnings: None,
         terminal_cause: None,
         project_id: "9".repeat(32),
         graph: "g".into(),
@@ -564,13 +565,15 @@ fn envelopes_validate_for_every_command_and_for_errors() {
     let lanes = command_schema("lanes").unwrap();
     let ok = json!({
         "schema_version": ENVELOPE_VERSION, "command": "lanes", "status": "ok",
-        "data": serde_json::to_value(list(vec![row()])).unwrap(), "error": null
+        "data": serde_json::to_value(list(vec![row()])).unwrap(), "error": null,
+        "warnings": [], "next": []
     });
     validate(&lanes, &ok).unwrap();
     // A failed command carries null data and the error envelope.
     let failed = json!({
         "schema_version": ENVELOPE_VERSION, "command": "lanes", "status": "failed", "data": null,
-        "error": {"code": "NOT_FOUND", "message": "m", "cause": null, "repair": null}
+        "error": {"code": "NOT_FOUND", "message": "m", "cause": null, "repair": null},
+        "warnings": [], "next": []
     });
     validate(&lanes, &failed).unwrap();
     let errors = error_envelope_schema();
@@ -593,9 +596,9 @@ fn envelopes_validate_for_every_command_and_for_errors() {
     let mut ok_with_error = ok.clone();
     ok_with_error["error"] = failed["error"].clone();
     rejected(&lanes, ok_with_error);
-    let mut planned = ok.clone();
-    planned["schema_version"] = json!(SCHEMA_VERSION);
-    rejected(&lanes, planned);
+    let mut future = ok.clone();
+    future["schema_version"] = json!(ENVELOPE_VERSION + 1);
+    rejected(&lanes, future);
     let mut wrong = ok;
     wrong["command"] = json!("status");
     assert!(validate(&lanes, &wrong).is_err());
@@ -711,8 +714,9 @@ fn published_set_is_stable_versioned_and_self_describing() {
 
 fn cli_envelope(command: &str, status: &str, data: Value, error: Value) -> Value {
     json!({
-        "schema_version": 1, "command": command, "status": status,
-        "data": data, "error": error
+        "schema_version": ENVELOPE_VERSION, "command": command, "status": status,
+        "data": data, "error": error,
+        "warnings": [], "next": []
     })
 }
 
@@ -720,14 +724,14 @@ fn cli_envelope(command: &str, status: &str, data: Value, error: Value) -> Value
 fn current_cli_failure_envelopes_validate() {
     let lanes = command_schema("lanes").unwrap();
     let cancel = command_schema("cancel").unwrap();
-    let list = serde_json::to_value(list(vec![row()])).unwrap();
+    let listed = serde_json::to_value(list(vec![row()])).unwrap();
     // `lanes --wait` timing out: partial data, no error object.
     validate(
         &lanes,
-        &cli_envelope("lanes", "timeout", list.clone(), Value::Null),
+        &cli_envelope("lanes", "timeout", listed.clone(), Value::Null),
     )
     .unwrap();
-    validate(&lanes, &cli_envelope("lanes", "ok", list, Value::Null)).unwrap();
+    validate(&lanes, &cli_envelope("lanes", "ok", listed, Value::Null)).unwrap();
     // Cancel with an unobservable receipt: failed, no error object.
     let unobservable = json!({"operation_id": "o", "receipts": [
         {"attempt_id": "a", "receipt": {"state": "unobservable", "reason": "no launch summary"}}
@@ -778,14 +782,34 @@ fn current_cli_failure_envelopes_validate() {
         &lanes,
         cli_envelope("lanes", "bogus", Value::Null, Value::Null),
     );
+    // A v2 envelope always carries typed warnings and next steps; neither may
+    // be dropped. Spec: docs/specs/cli.md#one-bounded-envelope-clipped-with-a-warning
+    let mut no_warnings = cli_envelope(
+        "lanes",
+        "ok",
+        serde_json::to_value(list(vec![row()])).unwrap(),
+        Value::Null,
+    );
+    no_warnings.as_object_mut().unwrap().remove("warnings");
+    rejected(&lanes, no_warnings);
+    let mut no_next = cli_envelope(
+        "cancel",
+        "failed",
+        json!({"operation_id": "o"}),
+        json!({"code": "NOT_FOUND", "message": "m", "cause": null, "repair": null}),
+    );
+    no_next.as_object_mut().unwrap().remove("next");
+    rejected(&cancel, no_next.clone());
+    rejected(&error_envelope_schema(), no_next);
 }
 
 #[test]
-fn version_one_envelopes_validate_and_version_two_is_planned_only() {
+fn version_one_envelopes_are_refused_and_version_two_is_current() {
     let lanes = command_schema("lanes").unwrap();
     let cancel = command_schema("cancel").unwrap();
     let list = serde_json::to_value(list(vec![row()])).unwrap();
     let receipts = json!({"operation_id": "o", "receipts": []});
+    // v2 is the emitted envelope: it carries warnings and next, and validates.
     validate(
         &lanes,
         &cli_envelope("lanes", "ok", list.clone(), Value::Null),
@@ -797,8 +821,13 @@ fn version_one_envelopes_validate_and_version_two_is_planned_only() {
     )
     .unwrap();
     for (schema, command, data) in [(&lanes, "lanes", list), (&cancel, "cancel", receipts)] {
-        let mut planned = cli_envelope(command, "ok", data, Value::Null);
-        planned["schema_version"] = json!(SCHEMA_VERSION);
-        rejected(schema, planned);
+        // There is no tolerant reader for version 1.
+        let mut v1 = cli_envelope(command, "ok", data.clone(), Value::Null);
+        v1["schema_version"] = json!(1);
+        rejected(schema, v1);
+        // A future version is refused until its readers are emitted.
+        let mut future = cli_envelope(command, "ok", data, Value::Null);
+        future["schema_version"] = json!(ENVELOPE_VERSION + 1);
+        rejected(schema, future);
     }
 }

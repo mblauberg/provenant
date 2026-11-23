@@ -35,8 +35,8 @@ pub(super) const CLEANUP_TIMEOUT: Duration = Duration::from_millis(250);
 pub struct ProfileLimits {
     pub grant_limit: usize,
     pub profile_limit_bytes: usize,
-    pub grant_origin: provenant_records::diagnostic::SettingSource,
-    pub profile_origin: provenant_records::diagnostic::SettingSource,
+    pub grant_origin: provenant_records::diagnostic::Layer,
+    pub profile_origin: provenant_records::diagnostic::Layer,
 }
 impl Default for ProfileLimits {
     fn default() -> Self {
@@ -44,8 +44,8 @@ impl Default for ProfileLimits {
         Self {
             grant_limit: config.grant_limit,
             profile_limit_bytes: config.profile_limit_bytes,
-            grant_origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
-            profile_origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
+            grant_origin: provenant_records::diagnostic::Layer::Default,
+            profile_origin: provenant_records::diagnostic::Layer::Default,
         }
     }
 }
@@ -326,9 +326,9 @@ pub(super) fn denied_probe(outcome: &ExecOutcome) -> bool {
 }
 
 #[cfg(any(target_os = "macos", test, feature = "snapshot"))]
-pub(super) fn report_policy_message(message: String) {
-    use std::io::Write;
-    let _ = writeln!(std::io::stderr().lock(), "{message}");
+pub(super) fn report_policy_message(warning: provenant_records::warning::Warning) {
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    provenant_records::warning::warn(warning);
 }
 
 /// Apply one advisory launch threshold. The table controls whether an
@@ -343,9 +343,9 @@ pub(super) fn check_capacity_policy(
     setting: &str,
     actual: usize,
     threshold: usize,
-    origin: provenant_records::diagnostic::SettingSource,
+    origin: provenant_records::diagnostic::Layer,
     strict_error: PermissionError,
-) -> Result<Option<String>, PermissionError> {
+) -> Result<Option<provenant_records::warning::Warning>, PermissionError> {
     let facts = if actual > threshold {
         Facts::violation(format!(
             "{setting} exceeded: effective value={actual}, threshold={threshold} (setting source: {})",
@@ -359,10 +359,11 @@ pub(super) fn check_capacity_policy(
     };
     match policy.check(code, facts) {
         Effect::Proceed => Ok(None),
-        Effect::Warn(message) => Ok(Some(message)),
+        Effect::Warn(warning) => Ok(Some(warning)),
         Effect::Refuse(diagnostic) | Effect::Stop(diagnostic) => {
             if let Some(detail) = diagnostic.detail {
-                report_policy_message(detail);
+                use provenant_records::warning::{POLICY_STRICT_REFUSAL, Warning};
+                report_policy_message(Warning::new(POLICY_STRICT_REFUSAL, detail));
             }
             Err(strict_error)
         }

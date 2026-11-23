@@ -1370,16 +1370,17 @@ fn ambient_values_from(
     validate_secrets(ambient_credentials(vars))
 }
 
-#[allow(
-    clippy::print_stderr,
-    reason = "warn once about bounded retry admission"
-)]
+/// Library code never writes a warning itself. The typed value reaches the one
+/// routing function, so `--json` carries it in the envelope instead of printing
+/// a bare line on stderr; the sink collapses repeats per invocation. No
+/// environment name or value is interpolated into the message.
+/// Spec: docs/specs/cli.md#warnings-are-typed-values
 fn warn_skipped_retry_credentials() {
-    static WARNING: std::sync::Once = std::sync::Once::new();
-    WARNING.call_once(|| {
-        // Do not interpolate environment names or values into diagnostics.
-        eprintln!("warning: retry admission skipped out-of-bounds ambient credentials (16 KiB per value, 128 values, 64 KiB total); publication remains fail-closed");
-    });
+    use provenant_records::warning::{RETRY_CREDENTIALS_SKIPPED, Warning, warn};
+    warn(Warning::new(
+        RETRY_CREDENTIALS_SKIPPED,
+        "retry admission skipped out-of-bounds ambient credentials (16 KiB per value, 128 values, 64 KiB total); publication remains fail-closed",
+    ));
 }
 
 /// Only retry admission may skip credentials outside the bounded exact matcher.
@@ -1729,7 +1730,15 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert_eq!(stderr.matches("warning: retry admission").count(), 1);
+        // Each retry admission that skips the oversized credential emits one
+        // typed warning. Collapsing repeats is the command sink's job, and this
+        // fixture has no sink, so the child's two admissions print twice.
+        assert_eq!(
+            stderr
+                .matches("warning: retry admission skipped out-of-bounds ambient credentials")
+                .count(),
+            2
+        );
         assert!(!stderr.contains(&oversized));
         assert!(!stderr.contains(NAME));
         assert!(!stderr.contains('\u{1b}'));

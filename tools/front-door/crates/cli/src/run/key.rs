@@ -6,7 +6,9 @@ use provenant_fabric_runtime::graph::FileJournal;
 /// Resolve `target` by reading only its own graph's checkpoint.
 pub fn resolve_target(edge: &Edge<'_>, target: &Target, want: Want) -> Result<Resolved, Fail> {
     let context = execution_context(edge)?;
-    target::resolve(target, want, |name| {
+    let names = FileJournal::reserved_graph_ids(&context.state_root, context.project_id)
+        .unwrap_or_default();
+    target::resolve(target, want, &names, |name| {
         FileJournal::read_status_checkpoint(&context.state_root, context.project_id, name)
     })
     .map_err(resolve_fail)
@@ -15,7 +17,7 @@ pub fn resolve_target(edge: &Edge<'_>, target: &Target, want: Want) -> Result<Re
 /// The envelope for a resolution fault: its code is the fault's own.
 pub fn resolve_fail<E: std::fmt::Display>(error: ResolveError<E>) -> Fail {
     let kind = match &error {
-        ResolveError::NotFound(_) => ErrorKind::NotFound,
+        ResolveError::NotFound { .. } => ErrorKind::NotFound,
         ResolveError::Ambiguous { .. } => ErrorKind::AmbiguousTarget,
         ResolveError::Read(_) => ErrorKind::Io,
     };

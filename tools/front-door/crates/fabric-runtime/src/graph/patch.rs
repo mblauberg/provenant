@@ -345,10 +345,15 @@ pub fn scan_for_secrets(text: &str) -> Result<(), String> {
 /// bytes are never included in a warning or used as an admission predicate.
 pub fn warn_for_secrets(field: &str, text: &str) {
     if provenant_confinement::disclosure::scan_snapshot(text.as_bytes(), &[]).is_err() {
-        use std::io::Write;
-        let _ = writeln!(
-            std::io::stderr().lock(),
-            "provenant: warning: field={field} rule=known_secret_shape"
+        use provenant_records::warning::{SECRET_SHAPE_IN_FIELD, Warning, warn};
+        // Spec: docs/specs/cli.md#warnings-are-typed-values
+        warn(
+            Warning::new(
+                SECRET_SHAPE_IN_FIELD,
+                format!("provenant: field={field} rule=known_secret_shape"),
+            )
+            .subject(field.to_owned())
+            .once_per_change(),
         );
     }
 }
@@ -1183,7 +1188,7 @@ pub fn compile_submission(
     }
     let library = context
         .library
-        .with(Layer::Inline, &patch.templates)
+        .with(Layer::Launch, &patch.templates)
         .map_err(PatchError::invalid)?;
     let compiler = Compiler {
         library: &library,
@@ -1192,7 +1197,7 @@ pub fn compile_submission(
     let mut nodes = compiler.compile_all(&patch.nodes)?;
     for (raw, node) in patch.nodes.iter().zip(&mut nodes) {
         if raw.get("use").and_then(Value::as_str) == Some("batch")
-            && library.layer("batch") == Some(Layer::Bundled)
+            && library.layer("batch") == Some(Layer::Default)
         {
             plans::provision_paths(
                 std::slice::from_mut(node),
@@ -1526,8 +1531,8 @@ pub(super) fn prepare(
         .unwrap_or_default();
     let library = context
         .library
-        .with(Layer::Repository, &planner_templates)
-        .and_then(|library| library.with(Layer::Inline, &patch.templates))
+        .with(Layer::Project, &planner_templates)
+        .and_then(|library| library.with(Layer::Launch, &patch.templates))
         .map_err(PatchError::invalid)?;
     let compiler = Compiler {
         library: &library,
@@ -1742,11 +1747,7 @@ pub(super) fn prepare(
     let mut model_warnings = Vec::new();
     super::canonicalise_route_nodes(&mut nodes, context.catalogue, &mut model_warnings);
     super::canonicalise_route_nodes(&mut replaced, context.catalogue, &mut model_warnings);
-    warnings.extend(
-        model_warnings
-            .into_iter()
-            .map(|warning| warning.to_string()),
-    );
+    warnings.extend(model_warnings.into_iter().map(|warning| warning.message));
     // Every node a lane or planner adds or replaces names it, whatever the
     // author wrote, so the graph owner can apply that lane's sandbox floor.
     if let Some(parent) = parent {

@@ -4,6 +4,7 @@ use provenant_records::diagnostic::ContinuationCopyLimit;
 use provenant_records::diagnostic::{
     ContinuationField as F, ContinuationGuard, ContinuationIssue as I, ContinuationRule as R,
 };
+use provenant_records::warning::warn;
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum ContinuationRequestError {
@@ -416,8 +417,8 @@ pub(super) fn continuation_for_policy(
                     if effect.blocks() {
                         return Err(StateCopyError::resource(policy.fact(setting, None)).into());
                     }
-                    if let Some(message) = effect.message() {
-                        let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+                    if let provenant_records::policy::Effect::Warn(warning) = effect {
+                        warn(warning);
                     }
                     match setting {
                         ContinuationCopyLimit::Entries => policy.limits.entries = u32::MAX,
@@ -501,12 +502,12 @@ pub(super) fn prior_uses_native_session_state(
 
 #[test]
 fn native_session_selection_follows_recorded_access_and_legacy_sandbox() {
-    use provenant_records::{LaneAccess, LaneAccessReceipt, LaneAccessSource};
+    use provenant_records::{LaneAccess, LaneAccessReceipt, Layer};
     let mut route = run::RouteRecord::default();
     assert!(!prior_uses_native_session_state(&route, "codex", None));
     route.lane_access = Some(LaneAccessReceipt {
         access: LaneAccess::Host,
-        source: LaneAccessSource::Default,
+        source: Layer::Default,
         key: "lanes.access".into(),
         extra: Default::default(),
     });
@@ -631,18 +632,18 @@ pub(super) const RETAINED_STATE: StateLimits = StateLimits {
 struct StateCopyPolicy {
     enforcement: Option<provenant_records::policy::Policy>,
     limits: StateLimits,
-    origins: [provenant_records::diagnostic::SettingSource; 3],
+    origins: [provenant_records::diagnostic::Layer; 3],
 }
 impl StateCopyPolicy {
     fn shipped(limits: StateLimits) -> Self {
         Self {
             enforcement: None,
             limits,
-            origins: [provenant_records::diagnostic::SettingSource::ShippedDefault; 3],
+            origins: [provenant_records::diagnostic::Layer::Default; 3],
         }
     }
     fn read(state_root: &Path, enforcement: &provenant_records::policy::Policy) -> Self {
-        use provenant_records::diagnostic::SettingSource;
+        use provenant_records::diagnostic::Layer;
         match provenant_confinement::run_config::RunConfig::read_with_keys(state_root) {
             Ok((config, keys)) => {
                 let origins = [
@@ -652,9 +653,9 @@ impl StateCopyPolicy {
                 ]
                 .map(|key| {
                     if keys.contains(key) {
-                        SettingSource::Configuration
+                        Layer::Host
                     } else {
-                        SettingSource::ShippedDefault
+                        Layer::Default
                     }
                 });
                 Self {
@@ -668,14 +669,13 @@ impl StateCopyPolicy {
                 }
             }
             Err(error) => {
-                if let provenant_records::policy::Effect::Warn(message) = enforcement.check(
+                if let provenant_records::policy::Effect::Warn(warning) = enforcement.check(
                     "CONTINUATION_STATECOPYPOLICY_READ_NONE",
                     provenant_records::policy::Facts::violation(format!(
                         "continuation copy settings unavailable ({error}); using compiled defaults"
                     )),
                 ) {
-                    use std::io::Write;
-                    let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+                    warn(warning);
                 }
                 let mut policy = Self::shipped(RETAINED_STATE);
                 policy.enforcement = Some(enforcement.clone());
@@ -977,8 +977,8 @@ fn copy_state_classified(
         if effect.blocks() {
             return result;
         }
-        if let Some(message) = effect.message() {
-            let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+        if let provenant_records::policy::Effect::Warn(warning) = effect {
+            warn(warning);
         }
         match setting {
             ContinuationCopyLimit::Bytes
@@ -1137,7 +1137,7 @@ fn retained_state_links_follow_access_model() -> Result<(), Box<dyn std::error::
     std::fs::hard_link(&external, source.join("link"))?;
     let access = provenant_records::LaneAccessReceipt {
         access: provenant_records::LaneAccess::Host,
-        source: provenant_records::LaneAccessSource::Default,
+        source: provenant_records::Layer::Default,
         key: "lanes.access".into(),
         extra: Default::default(),
     };
@@ -1276,15 +1276,11 @@ fn warn_link(budget: &Budget<'_>, kind: &str) {
         .map_or("default", |receipt| receipt.source.as_str());
     let detail =
         format!("copying retained {kind} by content (lanes.access=host, source: {source})");
-    if let Some(message) = budget
-        .enforcement
-        .check(
-            "CONTINUATION_LINK_NONE",
-            provenant_records::policy::Facts::violation(detail),
-        )
-        .message()
-    {
-        let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+    if let provenant_records::policy::Effect::Warn(warning) = budget.enforcement.check(
+        "CONTINUATION_LINK_NONE",
+        provenant_records::policy::Facts::violation(detail),
+    ) {
+        warn(warning);
     }
 }
 

@@ -89,6 +89,20 @@ Each mechanism has one implementation; callers supply the policy that varies.
 
 - Why: duplicate mechanisms drift and make fixes incomplete.
 
+## One owner per command domain
+
+Each command path has one owning domain module under `src/commands/` and one
+entry in `DOMAINS`; `run()` looks the parsed path up and calls its verb. A
+domain module declares its paths, so usage verbs and the consumer contract's
+command list derive from the same table instead of a second string list.
+
+- Why: a new verb edits one domain and its registration, not an 800-line
+  dispatch match in another file; a path cannot silently lose its owner.
+- Owner: `src/commands/mod.rs` (`DOMAINS`, `Domain`, `Verb`).
+
+The grammar's external subcommand (`hook <provider>`) has no static leaf, so
+its domain keeps the pre-registry dispatch route that the hook handler needs.
+
 ## Build for change; refuse what can lose data
 
 Build modular mechanisms around a declared core and make variable behaviour

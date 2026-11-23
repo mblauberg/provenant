@@ -3909,7 +3909,7 @@ fn planner_uses_snapshotted_repository_flavour_and_review_panel() {
     );
     document
         .template_layers
-        .insert("review.repository".into(), super::template::Layer::Inline);
+        .insert("review.repository".into(), super::template::Layer::Launch);
     document.template_resolvers.insert(
         "review-panel".into(),
         vec!["correctness".into(), "tests".into()],

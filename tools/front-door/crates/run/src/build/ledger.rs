@@ -169,7 +169,12 @@ fn date_stamp(unix_ms: u64) -> String {
 }
 
 fn warn(message: &str) {
-    let _ = writeln!(std::io::stderr().lock(), "provenant: {message}");
+    use provenant_records::warning::{BUILD_LEDGER_NOTE, Warning, warn};
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    warn(Warning::new(
+        BUILD_LEDGER_NOTE,
+        format!("provenant: {message}"),
+    ));
 }
 
 #[cfg(test)]

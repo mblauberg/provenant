@@ -3,7 +3,8 @@
 //! `config unset` make to the user's `config.toml`, plus the one config editor
 //! that every command uses to rewrite that file.
 use crate::{ConfigError, Profile};
-use serde::{Deserialize, Serialize};
+use provenant_records::{Layer, Precedence, Source, Sourced};
+use serde::Deserialize;
 use serde_json::Value;
 use std::{collections::BTreeMap, sync::OnceLock};
 use toml_edit::{DocumentMut, Item, TableLike};
@@ -26,6 +27,7 @@ struct ProviderUpdates {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Kind {
     Bool,
+    String,
     StringList,
     CensusIgnoreList,
     Enum,
@@ -62,18 +64,22 @@ pub(crate) struct Preset {
     pub(crate) knobs: BTreeMap<String, Value>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum KnobSource {
-    Default,
-    Profile,
-    Override,
-}
-/// An effective knob value and the layer that supplied it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct KnobValue {
-    pub value: Value,
-    pub source: KnobSource,
+/// The knob family's layers, lowest first. The registry default is the floor,
+/// a named preset overrides it, and an entry in the host's `[knobs]` table
+/// overrides the preset. A launch flag is recorded separately in the sealed
+/// profile and is not a configuration layer.
+/// Spec: docs/specs/state.md#every-setting-reports-its-layer
+pub const KNOB_PRECEDENCE: Precedence = Precedence(&[Layer::Default, Layer::Profile, Layer::Host]);
+
+/// An effective knob value tagged with its layer.
+fn sourced(value: Value, layer: Layer) -> Sourced<Value> {
+    Sourced {
+        value,
+        source: Source {
+            layer,
+            origin: None,
+        },
+    }
 }
 
 /// One change to the user's config file.
@@ -116,7 +122,7 @@ impl<D> crate::ResolvedConfig<D> {
             || self
                 .knobs
                 .get(name)
-                .is_some_and(|knob| knob.source == KnobSource::Override)
+                .is_some_and(|knob| knob.source.layer == Layer::Host)
     }
 
     /// Resolve a task's final policy without changing the config file.
@@ -139,25 +145,16 @@ impl<D> crate::ResolvedConfig<D> {
             if name != "lanes.access" {
                 check(spec, &value).map_err(|rule| invalid(name, rule))?;
             }
-            knobs.insert(
-                name.into(),
-                KnobValue {
-                    value,
-                    source: KnobSource::Override,
-                },
-            );
+            // A dispatch override is a launch-time source, not a config layer.
+            knobs.insert(name.into(), sourced(value, Layer::Launch));
         }
-        let launch_overrides: std::collections::BTreeSet<&str> = overrides
-            .iter()
-            .filter_map(|entry| entry.split_once('=').map(|(name, _)| name))
-            .collect();
         // The layer that set every effective knob. A knob absent from the
         // map took its registry default, so the map stays small.
         let knob_sources = knobs
             .iter()
             .filter_map(|(name, knob)| {
-                let source = layer(knob.source, launch_overrides.contains(name.as_str()));
-                (source != provenant_records::LimitSource::Default).then(|| (name.clone(), source))
+                let layer = knob.source.layer;
+                (layer != Layer::Default).then(|| (name.clone(), layer))
             })
             .collect();
         Ok(provenant_records::run::HarnessProfile {
@@ -188,30 +185,15 @@ impl<D> crate::ResolvedConfig<D> {
     }
 }
 
-/// The layer a lane reports for a knob: a launch override, host
-/// configuration (its `[knobs]` table or the profile preset it selected), or
-/// the registry default.
-fn layer(source: KnobSource, launched: bool) -> provenant_records::LimitSource {
-    use provenant_records::LimitSource::{Default, Host, Launch};
-    match source {
-        KnobSource::Override if launched => Launch,
-        KnobSource::Override | KnobSource::Profile => Host,
-        KnobSource::Default => Default,
-    }
-}
-
 /// The layer that set knob `name` for a sealed profile, as
 /// [`crate::ResolvedConfig::dispatch_profile`] recorded it. Every limit,
 /// receipt and status line reads its source here.
-pub fn knob_source(
-    profile: &provenant_records::run::HarnessProfile,
-    name: &str,
-) -> provenant_records::LimitSource {
+pub fn knob_source(profile: &provenant_records::run::HarnessProfile, name: &str) -> Layer {
     profile
         .knob_sources
         .get(name)
         .copied()
-        .unwrap_or(provenant_records::LimitSource::Default)
+        .unwrap_or(Layer::Default)
 }
 
 /// Parsed once; the embedded text is immutable.
@@ -268,38 +250,37 @@ fn spec<'a>(registry: &'a Registry, name: &str) -> Result<&'a Spec, ConfigError>
         .ok_or_else(|| unknown(registry, name))
 }
 fn unknown(registry: &Registry, name: &str) -> ConfigError {
+    // The refusal carries the close matches, so callers never compute them.
+    let candidates = match provenant_core::resolve(&KnobCatalogue(registry), name) {
+        Ok(_) => Vec::new(),
+        Err(refusal) => refusal.candidates,
+    };
     ConfigError::UnknownKnob {
         name: name.into(),
-        close: nearest(name, registry.knobs.keys().map(String::as_str)),
+        close: candidates,
     }
 }
-/// The names closest to `name` by edit distance (or containment), nearest first.
+/// The names closest to `name`, ranked by the shared ranker.
 pub(crate) fn nearest<'a>(name: &str, known: impl Iterator<Item = &'a str>) -> Vec<String> {
-    let mut near: Vec<(usize, &str)> = known
-        .filter(|known| known.contains(name) || name.contains(known) || distance(known, name) <= 3)
-        .map(|known| (distance(known, name), known))
-        .collect();
-    near.sort();
-    near.into_iter()
-        .take(3)
-        .map(|(_, known)| known.to_owned())
+    provenant_core::close_matches(name, known)
+        .into_iter()
+        .map(str::to_owned)
         .collect()
 }
-fn distance(a: &str, b: &str) -> usize {
-    let b: Vec<char> = b.chars().collect();
-    let mut row: Vec<usize> = (0..=b.len()).collect();
-    for (i, x) in a.chars().enumerate() {
-        let mut diagonal = row[0];
-        row[0] = i + 1;
-        for (j, y) in b.iter().enumerate() {
-            let above = row[j + 1];
-            row[j + 1] = (above + 1)
-                .min(row[j] + 1)
-                .min(diagonal + usize::from(x != *y));
-            diagonal = above;
-        }
+/// Knob names resolved through the shared name machinery.
+struct KnobCatalogue<'a>(&'a Registry);
+
+impl provenant_core::Catalogue for KnobCatalogue<'_> {
+    type Item = ();
+    const KIND: provenant_core::NameKind = provenant_core::NameKind("knob");
+
+    fn names(&self) -> Vec<String> {
+        self.0.knobs.keys().cloned().collect()
     }
-    row[b.len()]
+
+    fn lookup(&self, canonical: &str) -> Option<Self::Item> {
+        self.0.knobs.contains_key(canonical).then_some(())
+    }
 }
 
 /// Check a value against the knob's type, range, enum values and nullability.
@@ -320,6 +301,10 @@ fn check(spec: &Spec, value: &Value) -> Result<(), &'static str> {
             }
         }
         Value::Bool(_) if spec.kind == Kind::Bool => Ok(()),
+        Value::String(text) if spec.kind == Kind::String => (!text.contains('\0')
+            && text.len() <= 4096)
+            .then_some(())
+            .ok_or("type"),
         Value::Array(items) if spec.kind == Kind::StringList => {
             if items.len() <= 128
                 && items.iter().all(|v| {
@@ -470,6 +455,9 @@ pub(crate) struct KnobProblem {
     pub(crate) rule: &'static str,
 }
 
+/// Each knob with the layer that set it, plus the problems found on the way.
+type ResolvedKnobs = (BTreeMap<String, Sourced<Value>>, Vec<KnobProblem>);
+
 /// Registry default, then the profile preset, then the user's `[knobs]`.
 /// An unknown name or an invalid value is ignored and reported; it never
 /// refuses. A strict knob takes its restrictive value instead of the default,
@@ -478,27 +466,30 @@ pub(crate) fn resolve(
     profile: Profile,
     overrides: Option<&dyn TableLike>,
     malformed_table: bool,
-) -> Result<(BTreeMap<String, KnobValue>, Vec<KnobProblem>), ConfigError> {
+) -> Result<ResolvedKnobs, ConfigError> {
     let registry = registry()?;
     let preset = registry.presets.get(profile_name(profile));
-    let mut knobs = BTreeMap::new();
+    let mut by_name: BTreeMap<String, Vec<Sourced<Value>>> = BTreeMap::new();
     for (name, spec) in &registry.knobs {
-        let from_preset = preset.and_then(|p| p.knobs.get(name));
-        let value = match (from_preset, safe_value(name)) {
-            (_, Some(safe)) if malformed_table => KnobValue {
-                value: safe,
-                source: KnobSource::Default,
-            },
-            (Some(value), _) => KnobValue {
-                value: value.clone(),
-                source: KnobSource::Profile,
-            },
-            (None, _) => KnobValue {
-                value: spec.default.clone(),
-                source: KnobSource::Default,
-            },
-        };
-        knobs.insert(name.clone(), value);
+        let mut candidates = Vec::new();
+        let safe = safe_value(name);
+        if malformed_table {
+            // A malformed table narrows every strict knob to its safe value;
+            // other knobs keep the preset or default they would otherwise use.
+            if let Some(safe) = safe {
+                candidates.push(sourced(safe, Layer::Default));
+            } else if let Some(value) = preset.and_then(|preset| preset.knobs.get(name)) {
+                candidates.push(sourced(value.clone(), Layer::Profile));
+            } else {
+                candidates.push(sourced(spec.default.clone(), Layer::Default));
+            }
+        } else {
+            candidates.push(sourced(spec.default.clone(), Layer::Default));
+            if let Some(value) = preset.and_then(|preset| preset.knobs.get(name)) {
+                candidates.push(sourced(value.clone(), Layer::Profile));
+            }
+        }
+        by_name.insert(name.clone(), candidates);
     }
     let mut problems = Vec::new();
     let mut entries = Vec::new();
@@ -519,29 +510,30 @@ pub(crate) fn resolve(
             .and_then(|value| check(spec, &value).map(|()| value));
         match checked {
             Ok(value) => {
-                knobs.insert(
-                    name.into(),
-                    KnobValue {
-                        value,
-                        source: KnobSource::Override,
-                    },
-                );
+                by_name
+                    .entry(name.into())
+                    .or_default()
+                    .push(sourced(value, Layer::Host));
             }
             Err(rule) => {
                 if let Some(safe) = safe_value(name) {
-                    knobs.insert(
-                        name.into(),
-                        KnobValue {
-                            value: safe,
-                            source: KnobSource::Default,
-                        },
-                    );
+                    let candidates = by_name.entry(name.into()).or_default();
+                    candidates.clear();
+                    candidates.push(sourced(safe, Layer::Default));
                 }
                 problems.push(KnobProblem {
                     name: name.into(),
                     rule,
                 });
             }
+        }
+    }
+    let mut knobs = BTreeMap::new();
+    for (name, candidates) in by_name {
+        let merge = KNOB_PRECEDENCE.merge(candidates);
+        provenant_records::warn_ignored(&merge.ignored, &name);
+        if let Some(winner) = merge.winner {
+            knobs.insert(name, winner);
         }
     }
     Ok((knobs, problems))
@@ -780,6 +772,31 @@ mod policy_action_tests {
     }
 }
 
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod name_tests {
+    use super::*;
+
+    #[test]
+    // Spec: docs/specs/cli.md#every-name-refusal-lists-close-matches
+    fn a_one_edit_knob_typo_ranks_first_and_carries_candidates() {
+        let registry = registry().unwrap();
+        let matches = nearest(
+            "chair.switch_account",
+            registry.knobs.keys().map(String::as_str),
+        );
+        assert_eq!(
+            matches.first().map(String::as_str),
+            Some("chair.switch_accounts")
+        );
+        let ConfigError::UnknownKnob { close, .. } = unknown(registry, "chair.switch_account")
+        else {
+            panic!("unknown knob");
+        };
+        assert!(close.iter().any(|name| name == "chair.switch_accounts"));
+    }
+}
+
 /// Whether a field belongs to the compact agent-facing configuration surface.
 /// Provider placeholders cover the registry's documented adapters; internal
 /// adapters remain available through the full schema and validation.
@@ -807,4 +824,37 @@ pub fn documented_field(path: &str) -> bool {
             }
         })
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod precedence_tests {
+    use super::*;
+
+    /// Spec: docs/specs/state.md#every-setting-reports-its-layer
+    #[test]
+    fn every_knob_layer_set_picks_the_host_and_shadows_the_rest() {
+        let candidates = KNOB_PRECEDENCE
+            .0
+            .iter()
+            .copied()
+            .map(|layer| sourced(Value::Null, layer));
+        let merge = KNOB_PRECEDENCE.merge(candidates);
+        assert_eq!(
+            merge
+                .winner
+                .as_ref()
+                .map(|candidate| candidate.source.layer),
+            Some(Layer::Host)
+        );
+        assert_eq!(
+            merge
+                .shadowed
+                .iter()
+                .map(|candidate| candidate.source.layer)
+                .collect::<Vec<_>>(),
+            [Layer::Default, Layer::Profile]
+        );
+        assert!(merge.ignored.is_empty());
+    }
 }

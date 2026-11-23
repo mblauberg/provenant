@@ -61,16 +61,11 @@ pub(super) fn read_inner(
     let children_absent = 0u64;
     let mut root_coverage = "empty";
     let mut truncated = false;
-    let mut totals: BTreeMap<&str, (u64, u64)> = [
-        "uncached_input",
-        "cache_read",
-        "cache_write",
-        "output_excluding_reasoning",
-        "reasoning",
-    ]
-    .into_iter()
-    .map(|key| (key, (0, 0)))
-    .collect();
+    let mut totals: BTreeMap<&str, (u64, u64)> =
+        ["input", "cache_read", "cache_write", "output", "reasoning"]
+            .into_iter()
+            .map(|key| (key, (0, 0)))
+            .collect();
     while let Some((state, depth, owner)) = stores.pop_front() {
         let call = provenant_run::Request {
             clock: &clock,
@@ -153,11 +148,19 @@ pub(super) fn read_inner(
                     continue;
                 }
                 seen.insert(key, (work_key.clone(), parents, store_path.clone()));
-                let usage =
-                    serde_json::to_value(attempt.effective_usage()).map_err(|_| Error::Encode)?;
-                for (name, (sum, missing)) in &mut totals {
-                    if let Some(value) = usage[*name].as_u64() {
-                        *sum = sum.checked_add(value).ok_or(Error::Encode)?;
+                let effective = attempt.effective_usage();
+                let usage = serde_json::to_value(&effective).map_err(|_| Error::Encode)?;
+                let tokens = &effective.tokens;
+                for (name, count) in [
+                    ("input", tokens.input),
+                    ("cache_read", tokens.cache_read),
+                    ("cache_write", tokens.cache_write),
+                    ("output", tokens.output),
+                    ("reasoning", tokens.reasoning),
+                ] {
+                    let (sum, missing) = totals.get_mut(name).ok_or(Error::Encode)?;
+                    if let Some(count) = count {
+                        *sum = sum.checked_add(count).ok_or(Error::Encode)?;
                     } else {
                         *missing += 1;
                     }
@@ -433,26 +436,43 @@ mod tests {
         request.parent = None;
         request.parent_attempt = None;
         other_store.create(&prepared(4, request)?, &call)?;
-        // Historical provider data is stored in the current record shape.
+        // Historical codex totals are session-wide, so they are not counted
+        // against one lane. A stated bucket on a per-attempt lane is counted.
+        // Spec: docs/specs/cli.md#nested-tree
         let mut observed = store.record(AttemptId::from_bytes([1; 16]), &call)?;
         observed.applied_route = Some(provenant_records::run::RouteRecord {
             provider: Some("codex".into()),
             ..Default::default()
         });
-        observed.usage.uncached_input = Some(42);
+        observed.usage.tokens.input = Some(42);
+        let mut attributed = store.record(AttemptId::from_bytes([2; 16]), &call)?;
+        attributed.usage.tokens.input = Some(1_234);
         let db = rusqlite::Connection::open(roots.state.as_path().join("run.sqlite3"))?;
-        db.execute(
-            "UPDATE attempts SET record=?1 WHERE id=?2",
-            rusqlite::params![
-                serde_json::to_vec(&observed)?,
-                observed.attempt_id.to_string()
-            ],
-        )?;
+        for record in [&observed, &attributed] {
+            db.execute(
+                "UPDATE attempts SET record=?1 WHERE id=?2",
+                rusqlite::params![serde_json::to_vec(record)?, record.attempt_id.to_string()],
+            )?;
+        }
         let tree = read(&roots, None, 3, 100, false)?;
         assert!(tree["nodes"][0]["lane_id"]["key"].is_object());
         assert!(tree["nodes"][0]["lane_id"].get("run_id").is_none());
         assert!(tree["nodes"][0]["lane_id"].get("task_id").is_none());
-        assert_eq!(tree["totals"]["usage"]["uncached_input"]["missing"], 4);
+        let nodes = tree["nodes"].as_array().ok_or("nodes")?;
+        let codex_id = json!(AttemptId::from_bytes([1; 16]).to_string());
+        let attributed_id = json!(AttemptId::from_bytes([2; 16]).to_string());
+        let codex_node = nodes
+            .iter()
+            .find(|node| node["lane_id"]["attempt_id"] == codex_id)
+            .ok_or("codex node")?;
+        let attributed_node = nodes
+            .iter()
+            .find(|node| node["lane_id"]["attempt_id"] == attributed_id)
+            .ok_or("attributed node")?;
+        assert_eq!(codex_node["usage"]["tokens"]["input"], Value::Null);
+        assert_eq!(attributed_node["usage"]["tokens"]["input"], json!(1_234));
+        assert_eq!(tree["totals"]["usage"]["input"]["known_sum"], 1_234);
+        assert_eq!(tree["totals"]["usage"]["input"]["missing"], 3);
         assert_eq!(tree["totals"]["attempts"], 4);
         assert_eq!(tree["totals"]["usage"]["reasoning"]["missing"], 4);
         assert_eq!(tree["identity_conflicts"], json!([]));
@@ -555,7 +575,18 @@ mod tests {
         assert_eq!(detail["status"], "found");
         assert_eq!(detail["artifacts"][0]["bytes"], 4);
         assert_eq!(detail["artifacts"][0]["present"], true);
-        assert_eq!(detail["usage"]["reasoning"], Value::Null);
+        assert_eq!(
+            detail["usage"]["tokens"]["input"],
+            json!(1_234),
+            "the reported bucket reaches console detail"
+        );
+        assert_eq!(detail["usage"]["tokens"]["reasoning"], Value::Null);
+        assert!(
+            detail["usage_coverage"]["known"]
+                .as_array()
+                .ok_or("known buckets")?
+                .contains(&json!("input"))
+        );
         let selected = read(&roots, Some(other_project), 3, 100, false)?;
         assert_eq!(selected["totals"]["attempts"], 1);
         assert!(

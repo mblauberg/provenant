@@ -22,7 +22,7 @@ fn a_failing_git_step_stderr_reaches_the_rendered_delivery_error()
         .with_lane_access(
             Some(provenant_records::LaneAccessReceipt {
                 access: provenant_records::LaneAccess::Isolated,
-                source: provenant_records::LaneAccessSource::Launch,
+                source: provenant_records::Layer::Launch,
                 key: "lanes.access".into(),
                 extra: Default::default(),
             }),
@@ -104,6 +104,7 @@ fn a_failing_gh_step_stderr_reaches_the_rendered_delivery_error()
             "integration",
             base,
             "Graph fixture",
+            &crate::forge_for("origin", "main", &[]),
         )
         .expect_err("gh pr create must fail");
     let rendered = error.to_string();
@@ -181,6 +182,7 @@ fn existing_pr_delivery_only_creates_after_positive_absence()
                     "integration",
                     base,
                     "Graph fixture",
+                    &crate::forge_for("origin", "main", &[]),
                 )
             } else {
                 fixture
@@ -244,9 +246,12 @@ fn checked_out_parent_integration_defers_without_touching_edits()
             ])?;
             fixture.commit(&parent, "parent commit")?;
         }
-        fixture.request =
-            HostDeliveryContext::destination(DeliveryMode::Integrate("parent".into()), "lane")?
-                .ok_or("destination")?;
+        fixture.request = HostDeliveryContext::destination(
+            DeliveryMode::Integrate("parent".into()),
+            "lane",
+            &crate::forge_for("origin", "main", &[]),
+        )?
+        .ok_or("destination")?;
         let host = fixture.prepare()?;
         std::fs::write(fixture.writer.worktree.join("child"), "child work")?;
         std::fs::write(fixture.writer.worktree.join("live-edit"), "child work")?;
@@ -310,7 +315,12 @@ fn checked_out_parent_integration_defers_without_touching_edits()
                 std::fs::write(parent_ref.join("live-edit"), "parent final edit")
             });
             started.wait();
-            let result = host.integrate(&fixture.writer, &fixture.request, head);
+            let result = host.integrate(
+                &fixture.writer,
+                &fixture.request,
+                head,
+                &crate::forge_for("origin", "main", &[]),
+            );
             editing.store(false, std::sync::atomic::Ordering::Relaxed);
             editor
                 .join()
@@ -353,7 +363,12 @@ fn checked_out_parent_integration_defers_without_touching_edits()
             "checkout",
             "--detach",
         ])?;
-        host.integrate(&fixture.writer, &fixture.request, head)?;
+        host.integrate(
+            &fixture.writer,
+            &fixture.request,
+            head,
+            &crate::forge_for("origin", "main", &[]),
+        )?;
         let published = host.command(
             &fixture.writer.worktree,
             "git",
@@ -529,7 +544,11 @@ fn assert_host_delivery_repository_fact_caps() -> std::result::Result<(), Box<dy
             .unwrap_err(),
         HostDeliveryContext::new(fixture.environment.clone())
             .with_repo_facts(&inventory)
-            .check_delivery_branch_with_facts(&fixture.writer.project, "unprotected")
+            .check_delivery_branch_with_facts(
+                &fixture.writer.project,
+                "unprotected",
+                &crate::forge_for("origin", "main", &[]),
+            )
             .unwrap_err(),
     ] {
         assert!(matches!(
@@ -546,7 +565,12 @@ fn assert_host_delivery_repository_fact_caps() -> std::result::Result<(), Box<dy
     let error = host
         .clone()
         .with_repo_facts(&inventory)
-        .integrate(&fixture.writer, &fixture.request, head)
+        .integrate(
+            &fixture.writer,
+            &fixture.request,
+            head,
+            &crate::forge_for("origin", "main", &[]),
+        )
         .unwrap_err();
     assert!(
         matches!(
@@ -563,7 +587,7 @@ fn assert_host_delivery_repository_fact_caps() -> std::result::Result<(), Box<dy
     assert!(matches!(
         HostDeliveryContext::new(fixture.environment.clone())
             .with_repo_facts(&inventory)
-            .deliver_graph_pr(&fixture.writer.project, "unprotected", head, "body")
+            .deliver_graph_pr(&fixture.writer.project, "unprotected", head, "body", &crate::forge_for("origin", "main", &[]))
             .unwrap_err(),
         RunError::DeliveryLimit {
             tool: "git",

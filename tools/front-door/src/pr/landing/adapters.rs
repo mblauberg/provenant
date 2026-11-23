@@ -96,6 +96,10 @@ fn refusal_leaf(code: &str) -> Option<(&'static str, &'static str)> {
             "MERGE_NOT_ALLOWED",
             "resolve the pull request's mergeability problem, then rerun `provenant land`",
         )),
+        "REVIEW_REQUIRED" => Some((
+            "REVIEW_REQUIRED",
+            "obtain an approving review the ruleset accepts, or grant admin_publication when_review_unavailable in the host config, then rerun `provenant land`",
+        )),
         _ => None,
     }
 }
@@ -192,6 +196,28 @@ pub struct GhForge {
     reviews: std::collections::BTreeMap<u64, Vec<serde_json::Value>>,
 }
 impl GhForge {
+    /// Merge the pinned head, optionally with the owner's admin authority.
+    /// Only the review-requirement path in `publish` passes `admin: true`.
+    fn merge_inner(
+        &mut self,
+        number: u64,
+        head: &str,
+        method: MergeMethod,
+        admin: bool,
+    ) -> Result<String, LandingError> {
+        let pinned = object_id(head)?
+            .parse()
+            .map_err(|_| LandingError::Failed(format!("not a commit id: {head}")))?;
+        let sha = merge_with(&self.reader(), &number.to_string(), pinned, method, admin)
+            .map_err(mutation_failed)?;
+        sha.ok_or_else(|| {
+            LandingError::Failed(format!(
+                "GitHub merged #{number} by {} without naming the commit",
+                merge_label(method)
+            ))
+        })
+    }
+
     pub fn new(project: &Path, state: &Path) -> Self {
         Self {
             project: project.to_owned(),
@@ -804,17 +830,15 @@ impl Forge for GhForge {
         head: &str,
         method: MergeMethod,
     ) -> Result<String, LandingError> {
-        let pinned = object_id(head)?
-            .parse()
-            .map_err(|_| LandingError::Failed(format!("not a commit id: {head}")))?;
-        let sha = merge_with(&self.reader(), &number.to_string(), pinned, method)
-            .map_err(mutation_failed)?;
-        sha.ok_or_else(|| {
-            LandingError::Failed(format!(
-                "GitHub merged #{number} by {} without naming the commit",
-                merge_label(method)
-            ))
-        })
+        self.merge_inner(number, head, method, false)
+    }
+    fn merge_admin(
+        &mut self,
+        number: u64,
+        head: &str,
+        method: MergeMethod,
+    ) -> Result<String, LandingError> {
+        self.merge_inner(number, head, method, true)
     }
     fn merge_stack(
         &mut self,
@@ -824,6 +848,10 @@ impl Forge for GhForge {
     ) -> Result<String, LandingError> {
         GhForge::merge_stack(self, number, head, method)
     }
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "forge probe output goes to stderr at the landing boundary"
+    )]
     fn may_push_directly(&mut self, branch: &str) -> Result<bool, LandingError> {
         let verdict = (|| -> Result<(), String> {
             let encoded = encode_branch(branch);
@@ -1075,6 +1103,10 @@ impl<'a> GitRepo<'a> {
 }
 
 impl Repo for GitRepo<'_> {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "forge subprocess output goes to stderr at the landing boundary"
+    )]
     fn publish_command(
         &mut self,
         command: &provenant_records::landing::RepositoryCommand,
@@ -1092,13 +1124,15 @@ impl Repo for GitRepo<'_> {
         }
         let input = serde_json::to_vec(attempt)
             .map_err(|error| LandingError::Refused(format!("encode command intent: {error}")))?;
+        let ports = provenant_config::PortTable::read_for(Some(&self.project), &self.host_state)
+            .map_err(|error| LandingError::Refused(format!("read port table: {error}")))?;
+        let policy = provenant_config::operation_policy(&self.host_state, &self.project, &ports);
         let mut forge = provenant_config::ForgePort::from_land_port(
             port,
             "land",
             &self.project,
             &self.host_state,
-            // TODO(#3371 seam): caller owner supplies the operation-scoped policy.
-            std::sync::Arc::new(provenant_records::policy::Policy::default()),
+            policy,
         )
         .map_err(|error| LandingError::Refused(format!("prepare repository publisher: {error}")))?;
         provenant_confinement::publication::install_forge(
@@ -1614,6 +1648,10 @@ struct CheckObservation {
     next_interval: Option<Duration>,
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "forge probe output goes to stderr at the landing boundary"
+)]
 fn observe_checks_with(
     candidate: &Candidate,
     definition: &GateDefinition,
@@ -1631,11 +1669,15 @@ fn observe_checks_with(
         let observed = match observation.checks {
             // A rate limit skips this poll; the bound still ends the wait.
             Err(LandingError::RateLimited(message)) if elapsed < timeout => {
-                use std::io::Write;
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: candidate {} check read skipped: {message}",
-                    candidate.commit
+                provenant_records::warning::warn(
+                    provenant_records::warning::Warning::new(
+                        provenant_records::warning::GH_RATE_LIMITED,
+                        format!(
+                            "candidate {} check read skipped: {message}",
+                            candidate.commit
+                        ),
+                    )
+                    .subject(candidate.commit.clone()),
                 );
                 let pause = poll.min(timeout.saturating_sub(elapsed));
                 sleep(pause);
@@ -1744,6 +1786,10 @@ impl AlarmSink for ChairAlarms {
     fn set_project_path(&mut self, path: &Path) {
         self.project = path.to_owned();
     }
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "alarm progress goes to stderr at the landing boundary"
+    )]
     fn post(&mut self, alarm: &Alarm) -> Result<(), LandingError> {
         let text = alarm_text(alarm);
         let _ = writeln!(std::io::stderr().lock(), "{text}");

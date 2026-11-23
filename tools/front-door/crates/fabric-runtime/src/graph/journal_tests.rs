@@ -1055,7 +1055,10 @@ fn pending_index_reads_only_pending_checkpoints_after_rebuild() {
 
 #[test]
 #[ignore = "manual checkpoint read timing"]
-#[allow(clippy::print_stderr)]
+#[allow(
+    clippy::print_stderr,
+    reason = "this ignored test prints its own timing report"
+)]
 fn checkpoint_read_timing_at_scale() {
     let (_temp, root, project) = checkpoint_scale_fixture(5000, 20);
     // Build the markers before timing the steady-state pending path.

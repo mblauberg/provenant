@@ -211,38 +211,79 @@ fn host_git_with_tail(
     Ok(output)
 }
 
+/// The one forge remote for this checkout, when one can be named. Only the
+/// remote is needed to fetch: the branch comes from the remote's own HEAD, so
+/// resolving a full context would demand a default branch that is not used.
+/// A checkout with no remote at all is normal for local-only GC and yields
+/// `None`; an ambiguous remote, malformed port table or unreadable metadata is
+/// a real resolution failure and stays an error.
+fn forge_remote(context: &WorktreeContext<'_>) -> Result<Option<String>, Error> {
+    let invalid = || Error::GcObservation("cannot resolve forge context");
+    let state = context.host_state().map_err(|_| invalid())?;
+    let project = context.layout.project();
+    let ports = provenant_config::PortTable::read_for(project, &state).map_err(|_| invalid())?;
+    // A bound bare repository has no checkout; its layout root is the common
+    // Git directory, which holds the remote (a `git clone --bare` keeps
+    // `remote.origin.url`). Bind it there, as the confinement retirement scope
+    // does, so the fetch below records the default that scope resolves.
+    // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    let root = project.unwrap_or_else(|| context.layout.root());
+    let policy = provenant_config::operation_policy(&state, root, &ports);
+    let config = provenant_config::ForgeConfig::new(&ports, (*policy).clone());
+    let git = match project {
+        Some(project) => provenant_config::ForgeGit::new(project),
+        None => provenant_config::ForgeGit::bare(root),
+    }
+    .map_err(|_| invalid())?;
+    // Keep the typed refusal: its remotes and close matches reach the
+    // warning and its repair, instead of the circular collection message.
+    // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    provenant_config::ForgeContext::remote_if_any(&config, &git)
+        .map(|remote| remote.map(|remote| remote.value))
+        .map_err(Error::ForgeContextUnresolved)
+}
+
 /// Refresh only the writer's tracking ref. An absent remote branch is normal.
 pub(crate) fn refresh_writer_tracking_ref(
     context: &WorktreeContext<'_>,
     branch: &str,
 ) -> Result<(), Error> {
-    refresh_branch(context.repo.root_path(), context.executor, branch)
+    let Some(remote) = forge_remote(context)? else {
+        return Ok(());
+    };
+    refresh_branch(context.repo.root_path(), context.executor, &remote, branch)
         .map_err(|_| Error::GcObservation("cannot refresh writer tracking ref"))
 }
 
-fn refresh_branch(repo: &Path, executor: &dyn Executor, branch: &str) -> Result<(), Error> {
+fn refresh_branch(
+    repo: &Path,
+    executor: &dyn Executor,
+    remote: &str,
+    branch: &str,
+) -> Result<(), Error> {
     provenant_confinement::repo::GitRefName::branch(branch)
         .map_err(|_| Error::GcObservation("invalid writer branch"))?;
     if branch == "HEAD" {
         return Err(Error::GcObservation("invalid writer branch"));
     }
-    let remote = host_git_config_with_cancel(
+    let key = format!("remote.{remote}.url");
+    let url = host_git_config_with_cancel(
         repo,
         executor,
-        provenant_os::git_config::Read::Get("remote.origin.url"),
-        "read origin URL",
+        provenant_os::git_config::Read::Get(&key),
+        "read remote URL",
         Some("remote URL"),
         Duration::from_secs(5),
         None,
     )?;
-    if remote.termination == Termination::Exit(1) {
+    if url.termination == Termination::Exit(1) {
         return Ok(());
     }
-    if remote.termination != Termination::Exit(0) {
-        return Err(Error::GcObservation("cannot read origin"));
+    if url.termination != Termination::Exit(0) {
+        return Err(Error::GcObservation("cannot read remote URL"));
     }
     let source = format!("refs/heads/{branch}");
-    let refspec = format!("+{source}:refs/remotes/origin/{branch}");
+    let refspec = format!("+{source}:refs/remotes/{remote}/{branch}");
     let fetched = host_git_with_stderr(
         repo,
         executor,
@@ -252,7 +293,7 @@ fn refresh_branch(repo: &Path, executor: &dyn Executor, branch: &str) -> Result<
             "--no-recurse-submodules",
             "--no-write-fetch-head",
             "--refmap=",
-            "origin",
+            remote,
             &refspec,
         ],
         Duration::from_secs(15),
@@ -269,7 +310,9 @@ fn refresh_branch(repo: &Path, executor: &dyn Executor, branch: &str) -> Result<
 }
 
 /// Fetch the remote's actual default branch, independently of local main or a
-/// stale origin/HEAD. Only this branch's remote-tracking ref is updated.
+/// stale remote HEAD symref. Only this branch's remote-tracking ref is updated,
+/// and the remote's HEAD symref is pointed at it so the forge context resolves
+/// the advertised default.
 pub(crate) fn fetch_default(
     context: &WorktreeContext<'_>,
     cancel: &CancelToken,
@@ -285,23 +328,15 @@ pub(crate) fn fetch_default(
             None,
         )
     };
-    let remote = host_git_config_with_cancel(
-        context.repo.root_path(),
-        context.executor,
-        provenant_os::git_config::Read::Get("remote.origin.url"),
-        "read origin URL",
-        Some("remote URL"),
-        Duration::from_secs(5),
-        Some(cancel),
-    )?;
-    if remote.termination == Termination::Exit(1) {
+    // The remote comes from the one resolved forge context, never a hard-coded
+    // `origin`; only the branch is advertised by the remote itself. A checkout
+    // with no remote has nothing to fetch and reports no upstream.
+    let Some(remote) = forge_remote(context)? else {
         return Ok(None);
-    }
-    if remote.termination != Termination::Exit(0) {
-        return Err(Error::GcObservation("cannot read origin"));
-    }
+    };
+    let remote = remote.as_str();
     let advertised = run(
-        &["ls-remote", "--symref", "origin", "HEAD"],
+        &["ls-remote", "--symref", remote, "HEAD"],
         Duration::from_secs(60),
     )?;
     if advertised.termination != Termination::Exit(0) {
@@ -320,7 +355,7 @@ pub(crate) fn fetch_default(
         .ok_or(Error::GcObservation("upstream has no default branch"))?;
     provenant_confinement::repo::GitRefName::branch(branch)
         .map_err(|_| Error::GcObservation("invalid upstream default branch"))?;
-    let reference = format!("refs/remotes/origin/{branch}");
+    let reference = format!("refs/remotes/{remote}/{branch}");
     let refspec = format!("+refs/heads/{branch}:{reference}");
     let fetched = run(
         &[
@@ -329,7 +364,7 @@ pub(crate) fn fetch_default(
             "--no-recurse-submodules",
             "--no-write-fetch-head",
             "--refmap=",
-            "origin",
+            remote,
             &refspec,
         ],
         Duration::from_secs(60),
@@ -337,8 +372,25 @@ pub(crate) fn fetch_default(
     if fetched.termination != Termination::Exit(0) {
         return Err(Error::GcObservation("cannot fetch upstream default branch"));
     }
-    let name = provenant_confinement::repo::GitRefName::remote_tracking(format!("origin/{branch}"))
-        .map_err(|_| Error::GcObservation("invalid fetched upstream ref"))?;
+    // Record the advertised default as the remote's HEAD, as
+    // `git remote set-head --auto` would. The explicit refspec above skips
+    // Git's own remote-HEAD update, and the forge context reads the default
+    // branch from this symref: without it the context stays unresolved and no
+    // merged lane is ever retired.
+    // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    let remote_head = format!("refs/remotes/{remote}/HEAD");
+    let recorded = run(
+        &["symbolic-ref", &remote_head, &reference],
+        Duration::from_secs(10),
+    )?;
+    if recorded.termination != Termination::Exit(0) {
+        return Err(Error::GcObservation(
+            "cannot record upstream default branch",
+        ));
+    }
+    let name =
+        provenant_confinement::repo::GitRefName::remote_tracking(format!("{remote}/{branch}"))
+            .map_err(|_| Error::GcObservation("invalid fetched upstream ref"))?;
     let oid = context.facts.resolve_commit(context, name, cancel)?;
     Ok(Some((reference, oid)))
 }
@@ -1004,6 +1056,157 @@ mod tests {
             result.1,
             GitOid::parse(std::str::from_utf8(&actual)?.trim())?
         );
+        // The forge context reads the default from the remote's HEAD symref,
+        // which the explicit-refspec fetch does not write on its own.
+        let head =
+            provenant_os::fixture::run_git(&repo, &["symbolic-ref", "refs/remotes/origin/HEAD"])?;
+        assert_eq!(
+            std::str::from_utf8(&head)?.trim(),
+            "refs/remotes/origin/main"
+        );
+        Ok(())
+    }
+
+    /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    #[test]
+    fn a_gc_dry_run_uses_the_upstream_remote_and_protects_its_default()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().join("home");
+        let state = temp.path().join("state");
+        let repo = temp.path().join("repo");
+        let remote = temp.path().join("upstream.git");
+        std::fs::create_dir_all(&home)?;
+        std::fs::create_dir_all(&state)?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::create_dir_all(&repo)?;
+        provenant_os::fixture::run_git(
+            temp.path(),
+            &["init", "--bare", remote.to_str().ok_or("remote")?],
+        )?;
+        for args in [
+            vec!["init", "-q", "-b", "trunk"],
+            vec!["commit", "--allow-empty", "-qm", "base"],
+            vec![
+                "remote",
+                "add",
+                "upstream",
+                remote.to_str().ok_or("remote")?,
+            ],
+            vec!["push", "upstream", "HEAD:refs/heads/trunk"],
+        ] {
+            provenant_os::fixture::run_git(&repo, &args)?;
+        }
+        provenant_os::fixture::run_git(&remote, &["symbolic-ref", "HEAD", "refs/heads/trunk"])?;
+        let mut inputs = provenant_core::RootInputs::new(home.clone(), repo.clone());
+        inputs.state_dir = Some(state);
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let fetched = provenant_confinement::worktrees::with_context(
+            &roots,
+            &home,
+            &repo,
+            &clock,
+            &cancel,
+            |context| Ok(fetch_default(context, &cancel)),
+        )??
+        .ok_or("missing upstream")?;
+        assert_eq!(fetched.0, "refs/remotes/upstream/trunk");
+        let expected = provenant_os::fixture::run_git(&remote, &["rev-parse", "trunk"])?;
+        assert_eq!(
+            fetched.1,
+            GitOid::parse(std::str::from_utf8(&expected)?.trim())?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn no_remote_is_a_clean_absence_for_fetch_and_refresh() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().join("home");
+        let state = temp.path().join("state");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&home)?;
+        std::fs::create_dir_all(&state)?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::create_dir_all(&repo)?;
+        provenant_os::fixture::run_git(&repo, &["init", "-q"])?;
+        provenant_os::fixture::run_git(&repo, &["commit", "--allow-empty", "-qm", "base"])?;
+        let mut inputs = provenant_core::RootInputs::new(home.clone(), repo.clone());
+        inputs.state_dir = Some(state);
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let fetched = provenant_confinement::worktrees::with_context(
+            &roots,
+            &home,
+            &repo,
+            &clock,
+            &cancel,
+            |context| Ok(fetch_default(context, &cancel)),
+        )??;
+        assert!(fetched.is_none(), "{fetched:?}");
+        provenant_confinement::worktrees::with_context(
+            &roots,
+            &home,
+            &repo,
+            &clock,
+            &cancel,
+            |context| Ok(refresh_writer_tracking_ref(context, "lane/test")),
+        )??;
+        Ok(())
+    }
+
+    #[test]
+    fn ambiguous_remotes_stay_a_real_resolution_failure() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().join("home");
+        let state = temp.path().join("state");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&home)?;
+        std::fs::create_dir_all(&state)?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::create_dir_all(&repo)?;
+        provenant_os::fixture::run_git(&repo, &["init", "-q"])?;
+        provenant_os::fixture::run_git(&repo, &["commit", "--allow-empty", "-qm", "base"])?;
+        for remote in ["alpha", "beta"] {
+            provenant_os::fixture::run_git(
+                &repo,
+                &[
+                    "remote",
+                    "add",
+                    remote,
+                    &format!("https://example.invalid/{remote}.git"),
+                ],
+            )?;
+        }
+        let mut inputs = provenant_core::RootInputs::new(home.clone(), repo.clone());
+        inputs.state_dir = Some(state);
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let fetched = provenant_confinement::worktrees::with_context(
+            &roots,
+            &home,
+            &repo,
+            &clock,
+            &cancel,
+            |context| Ok(fetch_default(context, &cancel)),
+        )?;
+        let error = fetched.expect_err("an ambiguous remote stays a refusal");
+        // The typed cause reaches the caller: both remotes are named and the
+        // repair points at the declaration, not a circular collection hint.
+        // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+        let message = error.local_message();
+        assert!(message.contains("alpha"), "{message}");
+        assert!(message.contains("beta"), "{message}");
+        assert!(error.repair().contains("git.remote"), "{}", error.repair());
         Ok(())
     }
 
@@ -1061,10 +1264,10 @@ mod tests {
                 "HEAD:refs/heads/other/secret",
             ],
         )?;
-        refresh_branch(&repo, &executor, "lane/test")?;
+        refresh_branch(&repo, &executor, "origin", "lane/test")?;
         for invalid in ["a*b", "../x", "-x", "HEAD"] {
             assert!(
-                refresh_branch(&repo, &executor, invalid).is_err(),
+                refresh_branch(&repo, &executor, "origin", invalid).is_err(),
                 "{invalid}"
             );
         }
@@ -1078,7 +1281,7 @@ mod tests {
             &repo,
             &["update-ref", "-d", "refs/remotes/origin/lane/test"],
         )?;
-        refresh_branch(&repo, &executor, "lane/test")?;
+        refresh_branch(&repo, &executor, "origin", "lane/test")?;
         assert_eq!(
             git(&repo, &["rev-parse", "refs/remotes/origin/lane/test"])?,
             expected
@@ -1096,7 +1299,7 @@ mod tests {
             false,
         )?;
         assert_ne!(other.termination, Termination::Exit(0));
-        refresh_branch(&repo, &executor, "missing")?;
+        refresh_branch(&repo, &executor, "origin", "missing")?;
         git(
             &repo,
             &[
@@ -1109,7 +1312,7 @@ mod tests {
                     .ok_or("absent path")?,
             ],
         )?;
-        assert!(refresh_branch(&repo, &executor, "lane/test").is_err());
+        assert!(refresh_branch(&repo, &executor, "origin", "lane/test").is_err());
         Ok(())
     }
 

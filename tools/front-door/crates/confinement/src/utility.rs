@@ -2945,16 +2945,32 @@ pub fn set_lane_upstream_key(
     if branch.short_name().is_empty() {
         return Err(UtilityError::InvalidOperationValue);
     }
+    // The lane's upstream remote comes from the one resolved forge context,
+    // never a compiled-in `origin`. An absent remote is an absence, not a
+    // guessed identity.
+    // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    let project = repo.root_path();
+    let ports = provenant_config::PortTable::read_project_only(project)
+        .map_err(|_| UtilityError::InvalidOperationValue)?;
+    let policy = provenant_config::operation_policy(project, project, &ports);
+    let config = provenant_config::ForgeConfig::new(&ports, (*policy).clone());
+    let git = provenant_config::ForgeGit::new(project)
+        .map_err(|_| UtilityError::InvalidOperationValue)?;
+    // A remote-less checkout has no upstream: write neither key. An empty
+    // `branch.<name>.remote` makes Git itself crash on the next status read.
+    let Some(remote) = provenant_config::ForgeContext::remote_if_any(&config, &git)
+        .map_err(|_| UtilityError::InvalidOperationValue)?
+        .map(|remote| remote.value)
+    else {
+        return Ok(());
+    };
     let (field, value) = if merge {
         (
             provenant_os::git_config::BranchField::Merge,
             branch.as_str().to_owned(),
         )
     } else {
-        (
-            provenant_os::git_config::BranchField::Remote,
-            "origin".to_owned(),
-        )
+        (provenant_os::git_config::BranchField::Remote, remote)
     };
     let mutation = GitMutation::SetBranchConfig {
         branch: branch.clone(),
@@ -4761,10 +4777,60 @@ File exists\nfatal: could not lock config file .git/config: File exists\n";
         GitRefName::branch("lane/writer").map_err(|error| error.into())
     }
 
+    /// A fixture whose checkout has one remote, so the lane upstream keys are
+    /// written and the config mutation path is exercised.
+    fn fixture_with_remote() -> Result<Fixture, Box<dyn Error>> {
+        let mut fixture = Fixture::new()?;
+        let root = fixture
+            .root
+            .to_str()
+            .ok_or("non-UTF8 fixture root")?
+            .to_owned();
+        fixture.run(&["remote", "add", "origin", &root])?;
+        // Adding a remote rewrites the common config the verified handle digests.
+        fixture.repo = fixture.runtime.open_repo(
+            &fixture.executor,
+            &fixture.root,
+            fixture.budget()?,
+            &CancelToken::new(),
+        )?;
+        Ok(fixture)
+    }
+
+    /// A checkout without a remote has no upstream. Writing an empty
+    /// `branch.<name>.remote` makes Git crash (SIGSEGV) on the next status read,
+    /// so neither key is written and status stays readable.
+    /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    #[test]
+    fn lane_upstream_is_not_written_without_a_remote() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let branch = GitRefName::branch("lane-without-remote")?;
+        for merge in [false, true] {
+            set_lane_upstream_key(
+                &fixture.executor,
+                &fixture.repo,
+                &fixture.runtime,
+                &branch,
+                merge,
+                fixture.budget()?,
+                &CancelToken::new(),
+            )?;
+        }
+        let listed = fixture.run(&["config", "--local", "--list"])?;
+        let listed = String::from_utf8_lossy(&listed.stdout.bytes);
+        assert!(
+            !listed.contains("branch.lane-without-remote."),
+            "no upstream key is written without a remote: {listed}"
+        );
+        // The fixture runner fails on any non-zero exit or signal.
+        fixture.run(&["status", "--porcelain=v2", "--branch"])?;
+        Ok(())
+    }
+
     #[test]
     fn lane_upstream_nonzero_exit_reports_status_without_config_data() -> Result<(), Box<dyn Error>>
     {
-        let fixture = Fixture::new()?;
+        let fixture = fixture_with_remote()?;
         let fake = ScriptedConfig::new(
             vec![exit_outcome(
                 1,
@@ -4880,7 +4946,7 @@ File exists\nfatal: could not lock config file .git/config: File exists\n";
 
     #[test]
     fn lane_upstream_config_lock_contention_retries_until_success() -> Result<(), Box<dyn Error>> {
-        let fixture = Fixture::new()?;
+        let fixture = fixture_with_remote()?;
         let outcomes = vec![
             exit_outcome(255, LOCK_CONTENTION_STDERR),
             exit_outcome(255, LOCK_CONTENTION_STDERR),
@@ -5066,7 +5132,28 @@ File exists\nfatal: could not lock config file .git/config: File exists\n";
                 .map_err(|error| error.to_string())
         }
 
-        let fixture = Fixture::new()?;
+        let mut fixture = Fixture::new()?;
+        // The lane's upstream now comes from the resolved forge context, so
+        // give the fixture the sole remote that makes that context "origin".
+        // Without one the key legitimately becomes empty and the snapshot
+        // assertion would name an absence rather than the configured remote.
+        // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+        fixture.run(&[
+            "remote",
+            "add",
+            "origin",
+            fixture.root.to_str().ok_or("non-UTF8 fixture root")?,
+        ])?;
+        // Adding a remote rewrites the common config, which the verified
+        // handle digests on every retry. Re-anchor it before the writer starts,
+        // or the first revalidation reports IdentityChanged instead of
+        // exercising the config.lock retry this test is about.
+        fixture.repo = fixture.runtime.open_repo(
+            &fixture.executor,
+            &fixture.root,
+            fixture.budget()?,
+            &CancelToken::new(),
+        )?;
         let worktrees = fixture.root.join(".worktrees");
         fs::create_dir_all(&worktrees)?;
         let head = fixture.head()?.to_string();
@@ -5181,7 +5268,7 @@ File exists\nfatal: could not lock config file .git/config: File exists\n";
     #[test]
     fn lane_upstream_config_lock_contention_fails_after_the_retry_limit()
     -> Result<(), Box<dyn Error>> {
-        let fixture = Fixture::new()?;
+        let fixture = fixture_with_remote()?;
         let outcomes = (0..GIT_LOCK_MAX_ATTEMPTS)
             .map(|_| exit_outcome(255, LOCK_CONTENTION_STDERR))
             .collect();
@@ -5340,7 +5427,7 @@ File exists\nfatal: could not lock config file .git/config: File exists\n";
     #[allow(clippy::disallowed_methods)] // The elapsed span is the assertion.
     fn lane_upstream_config_lock_contention_stays_within_the_budget() -> Result<(), Box<dyn Error>>
     {
-        let fixture = Fixture::new()?;
+        let fixture = fixture_with_remote()?;
         // A small budget keeps the test fast. Five full-timeout attempts plus
         // their backoffs would run far past 200 ms, so the operation must stop
         // at its shared deadline instead of feeding each retry the whole budget.
@@ -5390,7 +5477,7 @@ File exists\nfatal: could not lock config file .git/config: File exists\n";
 
     #[test]
     fn lane_upstream_retry_stops_when_cancelled() -> Result<(), Box<dyn Error>> {
-        let fixture = Fixture::new()?;
+        let fixture = fixture_with_remote()?;
         let cancel = CancelToken::new();
         let fake = ScriptedConfig::new(
             vec![exit_outcome(255, LOCK_CONTENTION_STDERR)],

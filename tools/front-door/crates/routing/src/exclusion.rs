@@ -35,9 +35,10 @@ impl ExclusionSelector {
         models: &[ModelId],
         resolve_account: impl Fn(&str) -> Result<Option<(String, String)>, String>,
     ) -> Result<Self, RoutingError> {
-        let refuse = |detail: String| RoutingError::UnknownExclusion {
-            selector: text.to_owned(),
-            detail,
+        let mut universe: Vec<String> = providers.iter().map(|name| (*name).to_owned()).collect();
+        universe.extend(models.iter().map(|model| model.as_str().to_owned()));
+        let refuse = |detail: String| {
+            RoutingError::unknown_exclusion(text, detail, universe.iter().map(String::as_str))
         };
         if providers.contains(&text) {
             return Ok(Self::Provider(text.to_owned()));

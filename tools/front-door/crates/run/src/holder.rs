@@ -7,6 +7,8 @@ use crate::{
 };
 use provenant_core::{ActorId, AttemptId, CancelToken, Clock, OperationId, ProjectId, RootInputs};
 use provenant_os::{clock::SystemClock, exec::Termination, fs::Directory};
+#[cfg(test)]
+use provenant_records::Tokens;
 use provenant_supervisor::{
     custody::{self, CustodyError, ExitObservation},
     machine::StopReason,
@@ -48,27 +50,30 @@ fn codex_attempt_usage(
         }
         Some(_) => current.zip(previous).and_then(|(a, b)| a.checked_sub(b)),
     };
-    usage.uncached_input = delta(
-        total.uncached_input,
-        baseline.as_ref().and_then(|b| b.uncached_input),
+    usage.tokens.input = delta(
+        total.tokens.input,
+        baseline.as_ref().and_then(|b| b.tokens.input),
     );
-    usage.cache_read = delta(
-        total.cache_read,
-        baseline.as_ref().and_then(|b| b.cache_read),
+    usage.tokens.cache_read = delta(
+        total.tokens.cache_read,
+        baseline.as_ref().and_then(|b| b.tokens.cache_read),
     );
-    usage.cache_write = delta(
-        total.cache_write,
-        baseline.as_ref().and_then(|b| b.cache_write),
+    usage.tokens.cache_write = delta(
+        total.tokens.cache_write,
+        baseline.as_ref().and_then(|b| b.tokens.cache_write),
     );
-    usage.cache_write_1h = delta(
-        total.cache_write_1h,
-        baseline.as_ref().and_then(|b| b.cache_write_1h),
+    usage.tokens.cache_write_1h = delta(
+        total.tokens.cache_write_1h,
+        baseline.as_ref().and_then(|b| b.tokens.cache_write_1h),
     );
-    usage.output_excluding_reasoning = delta(
-        total.output_excluding_reasoning,
-        baseline.as_ref().and_then(|b| b.output_excluding_reasoning),
+    usage.tokens.output = delta(
+        total.tokens.output,
+        baseline.as_ref().and_then(|b| b.tokens.output),
     );
-    usage.reasoning = delta(total.reasoning, baseline.as_ref().and_then(|b| b.reasoning));
+    usage.tokens.reasoning = delta(
+        total.tokens.reasoning,
+        baseline.as_ref().and_then(|b| b.tokens.reasoning),
+    );
     usage.per_attempt = Some(true);
     usage.session_total = Some(Box::new(total));
 }
@@ -79,36 +84,35 @@ mod codex_usage_tests {
 
     #[test]
     fn codex_session_deltas_and_unknown_baseline() {
-        let mut first = UsageRecord {
-            uncached_input: Some(20),
-            cache_read: Some(80),
-            output_excluding_reasoning: Some(7),
+        let record = |input, cache_read, output| UsageRecord {
+            tokens: Tokens {
+                input: Some(input),
+                cache_read: Some(cache_read),
+                output: Some(output),
+                ..Tokens::default()
+            },
             ..Default::default()
         };
+        let mut first = record(20, 80, 7);
         codex_attempt_usage(&mut first, Some("t"), None, false);
-        assert_eq!(first.uncached_input, Some(20));
+        assert_eq!(first.tokens.input, Some(20));
         assert_eq!(
             first
                 .session_total
                 .as_deref()
-                .and_then(|total| total.cache_read),
+                .and_then(|total| total.tokens.cache_read),
             Some(80)
         );
-        let mut second = UsageRecord {
-            uncached_input: Some(50),
-            cache_read: Some(100),
-            output_excluding_reasoning: Some(12),
-            ..Default::default()
-        };
+        let mut second = record(50, 100, 12);
         codex_attempt_usage(&mut second, Some("t"), Some((Some("t"), &first)), false);
-        assert_eq!(second.uncached_input, Some(30));
-        assert_eq!(second.cache_read, Some(20));
-        assert_eq!(second.output_excluding_reasoning, Some(5));
+        assert_eq!(second.tokens.input, Some(30));
+        assert_eq!(second.tokens.cache_read, Some(20));
+        assert_eq!(second.tokens.output, Some(5));
         assert_eq!(
             second
                 .session_total
                 .as_deref()
-                .and_then(|total| total.uncached_input),
+                .and_then(|total| total.tokens.input),
             Some(50)
         );
         let mut unknown = second.clone();
@@ -118,7 +122,7 @@ mod codex_usage_tests {
             Some((Some("t"), &UsageRecord::default())),
             false,
         );
-        assert_eq!(unknown.uncached_input, None);
+        assert_eq!(unknown.tokens.input, None);
     }
 }
 
@@ -160,8 +164,8 @@ fn apply_provider_identity(
             Effect::Proceed => {}
             Effect::Warn(warning) => {
                 decoded.reason = Some(match decoded.reason.take() {
-                    Some(reason) => format!("{reason}; {warning}"),
-                    None => warning,
+                    Some(reason) => format!("{reason}; {}", warning.message),
+                    None => warning.message,
                 });
             }
             // Live identity checks run before retained-tail truncation. If a
@@ -865,21 +869,23 @@ fn seal_import_refusal(
 
 /// The stray-work check is advice: when it cannot run, the lane still settles.
 fn warn_stray_check(error: &dyn std::fmt::Display) {
-    use std::io::Write as _;
-    let _ = writeln!(
-        std::io::stderr().lock(),
-        "warning: could not check the primary checkout for stray lane work: {error}"
-    );
+    use provenant_records::warning::{STRAY_WORK_CHECK_FAILED, Warning, warn};
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    warn(Warning::new(
+        STRAY_WORK_CHECK_FAILED,
+        format!("could not check the primary checkout for stray lane work: {error}"),
+    ));
 }
 
 /// A refused import keeps its private Git whole, so a step that only guards
 /// removal of that Git is reported, not fatal.
 fn warn_retained_private_git(what: &str, error: &dyn std::fmt::Display) {
-    use std::io::Write as _;
-    let _ = writeln!(
-        std::io::stderr().lock(),
-        "warning: {what}; retaining the private Git: {error}"
-    );
+    use provenant_records::warning::{PRIVATE_GIT_RETAINED, Warning, warn};
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    warn(Warning::new(
+        PRIVATE_GIT_RETAINED,
+        format!("{what}; retaining the private Git: {error}"),
+    ));
 }
 
 pub(crate) fn object_import_refused(
@@ -1427,11 +1433,12 @@ impl RunStore {
                 match writer.private_staged_paths(attempt) {
                     Ok(paths) => paths,
                     Err(error) => {
-                        use std::io::Write as _;
-                        let _ = writeln!(
-                            std::io::stderr().lock(),
-                            "warning: private Git staged paths unreadable; retaining it: {error}"
-                        );
+                        use provenant_records::warning::{PRIVATE_GIT_RETAINED, Warning, warn};
+                        // Spec: docs/specs/cli.md#warnings-are-typed-values
+                        warn(Warning::new(
+                            PRIVATE_GIT_RETAINED,
+                            format!("private Git staged paths unreadable; retaining it: {error}"),
+                        ));
                         unreadable = true;
                         Vec::new()
                     }
@@ -3260,8 +3267,9 @@ impl RunStore {
                             }
                         };
                         if let Some(finding) = finding {
-                            use std::io::Write as _;
-                            let _ = writeln!(std::io::stderr().lock(), "warning: {finding}");
+                            use provenant_records::warning::{STRAY_LANE_WORK, Warning, warn};
+                            // Spec: docs/specs/cli.md#warnings-are-typed-values
+                            warn(Warning::new(STRAY_LANE_WORK, finding.clone()));
                             decoded.reason = Some(match decoded.reason.take() {
                                 Some(reason) => format!("{reason}; {finding}"),
                                 None => finding,
@@ -4715,12 +4723,12 @@ mod disk_admission_tests {
             custody_error(RunError::Admission(AdmissionError::Disk {
                 free: 99,
                 floor: 100,
-                origin: provenant_records::diagnostic::SettingSource::Configuration,
+                origin: provenant_records::diagnostic::Layer::Host,
             })),
             CustodyError::Admission(AdmissionError::Disk {
                 free: 99,
                 floor: 100,
-                origin: provenant_records::diagnostic::SettingSource::Configuration,
+                origin: provenant_records::diagnostic::Layer::Host,
             })
         ));
     }
@@ -7029,7 +7037,7 @@ mod writer_recovery_tests {
             provenant_records::LaneLimits {
                 token_budget: Some(provenant_records::Limit::new(
                     1_000_000,
-                    provenant_records::LimitSource::Default,
+                    provenant_records::Layer::Default,
                     provenant_records::LimitStrength::Default,
                 )),
                 budget_policy: Some(provenant_records::BudgetPolicy::default()),
@@ -7518,7 +7526,10 @@ mod writer_recovery_tests {
         ) {
             fake.codex_usage = Some(UsageRecord {
                 per_attempt: Some(true),
-                uncached_input: Some(1_000_001),
+                tokens: Tokens {
+                    input: Some(1_000_001),
+                    ..Tokens::default()
+                },
                 ..Default::default()
             });
         }

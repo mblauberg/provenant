@@ -670,7 +670,7 @@ mod tests {
             )]
         );
         assert_eq!(
-            r.alarms.0.last().map(|a| a.code.as_str()),
+            r.alarms.0.last().map(|a| a.code.as_ref()),
             Some("revert_forward_opened")
         );
         Ok(())

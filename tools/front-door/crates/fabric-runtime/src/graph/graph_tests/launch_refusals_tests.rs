@@ -107,14 +107,12 @@ fn admitted_launch_projects_typed_prompt_field_and_limit() {
 #[test]
 fn memory_pressure_launch_refusal_names_source_and_action() {
     use crate::coordination::facade::FacadeError;
-    use provenant_records::diagnostic::{
-        PressureLevel, PressureThreshold, ResourceFact, SettingSource,
-    };
+    use provenant_records::diagnostic::{PressureLevel, PressureThreshold, ResourceFact, Layer, };
     let error = FacadeError::ConfinementRefused {
         resource: Some(ResourceFact::MemoryPressure {
             level: PressureLevel::Critical,
             threshold: PressureThreshold::Critical,
-            origin: SettingSource::ShippedDefault,
+            origin: Layer::Default,
         }),
     };
     let mut owner = ErrorLauncher {
@@ -306,7 +304,7 @@ fn launch_invalid_field_matrix_preserves_local_facts() {
 #[test]
 fn graph_remedies_follow_writer_resource_and_unknown_handoff_causes() {
     use crate::coordination::facade::{DispatchRefusalFact, FacadeError};
-    use provenant_records::diagnostic::{ResourceFact, SettingSource};
+    use provenant_records::diagnostic::{ResourceFact, Layer};
     let cases = [
         (
             FacadeError::DispatchRefused {
@@ -322,7 +320,7 @@ fn graph_remedies_follow_writer_resource_and_unknown_handoff_causes() {
                 fact: Some(DispatchRefusalFact::Resource(ResourceFact::Disk {
                     free: 1,
                     floor: 2,
-                    origin: SettingSource::Configuration,
+                    origin: Layer::Host,
                 })),
                 disk: None,
                 reason: "TOKEN_SENTINEL".into(),

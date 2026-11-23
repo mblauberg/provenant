@@ -1,6 +1,7 @@
 //! Host/project policy overlays; the executable defaults belong to records.
 use crate::{DomainConfig, DomainSection, FieldMetadata};
 use provenant_records::policy::{Policy, Source, Strength};
+use provenant_records::warning::{CONFIG_UNAVAILABLE, Warning, warn};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::Path};
 
@@ -51,7 +52,7 @@ impl Settings {
     pub fn resolve_with_knobs(
         &self,
         project: &str,
-        knobs: &BTreeMap<String, crate::KnobValue>,
+        knobs: &BTreeMap<String, provenant_records::Sourced<serde_json::Value>>,
         dispatch: &BTreeMap<String, Strength>,
     ) -> Policy {
         let mut policy = Policy::default();
@@ -76,10 +77,14 @@ impl Settings {
 /// defaults, without changing the boundaries or operation errors.
 pub fn read(state: &Path, project: &str, dispatch: &BTreeMap<String, Strength>) -> Policy {
     read_reporting(state, project, dispatch, |error| {
-        use std::io::Write;
-        let _ = writeln!(
-            std::io::stderr().lock(),
-            "policy settings unavailable ({error}); using compiled defaults"
+        warn(
+            Warning::new(
+                CONFIG_UNAVAILABLE,
+                format!("policy settings unavailable ({error}); using compiled defaults"),
+            )
+            .subject("policy settings")
+            .repair("correct the host policy configuration")
+            .once_per_change(),
         );
     })
 }
@@ -140,11 +145,14 @@ pub fn for_task(state: &Path, project: &str, task: &provenant_records::run::Task
     read(state, project_id.as_deref().unwrap_or(project), &values)
 }
 
-pub fn overlay_knobs(policy: &mut Policy, knobs: &BTreeMap<String, crate::KnobValue>) {
+pub fn overlay_knobs(
+    policy: &mut Policy,
+    knobs: &BTreeMap<String, provenant_records::Sourced<serde_json::Value>>,
+) {
     let values = knobs
         .iter()
         .filter_map(|(name, knob)| {
-            if knob.source != crate::KnobSource::Override {
+            if knob.source.layer != provenant_records::Layer::Host {
                 return None;
             }
             Some((

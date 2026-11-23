@@ -40,12 +40,15 @@ impl ReadOnlyPolicy {
             .into_owned();
         let (policy, warnings) =
             decode_policy(&source, &bytes).map_err(|_| PermissionError::InvalidReadOnlyPolicy)?;
-        #[allow(
-            clippy::print_stderr,
-            reason = "unknown policy keys warn with their source shown"
-        )]
+        use provenant_records::warning::{CONFIG_KEY_IGNORED, Warning, warn};
         for warning in warnings {
-            eprintln!("warning: {warning}");
+            // Spec: docs/specs/cli.md#warnings-are-typed-values
+            warn(
+                Warning::new(CONFIG_KEY_IGNORED, warning.to_string())
+                    .subject(format!("{}: {}", warning.source, warning.key))
+                    .repair("remove the unknown key from the host read-only policy")
+                    .once_per_change(),
+            );
         }
         Ok(policy)
     }

@@ -53,12 +53,10 @@ type Failure = (ErrorKind, String);
 
 fn prices(edge: &Edge<'_>) -> Option<provenant_telemetry::PriceTable> {
     let project = edge.roots.checkout();
-    let key = provenant_config::project_key_for(project);
     provenant_telemetry::prices_overlay::load(
         edge.assets,
         edge.roots.state.as_path(),
         Some(project),
-        key.as_deref(),
     )
     .ok()
     .map(|layered| layered.table)
@@ -425,6 +423,7 @@ mod tests {
             native_config: None,
             native_attempt: None,
             reasoning_tokens: None,
+            usage_source: provenant_records::UsageSource::Ingest,
             reply: None,
         }
     }

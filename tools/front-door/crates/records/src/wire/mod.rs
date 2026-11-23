@@ -9,10 +9,10 @@
 //!
 //! [`ENVELOPE_VERSION`] is the `schema_version` the CLI emits today
 //! (`CommandResult::new`), and the published command schemas require it, so
-//! they accept current `--json` output. [`SCHEMA_VERSION`] (2) is the planned
-//! typed generation, which is not emitted yet: it will be bumped to in one
-//! change with the callers, with no dual-emit period (chair decision, 2 Nov
-//! 2026). The one exception to "accepts current output" is `status`: its `data`
+//! they accept current `--json` output. Version 2 is the emitted generation:
+//! every envelope carries `warnings` and `next`, with no tolerant reader for
+//! version 1. [`SCHEMA_VERSION`] tracks the current typed generation.
+//! The one exception to "accepts current output" is `status`: its `data`
 //! schema is the planned lane-row shape, while the CLI still emits raw attempt
 //! records and a numeric cursor.
 //!
@@ -31,7 +31,7 @@ pub mod output;
 pub mod schema;
 
 use crate::Outcome;
-use schema::{choices, constant, nullable, object, root, string};
+use schema::{array, choices, constant, nullable, object, root, string};
 use serde_json::{Value, json};
 
 pub use cancel::{
@@ -47,8 +47,10 @@ pub use output::{ChunkBytes, CompositeChunk, OutputChunk, OutputData, ReviewerRe
 /// Version of the planned typed wire contract; see the module notes.
 pub const SCHEMA_VERSION: u64 = 2;
 
-/// The `schema_version` the CLI envelope carries today.
-pub const ENVELOPE_VERSION: u64 = 1;
+/// The `schema_version` the CLI envelope carries today. Version 2 adds the
+/// always-present `warnings` array; the typed `data` projections below are
+/// unchanged. There is no tolerant reader for version 1.
+pub const ENVELOPE_VERSION: u64 = 2;
 
 /// Base of the `$id` of every published schema.
 pub const SCHEMA_ID_BASE: &str = "https://provenant.dev/schemas/v1/";
@@ -89,6 +91,8 @@ pub fn envelope_schema(command: &str, data: Value) -> Value {
             ("status", choices(&statuses)),
             ("data", json!({})),
             ("error", nullable(error_schema())),
+            ("warnings", schema::array(warning_schema())),
+            ("next", schema::array(next_step_schema())),
         ],
         &[],
     );
@@ -102,6 +106,26 @@ pub fn envelope_schema(command: &str, data: Value) -> Value {
         {"properties": {"status": {"enum": failures}}}
     ]);
     schema
+}
+
+/// The typed warning shape carried by the envelope's `warnings` array.
+/// `dedup` is never on the wire; `source` is the provenance of the setting that
+/// caused the warning when one did. Spec: docs/specs/cli.md#warnings-are-typed-values
+pub fn warning_schema() -> Value {
+    object(
+        &[("code", string()), ("message", string())],
+        &[
+            ("subject", string()),
+            ("source", json!({})),
+            ("repair", string()),
+        ],
+    )
+}
+
+/// The typed next-step shape carried by the envelope's `next` array. The argv
+/// is a list of literal arguments; the binary edge owns their presentation.
+pub fn next_step_schema() -> Value {
+    object(&[("argv", array(string())), ("why", string())], &[])
 }
 
 /// The data schema for a command in [`COMMANDS`].
@@ -144,6 +168,8 @@ pub fn error_envelope_schema() -> Value {
             ("status", choices(&statuses)),
             ("data", json!({})),
             ("error", error_schema()),
+            ("warnings", array(warning_schema())),
+            ("next", array(next_step_schema())),
         ],
         &[],
     );

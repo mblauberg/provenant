@@ -61,6 +61,8 @@
     "truncated": true
   },
   "error": null,
-  "schema_version": 1,
-  "status": "ok"
+  "next": [],
+  "schema_version": 2,
+  "status": "ok",
+  "warnings": []
 }

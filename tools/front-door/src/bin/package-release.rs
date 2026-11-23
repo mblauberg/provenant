@@ -63,6 +63,10 @@ fn require_current_source(identity: &VersionInfo, current: &SourceDigest) -> io:
     }
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "build helper prints its artifact path on stdout as its protocol"
+)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args_os().skip(1);
     let mut output = None;

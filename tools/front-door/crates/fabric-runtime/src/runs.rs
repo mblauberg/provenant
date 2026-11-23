@@ -341,7 +341,7 @@ mod tests {
         }))
         .unwrap();
         let binding = provenant_records::run::RepositoryAdmissionBinding::new(
-            provenant_records::PortSource::Project,
+            provenant_records::Layer::Project,
             &command,
         );
         record.repository_admission_binding = Some(binding.clone());

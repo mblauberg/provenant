@@ -33,6 +33,9 @@ Modeling = "Modeling"
 "URE" = "URE"
 # A deliberately misspelt knob name in the config tolerance tests.
 "concurency" = "concurency"
+# Deliberate near-misses in the close-match ranking tests.
+"utilty" = "utilty"
+"writter" = "writter"
 # Foundation's String.capitalized, used by the Swift console.
 "capitalized" = "capitalized"
 # GitHub's pull_request `unlabeled` event type.
@@ -61,6 +64,8 @@ Serialize = "Serialize"
 initialize = "initialize"
 initialized = "initialized"
 run_dir_finalize = "run_dir_finalize"
+# serde attributes quoted in Rust blocks inside Markdown specs and briefs.
+skip_serializing_if = "skip_serializing_if"
 
 [type.js.extend-identifiers]
 "Carbonize" = "Carbonize"

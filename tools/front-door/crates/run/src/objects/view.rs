@@ -787,20 +787,12 @@ fn advance_native_index(
         }
         return Ok(IndexSync::Synced);
     }
-    for marker in [
-        "MERGE_HEAD",
-        "CHERRY_PICK_HEAD",
-        "REVERT_HEAD",
-        "rebase-merge",
-        "rebase-apply",
-        "sequencer",
-        "BISECT_START",
-    ] {
-        match repo.private_dir().metadata_at(OsStr::new(marker), false) {
-            Ok(_) => return Ok(IndexSync::Deferred),
-            Err(error) if error.is_not_found() => {}
-            Err(error) => return Err(error.into()),
-        }
+    // The native index is the checkout's own state. Any unfinished operation
+    // there defers the advance rather than converging over its resolution.
+    if provenant_confinement::worktrees::incomplete_git_operation(repo.private_dir(), None)?
+        .is_some()
+    {
+        return Ok(IndexSync::Deferred);
     }
     let live = index_digest(&git, repo)?;
     if let Some(record) = &recorded

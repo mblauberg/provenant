@@ -18,6 +18,42 @@ sibling-divergent host tip is merged and published when no conflict exists, and 
 retains both commits with the conflict and setting named.
 - Why: recovery must resume durable effects without racing another driver or losing work.
 
+Settlement decides whether a Git operation is unfinished before it imports objects or
+publishes the branch, on the first pass and on a resume whose recorded phase is already Publish
+or Record. It observes every directory the lane's writer can write: the bound worktree's private
+Git and the attempt's candidate common directory, using one marker inventory shared with custody
+and the object view. An unfinished operation confined to the lane's own Git warns, names the
+commit its `HEAD` denotes whether symbolic or detached and the directory that retains the
+operation, then publishes the lane's committed tip and leaves that state intact, never resetting
+or cleaning it. Only an operation in the host checkout refuses, before import, with the checkout's
+bytes unchanged; a refusal never converges the checkout over an unfinished operation.
+- Why: a lane's own stopped merge, cherry-pick or rebase is still its committed work to publish
+  and a person's state to resume, while publishing over the host checkout's operation would move
+  the branch underneath it.
+
+The **host checkout** is the checkout whose Git directory settlement shares with the owner's
+working tree: for a linked lane worktree it is the primary checkout, whose operation markers live
+in the common Git directory; when the lane's worktree is itself the primary checkout, that
+checkout is the lane's own Git. A bare common directory has no host checkout. Settlement reads the
+host checkout but never writes its files or index, so a host operation refuses settlement *only*
+when it would leave that checkout mid-operation on a ref settlement moves — the lane branch or the
+delivery destination, read from a rebase's `head-name` or the checkout's `HEAD` — other than the
+lane's own in-progress operation on its branch. When the lane's worktree is the primary checkout,
+a stopped rebase or merge of the lane branch is the lane's own Git: settlement warns, names the
+commit and the directory retaining it, and publishes the committed tip with the in-progress state
+intact, never resetting or cleaning it. An operation on a moved ref other than the lane's own
+branch — the delivery destination — still refuses before import. Every other host operation, such
+as an owner mid-rebase on an unrelated branch, is retained intact and reported with a single
+`GIT_OPERATION_RETAINED` warning through the warning system, then publication proceeds. A warning
+that cannot resolve `HEAD` or a Git directory path names the commit or path `unknown` and never
+refuses settlement; a request record that cannot be read or decoded, however, is a refusal and
+never drops the delivery destination into a warning. Warnings are recorded once in the writer
+terminal record, so a resume does not repeat them and `status` can show them.
+- Why: an unrelated owner operation and the lane's own stopped work must not strand the lane, while
+  publishing over a host checkout's operation on a moved ref other than the lane's own rebase must
+  still refuse before import with the checkout's bytes unchanged. Hiding a moved destination behind
+  an unreadable request would turn that refusal into a warning.
+
 The guardian transfers its writer exclusion to recovery, and import and cleanup reuse that guard
 for the same scope. Failed steps before import share a durable budget of three failures. A resumed
 worker honours `retry_after_ms` before its first pass and paces every later pass. Exhausted

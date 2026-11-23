@@ -163,16 +163,19 @@ A route carries one spelling of its model: the full catalogue id
 `ADAPTER/ID`, such as `opencode/opencode/deepseek-v4.1-flash-free`. The host
 entry point that holds the effective catalogue decides that spelling once:
 submit, run edit/patch (in patch preparation, before a candidate is built) and
-tier lowering from configuration. The canonicaliser is pure and idempotent — a
-declared id that already names the route adapter is returned byte-for-byte
-(warning with `ROUTE_MODEL_NOT_CATALOGUED` when the effective catalogue does not
-know it), never prefixed again; only a bare or short `NAMESPACE/NAME` is
-resolved by catalogue match, a single unique namespaced candidate, or an
-adapter-prefixed spelling with that warning. Applying it to a stored id again
-changes nothing. Plan fallbacks and patch-added or replaced nodes are
-canonicalised on that same pass; exact-model tiers and batch items emit the
-full id at production. Admission reads the stored ids verbatim and never
-rewrites them, so launch, retry, advance and relay leave the spelling alone.
+tier lowering from configuration. The canonicaliser is pure and idempotent: a
+declared id that already names the route's adapter is final and returned
+byte-for-byte (warning with `ROUTE_MODEL_NOT_CATALOGUED` when the effective
+catalogue does not know it), never prefixed again. The exception is a
+namespaced adapter (such as `opencode`) whose model segment has no `/`, e.g.
+`opencode/glm`: that is a short `PROVIDER/NAME` form and resolves by catalogue
+match, a single unique namespaced candidate, or an adapter-prefixed spelling
+with that warning. A bare name or a short `NAMESPACE/NAME` resolves the same
+way. Applying it to a stored id again changes nothing. Plan fallbacks and
+patch-added or replaced nodes are canonicalised on that same pass; exact-model
+tiers and batch items emit the full id at production. Admission reads the stored
+ids verbatim and never rewrites them, so launch, retry, advance and relay leave
+the spelling alone.
 Nothing downstream splits, prefixes or re-derives the stored id: preparation,
 successor deduplication and prior-model exclusions parse it directly. This is
 what lets a batch route match `run implement --model` and a declared route

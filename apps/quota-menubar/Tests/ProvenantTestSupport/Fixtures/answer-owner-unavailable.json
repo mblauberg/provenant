@@ -7,6 +7,8 @@
     "message": "inbox owner studio is not reachable",
     "repair": "Retry with the same operation ID when the owner host is reachable."
   },
-  "schema_version": 1,
-  "status": "error"
+  "next": [],
+  "schema_version": 2,
+  "status": "error",
+  "warnings": []
 }

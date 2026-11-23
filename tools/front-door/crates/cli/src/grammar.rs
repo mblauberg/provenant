@@ -3,6 +3,7 @@ use crate::metadata::CatalogueArg;
 use clap::{Args, Parser, Subcommand, ValueEnum, builder::TypedValueParser};
 use provenant_core::{AttemptId, GitOid, OperationId};
 pub use provenant_records::Harness;
+use provenant_records::warning::{Warning, warn};
 use std::{ffi::OsString, path::PathBuf};
 
 #[derive(Debug, Parser)]
@@ -27,7 +28,7 @@ pub struct Globals {
     pub state_dir: Option<PathBuf>,
     pub project: Option<PathBuf>,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub(crate) struct RawGlobals {
     /// Print machine-readable JSON output
     #[arg(long, global = true, action = clap::ArgAction::Append, num_args = 0, default_missing_value = "true")]
@@ -42,7 +43,7 @@ pub(crate) struct RawGlobals {
     #[arg(long, global = true)]
     pub project: Vec<PathBuf>,
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Command {
     /// Show help for a command
     Help {
@@ -55,6 +56,7 @@ pub enum Command {
     /// Print the resolved release root
     Root,
     /// Read a fresh resident-memory sample of an owned lane process tree
+    #[command(visible_alias = "ps")]
     ProcessTree {
         /// PID inside this lane's sampled tree (defaults to the supervised command)
         #[arg(long, catalog_u32_range = 1..=i32::MAX as i64)]
@@ -89,6 +91,8 @@ pub enum Command {
     Upgrade(Upgrade),
     /// Remove installed harness integrations
     Uninstall(Uninstall),
+    /// Initialise a repository's port table from detected settings
+    Init,
     /// Inspect and edit model routing
     #[command(subcommand)]
     Route(crate::route::Route),
@@ -139,9 +143,9 @@ pub enum Command {
         /// Apply the named landing risk tier
         #[arg(long, value_parser = parse_landing_tier)]
         tier: Option<String>,
-        /// Pin a reviewed head (any unambiguous object name) instead of the current PR head
+        /// Pin a reviewed head: SHA for one PR, or N=SHA for member N of a batch (repeatable)
         #[arg(long)]
-        head: Option<String>,
+        head: Vec<String>,
         /// Wait for this head's CI (default 1 hour; maximum 4 hours)
         #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "1h", catalog_duration())]
         wait: Option<u64>,
@@ -265,7 +269,7 @@ pub enum Command {
     Internal(Internal),
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Build {
     /// Show build slot status
     Status,
@@ -300,7 +304,7 @@ fn landing_strategy_parser()
                 .ok_or_else(|| format!("undeclared landing strategy: {name}"))
         })
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Tracker {
     /// Advise on issue specifications without blocking work
     Lint {
@@ -315,7 +319,7 @@ pub enum Tracker {
         kind: String,
     },
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Preset {
     /// List available presets
     List,
@@ -351,7 +355,7 @@ pub enum Preset {
         underspecified: bool,
     },
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct Review {
     /// Git commit to review
     pub target: String,
@@ -390,7 +394,7 @@ pub struct Review {
     #[arg(long, default_value = "3600", catalog_duration())]
     pub wait: u64,
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Pr {
     /// Merge each pull request's base into its branch and push the result
     Sync {
@@ -401,6 +405,7 @@ pub enum Pr {
         no_lane: bool,
     },
     /// List retained local attempt contributions and missing peer coverage
+    #[command(visible_alias = "contrib")]
     Contributions {
         #[arg(catalog_u64_range = 1..)]
         number: u64,
@@ -417,7 +422,7 @@ pub enum Pr {
         numbers: Vec<u64>,
     },
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct PrOpen {
     /// The writer attempt that made the change, as NAME[/NODE[#N]]
     #[arg(long, value_name = "TARGET", catalog_graph_target())]
@@ -445,7 +450,7 @@ pub struct PrOpen {
     #[arg(long)]
     pub dry_run: bool,
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Chair {
     /// Read and update a chair session's structured summary.
     #[command(subcommand)]
@@ -468,7 +473,7 @@ pub enum Chair {
         session_id: Option<String>,
     },
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum ChairSummary {
     /// Show the current structured summary.
     Show {
@@ -502,7 +507,7 @@ pub enum ChairSummary {
         operation_id: Option<OperationId>,
     },
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum ChairLog {
     /// Append an update from a markdown or JSON file, or standard input with `-`.
     Append {
@@ -532,7 +537,7 @@ pub enum ChairLog {
         limit: u64,
     },
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Hosts {
     /// Probe sign-in without inference or credential access.
     Doctor {
@@ -553,7 +558,7 @@ fn host_alias(value: &str) -> Result<String, &'static str> {
     }
     Ok(value.into())
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Config {
     /// Show the effective repository integration ports and their sources.
     Ports,
@@ -627,7 +632,7 @@ pub enum Switch {
     On,
     Off,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct Access {
     /// Access mode: read-only or worktree-write [default: read-only]
     #[arg(long, value_enum)]
@@ -660,7 +665,7 @@ impl Access {
         self.mode.unwrap_or(Mode::ReadOnly)
     }
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct GraphRunArgs {
     /// Template to run (see `provenant templates`)
     #[arg(catalog_required_unless = "file", conflicts_with = "file")]
@@ -678,6 +683,9 @@ pub struct GraphRunArgs {
     /// Read the brief from a file, or from standard input given `-`
     #[arg(long, conflicts_with_all = ["file", "brief", "brief_text"])]
     pub brief_file: Option<PathBuf>,
+    /// Standing lane rules to append to every lane's preamble as its launch layer
+    #[arg(long = "preamble-file", value_name = "PATH")]
+    pub preamble_file: Option<PathBuf>,
     /// Place attempts on this peer name or host ID
     #[arg(long)]
     pub host: Option<String>,
@@ -709,7 +717,7 @@ pub struct GraphRunArgs {
     /// Git base for a new writer branch
     #[arg(long, catalog_requires = "branch")]
     pub base: Option<String>,
-    /// Pin a review to this pull request (host resolves its base and head)
+    /// Pin a review to this pull request, or repair a PR with `run implement --pr N` (host resolves its base and head)
     #[arg(long, value_name = "NUMBER", catalog_u64_range = 1..)]
     pub pr: Option<u64>,
     /// Expected head for `--pr`: re-read the forge briefly, then refuse a persistent mismatch
@@ -738,8 +746,9 @@ pub struct GraphRunArgs {
     /// Run the lane under the macOS sandbox (sets attempt.sandbox = "on")
     #[arg(long, conflicts_with = "no_sandbox")]
     pub sandbox: bool,
-    /// Run the lane unsandboxed (attempt.sandbox = "off"); overrides route,
-    /// network and parent floors where Provenant decides them
+    /// Run the lane unsandboxed (attempt.sandbox = "off"); overrides the host
+    /// knob default, while a resolved route policy and an active parent floor
+    /// keep their higher precedence
     #[arg(long)]
     pub no_sandbox: bool,
     /// Explain the compiled graph without starting work
@@ -748,10 +757,11 @@ pub struct GraphRunArgs {
 }
 
 /// A graph name, checked where it is typed so a bad one is a usage error.
+/// Capitals are folded to lower case with a warning instead of being refused.
 fn graph_name(text: &str) -> Result<String, String> {
-    match provenant_fabric_runtime::graph::template::graph_name_fault(text) {
-        None => Ok(text.to_owned()),
-        Some(fault) => {
+    match provenant_fabric_runtime::graph::template::fold_graph_name(text) {
+        Ok(name) => Ok(name),
+        Err(fault) => {
             let suggestion = provenant_fabric_runtime::graph::template::default_graph_base(text);
             if suggestion != text {
                 Err(format!("{fault}; try `{suggestion}`"))
@@ -804,14 +814,14 @@ pub struct Output {
     /// Byte offset to start from
     #[arg(long, default_value = "0", conflicts_with = "tail")]
     pub offset: u64,
-    /// Read the last N lines instead of an offset (above 500 is clamped to 500)
+    /// Return at most the last N bytes of the selected part
     #[arg(long, catalog_u64_range = 1..)]
     pub tail: Option<u64>,
     /// Maximum bytes to return
     #[arg(long, default_value = "65536", catalog_u64_range = 1..=65536)]
     pub max_bytes: u64,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct Cancel {
     /// Graph, node or attempt to stop, as NAME[/NODE[#N]]
     #[arg(value_name = "TARGET", catalog_graph_target())]
@@ -820,7 +830,7 @@ pub struct Cancel {
     #[arg(long, value_parser = reason, catalog_bounds = (0, 256))]
     pub reason: Option<String>,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct Resume {
     /// Graph, node or attempt to retry, as NAME[/NODE[#N]]
     #[arg(value_name = "TARGET", catalog_graph_target())]
@@ -835,7 +845,7 @@ pub struct Resume {
     #[arg(long, value_name = "KEY=VALUE")]
     pub extend: Vec<String>,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct Reconcile {
     /// Reconcile only these graphs, nodes or attempts (NAME[/NODE[#N]])
     #[arg(
@@ -857,7 +867,7 @@ pub struct Reconcile {
     #[arg(long, catalog_requires = "abandon", catalog_bounds = (0, 256))]
     pub reason: Option<String>,
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Lane {
     /// Re-run host delivery, requiring the settled receipt's clean, exact head
     Deliver {
@@ -872,7 +882,7 @@ pub enum Lane {
         accept_review: bool,
     },
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Native {
     /// Begin tracking a native tool call; do not pass its prompt
     Start {
@@ -907,7 +917,7 @@ pub enum NativeSettlement {
     Cancelled,
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Telemetry {
     /// Summarise local attempts and usage
     Stats(Stats),
@@ -927,22 +937,22 @@ pub enum Telemetry {
     /// Report API-equivalent cost from the usage ledger, for one attempt or grouped
     Cost(crate::telemetry_args::TelemetryCost),
     /// Compare experiment arms using offline pipeline outcomes
-    #[command(subcommand)]
+    #[command(subcommand, visible_alias = "exp")]
     Experiments(Experiments),
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Experiments {
     /// Show one experiment's stratified arm comparison
     Show(ExperimentShow),
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct ExperimentShow {
     /// Historical experiment name recorded in offline outcomes
     pub id: String,
     #[command(flatten)]
     pub pipeline: PipelineOptions,
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Prices {
     /// Fetch market prices and write a proposed diff; never edits the sheet
     Refresh(PricesRefresh),
@@ -952,7 +962,7 @@ pub enum PriceSource {
     Openrouter,
     Litellm,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct PricesRefresh {
     /// Primary source; the other is the cross-check (default openrouter)
     #[arg(long, value_enum, default_value = "openrouter")]
@@ -967,7 +977,7 @@ pub struct PricesRefresh {
     #[arg(long, default_value = "telemetry-prices.proposed.json")]
     pub out: PathBuf,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct Ingest {
     /// Ingest only this provider's sessions (only `claude` writes native transcripts)
     #[arg(long)]
@@ -976,7 +986,7 @@ pub struct Ingest {
     #[arg(long, value_parser = since)]
     pub since: Option<jiff::Timestamp>,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct Mileage {
     /// Account label or key
     #[arg(long)]
@@ -1000,7 +1010,7 @@ pub struct Mileage {
     #[arg(long, default_value_t = 7, catalog_u32_range = 1..=90)]
     pub recent_days: u32,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct Trace {
     /// Output file (default `provenant-trace.json`)
     #[arg(long, default_value = "provenant-trace.json")]
@@ -1015,7 +1025,7 @@ pub struct Trace {
     #[arg(long)]
     pub peers: bool,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct Stats {
     /// Include offline post-merge outcomes and stratified ranking
     #[arg(long, conflicts_with = "usage")]
@@ -1036,7 +1046,7 @@ pub struct Stats {
     pub until: Option<jiff::Timestamp>,
 }
 
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct PipelineOptions {
     /// Local main-line ref to analyse; no fetch is performed
     #[arg(long, default_value = "main")]
@@ -1054,7 +1064,7 @@ pub struct PipelineOptions {
     #[arg(long, default_value_t = 14, catalog_u32_range = 1..=3650)]
     pub expiry_days: u32,
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Worktree {
     /// Create a worktree on a new branch
     Create {
@@ -1066,6 +1076,11 @@ pub enum Worktree {
     },
     /// List worktrees
     List,
+    /// Print the checkout path for a branch, lane, attempt or PR number
+    Locate {
+        /// Branch, lane, attempt id or pull request number
+        query: String,
+    },
     /// Explain a worktree's state and suggest one repair command
     Doctor {
         /// Checkout path, relative to the selected project when not absolute
@@ -1077,12 +1092,12 @@ pub enum Worktree {
     /// Remove a worktree or merged ones, allowing declared ignored output
     Remove(Remove),
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Disk {
     /// Report disk use and reclaim classifications without changing files
     Report,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct Gc {
     /// Run for registered projects from the scheduled per-user agent
     #[arg(long, hide = true)]
@@ -1106,7 +1121,7 @@ pub struct Gc {
     #[arg(long, catalog_gc_idle())]
     pub idle: Option<u64>,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct Remove {
     /// Worktree to remove
     #[arg(catalog_required_unless = "merged", conflicts_with_all = ["merged", "branch", "since"])]
@@ -1129,7 +1144,7 @@ pub struct Remove {
     #[arg(long, catalog_requires = "merged")]
     pub since: Option<GitOid>,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct Page {
     /// Maximum results per page (1 to 100)
     #[arg(long, default_value = "50", catalog_u64_range = 1..=100)]
@@ -1146,7 +1161,7 @@ pub enum Rules {
 }
 pub use crate::check::Check;
 pub use crate::ci::Ci;
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Hook {
     /// Handle git hook events
     #[command(subcommand)]
@@ -1155,7 +1170,7 @@ pub enum Hook {
     #[command(external_subcommand)]
     Provider(Vec<OsString>),
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum GitHook {
     /// Check a push before it happens
     #[command(name = crate::hooks::PRE_PUSH)]
@@ -1166,7 +1181,7 @@ pub enum GitHook {
         location: String,
     },
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Internal {
     /// Resume preparation of an admitted local attempt in a separate process.
     Launch {
@@ -1253,15 +1268,20 @@ pub(crate) fn since(value: &str) -> Result<jiff::Timestamp, String> {
 #[cfg(test)]
 mod target_tests {
     use super::{graph_name, since};
+    use provenant_records::warning::{NAME_CASE_FOLDED, capture};
 
     #[test]
-    fn graph_name_refusal_suggests_the_normalised_name() {
-        for (bad, suggestion) in [
-            ("Foo-", "foo"),
-            ("Foo", "foo"),
-            ("foo--bar", "foo-bar"),
-            ("UPPER", "upper"),
-        ] {
+    // Spec: docs/specs/cli.md#every-name-refusal-lists-close-matches
+    fn graph_name_folds_capitals_and_suggests_for_other_faults() {
+        let (folded, warnings) = capture(|| graph_name("Fix-Login").unwrap());
+        assert_eq!(folded, "fix-login");
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.code.as_ref() == NAME_CASE_FOLDED.0),
+            "{warnings:?}"
+        );
+        for (bad, suggestion) in [("foo-", "foo"), ("foo--bar", "foo-bar"), ("a_b", "a-b")] {
             let error = graph_name(bad).expect_err(bad);
             assert!(error.contains(suggestion), "{bad}: {error}");
             assert!(error.contains("try `"), "{bad}: {error}");
@@ -1338,10 +1358,12 @@ pub(crate) fn duration_seconds(value: &str) -> Result<u64, &'static str> {
     let seconds = positive_span_seconds(value)?;
     let maximum = provenant_core::MAX_LANE_RUNTIME_SECONDS;
     if seconds > maximum {
-        use std::io::Write;
-        let _ = writeln!(
-            std::io::stderr().lock(),
-            "warning: wait budget clamped to maximum {maximum}s (source: provenant_core::MAX_LANE_RUNTIME_SECONDS)"
+        warn(
+            Warning::new(
+                provenant_records::warning::WAIT_BUDGET_CLAMPED,
+                format!("wait budget clamped to maximum {maximum}s"),
+            )
+            .repair("Request a smaller wait budget."),
         );
     }
     Ok(seconds.min(maximum))
@@ -1419,7 +1441,7 @@ pub struct Wait {
     pub timeout: Option<u64>,
 }
 /// `trace`: a graph's revisions and attempt timeline.
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct GraphTrace {
     /// Graph, node or attempt, as NAME[/NODE[#N]]
     #[arg(value_name = "TARGET", catalog_graph_target())]
@@ -1446,7 +1468,7 @@ pub(crate) fn branch_name(value: &str) -> Result<String, String> {
         .map_err(|error| error.to_string())
 }
 
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct Edit {
     /// Graph name
     #[arg(value_name = "NAME", value_parser = edit_graph_name, catalog_graph_name())]
@@ -1455,7 +1477,7 @@ pub struct Edit {
     #[arg(long)]
     pub file: PathBuf,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct Templates {
     #[command(subcommand)]
     pub command: Option<TemplatesCommand>,
@@ -1463,7 +1485,7 @@ pub struct Templates {
     #[arg(long, global = true)]
     pub file: Option<PathBuf>,
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum TemplatesCommand {
     /// Show one effective template
     Show { name: String },

@@ -200,12 +200,6 @@ pub(crate) fn resolved_text(preview: &RoutePreview) -> String {
             provenant_records::diagnostic::safe_text(exclusion)
         ));
     }
-    for warning in &preview.offered_warnings {
-        text.push_str(&format!(
-            "warning: {}\n",
-            provenant_records::diagnostic::safe_text(warning)
-        ));
-    }
     for warning in &route.diagnostics.launch_warnings {
         text.push_str(&format!("{warning}\n"));
     }
@@ -277,9 +271,12 @@ pub(crate) fn resolved_text(preview: &RoutePreview) -> String {
             }
         }
     }
+    // The knob travels as a `Sourced` value now, so print its layer with the
+    // one shared layer vocabulary instead of dumping the source struct.
     text.push_str(&format!(
-        "allow unknown partial headroom: {} (source: {:?})\n",
-        preview.allow_unknown_partial_headroom.value, preview.allow_unknown_partial_headroom.source
+        "allow unknown partial headroom: {} (source: {})\n",
+        preview.allow_unknown_partial_headroom.value,
+        preview.allow_unknown_partial_headroom.source.layer.as_str()
     ));
     if let Some(details) = preview.quota.as_ref().and_then(|q| q.details.as_ref())
         && let (Some(source), Some(coverage)) = (&details.source, &details.coverage)
@@ -308,6 +305,10 @@ pub(super) fn monthly_list_lines(list: &provenant_routing::RouteList) -> Vec<Str
     }));
     lines
 }
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the binary edge's output seam writes the command result to stdout and diagnostics to stderr"
+)]
 pub fn run(
     command: Route,
     globals: &Globals,
@@ -334,7 +335,7 @@ pub fn run(
     };
     let now = SystemClock::new().wall_now();
     let at = now.as_ref().ok().copied();
-    let result = match now
+    let mut result = match now
         .map_err(EdgeError::from)
         .and_then(|now| execute(&command, roots, now))
     {
@@ -532,7 +533,7 @@ pub fn run(
             None => String::new(),
         }
     };
-    let summary = match &result.data {
+    let (summary, next) = match &result.data {
         Some(Data::List(list)) => {
             let counts = [
                 ("valid pairs", list.valid_pairs.len()),
@@ -583,25 +584,35 @@ pub fn run(
                 )
             }));
             rows.extend(list.pools.keys().map(|name| format!("pool {name}")));
+            (
+                Some(crate::Summary::new(
+                    format!(
+                        "catalogue {}: {}",
+                        list.catalogue_revision,
+                        crate::Summary::tally(&counts)
+                    ),
+                    rows,
+                )),
+                Some(provenant_records::command_result::NextStep::from_command(
+                    "provenant route resolve MODEL",
+                    "inspect a resolved model route",
+                )),
+            )
+        }
+        Some(Data::Pacing(report)) => (
             Some(crate::Summary::new(
                 format!(
-                    "catalogue {}: {}",
-                    list.catalogue_revision,
-                    crate::Summary::tally(&counts)
+                    "recorded {}; {} active pacing overrides",
+                    report.recorded,
+                    report.active_overrides.len()
                 ),
-                rows,
-                Some("provenant route resolve MODEL".to_owned()),
-            ))
-        }
-        Some(Data::Pacing(report)) => Some(crate::Summary::new(
-            format!(
-                "recorded {}; {} active pacing overrides",
-                report.recorded,
-                report.active_overrides.len()
-            ),
-            Vec::new(),
-            Some("provenant route override list".to_owned()),
-        )),
+                Vec::new(),
+            )),
+            Some(provenant_records::command_result::NextStep::from_command(
+                "provenant route override list",
+                "list the pacing overrides",
+            )),
+        ),
         Some(Data::Overrides(report)) => {
             let active = report.overrides.iter().filter(|row| row.active).count();
             let tally = format!(
@@ -638,19 +649,25 @@ pub fn run(
             } else {
                 "provenant route override clear"
             };
-            Some(crate::Summary::new(
-                headline,
-                report
-                    .overrides
-                    .iter()
-                    .map(OverrideRow::line)
-                    .chain(report.notes.iter().map(|note| format!("note: {note}")))
-                    .collect(),
-                Some(next.to_owned()),
-            ))
+            (
+                Some(crate::Summary::new(
+                    headline,
+                    report
+                        .overrides
+                        .iter()
+                        .map(OverrideRow::line)
+                        .chain(report.notes.iter().map(|note| format!("note: {note}")))
+                        .collect(),
+                )),
+                Some(provenant_records::command_result::NextStep::from_command(
+                    next,
+                    "manage the scheduling overrides",
+                )),
+            )
         }
-        _ => None,
+        _ => (None, None),
     };
+    result.next.extend(next);
     let listing = matches!(
         command,
         Route::Override(RouteOverride {
@@ -662,13 +679,8 @@ pub fn run(
         listing || matches!(command, Route::List(_) | Route::Resolve(_)),
         summary.as_ref(),
     );
-    let outcome = crate::render_or_publish(
-        &result,
-        mode,
-        &mut io::stdout().lock(),
-        &mut io::stderr().lock(),
-        publish,
-        crate::OverflowPolicy::Refuse,
-    );
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    let outcome =
+        crate::render_command_result(&mut result, mode, publish, crate::OverflowPolicy::Refuse);
     outcome.map_or(3, |outcome| crate::exit_status(&outcome))
 }

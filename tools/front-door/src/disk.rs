@@ -4,10 +4,13 @@ use provenant_cli::{Globals, RenderError, RenderMode};
 use provenant_confinement::{UtilityBudget, UtilityRuntime, cache::CacheGcPolicy};
 use provenant_core::{ActorId, CancelToken, Clock, ProjectId};
 use provenant_os::{clock::SystemClock, disk::DiskReport, exec::SystemExecutor, fs::Directory};
+use provenant_records::warning::{self, RESULT_TOO_LARGE, Warning};
 use provenant_records::{CommandError, CommandResult, Outcome};
 use provenant_run::{ExecutionContext, Request, RunStore};
 use std::{io, path::Path, time::Duration};
 
+// The command's own result streams are the render seam for this reader.
+#[allow(clippy::disallowed_methods)]
 pub fn run(globals: &Globals) -> u8 {
     let mut result = match collect(globals) {
         Ok(report) => CommandResult::new("disk report", Outcome::Ok, Some(report)),
@@ -110,7 +113,7 @@ fn render(
         let (text, omitted) =
             provenant_cli::clip_for_output(human, provenant_cli::MAX_RESULT_BYTES);
         clipped = text;
-        warn_capped(omitted, stderr);
+        warning::warn(capped_warning(omitted));
         globals.render_mode(&clipped, true, None)
     } else {
         globals.render_mode(human, true, None)
@@ -124,8 +127,10 @@ fn render(
         Ok(()) => provenant_cli::exit_status(&result.status),
         Err(RenderError::TooLarge) => {
             // JSON cannot be clipped mid-object: page a bounded marker instead.
+            // The cap notice is a typed warning on the bounded envelope, never
+            // a bare line on stderr under `--json`.
+            // Spec: docs/specs/cli.md#one-bounded-envelope-clipped-with-a-warning
             let omitted = full_bytes.saturating_sub(provenant_cli::MAX_RESULT_BYTES);
-            warn_capped(omitted, stderr);
             let marker = serde_json::json!({
                 "truncated": true,
                 "omitted_bytes": omitted,
@@ -137,6 +142,7 @@ fn render(
                 .error
                 .as_ref()
                 .map(|error| provenant_cli::bounded_error(error, 512));
+            bounded.warnings = take_cap_warning(capped_warning(omitted));
             let _ = provenant_cli::render(&bounded, RenderMode::Json, stdout);
             provenant_cli::exit_status(&result.status)
         }
@@ -168,11 +174,31 @@ fn render(
 
 /// The one warning for a capped disk report: names the rule, the source that
 /// set the cap, the omitted size and the way to narrow the report.
-fn warn_capped(omitted: usize, stderr: &mut impl io::Write) {
-    let _ = writeln!(
-        stderr,
-        "warning: [RESULT_TOO_LARGE] disk report exceeds 1 MiB (source: COMMAND_RESULT_MAX_BYTES); showing a bounded view with {omitted} bytes omitted; preview reclaim candidates with `provenant gc --dry-run`"
-    );
+/// Spec: docs/specs/cli.md#one-bounded-envelope-clipped-with-a-warning
+fn capped_warning(omitted: usize) -> Warning {
+    Warning::new(
+        RESULT_TOO_LARGE,
+        format!("[RESULT_TOO_LARGE] disk report exceeds 1 MiB (source: COMMAND_RESULT_MAX_BYTES); showing a bounded view with {omitted} bytes omitted"),
+    )
+    .repair("preview reclaim candidates with `provenant gc --dry-run`")
+}
+
+/// Raise the cap notice through the one typed warning seam, then take it back
+/// for the bounded envelope. Under `--json` the binary edge holds it, so it
+/// travels in `envelope[warnings]` and stderr stays clean; in human mode the
+/// sink prints it as it arrives. A direct caller without a sink still gets the
+/// typed value on its envelope rather than a bare line.
+/// Spec: docs/specs/cli.md#warnings-are-typed-values
+fn take_cap_warning(notice: Warning) -> Vec<Warning> {
+    warning::warn(notice.clone());
+    let mut held = crate::output::take_warnings();
+    if !held
+        .iter()
+        .any(|warning| warning.code.as_ref() == RESULT_TOO_LARGE.as_str())
+    {
+        held.push(notice);
+    }
+    held
 }
 
 fn collect(globals: &Globals) -> Result<DiskReport, Box<dyn std::error::Error>> {
@@ -690,6 +716,7 @@ mod tests {
         Ok(())
     }
     #[test]
+    // Spec: docs/specs/cli.md#one-bounded-envelope-clipped-with-a-warning
     fn disk_overflow_warns_and_bounds_without_publishing() -> Result<(), Box<dyn std::error::Error>>
     {
         let mut report = DiskReport::new("/fixture".into(), 0);
@@ -716,7 +743,16 @@ mod tests {
         assert_eq!(value["data"]["truncated"], true);
         assert!(value["data"]["omitted_bytes"].as_u64().unwrap() > 0);
         assert!(value["error"].is_null());
-        assert!(String::from_utf8(errors)?.contains("warning: [RESULT_TOO_LARGE]"));
+        // Spec: docs/specs/cli.md#warnings-are-typed-values
+        assert!(
+            value["warnings"]
+                .as_array()
+                .ok_or("warnings")?
+                .iter()
+                .any(|warning| warning["code"] == "RESULT_TOO_LARGE"),
+            "{value}"
+        );
+        assert!(errors.is_empty(), "{}", String::from_utf8_lossy(&errors));
         Ok(())
     }
 }

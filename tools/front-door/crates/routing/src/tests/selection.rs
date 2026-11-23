@@ -1,6 +1,30 @@
 use super::*;
 
 #[test]
+// Spec: docs/specs/cli.md#every-name-refusal-lists-close-matches
+fn unknown_adapter_lists_close_matches() {
+    match RoutingError::unknown_adapter("opencod") {
+        RoutingError::UnknownAdapter { candidates } => {
+            assert_eq!(candidates.first().map(String::as_str), Some("opencode"));
+        }
+        other => panic!("expected UnknownAdapter, got {other:?}"),
+    }
+}
+
+#[test]
+// Spec: docs/specs/cli.md#every-name-refusal-lists-close-matches
+fn adapter_candidates_rank_a_one_edit_typo_and_drop_an_unrelated_name() {
+    assert_eq!(
+        adapter_candidates("opencod").first().map(String::as_str),
+        Some("opencode")
+    );
+    assert!(adapter_candidates("zzzzzz").is_empty());
+    let hint = close_matches_hint(&adapter_candidates("opencod"));
+    assert!(hint.contains("close matches: opencode"), "{hint}");
+    assert!(close_matches_hint(&[]).is_empty());
+}
+
+#[test]
 fn table_driven_weighted_pools_record_effort_readiness_roll_and_seed()
 -> Result<(), Box<dyn std::error::Error>> {
     let access = [
@@ -413,7 +437,7 @@ fn candidate_errors_and_fallback_effort_match_request_fixtures()
                 }
                 assert_eq!(route.effort.as_deref(), effort, "{wire}");
             }
-            (Err(RoutingError::UnknownAdapter), Expected::Adapter) => {}
+            (Err(RoutingError::UnknownAdapter { .. }), Expected::Adapter) => {}
             (
                 Err(RoutingError::UnsupportedEffort { model, effort, .. }),
                 Expected::Effort {
@@ -463,11 +487,11 @@ fn candidate_errors_and_fallback_effort_match_request_fixtures()
     )?;
     assert!(matches!(
         resolve(&query, &context),
-        Err(RoutingError::UnknownAdapter)
+        Err(RoutingError::UnknownAdapter { .. })
     ));
     assert!(matches!(
         list(&RouteListQuery::default(), &context),
-        Err(RoutingError::UnknownAdapter)
+        Err(RoutingError::UnknownAdapter { .. })
     ));
     Ok(())
 }

@@ -34,9 +34,12 @@ closing keyword. Find the project item and the current Status options with
 
 Name the branch `<type>/<area>-<slug>` without an issue number or run
 vocabulary. `provenant worktree create BRANCH --base main` makes the worktree
-(see [worktrees](../worktrees.md)); to record the issue link on GitHub, create
-the branch first with `gh issue develop N --name BRANCH`. Lane publishing is in
-[lane delivery](lane-lifecycle.md#delivery).
+(see [worktrees](../worktrees.md)); use `provenant worktree locate BRANCH` (or a
+lane, attempt or PR number) to find its checkout instead of parsing raw
+`git worktree list` output. `provenant worktree remove BRANCH` records the
+removed tip and prunes the local branch once it is merged. To record the issue
+link on GitHub, create the branch first with `gh issue develop N --name BRANCH`.
+Lane publishing is in [lane delivery](lane-lifecycle.md#delivery).
 
 `gh pr create --body` bypasses [the template](../../.github/pull_request_template.md):
 fill a copy (evidence rows bound to the exact head, the independent-review block)
@@ -52,6 +55,21 @@ each later PR the branch below, each with its own issue link (`gh stack --help`)
 Rebase and force-push with lease only your own unmerged branches, then recheck
 heads and review evidence. Land bottom-first with `provenant land`.
 
+## Repair a pull request
+
+`provenant run implement --pr N` repairs a pull request from its CI failures.
+The host resolves the PR's head branch and base through the forge, locates or
+creates the head branch's worktree, and appends the failing checks — each name
+and a bounded log tail read through the one CI observer — to the lane's brief.
+Re-run it after a push or a check finishes to refresh the evidence; use
+`provenant ci failures N` first to read the same failures without launching a
+lane.
+
+`--base` names the pull request's merge target; it never resets the branch. An
+existing branch behind its base warns `BRANCH_BEHIND_BASE` and proceeds at its
+current tip, so re-running a repair keeps the branch's commits. Merge the base
+into the branch before landing when the warning appears.
+
 ## Merge
 
 Agents merge directly: once a pull request has the lens review its risk
@@ -63,10 +81,20 @@ merging a substantial change, confirm its receipt is current
 (`provenant workflow receipt show ID`).
 
 Repository admins may bypass `Protect main` for pull-request merges only;
-direct pushes still need CI. Use `gh pr merge N --merge --admin` only when
-`ci-status` was green on an earlier head of the same pull request and
-`git diff --stat GREEN NEW` shows non-code files only (docs, skills, release
-notes). Never use it for a code delta, a red check or an unreviewed change.
+direct pushes still need CI. The `gh pr merge N --merge --admin` escape hatch
+is for an earlier green head of the same pull request whose later delta is
+docs, skills or release notes only (`git diff --stat GREEN NEW`); never for a
+code delta, a red check or an unreviewed change. `provenant land` does not
+invoke that escape hatch by default. If a ruleset demands a review the
+authenticated owner cannot give, set
+`domains.pr.land.admin_publication = "when_review_unavailable"` in the owner's
+**host** config: after land's own gate passed (green CI on the exact
+candidate and independent review evidence), a review-requirement 405 is
+retried with the same admin API `--admin` uses. Any other layer setting is
+warned (`SETTING_LAYER_IGNORED`) and ignored; red CI, a missing review receipt
+and every other 405 cause are never bypassed. The receipt records the grant
+and its source. This changes how the owner's authority is exercised, not who
+holds it.
 
 `ci-status` is the single required check: the aggregate job at the end of
 [`ci.yml`](../../.github/workflows/ci.yml). `Protect main` does not require

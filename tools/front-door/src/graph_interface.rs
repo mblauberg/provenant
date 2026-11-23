@@ -4,11 +4,14 @@ use provenant_cli::brief::{BriefSource, read_brief, select_brief_source};
 use provenant_cli::{Edit, Globals, GraphRunArgs, Templates};
 use provenant_confinement::worktrees::WorkerObserver;
 use provenant_core::{CancelToken, Clock, WaitBudget};
-use provenant_records::{CommandResult, Outcome};
+use provenant_records::{
+    CommandResult, Outcome,
+    warning::{Warning, warn},
+};
 use provenant_routing::BareModelError;
 use serde_json::{Value, json};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 fn document(path: &Path) -> Result<Value, Box<provenant_records::diagnostic::Diagnostic>> {
     let text = std::fs::read_to_string(path).map_err(|_| file_input_error(path))?;
@@ -74,13 +77,10 @@ fn config_cause<'a>(
 }
 
 fn config_repair(globals: &Globals) -> String {
-    let mut command = String::from("provenant");
-    if let Some(state) = &globals.state_dir {
-        let path = state.to_string_lossy().replace('\'', "'\\''");
-        command.push_str(&format!(" --state-dir '{path}'"));
-    }
-    command.push_str(" check config --json");
-    command
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    crate::output::command_prefix(globals, &cwd)
+        .runnable("check config --json")
+        .unwrap_or_else(|| "provenant check config --json".to_owned())
 }
 
 fn config_projection(
@@ -214,13 +214,24 @@ fn refusal_lines(checkpoint: &Value) -> String {
 
 /// The compact `run` result: the headline, unless it was already announced,
 /// then the one next command. A refusal before admission adds its own line.
-fn run_human(data: &Value, input: &Value, announced: bool) -> String {
+fn run_human(
+    data: &Value,
+    input: &Value,
+    announced: bool,
+) -> (String, provenant_records::command_result::NextStep) {
     let graph = data["checkpoint"]["graph_id"].as_str().unwrap_or_default();
-    let next = match data["status"].as_str() {
-        Some("complete" | "cancelled") => format!("provenant output {graph}"),
-        Some("paused") => format!("provenant status {graph}"),
-        _ => format!("provenant wait {graph}"),
+    // The reason comes from the run's own status: a copied command is useful
+    // only when the reader knows which state made it the next step.
+    let (rest, why) = match data["status"].as_str() {
+        Some("complete") => (format!("output {graph}"), "the run is complete"),
+        Some("cancelled") => (format!("output {graph}"), "the run was cancelled"),
+        Some("paused") => (format!("status {graph}"), "the run is paused"),
+        _ => (format!("wait {graph}"), "the run is still running"),
     };
+    let next = provenant_records::command_result::NextStep::from_command(
+        &format!("provenant {rest}"),
+        why,
+    );
     let status = data["status"].as_str().unwrap_or("pending");
     let document = input.get("document");
     // A changed input under a known name starts a suffixed graph. Say so in
@@ -253,13 +264,15 @@ fn run_human(data: &Value, input: &Value, announced: bool) -> String {
         }
     }
     if announced {
-        format!("{lanes}next: {next}\n")
+        (lanes, next)
     } else {
         let headline = run_headline(&data["checkpoint"], status, document, input);
-        format!("{notice}{headline}\n{lanes}next: {next}\n")
+        (format!("{notice}{headline}\n{lanes}"), next)
     }
 }
 
+// The graph command's one-line announcement is written to stdout as its protocol.
+#[allow(clippy::disallowed_methods)]
 fn invoke(
     command: &str,
     input: Result<Value, Box<provenant_records::diagnostic::Diagnostic>>,
@@ -390,18 +403,23 @@ fn invoke(
     })();
     match result {
         Ok(data) => {
-            let human = if command == "run"
+            let (human, next) = if command == "run"
                 && !globals.full
                 && data["checkpoint"]["graph_id"].is_string()
             {
-                run_human(&data, &input, announced.get())
+                let (human, step) = run_human(&data, &input, announced.get());
+                (human, Some(step))
             } else {
-                serde_json::to_string_pretty(&data).unwrap_or_default() + "\n"
+                (
+                    serde_json::to_string_pretty(&data).unwrap_or_default() + "\n",
+                    None,
+                )
             };
             // A replay reports the graph its input already started; its failure
             // was reported when it happened.
             let replayed = data["named"]["replayed"] == true;
             let mut result = CommandResult::new(command, response_outcome(command, &data), data);
+            result.next = next.into_iter().collect();
             if command == "run"
                 && let Some(refusal) = result.data["source_admission"]
                     .as_array()
@@ -538,11 +556,13 @@ pub(crate) fn run(
     workers: &'static dyn WorkerObserver,
 ) -> u8 {
     if request.over.len() > 5 {
-        let _ = writeln!(
-            std::io::stderr().lock(),
-            "warning: --over creates {} nodes; check comma-separated items",
-            request.over.len()
-        );
+        warn(Warning::new(
+            provenant_records::warning::ARGUMENT_VALUE_SUSPECT,
+            format!(
+                "--over creates {} nodes; check comma-separated items",
+                request.over.len()
+            ),
+        ));
     }
     let bare_model = request
         .model
@@ -590,7 +610,10 @@ pub(crate) fn run(
                 .and_then(|catalogue| catalogue.provider_segment_warning(&id))
             });
         if let Some(warning) = warning {
-            let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+            warn(Warning::new(
+                provenant_records::warning::MODEL_SEGMENT_ADVISORY,
+                warning,
+            ));
         }
     }
     invoke(
@@ -634,9 +657,16 @@ fn bare_model_detail(model: &str, error: &BareModelError) -> String {
             "model {shown} is offered by several providers: {}; name one as provider/model",
             candidates.join(", ")
         ),
-        BareModelError::Unknown => format!(
-            "unknown model {shown}; no catalogued provider offers it, so name it in the provider/model form"
-        ),
+        BareModelError::Unknown { candidates } => {
+            let mut detail = format!(
+                "unknown model {shown}; no catalogued provider offers it, so name it in the provider/model form"
+            );
+            if !candidates.is_empty() {
+                detail.push_str("; close matches: ");
+                detail.push_str(&candidates.join(", "));
+            }
+            detail
+        }
     }
 }
 
@@ -665,6 +695,9 @@ fn run_input(
             .map(|model| model_selector(model, catalogue))
             .transpose()?;
         let mut input = json!({"op":"run","explain":request.explain,"detached":request.detached});
+        if let Some(path) = request.preamble_file {
+            input["preamble_file"] = json!(path);
+        }
         for (field, value) in [
             ("host", request.host),
             ("model", model),
@@ -889,7 +922,6 @@ pub(crate) fn templates_summary(
                 format!("nodes: {nodes_str}"),
                 format!("parameters: {params_str}"),
             ],
-            next: None,
             omitted: 0,
         })
     } else {
@@ -912,11 +944,7 @@ pub(crate) fn templates_summary(
         if lines.is_empty() {
             lines.push("no templates".to_string());
         }
-        Some(provenant_cli::Summary {
-            lines,
-            next: None,
-            omitted: 0,
-        })
+        Some(provenant_cli::Summary { lines, omitted: 0 })
     }
 }
 
@@ -1020,6 +1048,7 @@ mod tests {
             brief: None,
             brief_text: None,
             brief_file: None,
+            preamble_file: None,
             template: None,
             route: None,
             mode: None,
@@ -1266,9 +1295,16 @@ mod tests {
             detail,
             "model `gpt-6.1-terra` is offered by several providers: codex/gpt-6.1-terra, cursor/gpt-6.1-terra; name one as provider/model"
         );
-        // A name that is not identifier-shaped is never echoed.
-        let secret = bare_model_detail("sk-x y", &BareModelError::Unknown);
+        // A name that is not identifier-shaped is never echoed, even when the
+        // refusal carries close matches.
+        let secret = bare_model_detail(
+            "sk-x y",
+            &BareModelError::Unknown {
+                candidates: vec!["gpt-6.1-terra".into()],
+            },
+        );
         assert!(!secret.contains("sk-x y"), "{secret}");
+        assert!(secret.contains("close matches: gpt-6.1-terra"), "{secret}");
     }
 
     #[test]
@@ -1364,27 +1400,45 @@ mod tests {
             .map(|n| json!({"id":format!("n{n}"), "state":"failed", "advance_error_code":"preparation_refused",
                 "advance_error":"x".repeat(1000), "attempts":[]}))
             .collect();
-        for (status, command) in [
-            ("pending", "provenant wait review-1"),
-            ("complete", "provenant output review-1"),
-            ("paused", "provenant status review-1"),
+        for (status, command, why) in [
+            (
+                "pending",
+                "provenant wait review-1",
+                "the run is still running",
+            ),
+            (
+                "complete",
+                "provenant output review-1",
+                "the run is complete",
+            ),
+            (
+                "cancelled",
+                "provenant output review-1",
+                "the run was cancelled",
+            ),
+            ("paused", "provenant status review-1", "the run is paused"),
         ] {
             let data =
                 json!({"status":status, "checkpoint":{"graph_id":"review-1", "nodes":nodes}});
             for announced in [false, true] {
-                let human = run_human(&data, &json!({"op":"run"}), announced);
+                let (human, step) = run_human(&data, &json!({"op":"run"}), announced);
                 assert!(
                     human.starts_with(if announced { "refused" } else { "review-1" }),
                     "{human}"
                 );
-                assert!(human.ends_with(&format!("next: {command}\n")), "{human}");
-                assert!(
-                    human
-                        .lines()
-                        .filter(|line| line.starts_with("next:"))
-                        .count()
-                        == 1
+                // The suggested command is a typed step; the edge renders the
+                // human line from the same argv and state-derived why it puts
+                // on the JSON envelope.
+                assert_eq!(step.argv, command.split_whitespace().collect::<Vec<_>>());
+                assert_eq!(step.why, why);
+                assert_eq!(
+                    provenant_cli::next_steps_text(
+                        &[step],
+                        &provenant_workflow::session::CommandPrefix::default()
+                    ),
+                    format!("next: {why}; {command}\n")
                 );
+                assert!(!human.lines().any(|line| line.starts_with("next:")));
                 assert!(
                     human
                         .lines()
@@ -1398,9 +1452,9 @@ mod tests {
     #[test]
     fn compact_run_reports_resolved_lane_access() {
         let data = json!({"status":"pending", "checkpoint":{"graph_id":"work", "nodes":[]},
-            "lane_accesses":[{"access":"isolated","source":"route_policy","key":"rules.policy.lane.access"}]});
-        let human = run_human(&data, &json!({}), true);
-        assert!(human.contains("access: isolated (rules.policy.lane.access route_policy)\n"));
+            "lane_accesses":[{"access":"isolated","source":"route","key":"rules.policy.lane.access"}]});
+        let (human, _) = run_human(&data, &json!({}), true);
+        assert!(human.contains("access: isolated (rules.policy.lane.access route)\n"));
     }
 
     // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
@@ -1420,9 +1474,23 @@ mod tests {
         let _mode = provenant_redact::scoped(provenant_redact::Mode::Secrets);
         let warnings =
             provenant_fabric_runtime::graph::refusal::input_warnings(&input, &Default::default());
-        let data = json!({"checkpoint":{"graph_id":"example","nodes":[]},"status":"pending","warnings":warnings});
+        let warning = warnings.first().expect("a field-only policy warning");
+        assert_eq!(warning.code.as_ref(), "SECRET_SHAPED_INPUT");
+        assert!(warning.message.contains("brief looks like a credential"));
+        assert!(
+            !warning
+                .message
+                .contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789")
+        );
+        // The facade carries typed warnings to the compact surface as their
+        // messages; the code stays with the typed value in the v2 envelope.
+        let messages: Vec<String> = warnings
+            .into_iter()
+            .map(|warning| warning.message)
+            .collect();
+        let data = json!({"checkpoint":{"graph_id":"example","nodes":[]},"status":"pending","warnings":messages});
         for announced in [false, true] {
-            let output = run_human(&data, &json!({"op":"run"}), announced);
+            let (output, _) = run_human(&data, &json!({"op":"run"}), announced);
             assert!(output.contains("warning: [SECRET_SHAPED_INPUT]"));
             assert!(output.contains("brief looks like a credential"));
             assert!(!output.contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"));
@@ -1433,22 +1501,21 @@ mod tests {
     fn a_suffixed_name_is_announced_and_a_replay_is_not_a_failure() {
         let data = json!({"status":"pending", "named":{"requested":"fix", "graph":"fix-2", "superseded":"fix"},
             "checkpoint":{"graph_id":"fix-2", "nodes":[]}});
-        let human = run_human(&data, &json!({}), false);
+        let (human, _) = run_human(&data, &json!({}), false);
         assert!(
             human.starts_with("started fix-2 (fix exists with a different input)\n"),
             "{human}"
         );
-        // An already-announced launch prints the next step only; the notice
-        // was the first line written at launch time and is never duplicated.
-        let announced = run_human(&data, &json!({}), true);
+        // An already-announced launch carries the next step on the envelope;
+        // the notice was the first line written at launch time and is never
+        // duplicated in the result.
+        let (announced, step) = run_human(&data, &json!({}), true);
         assert!(
             !announced.contains("exists with a different input"),
             "{announced}"
         );
-        assert!(
-            announced.starts_with("next: provenant wait fix-2\n"),
-            "{announced}"
-        );
+        assert_eq!(step.argv, ["provenant", "wait", "fix-2"]);
+        assert!(announced.is_empty(), "{announced}");
         let replay = json!({"status":"complete", "outcome":"failed", "named":{"graph":"fix", "replayed":true}});
         assert_eq!(response_outcome("run", &replay), Outcome::Ok);
         let fresh = json!({"status":"complete", "outcome":"failed"});

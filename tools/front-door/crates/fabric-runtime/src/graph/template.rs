@@ -5,9 +5,13 @@
 //! node to the compiled `GraphNode` form the kernel already executes: `over`
 //! copies a node per named item with `${item}`, a template with nodes becomes a
 //! composite and `repeat` becomes a loop. A dotted name is a flavour that
-//! inherits its base (`review.security` extends `review`). Layers are bundled,
-//! user, repository and inline; a later layer shadows an earlier one.
+//! inherits its base (`review.security` extends `review`). Layers use the
+//! shared vocabulary (default, host, project, launch); a later layer shadows an
+//! earlier one.
 use super::*;
+use provenant_core::{close_matches, valid_name};
+use provenant_records::Precedence;
+use provenant_records::warning::{NAME_CASE_FOLDED, Warning, warn};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -590,76 +594,59 @@ impl std::fmt::Display for CompileError {
 }
 
 /// The declared name closest to an unknown key. A key that extends a declared
-/// name with a dot (`subject.commit`) matches that name; otherwise a close
-/// edit distance does.
+/// name with a dot (`subject.commit`) matches that name; otherwise the shared
+/// close-match ranker decides.
 fn nearest_name<'a>(key: &str, accepted: impl IntoIterator<Item = &'a str>) -> Option<String> {
-    accepted
-        .into_iter()
-        .filter_map(|name| {
-            let extends = key
-                .strip_prefix(name)
-                .is_some_and(|rest| rest.starts_with('.'));
-            let distance = if extends { 0 } else { edit_distance(key, name) };
-            let limit = (key.len().max(name.len()) / 3).max(1);
-            (distance <= limit).then_some((distance, name))
-        })
+    let accepted: Vec<&'a str> = accepted.into_iter().collect();
+    let extended = accepted.iter().copied().filter(|name| {
+        key.strip_prefix(name)
+            .is_some_and(|rest| rest.starts_with('.'))
+    });
+    extended
         .min()
-        .map(|(_, name)| name.to_owned())
+        .or_else(|| close_matches(key, accepted).first().copied())
+        .map(str::to_owned)
 }
 
+/// Up to three declared names close to `key`, ranked by the shared ranker.
 fn nearest_names<'a>(key: &str, accepted: impl IntoIterator<Item = &'a str>) -> Vec<&'a str> {
-    let mut matches = accepted
-        .into_iter()
-        .map(|name| (edit_distance(key, name), name))
-        .collect::<Vec<_>>();
-    matches.sort_unstable();
-    matches.into_iter().take(3).map(|(_, name)| name).collect()
-}
-
-fn edit_distance(left: &str, right: &str) -> usize {
-    let right: Vec<char> = right.chars().collect();
-    let mut row: Vec<usize> = (0..=right.len()).collect();
-    for (i, lc) in left.chars().enumerate() {
-        let mut diagonal = row[0];
-        row[0] = i + 1;
-        for (j, rc) in right.iter().enumerate() {
-            let above = row[j + 1];
-            row[j + 1] = if lc == *rc {
-                diagonal
-            } else {
-                1 + diagonal.min(above).min(row[j])
-            };
-            diagonal = above;
-        }
-    }
-    row[right.len()]
+    close_matches(key, accepted).into_iter().take(3).collect()
 }
 
 /// The longest graph name. A name is a graph's id, so it also bounds the
 /// `NAME-k` suffix a changed replay appends.
 pub const MAX_GRAPH_NAME_BYTES: usize = 48;
 
-/// Whether `name` can name a graph: a lowercase ASCII letter, then lowercase
-/// letters, digits and single hyphens, not ending in a hyphen.
-pub fn graph_name_fault(name: &str) -> Option<&'static str> {
-    let bytes = name.as_bytes();
-    if bytes.is_empty() || bytes.len() > MAX_GRAPH_NAME_BYTES {
-        return Some("a graph name is 1 to 48 bytes");
+/// Validate a graph name, folding capitals to lower case with a warning.
+/// A name starts with a letter and holds letters, digits and single hyphens.
+pub fn fold_graph_name(name: &str) -> Result<String, &'static str> {
+    if name.is_empty() || name.len() > MAX_GRAPH_NAME_BYTES {
+        return Err("a graph name is 1 to 48 bytes");
     }
-    if !bytes[0].is_ascii_lowercase() {
-        return Some("a graph name starts with a lowercase letter");
-    }
-    if !bytes
-        .iter()
-        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
-        || name.contains("--")
-        || name.ends_with('-')
+    if !name
+        .chars()
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic())
     {
-        return Some(
-            "a graph name holds lowercase letters, digits and single hyphens, and does not end in a hyphen",
+        return Err("a graph name starts with a letter");
+    }
+    let Some((folded, changed)) = valid_name(name) else {
+        return Err(
+            "a graph name holds letters, digits and single hyphens, and does not end in a hyphen",
+        );
+    };
+    if folded.contains('_') || folded.contains("--") || folded.ends_with('-') {
+        return Err(
+            "a graph name holds letters, digits and single hyphens, and does not end in a hyphen",
         );
     }
-    None
+    if changed {
+        warn(
+            Warning::new(NAME_CASE_FOLDED, format!("folded `{name}` to `{folded}`"))
+                .subject(folded.clone()),
+        );
+    }
+    Ok(folded)
 }
 
 /// The handle a host assigns to an unnamed graph of `template`: dots and other
@@ -1198,19 +1185,28 @@ impl Template {
     }
 }
 
-/// Where a template was defined. A later layer shadows an earlier one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Layer {
-    Bundled,
-    User,
-    Repository,
-    Inline,
+/// The shared vocabulary for where a template was defined. Exposed here so a
+/// caller that already names `graph::template::Layer` keeps naming the one
+/// shared type; the old four-variant enum is gone.
+pub use provenant_records::Layer;
+
+/// The layers a template can be declared in, lowest first. A later layer
+/// shadows an earlier one, and the rank keeps that order in one place.
+/// Spec: docs/specs/state.md#every-setting-reports-its-layer
+pub const TEMPLATE_PRECEDENCE: Precedence =
+    Precedence(&[Layer::Default, Layer::Host, Layer::Project, Layer::Launch]);
+
+fn layer_rank(layer: Layer) -> usize {
+    TEMPLATE_PRECEDENCE
+        .0
+        .iter()
+        .position(|candidate| *candidate == layer)
+        .unwrap_or(usize::MAX)
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TemplateLibrary {
-    entries: BTreeMap<String, BTreeMap<Layer, Template>>,
+    entries: BTreeMap<String, BTreeMap<usize, (Layer, Template)>>,
 }
 
 const BUNDLED: &[(&str, &str)] = &[
@@ -1312,7 +1308,7 @@ impl TemplateLibrary {
                     .entries
                     .entry((*name).into())
                     .or_default()
-                    .insert(Layer::Bundled, template);
+                    .insert(layer_rank(Layer::Default), (Layer::Default, template));
             }
         }
         // Invalid bundled assets are detected by the catalogue tests.
@@ -1321,6 +1317,9 @@ impl TemplateLibrary {
     }
 
     pub fn insert(&mut self, layer: Layer, name: &str, template: Template) -> Result<(), String> {
+        if !TEMPLATE_PRECEDENCE.0.contains(&layer) {
+            return Err(format!("template layer {} is not declared", layer.as_str()));
+        }
         if !valid_template_name(name) {
             return Err(format!("template name {name:?} is invalid"));
         }
@@ -1330,7 +1329,7 @@ impl TemplateLibrary {
         self.entries
             .entry(name.into())
             .or_default()
-            .insert(layer, template);
+            .insert(layer_rank(layer), (layer, template));
         Ok(())
     }
 
@@ -1381,12 +1380,10 @@ impl TemplateLibrary {
     /// Effective layers, retaining flavour overrides for deterministic replay.
     pub fn snapshot(&self) -> BTreeMap<String, Template> {
         self.entries
-            .iter()
-            .filter_map(|(name, layers)| {
-                layers
-                    .values()
-                    .next_back()
-                    .map(|template| (name.clone(), template.clone()))
+            .keys()
+            .filter_map(|name| {
+                self.resolved_own(name)
+                    .map(|template| (name.clone(), template))
             })
             .collect()
     }
@@ -1441,13 +1438,24 @@ impl TemplateLibrary {
     pub fn layer(&self, name: &str) -> Option<Layer> {
         self.entries
             .get(name)
-            .and_then(|layers| layers.keys().next_back().copied())
+            .and_then(|layers| layers.values().next_back().map(|(layer, _)| *layer))
     }
 
-    fn own(&self, name: &str) -> Option<&Template> {
-        self.entries
-            .get(name)
-            .and_then(|layers| layers.values().next_back())
+    /// The effective template for `name`, merged with the family's one
+    /// declaration so the table, not the map's insertion order, decides.
+    fn resolved_own(&self, name: &str) -> Option<Template> {
+        use provenant_records::{Source, Sourced, warn_ignored};
+        let layers = self.entries.get(name)?;
+        let candidates = layers.values().map(|(layer, template)| Sourced {
+            value: template.clone(),
+            source: Source {
+                layer: *layer,
+                origin: None,
+            },
+        });
+        let merge = TEMPLATE_PRECEDENCE.merge(candidates);
+        warn_ignored(&merge.ignored, "graph template");
+        merge.winner.map(|winner| winner.value)
     }
 
     /// Resolve a name, applying each flavour over its base.
@@ -1457,10 +1465,10 @@ impl TemplateLibrary {
                 "invalid template name; use letters, digits, underscores, hyphens and dots".into(),
             );
         }
-        let own = self.own(name);
+        let own = self.resolved_own(name);
         match name.rsplit_once('.') {
             Some((base, _)) => {
-                if self.own(base).is_none() {
+                if self.resolved_own(base).is_none() {
                     return Err(self.unknown_name_message(name, None));
                 }
                 let base = self.resolve(base)?;
@@ -1468,11 +1476,9 @@ impl TemplateLibrary {
                     let base_name = name.rsplit_once('.').map(|(base, _)| base);
                     self.unknown_name_message(name, base_name)
                 })?;
-                Ok(Template::flavour(base, own))
+                Ok(Template::flavour(base, &own))
             }
-            None => own
-                .cloned()
-                .ok_or_else(|| self.unknown_name_message(name, None)),
+            None => own.ok_or_else(|| self.unknown_name_message(name, None)),
         }
     }
 }

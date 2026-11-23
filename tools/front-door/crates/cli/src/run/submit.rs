@@ -1,4 +1,5 @@
 use super::*;
+use provenant_records::warning::{CONFIG_KEY_IGNORED, Warning, warn};
 
 #[cfg(any(test, feature = "fixture"))]
 thread_local! {
@@ -112,16 +113,6 @@ pub fn lane_access(
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string()))
 }
 
-/// Emit an advisory for an unsupported capability without granting it.
-pub fn warn_ignored_capability(origin: &str, name: &str) {
-    use std::io::Write;
-    let _ = writeln!(
-        std::io::stderr().lock(),
-        "warning: ignored unknown {origin}capability {}",
-        plain_text(name, 128)
-    );
-}
-
 #[derive(Debug, thiserror::Error)]
 pub(super) enum AccessError {
     #[error("{flag} {} is not an existing directory", path.display())]
@@ -140,7 +131,13 @@ pub(super) fn lane_access_checked(
     for name in &access.capability {
         match name.as_str() {
             "postgres" => postgres = true,
-            other => warn_ignored_capability("", other),
+            other => warn(
+                Warning::new(
+                    CONFIG_KEY_IGNORED,
+                    format!("ignored unknown capability {}", plain_text(other, 128)),
+                )
+                .subject(other),
+            ),
         }
     }
     let network = network_access(access.network, postgres);
@@ -193,11 +190,9 @@ pub(super) fn lane_access_checked(
         let canonical = match provenant_os::fs::canonicalize(path) {
             Ok(path) if path.is_file() => path,
             _ => {
-                use std::io::Write;
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: cannot attach {}",
-                    path.display()
+                warn(
+                    Warning::new(CONFIG_KEY_IGNORED, "cannot attach path")
+                        .subject(path.display().to_string()),
                 );
                 continue;
             }
@@ -311,7 +306,7 @@ pub(super) enum DiskCheck {
         floor: u64,
         reclaimed: u64,
         gc_scheduled: bool,
-        origin: provenant_records::diagnostic::SettingSource,
+        origin: provenant_records::diagnostic::Layer,
     },
 }
 
@@ -394,7 +389,10 @@ pub(super) fn schedule_low_space_gc(state: &Path, home: &Path, worktree: &Path) 
         Ok(())
     };
     if let Err(error) = start() {
-        eprintln!("provenant: warning: could not schedule low-space GC: {error}");
+        warn(Warning::new(
+            provenant_records::warning::GC_SCHEDULE_FAILED,
+            format!("could not schedule low-space GC: {error}"),
+        ));
         false
     } else {
         true
@@ -412,7 +410,6 @@ pub(super) fn check_writer_disk_with(
     check_writer_disk_with_collection(settings, policy, state, worktree, available, || false)
 }
 
-#[allow(clippy::print_stderr)]
 pub(super) fn check_writer_disk_with_collection(
     settings: &provenant_config::GcSettings,
     policy: &provenant_records::policy::Policy,
@@ -437,10 +434,9 @@ pub(super) fn check_writer_disk_with_collection(
             // Admission and new builds take this same declared decision.
             match provenant_config::DiskGate::new(limits, policy).decide(minimum) {
                 provenant_records::policy::Effect::Proceed => {}
-                provenant_records::policy::Effect::Warn(message) => eprintln!(
-                    "provenant: warning: {message}; on {}; dispatching",
-                    limiting.display()
-                ),
+                provenant_records::policy::Effect::Warn(warning) => {
+                    warn(warning.subject(limiting.display().to_string()));
+                }
                 provenant_records::policy::Effect::Refuse(_)
                 | provenant_records::policy::Effect::Stop(_) => {
                     return Err(DiskCheck::Low {
@@ -458,9 +454,12 @@ pub(super) fn check_writer_disk_with_collection(
     })();
     match observed {
         Err(DiskCheck::Unobserved(message)) => {
-            eprintln!(
-                "provenant: writer disk observation unavailable; continuing without the disk floor check: {message}"
-            );
+            warn(Warning::new(
+                provenant_records::warning::DISK_OBSERVATION_UNAVAILABLE,
+                format!(
+                    "writer disk observation unavailable; continuing without the disk floor check: {message}"
+                ),
+            ));
             Ok(())
         }
         result => result,
@@ -636,7 +635,7 @@ fn submit_with_launcher(
                         .budget_sources
                         .get("lane_access")
                         .copied()
-                        .unwrap_or(provenant_records::LimitSource::Template),
+                        .unwrap_or(provenant_records::Layer::Template),
                 );
             }
             task_profile.policy_project = Some(session.context.project_id);

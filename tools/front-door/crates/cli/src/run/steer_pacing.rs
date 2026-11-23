@@ -2,6 +2,7 @@
 //! launch lock. The pure scheduling rule is kept separate from the state-dir
 //! gate so the concurrency bound can be tested without host timing.
 use super::*;
+use provenant_records::warning::{Warning, warn};
 use std::ffi::OsStr;
 
 const LOCK: &str = "steer-restart.lock";
@@ -68,11 +69,10 @@ pub fn pace_steer_restart(
         Ok(bytes) => match serde_json::from_slice::<LastRestart>(&bytes) {
             Ok(last) => (last.boot == boot).then_some(last.host_us),
             Err(_) => {
-                use std::io::Write as _;
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: ignoring invalid steer restart pacing record"
-                );
+                warn(Warning::new(
+                    provenant_records::warning::STEER_PACING_RECORD_INVALID,
+                    "ignoring invalid steer restart pacing record",
+                ));
                 None
             }
         },

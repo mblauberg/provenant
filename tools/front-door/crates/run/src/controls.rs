@@ -5206,8 +5206,13 @@ impl RunStore {
             && let Some(prior) = &deliver
             && matches!(prior.mode, DeliveryMode::Push | DeliveryMode::Pr)
         {
-            let mut destination = HostDeliveryContext::destination(prior.mode.clone(), branch)?
-                .ok_or(RunError::Validation("fresh fallback delivery destination"))?;
+            // The recorded delivery carries the owner's forge remote; reuse it
+            // instead of resolving a second context that could disagree.
+            // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+            let forge = crate::forge_for(&prior.remote, "", &[]);
+            let mut destination =
+                HostDeliveryContext::destination(prior.mode.clone(), branch, &forge)?
+                    .ok_or(RunError::Validation("fresh fallback delivery destination"))?;
             destination.remote = prior.remote.clone();
             destination.open_pr |= prior.open_pr;
             deliver = Some(destination);

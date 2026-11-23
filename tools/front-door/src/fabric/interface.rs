@@ -462,6 +462,11 @@ fn launch_input(input: &Value) -> Result<Value, FacadeError> {
             attempt[field] = value.clone();
         }
     }
+    // `--preamble-file` is a launch-layer input. Carry it on the attempt so
+    // `lane_knobs` records it as `lanes.brief_preamble` from the launch layer.
+    if let Some(value) = input.get("preamble_file").filter(|value| !value.is_null()) {
+        attempt["preamble_file"] = value.clone();
+    }
     // Retain provenance when these run controls are merged onto a template.
     for field in ["token_budget", "on_budget", "budget_grace", "lane_access"] {
         if attempt.get(field).is_some() {
@@ -632,6 +637,27 @@ fn bind_default_read_only_source(
     }
 }
 
+/// Bind the plan node of `implement --plan` to the commit named by the
+/// launch's `--base`, resolved through the same read-source resolver. The plan
+/// then reads the base it will implement instead of the caller's checkout.
+fn bind_plan_base_source(node: &mut provenant_fabric_runtime::graph::GraphNode, commit: &str) {
+    if node.template.as_deref() == Some("plan") || node.id == "plan" {
+        node.source = Some(provenant_fabric_runtime::graph::SourceBinding::Commit {
+            commit: commit.into(),
+        });
+    }
+    if let Some(composite) = &mut node.composite {
+        for child in &mut composite.nodes {
+            bind_plan_base_source(child, commit);
+        }
+    }
+    if let Some(loop_spec) = &mut node.loop_body {
+        for child in &mut loop_spec.body {
+            bind_plan_base_source(child, commit);
+        }
+    }
+}
+
 fn bind_review_base(node: &mut provenant_fabric_runtime::graph::GraphNode, base: &str) {
     node.review_base = Some(base.into());
     if let Some(composite) = &mut node.composite {
@@ -739,6 +765,67 @@ fn bind_review_warning(node: &mut provenant_fabric_runtime::graph::GraphNode, wa
 
 /// Launch controls that bind a writer; a composite template can take none of them.
 const LAUNCH_CONTROLS: [&str; 5] = ["access", "worktree", "branch", "base", "write_scope"];
+
+/// The `--source` flag is the launch layer of `lanes.read_source`. A host or
+/// project knob supplies the value and the fetch-first flag; `auto` (including
+/// the compiled default) keeps the advisory pin of a checkout behind its
+/// fetched upstream.
+fn read_source_choice(
+    input: &Value,
+    config: &provenant_config::ResolvedConfig<provenant_cli::domains::Domains>,
+) -> provenant_cli::run::ReadSourceChoice {
+    use provenant_cli::run::ReadSourceChoice;
+    use provenant_records::Layer;
+
+    let mut choice = ReadSourceChoice::automatic();
+    if let Some(knob) = config.knobs.get(ReadSourceChoice::KNOB) {
+        let value = knob.value.as_str().unwrap_or_default();
+        // `auto` is the registry name for the compiled default, so an explicit
+        // setting of it still resolves the advisory pin. config schema reports
+        // the same value as this resolver uses.
+        choice.value = if knob.source.layer == Layer::Default || value == "auto" {
+            String::new()
+        } else {
+            value.to_owned()
+        };
+        choice.layer = knob.source.layer;
+        choice.origin = Some(format!("config.toml#{}", ReadSourceChoice::KNOB));
+    }
+    if let Some(flag) = config.knobs.get("lanes.read_source_fetch_first") {
+        choice.fetch_first = flag.value.as_bool().unwrap_or(false);
+    }
+    match input.get("source").and_then(Value::as_str) {
+        Some("local") => {
+            choice.value = "checkout".into();
+            choice.layer = Layer::Launch;
+            choice.origin = Some("--source".into());
+        }
+        Some("upstream") => {
+            choice.value = "default_branch".into();
+            choice.layer = Layer::Launch;
+            choice.origin = Some("--source".into());
+        }
+        _ => {}
+    }
+    choice
+}
+
+/// One shape for the commit a read-only launch reads, in both `run --explain`
+/// (its status) and the launch result. The source names the layer that chose
+/// the ref; `commit` is null when the choice keeps the local checkout.
+fn read_source_report(
+    selected: Option<&provenant_cli::run::ReadOnlySourceRef>,
+    choice: &provenant_cli::run::ReadSourceChoice,
+) -> Value {
+    json!({
+        "value": choice.value,
+        "fetch_first": choice.fetch_first,
+        "source": choice.layer.as_str(),
+        "origin": choice.origin,
+        "commit": selected.map(|selected| selected.commit.to_string()),
+        "reference": selected.map(|selected| selected.reference.clone()),
+    })
+}
 
 /// Apply plain-task execution controls before template lowering and patch admission.
 fn bind_launch_controls(
@@ -929,32 +1016,150 @@ fn report_launch_refusals(result: &mut Value, rows: &[Value]) {
     result["launch_refusals"] = json!(refusals);
 }
 
+/// The one PR repair fact resolved from the forge and CI observer before an
+/// implement launch. The branch and base are launch controls; `failures` is a
+/// bounded section appended to the brief.
+struct PrRepairFact {
+    branch: String,
+    base: String,
+    failures: String,
+}
+
 impl Factory {
+    /// Resolve `run implement --pr N` from the one observer: the PR's head
+    /// branch and base become launch controls, and the failing checks (names
+    /// and bounded log tails) are appended to the brief. Review templates keep
+    /// their own subject path. Spec: docs/specs/cli.md#ci-observations
+    fn apply_pr_repair(&self, input: Value) -> Result<Value, FacadeError> {
+        if input.get("pr").is_none_or(|value| value.is_null()) {
+            return Ok(input);
+        }
+        self.apply_pr_repair_with(input, |number| self.observe_pr_repair(number))
+    }
+
+    /// The injectable resolution seam an invariant pins without a live forge.
+    fn apply_pr_repair_with(
+        &self,
+        mut input: Value,
+        resolve: impl FnOnce(u64) -> Result<PrRepairFact, FacadeError>,
+    ) -> Result<Value, FacadeError> {
+        let is_implement = input
+            .get("template")
+            .and_then(Value::as_str)
+            .is_some_and(|name| name == "implement" || name.starts_with("implement."));
+        let number = input
+            .get("pr")
+            .filter(|value| !value.is_null())
+            .and_then(Value::as_u64);
+        if !is_implement || number.is_none_or(|number| number == 0) {
+            return Ok(input);
+        }
+        let number =
+            number.ok_or_else(|| FacadeError::invalid(InvalidInputDetail::Field("pr".into())))?;
+        let fact = resolve(number)?;
+        if input.get("branch").is_none_or(Value::is_null) {
+            input["branch"] = json!(fact.branch);
+        }
+        if input.get("base").is_none_or(Value::is_null) {
+            input["base"] = json!(fact.base);
+        }
+        if !fact.failures.is_empty() {
+            let brief = input.get("brief").and_then(Value::as_str).unwrap_or("");
+            let mut augmented = brief.to_owned();
+            augmented.push_str("\n\n");
+            augmented.push_str(&fact.failures);
+            input["brief"] = json!(augmented);
+        }
+        // The PR has been consumed by the repair; leave no advisory pin for a
+        // review subject to reinterpret.
+        if let Some(object) = input.as_object_mut() {
+            object.remove("pr");
+            object.remove("head");
+        }
+        Ok(input)
+    }
+
+    /// Read the pull and its failing checks through the one CI observer, never
+    /// a caller-owned `gh` process. Spec: docs/specs/cli.md#ci-observations
+    fn observe_pr_repair(&self, number: u64) -> Result<PrRepairFact, FacadeError> {
+        use std::time::Duration;
+        let invalid = |reason: String| FacadeError::invalid(InvalidInputDetail::Field(reason));
+        let request = provenant_config::ports::Request::within(Duration::from_secs(60));
+        let state = self.context.roots.state.as_path();
+        let project = &self.context.project_root;
+        let repository = crate::pr::observer::repository_for_project(state, project, &request)
+            .map_err(|error| invalid(error.to_string()))?;
+        let mut observer =
+            crate::pr::observer::Observer::open(state, project, &repository, &request)
+                .map_err(|error| invalid(error.to_string()))?;
+        let resource = observer
+            .resource(&format!("pulls/{number}"), Duration::ZERO, &request)
+            .map_err(|error| invalid(error.to_string()))?;
+        let field = |pointer: &str| -> Result<&str, FacadeError> {
+            resource
+                .pointer(pointer)
+                .and_then(Value::as_str)
+                .ok_or_else(|| invalid(format!("pull resource has no {pointer}")))
+        };
+        let head_sha = field("/head/sha")?.to_owned();
+        let branch = field("/head/ref")?.to_owned();
+        let base = field("/base/ref")?.to_owned();
+        let checks = observer
+            .checks(&head_sha, Duration::ZERO, &request)
+            .map_err(|error| invalid(error.to_string()))?;
+        let mut failures = format!("CI failures for pull request #{number} at {head_sha}:\n");
+        let mut failed = 0;
+        for check in checks.iter().filter(|check| check.bucket == "fail") {
+            failed += 1;
+            let tail: String = check.excerpt.chars().take(2048).collect();
+            failures.push_str(&format!("- {}: {}\n", check.name, tail));
+        }
+        if failed == 0 {
+            failures.clear();
+        }
+        Ok(PrRepairFact {
+            branch,
+            base,
+            failures,
+        })
+    }
+
     #[allow(
         clippy::print_stderr,
         reason = "warn operator when policy is unavailable and defaults are used"
     )]
     pub(super) fn graph_input_warnings(&self, value: &Value) -> Result<Vec<String>, FacadeError> {
-        let policy = match provenant_cli::config_reads::read_for(
-            &self.context.roots,
-            "run admission",
-        ) {
-            Ok(config) => config.domains.policy.resolve_with_knobs(
-                &self.context.identity.project.to_string(),
-                &config.knobs,
-                &Default::default(),
-            ),
-            Err(error) => {
-                let error = provenant_records::diagnostic::safe_text(&error.to_string());
-                eprintln!(
-                    "warning: graph admission policy unavailable ({error}); using compiled defaults"
+        let policy =
+            match provenant_cli::config_reads::read_for(&self.context.roots, "run admission") {
+                Ok(config) => config.domains.policy.resolve_with_knobs(
+                    &self.context.identity.project.to_string(),
+                    &config.knobs,
+                    &Default::default(),
+                ),
+                Err(error) => {
+                    let error = provenant_records::diagnostic::safe_text(&error.to_string());
+                    provenant_records::warning::warn(
+                    provenant_records::warning::Warning::new(
+                        provenant_records::warning::CONFIG_UNAVAILABLE,
+                        format!(
+                            "full config unavailable ({error}); using the owner's resolved policy"
+                        ),
+                    )
+                    .subject(self.context.identity.project.to_string()),
                 );
-                provenant_records::policy::Policy::default()
-            }
-        };
-        Ok(provenant_fabric_runtime::graph::refusal::input_warnings(
-            value, &policy,
-        ))
+                    provenant_config::policy::read(
+                        self.context.roots.state.as_path(),
+                        &self.context.identity.project.to_string(),
+                        &Default::default(),
+                    )
+                }
+            };
+        Ok(
+            provenant_fabric_runtime::graph::refusal::input_warnings(value, &policy)
+                .into_iter()
+                .map(|warning| warning.message)
+                .collect(),
+        )
     }
 
     fn validate_host_placement(
@@ -1233,7 +1438,7 @@ impl Factory {
         input: &Value,
     ) -> Result<provenant_fabric_runtime::graph::relay::ChildRequest, FacadeError> {
         use provenant_fabric_runtime::graph::relay::{ChildLaunch, ChildRequest};
-        let input = launch_input(input)?;
+        let input = self.apply_pr_repair(launch_input(input)?)?;
         let input = &input;
         let invalid = || FacadeError::invalid(InvalidInputDetail::Field("document".into()));
         let raw = input.get("document").filter(|value| !value.is_null());
@@ -1272,12 +1477,9 @@ impl Factory {
                 let name = value.as_str().ok_or_else(|| {
                     FacadeError::invalid(InvalidInputDetail::Field("name".into()))
                 })?;
-                if let Some(fault) =
-                    provenant_fabric_runtime::graph::template::graph_name_fault(name)
-                {
-                    return Err(graph_input_reason(fault));
-                }
-                Some(name.to_owned())
+                let folded = provenant_fabric_runtime::graph::template::fold_graph_name(name)
+                    .map_err(graph_input_reason)?;
+                Some(folded)
             }
             None => None,
         };
@@ -1521,11 +1723,13 @@ impl Factory {
             crate::graph_support::ProjectWorktrees::Registered(paths) => paths,
             crate::graph_support::ProjectWorktrees::NotRepository => vec![self.cwd.clone()],
             crate::graph_support::ProjectWorktrees::Unavailable(reason) => {
-                use std::io::Write;
                 let reason = provenant_records::diagnostic::safe_text(&reason);
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: repository worktree inventory unavailable ({reason}); read roots are limited to the current directory"
+                provenant_records::warning::warn(
+                    provenant_records::warning::Warning::new(
+                        provenant_records::warning::WORKTREE_INVENTORY_UNAVAILABLE,
+                        format!("repository worktree inventory unavailable ({reason}); read roots are limited to the current directory"),
+                    )
+                    .subject(self.cwd.display().to_string()),
                 );
                 vec![self.cwd.clone()]
             }
@@ -1582,11 +1786,11 @@ impl Factory {
         }
         let mut library = TemplateLibrary::bundled();
         library
-            .load_dir(Layer::User, &config.join("provenant/templates"))
+            .load_dir(Layer::Host, &config.join("provenant/templates"))
             .map_err(|_| FacadeError::invalid(InvalidInputDetail::TemplateInvalid))?;
         library
             .load_dir(
-                Layer::Repository,
+                Layer::Project,
                 &self.cwd.join(provenant_config::repository_files::TEMPLATES),
             )
             .map_err(|_| FacadeError::invalid(InvalidInputDetail::TemplateInvalid))?;
@@ -1594,7 +1798,7 @@ impl Factory {
             let templates: BTreeMap<String, Template> = serde_json::from_value(inline.clone())
                 .map_err(|_| FacadeError::invalid(InvalidInputDetail::TemplateInvalid))?;
             library = library
-                .with(Layer::Inline, &templates)
+                .with(Layer::Launch, &templates)
                 .map_err(|_| FacadeError::invalid(InvalidInputDetail::TemplateInvalid))?;
         }
         Ok(library)
@@ -1760,7 +1964,7 @@ impl Factory {
         announce: Option<super::graph_execution::Announce<'_>>,
     ) -> Result<Value, FacadeError> {
         let submitted = input;
-        let mut input = launch_input(input)?;
+        let mut input = self.apply_pr_repair(launch_input(input)?)?;
         let raw_owned = input.get("document").cloned();
         let raw = raw_owned.as_ref();
         let mut input_warnings = self.graph_input_warnings(&input)?;
@@ -1870,6 +2074,20 @@ impl Factory {
             limits: &self.context.config.graph.limits,
             worktree_layout: self.context.port_table.worktree_layout.clone(),
         };
+        // The read source is one sourced setting: `--source` is its launch
+        // layer and the host/project knob supplies the ref and fetch flag. An
+        // unreadable configuration is advisory; the compiled default keeps the
+        // stale-checkout pin.
+        let read_config = provenant_cli::config_reads::read_for(&self.context.roots, "run").ok();
+        let read_source = read_config
+            .as_ref()
+            .map(|config| read_source_choice(input, config))
+            .unwrap_or_default();
+        if read_config.is_none() {
+            warn_operator(
+                "could not read the run configuration; lanes.read_source keeps its compiled default",
+            );
+        }
         // A plain read-only task from a checkout behind its fetched upstream
         // reviews that upstream head, not its stale local tree. Explicit source
         // choices, authored documents, writer launches and review ranges keep
@@ -1879,10 +2097,31 @@ impl Factory {
             && !matches!(
                 input.get("access").and_then(Value::as_str),
                 Some("worktree_write")
+            ) {
+            provenant_cli::run::read_only_source_ref(
+                self.context.roots.state.as_path(),
+                &self.cwd,
+                &read_source,
             )
-            && source_choice.and_then(Value::as_str) != Some("local")
-        {
-            provenant_cli::run::read_only_source_ref(self.context.roots.state.as_path(), &self.cwd)
+        } else {
+            None
+        };
+        // The plan node of `implement --plan` reads the base the launch names,
+        // resolved through the same resolver as any other explicit ref.
+        let plan_base_source = if review_subject.is_none() {
+            input.get("base").and_then(Value::as_str).and_then(|base| {
+                let choice = provenant_cli::run::ReadSourceChoice {
+                    value: base.to_owned(),
+                    fetch_first: read_source.fetch_first,
+                    layer: provenant_records::Layer::Launch,
+                    origin: Some("--base".into()),
+                };
+                provenant_cli::run::read_only_source_ref(
+                    self.context.roots.state.as_path(),
+                    &self.cwd,
+                    &choice,
+                )
+            })
         } else {
             None
         };
@@ -1905,12 +2144,9 @@ impl Factory {
         });
         let (base, named) = match requested {
             Some(name) => {
-                if let Some(fault) =
-                    provenant_fabric_runtime::graph::template::graph_name_fault(name)
-                {
-                    return Err(graph_input_reason(fault));
-                }
-                (name.to_owned(), true)
+                let folded = provenant_fabric_runtime::graph::template::fold_graph_name(name)
+                    .map_err(graph_input_reason)?;
+                (folded, true)
             }
             None if template_name == "lane-document" => ("graph".to_owned(), false),
             None => (
@@ -2023,7 +2259,7 @@ impl Factory {
                 .resolve(node["use"].as_str().unwrap_or("task"))
                 .map_err(graph_input_reason)?;
             let bundled_smoke =
-                node["use"] == "smoke" && library.layer("smoke") == Some(Layer::Bundled);
+                node["use"] == "smoke" && library.layer("smoke") == Some(Layer::Default);
             // Launch controls bind to one leaf. A composite has no single
             // worktree to bind, so name the first control it cannot take.
             let first_control = LAUNCH_CONTROLS
@@ -2095,7 +2331,7 @@ impl Factory {
             // Node parameters supplied explicitly (including CLI --set) beat
             // document settings; template defaults are the final fallback.
             let bundled_batch =
-                node["use"] == "batch" && library.layer("batch") == Some(Layer::Bundled);
+                node["use"] == "batch" && library.layer("batch") == Some(Layer::Default);
             let integration_branch = bundled_batch
                 .then(|| parameters.get("integration_branch").cloned())
                 .flatten()
@@ -2277,6 +2513,15 @@ impl Factory {
                 provenant_fabric_runtime::graph::minimum_schema_version(&document),
             ));
         }
+        if let Some(selected) = &plan_base_source {
+            let commit = selected.commit.to_string();
+            for node in &mut document.nodes {
+                bind_plan_base_source(node, &commit);
+            }
+            document.schema_version = document.schema_version.max(u64::from(
+                provenant_fabric_runtime::graph::minimum_schema_version(&document),
+            ));
+        }
         let mut bound = encode(&document)?;
         self.confine_nodes(&mut bound)?;
         // Template binding can assemble a credential from individually safe
@@ -2310,7 +2555,7 @@ impl Factory {
                 catalogue.as_ref(),
             )
             .into_iter()
-            .map(|warning| warning.to_string()),
+            .map(|warning| warning.message),
         );
         document.set_replay_digest(&digest);
         // Explain is read-only and still shows the compiled submission. For a
@@ -2352,7 +2597,8 @@ impl Factory {
             input_warnings.push(warning);
         }
         if let Some(selected) = &default_source {
-            let warning = provenant_cli::run::read_only_source_warning(&self.cwd, selected);
+            let warning =
+                provenant_cli::run::read_only_source_warning(&self.cwd, selected, &read_source);
             warn_operator(&warning);
             input_warnings.push(warning);
         }
@@ -2411,7 +2657,7 @@ impl Factory {
                             spec.budget_sources
                                 .get(field)
                                 .copied()
-                                .unwrap_or(provenant_records::LimitSource::Template),
+                                .unwrap_or(provenant_records::Layer::Template),
                         );
                     }
                 }
@@ -2448,6 +2694,7 @@ impl Factory {
                 "status": if refused { "refused" } else if source_admission.is_empty() { "admitted" } else { "pending_route" },
                 "credential_admission": if source_admission.is_empty() { "not_applicable" } else { "pending_route" },
                 "source_admission": source_admission, "warnings": warnings,
+                "read_source": read_source_report(default_source.as_ref(), &read_source),
                 "implement_plan": {
                     "value": input.pointer("/set/plan").or_else(|| input.pointer("/document/with/plan")).cloned().unwrap_or(json!(self.context.config.implement.plan)),
                     "source": if input.pointer("/set/plan").or_else(|| input.pointer("/document/with/plan")).is_some() { json!("parameter (--plan or --set)") } else {
@@ -2478,6 +2725,7 @@ impl Factory {
             result["review_subject"] = pin;
         }
         result["warnings"] = json!(warnings);
+        result["read_source"] = read_source_report(default_source.as_ref(), &read_source);
         result["named"] = json!({
             "requested": requested, "graph": id, "replayed": replayed, "superseded": taken,
         });
@@ -3026,6 +3274,23 @@ impl Factory {
             )?;
         }
         let mut receipt = json!({"rows":rows,"timed_out":timed_out});
+        // The commit a read-only lane reads is already bound on its node; show
+        // it on status as well, so the launch result and later status agree.
+        let read_commits: Vec<Value> = run
+            .checkpoint
+            .nodes
+            .iter()
+            .filter_map(|node| match (&node.source_binding, &node.source_commit) {
+                (
+                    Some(provenant_fabric_runtime::graph::SourceBinding::Commit { .. }),
+                    Some(commit),
+                ) => Some(json!({"node":node.id,"commit":commit})),
+                _ => None,
+            })
+            .collect();
+        if !read_commits.is_empty() {
+            receipt["read_source"] = json!({"commits":read_commits});
+        }
         if let Some(observation) = observation_report {
             receipt["observation"] = json!(observation);
         }
@@ -3873,6 +4138,22 @@ mod tests {
         Ok(())
     }
 
+    /// Declare the one forge context a delivery preview needs in a local-only
+    /// fixture. The batch resolves it lazily and never guesses a remote or
+    /// default branch, so a graph that checks a delivery target must declare
+    /// both. Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    fn declare_forge(rig: &TestRig, default_branch: &str) -> Result {
+        std::fs::create_dir_all(rig.project.join(".provenant"))?;
+        std::fs::write(
+            rig.project.join(provenant_config::PORTS_CONFIG),
+            serde_json::to_vec(&json!({
+                "schema_version": provenant_config::PORTS_SCHEMA_VERSION,
+                "git": {"remote":"origin", "default_branch":default_branch, "protected":[]},
+            }))?,
+        )?;
+        Ok(())
+    }
+
     fn factory(rig: &TestRig) -> Result<Factory> {
         let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
         // Library unit tests inherit the lane environment, where Context::open
@@ -3890,6 +4171,59 @@ mod tests {
             host_launch: None,
             workers: &Workers,
         })
+    }
+
+    /// Spec: docs/specs/cli.md#ci-observations -- a fake forge PR
+    /// with a failing check binds the head branch and base and carries the
+    /// failure into the launch brief.
+    #[test]
+    fn implement_pr_repair_binds_branch_base_and_carries_failing_checks() -> Result {
+        let rig = TestRig::new()?;
+        let factory = factory(&rig)?;
+        let input = json!({
+            "op": "run",
+            "template": "implement",
+            "brief": "Repair the pull request",
+            "pr": 7,
+        });
+        let repaired = factory.apply_pr_repair_with(input, |number| {
+            assert_eq!(number, 7);
+            Ok(super::PrRepairFact {
+                branch: "fix/ci".into(),
+                base: "main".into(),
+                failures:
+                    "CI failures for pull request #7:\n- test: assertion failed at src/lib.rs:42"
+                        .into(),
+            })
+        })?;
+        assert_eq!(repaired["branch"].as_str(), Some("fix/ci"));
+        assert_eq!(repaired["base"].as_str(), Some("main"));
+        let brief = repaired["brief"].as_str().ok_or("brief")?;
+        assert!(brief.contains("Repair the pull request"));
+        assert!(brief.contains("test: assertion failed at src/lib.rs:42"));
+        assert!(repaired.get("pr").is_none(), "the PR pin was consumed");
+        // An explicit branch or base wins over the forge answer.
+        let pinned = json!({
+            "op": "run", "template": "implement", "brief": "Repair",
+            "pr": 7, "branch": "chosen", "base": "refs/remotes/origin/main",
+        });
+        let repaired = factory.apply_pr_repair_with(pinned, |_| {
+            Ok(super::PrRepairFact {
+                branch: "fix/ci".into(),
+                base: "main".into(),
+                failures: String::new(),
+            })
+        })?;
+        assert_eq!(repaired["branch"].as_str(), Some("chosen"));
+        assert_eq!(repaired["base"].as_str(), Some("refs/remotes/origin/main"));
+        assert_eq!(repaired["brief"].as_str(), Some("Repair"));
+        // A review template keeps its own subject path; the repair is inert.
+        let review = json!({"op": "run", "template": "review", "pr": 7});
+        let unchanged = factory.apply_pr_repair_with(review.clone(), |_| {
+            panic!("a review template must not resolve a PR repair")
+        })?;
+        assert_eq!(unchanged, review);
+        Ok(())
     }
 
     // Spec: docs/specs/supervisor.md#native-environment-and-sandbox-tool-stores
@@ -4552,13 +4886,48 @@ mod tests {
                 &json!({"baseRefOid":base,"baseRefName":"main","headRefOid":head,"url":"https://github.com/owner/repo/pull/7"}),
             )?,
         )?;
-        // A command forge port exercises the host lookup without network or credentials.
+        // The PR subject is read through the one CI observation transport, so
+        // the command port must answer its repository and pull paths. A body is
+        // a JSON string inside the typed port response; prepare those bytes in
+        // the fixture rather than escaping them in a shell script.
+        // Spec: docs/specs/cli.md#ci-observations
+        let repository_response = rig.root.join("repository-response.json");
+        std::fs::write(
+            &repository_response,
+            serde_json::to_vec(&json!({
+                "status":200, "headers":{},
+                "body": json!({"full_name":"owner/repo"}).to_string(),
+            }))?,
+        )?;
+        let pull_response = rig.root.join("pull-response.json");
+        std::fs::write(
+            &pull_response,
+            serde_json::to_vec(&json!({
+                "status":200, "headers":{},
+                "body": json!({
+                    "base":{"ref":"main","sha":base},
+                    "head":{"ref":"feature","sha":head},
+                    "html_url":"https://github.com/owner/repo/pull/7",
+                }).to_string(),
+            }))?,
+        )?;
+        let observation_script = concat!(
+            "case \"$PROVENANT_PORT_REQUEST_PATH\" in\n",
+            "  'repos/{owner}/{repo}') /bin/cat \"$1\" ;;\n",
+            "  'repos/owner/repo/pulls/7') /bin/cat \"$2\" ;;\n",
+            "  *) exit 71 ;;\n",
+            "esac\n",
+        );
         std::fs::write(
             rig.state.join("ports.json"),
             serde_json::to_vec(&json!({
                 "schema_version":provenant_config::PORTS_SCHEMA_VERSION,
                 "forge":{"source":"host","backend":{"kind":"command","command":{
                     "argv":["/bin/sh","-c","test \"$2\" = pr && test \"$3\" = view && test \"$4\" = 7 && /bin/cat \"$1\"","fixture",metadata],
+                    "exit_codes":{"success":[0],"unknown":[75],"other":"refused"}
+                }}},
+                "ci_observation":{"source":"host","backend":{"kind":"command","command":{
+                    "argv":["/bin/sh","-c",observation_script,"fixture",repository_response,pull_response],
                     "exit_codes":{"success":[0],"unknown":[75],"other":"refused"}
                 }}}
             }))?,
@@ -5995,6 +6364,269 @@ mod tests {
         Ok(())
     }
 
+    /// Spec: docs/specs/run-launch.md#inputs-and-resources
+    #[test]
+    fn read_source_choices_pin_the_commit_and_name_their_layer() -> Result {
+        let rig = TestRig::new()?;
+        let remote = rig.root.join("remote.git");
+        let remote = remote.to_str().ok_or("remote path")?;
+        git(&rig, &["init", "-q", "--bare", remote])?;
+        git(
+            &rig,
+            &["-C", remote, "symbolic-ref", "HEAD", "refs/heads/master"],
+        )?;
+        git(&rig, &["config", "user.name", "Test"])?;
+        git(&rig, &["config", "user.email", "test@example.invalid"])?;
+        std::fs::write(rig.project.join("file"), "one\n")?;
+        git(&rig, &["add", "file"])?;
+        git(&rig, &["commit", "-q", "-m", "one"])?;
+        let stale = git(&rig, &["rev-parse", "HEAD"])?;
+        git(&rig, &["branch", "-M", "master"])?;
+        std::fs::write(rig.project.join("file"), "two\n")?;
+        git(&rig, &["add", "file"])?;
+        git(&rig, &["commit", "-q", "-m", "two"])?;
+        let default = git(&rig, &["rev-parse", "HEAD"])?;
+        git(&rig, &["remote", "add", "origin", remote])?;
+        git(&rig, &["push", "-q", "origin", "master"])?;
+        git(&rig, &["remote", "set-head", "origin", "master"])?;
+        git(&rig, &["reset", "-q", "--hard", &stale])?;
+
+        let factory = factory(&rig)?;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
+        let submit = |knob: Option<&str>, source: Option<&str>| -> Result<Value> {
+            let mut config = "schema_version=1\n[gc]\nfree_floor='1B'\n".to_owned();
+            if let Some(knob) = knob {
+                config.push_str(&format!("[knobs]\nlanes.read_source='{knob}'\n"));
+            }
+            std::fs::write(rig.state.join("config.toml"), config)?;
+            let mut input =
+                json!({"op":"run","template":"task","brief":"Review the tree","explain":true});
+            if let Some(source) = source {
+                input["source"] = json!(source);
+            }
+            Ok(factory.graph_document(input, budget, &cancel)?)
+        };
+
+        let pinned = submit(Some("default_branch"), None)?;
+        assert_eq!(
+            pinned["document"]["nodes"][0]["source"]["commit"],
+            json!(default),
+            "{pinned}"
+        );
+        assert_eq!(pinned["read_source"]["source"], json!("host"));
+        assert_eq!(pinned["read_source"]["commit"], json!(default));
+        assert!(
+            pinned["warnings"]
+                .as_array()
+                .is_some_and(|rows| rows.iter().any(|row| row
+                    .as_str()
+                    .is_some_and(|text| text.contains("lanes.read_source=default_branch")))),
+            "the warning must name the sourced setting: {}",
+            pinned["warnings"]
+        );
+
+        let checkout = submit(Some("checkout"), None)?;
+        assert!(checkout["document"]["nodes"][0]["source"].is_null());
+        assert!(checkout["read_source"]["commit"].is_null());
+
+        let explicit = submit(Some("refs/remotes/origin/master"), None)?;
+        assert_eq!(
+            explicit["document"]["nodes"][0]["source"]["commit"],
+            json!(default),
+            "{explicit}"
+        );
+        assert_eq!(
+            explicit["read_source"]["value"],
+            json!("refs/remotes/origin/master")
+        );
+
+        let flag = submit(None, Some("upstream"))?;
+        assert_eq!(
+            flag["document"]["nodes"][0]["source"]["commit"],
+            json!(default)
+        );
+        assert_eq!(flag["read_source"]["source"], json!("launch"));
+        let flag = submit(None, Some("local"))?;
+        assert!(flag["document"]["nodes"][0]["source"].is_null());
+        Ok(())
+    }
+
+    /// An explicit `default_branch` pins the fetched default, not the current
+    /// branch's tracking upstream: a feature checkout must not read its own tip.
+    /// Spec: docs/specs/run-launch.md#inputs-and-resources
+    #[test]
+    fn default_branch_pins_the_forge_default_not_the_feature_upstream() -> Result {
+        let rig = TestRig::new()?;
+        let remote = rig.root.join("remote.git");
+        let remote = remote.to_str().ok_or("remote path")?;
+        git(&rig, &["init", "-q", "--bare", remote])?;
+        git(
+            &rig,
+            &["-C", remote, "symbolic-ref", "HEAD", "refs/heads/main"],
+        )?;
+        git(&rig, &["config", "user.name", "Test"])?;
+        git(&rig, &["config", "user.email", "test@example.invalid"])?;
+        std::fs::write(rig.project.join("file"), "one\n")?;
+        git(&rig, &["add", "file"])?;
+        git(&rig, &["commit", "-q", "-m", "one"])?;
+        git(&rig, &["branch", "-M", "main"])?;
+        git(&rig, &["remote", "add", "origin", remote])?;
+        git(&rig, &["push", "-q", "-u", "origin", "main"])?;
+        git(&rig, &["remote", "set-head", "origin", "main"])?;
+        let default = git(&rig, &["rev-parse", "HEAD"])?;
+        // The feature branch tracks origin/feature, a non-default upstream.
+        git(&rig, &["checkout", "-q", "-b", "feature"])?;
+        std::fs::write(rig.project.join("file"), "two\n")?;
+        git(&rig, &["add", "file"])?;
+        git(&rig, &["commit", "-q", "-m", "two"])?;
+        git(&rig, &["push", "-q", "-u", "origin", "feature"])?;
+        let feature = git(&rig, &["rev-parse", "HEAD"])?;
+        assert_ne!(feature, default, "the fixture needs two distinct tips");
+
+        let factory = factory(&rig)?;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
+        let submit = |knob: Option<&str>, source: Option<&str>| -> Result<Value> {
+            let mut config = "schema_version=1\n[gc]\nfree_floor='1B'\n".to_owned();
+            if let Some(knob) = knob {
+                config.push_str(&format!("[knobs]\nlanes.read_source='{knob}'\n"));
+            }
+            std::fs::write(rig.state.join("config.toml"), config)?;
+            let mut input =
+                json!({"op":"run","template":"task","brief":"Review the tree","explain":true});
+            if let Some(source) = source {
+                input["source"] = json!(source);
+            }
+            Ok(factory.graph_document(input, budget, &cancel)?)
+        };
+
+        for chosen in [
+            submit(Some("default_branch"), None)?,
+            submit(None, Some("upstream"))?,
+        ] {
+            let commit = chosen["document"]["nodes"][0]["source"]["commit"].clone();
+            assert_eq!(
+                commit,
+                json!(default),
+                "explicit default_branch must pin the fetched default: {chosen}"
+            );
+            assert_ne!(
+                commit,
+                json!(feature),
+                "the tracking upstream is not the default branch: {chosen}"
+            );
+        }
+        // With no source setting the advisory pin keeps this level checkout.
+        let automatic = submit(None, None)?;
+        assert!(
+            automatic["document"]["nodes"][0]["source"].is_null(),
+            "{automatic}"
+        );
+        Ok(())
+    }
+
+    /// Spec: docs/specs/run-launch.md#inputs-and-resources
+    #[test]
+    fn read_source_fetch_first_refreshes_the_ref_before_resolving() -> Result {
+        let rig = TestRig::new()?;
+        let remote = rig.root.join("remote.git");
+        let remote = remote.to_str().ok_or("remote path")?;
+        git(&rig, &["init", "-q", "--bare", remote])?;
+        git(
+            &rig,
+            &["-C", remote, "symbolic-ref", "HEAD", "refs/heads/main"],
+        )?;
+        git(&rig, &["config", "user.name", "Test"])?;
+        git(&rig, &["config", "user.email", "test@example.invalid"])?;
+        std::fs::write(rig.project.join("file"), "one\n")?;
+        git(&rig, &["add", "file"])?;
+        git(&rig, &["commit", "-q", "-m", "one"])?;
+        let first = git(&rig, &["rev-parse", "HEAD"])?;
+        git(&rig, &["branch", "-M", "main"])?;
+        git(&rig, &["remote", "add", "origin", remote])?;
+        git(&rig, &["push", "-q", "origin", "main"])?;
+        git(&rig, &["remote", "set-head", "origin", "main"])?;
+        // A separate clone publishes a newer tip the checkout has not fetched.
+        let seed = rig.root.join("seed");
+        git(
+            &rig,
+            &["clone", "-q", remote, seed.to_str().ok_or("seed path")?],
+        )?;
+        let seed = seed.to_str().ok_or("seed path")?;
+        git(&rig, &["-C", seed, "config", "user.name", "Test"])?;
+        git(
+            &rig,
+            &["-C", seed, "config", "user.email", "test@example.invalid"],
+        )?;
+        std::fs::write(rig.root.join("seed").join("file"), "two\n")?;
+        git(&rig, &["-C", seed, "add", "file"])?;
+        git(&rig, &["-C", seed, "commit", "-q", "-m", "two"])?;
+        let second = git(&rig, &["-C", seed, "rev-parse", "HEAD"])?;
+        git(&rig, &["-C", seed, "push", "-q", "origin", "main"])?;
+
+        let factory = factory(&rig)?;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
+        let submit = |fetch_first: bool| -> Result<Value> {
+            let config = format!(
+                "schema_version=1\n[gc]\nfree_floor='1B'\n[knobs]\nlanes.read_source='refs/remotes/origin/main'\nlanes.read_source_fetch_first={fetch_first}\n"
+            );
+            std::fs::write(rig.state.join("config.toml"), config)?;
+            Ok(factory.graph_document(
+                json!({"op":"run","template":"task","brief":"Review the tree","explain":true}),
+                budget,
+                &cancel,
+            )?)
+        };
+
+        let last_fetched = submit(false)?;
+        assert_eq!(
+            last_fetched["document"]["nodes"][0]["source"]["commit"],
+            json!(first),
+            "{last_fetched}"
+        );
+        let fetched = submit(true)?;
+        assert_eq!(
+            fetched["document"]["nodes"][0]["source"]["commit"],
+            json!(second),
+            "fetch-first must pin the newly fetched tip: {fetched}"
+        );
+        assert_eq!(fetched["read_source"]["fetch_first"], json!(true));
+        Ok(())
+    }
+
+    /// Spec: docs/specs/run-launch.md#inputs-and-resources
+    #[test]
+    fn plan_node_of_implement_plan_reads_the_launch_base() -> Result {
+        let rig = TestRig::new()?;
+        git(&rig, &["config", "user.name", "Test"])?;
+        git(&rig, &["config", "user.email", "test@example.invalid"])?;
+        std::fs::write(rig.project.join("file"), "one\n")?;
+        git(&rig, &["add", "file"])?;
+        git(&rig, &["commit", "-q", "-m", "one"])?;
+        let base = git(&rig, &["rev-parse", "HEAD"])?;
+        std::fs::write(rig.project.join("file"), "two\n")?;
+        git(&rig, &["add", "file"])?;
+        git(&rig, &["commit", "-q", "-m", "two"])?;
+
+        let factory = factory(&rig)?;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
+        let planned = factory.graph_document(
+            json!({
+                "op":"run","template":"implement","brief":"Fix it","explain":true,
+                "branch":"fix/base","base":base,"set":{"plan":true}
+            }),
+            budget,
+            &cancel,
+        )?;
+        let plan = &planned["document"]["nodes"][0]["composite"]["nodes"][0];
+        assert_eq!(plan["template"], json!("plan"), "{planned}");
+        assert_eq!(plan["source"]["commit"], json!(base), "{planned}");
+        Ok(())
+    }
+
     #[test]
     fn writer_template_with_target_defaults_to_writer_access() -> Result {
         let rig = TestRig::new()?;
@@ -6959,6 +7591,7 @@ mod tests {
     #[test]
     fn generated_graph_id_preserves_document_binding_and_settings() -> Result {
         let rig = TestRig::new()?;
+        declare_forge(&rig, "main")?;
         let factory = factory(&rig)?;
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
@@ -6987,7 +7620,7 @@ mod tests {
         )?;
         let compiled = &response["document"];
         assert!(compiled["graph_id"].as_str().is_some_and(|id| {
-            provenant_fabric_runtime::graph::template::graph_name_fault(id).is_none()
+            provenant_fabric_runtime::graph::template::fold_graph_name(id).is_ok()
         }));
         // Compare declarations after decoding: empty default fields may be omitted on the wire.
         let document: GraphDocument = serde_json::from_value(compiled.clone())?;
@@ -7030,6 +7663,7 @@ mod tests {
     #[test]
     fn explicit_batch_node_and_cli_branch_parameters_override_document_binding() -> Result {
         let rig = TestRig::new()?;
+        declare_forge(&rig, "main")?;
         let factory = factory(&rig)?;
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
@@ -7181,6 +7815,7 @@ mod tests {
                 writer_tree.to_str().ok_or("writer worktree")?,
             ],
         )?;
+        declare_forge(&rig, "main")?;
         let factory = factory(&rig)?;
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
@@ -7657,8 +8292,13 @@ mod tests {
     }
 }
 
-/// Prints a launch warning for the operator; a warning never blocks a launch.
+/// Reports a launch warning for the operator; a warning never blocks a launch.
 pub(super) fn warn_operator(warning: impl std::fmt::Display) {
-    use std::io::Write;
-    let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+    provenant_records::warning::warn(
+        provenant_records::warning::Warning::new(
+            provenant_records::warning::LAUNCH_ADVISORY,
+            warning.to_string(),
+        )
+        .once_per_change(),
+    );
 }

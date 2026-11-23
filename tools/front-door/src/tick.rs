@@ -11,7 +11,6 @@ use provenant_records::{CommandResult, Outcome};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
-    io::Write,
     path::{Path, PathBuf},
     time::{Duration, UNIX_EPOCH},
 };
@@ -440,7 +439,13 @@ pub(crate) fn gc_worker(globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
         )?;
         // Build-slot GC and prewarm follow a collection that finished its work.
         for warning in schedule_build_hygiene(&resolved) {
-            let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+            provenant_records::warning::warn(
+                provenant_records::warning::Warning::new(
+                    provenant_records::warning::BUILD_HYGIENE_ADVISORY,
+                    warning,
+                )
+                .once_per_change(),
+            );
         }
         failed.map_or(Ok(()), |error| Err(error.into()))
     })();
@@ -502,7 +507,7 @@ fn schedule_build_hygiene(resolved: &crate::roots::Resolved) -> Vec<String> {
         host.build.slot_idle_duration().value,
         host.build.snapshot_retention_duration().value,
     );
-    let limit = provenant_config::ResolvedAdmissionClass::resolve("build", state, None, None).slots;
+    let limit = provenant_config::ResolvedAdmissionClass::resolve("build", state, None).slots;
     let mut settings: BTreeMap<String, (Duration, Duration)> = BTreeMap::new();
     let mut projects: Vec<(PathBuf, String)> = Vec::new();
     for binding in provenant_config::registered_gc_projects(&resolved.roots).unwrap_or_default() {
@@ -529,10 +534,15 @@ fn schedule_build_hygiene(resolved: &crate::roots::Resolved) -> Vec<String> {
     });
     let mut warnings = report.warnings;
     if report.rotated_ledgers > 0 {
-        let _ = writeln!(
-            std::io::stderr().lock(),
-            "build ledger rotated; {} rotation(s) expired",
-            report.expired_ledgers
+        provenant_records::warning::warn(
+            provenant_records::warning::Warning::new(
+                provenant_records::warning::BUILD_LEDGER_ROTATED,
+                format!(
+                    "build ledger rotated; {} rotation(s) expired",
+                    report.expired_ledgers
+                ),
+            )
+            .once_per_change(),
         );
     }
     for (path, key) in projects.iter().take(8) {
@@ -820,17 +830,20 @@ pub(crate) fn run(globals: &Globals, workers: &'static dyn WorkerObserver) -> u8
                         .map(|diagnostic| format!("note: {}: {diagnostic}", task.task))
                 }))
                 .collect();
-            let summary = provenant_cli::Summary::new(
-                human.trim(),
-                rows,
-                failed.then(|| "provenant tick --json".into()),
-            );
+            let summary = provenant_cli::Summary::new(human.trim(), rows);
+            let next = failed.then(|| {
+                provenant_records::command_result::NextStep::from_command(
+                    "provenant tick --json",
+                    "inspect the failed scheduled tasks",
+                )
+            });
             crate::emit_summarised(
                 &CommandResult::new(
                     "tick",
                     if failed { Outcome::Error } else { Outcome::Ok },
                     data,
-                ),
+                )
+                .with_next(next.into_iter().collect()),
                 globals,
                 &human,
                 false,

@@ -33,7 +33,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::{io, path::PathBuf};
 
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Fabric {
     /// Show this agent's project and inbox identity
     Identity,
@@ -56,13 +56,13 @@ pub enum Fabric {
     #[command(subcommand)]
     Claim(Claim),
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct Operation {
     /// Caller-chosen ID that makes retries idempotent
     #[arg(long)]
     pub operation_id: OperationId,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct SequencePage {
     /// Return entries after this sequence number
     #[arg(long, catalog_i64_range = 0..)]
@@ -77,7 +77,7 @@ pub enum Kind {
     Response,
     Note,
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Mail {
     /// Send a message to one or more inboxes
     Send {
@@ -105,6 +105,7 @@ pub enum Mail {
         session: Option<String>,
     },
     /// Mark messages read up to a sequence number
+    #[command(visible_alias = "mark")]
     MarkRead {
         /// Last sequence number to mark read
         #[arg(catalog_i64_range = 0..)]
@@ -116,7 +117,7 @@ pub enum Mail {
         operation: Operation,
     },
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Events {
     /// Read activity log entries
     Read {
@@ -135,7 +136,7 @@ pub enum Events {
         operation: Operation,
     },
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Claim {
     /// Acquire durable advisory custody
     Acquire {
@@ -537,6 +538,10 @@ fn execute(
     Ok((value, false))
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the binary edge's output seam writes the command result to stdout and diagnostics to stderr"
+)]
 pub fn run(
     cmd: Fabric,
     globals: &Globals,
@@ -614,11 +619,10 @@ pub fn run(
     };
     let mode = globals.render_mode(&human, read_only, None);
     // Runtime pages/mutation receipts are bounded well below the ordinary cap.
-    match crate::render_or_publish(
-        &result,
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    match crate::render_command_result(
+        &mut result,
         mode,
-        &mut io::stdout().lock(),
-        &mut io::stderr().lock(),
         |value| context::publish(value, roots),
         crate::OverflowPolicy::Refuse,
     ) {

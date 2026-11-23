@@ -196,7 +196,7 @@ mod tests {
     #[test]
     fn effective_catalogue_model_is_canonicalised_at_the_entry_point() {
         let layer = provenant_config::OverlayLayer {
-            source: provenant_config::OverlaySource::Host,
+            source: provenant_config::Layer::Host,
             text: "[[catalogue.models]]\nmodel = 'opencode/opencode/overlay-only-model'\nevidence_ref = 'owner fact'\n"
                 .to_owned(),
         };
@@ -243,7 +243,7 @@ mod tests {
         assert_eq!(warnings.len(), 1);
         assert_eq!(
             warnings[0].code,
-            provenant_records::warning::ROUTE_MODEL_NOT_CATALOGUED
+            provenant_records::warning::ROUTE_MODEL_NOT_CATALOGUED.as_str()
         );
         let model = document.nodes[0]
             .route

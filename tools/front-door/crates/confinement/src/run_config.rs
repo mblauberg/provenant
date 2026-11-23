@@ -6,7 +6,8 @@ use crate::permissions::{
 };
 use crate::review_exempt::{MAX_PATTERNS, ReviewExempt, valid_pattern};
 use provenant_config::{DomainConfig, DomainSection, FieldMetadata, SectionError};
-use provenant_records::{BudgetAction, BudgetGrace, Limit, LimitSource, LimitStrength};
+use provenant_records::run::SandboxConstraint;
+use provenant_records::{BudgetAction, BudgetGrace, Layer, Limit, LimitStrength};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
@@ -138,24 +139,11 @@ const MAX_SANDBOXED_ROUTES: usize = 64;
 fn default_sandboxed_routes() -> Vec<String> {
     Vec::new()
 }
-/// Why a lane runs with or without the sandbox, strongest reason first.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SandboxSource {
-    /// The lane was started, or added or replaced in a graph, by a lane
-    /// sandboxed by its route, its own parent or the knob.
-    Parent,
-    /// The route matches `domains.run.sandboxed_routes`.
-    Route,
-    /// Explicit network or path denials require kernel enforcement.
-    Restriction,
-    /// The host platform does not implement sandbox confinement.
-    Platform,
-    /// The `lanes.sandbox` knob, from the run, graph node or host `[knobs]`.
-    Knob,
-    /// Default resolution: lanes run unsandboxed like the CLI started by hand.
-    Default,
-}
+// The layers a sandbox mode can come from are declared once as
+// `provenant_records::run::SANDBOX_PRECEDENCE`, beside the receipt this mode
+// feeds. A restriction or an unsupported platform is a `SandboxConstraint`
+// beside the host layer, never a separate source of the value.
+// Spec: docs/specs/state.md#every-setting-reports-its-layer
 /// Whether launch needs a newly compiled profile to meet its selected policy.
 /// The inherited case is only produced when the route independently resolves
 /// to trusted, no-profile execution without the outer OS sandbox.
@@ -210,8 +198,13 @@ pub struct SandboxMode {
     pub requested: bool,
     /// Whether the lane effectively runs under a sandbox.
     pub effective: bool,
-    /// Why the lane runs with or without the sandbox.
-    pub source: SandboxSource,
+    /// The layer that decided whether the lane runs with or without the
+    /// sandbox. An explicit knob records the host layer with no constraint;
+    /// the caller that knows the knob's own layer can rebind it on the receipt.
+    pub source: Layer,
+    /// A cap from a restriction or the platform, beside the layer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub constraint: Option<SandboxConstraint>,
     /// Whether this attempt needs a new profile. This is internal launch
     /// state; receipts record the effective mode and source instead.
     #[serde(skip)]
@@ -226,13 +219,14 @@ impl SandboxMode {
     pub fn required(
         requested: bool,
         effective: bool,
-        source: SandboxSource,
+        source: Layer,
         warning: Option<String>,
     ) -> Self {
         Self {
             requested,
             effective,
             source,
+            constraint: None,
             backend_requirement: BackendRequirement::Required,
             warning,
         }
@@ -378,6 +372,46 @@ impl Default for RunConfig {
         }
     }
 }
+/// Resolve the layer-based sandbox decision through the family's one
+/// precedence declaration. Constraints (restrictions, platform, inherited OS
+/// sandbox) are applied by the caller beside the winning layer.
+fn sandbox_layer_choice(knob: Option<&str>, listed: bool, parent_sandboxed: bool) -> (bool, Layer) {
+    use provenant_records::{Source, Sourced, warn_ignored};
+    let mut candidates: Vec<Sourced<bool>> = Vec::new();
+    match knob {
+        Some("on") | Some("off") => candidates.push(Sourced {
+            value: knob == Some("on"),
+            source: Source {
+                layer: Layer::Host,
+                origin: None,
+            },
+        }),
+        // `auto` and an invalid value leave the compiled default in place.
+        _ => {}
+    }
+    if listed {
+        candidates.push(Sourced {
+            value: true,
+            source: Source {
+                layer: Layer::Route,
+                origin: None,
+            },
+        });
+    }
+    if parent_sandboxed {
+        candidates.push(Sourced {
+            value: true,
+            source: Source {
+                layer: Layer::Parent,
+                origin: None,
+            },
+        });
+    }
+    let resolved = provenant_records::run::SANDBOX_PRECEDENCE.merge_over_default(false, candidates);
+    warn_ignored(&resolved.ignored, "lanes.sandbox");
+    (resolved.winner.value, resolved.winner.source.layer)
+}
+
 impl RunConfig {
     /// Resolve the host policy once per launch, then report its source and
     /// warnings with `LanePolicy::report_launch`. The renderer consumes the
@@ -411,8 +445,9 @@ impl RunConfig {
     /// Explicit denials always select a profile, even with an off knob or an
     /// unsupported platform: backend resolution reports unavailable mandatory
     /// enforcement as a capability failure.
-    /// The off knob may override an advisory route or warning floor, but not
-    /// an active parent retention floor.
+    /// The layer-based choice goes through `SANDBOX_PRECEDENCE`, so a resolved
+    /// route policy outranks a host knob and an active parent floor outranks
+    /// both. Constraints apply beside the winning layer.
     pub fn sandbox_for(&self, inputs: SandboxInputs<'_>) -> SandboxMode {
         let listed = self
             .sandboxed_routes
@@ -430,7 +465,8 @@ impl RunConfig {
             return SandboxMode {
                 requested,
                 effective: true,
-                source: SandboxSource::Restriction,
+                source: Layer::Host,
+                constraint: Some(SandboxConstraint::Restriction),
                 backend_requirement: BackendRequirement::Required,
                 warning: if inputs.knob == Some("off") {
                     Some(
@@ -443,8 +479,10 @@ impl RunConfig {
         }
 
         if inputs.os_sandboxed {
+            // A listed route keeps a profile-bound floor even under sandbox=off,
+            // so it can never collapse into a trusted inherited fallback.
             let trusted_inherited =
-                !inputs.parent_sandboxed && (inputs.knob == Some("off") || (!requested && !listed));
+                !inputs.parent_sandboxed && !listed && (inputs.knob == Some("off") || !requested);
             let warning = match inputs.knob {
                 Some("off") => Some("process is already inside an operating-system sandbox; this launch cannot disable it".to_string()),
                 Some(value) if !matches!(value, "auto" | "off" | "on") => {
@@ -455,7 +493,8 @@ impl RunConfig {
             return SandboxMode {
                 requested,
                 effective: true,
-                source: SandboxSource::Parent,
+                source: Layer::Parent,
+                constraint: None,
                 backend_requirement: if trusted_inherited {
                     BackendRequirement::TrustedInherited
                 } else {
@@ -466,89 +505,39 @@ impl RunConfig {
         }
 
         if !inputs.platform_supported {
-            let effective =
-                requested || inputs.parent_sandboxed || (listed && inputs.knob != Some("off"));
+            let (effective, _) = sandbox_layer_choice(inputs.knob, listed, inputs.parent_sandboxed);
             return SandboxMode {
                 requested,
                 effective,
-                source: SandboxSource::Platform,
+                source: Layer::Host,
+                constraint: Some(SandboxConstraint::Platform),
                 backend_requirement: BackendRequirement::Required,
                 warning: effective
                     .then(|| "requested sandbox is unavailable on this platform".into()),
             };
         }
 
-        if inputs.knob == Some("off") {
-            if inputs.parent_sandboxed {
-                return SandboxMode {
-                    requested: false,
-                    effective: true,
-                    source: SandboxSource::Parent,
-                    backend_requirement: BackendRequirement::Required,
-                    warning: Some(
-                        "active parent sandbox floor requires confinement despite sandbox=off"
-                            .into(),
-                    ),
-                };
+        let (effective, source) =
+            sandbox_layer_choice(inputs.knob, listed, inputs.parent_sandboxed);
+        let warning = match inputs.knob {
+            Some("off") if source == Layer::Parent => {
+                Some("active parent sandbox floor requires confinement despite sandbox=off".into())
             }
-            let mut dropped = Vec::new();
-            if listed {
-                dropped.push(format!("route '{}'", inputs.route));
+            Some("off") if source == Layer::Route => {
+                Some("route policy requires a sandbox despite sandbox=off".into())
             }
-            let warning = if dropped.is_empty() {
-                None
-            } else {
-                Some(format!(
-                    "explicit --no-sandbox drops restriction: {}",
-                    dropped.join(", ")
-                ))
-            };
-            return SandboxMode {
-                requested: false,
-                effective: false,
-                source: SandboxSource::Knob,
-                backend_requirement: BackendRequirement::Required,
-                warning,
-            };
-        }
-
-        if inputs.knob == Some("on") {
-            return SandboxMode {
-                requested: true,
-                effective: true,
-                source: SandboxSource::Knob,
-                backend_requirement: BackendRequirement::Required,
-                warning: None,
-            };
-        }
-
-        if inputs.parent_sandboxed {
-            SandboxMode {
-                requested: false,
-                effective: true,
-                source: SandboxSource::Parent,
-                backend_requirement: BackendRequirement::Required,
-                warning: None,
+            Some(value) if !matches!(value, "auto" | "off" | "on") => {
+                Some("invalid lanes.sandbox; using default off".into())
             }
-        } else if listed {
-            SandboxMode {
-                requested: false,
-                effective: true,
-                source: SandboxSource::Route,
-                backend_requirement: BackendRequirement::Required,
-                warning: None,
-            }
-        } else {
-            SandboxMode {
-                requested: false,
-                effective: false,
-                source: SandboxSource::Default,
-                backend_requirement: BackendRequirement::Required,
-                warning: inputs
-                    .knob
-                    .filter(|value| !matches!(*value, "auto" | "off" | "on"))
-                    .map(|_| "invalid lanes.sandbox; using default off".into()),
-            }
+            _ => None,
+        };
+        SandboxMode {
+            requested,
+            effective,
+            source,
+            constraint: None,
+            backend_requirement: BackendRequirement::Required,
+            warning,
         }
     }
 
@@ -581,47 +570,46 @@ impl RunConfig {
     /// setting, then the host setting, then the default.
     pub fn writer_token_budget_for(&self, project: &str) -> Limit {
         let layers = [
-            Some((LimitSource::Default, DEFAULT_WRITER_TOKEN_BUDGET)),
-            self.writer_token_budget
-                .map(|tokens| (LimitSource::Host, tokens)),
+            Some((Layer::Default, DEFAULT_WRITER_TOKEN_BUDGET)),
+            self.writer_token_budget.map(|tokens| (Layer::Host, tokens)),
             self.projects
                 .get(project)
                 .and_then(|settings| settings.writer_token_budget)
-                .map(|tokens| (LimitSource::Project, tokens)),
+                .map(|tokens| (Layer::Project, tokens)),
         ];
         Limit::resolve(layers.into_iter().flatten(), LimitStrength::Default)
-            .unwrap_or_else(|| Limit::new(0, LimitSource::Default, LimitStrength::Default))
+            .unwrap_or_else(|| Limit::new(0, Layer::Default, LimitStrength::Default))
     }
 
     /// The action and its source for `project`, with project taking precedence
     /// over host and the compiled `wrap_up` default.
-    pub fn writer_budget_action_for(&self, project: &str) -> (BudgetAction, LimitSource) {
+    pub fn writer_budget_action_for(&self, project: &str) -> (BudgetAction, Layer) {
         if let Some(action) = self
             .projects
             .get(project)
             .and_then(|settings| settings.writer_budget_action)
         {
-            (action, LimitSource::Project)
+            (action, Layer::Project)
         } else if let Some(action) = self.writer_budget_action {
-            (action, LimitSource::Host)
+            (action, Layer::Host)
         } else {
-            (BudgetAction::default(), LimitSource::Default)
+            (BudgetAction::default(), Layer::Default)
         }
     }
 
     /// The action grace and its source for `project`, with project taking
     /// precedence over host and the compiled 0.10 default.
-    pub fn writer_budget_grace_for(&self, project: &str) -> (BudgetGrace, LimitSource) {
+    pub fn writer_budget_grace_for(&self, project: &str) -> (BudgetGrace, Layer) {
         if let Some(grace) = self
             .projects
             .get(project)
             .and_then(|settings| settings.writer_budget_grace)
         {
-            (grace, LimitSource::Project)
+            (grace, Layer::Project)
         } else if let Some(grace) = self.writer_budget_grace {
-            (grace, LimitSource::Host)
+            (grace, Layer::Host)
         } else {
-            (BudgetGrace::default(), LimitSource::Default)
+            (BudgetGrace::default(), Layer::Default)
         }
     }
 
@@ -901,10 +889,10 @@ mod tests {
         let availability = Availability::Unavailable {
             reason: AvailabilityReason::ProbeFailed,
         };
-        let mut isolated = SandboxMode::required(true, true, SandboxSource::Knob, None);
+        let mut isolated = SandboxMode::required(true, true, Layer::Host, None);
         assert!(isolated.resolve_backend(availability, true).is_err());
         assert!(isolated.effective);
-        let mut host = SandboxMode::required(true, true, SandboxSource::Knob, None);
+        let mut host = SandboxMode::required(true, true, Layer::Host, None);
         assert!(host.resolve_backend(availability, false).is_ok());
         assert!(!host.effective);
         assert!(
@@ -1087,11 +1075,12 @@ mod tests {
                                 "an active parent floor cannot become a trusted fallback"
                             );
                         }
+                        // Spec: docs/specs/state.md#every-setting-reports-its-layer
+                        // Route outranks the host knob, so a listed route keeps
+                        // its sandbox floor even under sandbox=off.
                         assert_eq!(
                             mode.effective,
-                            knob == Some("on")
-                                || parent_sandboxed
-                                || (knob != Some("off") && listed)
+                            knob == Some("on") || parent_sandboxed || listed
                         );
                     }
                 }
@@ -1195,7 +1184,7 @@ mod tests {
                     mode.effective,
                     "inherited OS sandbox must always be reported effective"
                 );
-                assert_eq!(mode.source, SandboxSource::Parent);
+                assert_eq!(mode.source, Layer::Parent);
                 if knob == Some("off") {
                     assert!(
                         mode.warning.is_some(),
@@ -1306,7 +1295,8 @@ mod tests {
             let mode = default_config.sandbox_for(input);
             assert_eq!(mode.effective, knob == Some("on"));
             assert_eq!(mode.requested, knob == Some("on"));
-            assert_eq!(mode.source, SandboxSource::Platform);
+            assert_eq!(mode.source, Layer::Host);
+            assert_eq!(mode.constraint, Some(SandboxConstraint::Platform));
         }
     }
     #[test]
@@ -1372,7 +1362,7 @@ mod tests {
         let unset = RunConfig::default().writer_token_budget_for("p");
         assert_eq!(
             (unset.value, unset.source),
-            (DEFAULT_WRITER_TOKEN_BUDGET, LimitSource::Default)
+            (DEFAULT_WRITER_TOKEN_BUDGET, Layer::Default)
         );
         let host: RunConfig = toml_edit::de::from_str(&format!(
             "writer_token_budget = {DEFAULT_WRITER_TOKEN_BUDGET}\n"
@@ -1381,7 +1371,7 @@ mod tests {
         let budget = host.writer_token_budget_for("p");
         assert_eq!(
             (budget.value, budget.source),
-            (DEFAULT_WRITER_TOKEN_BUDGET, LimitSource::Host)
+            (DEFAULT_WRITER_TOKEN_BUDGET, Layer::Host)
         );
         let off: RunConfig = toml_edit::de::from_str("writer_token_budget = 0\n").unwrap();
         assert_eq!(off.writer_token_budget_for("p").value, 0);

@@ -864,6 +864,8 @@ fn emit_path_instruction(kind: &str, path: &Path) -> io::Result<()> {
     emit_instruction(kind, value)
 }
 
+// `cargo:` directives are a build script's protocol with Cargo, not command output.
+#[allow(clippy::disallowed_methods)]
 fn emit_instruction(kind: &str, value: &str) -> io::Result<()> {
     let stdout = io::stdout();
     let mut output = stdout.lock();

@@ -401,9 +401,7 @@ fn codex_terminal_observation_uses_final_route_bound_native_home()
 fn native_codex_continuation_uses_the_bound_account_home_without_copying_it()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_core::{AttemptId, Digest};
-    use provenant_records::diagnostic::{
-        ContinuationField as F, ContinuationIssue as I, ContinuationRule as R,
-    };
+    use provenant_records::diagnostic::{ContinuationField as F, ContinuationIssue as I, ContinuationRule as R, };
 
     let temp = tempfile::tempdir()?;
     let base = temp.path().canonicalize()?;
@@ -2627,7 +2625,7 @@ fn write_grant_limit_reports_configured_value_and_origin() -> Result<(), Box<dyn
     assert_eq!(default.bytes, provenant_records::run::MAX_WRITE_GRANT_BYTES);
     assert_eq!(
         default.origin,
-        provenant_records::diagnostic::SettingSource::ShippedDefault
+        provenant_records::diagnostic::Layer::Default
     );
     std::fs::write(
         state.join("config.toml"),
@@ -2637,7 +2635,7 @@ fn write_grant_limit_reports_configured_value_and_origin() -> Result<(), Box<dyn
     assert_eq!(configured.bytes, 1048576);
     assert_eq!(
         configured.origin,
-        provenant_records::diagnostic::SettingSource::Configuration
+        provenant_records::diagnostic::Layer::Host
     );
     Ok(())
 }
@@ -2692,7 +2690,7 @@ fn opencode_continuation_copies_a_linked_host_config_directory()
     std::fs::create_dir_all(&child_state)?;
     let access = provenant_records::LaneAccessReceipt {
         access: provenant_records::LaneAccess::Host,
-        source: provenant_records::LaneAccessSource::Default,
+        source: provenant_records::Layer::Default,
         key: "lanes.access".into(),
         extra: Default::default(),
     };

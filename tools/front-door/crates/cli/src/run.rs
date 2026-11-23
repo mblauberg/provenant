@@ -8,7 +8,10 @@ use provenant_core::{AttemptId, CancelToken, Clock, DeliveryId, OperationId, Roo
 use provenant_fabric_runtime::hosts::plain_text;
 use provenant_os::clock::SystemClock;
 use provenant_providers::{OutcomeStatus, ProviderEvent, REGISTRY};
-use provenant_records::{CommandError, CommandResult, Outcome as Status};
+use provenant_records::{
+    CommandError, CommandResult, Outcome as Status, UsageSource,
+    warning::{Warning, warn},
+};
 use provenant_routing::{Fallback, ModelId, RouteChoice, RouteName};
 use provenant_run as run;
 use provenant_supervisor::custody::ExitObservation;
@@ -45,6 +48,13 @@ pub use key::{resolve_fail, resolve_target};
 pub use launch::*;
 pub use output::*;
 pub use steer_pacing::pace_steer_restart;
+fn absent_usage(reason: &str) -> run::UsageRecord {
+    run::UsageRecord {
+        absence_reason: Some(reason.to_owned()),
+        ..Default::default()
+    }
+}
+
 pub fn provider_executable(name: &str) -> Result<PathBuf, String> {
     provider::find_executable(name)
 }
@@ -300,27 +310,88 @@ pub struct ReadOnlySourceRef {
     pub head: provenant_core::GitOid,
 }
 
-/// Resolve the default source of a read-only launch from `source`. Only a
-/// checkout behind its fetched upstream yields a pin; a level or ahead checkout
-/// keeps its local tree. Missing Git evidence is advisory, never a refusal.
-pub fn read_only_source_ref(state: &Path, source: &Path) -> Option<ReadOnlySourceRef> {
-    provider::confinement::read_only_source_ref(state, source)
+/// The sourced choice of what a read-only lane reads. `value` is `checkout`,
+/// `default_branch`, an explicit ref, or empty for the compiled default (the
+/// `auto` registry value); the layer and origin are the ones the owner actually
+/// set the knob at, so every warning and receipt names the same place.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReadSourceChoice {
+    pub value: String,
+    pub fetch_first: bool,
+    pub layer: provenant_records::Layer,
+    pub origin: Option<String>,
 }
 
-/// The warning a stale read-only checkout carries when an upstream source is
-/// pinned, naming the ref and commit the lane will read and the local head it
-/// replaces.
-pub fn read_only_source_warning(source: &Path, selected: &ReadOnlySourceRef) -> String {
-    format!(
-        "{} is {} commit{} behind {}; read-only lane will read {} ({}) instead of local {} because the checkout is stale",
-        source.display(),
-        selected.behind,
-        if selected.behind == 1 { "" } else { "s" },
-        selected.reference,
-        selected.reference,
-        selected.commit,
-        selected.head
-    )
+impl Default for ReadSourceChoice {
+    fn default() -> Self {
+        Self {
+            value: String::new(),
+            fetch_first: false,
+            layer: provenant_records::Layer::Default,
+            origin: None,
+        }
+    }
+}
+
+impl ReadSourceChoice {
+    /// The compiled default: only a stale checkout is pinned, as last fetched.
+    pub fn automatic() -> Self {
+        Self::default()
+    }
+
+    /// The knob named whenever this choice is reported.
+    pub const KNOB: &'static str = "lanes.read_source";
+
+    /// Where this choice was set, for warnings and receipts.
+    pub fn description(&self) -> String {
+        match &self.origin {
+            Some(origin) => format!("{} ({origin})", self.layer.as_str()),
+            None => self.layer.as_str().to_owned(),
+        }
+    }
+}
+
+/// Resolve the source of a read-only launch through the one resolver. Only a
+/// checkout behind its fetched upstream yields a pin under the compiled
+/// default; an explicit choice pins its own commit. Missing Git evidence is
+/// advisory, never a refusal.
+pub fn read_only_source_ref(
+    state: &Path,
+    source: &Path,
+    choice: &ReadSourceChoice,
+) -> Option<ReadOnlySourceRef> {
+    provider::confinement::read_only_source_ref(state, source, choice)
+}
+
+/// The warning a read-only launch carries when a source is pinned, naming the
+/// ref and commit the lane will read and where that choice came from.
+pub fn read_only_source_warning(
+    source: &Path,
+    selected: &ReadOnlySourceRef,
+    choice: &ReadSourceChoice,
+) -> String {
+    if choice.value.is_empty() {
+        format!(
+            "{} is {} commit{} behind {}; read-only lane will read {} ({}) instead of local {} because the checkout is stale",
+            source.display(),
+            selected.behind,
+            if selected.behind == 1 { "" } else { "s" },
+            selected.reference,
+            selected.reference,
+            selected.commit,
+            selected.head
+        )
+    } else {
+        format!(
+            "read-only lane will read {} ({}) from {} because {}={} (source: {})",
+            selected.reference,
+            selected.commit,
+            source.display(),
+            ReadSourceChoice::KNOB,
+            choice.value,
+            choice.description()
+        )
+    }
 }
 
 /// The warning for an unpinned read-only launch. The lane still reads the
@@ -337,14 +408,28 @@ pub fn read_only_local_checkout_warning(source: &Path, selected: &ReadOnlySource
     )
 }
 
-pub fn read_only_checkout_warning(state: &Path, source: &Path) -> Option<String> {
-    provider::confinement::read_only_checkout_warning(state, source)
+pub fn read_only_checkout_warning(
+    state: &Path,
+    source: &Path,
+    choice: &ReadSourceChoice,
+) -> Option<String> {
+    provider::confinement::read_only_checkout_warning(state, source, choice)
 }
 
 fn reply(command: &str, outcome: Result<(Value, String), Fail>) -> Reply {
+    reply_with_next(command, outcome, Vec::new())
+}
+
+/// `reply` for an owner that suggests commands: the steps go on the envelope
+/// so JSON and the edge's one human rendering cannot diverge.
+fn reply_with_next(
+    command: &str,
+    outcome: Result<(Value, String), Fail>,
+    next: Vec<provenant_records::command_result::NextStep>,
+) -> Reply {
     match outcome {
         Ok((data, human)) => Reply {
-            result: CommandResult::new(command, Status::Ok, data),
+            result: CommandResult::new(command, Status::Ok, data).with_next(next),
             human,
             summary: None,
             read_only: false,
@@ -523,14 +608,13 @@ fn writer_gc_settings(
     policy: &provenant_records::policy::Policy,
 ) -> provenant_config::GcSettings {
     provenant_config::GcSettings::read(state).unwrap_or_else(|error| {
-        if let provenant_records::policy::Effect::Warn(message) = policy.check(
+        if let provenant_records::policy::Effect::Warn(warning) = policy.check(
             "RUN_WRITER_GC_SETTINGS_NONE",
             provenant_records::policy::Facts::violation(format!(
                 "gc.free_floor configuration unavailable ({error}); using compiled GC defaults"
             )),
         ) {
-            use std::io::Write;
-            let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+            warn(warning);
         }
         provenant_config::GcSettings::default()
     })
@@ -580,9 +664,9 @@ impl run::Providers for Registry<'_> {
                     config.origins.get("domains.run.write_grant_limit_bytes"),
                     Some(provenant_config::Origin::User { .. })
                 ) {
-                    provenant_records::diagnostic::SettingSource::Configuration
+                    provenant_records::diagnostic::Layer::Host
                 } else {
-                    provenant_records::diagnostic::SettingSource::ShippedDefault
+                    provenant_records::diagnostic::Layer::Default
                 };
                 run::WriteGrantLimit {
                     bytes: config.domains.run.write_grant_limit_bytes,
@@ -590,14 +674,13 @@ impl run::Providers for Registry<'_> {
                 }
             }
             Err(error) => {
-                if let provenant_records::policy::Effect::Warn(message) = policy.check(
+                if let provenant_records::policy::Effect::Warn(warning) = policy.check(
                     "WRITE_GRANT_LIMIT_READ_NONE",
                     provenant_records::policy::Facts::violation(format!(
                         "domains.run.write_grant_limit_bytes unavailable ({error}); using compiled default"
                     )),
                 ) {
-                    use std::io::Write;
-                    let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+                    warn(warning);
                 }
                 run::WriteGrantLimit::default()
             }
@@ -632,14 +715,13 @@ impl run::Providers for Registry<'_> {
                 run::launch_policy(roots.state.as_path(), &project, task)
             });
         let (Some(roots), Some(home)) = (self.roots, self.home) else {
-            if let provenant_records::policy::Effect::Warn(message) = policy.check(
+            if let provenant_records::policy::Effect::Warn(warning) = policy.check(
                 "RUN_WRITER_GC_SETTINGS_NONE",
                 provenant_records::policy::Facts::violation(
                     "writer disk policy context unavailable; continuing without a disk check",
                 ),
             ) {
-                use std::io::Write;
-                let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+                warn(warning);
             }
             return Ok(());
         };
@@ -834,7 +916,8 @@ fn settlement_policy(
             );
             policy
         }
-        // TODO(#3371 seam): run owner supplies task policy for legacy decode callers.
+        // No host roots and no sealed task: only the compiled policy table
+        // applies, so the compiled default is the owner's resolved layer here.
         _ => provenant_records::policy::Policy::default(),
     }
 }
@@ -915,10 +998,10 @@ impl Registry<'_> {
             result: String::new(),
             complete: false,
             observed_route: None,
-            // `source` names why the current observation has no usage.
-            usage: run::UsageRecord {
-                source: result_event_usage.then(|| "absent: no result event".into()),
-                ..run::UsageRecord::default()
+            usage: if result_event_usage {
+                absent_usage("absent: no result event")
+            } else {
+                run::UsageRecord::default()
             },
             session: None,
             reason: Some(reason.into()),
@@ -962,7 +1045,8 @@ impl Registry<'_> {
             .map(|spec| spec.model_observation)
             .unwrap_or(provenant_records::ModelObservation::Stream);
         let model = stream_model(route);
-        // TODO(#3371 seam): run owner supplies task policy for legacy decode callers.
+        // A caller without a sealed task policy receives the compiled table;
+        // there is no host or project layer to overlay in that case.
         let fallback = provenant_records::policy::Policy::default();
         let policy = policy.unwrap_or(&fallback);
         let mut state = match expected_session {
@@ -1211,6 +1295,18 @@ impl Registry<'_> {
             turns: Vec::new(),
         };
         let mut has_usage = false;
+        // The adapter declares what one report means; the accumulator is the
+        // only merge. A name we do not have a spec for reports nothing live.
+        let usage_semantics = provenant_records::AdapterSpec::get(adapter.id())
+            .map(|spec| spec.usage)
+            .unwrap_or_else(|| {
+                provenant_records::UsageSemantics::new(
+                    provenant_records::UsageScope::Step,
+                    false,
+                    false,
+                )
+            });
+        let mut accumulator = provenant_providers::UsageAccumulator::new(usage_semantics);
         let mut early_stop = false;
         let mut result_fallback = false;
         for event in &events {
@@ -1234,24 +1330,17 @@ impl Registry<'_> {
                         .push(run::PartialSignal::ProviderStop);
                     early_stop = true;
                 }
-                ProviderEvent::Usage {
-                    input,
-                    output,
-                    cache_read,
-                    cache_write,
-                    cache_write_1h,
-                } => {
+                ProviderEvent::Usage(report) => {
                     has_usage = true;
-                    decoded.usage.uncached_input = Some(*input);
-                    decoded.usage.output_excluding_reasoning = Some(*output);
-                    decoded.usage.cache_read = *cache_read;
-                    decoded.usage.cache_write = *cache_write;
-                    decoded.usage.cache_write_1h = *cache_write_1h;
-                    decoded.usage.source = Some("provider".into());
+                    accumulator.push(report.clone());
                 }
                 _ => {}
             }
         }
+        let (tokens, cost) = accumulator.total();
+        decoded.usage.tokens = tokens;
+        decoded.usage.cost = cost;
+        decoded.usage.source = UsageSource::Stream;
         // Provider config-deprecation notices are advice, not failures. Show
         // each distinct notice once per attempt beside the applied route,
         // naming the config file the provider reported. The same notice can
@@ -1259,11 +1348,7 @@ impl Registry<'_> {
         // warning even when Codex prints the key twice.
         let scan_stderr = provenant_records::AdapterSpec::get(adapter.id())
             .is_some_and(|spec| spec.stderr_config_notices);
-        if let Some(route) = decoded.observed_route.as_mut() {
-            route
-                .launch_warnings
-                .extend(config_notice_warnings(&events, stderr, scan_stderr));
-        }
+        report_config_notices(&events, stderr, scan_stderr);
         if provenant_records::AdapterSpec::get(adapter.id())
             .is_some_and(|spec| spec.deduplicate_result)
         {
@@ -1300,11 +1385,14 @@ impl Registry<'_> {
                 serde_json::from_slice::<serde_json::Value>(line)
                     .is_ok_and(|event| event["type"] == "result")
             });
-            decoded.usage.source = Some(if has_result {
-                "absent: result event has no usage".into()
-            } else {
-                "absent: no result event".into()
-            });
+            decoded.usage.absence_reason = Some(
+                if has_result {
+                    "absent: result event has no usage"
+                } else {
+                    "absent: no result event"
+                }
+                .to_owned(),
+            );
         }
         let failure_cause = if events.contains(&ProviderEvent::AuthRequired) {
             provenant_providers::FailureCause::AuthRequired
@@ -1707,6 +1795,7 @@ fn attach_freshness(
     prices: &provenant_telemetry::PriceTable,
     data: &mut Value,
     human: &mut String,
+    next: &mut Vec<provenant_records::command_result::NextStep>,
 ) -> Result<(), Fail> {
     let today = jiff::Timestamp::from_microsecond(now(&SystemClock::new())?.as_micros())
         .map_err(|error| Fail::new(Status::Error, ErrorKind::Time, error.to_string()))?
@@ -1714,11 +1803,18 @@ fn attach_freshness(
         .date();
     let freshness = prices.freshness(today);
     if freshness.stale {
-        human.insert_str(0, &format!(
-            "price sheet reviewed {} days ago ({}), over the {}-day limit\nnext: review and refresh with `provenant telemetry prices refresh`\n",
-            freshness.age_days,
-            freshness.reviewed_at,
-            freshness.max_age_days.unwrap_or(0)
+        human.insert_str(
+            0,
+            &format!(
+                "price sheet reviewed {} days ago ({}), over the {}-day limit\n",
+                freshness.age_days,
+                freshness.reviewed_at,
+                freshness.max_age_days.unwrap_or(0)
+            ),
+        );
+        next.push(provenant_records::command_result::NextStep::from_command(
+            "provenant telemetry prices refresh",
+            "review and refresh the stale price sheet",
         ));
     }
     data["price_freshness"] = json!(freshness);
@@ -2082,12 +2178,10 @@ fn load_price_sheet(
     let config = toml_edit::de::from_str::<provenant_telemetry::ConfiguredPrices>(&text)
         .map_err(|error| Fail::new(Status::Error, ErrorKind::Prices, error.to_string()))?;
     let project = edge.roots.checkout();
-    let key = provenant_config::project_key_for(project);
     let layered = provenant_telemetry::prices_overlay::load(
         edge.assets,
         edge.roots.state.as_path(),
         Some(project),
-        key.as_deref(),
     )
     .map_err(|error| Fail::new(Status::Error, ErrorKind::Prices, error.to_string()))?;
     Ok((config, layered.table))
@@ -2240,10 +2334,10 @@ fn prices_refresh_inner(command: PricesRefresh, edge: &Edge<'_>) -> Result<(Valu
         plain_text(&primary_origin, 256),
         command.out.display()
     );
-    if proposal.is_clean() {
-        human.push_str("next: nothing to review\n");
-    } else {
-        human.push_str("next: review the proposal, then edit config/telemetry-prices.toml\n");
+    // Advisory prose, not a command suggestion: a proposal has no argv a
+    // consumer could copy, so it stays in the human text without a `next:` line.
+    if !proposal.is_clean() {
+        human.push_str("review the proposal, then edit config/telemetry-prices.toml\n");
     }
     let mut data = data;
     data["clean"] = json!(proposal.is_clean());
@@ -2376,23 +2470,25 @@ pub fn chair_snapshot(edge: &Edge<'_>) -> Result<(provenant_core::ProjectId, Vec
 /// One warning per distinct provider config-deprecation notice. The notice
 /// can arrive as a decoded event and again on stderr with a different prefix
 /// and source, so both are keyed by the notice text alone.
-fn config_notice_warnings(
-    events: &[ProviderEvent],
-    stderr: &[u8],
-    scan_stderr: bool,
-) -> Vec<String> {
+fn report_config_notices(events: &[ProviderEvent], stderr: &[u8], scan_stderr: bool) {
     use provenant_providers::codex::{
         config_deprecation_notice, config_notice_key, config_notice_source,
     };
     let mut seen = std::collections::BTreeSet::new();
-    let mut warnings = Vec::new();
     let mut note = |message: &str, source: String| {
         let key = config_notice_key(message);
         if seen.insert(key.clone()) {
-            warnings.push(format!(
-                "warning: provider config deprecation ({source}): {}; fix the key or use providers.codex.clean_config",
-                crate::bounded_text(&key, 512)
-            ));
+            warn(
+                Warning::new(
+                    provenant_records::warning::CONFIG_DEPRECATION,
+                    format!(
+                        "provider config deprecation ({source}): {}",
+                        crate::bounded_text(&key, 512)
+                    ),
+                )
+                .subject(source)
+                .repair("Fix the key or use providers.codex.clean_config."),
+            );
         }
     };
     for event in events {
@@ -2411,7 +2507,6 @@ fn config_notice_warnings(
             }
         }
     }
-    warnings
 }
 
 #[cfg(test)]

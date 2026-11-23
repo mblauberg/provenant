@@ -38,6 +38,8 @@ fn error_envelope(command: &str, code: &str, message: &str, repair: &str) -> Res
         error: Some(provenant_records::CommandError::new(
             code, message, None, repair,
         )),
+        warnings: Vec::new(),
+        next: Vec::new(),
     };
     serde_json::to_value(result).map_err(|error| format!("error envelope: {error}"))
 }
@@ -126,9 +128,10 @@ mod fixtures {
             "verified_owner": "02020202020202020202020202020202",
             "read_only_writable": [],
             "protected_paths": [],
-            "usage": {"uncached_input": null, "cache_read": null, "cache_write": null,
-                "cache_write_1h": null, "output_excluding_reasoning": null, "reasoning": null,
-                "source": null, "context_basis_points": null},
+            // Spec: docs/specs/telemetry.md#usage-merges-by-declared-semantics
+            // UsageRecord carries typed token buckets and a non-optional source.
+            "usage": {"tokens":{"input": null, "cache_read": null, "cache_write": null,
+                "cache_write_1h": null, "output": null, "reasoning": null}},
             "prompt": {"path": {"encoding": "utf8", "path": "attempts/65656565656565656565656565656565/prompt.txt"},
                 "digest": "sha256:aaecb569221e2e49869a9b3e5d61280a2098fb65b08bae1198e892e8f6f00aba",
                 "bytes": 12, "complete": true, "redacted": false},
@@ -414,7 +417,7 @@ mod fixtures {
                         "lanes": [{"lane_id": lane_id("board-fixture", "65656565656565656565656565656565"),
                             "chair": null, "metadata": {"attempt": board_lane},
                             "wait": {"lane_class": "read_only", "waiting_for": "launch: not yet handed to a guardian"},
-                            "attention": false, "usage_coverage": {"known": [], "missing": ["uncached_input", "cache_read", "cache_write", "output_excluding_reasoning", "reasoning"]},
+                            "attention": false, "usage_coverage": {"known": [], "missing": ["input", "cache_read", "cache_write", "output", "reasoning"]},
                             "observation_coverage": "complete"}],
                         "next_cursor": "2.101.101.sha256:88fdd1c45d28a6ed462639aaadc725d8f7821fd400d0c5b0481ba269745061c7",
                         "truncated": true
@@ -472,9 +475,10 @@ mod fixtures {
                         "artifacts": [{"name": "prompt", "bytes": 12, "complete": true,
                             "digest": "sha256:aaecb569221e2e49869a9b3e5d61280a2098fb65b08bae1198e892e8f6f00aba",
                             "present": true, "redacted": false}],
-                        "usage": {"uncached_input": null, "cache_read": null, "cache_write": null,
-                            "output_excluding_reasoning": null, "reasoning": null, "context_basis_points": null, "source": null},
-                        "usage_coverage": {"known": [], "missing": ["uncached_input", "cache_read", "cache_write", "output_excluding_reasoning", "reasoning"]},
+                        "usage": {"tokens":{"input": null, "cache_read": null, "cache_write": null,
+                            "cache_write_1h": null, "output": null, "reasoning": null},
+                            "source": "stream", "context_basis_points": null},
+                        "usage_coverage": {"known": [], "missing": ["input", "cache_read", "cache_write", "output", "reasoning"]},
                         "linked_inbox_requests": [],
                         "coverage": {"linked_inbox_requests": "complete", "nested": "bounded_tree_search", "peer": "not_searched"}
                     }),

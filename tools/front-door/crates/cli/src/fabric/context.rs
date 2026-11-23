@@ -231,6 +231,14 @@ pub struct HostChairSession {
     pub source: String,
 }
 
+/// Rank the configured peer names close to `name` with the shared ranker.
+fn close_host_names<'a>(name: &str, names: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    provenant_core::close_matches(name, names)
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+}
+
 impl Context {
     /// The host chair session when known, and the source it came from.
     pub fn host_chair_session(&self) -> Option<HostChairSession> {
@@ -856,6 +864,15 @@ impl Context {
         }
         Ok(())
     }
+    /// The configured peer labels and host IDs close to `name`, ranked by the
+    /// one shared name ranker. Labels and IDs are the only names a host
+    /// refusal may show; no secret or path ever enters the universe.
+    pub fn host_candidates(&self, name: &str) -> Vec<String> {
+        let mut universe: Vec<String> = self.config.peers.keys().cloned().collect();
+        universe.extend(self.config.peers.values().map(|peer| peer.host.to_string()));
+        close_host_names(name, universe.iter().map(String::as_str))
+    }
+
     /// Resolve a configured peer by its label or host ID.
     pub fn peer_host(&self, name: &str) -> Option<HostId> {
         if let Some(peer) = self.config.peers.get(name) {
@@ -1252,6 +1269,14 @@ pub fn publish<T: Serialize>(value: &CommandResult<T>, roots: &Roots) -> io::Res
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    // Spec: docs/specs/cli.md#every-name-refusal-lists-close-matches
+    fn a_one_edit_peer_label_typo_ranks_the_configured_label_first() {
+        let close = super::close_host_names("worksttion", ["workstation", "laptop"]);
+        assert_eq!(close.first().map(String::as_str), Some("workstation"));
+        assert!(super::close_host_names("zzzzzz", ["workstation"]).is_empty());
+    }
+
     #[test]
     #[allow(
         clippy::disallowed_methods,

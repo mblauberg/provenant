@@ -1,4 +1,5 @@
 use super::*;
+use provenant_records::warning::{Warning, warn};
 
 /// Bind declared lane capabilities to the provider's confinement profile.
 pub(in crate::run) fn apply_lane_capabilities(
@@ -191,14 +192,14 @@ pub(super) fn confinement_request(
         InventoryContext::Launch(_, _, receipt) => (*receipt).clone(),
         InventoryContext::Preflight => provenant_records::LaneAccessReceipt {
             access: provenant_records::LaneAccess::Host,
-            source: provenant_records::LaneAccessSource::Default,
+            source: provenant_records::Layer::Default,
             key: "lanes.access".into(),
             extra: Default::default(),
         },
         #[cfg(any(test, feature = "fixture"))]
         InventoryContext::Sandboxed => provenant_records::LaneAccessReceipt {
             access: provenant_records::LaneAccess::Isolated,
-            source: provenant_records::LaneAccessSource::Default,
+            source: provenant_records::Layer::Default,
             key: "lanes.access".into(),
             extra: Default::default(),
         },
@@ -408,9 +409,11 @@ pub(super) fn sandbox_mode(
             .map(|p| p.optional())
             .unwrap_or(&Default::default()),
     );
-    if let Some(warning) = &mode.warning {
-        use std::io::Write as _;
-        let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+    if let Some(message) = &mode.warning {
+        warn(Warning::new(
+            provenant_records::warning::SANDBOX_MODE_OVERRIDDEN,
+            message.clone(),
+        ));
     }
     mode
 }
@@ -447,7 +450,10 @@ fn sandbox_mode_for_access(
     });
     if floor && mode.effective {
         mode.requested = sandbox == Some("on");
-        mode.source = provenant_confinement::run_config::SandboxSource::Parent;
+        mode.source = provenant_records::Layer::Parent;
+        // The floor replaces the earlier cause outright, as it did when the
+        // mode carried a single source and no separate cap.
+        mode.constraint = None;
     }
     if warn {
         let source = task
@@ -455,7 +461,7 @@ fn sandbox_mode_for_access(
             .knob_sources
             .get("lanes.sandbox_floor")
             .copied()
-            .map(provenant_records::LimitSource::as_str)
+            .map(provenant_records::Layer::as_str)
             .unwrap_or("default");
         let warning = format!(
             "sandbox admission floor lowered; lanes.sandbox_floor=warn (source: {source}, boundary: none)"
@@ -529,7 +535,7 @@ fn admission_policy_is_independent_of_primary_or_fallback_adapter()
                 admission.boundary,
                 provenant_records::diagnostic::BoundaryClass::None
             );
-            assert_eq!(admission.source, provenant_records::LimitSource::Default);
+            assert_eq!(admission.source, provenant_records::Layer::Default);
         }
     }
     Ok(())
@@ -566,24 +572,27 @@ pub(super) fn apply_sandbox_mode(
             .knob_sources
             .get("lanes.sandbox_floor")
             .copied()
-            .unwrap_or(provenant_records::LimitSource::Default),
+            .unwrap_or(provenant_records::Layer::Default),
         extra: Default::default(),
     });
     environment.retain(|(name, _)| name != SANDBOX);
     environment.push((SANDBOX.into(), mode.env_value().into()));
-    use provenant_confinement::run_config::SandboxSource;
-    use run::SandboxSourceReceipt as ReceiptSource;
+    // A host-layer mode with no cap is the explicit knob: the preparation edge
+    // knows the knob's own layer, which the supervisor rebind does not.
+    let source = if mode.source == provenant_records::Layer::Host && mode.constraint.is_none() {
+        task.profile
+            .knob_sources
+            .get("lanes.sandbox")
+            .copied()
+            .unwrap_or(provenant_records::Layer::Default)
+    } else {
+        mode.source
+    };
     route.sandbox = Some(run::SandboxModeReceipt {
         requested: mode.requested,
         effective: mode.effective,
-        source: match mode.source {
-            SandboxSource::Parent => ReceiptSource::Parent,
-            SandboxSource::Route => ReceiptSource::Route,
-            SandboxSource::Restriction => ReceiptSource::Restriction,
-            SandboxSource::Platform => ReceiptSource::Platform,
-            SandboxSource::Knob => ReceiptSource::Knob,
-            SandboxSource::Default => ReceiptSource::Default,
-        },
+        source,
+        constraint: mode.constraint,
         warning: mode.warning,
         extra: Default::default(),
     });
@@ -887,11 +896,6 @@ fn credential_declarations(
     unique
 }
 
-fn report_credential_warning(message: &str) {
-    use std::io::Write;
-    let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
-}
-
 /// Inventory names and registration metadata only; credential contents are
 /// never needed to establish the mandatory boundary.
 pub(super) fn credential_roots(
@@ -912,14 +916,11 @@ pub(super) fn credential_roots(
                 receipt.access.as_str(),
                 receipt.source.as_str()
             );
-            if let Some(message) = policy
-                .check(
-                    "CREDENTIAL_ROOTS_OVERLAP_NONE",
-                    provenant_records::policy::Facts::violation(detail),
-                )
-                .message()
-            {
-                report_credential_warning(message);
+            if let provenant_records::policy::Effect::Warn(warning) = policy.check(
+                "CREDENTIAL_ROOTS_OVERLAP_NONE",
+                provenant_records::policy::Facts::violation(detail),
+            ) {
+                warn(warning);
             }
         }
     };
@@ -1147,14 +1148,11 @@ pub(super) fn credential_access_grant_refusal(
                     receipt.access.as_str(),
                     receipt.source.as_str()
                 );
-                if let Some(message) = policy
-                    .check(
-                        "CREDENTIAL_ROOTS_OVERLAP_NONE",
-                        provenant_records::policy::Facts::violation(detail),
-                    )
-                    .message()
-                {
-                    report_credential_warning(message);
+                if let provenant_records::policy::Effect::Warn(warning) = policy.check(
+                    "CREDENTIAL_ROOTS_OVERLAP_NONE",
+                    provenant_records::policy::Facts::violation(detail),
+                ) {
+                    warn(warning);
                 }
             }
         }
@@ -1202,14 +1200,11 @@ pub(super) fn warn_profile_credential_grants(
                 receipt.access.as_str(),
                 receipt.source.as_str()
             );
-            if let Some(message) = policy
-                .check(
-                    "CREDENTIAL_ROOTS_OVERLAP_NONE",
-                    provenant_records::policy::Facts::violation(detail),
-                )
-                .message()
-            {
-                report_credential_warning(message);
+            if let provenant_records::policy::Effect::Warn(warning) = policy.check(
+                "CREDENTIAL_ROOTS_OVERLAP_NONE",
+                provenant_records::policy::Facts::violation(detail),
+            ) {
+                warn(warning);
             }
         }
     }
@@ -1468,22 +1463,22 @@ fn source_admission_error(error: crate::run::SourceAdmissionError) -> SourceCwdE
 fn source_warning_messages(
     admission: &crate::run::SourceAdmission,
     policy: &provenant_records::policy::Policy,
-) -> Vec<String> {
+) -> Vec<Warning> {
     admission
         .warnings
         .iter()
         .filter_map(|warning| {
-            policy
-                .check(
-                    "CONFINEMENT_SOURCE_AGENT_CONFIG_NONE",
-                    provenant_records::policy::Facts::violation(format!(
-                        "source overlaps {} (source: {})",
-                        warning.path.display(),
-                        warning.source
-                    )),
-                )
-                .message()
-                .map(str::to_owned)
+            match policy.check(
+                "CONFINEMENT_SOURCE_AGENT_CONFIG_NONE",
+                provenant_records::policy::Facts::violation(format!(
+                    "source overlaps {} (source: {})",
+                    warning.path.display(),
+                    warning.source
+                )),
+            ) {
+                provenant_records::policy::Effect::Warn(warning) => Some(warning),
+                _ => None,
+            }
         })
         .collect()
 }
@@ -1493,7 +1488,6 @@ fn report_source_warnings(
     registry: &Registry<'_>,
     task: &run::TaskRequest,
 ) {
-    use std::io::Write;
     let project = task
         .profile
         .policy_project
@@ -1505,9 +1499,8 @@ fn report_source_warnings(
         .map_or_else(provenant_records::policy::Policy::default, |roots| {
             run::launch_policy(roots.state.as_path(), &project, task)
         });
-    let mut stderr = std::io::stderr().lock();
-    for message in source_warning_messages(admission, &policy) {
-        let _ = writeln!(stderr, "warning: {message}");
+    for warning in source_warning_messages(admission, &policy) {
+        warn(warning);
     }
 }
 
@@ -1893,24 +1886,71 @@ pub(super) fn read_only_plan(
 /// Advisory freshness of the checkout a read-only lane reads, for the launch
 /// warnings. The lane reads `source`: the `--worktree` checkout, or the caller's
 /// checkout when none is named. Absent or unusable Git data yields no warning.
-pub(in crate::run) fn read_only_checkout_warning(state: &Path, source: &Path) -> Option<String> {
-    let selected = read_only_source_ref(state, source)?;
+pub(in crate::run) fn read_only_checkout_warning(
+    state: &Path,
+    source: &Path,
+    choice: &crate::run::ReadSourceChoice,
+) -> Option<String> {
+    let selected = read_only_source_ref(state, source, choice)?;
     Some(crate::run::read_only_local_checkout_warning(
         source, &selected,
     ))
 }
 
-/// The fetched upstream head a stale read-only checkout should review instead
-/// of its own working tree. This is advisory: missing or unusable Git data
-/// yields no pin, so the launch keeps its existing local-source behaviour.
+/// Run a bounded host-side fetch so a fetch-first source resolves a ref that
+/// the checkout's last fetch did not yet have. This runs on the host at launch,
+/// never inside a lane, and uses the host's own Git and credential settings.
+fn fetch_read_source(remote: &str, repo: &Path) -> bool {
+    use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
+
+    let Some(git) = provenant_os::git::git_executable() else {
+        return false;
+    };
+    let Ok(executor) = SystemExecutor::new(1) else {
+        return false;
+    };
+    let argv: Vec<std::ffi::OsString> = vec![
+        git.as_os_str().to_owned(),
+        std::ffi::OsString::from("--no-pager"),
+        std::ffi::OsString::from("fetch"),
+        std::ffi::OsString::from("--no-tags"),
+        std::ffi::OsString::from("--quiet"),
+        std::ffi::OsString::from(remote),
+    ];
+    let env: Vec<(std::ffi::OsString, std::ffi::OsString)> = std::env::vars_os()
+        .filter(|(key, _)| {
+            let key = key.to_string_lossy();
+            key != "GIT_TERMINAL_PROMPT" && key != "GIT_ASKPASS"
+        })
+        .chain([(
+            std::ffi::OsString::from("GIT_TERMINAL_PROMPT"),
+            std::ffi::OsString::from("0"),
+        )])
+        .collect();
+    let mut options = ExecOptions::new(&argv, repo, std::time::Duration::from_secs(60));
+    options.env = Some(&env);
+    executor
+        .execute(options)
+        .map(|out| out.termination == Termination::Exit(0))
+        .unwrap_or(false)
+}
+
+/// The one resolver for a read-only lane's source. The compiled default still
+/// pins only a checkout behind its fetched upstream; `checkout` keeps the
+/// local tree, `default_branch` pins the fetched default and any other value is
+/// an explicit ref. `fetch_first` fetches from the resolved remote before the
+/// ref is read. Missing or unusable Git evidence is advisory, never a refusal.
 pub(in crate::run) fn read_only_source_ref(
     state: &Path,
     source: &Path,
+    choice: &crate::run::ReadSourceChoice,
 ) -> Option<crate::run::ReadOnlySourceRef> {
     use provenant_confinement::{GitRead, UtilityBudget, UtilityRuntime, run_read_utility};
     use provenant_os::exec::SystemExecutor;
-    use std::io::Write;
 
+    if choice.value == "checkout" {
+        return None;
+    }
     let git = provenant_os::git::git_executable()?;
     let utility_home = host_git_home(state).ok()?;
     let utility = UtilityRuntime::new(&git, utility_home.path(), state).ok()?;
@@ -1918,6 +1958,18 @@ pub(in crate::run) fn read_only_source_ref(
     let budget = UtilityBudget::bounded(std::time::Duration::from_secs(5)).ok()?;
     let cancel = provenant_core::CancelToken::new();
     let ancestor = source.ancestors().find(|path| path.join(".git").exists())?;
+    if choice.fetch_first
+        && let Some(remote) = resolved_forge_remote(state, ancestor)
+        && !fetch_read_source(&remote, ancestor)
+    {
+        warn(Warning::new(
+            provenant_records::warning::UPSTREAM_UNRESOLVED,
+            format!(
+                "lanes.read_source_fetch_first: fetch from {remote} did not complete; resolving {} from the last fetched refs",
+                choice.value
+            ),
+        ));
+    }
     let repo = utility
         .open_read_repo(&executor, ancestor, budget, &cancel)
         .ok()?;
@@ -1932,20 +1984,41 @@ pub(in crate::run) fn read_only_source_ref(
     .ok()
     .and_then(|out| String::from_utf8(out.stdout.bytes).ok())
     .and_then(|text| provenant_core::GitOid::parse(text.trim()).ok())?;
-    let (commit, reference) = configured_upstream(&executor, &repo, &utility, budget, &cancel)
-        .or_else(|| {
-            let fallback = default_upstream(&executor, &repo, &utility, budget, &cancel)?;
+    let (commit, reference) = if choice.value.is_empty() {
+        configured_upstream(&executor, &repo, &utility, budget, &cancel).or_else(|| {
+            // The remote comes from the one declared/inferred context, never a
+            // compiled `origin`: a fork checkout must not pin its review base to
+            // the fork's default when `upstream` is the real forge. An
+            // unresolvable or ambiguous remote keeps the local-source behaviour.
+            // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+            let remote = resolved_forge_remote(state, ancestor)?;
+            let fallback =
+                default_upstream(&executor, &repo, &utility, budget, &cancel, &remote)?;
             // The branch's own tracking configuration could not be resolved, so
             // the remote's default branch is only an advisory stand-in.
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: read-only source could not resolve this branch's configured upstream; using {} instead, which may not track this checkout",
-                fallback.1
-            );
+            warn(Warning::new(
+                provenant_records::warning::UPSTREAM_UNRESOLVED,
+                format!("read-only source could not resolve this branch's configured upstream; using {} instead, which may not track this checkout", fallback.1),
+            ));
             Some(fallback)
-        })?;
-    let behind = commits_behind(&executor, &repo, &utility, budget, &cancel, head, commit)?;
-    (behind > 0).then_some(crate::run::ReadOnlySourceRef {
+        })?
+    } else if choice.value == "default_branch" {
+        // An explicit default_branch pins the fetched default branch, never
+        // this checkout's configured tracking upstream: a feature branch may
+        // track a different branch and must still read the forge default.
+        // Only the empty compiled-default case above uses configured_upstream.
+        // Spec: docs/specs/run-launch.md#inputs-and-resources
+        let remote = resolved_forge_remote(state, ancestor)?;
+        default_upstream(&executor, &repo, &utility, budget, &cancel, &remote)?
+    } else {
+        resolve_upstream_ref(&executor, &repo, &utility, budget, &cancel, &choice.value)?
+    };
+    let behind =
+        commits_behind(&executor, &repo, &utility, budget, &cancel, head, commit).unwrap_or(0);
+    if choice.value.is_empty() && behind == 0 {
+        return None;
+    }
+    Some(crate::run::ReadOnlySourceRef {
         commit,
         reference,
         behind,
@@ -2017,11 +2090,6 @@ fn current_branch(
         .map(str::to_owned)
 }
 
-fn warn_branch_config(detail: impl std::fmt::Display) {
-    use std::io::Write;
-    let _ = writeln!(std::io::stderr().lock(), "warning: {detail}");
-}
-
 /// One branch remote or merge value from the verified repository config.
 /// Missing values are normal; other failures are reported before falling back.
 fn branch_config_value(
@@ -2038,7 +2106,10 @@ fn branch_config_value(
     use provenant_os::exec::Termination;
 
     if validate_branch_config_key(key).is_err() {
-        warn_branch_config("read branch Git configuration rejected an invalid key");
+        warn(Warning::new(
+            provenant_records::warning::BRANCH_CONFIG_UNREADABLE,
+            "read branch Git configuration rejected an invalid key",
+        ));
         return None;
     }
     let context = provenant_os::git_config::ConfigContext {
@@ -2053,7 +2124,10 @@ fn branch_config_value(
     ) {
         Ok(out) => out,
         Err(error) => {
-            warn_branch_config(error.to_string());
+            warn(Warning::new(
+                provenant_records::warning::BRANCH_CONFIG_UNREADABLE,
+                error.to_string(),
+            ));
             return None;
         }
     };
@@ -2061,8 +2135,9 @@ fn branch_config_value(
         Termination::Exit(0) => {}
         Termination::Exit(1) => return None,
         termination => {
-            warn_branch_config(format!(
-                "read branch Git configuration ended with {termination:?}"
+            warn(Warning::new(
+                provenant_records::warning::BRANCH_CONFIG_UNREADABLE,
+                format!("read branch Git configuration ended with {termination:?}"),
             ));
             return None;
         }
@@ -2070,7 +2145,10 @@ fn branch_config_value(
     let value = match std::str::from_utf8(&out.stdout.bytes) {
         Ok(value) => value.trim(),
         Err(error) => {
-            warn_branch_config(format!("parse branch Git configuration failed: {error}"));
+            warn(Warning::new(
+                provenant_records::warning::BRANCH_CONFIG_UNREADABLE,
+                format!("parse branch Git configuration failed: {error}"),
+            ));
             return None;
         }
     };
@@ -2111,15 +2189,35 @@ fn configured_upstream(
     resolve_upstream_ref(executor, repo, utility, budget, cancel, name.as_str())
 }
 
+/// The one remote for an advisory read-only source pin, from the full port
+/// table (host and project declarations together). A fork's `origin` is never
+/// assumed: when no remote is declared or inferred, the caller keeps its local
+/// source behaviour instead of pinning to a guessed remote.
+///
+/// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+fn resolved_forge_remote(state: &Path, project: &Path) -> Option<String> {
+    let ports = provenant_config::PortTable::read_for(Some(project), state).ok()?;
+    let policy = provenant_config::operation_policy(state, project, &ports);
+    let config = provenant_config::ForgeConfig::new(&ports, (*policy).clone());
+    let git = provenant_config::ForgeGit::new(project).ok()?;
+    provenant_config::ForgeContext::remote(&config, &git)
+        .ok()
+        .map(|remote| remote.value)
+}
+
 /// The remote's default branch as last fetched, with the exact ref that named
 /// it. Advisory fallback only: this never fetches. The remote is asked only
-/// when no `origin/HEAD` is recorded, and only within the utility budget.
+/// when no tracking ref is recorded for the resolved remote, and only within
+/// the utility budget.
+///
+/// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
 fn default_upstream(
     executor: &dyn provenant_os::exec::Executor,
     repo: &provenant_confinement::ReadOnlyRepo,
     utility: &provenant_confinement::UtilityRuntime,
     budget: provenant_confinement::UtilityBudget,
     cancel: &provenant_core::CancelToken,
+    remote: &str,
 ) -> Option<(provenant_core::GitOid, String)> {
     use provenant_confinement::utility::advertised_default_branch;
 
@@ -2129,18 +2227,18 @@ fn default_upstream(
         utility,
         budget,
         cancel,
-        "refs/remotes/origin/HEAD",
+        &format!("refs/remotes/{remote}/HEAD"),
     )
     .or_else(|| {
         let branch =
-            advertised_default_branch(executor, repo, utility, "origin", budget, cancel).ok()??;
+            advertised_default_branch(executor, repo, utility, remote, budget, cancel).ok()??;
         resolve_upstream_ref(
             executor,
             repo,
             utility,
             budget,
             cancel,
-            &format!("refs/remotes/origin/{}", branch.short_name()),
+            &format!("refs/remotes/{remote}/{}", branch.short_name()),
         )
     })
 }

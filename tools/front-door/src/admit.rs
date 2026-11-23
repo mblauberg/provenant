@@ -15,6 +15,7 @@ use provenant_core::consumer_env::{
 use provenant_os::admission::{
     HeldGuard, HostHeldGuard, mark_held_with_command, mark_host_held_with_command,
 };
+use provenant_records::warning::{CONFIG_MALFORMED, SETTING_LAYER_IGNORED, Warning, warn};
 use provenant_supervisor::census::{ProcessObservation, ProcessObserver, SystemProcessObserver};
 use std::{
     ffi::{OsStr, OsString},
@@ -216,8 +217,9 @@ fn check_disk_and_trim(
             let free_after =
                 provenant_os::fs::available_bytes_at(root).map_err(|e| e.to_string())?;
             if free_after < floor {
-                say(&format!(
-                    "warning: available disk ({free_after} B) remains below floor ({floor} B)"
+                warn(Warning::new(
+                    provenant_records::warning::DISK_FLOOR_LOW,
+                    format!("available disk ({free_after} B) remains below floor ({floor} B)"),
                 ));
             }
         }
@@ -231,8 +233,8 @@ fn check_disk_and_trim(
             let free = provenant_os::fs::available_bytes_at(root).map_err(|e| e.to_string())?;
             match gate.decide(free) {
                 provenant_records::policy::Effect::Proceed => {}
-                provenant_records::policy::Effect::Warn(message) => {
-                    say(&format!("warning: {message}; proceeding"));
+                provenant_records::policy::Effect::Warn(warning) => {
+                    warn(warning);
                 }
                 provenant_records::policy::Effect::Refuse(diagnostic)
                 | provenant_records::policy::Effect::Stop(diagnostic) => {
@@ -252,8 +254,11 @@ fn check_memory_and_trim(memory_limit: Option<u64>, trim_action: Option<&str>, c
         return;
     };
     let Some(rss) = sample_rss_bytes() else {
-        say(&format!(
-            "warning: class '{class}' sets a memory limit but no process-tree sample is available; limit not checked"
+        warn(Warning::new(
+            provenant_records::warning::RESOURCE_PROBE_FAILED,
+            format!(
+                "class '{class}' sets a memory limit but no process-tree sample is available; limit not checked"
+            ),
         ));
         return;
     };
@@ -271,8 +276,11 @@ fn check_memory_and_trim(memory_limit: Option<u64>, trim_action: Option<&str>, c
         if let Some(rss_after) = sample_rss_bytes()
             && rss_after > limit
         {
-            say(&format!(
-                "warning: process resident memory ({rss_after} B) exceeds class '{class}' limit ({limit} B)"
+            warn(Warning::new(
+                provenant_records::warning::MEMORY_FLOOR_LOW,
+                format!(
+                    "process resident memory ({rss_after} B) exceeds class '{class}' limit ({limit} B)"
+                ),
             ));
         }
     }
@@ -309,7 +317,6 @@ pub fn run(class: &str, command: &[OsString], env: &[(OsString, OsString)]) -> i
             provenant_config::ResolvedAdmissionClass::resolve(
                 class,
                 state_buf.as_deref().unwrap_or(Path::new("")),
-                None,
                 None,
             )
         });
@@ -351,8 +358,9 @@ pub fn run(class: &str, command: &[OsString], env: &[(OsString, OsString)]) -> i
         let context = match host_build_context(&env, state_buf.as_deref()) {
             Ok(context) => context,
             Err(error) => {
-                say(&format!(
-                    "warning: build context unavailable: {error}; running command locally"
+                warn(Warning::new(
+                    provenant_records::warning::BUILD_CONTEXT_UNAVAILABLE,
+                    format!("build context unavailable: {error}; running command locally"),
                 ));
                 let code = execute_and_forward(program, args, &env);
                 if code != 0 {
@@ -583,7 +591,10 @@ fn run_build_job(
     };
     let resolved_priority = context.port.priority_for(priority_class);
     for warning in &resolved_priority.warnings {
-        say(warning);
+        warn(Warning::new(
+            provenant_records::warning::BUILD_PRIORITY_ADVISORY,
+            warning.clone(),
+        ));
     }
     let priority = match resolved_priority.value {
         provenant_config::BuildPriority::Interactive => Priority::Interactive,
@@ -606,7 +617,10 @@ fn run_build_job(
         Origin::Chair
     };
     let git = context.git.clone().unwrap_or_else(|| {
-        say("warning: build Git binding is unavailable; slot snapshotting will fall back locally");
+        warn(Warning::new(
+            provenant_records::warning::BUILD_CONTEXT_UNAVAILABLE,
+            "build Git binding is unavailable; slot snapshotting will fall back locally",
+        ));
         let git_dir = context.worktree.join(".git");
         GitBinding {
             git: provenant_os::git::git_executable().unwrap_or_else(|| PathBuf::from("git")),
@@ -663,7 +677,10 @@ fn run_build_job(
     let code = match provenant_run::build::run(job, &run_context) {
         Ok(result) => {
             for warning in &result.outcome.warnings {
-                say(warning);
+                warn(Warning::new(
+                    provenant_records::warning::BUILD_OUTCOME_ADVISORY,
+                    warning.clone(),
+                ));
             }
             if let Some(exit) = result.outcome.exit {
                 exit.code
@@ -723,7 +740,10 @@ pub(crate) fn host_build_context(
     let is_repository = resolved_project.is_some();
     let project = resolved_project.unwrap_or_else(|| cwd.clone());
     if !is_repository {
-        say("warning: Git repository is unavailable; build will run locally");
+        warn(Warning::new(
+            provenant_records::warning::BUILD_CONTEXT_UNAVAILABLE,
+            "Git repository is unavailable; build will run locally",
+        ));
     }
     let git_dir = git
         .as_ref()
@@ -751,8 +771,11 @@ pub(crate) fn host_build_context(
     } {
         Ok(table) => table,
         Err(error) => {
-            say(&format!(
-                "warning: build ports failed validation: {error}; reading configured values for build"
+            warn(Warning::new(
+                CONFIG_MALFORMED,
+                format!(
+                    "build ports failed validation: {error}; reading configured values for build"
+                ),
             ));
             match if is_repository {
                 provenant_config::PortTable::read_for_inspection(Some(&project), &state)
@@ -761,8 +784,11 @@ pub(crate) fn host_build_context(
             } {
                 Ok(table) => table,
                 Err(inspection_error) => {
-                    say(&format!(
-                        "warning: build ports unavailable: {inspection_error}; using builtin build configuration"
+                    warn(Warning::new(
+                        provenant_records::warning::CONFIG_UNAVAILABLE,
+                        format!(
+                            "build ports unavailable: {inspection_error}; using builtin build configuration"
+                        ),
                     ));
                     provenant_config::PortTable::default()
                 }
@@ -793,9 +819,12 @@ pub(crate) fn host_build_context(
             .map(|commit| BaseRef { remote_ref, commit })
     };
     if is_repository && !table.verify.base.trim().is_empty() && verify_base.is_none() {
-        say(&format!(
-            "warning: verify.base {:?} could not be resolved; build context has no verify base",
-            table.verify.base
+        warn(Warning::new(
+            provenant_records::warning::UPSTREAM_UNRESOLVED,
+            format!(
+                "verify.base {:?} could not be resolved; build context has no verify base",
+                table.verify.base
+            ),
         ));
     }
     let mut host_path = value("PATH").unwrap_or_default();
@@ -891,23 +920,39 @@ fn warn_readonly_sources(env: &[(OsString, OsString)]) {
     {
         return;
     }
+    let repair = "Fetch the missing dependency on the host or enable this setting with network access for the lane.";
     if let Some(source_str) = env
         .iter()
         .find(|(key, _)| key == CARGO_SOURCE_WRITES_SOURCE)
         .and_then(|(_, value)| value.to_str())
     {
-        say(&format!(
-            "Cargo sources are read-only ({} = false; source: {source_str}). If a dependency is missing offline, fetch it on the host or enable this setting with network access for the lane.",
-            provenant_confinement::cargo::SOURCE_WRITES_KNOB
-        ));
+        warn(
+            Warning::new(
+                SETTING_LAYER_IGNORED,
+                format!(
+                    "Cargo sources are read-only ({} = false; source: {source_str})",
+                    provenant_confinement::cargo::SOURCE_WRITES_KNOB
+                ),
+            )
+            .subject(source_str)
+            .repair(repair),
+        );
     } else {
-        say(&format!(
-            "Cargo sources are read-only ({} = false; source: compiled default). If a dependency is missing offline, fetch it on the host or enable this setting with network access for the lane.",
-            provenant_confinement::cargo::SOURCE_WRITES_KNOB
-        ));
+        warn(
+            Warning::new(
+                SETTING_LAYER_IGNORED,
+                format!(
+                    "Cargo sources are read-only ({} = false; source: compiled default)",
+                    provenant_confinement::cargo::SOURCE_WRITES_KNOB
+                ),
+            )
+            .repair(repair),
+        );
     }
 }
 
+// The admit edge writes its own diagnostic prefix to stderr; warnings go through the typed seam.
+#[allow(clippy::disallowed_methods)]
 fn say(message: &str) {
     let _ = writeln!(std::io::stderr().lock(), "provenant: {message}");
 }

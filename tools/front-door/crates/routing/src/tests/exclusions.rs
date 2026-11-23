@@ -830,3 +830,30 @@ fn live_scoped_refusal_excludes_only_the_matching_account_and_model()
     assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
     Ok(())
 }
+
+#[test]
+// Spec: docs/specs/cli.md#every-name-refusal-lists-close-matches
+fn an_unknown_exclusion_lists_close_provider_and_model_names() {
+    let models = [ModelId::parse("codex/gpt-6-luna").unwrap()];
+    let none = |_: &str| Ok::<_, String>(None);
+    let error = ExclusionSelector::parse("codex/gpt-6-lun", &["claude", "codex"], &models, none)
+        .expect_err("unknown exclusion");
+    assert_eq!(error.code(), "unknown_exclusion");
+    let RoutingError::UnknownExclusion {
+        selector,
+        candidates,
+        ..
+    } = &error
+    else {
+        panic!("expected an exclusion refusal");
+    };
+    assert_eq!(selector, "codex/gpt-6-lun");
+    assert_eq!(
+        candidates.first().map(String::as_str),
+        Some("codex/gpt-6-luna")
+    );
+    assert!(error.to_string().contains("close matches:"));
+    let unrelated = ExclusionSelector::parse("zzzzzz", &["claude", "codex"], &models, none)
+        .expect_err("unknown");
+    assert!(!unrelated.to_string().contains("close matches:"));
+}

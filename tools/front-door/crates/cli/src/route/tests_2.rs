@@ -153,8 +153,13 @@
                 }
             ));
             let error = error.to_string();
-            for expected in ["claude/shared", "codex/other", "agy/shared", "adapter/key"] {
+            // Spec: docs/specs/routing.md#account-references
+            // Refusals name labels only, never adapter keys, entry ids or paths.
+            for expected in ["personal", "shared", "work", "adapter/key"] {
                 assert!(error.contains(expected), "{error}");
+            }
+            for leaked in ["claude/shared", "codex/other", "agy/shared", "/tmp/"] {
+                assert!(!error.contains(leaked), "{error}");
             }
         }
         let mut config: RoutingConfig = serde_json::from_value(serde_json::json!({"pacing":{

@@ -759,7 +759,10 @@ printf 'custom interpreter ran; credentials and writes denied\n'
         lane["applied_route"]["sandbox"]["effective"], true,
         "{lane}"
     );
-    assert_eq!(lane["applied_route"]["sandbox"]["source"], "knob", "{lane}");
+    // Spec: docs/specs/state.md#every-setting-reports-its-layer — a sandbox
+    // knob records its actual layer; this knob is set in the host state
+    // config, so the applied route reports `host`, not the retired `knob`.
+    assert_eq!(lane["applied_route"]["sandbox"]["source"], "host", "{lane}");
     // Network is on unless the task turns it off.
     assert_eq!(lane["network"], "open", "{submitted}");
     let result = fs::read_to_string(attempt_dir(&rig, id)?.join("result.md"))?;
@@ -1060,7 +1063,7 @@ printf 'private-output\n'
         receipt.backend,
         provenant_records::PortCommandBackend::RepositoryCommand
     );
-    assert_eq!(receipt.source, provenant_records::PortSource::Project);
+    assert_eq!(receipt.source, provenant_records::Layer::Project);
     assert_eq!(
         receipt.outcome,
         provenant_records::PortCommandDisposition::Succeeded
@@ -1171,8 +1174,22 @@ printf 'executed\n' > verify-call.txt
             .contains("verify port is disabled")
     );
     assert!(result["error"].is_null());
+    // Under --json the warning travels in the envelope, never on stderr.
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
     assert!(
-        String::from_utf8_lossy(&output.stderr.bytes).contains("warning: [VERIFY_UNAVAILABLE]")
+        result["warnings"].as_array().is_some_and(|warnings| {
+            warnings.iter().any(|warning| {
+                warning["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("VERIFY_UNAVAILABLE"))
+            })
+        }),
+        "the envelope must carry the verify-unavailable warning: {result}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr.bytes);
+    assert!(
+        !stderr.contains("warning:"),
+        "bare warning leaked: {stderr}"
     );
     assert!(!marker.exists());
     let inventory = provenant_config::port_command_receipts(

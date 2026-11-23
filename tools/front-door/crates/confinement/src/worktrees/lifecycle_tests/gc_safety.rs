@@ -597,6 +597,46 @@ fn gc_collects_output_from_created_and_primary_worktrees() -> Result<(), Box<dyn
 }
 
 #[test]
+fn output_pruning_runs_when_the_forge_context_is_unresolved() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    fs::write(fixture.root.join(".gitignore"), "target/\n")?;
+    fixture.run(&["add", ".gitignore"])?;
+    fixture.run(&["commit", "-m", "ignore output"])?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let lane = gc_owned_lane(&test, &context, "unresolved-output")?;
+    let target = lane.path.join("target");
+    fs::create_dir(&target)?;
+    fs::write(target.join("artifact"), "regenerable")?;
+    // The fixture declares no remote, so its one forge context cannot resolve.
+    assert!(local_retirement_scope(&context, None, &cancel())?.unresolved());
+    let policy = WorktreeGcPolicy {
+        include_foreign: false,
+        retirement_port: None,
+        retirement_feeds: None,
+        mode: CollectionMode::Outputs,
+        proof: None,
+        upstream_reference: None,
+        integration_patterns: &[],
+        excluded_paths: &[],
+        upstream: None,
+        terminal: &|_| true,
+        no_live_lanes: &|_| true,
+        regenerable: &["target".into()],
+        keep: &[],
+        written_before_ns: i128::MAX,
+        dry_run: false,
+    };
+    let report = collect(&context, std::slice::from_ref(&lane), &policy, &cancel())?;
+    assert!(!target.exists(), "{:?}", report.candidates);
+    assert_eq!(
+        report.output.iter().filter(|entry| entry.removed).count(),
+        1
+    );
+    Ok(())
+}
+
+#[test]
 fn gc_stops_output_deletion_and_resumes_remaining_files() -> Result<(), Box<dyn Error>> {
     fn scenario(primary: bool) -> Result<(), Box<dyn Error>> {
         let fixture = Fixture::new()?;
@@ -1254,6 +1294,7 @@ fn gc_output_pruning_holds_writer_custody() -> Result<(), Box<dyn Error>> {
 fn landing_output_pruning_keeps_the_writer_lease_through_retirement() -> Result<(), Box<dyn Error>>
 {
     let fixture = Fixture::new()?;
+    declare_forge_default(&fixture)?;
     fs::write(fixture.root.join(".gitignore"), "target/\n")?;
     fixture.run(&["add", ".gitignore"])?;
     fixture.run(&["commit", "-m", "ignore output"])?;

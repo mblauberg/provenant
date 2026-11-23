@@ -8,17 +8,16 @@ use provenant_core::{
     Roots,
 };
 use provenant_os::fs::Directory;
-use provenant_records::{LaneAccess, LaneAccessReceipt, LaneAccessSource};
+use provenant_records::{LaneAccess, LaneAccessReceipt, Layer};
 use std::{
     ffi::{OsStr, OsString},
-    io::Write,
     path::{Path, PathBuf},
 };
 
 fn isolated_lane_access_receipt() -> LaneAccessReceipt {
     LaneAccessReceipt {
         access: LaneAccess::Isolated,
-        source: LaneAccessSource::Default,
+        source: Layer::Default,
         key: "lanes.access".into(),
         extra: Default::default(),
     }
@@ -159,11 +158,19 @@ fn inventory_error(path: &Path, stage: &'static str) -> PermissionError {
     }
 }
 
-fn warn_inventory(warnings: &mut impl Write, path: &Path, stage: &str, reason: &str) {
-    let _ = writeln!(
-        warnings,
-        "warning: {stage} incomplete at {}: {reason}; protecting this directory",
-        path.display()
+fn warn_inventory(path: &Path, stage: &str, reason: &str) {
+    use provenant_records::warning::{HOST_INVENTORY_INCOMPLETE, Warning, warn};
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    warn(
+        Warning::new(
+            HOST_INVENTORY_INCOMPLETE,
+            format!(
+                "{stage} incomplete at {}: {reason}; protecting this directory",
+                path.display()
+            ),
+        )
+        .subject(path.display().to_string())
+        .once_per_change(),
     );
 }
 
@@ -221,7 +228,7 @@ impl InventorySummary {
         }
     }
 
-    fn report(&self, warnings: &mut impl Write) {
+    fn report(&self) {
         let mut details = Vec::new();
         for (label, counts) in [
             ("cannot resolve credential symlink", &self.unresolved),
@@ -270,10 +277,15 @@ impl InventorySummary {
             details.push(format!("{label}: {total}; top roots: {top}"));
         }
         if !details.is_empty() {
-            let _ = writeln!(
-                warnings,
-                "warning: credential symlink inventory incomplete: {}; repair the reported links or move credentials into their configured home stores",
-                details.join(" | ")
+            use provenant_records::warning::{CREDENTIAL_INVENTORY_INCOMPLETE, Warning, warn};
+            // Spec: docs/specs/cli.md#warnings-are-typed-values
+            warn(
+                Warning::new(
+                    CREDENTIAL_INVENTORY_INCOMPLETE,
+                    format!("credential symlink inventory incomplete: {}", details.join(" | ")),
+                )
+                .repair("repair the reported links or move credentials into their configured home stores")
+                .once_per_change(),
             );
         }
     }
@@ -655,7 +667,7 @@ impl MandatoryRoots {
                     }
                 }
             }
-            summary.report(&mut std::io::stderr().lock());
+            summary.report();
         }
         let state = resolve_boundary_path(roots.state.as_path())?;
         if state != roots.state.as_path() {
@@ -673,7 +685,6 @@ impl MandatoryRoots {
         // Common Git directories are flagged so no host write can open them.
         let mut controls: Vec<(PathGrant, bool)> =
             protected.iter().map(|root| (root.clone(), false)).collect();
-        let mut warnings = std::io::stderr().lock();
         // Aggregate failures do not name the affected checkout. Denying the
         // registry or Git metadata alone cannot protect an unknown worktree.
         let bindings = provenant_config::registered_projects(roots)
@@ -727,12 +738,7 @@ impl MandatoryRoots {
                         };
                         let slot = PathBuf::from(slot);
                         let path = project_state.join(&slot);
-                        warn_inventory(
-                            &mut warnings,
-                            &path,
-                            "writer custody inventory",
-                            &issue.reason,
-                        );
+                        warn_inventory(&path, "writer custody inventory", &issue.reason);
                         controls.push((subtree(&path), false));
                         slots.push(slot);
                     }
@@ -750,12 +756,7 @@ impl MandatoryRoots {
                     .map(|path| (subtree(&path), false)),
             );
             for issue in listing.issues {
-                warn_inventory(
-                    &mut warnings,
-                    &issue.path,
-                    "owned worktree inventory",
-                    &issue.reason,
-                );
+                warn_inventory(&issue.path, "owned worktree inventory", &issue.reason);
                 controls.push((subtree(&issue.path), false));
             }
         }
@@ -850,7 +851,7 @@ mod tests {
             true,
             LaneAccessReceipt {
                 access: LaneAccess::Host,
-                source: LaneAccessSource::Default,
+                source: Layer::Default,
                 key: "lanes.access".into(),
                 extra: Default::default(),
             },
@@ -998,16 +999,17 @@ mod tests {
 
     #[test]
     fn custody_inventory_warning_names_the_path_and_reason() {
-        let mut warnings = Vec::new();
-        warn_inventory(
-            &mut warnings,
-            Path::new("/state/slot"),
-            "writer custody inventory",
-            "legacy evidence",
-        );
-        let warning = String::from_utf8(warnings).unwrap();
-        assert!(warning.contains("/state/slot"));
-        assert!(warning.contains("legacy evidence"));
+        let ((), captured) = provenant_records::warning::capture(|| {
+            warn_inventory(
+                Path::new("/state/slot"),
+                "writer custody inventory",
+                "legacy evidence",
+            );
+        });
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].code.as_ref(), "HOST_INVENTORY_INCOMPLETE");
+        assert_eq!(captured[0].subject.as_deref(), Some("/state/slot"));
+        assert!(captured[0].message.contains("legacy evidence"));
     }
 
     #[test]
@@ -1359,13 +1361,8 @@ mod tests {
             &root.join("scratch"),
             &mut summary,
         )?;
-        let mut warnings = Vec::new();
-        summary.report(&mut warnings);
-        assert!(
-            warnings.is_empty(),
-            "{}",
-            String::from_utf8_lossy(&warnings)
-        );
+        let ((), captured) = provenant_records::warning::capture(|| summary.report());
+        assert!(captured.is_empty(), "{captured:?}");
         assert!(
             mandatory.credentials().contains(
                 &(PathGrant {

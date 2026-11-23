@@ -14,6 +14,18 @@ use std::{
 };
 use support::{Result, TestRig, code};
 
+/// Under `--json` a typed warning lives in the command envelope, never on raw
+/// stderr. Spec: docs/specs/cli.md#warnings-are-typed-values.
+fn envelope_warns(report: &Value, text: &str) -> bool {
+    report["warnings"].as_array().is_some_and(|warnings| {
+        warnings.iter().any(|warning| {
+            warning["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(text))
+        })
+    })
+}
+
 // Medium: a real shell inherits the provider's lane environment and native
 // confinement. No network, provider login, compiler or sleeps are involved.
 fn writer_shell_probe() -> Result<String> {
@@ -1562,7 +1574,19 @@ fn remote_only_writer_cli_starts_at_remote_tip() -> Result {
         report["data"]["checkpoint"]["nodes"][0]["new_worktree_base"], remote_tip,
         "recovery must retain the selected remote tip before provisioning"
     );
-    assert!(combined.contains("warning: ignoring --base"), "{combined}");
+    // Spec: docs/specs/cli.md#warnings-are-typed-values -- under
+    // --json warnings travel in the envelope, never on raw stderr.
+    assert!(
+        settled.launch_value["warnings"]
+            .as_array()
+            .is_some_and(|warnings| warnings.iter().any(|warning| {
+                warning["code"] == "BRANCH_BEHIND_BASE"
+                    && warning["message"]
+                        .as_str()
+                        .is_some_and(|message| message.contains("ignoring --base"))
+            })),
+        "no BRANCH_BEHIND_BASE warning in the launch envelope: {combined}"
+    );
 
     let args = vec![
         "run",
@@ -1729,8 +1753,11 @@ fn graph_opencode_observes_v2_wal_session() -> Result {
                 settled.launch_value
             );
             if batch.iter().any(|case| case.2 == "model_unavailable") {
-                let stderr = String::from_utf8_lossy(&settled.launch.stderr.bytes);
-                assert!(stderr.contains("not in the catalogue"), "{stderr}");
+                assert!(
+                    envelope_warns(&settled.launch_value, "not in the catalogue"),
+                    "{}",
+                    settled.launch_value
+                );
             }
             for &(operation, _, expected, model, account) in batch {
                 let node = settled.checkpoint["nodes"]
@@ -1926,17 +1953,15 @@ fn host_native_preparation_uses_the_provider_contract() -> Result {
     task.profile
         .knobs
         .insert("lanes.access".into(), serde_json::json!("isolated"));
-    task.profile.knob_sources.insert(
-        "lanes.access".into(),
-        provenant_records::LimitSource::Launch,
-    );
+    task.profile
+        .knob_sources
+        .insert("lanes.access".into(), provenant_records::Layer::Launch);
     task.profile
         .knobs
         .insert("lanes.sandbox".into(), serde_json::json!("on"));
-    task.profile.knob_sources.insert(
-        "lanes.sandbox".into(),
-        provenant_records::LimitSource::Launch,
-    );
+    task.profile
+        .knob_sources
+        .insert("lanes.sandbox".into(), provenant_records::Layer::Launch);
     let mut absent = task.clone();
     absent.route = provenant_run::RequestedRoute::Adapter {
         required_family: None,
@@ -2664,6 +2689,79 @@ fn continue_in_place_launches_direct_writer_graph() -> Result {
 fn wip_commit_launches_direct_writer_graph() -> Result {
     dirty_writer_mode_launches_direct_graph("wip_commit")
 }
+
+// Spec: docs/specs/run.md#writer-pin-and-re-pin
+fn unheld_dirty_tree_adoption_warns_with_commit() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    let rig = writer_registry_fixture()?;
+    let _cleanup = rig.process_cleanup();
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.routing.pools]\njunior=[{model='codex/gpt-6-luna',effort='low'}]\n",
+    )?;
+    let made = rig.command(&[
+        "worktree",
+        "create",
+        "dirty-lane",
+        "--base",
+        "HEAD",
+        "--json",
+    ])?;
+    assert_eq!(code(&made), 0, "{made:?}");
+    let tree = rig.project.join(".worktrees/dirty-lane");
+    fs::write(tree.join("retained.txt"), "draft")?;
+    let git_head = || -> Result<String> {
+        let result = provenant_os::fixture::git_command()
+            .current_dir(&tree)
+            .args(["rev-parse", "HEAD"])
+            .output()?;
+        assert!(result.status.success());
+        Ok(String::from_utf8(result.stdout)?.trim().to_owned())
+    };
+    let before = git_head()?;
+    let graph = rig.root.join("dirty-adoption.json");
+    fs::write(
+        &graph,
+        serde_json::to_vec(&json!({
+            "schema_version": support::GRAPH_DOCUMENT_SCHEMA_VERSION,
+            "graph_id": "dirty-adoption",
+            "nodes": [{
+                "id": "writer", "prompt": "fixture writer", "access": "worktree_write",
+                "worktree": tree, "route": {"alias": "junior"}
+            }]
+        }))?,
+    )?;
+    let settled = rig.run_and_wait(&["--file", graph.to_str().ok_or("graph")?], "30s")?;
+    assert!(
+        settled.launch_value["error"].is_null(),
+        "{}",
+        settled.launch_value
+    );
+    let after = git_head()?;
+    assert_ne!(
+        before, after,
+        "the unheld tree must be adopted as a WIP commit"
+    );
+    assert_eq!(fs::read_to_string(tree.join("retained.txt"))?, "draft");
+    let warning = settled.launch_value["warnings"]
+        .as_array()
+        .and_then(|warnings| {
+            warnings
+                .iter()
+                .find(|warning| warning["code"] == "WORKTREE_ADOPTED_DIRTY")
+        })
+        .ok_or("missing WORKTREE_ADOPTED_DIRTY warning")?;
+    assert!(
+        warning["message"]
+            .as_str()
+            .is_some_and(|message| message.contains(after.as_str()) && message.contains("WIP")),
+        "the warning must name the WIP commit: {warning}"
+    );
+    Ok(())
+}
+
 /// Distinct branch launches start directly without repository-wide waiting.
 fn distinct_branch_writer_launches_start_without_shared_waits() -> Result {
     if !graph_fixture_available()? {
@@ -3060,10 +3158,7 @@ fn partial_quota_alias_fixture(writer: bool) -> Result {
         "graph writer predecessor must survive admission"
     );
     assert_eq!(first["state"], "quota_limited", "{lanes}");
-    assert_eq!(
-        first["usage"]["output_excluding_reasoning"], 2280,
-        "{lanes}"
-    );
+    assert_eq!(first["usage"]["tokens"]["output"], 2280, "{lanes}");
     assert_eq!(
         first["applied_route"]["model"], "codex/gpt-6-luna",
         "{lanes}"
@@ -4745,6 +4840,24 @@ fn nested_writer_ignores_outer_lane_git() -> Result {
     Ok(())
 }
 
+/// Name the origin's default branch the way a clone records it. These fixtures
+/// add a remote without fetching, and the forge context has no compiled
+/// main/master fallback.
+/// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+fn declare_origin_head(rig: &TestRig, git: &std::path::Path) -> Result {
+    let branch = rig.execute(git, &["symbolic-ref", "--short", "HEAD"], None)?;
+    assert_eq!(code(&branch), 0, "{branch:?}");
+    let branch = String::from_utf8(branch.stdout.bytes.clone())?;
+    let target = format!("refs/remotes/origin/{}", branch.trim());
+    let out = rig.execute(
+        git,
+        &["symbolic-ref", "refs/remotes/origin/HEAD", &target],
+        None,
+    )?;
+    assert_eq!(code(&out), 0, "{out:?}");
+    Ok(())
+}
+
 fn nested_writer_fixture_child() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
@@ -4772,6 +4885,7 @@ fn nested_writer_fixture_child() -> Result {
         let out = rig.execute(&git, &args, None)?;
         assert_eq!(code(&out), 0, "{out:?}");
     }
+    declare_origin_head(&rig, &git)?;
     let document = rig.project.join("nested-graph.json");
     fs::write(
         &document,
@@ -5191,6 +5305,7 @@ fn light_graph_delivers_and_applies_preset_per_node() -> Result {
         let out = rig.execute(&git, &args, None)?;
         assert_eq!(code(&out), 0, "{out:?}");
     }
+    declare_origin_head(&rig, &git)?;
     let route = json!({"adapter":"codex","model":"gpt-6-luna","effort":"low"});
     let document = rig.project.join("light-graph.json");
     fs::write(
@@ -5262,10 +5377,12 @@ fn run_graph_provider_with_wait(
         )?,
     )?;
     let settled = rig.run_and_wait(&["--file", document.to_str().ok_or("document")?], wait)?;
-    let out = &settled.launch;
     if unlisted {
-        let stderr = String::from_utf8_lossy(&out.stderr.bytes);
-        assert!(stderr.contains("not in the catalogue"), "{stderr}");
+        assert!(
+            envelope_warns(&settled.launch_value, "not in the catalogue"),
+            "{}",
+            settled.launch_value
+        );
     }
     let response = &settled.launch_value;
     // The wait reports how the graph ended: settled, unsuccessful, needing
@@ -5278,7 +5395,7 @@ fn run_graph_provider_with_wait(
     assert!(response["error"].is_null(), "{response}");
     let lane = provider_lane(rig, &settled.checkpoint["nodes"][0])?;
     if graph_id == "fixture-claude" && !lane["started_at"].is_null() {
-        let stderr = String::from_utf8_lossy(&out.stderr.bytes);
+        let stderr = String::from_utf8_lossy(&settled.launch.stderr.bytes);
         assert_eq!(
             stderr
                 .lines()
@@ -5552,7 +5669,9 @@ fn writer_shell_edits_instructions_and_keeps_private_logs(adapter: &str) -> Resu
         for name in ["AGENTS.md", "CLAUDE.md", "GLOBAL-AGENTS.md"] {
             assert!(paths.contains(&tree.join(name)), "{paths:?}");
         }
-        let human = rig.command(&["output", "shell-evidence/writer#1"])?;
+        // Changed files are host-fact narration, shown by the full view.
+        // Spec: docs/specs/lane-contracts.md#result-projection
+        let human = rig.command(&["output", "shell-evidence/writer#1", "--full"])?;
         let human = String::from_utf8_lossy(&human.stdout.bytes);
         assert!(
             human.contains(&tree.join("AGENTS.md").display().to_string()),
@@ -5602,9 +5721,9 @@ fn uncatalogued_cli_model_launches_and_surfaces_provider_failure() -> Result {
         let settled = rig.wait_launched(launch, value, "30s")?;
         assert_eq!(settled.exit(), expected, "{:?}", settled.wait);
         assert!(
-            String::from_utf8_lossy(&settled.launch.stderr.bytes).contains("not in the catalogue"),
-            "{:?}",
-            settled.launch
+            envelope_warns(&settled.launch_value, "not in the catalogue"),
+            "{}",
+            settled.launch_value
         );
         let node = settled.checkpoint["nodes"][0]["id"]
             .as_str()
@@ -6269,10 +6388,10 @@ fn discovered_exact_model_launch_has_no_catalogue_warning() -> Result {
         "{:?}",
         discovered.launch_value
     );
-    let stderr = String::from_utf8_lossy(&discovered.launch.stderr.bytes);
     assert!(
-        !stderr.contains("not in the catalogue"),
-        "discovered exact model warned: {stderr}"
+        !envelope_warns(&discovered.launch_value, "not in the catalogue"),
+        "discovered exact model warned: {}",
+        discovered.launch_value
     );
 
     let unknown = run_one("unknown-exact", "opencode/opencode/uncatalogued-3531")?;
@@ -6282,10 +6401,10 @@ fn discovered_exact_model_launch_has_no_catalogue_warning() -> Result {
         "{:?}",
         unknown.launch_value
     );
-    let stderr = String::from_utf8_lossy(&unknown.launch.stderr.bytes);
     assert!(
-        stderr.contains("not in the catalogue"),
-        "unknown model did not warn: {stderr}"
+        envelope_warns(&unknown.launch_value, "not in the catalogue"),
+        "unknown model did not warn: {}",
+        unknown.launch_value
     );
 
     cleanup.disarm();
@@ -6478,6 +6597,10 @@ fn main() -> ExitCode {
             (
                 "wip_commit_launches_direct_writer_graph",
                 wip_commit_launches_direct_writer_graph,
+            ),
+            (
+                "unheld_dirty_tree_adoption_warns_with_commit",
+                unheld_dirty_tree_adoption_warns_with_commit,
             ),
             ("graph_writer_restarts_fresh", graph_writer_restarts_fresh),
             ("nested_writer_fixture_child", nested_writer_fixture_child),

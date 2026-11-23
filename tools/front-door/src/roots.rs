@@ -335,27 +335,22 @@ pub fn state_candidate(context: &Roots, candidate: PathBuf) -> Result<Roots, Roo
     Ok(roots)
 }
 
-#[allow(clippy::print_stderr)] // Root warnings go to the operator before any output.
+// Root findings are typed warnings now. The sink installed by the binary edge
+// collapses repeats per invocation and remembers per-change keys in the state
+// root, so no marker file is needed. State root is published first so a
+// per-change key can be checked as soon as the warning arrives.
 fn report_warnings(roots: &Roots) {
-    if !roots.state.warnings().is_empty() && first_root_warning(roots.state.as_path()) {
-        for warning in roots.state.warnings() {
-            eprintln!("warning: {}", warning.message());
-        }
-    }
-}
-
-// Like config warnings, use an atomic marker in the state root so concurrent
-// commands and scheduled ticks report an unusual root only once.
-fn first_root_warning(state: &Path) -> bool {
-    let digest = provenant_records::CanonicalV1::file_digest(state.as_os_str().as_encoded_bytes());
-    let name = format!("root-warning-{digest}");
-    let Ok(dir) = provenant_os::fs::Directory::open_anchor(state) else {
-        return true;
-    };
-    match dir.create_new(OsStr::new(&name)) {
-        Ok(_) => true,
-        Err(error) if error.is_exists() => false,
-        Err(_) => true,
+    crate::output::set_state_root(roots.state.as_path());
+    for warning in roots.state.warnings() {
+        provenant_records::warning::warn(
+            provenant_records::Warning::new(
+                provenant_records::warning::STATE_ROOT_OVERLAP,
+                warning.message(),
+            )
+            .subject(warning.path.display().to_string())
+            .repair("choose a state root outside the advisory location or pass --state-dir PATH")
+            .once_per_change(),
+        );
     }
 }
 
@@ -562,16 +557,26 @@ mod tests {
     }
 
     #[test]
-    // Spec: docs/specs/consumer-contract.md#state-root
-    fn unusual_root_warning_is_reported_once_per_root() -> Result<(), Box<dyn std::error::Error>> {
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    fn unusual_root_warning_is_a_typed_per_change_warning() -> Result<(), Box<dyn std::error::Error>>
+    {
         let temp = tempfile::tempdir()?;
-        let first = temp.path().join("first");
-        let second = temp.path().join("second");
-        std::fs::create_dir(&first)?;
-        std::fs::create_dir(&second)?;
-        assert!(super::first_root_warning(&first));
-        assert!(!super::first_root_warning(&first));
-        assert!(super::first_root_warning(&second));
+        let root = temp.path().canonicalize()?;
+        let home = root.join("home");
+        let checkout = root.join("checkout");
+        std::fs::create_dir_all(&home)?;
+        std::fs::create_dir_all(&checkout)?;
+        let mut inputs = provenant_core::RootInputs::new(home, checkout.clone());
+        inputs.state_dir = Some(checkout.join(".claude").join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let ((), warnings) = provenant_records::warning::capture(|| super::report_warnings(&roots));
+        assert!(
+            warnings.iter().any(|warning| {
+                warning.code.as_ref() == provenant_records::warning::STATE_ROOT_OVERLAP.0
+                    && warning.dedup == provenant_records::Dedup::PerChange
+            }),
+            "{warnings:?}"
+        );
         Ok(())
     }
 

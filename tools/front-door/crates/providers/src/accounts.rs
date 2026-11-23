@@ -1,6 +1,7 @@
 //! Durable non-secret registrations and host identity checks.
 use crate::{ProviderError, host::PROBE_DIR_OPERATION, identity::RegisteredAccount};
 use provenant_config::{DomainConfig, DomainSection, FieldMetadata, Profile, SectionError};
+use provenant_core::names::{self, Catalogue, Fold, NameKind, NameRefusal, Resolved};
 use provenant_os::{
     exec::{ExecError, ExecOptions, Executor, StreamPolicy, Termination},
     fs::{ReadOptions, read_following},
@@ -250,6 +251,295 @@ pub fn label(s: &str) -> bool {
         && s.len() <= 64
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+}
+
+/// The one typed identity every account reference resolves to. Callers project
+/// it to the canonical spelling their own output needs; no caller re-matches
+/// the reference.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AccountIdentity {
+    pub adapter: String,
+    pub key: String,
+    pub entry_id: String,
+    pub label: String,
+    /// A harness local login with no registry entry. It answers only to its
+    /// harness-qualified spelling, so a bare `local` cannot steal a label.
+    pub local_login: bool,
+}
+
+impl AccountIdentity {
+    /// The harness-qualified spelling, `adapter/key`.
+    pub fn qualified(&self) -> String {
+        format!("{}/{}", self.adapter, self.key)
+    }
+}
+
+/// The spellings one calling context accepts. Declared as data so every
+/// context shares the resolver while keeping its own accepted forms.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ReferenceForms {
+    pub entry_id: bool,
+    pub label: bool,
+    pub key: bool,
+    pub qualified: bool,
+    pub local_logins: bool,
+}
+
+impl ReferenceForms {
+    /// `accounts` commands: registry entry ids and unique labels.
+    pub const REGISTRY: Self = Self {
+        entry_id: true,
+        label: true,
+        key: false,
+        qualified: false,
+        local_logins: false,
+    };
+    /// Route configuration: every registered form and harness local logins.
+    pub const ROUTING: Self = Self {
+        entry_id: true,
+        label: true,
+        key: true,
+        qualified: true,
+        local_logins: true,
+    };
+    /// Run preparation: registered keys and labels within one adapter.
+    pub const SELECTION: Self = Self {
+        entry_id: false,
+        label: true,
+        key: true,
+        qualified: false,
+        local_logins: false,
+    };
+    /// Continuation: an exact provider and account key pair.
+    pub const RETAINED: Self = Self {
+        entry_id: false,
+        label: false,
+        key: true,
+        qualified: false,
+        local_logins: false,
+    };
+}
+
+fn account_identities(settings: &Settings) -> Vec<AccountIdentity> {
+    let mut identities: Vec<AccountIdentity> = settings
+        .entries
+        .iter()
+        .map(|(entry_id, entry)| AccountIdentity {
+            adapter: entry.adapter.clone(),
+            key: entry.key.clone(),
+            entry_id: entry_id.clone(),
+            label: entry.label.clone(),
+            local_login: false,
+        })
+        .collect();
+    for spec in provenant_records::ADAPTER_SPECS
+        .iter()
+        .filter(|spec| spec.local_login)
+    {
+        let key = spec.local_account.1;
+        let qualified = format!("{}/{}", spec.name, key);
+        if identities
+            .iter()
+            .any(|identity| identity.adapter == spec.name && identity.key == key)
+        {
+            continue;
+        }
+        identities.push(AccountIdentity {
+            adapter: spec.name.to_owned(),
+            key: key.to_owned(),
+            entry_id: qualified,
+            label: spec.local_account.0.to_owned(),
+            local_login: true,
+        });
+    }
+    identities
+}
+
+/// Every identity answering to `reference` under `forms`, compared
+/// case-insensitively. A local login is never matched by its bare label or key.
+fn matching_identities<'a>(
+    identities: &'a [AccountIdentity],
+    forms: ReferenceForms,
+    reference: &str,
+) -> Vec<&'a AccountIdentity> {
+    let folded = reference.to_lowercase();
+    let matches_form = |form: &str| form == reference || form.to_lowercase() == folded;
+    identities
+        .iter()
+        .filter(|identity| {
+            if identity.local_login {
+                return forms.local_logins
+                    && forms.qualified
+                    && matches_form(&identity.qualified());
+            }
+            (forms.label && matches_form(&identity.label))
+                || (forms.entry_id && matches_form(&identity.entry_id))
+                || (forms.key && matches_form(&identity.key))
+                || (forms.qualified && matches_form(&identity.qualified()))
+        })
+        .collect()
+}
+
+impl Catalogue for AccountCatalogue {
+    type Item = AccountIdentity;
+    const KIND: NameKind = NameKind("account");
+
+    fn names(&self) -> Vec<String> {
+        if !self.forms.label {
+            return Vec::new();
+        }
+        let mut labels: Vec<String> = self
+            .identities
+            .iter()
+            .filter(|identity| !identity.local_login)
+            .map(|identity| identity.label.clone())
+            .collect();
+        labels.sort();
+        labels.dedup();
+        labels
+    }
+
+    fn lookup(&self, canonical: &str) -> Option<Self::Item> {
+        // Aliases point at a sentinel-prefixed entry id: a label is not a safe
+        // key here because a local login may share a registered account's label.
+        if let Some(entry_id) = canonical.strip_prefix('\0') {
+            return self
+                .identities
+                .iter()
+                .find(|identity| identity.entry_id == entry_id)
+                .cloned();
+        }
+        let mut matching = self
+            .identities
+            .iter()
+            .filter(|identity| !identity.local_login && identity.label == canonical);
+        let first = matching.next()?;
+        matching.next().is_none().then(|| (*first).clone())
+    }
+
+    fn aliases(&self) -> Vec<(String, String)> {
+        let mut aliases = Vec::new();
+        for identity in &self.identities {
+            let canonical = format!("\0{}", identity.entry_id);
+            let mut add = |form: &str| {
+                aliases.push((form.to_owned(), canonical.clone()));
+                let folded = form.to_lowercase();
+                if folded != form {
+                    aliases.push((folded, canonical.clone()));
+                }
+            };
+            if identity.local_login {
+                if self.forms.qualified {
+                    add(&identity.qualified());
+                }
+                continue;
+            }
+            if self.forms.entry_id {
+                add(&identity.entry_id);
+            }
+            if self.forms.key {
+                add(&identity.key);
+            }
+            if self.forms.qualified {
+                add(&identity.qualified());
+            }
+        }
+        aliases
+    }
+}
+
+struct AccountCatalogue {
+    identities: Vec<AccountIdentity>,
+    forms: ReferenceForms,
+}
+
+/// Labels of the accounts that answer to `reference` when more than one does
+/// under `forms`; empty when the reference is unambiguous. Callers use this to
+/// keep the ambiguity one refusal code family across every context.
+pub fn ambiguous_labels(
+    settings: &Settings,
+    reference: &str,
+    forms: ReferenceForms,
+) -> Vec<String> {
+    let identities = account_identities(settings);
+    let matched = matching_identities(&identities, forms, reference);
+    if matched.len() < 2 {
+        return Vec::new();
+    }
+    let mut labels: Vec<String> = matched
+        .iter()
+        .map(|identity| identity.label.clone())
+        .collect();
+    labels.sort();
+    labels.dedup();
+    labels
+}
+
+/// Resolve one account reference to its typed identity. Every command uses
+/// this resolver; `forms` declares what the calling context accepts. A miss is
+/// a [`NameRefusal`] carrying close matching labels only — never a directory,
+/// key or credential value.
+pub fn resolve(
+    settings: &Settings,
+    reference: &str,
+    forms: ReferenceForms,
+) -> Result<Resolved<AccountIdentity>, NameRefusal> {
+    let identities = account_identities(settings);
+    let matched = matching_identities(&identities, forms, reference);
+    if matched.len() > 1 {
+        let mut labels: Vec<String> = matched
+            .iter()
+            .map(|identity| identity.label.clone())
+            .collect();
+        labels.sort();
+        labels.dedup();
+        return Err(NameRefusal {
+            kind: NameKind("account"),
+            query: reference.to_owned(),
+            candidates: labels,
+        });
+    }
+    let catalogue = AccountCatalogue { identities, forms };
+    let labels = catalogue.names();
+    let mut candidate_labels: Vec<String> = catalogue
+        .identities
+        .iter()
+        .filter(|identity| !identity.local_login)
+        .map(|identity| identity.label.clone())
+        .collect();
+    candidate_labels.sort();
+    candidate_labels.dedup();
+    let name_matches = labels
+        .iter()
+        .any(|label| label.eq_ignore_ascii_case(reference));
+    let alias_matches = catalogue
+        .aliases()
+        .iter()
+        .any(|(alias, _)| alias == reference);
+    let query = if name_matches || alias_matches {
+        reference.to_owned()
+    } else {
+        reference.to_lowercase()
+    };
+    let folded = query != reference;
+    match names::resolve(&catalogue, query.as_str()) {
+        Ok(mut resolved) => {
+            resolved.canonical = resolved.item.qualified();
+            if folded {
+                resolved.fold = Fold::CaseFolded;
+            }
+            Ok(resolved)
+        }
+        Err(mut refusal) => {
+            refusal.candidates =
+                names::close_matches(query.as_str(), candidate_labels.iter().map(String::as_str))
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect();
+            refusal.query = reference.to_owned();
+            Err(refusal)
+        }
+    }
 }
 fn defaults(_: Profile) -> &'static str {
     "[entries]\n"
@@ -607,6 +897,156 @@ fn detect_agy(
     let stderr_str = std::str::from_utf8(&out.stderr.bytes).ok();
     let models = crate::quota::agy::extract_agy_models(Some(&payload), stderr_str);
     Ok((key, models))
+}
+
+#[cfg(test)]
+mod resolver_tests {
+    use super::*;
+
+    fn registration(adapter: &str, label: &str, key: &str, directory: &str) -> Registration {
+        Registration {
+            adapter: adapter.into(),
+            label: label.into(),
+            key: key.into(),
+            org_fingerprint: None,
+            directory: directory.into(),
+            plan: None,
+            priority: None,
+            billing_anchor: None,
+            plans: Vec::new(),
+            directories: Vec::new(),
+            limits: None,
+            display_name: None,
+            hidden: false,
+            order: None,
+            headline: None,
+            settings: Default::default(),
+        }
+    }
+
+    fn settings() -> Settings {
+        let mut settings = Settings::default();
+        settings.entries.insert(
+            "work-id".into(),
+            registration("claude", "work", "key-work", "/fixture/claude-work"),
+        );
+        settings.entries.insert(
+            "home-id".into(),
+            registration("codex", "home", "key-home", "/fixture/codex-home"),
+        );
+        settings
+    }
+
+    fn work_identity() -> AccountIdentity {
+        AccountIdentity {
+            adapter: "claude".into(),
+            key: "key-work".into(),
+            entry_id: "work-id".into(),
+            label: "work".into(),
+            local_login: false,
+        }
+    }
+
+    // Spec: docs/specs/routing.md#account-references
+    #[test]
+    fn every_accepted_form_resolves_to_one_typed_identity() {
+        let settings = settings();
+        for reference in ["work-id", "work", "key-work", "claude/key-work"] {
+            let resolved = resolve(&settings, reference, ReferenceForms::ROUTING)
+                .unwrap_or_else(|error| panic!("{reference}: {error}"));
+            assert_eq!(resolved.item, work_identity(), "{reference}");
+            assert_eq!(resolved.item.qualified(), "claude/key-work");
+        }
+        for reference in ["work-id", "work"] {
+            assert_eq!(
+                resolve(&settings, reference, ReferenceForms::REGISTRY)
+                    .unwrap()
+                    .item,
+                work_identity(),
+                "{reference}"
+            );
+        }
+        for reference in ["key-work", "work"] {
+            assert_eq!(
+                resolve(&settings, reference, ReferenceForms::SELECTION)
+                    .unwrap()
+                    .item,
+                work_identity(),
+                "{reference}"
+            );
+        }
+        assert_eq!(
+            resolve(&settings, "key-work", ReferenceForms::RETAINED)
+                .unwrap()
+                .item,
+            work_identity()
+        );
+    }
+
+    // Spec: docs/specs/routing.md#account-references
+    #[test]
+    fn a_missing_reference_lists_close_matching_labels_only() {
+        let settings = settings();
+        let refusal = resolve(&settings, "wokk", ReferenceForms::ROUTING).expect_err("miss");
+        assert_eq!(refusal.kind, NameKind("account"));
+        assert_eq!(refusal.query, "wokk");
+        assert!(
+            refusal.candidates.contains(&"work".to_owned()),
+            "{refusal:?}"
+        );
+        for candidate in &refusal.candidates {
+            assert!(candidate == "work" || candidate == "home", "{candidate}");
+        }
+        assert!(!refusal.to_string().contains("key-"), "{refusal}");
+    }
+
+    // Spec: docs/specs/routing.md#account-references
+    #[test]
+    fn a_shared_label_or_key_is_ambiguous_in_every_context() {
+        let mut settings = settings();
+        settings.entries.insert(
+            "other-id".into(),
+            registration("codex", "work", "key-work", "/fixture/codex-other"),
+        );
+        for forms in [
+            ReferenceForms::REGISTRY,
+            ReferenceForms::ROUTING,
+            ReferenceForms::SELECTION,
+        ] {
+            let refusal = resolve(&settings, "work", forms).expect_err("shared label");
+            assert_eq!(refusal.candidates, ["work".to_owned()], "{forms:?}");
+            assert_eq!(
+                ambiguous_labels(&settings, "work", forms),
+                refusal.candidates
+            );
+        }
+        let refusal =
+            resolve(&settings, "key-work", ReferenceForms::ROUTING).expect_err("shared key");
+        assert_eq!(refusal.candidates, ["work".to_owned()]);
+    }
+
+    // Spec: docs/specs/routing.md#account-references
+    #[test]
+    fn a_case_folded_reference_carries_the_fold_cue() {
+        let settings = settings();
+        let label = resolve(&settings, "WORK", ReferenceForms::ROUTING).expect("folded label");
+        assert_eq!(label.item.label, "work");
+        assert_eq!(label.fold, Fold::CaseFolded);
+        let qualified = resolve(&settings, "CLAUDE/KEY-WORK", ReferenceForms::ROUTING)
+            .expect("folded qualified reference");
+        assert_eq!(qualified.item, work_identity());
+        assert_eq!(qualified.fold, Fold::CaseFolded);
+    }
+
+    // Spec: docs/specs/routing.md#account-references
+    #[test]
+    fn a_local_login_answers_only_to_its_harness_qualified_reference() {
+        let settings = Settings::default();
+        let local = resolve(&settings, "agy/local", ReferenceForms::ROUTING).expect("local login");
+        assert_eq!(local.item.qualified(), "agy/local");
+        assert!(local.item.local_login);
+        assert!(resolve(&settings, "local", ReferenceForms::ROUTING).is_err());
+    }
 }
 
 #[cfg(test)]

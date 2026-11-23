@@ -2,7 +2,7 @@
 use crate::{Target, metadata::CatalogueArg};
 use clap::{Args, ValueEnum};
 
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct TelemetryValue {
     /// Account label or key
     #[arg(long)]
@@ -25,7 +25,7 @@ pub enum CostBy {
     Node,
 }
 
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct TelemetryCost {
     /// Count only this graph, node or attempt (NAME[/NODE[#N]]); default every attempt in the ledger
     #[arg(value_name = "TARGET", catalog_graph_target())]

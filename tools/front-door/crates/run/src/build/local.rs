@@ -99,6 +99,10 @@ pub(super) fn execute_in_slot(
     )
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the build child inherits stdout/stderr from the command output seam"
+)]
 fn execute_configured(
     job: &mut Job,
     ctx: &RunContext,

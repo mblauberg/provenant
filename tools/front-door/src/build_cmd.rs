@@ -280,7 +280,6 @@ pub fn run(command: Build, globals: &Globals) -> u8 {
                 "build",
                 state,
                 Some(&resolved.project),
-                Some(&key),
             )
             .slots;
             let cutoff = provenant_os::clock::now_unix_millis()

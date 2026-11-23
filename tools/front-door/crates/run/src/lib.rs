@@ -7,8 +7,9 @@ pub mod build;
 mod completion;
 pub use board::{BoardLane, BoardPage};
 pub use completion::{
-    BuildCap, LaneLocation, PreambleExtras, handoff_progress_guidance, lane_preamble,
-    lane_preamble_with, route_label,
+    BRIEF_PREAMBLE_KNOB, BriefLayer, BriefPreamble, BriefRole, BriefStaticCheck, BuildCap,
+    LaneLocation, PreambleExtras, handoff_progress_guidance, lane_preamble, lane_preamble_with,
+    route_label,
 };
 mod verification;
 pub use verification::{VerificationResolution, conflict_cause};
@@ -63,7 +64,7 @@ pub use controls::{
     TemporaryReasonKind, UncertainReason, attempt_presence, attempt_presence_with_census,
     attempt_presence_with_unavailable_census, holder_absent, overdue_at,
 };
-pub use delivery::{FilteredLanePath, HostDeliveryContext};
+pub use delivery::{FilteredLanePath, ForgeOnce, HostDeliveryContext, forge_for, resolve_forge};
 pub use git_context::{
     GitContext, ReviewDiffContext, continuation_history, ensure_local_branch,
     ensure_recorded_local_branch, resolve_git_base, resolve_git_base_with_facts,
@@ -106,6 +107,7 @@ pub use provenant_records::run::*;
 pub use provenant_supervisor::custody::AdmissionError;
 pub use reader::{
     ArtifactPart, AttemptReader, Attempts, ByteRange, LanePage, LaneQuery, OutputChunk, fact,
+    observed_commands,
 };
 pub use store::{PreparedRun, TerminalPublication};
 use thiserror::Error;
@@ -1046,11 +1048,6 @@ impl RunError {
                         .detail("branch name collides with an existing ref")
                         .next("inspect existing Git refs and choose a different branch name");
                 }
-                if let WorktreeError::BranchExistsWithBase { head, base, .. } = error {
-                    diagnostic = diagnostic
-                        .detail(format!("branch at {head} does not contain base {base}"))
-                        .next("omit --base to reuse the branch");
-                }
                 if let WorktreeError::WriterLeaseHeld { .. } = error {
                     diagnostic = diagnostic
                         .detail(error.to_string())
@@ -1425,13 +1422,13 @@ mod diagnostic_projection_tests {
     #[test]
     fn confinement_resource_diagnostic_keeps_code_and_excludes_source_text() {
         use provenant_confinement::permissions::PermissionError;
-        use provenant_records::diagnostic::{DiagnosticFact, ResourceFact, SettingSource};
+        use provenant_records::diagnostic::{DiagnosticFact, Layer, ResourceFact};
         let error = RunError::Confinement(PermissionError::ConfigOrigin {
             source: Box::new(PermissionError::GrantLimitExceeded {
                 family: "TOKEN_SENTINEL",
                 limit: 17,
             }),
-            origin: SettingSource::Configuration,
+            origin: Layer::Host,
         });
         let diagnostic = error.diagnostic(Destination::Remote);
         assert_eq!(diagnostic.code, ErrorKind::Confinement.code());

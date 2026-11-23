@@ -68,12 +68,7 @@ pub fn request_for_job<'a>(job: &'a Job, context: &'a RunContext) -> AdmissionRe
         .and_then(|value| serde_json::from_str::<ResolvedAdmissionClass>(value).ok())
         .filter(|config| config.name == "build")
         .unwrap_or_else(|| {
-            ResolvedAdmissionClass::resolve(
-                "build",
-                &context.state,
-                Some(&job.project),
-                Some(&job.project_key),
-            )
+            ResolvedAdmissionClass::resolve("build", &context.state, Some(&job.project))
         });
     let limit = env_value(&job.env, "PROVENANT_ADMISSION_SLOTS")
         .and_then(|value| value.parse::<u64>().ok())
@@ -314,7 +309,10 @@ fn check_cancel(
 }
 
 /// Admit immediately if possible, otherwise join the host-wide priority queue.
-#[allow(clippy::disallowed_methods)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "slot wait progress belongs to the build command output seam"
+)]
 pub fn admit(request: &AdmissionRequest<'_>) -> Result<Admitted, BuildError> {
     let signals = provenant_os::exec::BuildSignalWait::install().map_err(unavailable)?;
     check_cancel(request, &signals)?;

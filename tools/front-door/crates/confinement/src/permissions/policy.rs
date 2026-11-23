@@ -7,7 +7,7 @@ use super::validation::{profile_path_representable, validate_absolute};
 use super::{NetworkAccess, PathGrant, PathScope, PermissionError};
 pub use host::{host_credential_declarations, host_credential_roots, host_github_roots};
 use provenant_core::{CredentialKind, CredentialRoots, CredentialScope};
-use provenant_records::{LaneAccess, LaneAccessReceipt, LaneAccessSource};
+use provenant_records::{LaneAccess, LaneAccessReceipt, Layer};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -158,7 +158,7 @@ impl MandatoryRoots {
         let roots = Self {
             lane_access: LaneAccessReceipt {
                 access: LaneAccess::Isolated,
-                source: LaneAccessSource::Default,
+                source: Layer::Default,
                 key: "lanes.access".into(),
                 extra: Default::default(),
             },

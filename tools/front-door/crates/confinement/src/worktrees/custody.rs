@@ -85,36 +85,261 @@ fn check_writer_terminal_with_expected_merge(
     Ok(())
 }
 
+/// One marker that records an unfinished Git operation. The inventory is
+/// shared by custody, the object view and settlement, so a new operation is
+/// listed once rather than in three places that can drift apart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GitOperationMarker {
+    pub marker: &'static str,
+    pub label: &'static str,
+}
+
+pub const GIT_OPERATION_MARKERS: &[GitOperationMarker] = &[
+    GitOperationMarker {
+        marker: "MERGE_HEAD",
+        label: "merge",
+    },
+    GitOperationMarker {
+        marker: "CHERRY_PICK_HEAD",
+        label: "cherry-pick",
+    },
+    GitOperationMarker {
+        marker: "REVERT_HEAD",
+        label: "revert",
+    },
+    GitOperationMarker {
+        marker: "rebase-merge",
+        label: "rebase",
+    },
+    GitOperationMarker {
+        marker: "rebase-apply",
+        label: "rebase",
+    },
+    GitOperationMarker {
+        marker: "sequencer",
+        label: "sequencer",
+    },
+    GitOperationMarker {
+        marker: "BISECT_START",
+        label: "bisect",
+    },
+];
+
+/// The first unfinished Git operation recorded in `directory`, if any.
+/// `expected_merge` accepts one explicit MERGE_HEAD; every other operation
+/// stays unfinished. Only marker presence is read, never operation content.
+pub fn incomplete_git_operation(
+    directory: &Directory,
+    expected_merge: Option<&[u8]>,
+) -> Result<Option<GitOperationMarker>, WorktreeError> {
+    for marker in GIT_OPERATION_MARKERS {
+        if marker.marker == "MERGE_HEAD"
+            && let Some(expected) = expected_merge
+        {
+            let actual = directory.read_stable(OsStr::new(marker.marker), 1024 * 1024)?;
+            if actual != expected {
+                return Ok(Some(*marker));
+            }
+            continue;
+        }
+        match directory.metadata_at(OsStr::new(marker.marker), false) {
+            Ok(_) => return Ok(Some(*marker)),
+            Err(error) if error.is_not_found() => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(None)
+}
+
 /// Inspect the Git state owned by a writer, including an attempt-private view.
 pub fn check_git_operation_terminal(
     private: &Directory,
     expected_merge: Option<&[u8]>,
 ) -> Result<(), WorktreeError> {
-    for marker in [
-        "CHERRY_PICK_HEAD",
-        "REVERT_HEAD",
-        "rebase-merge",
-        "rebase-apply",
-        "MERGE_HEAD",
-        "sequencer",
-        "BISECT_START",
-    ] {
-        if marker == "MERGE_HEAD"
-            && let Some(expected) = expected_merge
-        {
-            let actual = private.read_stable(OsStr::new(marker), 1024 * 1024)?;
-            if actual != expected {
-                return Err(WorktreeError::GitOperationInProgress);
-            }
-            continue;
-        }
-        match private.metadata_at(OsStr::new(marker), false) {
-            Ok(_) => return Err(WorktreeError::GitOperationInProgress),
-            Err(error) if error.is_not_found() => {}
-            Err(error) => return Err(error.into()),
-        }
+    if incomplete_git_operation(private, expected_merge)?.is_some() {
+        return Err(WorktreeError::GitOperationInProgress);
     }
     Ok(())
+}
+
+/// The ref a rebase recorded as the branch it is replaying, when this Git
+/// directory holds a rebase whose `head-name` can be read. Missing or malformed
+/// state means the ref is unknown, not that no rebase is in progress.
+pub fn rebase_operation_ref(directory: &Directory) -> Option<String> {
+    for marker in ["rebase-merge", "rebase-apply"] {
+        if let Ok(sub) = directory.open_verified_directory(OsStr::new(marker))
+            && let Ok(raw) = sub.read_stable(OsStr::new("head-name"), 1024)
+            && let Ok(value) = String::from_utf8(raw)
+        {
+            let value = value.trim();
+            if !value.is_empty() {
+                return Some(value.to_owned());
+            }
+        }
+    }
+    None
+}
+
+/// The ref an unfinished operation in `directory` acts on, when it names one.
+/// A rebase keeps the branch in its `head-name`; every other operation acts on
+/// the checkout's `HEAD`. A detached `HEAD` names no ref and is reported as
+/// unknown, which never blocks settlement on its own.
+fn operation_ref(directory: &Directory, marker: GitOperationMarker) -> Option<String> {
+    if (marker.marker == "rebase-merge" || marker.marker == "rebase-apply")
+        && let Some(reference) = rebase_operation_ref(directory)
+    {
+        return Some(reference);
+    }
+    let raw = directory.read_stable(OsStr::new("HEAD"), 1024).ok()?;
+    let head = std::str::from_utf8(&raw).ok()?.trim();
+    head.strip_prefix("ref: ").map(str::to_owned)
+}
+
+/// An unfinished operation found in the host checkout and whether it blocks
+/// settlement. The marker is reported so an unrelated operation can be named
+/// in a warning; only `blocks` decides whether settlement refuses.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostCheckoutOperation {
+    pub marker: GitOperationMarker,
+    /// The ref the operation acts on, when it names one.
+    pub reference: Option<String>,
+    pub blocks: bool,
+}
+
+/// Decide whether an unfinished operation in the host checkout blocks
+/// settlement. A bare common directory has no checkout to leave mid-operation.
+///
+/// The host checkout is the primary checkout when a lane runs in a linked
+/// worktree: its operation markers live in the shared common directory, but
+/// settlement never writes that checkout's files or index. Only an operation
+/// on a ref settlement moves (the lane branch or the delivery destination) can
+/// therefore conflict and refuse before import. Every other host operation is
+/// retained and reported for a warning. When the lane's own worktree *is* the
+/// primary checkout, the checked directory is the lane's own Git: an
+/// unfinished operation there is the lane's committed work, so settlement
+/// warns and publishes the committed tip with the state intact. Only an
+/// operation on a moved ref other than the lane's own branch (the delivery
+/// destination) refuses, because publication would move it underneath the
+/// operation.
+pub fn check_host_checkout_terminal(
+    repo: &VerifiedRepo,
+    lane_branch: &str,
+    moved_refs: &[&str],
+) -> Result<Option<HostCheckoutOperation>, WorktreeError> {
+    if repo.is_bare() {
+        return Ok(None);
+    }
+    let primary = repo.is_primary_checkout();
+    let directory = if primary {
+        repo.private_dir()
+    } else {
+        repo.common_dir()
+    };
+    let Some(marker) = incomplete_git_operation(directory, None)? else {
+        return Ok(None);
+    };
+    let reference = operation_ref(directory, marker);
+    let blocks = host_operation_blocks(primary, reference.as_deref(), lane_branch, moved_refs);
+    Ok(Some(HostCheckoutOperation {
+        marker,
+        reference,
+        blocks,
+    }))
+}
+
+/// The decision made by [`check_host_checkout_terminal`] from the facts it
+/// observed. Kept pure so every branch can be pinned without building a repo.
+///
+/// A linked lane's host checkout never holds the lane's own rebase, so any
+/// operation there on a moved ref refuses. When the lane's worktree is the
+/// primary checkout the checked directory is the lane's own Git: the owner
+/// rule warns and proceeds with the committed tip, including for the lane's
+/// own rebase or merge of its branch. An operation on a moved ref other than
+/// that branch (the delivery destination) is the sole refusal there.
+fn host_operation_blocks(
+    primary: bool,
+    reference: Option<&str>,
+    lane_branch: &str,
+    moved_refs: &[&str],
+) -> bool {
+    let on_moved_ref = reference.is_some_and(|reference| moved_refs.contains(&reference));
+    if primary {
+        return on_moved_ref && reference != Some(lane_branch);
+    }
+    on_moved_ref
+}
+
+#[cfg(test)]
+mod host_checkout_tests {
+    use super::*;
+
+    const MOVED: &[&str] = &["refs/heads/lane", "refs/heads/published/lane"];
+
+    #[test]
+    fn unrelated_host_operation_does_not_block_a_linked_lane() {
+        assert!(!host_operation_blocks(
+            false,
+            Some("refs/heads/side"),
+            "refs/heads/lane",
+            MOVED
+        ));
+        // An unknown ref (detached HEAD, unreadable head-name) is not a moved
+        // ref, so it cannot refuse settlement on its own.
+        assert!(!host_operation_blocks(
+            false,
+            None,
+            "refs/heads/lane",
+            MOVED
+        ));
+    }
+
+    #[test]
+    fn host_operation_on_a_moved_ref_blocks_a_linked_lane() {
+        assert!(host_operation_blocks(
+            false,
+            Some("refs/heads/lane"),
+            "refs/heads/lane",
+            MOVED
+        ));
+        assert!(host_operation_blocks(
+            false,
+            Some("refs/heads/published/lane"),
+            "refs/heads/lane",
+            MOVED
+        ));
+    }
+
+    #[test]
+    fn primary_checkout_keeps_the_lanes_own_operation_without_refusing() {
+        // The lane's worktree is the primary checkout, so this is its own Git:
+        // a stopped rebase or merge of its branch warns and proceeds with the
+        // committed tip rather than refusing and hiding lane_git_operation_warning.
+        assert!(!host_operation_blocks(
+            true,
+            Some("refs/heads/lane"),
+            "refs/heads/lane",
+            MOVED
+        ));
+        assert!(!host_operation_blocks(
+            true,
+            Some("refs/heads/side"),
+            "refs/heads/lane",
+            MOVED
+        ));
+        assert!(!host_operation_blocks(true, None, "refs/heads/lane", MOVED));
+    }
+
+    #[test]
+    fn primary_checkout_operation_on_the_delivery_destination_blocks() {
+        // The one ref settlement moves that is not the lane's own in-progress
+        // operation: publication would move it underneath that operation.
+        assert!(host_operation_blocks(
+            true,
+            Some("refs/heads/published/lane"),
+            "refs/heads/lane",
+            MOVED
+        ));
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -684,23 +909,7 @@ pub fn in_progress_git_operation(
     cancel: &CancelToken,
 ) -> Result<Option<&'static str>, WorktreeError> {
     let tree = verify_probed_worktree(context, path, cancel)?;
-    let private = tree.repo().private_dir();
-    for (marker, label) in [
-        ("MERGE_HEAD", "merge"),
-        ("rebase-merge", "rebase"),
-        ("rebase-apply", "rebase"),
-        ("CHERRY_PICK_HEAD", "cherry-pick"),
-        ("REVERT_HEAD", "revert"),
-        ("sequencer", "sequencer"),
-        ("BISECT_START", "bisect"),
-    ] {
-        match private.metadata_at(OsStr::new(marker), false) {
-            Ok(_) => return Ok(Some(label)),
-            Err(error) if error.is_not_found() => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
-    Ok(None)
+    Ok(incomplete_git_operation(tree.repo().private_dir(), None)?.map(|marker| marker.label))
 }
 
 /// Verify a registered worktree and probe its own effective Git configuration,
@@ -865,10 +1074,7 @@ fn lock_worktree_impl(
         });
         match effect {
             Effect::Proceed => {}
-            Effect::Warn(message) => {
-                use std::io::Write;
-                let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
-            }
+            Effect::Warn(warning) => provenant_records::warning::warn(warning),
             Effect::Refuse(_) | Effect::Stop(_) => {
                 return Err(live_refusal(context.workers, &canonical));
             }

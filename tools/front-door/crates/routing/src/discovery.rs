@@ -101,7 +101,7 @@ pub fn parse_text_models(
             Some(provenant_records::ModelListingFormat::CursorText) => (true, true),
             Some(provenant_records::ModelListingFormat::AgyText) => (false, true),
             Some(provenant_records::ModelListingFormat::OpencodeText) => (false, false),
-            _ => return Err(RoutingError::UnknownAdapter),
+            _ => return Err(RoutingError::unknown_adapter(adapter)),
         };
     let mut models = std::collections::BTreeMap::<ModelId, DiscoveredModel>::new();
     let mut raw_ids = std::collections::BTreeSet::new();

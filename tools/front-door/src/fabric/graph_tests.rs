@@ -765,10 +765,7 @@ mod graph_writer_admission_tests {
     #[test]
     fn invalid_fake_launch_reaches_human_and_machine_graph_status() {
         use provenant_fabric_runtime::coordination::facade::InvalidInputDetail;
-        use provenant_fabric_runtime::graph::{
-            AccessMode, AttemptKey, AttemptObservation, AttemptOwner, GraphDocument, GraphRoute,
-            NodeInput, Replay,
-        };
+        use provenant_fabric_runtime::graph::{AccessMode, AttemptKey, AttemptObservation, AttemptOwner, GraphDocument, GraphRoute, NodeInput, Replay, };
         struct Refuse(FacadeError);
         impl AttemptOwner for Refuse {
             type Error = FacadeError;
@@ -838,9 +835,7 @@ mod graph_writer_admission_tests {
             }
         }
         use provenant_fabric_runtime::coordination::facade::DispatchRefusalFact;
-        use provenant_records::diagnostic::{
-            PressureLevel, PressureThreshold, ResourceFact, SettingSource,
-        };
+        use provenant_records::diagnostic::{PressureLevel, PressureThreshold, ResourceFact, Layer, };
         for cause in [
             FacadeError::DispatchRefused {
                 fact: Some(DispatchRefusalFact::DirtyWriter),
@@ -851,7 +846,7 @@ mod graph_writer_admission_tests {
                 resource: Some(ResourceFact::MemoryPressure {
                     level: PressureLevel::Critical,
                     threshold: PressureThreshold::Critical,
-                    origin: SettingSource::Configuration,
+                    origin: Layer::Host,
                 }),
             },
             FacadeError::LaunchUnknown {
@@ -1225,9 +1220,7 @@ mod graph_review_tests {
     #[test]
     fn review_identity_requires_read_only_and_recognises_behaviour()
     -> Result<(), Box<dyn std::error::Error>> {
-        use provenant_fabric_runtime::graph::{
-            GraphNode, is_review_node, template::ReviewBehaviour,
-        };
+        use provenant_fabric_runtime::graph::{GraphNode, is_review_node, template::ReviewBehaviour, };
         for (role, reviews) in [
             (None, false),
             (Some("lens"), true),
@@ -1305,9 +1298,7 @@ mod graph_ask_inbox_tests {
         graph::{AskFiling, AskLink, AskScope, LoopDecision, loop_ask},
         inbox::{InboxFilter, InboxInput, InboxResult, InboxService},
     };
-    use provenant_records::inbox::{
-        AnswerAction, AnswerDeliveryState, InteractionChannel, RequestState,
-    };
+    use provenant_records::inbox::{AnswerAction, AnswerDeliveryState, InteractionChannel, RequestState, };
 
     #[test]
     fn graph_owner_notification_is_non_blocking_and_replays_one_receipt()
@@ -1747,9 +1738,7 @@ mod graph_ask_inbox_tests {
     #[test]
     fn graph_ask_is_one_open_request_and_a_chat_answer_resumes_the_node()
     -> Result<(), Box<dyn std::error::Error>> {
-        use provenant_fabric_runtime::graph::{
-            GraphDocument, GraphStatus, NodeState, advance_with_budget,
-        };
+        use provenant_fabric_runtime::graph::{GraphDocument, GraphStatus, NodeState, advance_with_budget, };
         let temp = tempfile::tempdir()?;
         let base = temp.path().canonicalize()?;
         let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("assets"));
@@ -1840,9 +1829,7 @@ mod graph_ask_inbox_tests {
     #[test]
     fn graph_decide_asks_stay_fresh_across_repeated_cancel_and_resume()
     -> Result<(), Box<dyn std::error::Error>> {
-        use provenant_fabric_runtime::graph::{
-            GraphDocument, GraphStatus, NodeState, advance_with_budget, resume_with_budget,
-        };
+        use provenant_fabric_runtime::graph::{GraphDocument, GraphStatus, NodeState, advance_with_budget, resume_with_budget, };
         let temp = tempfile::tempdir()?;
         let base = temp.path().canonicalize()?;
         let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("assets"));
@@ -2174,7 +2161,7 @@ mod result_tests {
             super::graph_human::graph_human_full(&run)
                 .contains("error=blocked by ordinary (Failed)")
         );
-        let summary = super::graph_human::graph_summary(&serde_json::to_value(&run).unwrap());
+        let (summary, _) = super::graph_human::graph_summary(&serde_json::to_value(&run).unwrap());
         assert!(format!("{summary:?}").contains("blocked by ordinary (Failed)"));
     }
 
@@ -2541,7 +2528,7 @@ mod result_tests {
                 "{command}: {human}"
             );
         }
-        let summary = super::graph_human::graph_summary(&serde_json::to_value(&run).unwrap());
+        let (summary, _) = super::graph_human::graph_summary(&serde_json::to_value(&run).unwrap());
         assert!(
             summary
                 .lines
@@ -2567,7 +2554,7 @@ mod result_tests {
         let human = super::graph_display(&run, "status", &globals);
         assert!(human.contains("Pause reason: before[31mafter"));
         assert!(!human.contains('\u{1b}'));
-        let summary = super::graph_human::graph_summary(&serde_json::to_value(&run).unwrap());
+        let (summary, _) = super::graph_human::graph_summary(&serde_json::to_value(&run).unwrap());
         assert!(
             summary
                 .lines
@@ -2584,9 +2571,7 @@ mod result_tests {
             return Ok(());
         }
         use super::*;
-        use provenant_fabric_runtime::graph::{
-            FileJournal, GraphDocument, GraphExecution, GraphJournal,
-        };
+        use provenant_fabric_runtime::graph::{FileJournal, GraphDocument, GraphExecution, GraphJournal, };
         struct FreeWorkers;
         impl WorkerObserver for FreeWorkers {
             fn observe_roots(
@@ -3165,9 +3150,12 @@ mod result_tests {
         let run = super::graph_snapshot(display);
         let expected = "CI waiting elapsed=65s checks=build, tests head=abc123";
         assert!(super::graph_human(&run).contains(expected));
-        let summary = super::graph_summary(&serde_json::to_value(&run).unwrap());
+        let (summary, next) = super::graph_summary(&serde_json::to_value(&run).unwrap());
         assert_eq!(summary.lines[1], format!("ci running: {expected}"));
-        assert_eq!(summary.next.as_deref(), Some("provenant status delivery"));
+        assert_eq!(
+            next.expect("a running graph offers a next step").argv,
+            ["provenant", "status", "delivery"]
+        );
         assert_eq!(checkpoint.nodes[0].ci.as_ref().unwrap().elapsed_seconds, 10);
 
         let mut nested = run.clone();
@@ -3247,8 +3235,11 @@ mod result_tests {
 
         use serde_json::json;
         let prices = usage_prices();
-        let full = json!({"uncached_input":1_000_000, "cache_read":1_000_000,
-            "cache_write":1_000_000, "output_excluding_reasoning":1_000_000, "reasoning":1_000_000});
+        // Spec: docs/specs/telemetry.md#usage-merges-by-declared-semantics
+        // UsageRecord holds a typed `tokens` bucket; the old flat spellings are
+        // forward-compatible extras and carry no usage semantics.
+        let full = json!({"tokens":{"input":1_000_000, "cache_read":1_000_000,
+            "cache_write":1_000_000, "output":1_000_000, "reasoning":1_000_000}});
         let result = super::graph_attempt_usage(
             usage_record("priced", full.clone(), Some(1001)),
             Some(&prices),
@@ -3314,8 +3305,8 @@ mod result_tests {
         let without_reasoning = super::graph_attempt_usage(
             usage_record(
                 "priced",
-                json!({"uncached_input":1_000_000, "cache_read":1_000_000,
-                    "cache_write":1_000_000, "output_excluding_reasoning":1_000_000}),
+                json!({"tokens":{"input":1_000_000, "cache_read":1_000_000,
+                    "cache_write":1_000_000, "output":1_000_000}}),
                 Some(1000),
             ),
             Some(&prices),
@@ -3326,7 +3317,7 @@ mod result_tests {
         assert_eq!(without_reasoning.cost_micro_usd, Some(10_000_000));
 
         let partial = super::graph_attempt_usage(
-            usage_record("priced", json!({"uncached_input":1_000_000}), Some(1000)),
+            usage_record("priced", json!({"tokens":{"input":1_000_000}}), Some(1000)),
             Some(&prices),
             None,
         );
@@ -3443,7 +3434,7 @@ mod result_tests {
     fn missing_graph_price_table_reports_its_path_and_failure() {
         let assets = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
-        let reason = provenant_telemetry::prices_overlay::load(assets.path(), state.path(), None, None)
+        let reason = provenant_telemetry::prices_overlay::load(assets.path(), state.path(), None)
             .unwrap_err()
             .to_string();
         assert!(
@@ -4046,9 +4037,7 @@ mod provisioned_writer_submission_tests {
             provenant_core::WallTime::from_micros(record.queued_at.as_micros() + 1_500_000)?;
         let finished = provenant_core::WallTime::from_micros(started.as_micros() + 3_000_000)?;
         use provenant_records::custody::Scope;
-        use provenant_supervisor::custody::{
-            ExitObservation, PublicationState, SettlementEvidence,
-        };
+        use provenant_supervisor::custody::{ExitObservation, PublicationState, SettlementEvidence, };
         let exit = ExitObservation {
             launch_refusal: None,
             publication: PublicationState::Durable,
@@ -4131,10 +4120,13 @@ mod provisioned_writer_submission_tests {
                 applied_route: Some(route.clone()),
                 observed_route: Some(route),
                 usage: provenant_records::run::UsageRecord {
-                    uncached_input: Some(20),
-                    cache_read: Some(60),
-                    cache_write: Some(0),
-                    output_excluding_reasoning: Some(20),
+                    tokens: provenant_records::Tokens {
+                        input: Some(20),
+                        cache_read: Some(60),
+                        cache_write: Some(0),
+                        output: Some(20),
+                        ..provenant_records::Tokens::default()
+                    },
                     ..Default::default()
                 },
                 session: None,

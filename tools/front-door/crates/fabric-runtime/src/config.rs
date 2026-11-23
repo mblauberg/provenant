@@ -1,6 +1,7 @@
 //! Fabric owns domain policy and complete compiled profile assets.
 use provenant_config::{DomainConfig, DomainSection, FieldMetadata, Profile, SectionError};
 use provenant_core::HostId;
+use provenant_records::{Layer, Precedence};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -279,19 +280,23 @@ pub struct GraphLand {
     pub projects: BTreeMap<String, LandTiers>,
 }
 
+/// The layers a land policy can come from, lowest first. A project entry
+/// overrides the host entry, which overrides the compiled default.
+/// Spec: docs/specs/state.md#every-setting-reports-its-layer
+pub const LAND_PRECEDENCE: Precedence = Precedence(&[Layer::Default, Layer::Host, Layer::Project]);
+
+/// Admin publication is a host-only authority grant: the bundled `never` and
+/// the owner's host config are the only layers that may set it. A grant from
+/// any other layer lands in [`provenant_records::Merge::ignored`] so the caller
+/// can warn with its source rather than silently honouring it.
+/// Spec: docs/specs/cli.md#landing-adds-no-merge-authority
+pub const ADMIN_PUBLICATION_PRECEDENCE: Precedence = Precedence(&[Layer::Default, Layer::Host]);
+
 /// The effective policy for one tier and the layer it came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LandChoice {
     pub policy: LandPolicy,
-    pub source: LandSource,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LandSource {
-    Default,
-    Config,
-    Project,
+    pub source: Layer,
 }
 
 impl GraphLand {
@@ -304,36 +309,48 @@ impl GraphLand {
         }
     }
 
-    /// Project entry, then host entry, then the compiled default.
+    /// Project entry, then host entry, then the compiled default, resolved
+    /// through the family's one precedence declaration.
     pub fn choose(
         &self,
         project: Option<&str>,
         tier: provenant_records::workflow::RiskTier,
     ) -> LandChoice {
+        use provenant_records::{Source, Sourced, warn_ignored};
         let host = LandTiers {
             routine: self.routine,
             substantial: self.substantial,
             crucial: self.crucial,
             terminal: self.terminal,
         };
+        let mut candidates: Vec<Sourced<LandPolicy>> = Vec::new();
+        if let Some(policy) = host.get(tier) {
+            candidates.push(Sourced {
+                value: policy,
+                source: Source {
+                    layer: Layer::Host,
+                    origin: None,
+                },
+            });
+        }
         if let Some(policy) = project
             .and_then(|id| self.projects.get(id))
             .and_then(|tiers| tiers.get(tier))
         {
-            LandChoice {
-                policy,
-                source: LandSource::Project,
-            }
-        } else if let Some(policy) = host.get(tier) {
-            LandChoice {
-                policy,
-                source: LandSource::Config,
-            }
-        } else {
-            LandChoice {
-                policy: Self::default_policy(tier),
-                source: LandSource::Default,
-            }
+            candidates.push(Sourced {
+                value: policy,
+                source: Source {
+                    layer: Layer::Project,
+                    origin: None,
+                },
+            });
+        }
+        let resolved = LAND_PRECEDENCE.merge_over_default(Self::default_policy(tier), candidates);
+        warn_ignored(&resolved.ignored, "land policy");
+        let winner = resolved.winner;
+        LandChoice {
+            policy: winner.value,
+            source: winner.source.layer,
         }
     }
 }
@@ -1421,7 +1438,7 @@ mod tests {
             choose(&land, None, RiskTier::Routine),
             LandChoice {
                 policy: LandPolicy::Auto,
-                source: LandSource::Default
+                source: Layer::Default
             }
         );
         assert_eq!(
@@ -1443,18 +1460,18 @@ mod tests {
             choose(&land, Some("p1"), RiskTier::Substantial),
             LandChoice {
                 policy: LandPolicy::Ask,
-                source: LandSource::Project
+                source: Layer::Project
             }
         );
         assert_eq!(
             choose(&land, Some("p2"), RiskTier::Substantial).source,
-            LandSource::Default
+            Layer::Default
         );
         assert_eq!(
             choose(&land, Some("p1"), RiskTier::Crucial),
             LandChoice {
                 policy: LandPolicy::Auto,
-                source: LandSource::Config
+                source: Layer::Host
             }
         );
         assert!(serde_json::from_str::<GraphLand>(r#"{"crucial":"never"}"#).is_err());
@@ -1693,6 +1710,14 @@ mod tests {
         assert_eq!(
             warning.message,
             "domains.fabric.lanes.max_concurrent_builds: unknown configuration key; ignored"
+        );
+    }
+    /// Spec: docs/specs/state.md#every-setting-reports-its-layer
+    #[test]
+    fn land_precedence_ranks_default_then_host_then_project() {
+        assert_eq!(
+            LAND_PRECEDENCE.0,
+            &[Layer::Default, Layer::Host, Layer::Project]
         );
     }
 }

@@ -115,6 +115,7 @@ lane_row! {
             ("trigger", choices(&["wall_deadline", "token_budget", "explicit_cancellation", "steered", "context_handoff"])),
             ("push", choices(&["not_granted", "not_attempted", "not_needed", "pushed", "failed"])),
         ], &[("head", string()), ("ahead", unsigned()), ("dirty_paths", unsigned())]);
+        warnings: Vec<String> => array(string());
         write_grants: Value => nullable(array(grant_schema()));
         terminal_cause: crate::run::TerminalCause => terminal_cause_schema();
         host: String => string();
@@ -520,6 +521,7 @@ impl LaneRow {
                 })
             }),
             stop_work: lane.stop_work.clone(),
+            warnings: (!lane.warnings.is_empty()).then(|| lane.warnings.clone()),
             cause: if git_import_failure.is_some() {
                 Some(crate::run::SettlementReason::Failed)
             } else {

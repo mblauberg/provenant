@@ -1,9 +1,9 @@
 //! Format-2 records: the stop table and the canonical encoding of each record.
 use crate::handoff::{Handoff, HandoffStatus};
 use crate::{
-    CanonicalV1, Continuation, FindingDecision, FindingDisposition, Limit, LimitSource,
-    LimitStrength, Limits, NextStep, OnStop, Pause, PauseCause, STOP_TABLE, Stop, StopCause,
-    StopFacts, WorkKey, decode,
+    CanonicalV1, Continuation, FindingDecision, FindingDisposition, Layer, Limit, LimitStrength,
+    Limits, NextStep, OnStop, Pause, PauseCause, STOP_TABLE, Stop, StopCause, StopFacts, WorkKey,
+    decode,
 };
 use provenant_core::{GitOid, ProjectId};
 use serde::{Serialize, de::DeserializeOwned};
@@ -536,10 +536,7 @@ fn each_record_round_trips_and_keeps_an_unknown_field() {
     blocked.extra.insert("future".into(), json!(1));
     round_trip(&Stop::declared(blocked).unwrap().unwrap(), true);
     round_trip(&Stop::new(StopCause::Lost, None).unwrap(), true);
-    round_trip(
-        &Limit::new(3, LimitSource::Launch, LimitStrength::Default),
-        true,
-    );
+    round_trip(&Limit::new(3, Layer::Launch, LimitStrength::Default), true);
     let head = GitOid::parse(&"a".repeat(40)).unwrap();
     let base = GitOid::parse(&"b".repeat(64)).unwrap();
     round_trip(

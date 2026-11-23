@@ -1,5 +1,6 @@
-//! Version-one command transport facts, shared by CLI edges.
+//! Version-two command transport facts, shared by CLI edges.
 
+use crate::warning::Warning;
 use crate::wire::ENVELOPE_VERSION;
 use serde::{Deserialize, Serialize};
 
@@ -84,6 +85,36 @@ impl Outcome {
         }
     }
 }
+/// One suggested next command, carried as data rather than formatted text.
+/// `argv` holds the executable and its arguments; the binary edge turns it into
+/// one human line with the single command formatter.
+/// Spec: docs/specs/cli.md#one-bounded-envelope-clipped-with-a-warning
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NextStep {
+    /// The command as an argument vector, beginning with `provenant`.
+    pub argv: Vec<String>,
+    /// One sentence saying why this is the next step.
+    pub why: String,
+}
+impl NextStep {
+    pub fn new(argv: Vec<String>, why: impl Into<String>) -> Self {
+        Self {
+            argv,
+            why: why.into(),
+        }
+    }
+    /// Build a step from literal arguments. Owners use this form so the argv a
+    /// consumer reads and the line the edge prints come from one value.
+    pub fn from_args(argv: &[&str], why: impl Into<String>) -> Self {
+        Self::new(argv.iter().map(|arg| (*arg).to_owned()).collect(), why)
+    }
+    /// Build a step from an already-safe command string whose arguments are
+    /// separated by whitespace. Each token becomes one literal argv entry.
+    pub fn from_command(command: &str, why: impl Into<String>) -> Self {
+        Self::new(command.split_whitespace().map(str::to_owned).collect(), why)
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CommandResult<T> {
     pub schema_version: u64,
@@ -91,6 +122,14 @@ pub struct CommandResult<T> {
     pub status: Outcome,
     pub data: T,
     pub error: Option<CommandError>,
+    /// Every warning raised while running the command. Always on the wire:
+    /// under `--json` nothing is printed to stderr, so this is the only place
+    /// a consumer can see them. Spec: docs/specs/cli.md#warnings-are-typed-values
+    pub warnings: Vec<Warning>,
+    /// Suggested next commands. Always on the wire, empty when the command
+    /// suggests nothing; rendered once by the binary edge.
+    /// Spec: docs/specs/cli.md#one-bounded-envelope-clipped-with-a-warning
+    pub next: Vec<NextStep>,
 }
 impl<T> CommandResult<T> {
     pub fn new(command: impl Into<String>, status: Outcome, data: T) -> Self {
@@ -100,7 +139,15 @@ impl<T> CommandResult<T> {
             status,
             data,
             error: None,
+            warnings: Vec::new(),
+            next: Vec::new(),
         }
+    }
+
+    /// Attach suggested next commands to a result before it is emitted.
+    pub fn with_next(mut self, next: Vec<NextStep>) -> Self {
+        self.next = next;
+        self
     }
 }
 #[derive(Debug, Serialize)]

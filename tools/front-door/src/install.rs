@@ -12,13 +12,20 @@ use provenant_config::{
 use provenant_core::{CancelToken, Clock, WaitBudget};
 use provenant_os::clock::SystemClock;
 use provenant_os::fs::Directory;
-use provenant_records::{CommandError, CommandResult, Harness, Outcome};
+use provenant_records::{
+    CommandError, CommandResult, Harness, Outcome,
+    warning::{
+        GIT_OPERATION_RETAINED, LIVE_RECORD_FORMAT_CHANGED, STATE_ROOT_OVERLAP, Warning, warn,
+    },
+};
 use serde::Serialize;
 use std::ffi::OsStr;
 use std::{
     io::{self, Write},
     path::{Path, PathBuf},
 };
+
+mod migrations;
 
 #[derive(Debug)]
 enum EdgeError {
@@ -254,7 +261,7 @@ fn receipt_targets(
         Ok(targets) => targets,
         Err(InstallError::Config(error)) => {
             warning = Some(format!(
-                "warning: configuration ignored for uninstall ({error}); removing recorded targets only"
+                "configuration ignored for uninstall ({error}); removing recorded targets only"
             ));
             // Uninstall is host-only, including its configuration fallback.
             let policy = std::sync::Arc::new(provenant_config::policy::read(
@@ -851,7 +858,11 @@ fn warn_legacy_custody(destination: &provenant_core::Roots) -> Option<String> {
                 "could not inspect retained writer custody under {}: {error}",
                 worktrees_path.display()
             );
-            let _ = writeln!(io::stderr().lock(), "{message}");
+            warn(
+                Warning::new(GIT_OPERATION_RETAINED, message.clone())
+                    .subject(worktrees_path.display().to_string())
+                    .once_per_change(),
+            );
             return Some(message);
         }
     };
@@ -864,7 +875,11 @@ fn warn_legacy_custody(destination: &provenant_core::Roots) -> Option<String> {
                 "could not inspect retained writer custody under {}: {error}",
                 worktrees_path.display()
             );
-            let _ = writeln!(io::stderr().lock(), "{message}");
+            warn(
+                Warning::new(GIT_OPERATION_RETAINED, message.clone())
+                    .subject(worktrees_path.display().to_string())
+                    .once_per_change(),
+            );
             return Some(message);
         }
     };
@@ -893,7 +908,11 @@ fn warn_legacy_custody(destination: &provenant_core::Roots) -> Option<String> {
     } else {
         inspection_issue?
     };
-    let _ = writeln!(io::stderr().lock(), "{message}");
+    warn(
+        Warning::new(GIT_OPERATION_RETAINED, message.clone())
+            .subject(worktrees_path.display().to_string())
+            .once_per_change(),
+    );
     Some(message)
 }
 
@@ -928,7 +947,11 @@ fn warn_live_record_change(
             destination.state.as_path().display()
         ),
     };
-    let _ = writeln!(io::stderr().lock(), "{message}");
+    warn(
+        Warning::new(LIVE_RECORD_FORMAT_CHANGED, message.clone())
+            .subject(destination.state.as_path().display().to_string())
+            .once_per_change(),
+    );
     Some(message)
 }
 
@@ -1446,6 +1469,9 @@ fn apply_install(
     }
     // Configuration has been validated at the staged root; every actual write
     // now targets its published name. Agent bytes already name that destination.
+    // Non-SQLite state migrates once here, after the live-attempt advisory and
+    // before any release is swapped in.
+    let migrated = migrations::run(environment.roots.state.as_path());
     for batch in &mut batches {
         batch.roots = environment.roots.clone();
     }
@@ -1524,7 +1550,11 @@ fn apply_install(
     if result.is_err()
         && let Some(message) = reporter.stopped_report(&state)
     {
-        let _ = writeln!(io::stderr().lock(), "{message}");
+        warn(
+            Warning::new(GIT_OPERATION_RETAINED, message.clone())
+                .subject(state.display().to_string())
+                .once_per_change(),
+        );
     }
     let result = match result {
         Ok(outcome) => Ok(outcome),
@@ -1534,6 +1564,9 @@ fn apply_install(
     if let Ok(outcome) = &result
         && !outcome.dry_run
     {
+        // A step that ran before this install had no receipt to record into;
+        // record its id on the receipt the install just published.
+        migrations::record(&state, &migrated);
         // The seeding feature is gone; a state root left by an older release
         // still pays for its seeds until install retires them once.
         let _ = retire_cargo_target_seeds(&state);
@@ -1590,7 +1623,11 @@ fn apply_install(
     if result.is_ok()
         && let Some(message) = reporter.stopped_report(&state)
     {
-        let _ = writeln!(io::stderr().lock(), "{message}");
+        warn(
+            Warning::new(GIT_OPERATION_RETAINED, message.clone())
+                .subject(state.display().to_string())
+                .once_per_change(),
+        );
     }
     Ok(Applied {
         result,
@@ -1709,6 +1746,8 @@ fn retired_tree_bytes(path: &Path) -> u64 {
 
 /// Remove the directory left by the retired seeding feature, reporting its
 /// path and size. A missing directory is the normal case and stays silent.
+// A successful retirement is reported on stderr as the install's progress trace.
+#[allow(clippy::disallowed_methods)]
 fn retire_cargo_target_seeds(state: &Path) -> Option<String> {
     let path = state.join(RETIRED_CARGO_TARGET_SEEDS);
     let metadata = match std::fs::symlink_metadata(&path) {
@@ -1716,19 +1755,27 @@ fn retire_cargo_target_seeds(state: &Path) -> Option<String> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return None,
         Err(error) => {
             let message = format!(
-                "warning: could not inspect retired cargo target seeds at {}: {error}",
+                "could not inspect retired cargo target seeds at {}: {error}",
                 path.display()
             );
-            let _ = writeln!(io::stderr().lock(), "{message}");
+            warn(
+                Warning::new(STATE_ROOT_OVERLAP, message.clone())
+                    .subject(path.display().to_string())
+                    .once_per_change(),
+            );
             return Some(message);
         }
     };
     if !metadata.is_dir() {
         let message = format!(
-            "warning: retired cargo target seeds at {} is not a directory; left untouched",
+            "retired cargo target seeds at {} is not a directory; left untouched",
             path.display()
         );
-        let _ = writeln!(io::stderr().lock(), "{message}");
+        warn(
+            Warning::new(STATE_ROOT_OVERLAP, message.clone())
+                .subject(path.display().to_string())
+                .once_per_change(),
+        );
         return Some(message);
     }
     let bytes = retired_tree_bytes(&path);
@@ -1738,11 +1785,19 @@ fn retire_cargo_target_seeds(state: &Path) -> Option<String> {
             path.display()
         ),
         Err(error) => format!(
-            "warning: could not remove retired cargo target seeds at {}: {error}",
+            "could not remove retired cargo target seeds at {}: {error}",
             path.display()
         ),
     };
-    let _ = writeln!(io::stderr().lock(), "{message}");
+    if message.starts_with("could not remove") {
+        warn(
+            Warning::new(STATE_ROOT_OVERLAP, message.clone())
+                .subject(path.display().to_string())
+                .once_per_change(),
+        );
+    } else {
+        let _ = writeln!(io::stderr().lock(), "{message}");
+    }
     Some(message)
 }
 
@@ -2429,7 +2484,13 @@ fn report_smoke_cleanup<T>(
         return outcome;
     };
     let warning = format!("smoke scratch project binding was not removed: {error}");
-    let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+    warn(
+        Warning::new(
+            provenant_records::warning::SMOKE_BINDING_RETAINED,
+            warning.clone(),
+        )
+        .once_per_change(),
+    );
     match outcome {
         Ok(output) => Ok(output),
         Err(error) => Err(format!("{error}\n{warning}")),
@@ -2998,6 +3059,7 @@ mod tests {
             harnesses: Vec::new(),
             harness_targets: Vec::new(),
             entries: Vec::new(),
+            migrations: Vec::new(),
         };
         std::fs::write(
             install.join("receipt.json"),
@@ -3817,6 +3879,7 @@ mod tests {
                 target("orphan")?,
             ],
             entries: vec![],
+            migrations: Vec::new(),
         };
         let orphans = orphaned_targets(&environment, &base, &receipt);
         assert_eq!(orphans.len(), 1);

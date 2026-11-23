@@ -157,19 +157,24 @@ fn install_staged_release(rig: &TestRig) -> Result<provenant_records::SourceDige
     let marker = rig.root.join("smoke-home.txt");
     let mut version_data = serde_json::to_value(&version)?;
     version_data["package_version"] = env!("CARGO_PKG_VERSION").into();
+    // The staged binary must answer in the envelope the real smoke check
+    // decodes: v2, with the always-present warnings array. A v1 fixture fails
+    // `check install` at the identity gate before its findings can be read.
     let version_json = serde_json::to_string(&serde_json::json!({
-        "schema_version": 1,
+        "schema_version": provenant_records::wire::ENVELOPE_VERSION,
         "command": "version",
         "status": "ok",
         "data": version_data,
         "error": null,
+        "warnings": [],
     }))?;
     let help_json = serde_json::to_string(&serde_json::json!({
-        "schema_version": 1,
+        "schema_version": provenant_records::wire::ENVELOPE_VERSION,
         "command": "help",
         "status": "ok",
         "data": {"commands": []},
         "error": null,
+        "warnings": [],
     }))?;
     let executable = source.join("bin/provenant");
     fs::write(
@@ -231,10 +236,17 @@ fn check_install_smokes_a_staged_binary_with_private_home_and_keeps_scan_status(
     fs::remove_file(home.join("keep"))?;
     fs::remove_dir(&home)?;
     fs::remove_file(&marker)?;
-    let stderr = String::from_utf8_lossy(&output.stderr.bytes);
+    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
     assert!(
-        stderr.contains("warning") && stderr.contains("private check directory"),
-        "{stderr}"
+        envelope["warnings"].as_array().is_some_and(|warnings| {
+            warnings.iter().any(|warning| {
+                warning["code"] == "PRIVATE_CHECK_DIR_UNCLEAN"
+                    && warning["message"]
+                        .as_str()
+                        .is_some_and(|message| message.contains("private check directory"))
+            })
+        }),
+        "envelope must carry the private check directory warning: {envelope}"
     );
     Ok(())
 }

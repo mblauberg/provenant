@@ -1,6 +1,5 @@
 //! Pure argument parsing, help and bounded result rendering. No owner execution.
 #![forbid(unsafe_code)]
-use provenant_core::edit_distance;
 pub mod accounts;
 pub mod brief;
 pub mod check;
@@ -42,7 +41,9 @@ pub mod telemetry_value;
 use clap::builder::ArgExt;
 use clap::{Arg, ArgAction, ArgGroup, CommandFactory, FromArgMatches};
 pub use grammar::*;
-use provenant_records::{HelpArgument, HelpCatalogue, HelpCommand, HelpErrorCode, HelpGroup};
+use provenant_records::{
+    CommandError, HelpArgument, HelpCatalogue, HelpCommand, HelpErrorCode, HelpGroup, Outcome,
+};
 pub use render::*;
 use std::ffi::OsString;
 pub use telemetry_args::CostBy;
@@ -145,7 +146,7 @@ fn parse_with_models(
             }
             return match error.kind() {
                 clap::error::ErrorKind::DisplayHelp => match help_scope(&model, &argv) {
-                    Some(scope) => {
+                    HelpScope::Resolved(scope) => {
                         let (text, catalog) = if scope == "provenant" {
                             (core_help(&model), catalog(&model))
                         } else if is_core_scope(&model, &scope) {
@@ -167,10 +168,26 @@ fn parse_with_models(
                             globals,
                         }
                     }
-                    None => ParseOutcome::Invalid {
-                        error: CliError::invalid("unknown help command"),
-                        globals,
-                    },
+                    HelpScope::Unknown {
+                        word,
+                        scope,
+                        candidates,
+                    } => {
+                        let close = provenant_core::close_matches(
+                            &word,
+                            candidates.iter().map(String::as_str),
+                        );
+                        let mut message = format!("unknown help command `{word}` under `{scope}`");
+                        if close.is_empty() {
+                            message.push_str(&format!("; commands: {}", candidates.join(", ")));
+                        } else {
+                            message.push_str(&format!("; close matches: {}", close.join(", ")));
+                        }
+                        ParseOutcome::Invalid {
+                            error: CliError::invalid(message),
+                            globals,
+                        }
+                    }
                 },
                 clap::error::ErrorKind::DisplayVersion => ParseOutcome::Version { globals },
                 _ => ParseOutcome::Invalid {
@@ -373,16 +390,16 @@ fn usage_suggestion(error: &clap::Error, argv: &[OsString]) -> Option<String> {
             .map(|child| child.get_name().to_owned())
             .collect()
     };
-    let candidate = candidates
-        .into_iter()
-        .map(|name| (edit_distance(&rejected, &name), name))
-        .filter(|(distance, _)| (1..=2).contains(distance))
-        .min()?;
-    Some(if flag.is_some() {
-        candidate.1
-    } else {
-        format!("{path} {}", candidate.1)
-    })
+    let suggested = provenant_core::close_matches(&rejected, candidates.iter().map(String::as_str))
+        .first()
+        .map(|name| {
+            if flag.is_some() {
+                (*name).to_owned()
+            } else {
+                format!("{path} {name}")
+            }
+        })?;
+    Some(suggested)
 }
 /// Follow the subcommand words in `argv` (skipping option values) down the
 /// command model, stopping at `stop` when given. Returns the deepest command
@@ -856,7 +873,18 @@ fn validate(inv: &Invocation) -> Result<(), CliError> {
 /// `provenant fabric mail`. Flags are skipped, along with the values of the
 /// global `--state-dir` and `--project`. Explicit quota subcommands remain
 /// addressable even though they are omitted from the compact listing.
-fn help_scope(model: &clap::Command, argv: &[OsString]) -> Option<String> {
+/// The scope an explicit `--help` names, or the hidden component that stopped
+/// the walk with the visible siblings worth suggesting.
+enum HelpScope {
+    Resolved(String),
+    Unknown {
+        word: String,
+        scope: String,
+        candidates: Vec<String>,
+    },
+}
+
+fn help_scope(model: &clap::Command, argv: &[OsString]) -> HelpScope {
     let mut scope = String::from("provenant");
     let mut current = model;
     let mut words = argv
@@ -871,13 +899,22 @@ fn help_scope(model: &clap::Command, argv: &[OsString]) -> Option<String> {
                 || (child.is_hide_set()
                     && !matches!(scope.as_str(), "provenant" | "provenant quota"))
             {
-                return None;
+                let candidates = current
+                    .get_subcommands()
+                    .filter(|child| !child.is_hide_set())
+                    .map(|child| child.get_name().to_owned())
+                    .collect();
+                return HelpScope::Unknown {
+                    word: arg.to_string_lossy().into_owned(),
+                    scope,
+                    candidates,
+                };
             }
             scope = format!("{scope} {}", child.get_name());
             current = child;
         }
     }
-    Some(scope)
+    HelpScope::Resolved(scope)
 }
 fn is_core_scope(model: &clap::Command, scope: &str) -> bool {
     let mut selected = model;
@@ -930,10 +967,15 @@ fn resolved_help_text(
                 .filter(|child| !child.is_hide_set())
                 .map(clap::Command::get_name)
                 .collect();
-            return Err(CliError::invalid(format!(
+            let close = provenant_core::close_matches(component, children.iter().copied());
+            let mut message = format!(
                 "unknown help command `{component}` under `{scope}`; commands: {}",
                 children.join(", ")
-            )));
+            );
+            if !close.is_empty() {
+                message.push_str(&format!("; close matches: {}", close.join(", ")));
+            }
+            return Err(CliError::invalid(message));
         };
         scope = format!("{scope} {}", child.get_name());
         names.push(child.get_name().to_string());
@@ -1177,8 +1219,137 @@ pub fn command_verbs() -> Vec<String> {
 /// Command paths plus the two non-command events recorded by usage telemetry.
 pub fn usage_verbs() -> Vec<String> {
     let mut verbs = vec!["parse".into(), "version".into()];
-    verbs.extend(command_verbs());
+    verbs.extend(
+        domains()
+            .iter()
+            .flat_map(|domain| domain.verbs)
+            .map(|verb| verb.path.join(" ")),
+    );
     verbs
+}
+
+/// The process seams a command sees. The binary selects an implementation at
+/// the process edge and the registry hands it to every verb, so a fixture
+/// reaches the command body without a process-global.
+pub trait Process {
+    /// Host admission observations used by the composed guardian.
+    fn admission_resources(&self) -> &dyn provenant_run::Resources {
+        &provenant_run::SystemResources
+    }
+    /// The guardian's clock, sampled at the process edge.
+    fn clock(&self) -> &dyn provenant_core::Clock {
+        &provenant_os::clock::SystemClock
+    }
+    /// Observes whether a worktree's writer is alive.
+    fn workers(&self) -> &'static dyn provenant_confinement::worktrees::WorkerObserver {
+        &provenant_confinement::worktrees::SystemWorkerObserver
+    }
+    /// Hands Run's terminal holder to the guardian composition.
+    fn holder(
+        &self,
+        holder: &dyn provenant_supervisor::Holder,
+        guard: &mut dyn FnMut(&dyn provenant_supervisor::Holder) -> u8,
+    ) -> u8 {
+        guard(holder)
+    }
+    /// Runs the guardian with the composed hooks.
+    fn supervise(
+        &self,
+        descriptors: &[OsString],
+        hooks: provenant_supervisor::GuardianHooks<'_>,
+    ) -> provenant_supervisor::custody::Result<()> {
+        provenant_supervisor::supervise(descriptors, hooks)
+    }
+}
+
+/// One command domain: a module under `src/commands/` owns its verbs.
+///
+/// Spec: docs/specs/rust-workspace.md#one-owner-per-command-domain
+#[derive(Debug)]
+pub struct Domain {
+    pub name: &'static str,
+    pub verbs: &'static [Verb],
+}
+
+/// One registry entry: the parsed command path, its stability and its owner.
+#[derive(Debug)]
+pub struct Verb {
+    /// `["worktree", "locate"]`; the persisted usage verb is `path.join(" ")`.
+    pub path: &'static [&'static str],
+    /// What `external_contract` declares for the command.
+    pub stability: provenant_core::consumer_env::Stability,
+    pub run: fn(&Call) -> Result<Outcome, CommandError>,
+}
+
+/// What a verb receives: the parsed command, the globals it was parsed with,
+/// its resolved path and the process seams selected at the edge.
+pub struct Call<'a> {
+    pub command: &'a Command,
+    pub globals: &'a Globals,
+    /// Space-joined command path, such as `quota tick`.
+    pub leaf: &'a str,
+    pub process: &'a dyn Process,
+}
+
+/// The domains the binary registered at its process edge.
+///
+/// The types live here rather than in the binary because `usage_verbs` and
+/// `external_contract` derive from the same table and the binary depends on
+/// this crate, not the reverse. `src/commands/mod.rs` owns `DOMAINS` and
+/// installs it once before the first command runs.
+static DOMAINS: std::sync::OnceLock<&'static [&'static Domain]> = std::sync::OnceLock::new();
+
+/// Installs the command registry for this process. Later calls are ignored.
+pub fn install_domains(domains: &'static [&'static Domain]) {
+    let _ = DOMAINS.set(domains);
+}
+
+/// The installed registry. Before installation the surface has no commands;
+/// the binary installs it before parsing anything that reads it.
+pub fn domains() -> &'static [&'static Domain] {
+    debug_assert!(
+        DOMAINS.get().is_some(),
+        "the command registry is installed at the process edge"
+    );
+    DOMAINS.get().copied().unwrap_or(&[])
+}
+
+/// A registry built from the grammar, for this crate's own tests. The binary
+/// installs the real one; the mapping test in `workspace_policy` pins the two.
+#[cfg(test)]
+pub(crate) fn install_test_domains() {
+    static FIXTURE: std::sync::OnceLock<&'static [&'static Domain]> = std::sync::OnceLock::new();
+    let fixture = FIXTURE.get_or_init(|| {
+        #[allow(clippy::result_large_err)]
+        fn unused(_: &Call) -> Result<Outcome, CommandError> {
+            Ok(Outcome::Ok)
+        }
+        let verbs: Vec<Verb> = command_verbs()
+            .into_iter()
+            .map(|path| {
+                let parts: Vec<&'static str> = path
+                    .split(' ')
+                    .map(|part| -> &'static str { Box::leak(part.to_owned().into_boxed_str()) })
+                    .collect();
+                let stability = if path == "process-tree" {
+                    provenant_core::consumer_env::Stability::Stable
+                } else {
+                    provenant_core::consumer_env::Stability::Evolving
+                };
+                Verb {
+                    path: Box::leak(parts.into_boxed_slice()),
+                    stability,
+                    run: unused,
+                }
+            })
+            .collect();
+        let domain: &'static Domain = Box::leak(Box::new(Domain {
+            name: "fixture",
+            verbs: Box::leak(verbs.into_boxed_slice()),
+        }));
+        Box::leak(Box::new([domain]))
+    });
+    install_domains(fixture);
 }
 const WAIT_JSON_CONTRACT: &str = "With --json, wait writes JSONL: zero or more event objects followed by one terminal command-result envelope. Events have an `event` field; the terminal envelope has `command`, `status` and `data`. Settlement events are emitted without --follow; --follow also emits each observed transition.";
 
@@ -1641,6 +1812,36 @@ mod tests {
             }
         }
     }
+    #[test]
+    // Spec: docs/specs/cli.md#every-name-refusal-lists-close-matches
+    fn an_unknown_help_command_lists_close_matches() {
+        let ParseOutcome::Invalid { error, .. } = parsed(&["help", "config", "no-such-command"])
+        else {
+            panic!("unknown help path")
+        };
+        let text = error.to_string();
+        assert!(
+            text.contains("unknown help command `no-such-command`"),
+            "{text}"
+        );
+        assert!(text.contains("commands:"), "{text}");
+
+        // A one-edit typo of a real command ranks that command first.
+        let ParseOutcome::Invalid { error, .. } = parsed(&["help", "konfig", "path"]) else {
+            panic!("typo help path")
+        };
+        let text = error.to_string();
+        assert!(text.contains("close matches: config"), "{text}");
+
+        // A hidden command is no longer a bare, unhelpful refusal.
+        let ParseOutcome::Invalid { error, .. } = parsed(&["fabric", "peer", "--help"]) else {
+            panic!("hidden help path")
+        };
+        let text = error.to_string();
+        assert!(text.contains("unknown help command `peer`"), "{text}");
+        assert!(text.contains(";"), "{text}");
+    }
+
     #[test]
     // Spec: docs/specs/cli.md#parsing
     fn help_tree_resolves_nested_paths_and_lists_globals_once() {
@@ -2271,14 +2472,14 @@ mod tests {
                 panic!("land command");
             };
             assert_eq!(numbers, [1953]);
-            assert_eq!(head, Some(sha));
+            assert_eq!(head, vec![sha]);
         }
         // A short or symbolic name parses; landing resolves it against the repository.
         let inv = valid(&["land", "1953", "--head", "abc1234"]);
         let Command::Land { head, .. } = inv.command else {
             panic!("land command");
         };
-        assert_eq!(head.as_deref(), Some("abc1234"));
+        assert_eq!(head, vec!["abc1234".to_owned()]);
         let mut model = command_model();
         let Some(land) = model.find_subcommand_mut("land") else {
             panic!("land grammar");
@@ -2897,7 +3098,6 @@ mod tests {
         }
         let graph_refused = [
             "",
-            "Fix",
             "1fix",
             "fix-",
             "fix--login",
@@ -3409,6 +3609,7 @@ mod tests {
     }
     #[test]
     fn usage_verbs_include_optional_parents_only() {
+        install_test_domains();
         let verbs = usage_verbs();
         assert!(verbs.contains(&"hosts".to_owned()));
         assert!(verbs.contains(&"hosts doctor".to_owned()));
@@ -3423,7 +3624,7 @@ mod tests {
         let codes: Vec<_> = catalog
             .error_codes
             .iter()
-            .map(|c| c.code.as_str())
+            .map(|c| c.code.as_ref())
             .collect();
         assert_eq!(codes.len(), provenant_run::ErrorKind::ALL.len());
         let unique: std::collections::BTreeSet<_> = codes.iter().collect();

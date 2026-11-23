@@ -121,6 +121,36 @@ pub struct PublishDecision {
     #[serde(flatten, default)]
     pub extra: provenant_records::ExtraFields,
 }
+
+/// The admin-publication mode and the layer that granted it. Only `Host` may
+/// grant admin authority; every other layer is warned and ignored.
+/// Spec: docs/specs/cli.md#landing-adds-no-merge-authority
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicationGrant {
+    pub mode: provenant_cli::domains::AdminPublication,
+    #[serde(flatten)]
+    pub source: provenant_records::provenance::Source,
+}
+
+impl Default for PublicationGrant {
+    fn default() -> Self {
+        Self {
+            mode: provenant_cli::domains::AdminPublication::Never,
+            source: provenant_records::provenance::Source {
+                layer: provenant_records::Layer::Default,
+                origin: None,
+            },
+        }
+    }
+}
+
+impl PublicationGrant {
+    /// Whether this grant permits an admin retry after the land gate passed.
+    pub fn allows_review_unavailable(&self) -> bool {
+        self.mode == provenant_cli::domains::AdminPublication::WhenReviewUnavailable
+            && self.source.layer == provenant_records::Layer::Host
+    }
+}
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublishResult {
     pub landed: Vec<String>,
@@ -243,6 +273,12 @@ pub struct LandingReceipt {
     pub gate_definition: GateDefinition,
     pub gate_evidence: GateEvidence,
     pub publish: PublishDecision,
+    /// Admin publication grant and its source, recorded with the receipt.
+    #[serde(default)]
+    pub publication: PublicationGrant,
+    /// The landing target and the layer that chose it (#3191).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_source: Option<provenant_records::provenance::Sourced<String>>,
     pub outcomes: BTreeMap<u64, Outcome>,
     pub split: Vec<Vec<u64>>,
     pub approved_to_landed: BTreeMap<String, String>,
@@ -264,6 +300,8 @@ impl LandingReceipt {
         cost: CostEstimate,
         shadow: bool,
     ) -> Self {
+        let publication = policy.publication.clone();
+        let target_source = policy.target_source.clone();
         Self {
             policy,
             base: candidate.base.clone(),
@@ -275,6 +313,8 @@ impl LandingReceipt {
             gate_definition,
             gate_evidence,
             publish,
+            publication,
+            target_source,
             outcomes: BTreeMap::new(),
             split: Vec::new(),
             approved_to_landed: BTreeMap::new(),

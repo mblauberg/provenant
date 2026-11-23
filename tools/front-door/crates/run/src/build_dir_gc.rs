@@ -44,7 +44,7 @@ use provenant_os::fs::{
 use std::{
     collections::BTreeSet,
     ffi::{OsStr, OsString},
-    io::{self, Write},
+    io,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -572,6 +572,13 @@ impl TargetProtection {
     }
 }
 
+/// Every GC protection diagnostic is advisory: a failed observation preserves
+/// targets rather than deleting them. Spec: docs/specs/cli.md#warnings-are-typed-values
+fn gc_warning(message: impl Into<String>) {
+    use provenant_records::warning::{BUILD_DIR_GC_TARGET_RETAINED, Warning, warn};
+    warn(Warning::new(BUILD_DIR_GC_TARGET_RETAINED, message.into()));
+}
+
 /// Snapshot live writer custody across every registered project for launch
 /// eviction. Any unreadable registration, run store or request makes the whole
 /// cache set conservative until a later observation succeeds. A vanished,
@@ -625,35 +632,29 @@ pub fn target_protection_for_launch_while(
     ) {
         Ok(selection) => selection,
         Err(error) => {
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: project selection failed: {error}; preserving all targets"
-            );
+            gc_warning(format!(
+                "project selection failed: {error}; preserving all targets"
+            ));
             protection.unobserved = true;
             return protection;
         }
     };
     for warning in &selection.warnings {
-        let _ = writeln!(
-            std::io::stderr().lock(),
-            "warning: project selection warning: {warning}"
-        );
+        gc_warning(format!("project selection warning: {warning}"));
     }
     if let Some(interrupted) = &selection.interrupted_at {
-        let _ = writeln!(
-            std::io::stderr().lock(),
-            "warning: project selection interrupted at {}; preserving all targets",
+        gc_warning(format!(
+            "project selection interrupted at {}; preserving all targets",
             interrupted.display()
-        );
+        ));
         protection.unobserved = true;
         return protection;
     }
     let project_ids = selection.project_ids;
     if project_ids.len() > MAX_PROTECTION_PROJECTS {
-        let _ = writeln!(
-            std::io::stderr().lock(),
-            "warning: registered projects exceed maximum ({MAX_PROTECTION_PROJECTS}); preserving all targets"
-        );
+        gc_warning(format!(
+            "registered projects exceed maximum ({MAX_PROTECTION_PROJECTS}); preserving all targets"
+        ));
         protection.unobserved = true;
         return protection;
     }
@@ -688,32 +689,29 @@ pub fn target_protection_for_launch_while(
     let mut records_observed = 0_usize;
     'projects: for project_id in project_ids {
         if !keep_going() {
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: project scan budget expired at project {project_id}; preserving all targets"
-            );
+            gc_warning(format!(
+                "project scan budget expired at project {project_id}; preserving all targets"
+            ));
             protection.unobserved = true;
             return protection;
         }
         let binding = match provenant_config::lookup_gc_project(roots, project_id) {
             Ok(provenant_config::GcProjectStatus::Git(binding)) => binding,
             Ok(provenant_config::GcProjectStatus::Transient(common_dir)) => {
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: project {project_id} at {} is transient; preserving all targets",
+                gc_warning(format!(
+                    "project {project_id} at {} is transient; preserving all targets",
                     common_dir.display()
-                );
+                ));
                 protection.unobserved = true;
                 continue 'projects;
             }
             // The common directory is gone: the project holds no live custody,
             // so it protects nothing. Retirement removes its record separately.
             Ok(provenant_config::GcProjectStatus::Vanished { binding, .. }) => {
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: project {project_id} at {} is gone; it protects no targets",
+                gc_warning(format!(
+                    "project {project_id} at {} is gone; it protects no targets",
                     binding.common_dir().display()
-                );
+                ));
                 continue 'projects;
             }
             // Excluded registrations (non-Git workspaces, and record-less
@@ -721,10 +719,9 @@ pub fn target_protection_for_launch_while(
             // collection and protect nothing.
             Ok(provenant_config::GcProjectStatus::Excluded) => continue 'projects,
             Err(error) => {
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: project {project_id} lookup failed: {error}; preserving all targets"
-                );
+                gc_warning(format!(
+                    "project {project_id} lookup failed: {error}; preserving all targets"
+                ));
                 protection.unobserved = true;
                 continue 'projects;
             }
@@ -734,10 +731,9 @@ pub fn target_protection_for_launch_while(
             .map(Path::to_path_buf)
             .or_else(|| binding.common_dir().parent().map(Path::to_path_buf));
         let Some(checkout) = checkout else {
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: project {project_id} has no primary checkout; preserving all targets"
-            );
+            gc_warning(format!(
+                "project {project_id} has no primary checkout; preserving all targets"
+            ));
             protection.unobserved = true;
             continue 'projects;
         };
@@ -747,10 +743,9 @@ pub fn target_protection_for_launch_while(
         {
             Ok(budget) => budget,
             Err(_) => {
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: scan budget expired opening project {project_id}; preserving all targets"
-                );
+                gc_warning(format!(
+                    "scan budget expired opening project {project_id}; preserving all targets"
+                ));
                 protection.unobserved = true;
                 return protection;
             }
@@ -758,10 +753,9 @@ pub fn target_protection_for_launch_while(
         let repo = match utility.open_repo(&executor, &checkout, budget, &cancel) {
             Ok(repo) if repo.common_git_dir() == binding.common_dir() => repo,
             _ => {
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: could not open repository for project {project_id}; preserving all targets"
-                );
+                gc_warning(format!(
+                    "could not open repository for project {project_id}; preserving all targets"
+                ));
                 protection.unobserved = true;
                 continue 'projects;
             }
@@ -769,10 +763,9 @@ pub fn target_protection_for_launch_while(
         let common = match Directory::open_anchor(binding.common_dir()) {
             Ok(common) => common,
             Err(_) => {
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: could not open common dir for project {project_id}; preserving all targets"
-                );
+                gc_warning(format!(
+                    "could not open common dir for project {project_id}; preserving all targets"
+                ));
                 protection.unobserved = true;
                 continue 'projects;
             }
@@ -781,10 +774,9 @@ pub fn target_protection_for_launch_while(
             .metadata()
             .is_ok_and(|metadata| metadata.same_identity(&repo.common_identity()))
         {
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: common dir identity mismatch for project {project_id}; preserving all targets"
-            );
+            gc_warning(format!(
+                "common dir identity mismatch for project {project_id}; preserving all targets"
+            ));
             protection.unobserved = true;
             continue 'projects;
         }
@@ -797,10 +789,9 @@ pub fn target_protection_for_launch_while(
             Ok(directory) => Some(directory),
             Err(error) if error.is_not_found() => None,
             Err(_) => {
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: could not read project state for project {project_id}; preserving all targets"
-                );
+                gc_warning(format!(
+                    "could not read project state for project {project_id}; preserving all targets"
+                ));
                 protection.unobserved = true;
                 continue 'projects;
             }
@@ -815,10 +806,9 @@ pub fn target_protection_for_launch_while(
         {
             Ok(budget) => budget,
             Err(_) => {
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: scan budget expired for writer occupancy of project {project_id}; preserving all targets"
-                );
+                gc_warning(format!(
+                    "scan budget expired for writer occupancy of project {project_id}; preserving all targets"
+                ));
                 protection.unobserved = true;
                 return protection;
             }
@@ -835,10 +825,9 @@ pub fn target_protection_for_launch_while(
         ) {
             Ok(occupancy) => occupancy,
             Err(_) => {
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: writer occupancy inspection failed for project {project_id}; preserving all targets"
-                );
+                gc_warning(format!(
+                    "writer occupancy inspection failed for project {project_id}; preserving all targets"
+                ));
                 protection.unobserved = true;
                 continue 'projects;
             }
@@ -860,10 +849,9 @@ pub fn target_protection_for_launch_while(
         let Some(store) = (match crate::RunStore::open_disk_read_only(&context, &request) {
             Ok(store) => store,
             Err(error) => {
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: could not open run store for project {project_id}: {error}; preserving all targets"
-                );
+                gc_warning(format!(
+                    "could not open run store for project {project_id}: {error}; preserving all targets"
+                ));
                 protection.unobserved = true;
                 continue 'projects;
             }
@@ -942,10 +930,9 @@ pub fn target_protection_for_launch_while(
             }
         }
         if store_interrupted {
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: lane record scan incomplete for project {project_id}; preserving all targets"
-            );
+            gc_warning(format!(
+                "lane record scan incomplete for project {project_id}; preserving all targets"
+            ));
             protection.unobserved = true;
             continue 'projects;
         }
@@ -1152,7 +1139,7 @@ pub fn collect(
         &provenant_config::CargoCacheBudget {
             bytes: limits.max_bytes,
             setting: "unspecified".into(),
-            source: provenant_records::LimitSource::Default,
+            source: provenant_records::Layer::Default,
         },
         &TargetProtection::default(),
     )
@@ -3682,7 +3669,7 @@ mod tests {
         let budget = provenant_config::CargoCacheBudget {
             bytes: 0,
             setting: "0".into(),
-            source: provenant_records::LimitSource::Default,
+            source: provenant_records::Layer::Default,
         };
         let mut stop = || false;
         let mut refresh = TargetProtection::default;
@@ -3959,7 +3946,7 @@ mod tests {
         let budget = provenant_config::CargoCacheBudget {
             bytes: 1024,
             setting: "1K".into(),
-            source: provenant_records::LimitSource::Default,
+            source: provenant_records::Layer::Default,
         };
         let report = collect_with_protection(
             fixture.home.path(),
@@ -4023,7 +4010,7 @@ mod tests {
         let budget = provenant_config::CargoCacheBudget {
             bytes: u64::MAX,
             setting: "100%".into(),
-            source: provenant_records::LimitSource::Default,
+            source: provenant_records::Layer::Default,
         };
         let mut calls = 0;
         let mut stop = || {
@@ -4185,7 +4172,7 @@ mod tests {
         let budget = provenant_config::CargoCacheBudget {
             bytes: 0,
             setting: "0".into(),
-            source: provenant_records::LimitSource::Default,
+            source: provenant_records::Layer::Default,
         };
         let mut calls = 0;
         let mut stop = || {
@@ -4223,7 +4210,7 @@ mod tests {
         let budget = provenant_config::CargoCacheBudget {
             bytes: 0,
             setting: "0".into(),
-            source: provenant_records::LimitSource::Default,
+            source: provenant_records::Layer::Default,
         };
         let mut stop = || false;
         let mut refresh = || TargetProtection {
@@ -4286,7 +4273,7 @@ mod tests {
         let budget = provenant_config::CargoCacheBudget {
             bytes: 0,
             setting: "0".into(),
-            source: provenant_records::LimitSource::Default,
+            source: provenant_records::Layer::Default,
         };
         let report = collect_with_protection(
             &state,
@@ -4359,7 +4346,7 @@ mod tests {
         let budget = provenant_config::CargoCacheBudget {
             bytes: 0,
             setting: "0".into(),
-            source: provenant_records::LimitSource::Default,
+            source: provenant_records::Layer::Default,
         };
         let report = collect_with_protection(
             roots.state.as_path(),
@@ -4501,7 +4488,7 @@ mod tests {
         let budget = provenant_config::CargoCacheBudget {
             bytes: 0,
             setting: "0".into(),
-            source: provenant_records::LimitSource::Default,
+            source: provenant_records::Layer::Default,
         };
         let report = collect_with_protection(
             roots.state.as_path(),
@@ -4557,7 +4544,7 @@ mod tests {
         let budget = provenant_config::CargoCacheBudget {
             bytes: budget_bytes,
             setting: budget_bytes.to_string(),
-            source: provenant_records::LimitSource::Default,
+            source: provenant_records::Layer::Default,
         };
         collect_with_progress(
             state,
@@ -5004,7 +4991,7 @@ mod tests {
         let budget = provenant_config::CargoCacheBudget {
             bytes: u64::MAX,
             setting: "100%".into(),
-            source: provenant_records::LimitSource::Default,
+            source: provenant_records::Layer::Default,
         };
         let mut detail = None;
         for epoch in 1..=16_u64 {
@@ -5057,7 +5044,7 @@ mod tests {
         let budget = provenant_config::CargoCacheBudget {
             bytes: u64::MAX,
             setting: "100%".into(),
-            source: provenant_records::LimitSource::Default,
+            source: provenant_records::Layer::Default,
         };
         let mut continue_scan = || false;
         let mut refresh = TargetProtection::default;
@@ -5129,7 +5116,7 @@ mod tests {
         let budget = provenant_config::CargoCacheBudget {
             bytes: 0,
             setting: "0".into(),
-            source: provenant_records::LimitSource::Default,
+            source: provenant_records::Layer::Default,
         };
         let mut continue_scan = || false;
         let mut refresh_called = false;
@@ -5246,7 +5233,7 @@ mod tests {
         let budget = provenant_config::CargoCacheBudget {
             bytes: 0,
             setting: "0".into(),
-            source: provenant_records::LimitSource::Default,
+            source: provenant_records::Layer::Default,
         };
         let mut began_deletion = false;
         let mut stop_at_tombstone = || {
@@ -5313,7 +5300,7 @@ mod tests {
         let budget = provenant_config::CargoCacheBudget {
             bytes: 0,
             setting: "0".into(),
-            source: provenant_records::LimitSource::Default,
+            source: provenant_records::Layer::Default,
         };
         let mut locked_steps = 0;
         let mut stop_during_recheck = || {

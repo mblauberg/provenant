@@ -565,9 +565,12 @@ fn land_explains_poll_and_budget_sources() -> Result {
         default["data"]["fields"]["poll_seconds"]["value"],
         provenant_cli::domains::LandSettings::default().poll_seconds
     );
+    // One layer vocabulary names every setting's source; a shipped default is
+    // reported as `default`, not the retired `bundled` spelling. A CLI flag is
+    // the `launch` layer, not a retired `invocation` spelling.
     assert_eq!(
         default["data"]["fields"]["poll_seconds"]["source"]["layer"],
-        "bundled"
+        "default"
     );
     fs::write(
         rig.state.join("config.toml"),
@@ -605,7 +608,7 @@ fn land_explains_poll_and_budget_sources() -> Result {
     assert_eq!(cli["data"]["fields"]["poll_seconds"]["value"], 7);
     assert_eq!(
         cli["data"]["fields"]["poll_seconds"]["source"]["layer"],
-        "invocation"
+        "launch"
     );
     assert_eq!(cli["data"]["ci_patience_seconds"], 90);
     assert_eq!(cli["data"]["ci_patience_source"], "--wait");
@@ -628,7 +631,7 @@ fn land_explains_poll_and_budget_sources() -> Result {
     assert_eq!(project["data"]["fields"]["poll_seconds"]["value"], 21);
     assert_eq!(
         project["data"]["fields"]["poll_seconds"]["source"]["layer"],
-        "project"
+        "host_project"
     );
     let tier = show(&["land", "--explain", "--tier", "crucial", "--json"])?;
     assert_eq!(tier["data"]["fields"]["poll_seconds"]["value"], 12);
@@ -955,8 +958,9 @@ fn pr_status_prints_one_compact_line_per_pull_request() -> Result {
     let text = String::from_utf8(output.stdout.bytes)?;
     assert!(text.starts_with("2 PRs:"), "{text}");
     assert!(
-        text.lines()
-            .any(|line| line == "next: provenant ci failures pr 1669"),
+        text.lines().any(|line| {
+            line.starts_with("next: ") && line.ends_with("provenant ci failures pr 1669")
+        }),
         "{text}"
     );
     let line = text
@@ -1113,6 +1117,8 @@ fn normalise_api_call(args: &[String]) -> Result<String> {
     Ok(operation.join(" "))
 }
 
+// The fake gh executable's stdout and stderr are its wire protocol.
+#[allow(clippy::disallowed_methods)]
 fn fake_gh(args: &[String]) -> Result<u8> {
     let call = args.join(" ");
     // Real gh rejects JSON fields it does not have; so does this fake.
@@ -1578,6 +1584,8 @@ fn fake_gh(args: &[String]) -> Result<u8> {
     Ok(0)
 }
 
+// A harness=false target: main reports fixture and test failures on stderr.
+#[allow(clippy::disallowed_methods)]
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.first().is_some_and(|arg| arg == "--forge-port") {

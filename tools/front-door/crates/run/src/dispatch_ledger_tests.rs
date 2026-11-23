@@ -10,7 +10,7 @@ fn write_grant_warning_threshold_preserves_a_large_terminal_record() -> TestResu
         ) -> WriteGrantLimit {
             WriteGrantLimit {
                 bytes: provenant_records::run::MAX_WRITE_GRANT_BYTES,
-                origin: provenant_records::diagnostic::SettingSource::Configuration,
+                origin: provenant_records::diagnostic::Layer::Host,
             }
         }
         fn prepare(

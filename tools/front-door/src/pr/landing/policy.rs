@@ -1,8 +1,10 @@
 //! Resolves landing policy without adding configuration-loader layers.
 use std::collections::BTreeMap;
 
-use provenant_cli::domains::{LandOverride, LandSettings};
+use super::model::PublicationGrant;
+use provenant_cli::domains::{AdminPublication, LandOverride, LandSettings};
 use provenant_config::Origin;
+use provenant_records::Layer;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -16,7 +18,7 @@ pub struct TargetRule {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Source {
-    pub layer: String,
+    pub layer: Layer,
     pub path: Option<Value>,
     pub key: String,
     pub rule: Option<TargetRule>,
@@ -25,9 +27,9 @@ pub struct Source {
 }
 
 impl Source {
-    fn new(layer: &str, key: String, path: Option<Value>) -> Self {
+    fn new(layer: Layer, key: String, path: Option<Value>) -> Self {
         Self {
-            layer: layer.into(),
+            layer,
             path,
             key,
             rule: None,
@@ -76,6 +78,68 @@ pub struct Sourced<T> {
     pub extra: provenant_records::ExtraFields,
 }
 
+/// Resolve the admin-publication grant. Only the owner's host config may grant
+/// it: other layers are reported with [`provenant_records::warning::SETTING_LAYER_IGNORED`]
+/// and fall back to `never`. The shared `Precedence` merge reports the ignored
+/// candidate with its source so the warning never invents a second vocabulary.
+/// Spec: docs/specs/cli.md#landing-adds-no-merge-authority
+fn admin_candidate(
+    field: &Sourced<Value>,
+) -> Result<provenant_records::Sourced<AdminPublication>, serde_json::Error> {
+    use provenant_records::{Source as SharedSource, Sourced as SharedSourced};
+    let value: AdminPublication = serde_json::from_value(field.value.clone())?;
+    let origin = field.source.path.as_ref().map(|path| {
+        path.as_str()
+            .map(str::to_owned)
+            .unwrap_or_else(|| path.to_string())
+    });
+    Ok(SharedSourced {
+        value,
+        source: SharedSource {
+            layer: field.source.layer,
+            origin,
+        },
+    })
+}
+
+fn resolve_admin_publication(
+    fields: &BTreeMap<String, Sourced<Value>>,
+    base: Option<provenant_records::Sourced<AdminPublication>>,
+) -> Result<PublicationGrant, serde_json::Error> {
+    use provenant_records::warning;
+    let final_candidate = fields
+        .get("admin_publication")
+        .map(admin_candidate)
+        .transpose()?;
+    let candidates = base.into_iter().chain(final_candidate).collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return Ok(PublicationGrant::default());
+    }
+    let merged = provenant_fabric_runtime::config::ADMIN_PUBLICATION_PRECEDENCE.merge(candidates);
+    for ignored in merged.ignored {
+        warning::warn(
+            warning::Warning::new(
+                warning::SETTING_LAYER_IGNORED,
+                format!(
+                    "domains.pr.land.admin_publication from {} is ignored; only the host layer may grant admin publication",
+                    ignored.source.layer.description()
+                ),
+            )
+            .subject("domains.pr.land.admin_publication")
+            .source(ignored.source)
+            .repair("set admin_publication in the owner's host config [domains.pr.land]")
+            .once_per_change(),
+        );
+    }
+    Ok(merged
+        .winner
+        .map(|winner| PublicationGrant {
+            mode: winner.value,
+            source: winner.source,
+        })
+        .unwrap_or_default())
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LandPolicy {
     /// Publication declaration sealed in the plan and pending intent.
@@ -84,6 +148,13 @@ pub struct LandPolicy {
     pub landing: Option<provenant_records::landing::LandingContext>,
     pub fields: BTreeMap<String, Sourced<Value>>,
     pub budget_rate_micros_per_minute: BTreeMap<String, Sourced<u64>>,
+    /// Admin publication is a host-only grant; its source travels with the policy.
+    #[serde(default)]
+    pub publication: PublicationGrant,
+    /// The landing target and where it came from (#3191). Set by the caller
+    /// once the target is resolved from members or the repository default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_source: Option<provenant_records::provenance::Sourced<String>>,
     #[serde(flatten, default)]
     pub extra: provenant_records::ExtraFields,
 }
@@ -183,9 +254,9 @@ impl LandPolicy {
             let key = format!("domains.pr.land.budget.rate_micros_per_minute.{pool}");
             let source = match origins.get(&key) {
                 Some(Origin::User { path }) => {
-                    Source::new("host", key.clone(), Some(serde_json::to_value(path)?))
+                    Source::new(Layer::Host, key.clone(), Some(serde_json::to_value(path)?))
                 }
-                _ => Source::new("bundled", key.clone(), None),
+                _ => Source::new(Layer::Default, key.clone(), None),
             };
             budget_rate_micros_per_minute.insert(
                 pool.clone(),
@@ -211,9 +282,9 @@ impl LandPolicy {
             });
             let source = match origin {
                 Some(Origin::User { path: file }) => {
-                    Source::new("host", path, Some(serde_json::to_value(file)?))
+                    Source::new(Layer::Host, path, Some(serde_json::to_value(file)?))
                 }
-                _ => Source::new("bundled", path, None),
+                _ => Source::new(Layer::Default, path, None),
             };
             fields.insert(
                 key,
@@ -224,6 +295,13 @@ impl LandPolicy {
                 },
             );
         }
+        // Keep the host/bundled candidate before any lower-precedence layer
+        // overwrites the field: a tier or project value must not suppress a
+        // grant the owner made in the host config.
+        let base_admin = fields
+            .get("admin_publication")
+            .map(admin_candidate)
+            .transpose()?;
         fn apply(
             fields: &mut BTreeMap<String, Sourced<Value>>,
             override_: &LandOverride,
@@ -245,7 +323,7 @@ impl LandPolicy {
                     if !beneath_host
                         || !rates
                             .get(pool)
-                            .is_some_and(|rate| rate.source.layer == "host")
+                            .is_some_and(|rate| rate.source.layer == Layer::Host)
                     {
                         rates.insert(
                             pool.clone(),
@@ -266,7 +344,7 @@ impl LandPolicy {
                 if !beneath_host
                     || !fields
                         .get(&key)
-                        .is_some_and(|field| field.source.layer == "host")
+                        .is_some_and(|field| field.source.layer == Layer::Host)
                 {
                     let field_source = source.field(&key, origins)?;
                     fields.insert(
@@ -286,7 +364,7 @@ impl LandPolicy {
                 &mut fields,
                 declaration,
                 Source::new(
-                    "repository",
+                    Layer::Project,
                     "domains.pr.land".into(),
                     Some(serde_json::to_value(path)?),
                 ),
@@ -300,7 +378,7 @@ impl LandPolicy {
                 &mut fields,
                 override_,
                 Source::new(
-                    "project",
+                    Layer::HostProject,
                     format!("domains.pr.land.projects.{}", project.unwrap_or_default()),
                     None,
                 ),
@@ -337,7 +415,7 @@ impl LandPolicy {
         } else {
             (&settings.branches, "domains.pr.land.branches".into(), None)
         };
-        let rules_file = Source::new("target_rule", rules_key.clone(), rules_path)
+        let rules_file = Source::new(Layer::Route, rules_key.clone(), rules_path)
             .field("", origins)?
             .path;
         if let Some(target) = target
@@ -356,7 +434,7 @@ impl LandPolicy {
                 &mut fields,
                 &override_,
                 Source {
-                    layer: "target_rule".into(),
+                    layer: Layer::Route,
                     path: rules_file.clone(),
                     key: format!("{rules_key}.{index}"),
                     rule: Some(TargetRule {
@@ -373,11 +451,11 @@ impl LandPolicy {
         }
         for (layer, key, override_) in [
             (
-                "tier",
+                Layer::Tier,
                 tier.map(|key| format!("domains.pr.land.tiers.{key}")),
                 tier.and_then(|key| settings.tiers.get(key)),
             ),
-            ("invocation", None, Some(invocation)),
+            (Layer::Launch, None, Some(invocation)),
         ] {
             if let Some(override_) = override_ {
                 if override_.branches.is_some() {
@@ -395,11 +473,14 @@ impl LandPolicy {
                 )?;
             }
         }
+        let publication = resolve_admin_publication(&fields, base_admin)?;
         Ok(Self {
             publication_port: provenant_config::PortTable::builtin().land,
             landing: None,
             fields,
             budget_rate_micros_per_minute,
+            publication,
+            target_source: None,
             extra: Default::default(),
         })
     }
@@ -447,7 +528,7 @@ impl LandPolicy {
                 key.clone(),
                 Sourced {
                     value,
-                    source: Source::new("invocation", format!("request.{key}"), None),
+                    source: Source::new(Layer::Launch, format!("request.{key}"), None),
                     extra: Default::default(),
                 },
             );
@@ -556,15 +637,22 @@ mod tests {
             },
         )]);
         let cases = [
-            (None, None, None, None, Strategy::Batch, "host"),
-            (Some("p"), None, None, None, Strategy::Direct, "project"),
+            (None, None, None, None, Strategy::Batch, Layer::Host),
+            (
+                Some("p"),
+                None,
+                None,
+                None,
+                Strategy::Direct,
+                Layer::HostProject,
+            ),
             (
                 Some("p"),
                 Some("release/x"),
                 None,
                 None,
                 Strategy::Queue,
-                "target_rule",
+                Layer::Route,
             ),
             (
                 Some("p"),
@@ -572,7 +660,7 @@ mod tests {
                 Some("risk"),
                 None,
                 Strategy::Async,
-                "tier",
+                Layer::Tier,
             ),
             (
                 Some("p"),
@@ -580,7 +668,7 @@ mod tests {
                 Some("risk"),
                 Some(Strategy::Direct),
                 Strategy::Direct,
-                "invocation",
+                Layer::Launch,
             ),
         ];
         for (project, target, tier, strategy, expected, source) in cases {
@@ -655,7 +743,7 @@ mod tests {
             field.value,
             serde_json::to_value(&settings.approval_sources)?
         );
-        assert_eq!(field.source.layer, "bundled");
+        assert_eq!(field.source.layer, Layer::Default);
         settings.projects.insert(
             "p".into(),
             LandOverride {
@@ -674,7 +762,10 @@ mod tests {
             policy.fields["approval_sources"].value,
             serde_json::json!(["forge"])
         );
-        assert_eq!(policy.fields["approval_sources"].source.layer, "project");
+        assert_eq!(
+            policy.fields["approval_sources"].source.layer,
+            Layer::HostProject
+        );
         assert!(
             serde_json::from_value::<LandSettings>(
                 serde_json::json!({"approval_sources":["receipt"]})
@@ -731,17 +822,17 @@ mod tests {
         )?;
         assert_eq!(
             policy.budget_rate_micros_per_minute["host"].source.layer,
-            "host"
+            Layer::Host
         );
         assert_eq!(
             policy.budget_rate_micros_per_minute["project.with.dot"]
                 .source
                 .layer,
-            "project"
+            Layer::HostProject
         );
         assert_eq!(
             policy.budget_rate_micros_per_minute["shared"].source.layer,
-            "tier"
+            Layer::Tier
         );
         assert_eq!(
             policy.settings()?.budget.rate_micros_per_minute,
@@ -792,9 +883,9 @@ mod tests {
         let base = LandPolicy::resolve(&settings, &origins, None, None, &LandOverride::default())?;
         assert_eq!(base.fields["publish_settle_seconds"].value, 30);
         assert_eq!(base.fields["batch_size"].value, 7);
-        assert_eq!(base.fields["batch_size"].source.layer, "host");
+        assert_eq!(base.fields["batch_size"].source.layer, Layer::Host);
         assert!(base.fields["batch_size"].source.path.is_some());
-        assert_eq!(base.fields["gate.kind"].source.layer, "bundled");
+        assert_eq!(base.fields["gate.kind"].source.layer, Layer::Default);
         let project = LandPolicy::resolve(
             &settings,
             &origins,
@@ -805,10 +896,13 @@ mod tests {
         assert_eq!(project.fields["publish_settle_seconds"].value, 12);
         assert_eq!(
             project.fields["publish_settle_seconds"].source.layer,
-            "project"
+            Layer::HostProject
         );
         assert_eq!(project.fields["batch_size"].value, 4);
-        assert_eq!(project.fields["batch_size"].source.layer, "project");
+        assert_eq!(
+            project.fields["batch_size"].source.layer,
+            Layer::HostProject
+        );
         assert_eq!(project.fields["gate.timeout_seconds"].value, 50);
         let tier = LandPolicy::resolve(
             &settings,
@@ -818,21 +912,80 @@ mod tests {
             &LandOverride::default(),
         )?;
         assert_eq!(tier.fields["publish_settle_seconds"].value, 7);
-        assert_eq!(tier.fields["publish_settle_seconds"].source.layer, "tier");
+        assert_eq!(
+            tier.fields["publish_settle_seconds"].source.layer,
+            Layer::Tier
+        );
         assert_eq!(tier.fields["batch_size"].value, 2);
-        assert_eq!(tier.fields["batch_size"].source.layer, "tier");
+        assert_eq!(tier.fields["batch_size"].source.layer, Layer::Tier);
         let effective =
             LandPolicy::resolve(&settings, &origins, Some("p"), Some("high"), &invocation)?;
         assert_eq!(effective.fields["batch_size"].value, 1);
-        assert_eq!(effective.fields["batch_size"].source.layer, "invocation");
+        assert_eq!(effective.fields["batch_size"].source.layer, Layer::Launch);
         assert_eq!(
             effective.fields["gate.timeout_seconds"].source.layer,
-            "project"
+            Layer::HostProject
         );
         let resolved = effective.settings()?;
         assert_eq!(resolved.strategy, Strategy::Direct);
         assert_eq!(resolved.batch_size, 1);
         assert_eq!(resolved.gate.timeout_seconds, 50);
+        Ok(())
+    }
+
+    // Spec: docs/specs/cli.md#landing-adds-no-merge-authority
+    #[test]
+    fn admin_publication_is_honoured_only_from_the_host_layer()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_records::warning;
+
+        let settings = LandSettings {
+            admin_publication: AdminPublication::WhenReviewUnavailable,
+            ..LandSettings::default()
+        };
+        let path = PathWire::from_relative(&RelativePath::parse("config.toml")?)?;
+        let origins = BTreeMap::from([(
+            "domains.pr.land.admin_publication".into(),
+            Origin::User { path },
+        )]);
+        let (host, warnings) = warning::capture(|| {
+            LandPolicy::resolve(&settings, &origins, None, None, &LandOverride::default())
+        });
+        let host = host?;
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(
+            host.publication.mode,
+            AdminPublication::WhenReviewUnavailable
+        );
+        assert_eq!(host.publication.source.layer, Layer::Host);
+        assert!(host.publication.allows_review_unavailable());
+
+        let mut project = LandSettings::default();
+        project.projects.insert(
+            "p".into(),
+            LandOverride {
+                admin_publication: Some(AdminPublication::WhenReviewUnavailable),
+                ..Default::default()
+            },
+        );
+        let (ignored, warnings) = warning::capture(|| {
+            LandPolicy::resolve(
+                &project,
+                &BTreeMap::new(),
+                Some("p"),
+                None,
+                &LandOverride::default(),
+            )
+        });
+        let ignored = ignored?;
+        assert_eq!(ignored.publication.mode, AdminPublication::Never);
+        assert!(!ignored.publication.allows_review_unavailable());
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(warnings[0].code, "SETTING_LAYER_IGNORED");
+        assert_eq!(
+            warnings[0].source.as_ref().map(|source| source.layer),
+            Some(Layer::HostProject)
+        );
         Ok(())
     }
 }

@@ -163,10 +163,14 @@ impl SqlCancellation {
                 worker: Some(worker),
             }),
             Err(error) => {
-                use std::io::Write as _;
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: cannot monitor retention SQLite cancellation; using bounded batches: {error}"
+                use provenant_records::warning::{RESOURCE_PROBE_FAILED, Warning, warn};
+                // Spec: docs/specs/cli.md#warnings-are-typed-values
+                warn(
+                    Warning::new(
+                        RESOURCE_PROBE_FAILED,
+                        format!("cannot monitor retention SQLite cancellation; using bounded batches: {error}"),
+                    )
+                    .subject("retention cancellation monitor"),
                 );
                 None
             }
@@ -2424,7 +2428,10 @@ mod tests {
         drop(store);
 
         let store = RunStore::open(&context, &call)?;
-        assert_eq!(provenant_sqlite::stored_version(&store.db)?, 13);
+        assert_eq!(
+            provenant_sqlite::stored_version(&store.db)?,
+            crate::db::SCHEMA.version
+        );
         let record = store.record(input.attempt_id, &call)?;
         // The current type reads the retired snapshot as an extra field, so
         // the migration leaves it in place; the sealed request keeps the
@@ -2504,7 +2511,10 @@ mod tests {
         id: AttemptId,
     ) -> std::result::Result<serde_json::Value, Box<dyn std::error::Error>> {
         let store = RunStore::open(context, call)?;
-        assert_eq!(provenant_sqlite::stored_version(&store.db)?, 13);
+        assert_eq!(
+            provenant_sqlite::stored_version(&store.db)?,
+            crate::db::SCHEMA.version
+        );
         let stored: Vec<u8> = store.db.query_row(
             "SELECT record FROM attempts WHERE id=?1",
             [id.to_string()],
@@ -2634,11 +2644,261 @@ mod tests {
         drop(store);
 
         let store = RunStore::open(&context, &call)?;
-        assert_eq!(provenant_sqlite::stored_version(&store.db)?, 13);
+        assert_eq!(
+            provenant_sqlite::stored_version(&store.db)?,
+            crate::db::SCHEMA.version
+        );
         assert!(store.record(input.attempt_id, &call).is_ok());
         assert!(store.record(broken, &call).is_err());
         assert!(store.record(string_grants, &call).is_err());
         assert!(store.record(array_grants, &call).is_err());
+        Ok(())
+    }
+
+    fn seal_base_thirteen_row(
+        store: &RunStore,
+        id: AttemptId,
+        record: &serde_json::Value,
+    ) -> TestResult {
+        // A terminal attempt is immutable to ordinary writers; the migration
+        // lifts the trigger inside its own transaction.
+        store
+            .db
+            .execute_batch("DROP TRIGGER IF EXISTS immutable_terminal_update")?;
+        store.db.execute(
+            "UPDATE attempts SET record=?1 WHERE id=?2",
+            rusqlite::params![serde_json::to_vec(record)?, id.to_string()],
+        )?;
+        store.db.execute_batch(
+            "CREATE TRIGGER immutable_terminal_update
+             BEFORE UPDATE OF rowid,oid,_rowid_,sequence,id,project,graph,node,attempt,digest,actor,operation,number,continues,refused,revision,terminal,record,sealed,repository,head ON attempts
+             WHEN OLD.terminal=1
+             BEGIN SELECT RAISE(ABORT,'terminal attempt is immutable'); END;
+             PRAGMA user_version=13;",
+        )?;
+        Ok(())
+    }
+
+    /// Build a real current route receipt, then return its v2.8.2 wire shape.
+    fn legacy_route(
+        source: &str,
+        sandbox_source: &str,
+    ) -> std::result::Result<serde_json::Value, Box<dyn std::error::Error>> {
+        let lane = LaneAccessReceipt {
+            access: LaneAccess::Isolated,
+            source: Layer::Route,
+            key: "fixture".into(),
+            extra: Default::default(),
+        };
+        let sandbox = SandboxModeReceipt {
+            requested: true,
+            effective: true,
+            source: Layer::Host,
+            constraint: Some(SandboxConstraint::Restriction),
+            warning: None,
+            extra: Default::default(),
+        };
+        let mut route = serde_json::to_value(RouteRecord {
+            lane_access: Some(lane),
+            sandbox: Some(sandbox),
+            ..Default::default()
+        })?;
+        route["lane_access"]["source"] = source.into();
+        route["sandbox"]["source"] = sandbox_source.into();
+        route["sandbox"]
+            .as_object_mut()
+            .ok_or("sandbox object")?
+            .remove("constraint");
+        Ok(route)
+    }
+
+    #[test]
+    fn base_thirteen_migration_rewrites_v282_usage_and_receipts() -> TestResult {
+        let (_temp, context, store, input, _attempt) = seeded()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        withdraw(&store, &input, &call)?;
+        let mut legacy = base_twelve_record(&store, input.attempt_id)?;
+
+        // A real v2.8.2 attempt stored flat token buckets and a free-form
+        // source, including on a retained session total.
+        legacy["usage"] = serde_json::json!({
+            "uncached_input": 11,
+            "cache_read": 22,
+            "cache_write": 33,
+            "cache_write_1h": 4,
+            "output_excluding_reasoning": 55,
+            "reasoning": 6,
+            "source": "provider",
+            "context_basis_points": null,
+            "session_total": {
+                "uncached_input": 111,
+                "output_excluding_reasoning": 222,
+                "source": "provider"
+            }
+        });
+        legacy["resolved_route"] = legacy_route("route_policy", "restriction")?;
+        legacy["applied_route"] = legacy_route("route_policy", "platform")?;
+        legacy["observed_route"] = legacy_route("route_policy", "knob")?;
+        legacy["skipped_routes"] = serde_json::json!([
+            {"route":"a","kind":"unavailable","detail":"fixture",
+             "guard_resource":{"kind":"disk","free":1,"floor":2,"origin":"configuration"}},
+            {"route":"b","kind":"unavailable","detail":"fixture",
+             "guard_resource":{"kind":"grant_limit","limit":7,"origin":"shipped_default"}},
+            // These two guards use their own setting-source enums, which still
+            // spell these origins `configuration` / `shipped_default`. The
+            // Layer-typed rewrite must leave them alone or this terminal row
+            // would stop decoding after migration.
+            {"route":"c","kind":"unavailable","detail":"fixture",
+             "guard_resource":{"kind":"pacing_reserve","percent":25,"setting":"account",
+                               "origin":"configuration","account":"acct",
+                               "window":"window","setting_path":"path"}},
+            {"route":"d","kind":"unavailable","detail":"fixture",
+             "guard_resource":{"kind":"lane_ports","blocks":4,"origin":"shipped_default"}},
+            {"route":"e","kind":"unavailable","detail":"fixture"}
+        ]);
+        let command = provenant_records::PortCommand {
+            argv: vec!["probe".into()],
+            exit_codes: provenant_records::CommandExitCodes {
+                success: vec![0],
+                unknown: vec![],
+                other: provenant_records::ExitDisposition::Refused,
+            },
+        };
+        let mut binding =
+            serde_json::to_value(RepositoryAdmissionBinding::new(Layer::Default, &command))?;
+        binding["source"] = "builtin".into();
+        legacy["repository_admission_binding"] = binding;
+        legacy["future_attempt_field"] = serde_json::json!({"kept": true});
+        seal_base_thirteen_row(&store, input.attempt_id, &legacy)?;
+        drop(store);
+
+        let store = RunStore::open(&context, &call)?;
+        assert_eq!(
+            provenant_sqlite::stored_version(&store.db)?,
+            crate::db::SCHEMA.version
+        );
+        // Without the migration this decode fails on the unknown source and
+        // retired receipt spellings, breaking status, resume and settlement.
+        let record = store.record(input.attempt_id, &call)?;
+        assert_eq!(record.usage.source, provenant_records::UsageSource::Stream);
+        assert_eq!(record.usage.tokens.input, Some(11));
+        assert_eq!(record.usage.tokens.cache_read, Some(22));
+        assert_eq!(record.usage.tokens.cache_write, Some(33));
+        assert_eq!(record.usage.tokens.cache_write_1h, Some(4));
+        assert_eq!(record.usage.tokens.output, Some(55));
+        assert_eq!(record.usage.tokens.reasoning, Some(6));
+        let total = record
+            .usage
+            .session_total
+            .as_deref()
+            .ok_or("session total")?;
+        assert_eq!(total.tokens.input, Some(111));
+        assert_eq!(total.tokens.output, Some(222));
+        assert_eq!(total.source, provenant_records::UsageSource::Stream);
+
+        let resolved = record.resolved_route.as_ref().ok_or("resolved route")?;
+        assert_eq!(
+            resolved.lane_access.as_ref().map(|lane| lane.source),
+            Some(Layer::Route)
+        );
+        let sandbox = resolved.sandbox.as_ref().ok_or("resolved sandbox")?;
+        assert_eq!(sandbox.source, Layer::Host);
+        assert_eq!(sandbox.constraint, Some(SandboxConstraint::Restriction));
+        let applied = record.applied_route.as_ref().ok_or("applied route")?;
+        let sandbox = applied.sandbox.as_ref().ok_or("applied sandbox")?;
+        assert_eq!(sandbox.source, Layer::Host);
+        assert_eq!(sandbox.constraint, Some(SandboxConstraint::Platform));
+        let observed = record.observed_route.as_ref().ok_or("observed route")?;
+        let sandbox = observed.sandbox.as_ref().ok_or("observed sandbox")?;
+        assert_eq!(sandbox.source, Layer::Host);
+        assert_eq!(sandbox.constraint, None);
+        let guards: Vec<_> = record
+            .skipped_routes
+            .iter()
+            .filter_map(|route| route.guard_resource.as_ref())
+            .collect();
+        assert_eq!(guards.len(), 4, "every guard must still decode: {guards:?}");
+        assert!(matches!(
+            guards[0],
+            provenant_records::diagnostic::ResourceFact::Disk {
+                origin: Layer::Host,
+                ..
+            }
+        ));
+        assert!(matches!(
+            guards[1],
+            provenant_records::diagnostic::ResourceFact::GrantLimit {
+                origin: Layer::Default,
+                ..
+            }
+        ));
+        // These origins belong to PacingSettingSource and PortSettingSource,
+        // whose current spellings are still configuration / shipped_default.
+        // Rewriting them would make this terminal row undecodable.
+        assert!(matches!(
+            guards[2],
+            provenant_records::diagnostic::ResourceFact::PacingReserve {
+                origin: provenant_records::diagnostic::PacingSettingSource::Configuration,
+                ..
+            }
+        ));
+        assert!(matches!(
+            guards[3],
+            provenant_records::diagnostic::ResourceFact::LanePorts {
+                origin: provenant_records::diagnostic::PortSettingSource::ShippedDefault,
+                ..
+            }
+        ));
+        let binding = record
+            .repository_admission_binding
+            .as_ref()
+            .ok_or("admission binding")?;
+        assert_eq!(binding.source, Layer::Default);
+        assert_eq!(
+            record.extra.get("future_attempt_field"),
+            Some(&serde_json::json!({"kept": true}))
+        );
+        let report = sweep(&store, &context, 7, DAY_MICROS, false, &call)?;
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        Ok(())
+    }
+
+    #[test]
+    fn base_thirteen_migration_leaves_current_rows_and_skips_malformed_rows() -> TestResult {
+        let (_temp, context, store, input, _attempt) = seeded()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        withdraw(&store, &input, &call)?;
+        let raw: Vec<u8> = store.db.query_row(
+            "SELECT record FROM attempts WHERE id=?1",
+            [input.attempt_id.to_string()],
+            |row| row.get(0),
+        )?;
+        let broken = AttemptId::from_bytes([12; 16]);
+        insert_base_twelve_record(
+            &store,
+            input.attempt_id,
+            broken,
+            1003,
+            &serde_json::Value::String("{malformed JSON".into()),
+        )?;
+        store.db.execute_batch("PRAGMA user_version=13;")?;
+        drop(store);
+
+        let store = RunStore::open(&context, &call)?;
+        assert_eq!(
+            provenant_sqlite::stored_version(&store.db)?,
+            crate::db::SCHEMA.version
+        );
+        let migrated: Vec<u8> = store.db.query_row(
+            "SELECT record FROM attempts WHERE id=?1",
+            [input.attempt_id.to_string()],
+            |row| row.get(0),
+        )?;
+        assert_eq!(migrated, raw, "a current-shape row is left byte-identical");
+        assert!(store.record(input.attempt_id, &call).is_ok());
+        assert!(store.record(broken, &call).is_err());
         Ok(())
     }
 

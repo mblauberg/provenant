@@ -162,14 +162,14 @@ impl fmt::Display for SchemaPath {
 pub fn input_warnings(
     value: &serde_json::Value,
     policy: &provenant_records::policy::Policy,
-) -> Vec<String> {
+) -> Vec<provenant_records::warning::Warning> {
     use provenant_records::policy::{Effect, Facts};
 
     fn check(
         path: &SchemaPath,
         text: &str,
         policy: &provenant_records::policy::Policy,
-        warnings: &mut Vec<String>,
+        warnings: &mut Vec<provenant_records::warning::Warning>,
     ) {
         if super::patch::scan_for_secrets(text).is_ok() {
             return;
@@ -177,19 +177,23 @@ pub fn input_warnings(
         let fact = Facts::violation(format!("{path} looks like a credential"));
         match policy.check("SECRET_SHAPED_INPUT", fact) {
             Effect::Proceed => {}
-            Effect::Warn(message) => {
-                warnings.push(message);
+            Effect::Warn(warning) => {
+                warnings.push(warning);
             }
             // Keep the input scanner advisory even if a caller constructs a
             // stale or otherwise unsupported strict policy directly. Exact
             // credential matches are handled by their owning publication
             // boundary before any mutation.
             Effect::Refuse(_) | Effect::Stop(_) => {
+                use provenant_records::warning::{SECRET_INPUT_POLICY_UNEXPECTED, Warning};
                 let rule = policy.rule("SECRET_SHAPED_INPUT");
-                warnings.push(format!(
-                    "[SECRET_SHAPED_INPUT] {path} looks like a credential (strength=Warn, source={:?}, knob={})",
-                    rule.source,
-                    rule.rule.knob.as_deref().unwrap_or("unknown")
+                warnings.push(Warning::new(
+                    SECRET_INPUT_POLICY_UNEXPECTED,
+                    format!(
+                        "[SECRET_SHAPED_INPUT] {path} looks like a credential (strength=Warn, source={:?}, knob={})",
+                        rule.source,
+                        rule.rule.knob.as_deref().unwrap_or("unknown")
+                    ),
                 ));
             }
         }
@@ -200,7 +204,7 @@ pub fn input_warnings(
         path: &SchemaPath,
         policy: &provenant_records::policy::Policy,
         seen: &mut HashSet<String>,
-        warnings: &mut Vec<String>,
+        warnings: &mut Vec<provenant_records::warning::Warning>,
         matched: &mut bool,
     ) {
         match value {
@@ -496,7 +500,7 @@ mod tests {
             let policy = provenant_records::policy::Policy::default();
             let warnings = input_warnings(&value, &policy);
             assert_eq!(warnings.len(), 1);
-            let text = &warnings[0];
+            let text = &warnings[0].message;
             assert!(text.contains("[<key>][<key>]"), "{text}");
             assert!(!text.contains("CALLER_MARKER"));
             assert!(text.contains("looks like a credential"));
@@ -513,9 +517,9 @@ mod tests {
         let input = serde_json::json!({"nodes":[{"prompt":format!("use {marker}")}]});
         let warnings = input_warnings(&input, &Policy::default());
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("nodes[0].prompt"));
-        assert!(warnings[0].contains("looks like a credential"));
-        assert!(!warnings[0].contains(marker));
+        assert!(warnings[0].message.contains("nodes[0].prompt"));
+        assert!(warnings[0].message.contains("looks like a credential"));
+        assert!(!warnings[0].message.contains(marker));
 
         let mut strict = Policy::default();
         strict.overlay(
@@ -528,9 +532,9 @@ mod tests {
         );
         let warnings = input_warnings(&input, &strict);
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("nodes[0].prompt"));
-        assert!(warnings[0].contains("looks like a credential"));
-        assert!(!warnings[0].contains(marker));
+        assert!(warnings[0].message.contains("nodes[0].prompt"));
+        assert!(warnings[0].message.contains("looks like a credential"));
+        assert!(!warnings[0].message.contains(marker));
 
         // A directly constructed legacy policy can still say Refuse. The
         // scanner itself remains advisory even in that unsupported state.
@@ -544,7 +548,7 @@ mod tests {
         rule.rule.strength = Strength::Refuse;
         let warnings = input_warnings(&input, &legacy);
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("strength=Warn"));
-        assert!(!warnings[0].contains(marker));
+        assert!(warnings[0].message.contains("strength=Warn"));
+        assert!(!warnings[0].message.contains(marker));
     }
 }

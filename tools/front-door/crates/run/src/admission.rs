@@ -254,9 +254,10 @@ impl RunStore {
             }
             Ok((admitted, warnings))
         })?;
+        use provenant_records::warning::warn;
         for warning in warnings {
-            use std::io::Write;
-            let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+            // Spec: docs/specs/cli.md#warnings-are-typed-values
+            warn(warning.subject("ADMISSION_LEASE"));
         }
         Ok(admitted)
     }
@@ -804,7 +805,6 @@ impl RunStore {
         Ok(next)
     }
     /// Sample advisory resources once, then claim custody without a resource poll loop.
-    #[allow(clippy::print_stderr)]
     pub fn admit(
         &self,
         id: AttemptId,
@@ -828,20 +828,37 @@ impl RunStore {
             &self.context.project_id.to_string(),
             &request.task,
         );
+        use provenant_records::warning::{
+            MEMORY_FLOOR_LOW, RESOURCE_PROBE_FAILED, RUN_SETTINGS_UNAVAILABLE, Warning, warn,
+        };
         let settings = provenant_config::LaneBuildSettings::read(&self.writer_registry)
             .inspect_err(|error| {
-                eprintln!(
-                    "admission: settings unavailable: {}; proceeding with shipped policy",
-                    probe_error(error)
+                // Spec: docs/specs/cli.md#warnings-are-typed-values
+                warn(
+                    Warning::new(
+                        RUN_SETTINGS_UNAVAILABLE,
+                        format!(
+                            "admission: settings unavailable: {}; proceeding with shipped policy",
+                            probe_error(error)
+                        ),
+                    )
+                    .subject("LaneBuildSettings"),
                 )
             })
             .unwrap_or_default();
         let pressure = resources
             .pressure()
             .inspect_err(|error| {
-                eprintln!(
-                    "admission: memory pressure probe failed: {}",
-                    probe_error(error)
+                // Spec: docs/specs/cli.md#warnings-are-typed-values
+                warn(
+                    Warning::new(
+                        RESOURCE_PROBE_FAILED,
+                        format!(
+                            "admission: memory pressure probe failed: {}",
+                            probe_error(error)
+                        ),
+                    )
+                    .subject("memory pressure"),
                 )
             })
             .ok()
@@ -850,34 +867,64 @@ impl RunStore {
         let processes = resources
             .process_budget()
             .inspect_err(|error| {
-                eprintln!(
-                    "admission: process budget probe failed: {}",
-                    probe_error(error)
+                // Spec: docs/specs/cli.md#warnings-are-typed-values
+                warn(
+                    Warning::new(
+                        RESOURCE_PROBE_FAILED,
+                        format!(
+                            "admission: process budget probe failed: {}",
+                            probe_error(error)
+                        ),
+                    )
+                    .subject("process budget"),
                 )
             })
             .ok()
             .filter(|budget| !budget.has_room());
         let disk = resources
             .disk(attempt)
-            .inspect_err(|error| eprintln!("admission: disk probe failed: {}", probe_error(error)))
+            .inspect_err(|error| {
+                // Spec: docs/specs/cli.md#warnings-are-typed-values
+                warn(
+                    Warning::new(
+                        RESOURCE_PROBE_FAILED,
+                        format!("admission: disk probe failed: {}", probe_error(error)),
+                    )
+                    .subject("disk probe"),
+                )
+            })
             .ok();
         let limits = provenant_config::GcSettings::read(&self.writer_registry)
             .and_then(|settings| settings.disk_limits(&self.writer_registry))
             .inspect_err(|error| {
-                eprintln!("admission: disk floor unavailable: {error}; proceeding")
+                // Spec: docs/specs/cli.md#warnings-are-typed-values
+                warn(
+                    Warning::new(
+                        RESOURCE_PROBE_FAILED,
+                        format!("admission: disk floor unavailable: {error}; proceeding"),
+                    )
+                    .subject("disk floor"),
+                )
             })
             .ok();
         if let Some(warning) =
             memory_floor_warning(resources.memory(), ticket.memory_floor_basis_points)
         {
-            eprintln!(
-                "admission warning [{}]: {}; next: {}",
-                warning.code,
-                warning
-                    .detail
-                    .as_deref()
-                    .unwrap_or("available memory is low"),
-                warning.next.as_deref().unwrap_or("inspect host memory")
+            // Spec: docs/specs/cli.md#warnings-are-typed-values
+            warn(
+                Warning::new(
+                    MEMORY_FLOOR_LOW,
+                    format!(
+                        "admission [{}]: {}; next: {}",
+                        warning.code,
+                        warning
+                            .detail
+                            .as_deref()
+                            .unwrap_or("available memory is low"),
+                        warning.next.as_deref().unwrap_or("inspect host memory")
+                    ),
+                )
+                .subject(warning.code.clone()),
             );
         }
         let spacing = crate::ledger::spacing_left(
@@ -892,7 +939,10 @@ impl RunStore {
             // Submission and new builds take this same declared decision.
             match provenant_config::DiskGate::new(limits, &policy).decide(free) {
                 Effect::Proceed => {}
-                Effect::Warn(message) => eprintln!("admission warning: {message}"),
+                Effect::Warn(message) => {
+                    // Spec: docs/specs/cli.md#warnings-are-typed-values
+                    warn(message);
+                }
                 Effect::Refuse(_) | Effect::Stop(_) => {
                     return Err(RunError::Admission(AdmissionError::Disk {
                         free,
@@ -947,7 +997,10 @@ impl RunStore {
             };
             match policy.check(code, Facts::violation(detail)) {
                 Effect::Proceed => {}
-                Effect::Warn(message) => eprintln!("warning: {message}"),
+                Effect::Warn(message) => {
+                    // Spec: docs/specs/cli.md#warnings-are-typed-values
+                    warn(message);
+                }
                 Effect::Refuse(_) | Effect::Stop(_) => return Err(error),
             }
         }
@@ -1053,9 +1106,10 @@ impl RunStore {
             update_attempt(tx, &old, &next)?;
             Ok((Some(next), warnings))
         })?;
+        use provenant_records::warning::warn;
         for warning in warnings {
-            use std::io::Write;
-            let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+            // Spec: docs/specs/cli.md#warnings-are-typed-values
+            warn(warning.subject("ADMISSION_LEASE"));
         }
         Ok(record)
     }

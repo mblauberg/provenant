@@ -418,8 +418,9 @@ fn unknown_exclusion_selectors_are_refused_with_the_valid_forms()
     let error = parse("claud").unwrap_err();
     assert_eq!(error.code(), "unknown_exclusion");
     assert!(
-        matches!(error, RoutingError::UnknownExclusion { selector, detail }
-        if selector == "claud" && !detail.is_empty())
+        matches!(error, RoutingError::UnknownExclusion { selector, detail, candidates }
+        if selector == "claud" && !detail.is_empty()
+            && candidates.first().map(String::as_str) == Some("claude"))
     );
     Ok(())
 }

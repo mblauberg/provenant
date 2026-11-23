@@ -107,10 +107,12 @@ impl Reader<'_> {
                 // A rate limit skips this read rather than sleeping to the
                 // reset: the caller resubmits once the quota returns.
                 let (_, reset) = rate_delay(&headers, Duration::from_secs(60));
-                use std::io::Write;
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: GitHub rate limit; skipped this read; reset {reset}"
+                provenant_records::warning::warn(
+                    provenant_records::warning::Warning::new(
+                        provenant_records::warning::GH_RATE_LIMITED,
+                        format!("GitHub rate limit; skipped this read; reset {reset}"),
+                    )
+                    .once_per_change(),
                 );
                 return Err(failure(
                     "RATE_LIMITED",

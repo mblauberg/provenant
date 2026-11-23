@@ -142,6 +142,8 @@ pub fn assert_process_gone(pid: &str) -> Result<(), String> {
 /// Reports an unavailable sandbox-dependent test locally, or fails when CI
 /// requires native confinement. The ordinal makes skips visible and countable
 /// in captured test output.
+// Test diagnostics print the skip on stderr so the harness captures it.
+#[allow(clippy::disallowed_methods)]
 pub fn skip_sandbox_dependent_test(reason: impl Display) -> Result<(), String> {
     report_unavailable_sandbox(
         reason.to_string(),
@@ -166,6 +168,8 @@ fn report_unavailable_sandbox(
 }
 
 /// Fail a required native prerequisite, or print a numbered local skip.
+// Test diagnostics print the prerequisite context on stderr for the harness.
+#[allow(clippy::disallowed_methods)]
 pub fn missing_prerequisite(required: bool, reason: impl Display) -> Result<(), String> {
     report_missing_prerequisite(
         required,

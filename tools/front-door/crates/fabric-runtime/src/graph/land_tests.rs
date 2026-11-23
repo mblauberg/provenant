@@ -1,5 +1,5 @@
 use super::*;
-use crate::config::{LandChoice, LandPolicy, LandSource};
+use crate::config::{LandChoice, LandPolicy};
 use serde_json::json;
 use std::collections::VecDeque;
 use std::convert::Infallible;
@@ -466,7 +466,7 @@ fn bundled_deliver_repairs_findings_before_landing() {
     owner.repair_alternative = true;
     owner.policy = Some(LandChoice {
         policy: LandPolicy::Auto,
-        source: LandSource::Default,
+        source: Layer::Default,
     });
     let mut journal = Journal::default();
     let run = advance(&document, &mut owner, &mut journal).unwrap();
@@ -628,7 +628,7 @@ fn an_auto_tier_lands_the_newest_delivered_head_through_the_host() {
     let record = land.land.as_ref().unwrap();
     assert_eq!(
         (record.policy, record.policy_source, record.pull_request),
-        (LandPolicy::Auto, LandSource::Default, Some(7))
+        (LandPolicy::Auto, Layer::Default, Some(7))
     );
     let outputs = land.outputs.as_ref().unwrap();
     assert_eq!(outputs.verdict.as_deref(), Some(land::LANDED));
@@ -868,7 +868,7 @@ fn a_configured_policy_overrides_the_default_and_records_its_source() {
     let mut owner = owner();
     owner.policy = Some(LandChoice {
         policy: LandPolicy::Ask,
-        source: LandSource::Project,
+        source: Layer::Project,
     });
     let checkpoint = run(
         &document("routine", Some("chair")),
@@ -882,9 +882,9 @@ fn a_configured_policy_overrides_the_default_and_records_its_source() {
             record.policy_source,
             record.authorised_by.as_ref()
         ),
-        (LandPolicy::Ask, LandSource::Project, None)
+        (LandPolicy::Ask, Layer::Project, None)
     );
-    assert!(owner.filed[0].body.contains("project config"));
+    assert!(owner.filed[0].body.contains("project"));
     assert!(owner.lands.is_empty());
 }
 

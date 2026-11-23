@@ -173,7 +173,7 @@ pub(super) fn naming_and_post_create_ports_are_advisory_and_evidenced() -> Resul
     let marker = marker_path.to_str().ok_or("marker path")?.to_owned();
     let mut ports = provenant_config::PortTable::builtin();
     ports.naming = provenant_config::Port {
-        source: provenant_records::PortSource::Project,
+        source: provenant_records::Layer::Project,
         backend: provenant_config::PortBackend::Command {
             command: provenant_records::PortCommand {
                 argv: vec![
@@ -191,7 +191,7 @@ pub(super) fn naming_and_post_create_ports_are_advisory_and_evidenced() -> Resul
         },
     };
     ports.post_create = provenant_config::Port {
-        source: provenant_records::PortSource::Project,
+        source: provenant_records::Layer::Project,
         backend: provenant_config::PortBackend::Command {
             command: provenant_records::PortCommand {
                 argv: vec![
@@ -249,7 +249,7 @@ pub(super) fn naming_and_post_create_ports_are_advisory_and_evidenced() -> Resul
             .find(|entry| entry.receipt.owner == owner && entry.receipt.phase == phase)
             .ok_or("missing setup command receipt")?
             .receipt;
-        assert_eq!(receipt.source, provenant_records::PortSource::Project);
+        assert_eq!(receipt.source, provenant_records::Layer::Project);
         assert_eq!(
             receipt.backend,
             provenant_records::PortCommandBackend::RepositoryCommand
@@ -471,33 +471,38 @@ pub(super) fn create_list_and_remove_a_managed_worktree() -> Result {
     rig.assert_v1_root_untouched()
 }
 
-pub(super) fn existing_branch_with_base_names_the_repair_in_json_and_human_output() -> Result {
+pub(super) fn existing_branch_behind_base_warns_and_keeps_its_tip() -> Result {
+    // Spec: docs/specs/run.md#lane-git-and-import -- an existing branch
+    // behind its base warns BRANCH_BEHIND_BASE and proceeds; --base records the
+    // merge target and never resets the branch.
     let rig = repository()?;
     git(&rig, &["branch", "existing"])?;
+    let tip = git(&rig, &["rev-parse", "existing"])?;
     git(&rig, &["commit", "--allow-empty", "-qm", "advance"])?;
-    let json_output = command(
+    let json_output = ok(
         &rig,
         &["worktree", "create", "existing", "--base", "HEAD", "--json"],
     )?;
-    assert_ne!(code(&json_output), 0);
-    let value = json(&json_output)?;
-    let message = value["error"]["message"].as_str().ok_or("error message")?;
+    let warnings = json_output["data"]["warnings"]
+        .as_array()
+        .ok_or("worktree warnings are not an array")?;
     assert!(
-        message.contains("branch existing at")
-            && message.contains("does not contain base")
-            && message.contains("omit --base"),
-        "{value}"
+        warnings.iter().any(|warning| {
+            warning.as_str().is_some_and(|text| {
+                text.contains("branch existing at")
+                    && text.contains("does not contain base")
+                    && text.contains("merge target")
+            })
+        }),
+        "{json_output}"
     );
-
-    let human_output = command(&rig, &["worktree", "create", "existing", "--base", "HEAD"])?;
-    assert_ne!(code(&human_output), 0);
-    let message = String::from_utf8_lossy(&human_output.stderr.bytes);
-    assert!(
-        message.contains("branch existing at")
-            && message.contains("does not contain base")
-            && message.contains("omit --base"),
-        "{message}"
+    assert_eq!(
+        git(&rig, &["rev-parse", "existing"])?,
+        tip,
+        "--base must not move the branch"
     );
+    let head = git(&rig, &["rev-parse", "HEAD"])?;
+    assert_eq!(json_output["data"]["base"].as_str(), Some(head.as_str()));
     Ok(())
 }
 
@@ -685,11 +690,19 @@ pub(super) fn remove_by_name_deletes_a_branch_fully_contained_in_integration() -
     let at_tip = rig.project.join(".worktrees/at-tip");
     let output = command(&rig, &["worktree", "remove", "at-tip", "--json"])?;
     assert_eq!(code(&output), 0);
-    assert!(
-        String::from_utf8_lossy(&output.stderr.bytes)
-            .contains("using the current integration resolution")
-    );
     let removed = json(&output)?;
+    // A failed optional fetch is reported as a typed warning in the v2
+    // envelope, not as prose on stderr.
+    assert!(
+        removed["warnings"].as_array().is_some_and(|warnings| {
+            warnings.iter().any(|warning| {
+                warning["message"].as_str().is_some_and(|message| {
+                    message.contains("using the current integration resolution")
+                })
+            })
+        }),
+        "envelope must carry the fetch-fallback warning: {removed}"
+    );
     assert_eq!(
         removed["data"]["pruned_refs"],
         serde_json::json!(["at-tip"])

@@ -1,6 +1,24 @@
 //! Worktree creation, listing, removal and ref pruning.
 use super::*;
+use provenant_records::warning::{BRANCH_BEHIND_BASE, Warning, warn};
 use std::path::Component;
+
+/// An existing branch behind its declared `--base` is reused at its current
+/// tip. `--base` is only the merge target; it never resets the branch. Emit the
+/// one typed warning that names both commits so the operator can merge the base
+/// before landing.
+/// Spec: docs/specs/run.md#lane-git-and-import
+fn branch_behind_base_warning(branch: &str, head: GitOid, base: GitOid) -> String {
+    let message = format!(
+        "branch {branch} at {head} does not contain base {base}; reusing the branch at {head} with {base} as its merge target"
+    );
+    warn(
+        Warning::new(BRANCH_BEHIND_BASE, message.clone())
+            .subject(branch.to_owned())
+            .repair("merge the base into the branch before landing".to_owned()),
+    );
+    message
+}
 
 /// Credential and Git roots may never be carried into a writer checkout.
 pub fn writer_edit_is_protected(path: &str) -> bool {
@@ -419,8 +437,12 @@ fn list_impl(
             occupancy,
             owner,
             primary: is_primary,
+            lane: None,
+            attempt: None,
+            base: None,
             reused: false,
-        };
+        }
+        .with_owner_identity();
         report(total, Some(&info));
         result.push(info);
     }
@@ -452,17 +474,21 @@ pub fn fetch_remote_branch_tip(
     context: &WorktreeContext<'_>,
     name: &str,
     cancel: &CancelToken,
+    remote: Option<&str>,
 ) -> Result<Option<GitOid>, WorktreeError> {
     let branch = GitRefName::branch(name).map_err(|_| WorktreeError::InvalidRequest)?;
     if read_branch_tips(context, cancel)?.contains_key(&branch) {
         return Ok(None);
     }
+    let Some(remote) = remote else {
+        return Ok(None);
+    };
     let remote = crate::utility::fetch_missing_remote_branch(
         context.executor,
         context.repo,
         context.utility,
         context.home,
-        &format!("origin/{name}"),
+        &format!("{remote}/{name}"),
         context.mutation_budget,
         cancel,
     )
@@ -481,6 +507,11 @@ fn open_or_create_layout_directory(
     create: bool,
     device: u64,
 ) -> Result<Directory, WorktreeError> {
+    // A worktree declared directly under an outside root has no tail to walk;
+    // the root itself is the allocation's parent directory.
+    if relative.as_os_str().is_empty() {
+        return Ok(root.try_clone()?);
+    }
     let mut current: Option<Directory> = None;
     for component in relative.components() {
         let Component::Normal(name) = component else {
@@ -594,7 +625,11 @@ fn reuse_existing_worktree(
         primary: false,
         reused: true,
         occupancy,
-    })
+        lane: None,
+        attempt: None,
+        base: None,
+    }
+    .with_owner_identity())
 }
 
 fn create_with_default(
@@ -645,33 +680,60 @@ fn create_with_default(
     let target_relative = ports
         .managed_writer_path(&request.branch)
         .map_err(WorktreeError::PortConfiguration)?;
-    let parent_relative = target_relative
-        .parent()
-        .ok_or(WorktreeError::InvalidRequest)?;
-    let path_name = target_relative
-        .file_name()
-        .ok_or(WorktreeError::InvalidRequest)?;
-    let layout_device = context.layout.directory().metadata()?.device;
-    let worktree_parent = open_or_create_layout_directory(
-        context.layout.directory(),
-        parent_relative,
-        true,
-        layout_device,
-    )?;
+    // A declared root may be absolute or parent-relative. Its allocation then
+    // lives outside the checkout anchor, so open that root as its own anchor
+    // and create the template tail beneath it. The default relative root keeps
+    // the device-checked walk from the layout anchor.
+    let outside = target_relative.is_absolute()
+        || target_relative
+            .components()
+            .any(|component| matches!(component, Component::ParentDir));
+    let (allocation, parent_relative, path_name, target) = if outside {
+        let (anchor_path, tail) = ports
+            .worktree_layout
+            .allocation_for(context.layout.root(), &request.branch)
+            .map_err(WorktreeError::PortConfiguration)?;
+        let anchor_path = canonicalize(&anchor_path).map_err(|_| WorktreeError::InvalidRequest)?;
+        let allocation = Directory::open_anchor(&anchor_path)?;
+        let parent_relative = tail
+            .parent()
+            .ok_or(WorktreeError::InvalidRequest)?
+            .to_path_buf();
+        let path_name = tail
+            .file_name()
+            .ok_or(WorktreeError::InvalidRequest)?
+            .to_os_string();
+        let target = allocation.current_path()?.join(&tail);
+        (allocation, parent_relative, path_name, target)
+    } else {
+        let parent_relative = target_relative
+            .parent()
+            .ok_or(WorktreeError::InvalidRequest)?
+            .to_path_buf();
+        let path_name = target_relative
+            .file_name()
+            .ok_or(WorktreeError::InvalidRequest)?
+            .to_os_string();
+        let target = context.layout.root().join(&target_relative);
+        (
+            context.layout.directory().try_clone()?,
+            parent_relative,
+            path_name,
+            target,
+        )
+    };
+    let layout_device = allocation.metadata()?.device;
+    let worktree_parent =
+        open_or_create_layout_directory(&allocation, &parent_relative, true, layout_device)?;
     let parent_identity = worktree_parent.metadata()?;
-    let target = context.layout.root().join(&target_relative);
     let _writer = cache_writer_guard(context.project_state, &target).map_err(custody_refusal)?;
     context.repo.revalidate()?;
-    let named_parent = open_or_create_layout_directory(
-        context.layout.directory(),
-        parent_relative,
-        false,
-        layout_device,
-    )?;
+    let named_parent =
+        open_or_create_layout_directory(&allocation, &parent_relative, false, layout_device)?;
     if !parent_identity.same_identity(&named_parent.metadata()?) {
         return Err(WorktreeError::UnknownWriter);
     }
-    let path_exists = match worktree_parent.metadata_at(path_name, false) {
+    let path_exists = match worktree_parent.metadata_at(&path_name, false) {
         Ok(_) => true,
         Err(error) if error.is_not_found() => false,
         Err(_) => return Err(WorktreeError::UnknownWriter),
@@ -693,26 +755,26 @@ fn create_with_default(
             return Err(WorktreeError::UnknownWriter);
         }
     }
+    // A declared `--base` is the merge target for an existing branch, never a
+    // reset. Pin it once so the behind-base warning and the recorded base agree.
+    // Spec: docs/specs/run.md#lane-git-and-import
+    let requested_base = request
+        .base
+        .as_deref()
+        .map(|base| pin_revision(context, facts, base, cancel))
+        .transpose()?;
     let checked_out = entries
         .iter()
         .filter(|entry| !entry.prunable)
         .find(|entry| entry.branch.as_ref() == Some(&branch));
     if let Some(entry) = checked_out {
         let head = entry.head.ok_or(WorktreeError::InvalidOutput)?;
-        return Err(if let Some(base) = request.base.as_deref() {
-            let base_oid = pin_revision(context, facts, base, cancel)?;
-            if !is_ancestor(context, base_oid, head, cancel)? {
-                WorktreeError::BranchExistsWithBase {
-                    branch: request.branch.clone(),
-                    head,
-                    base: base_oid,
-                }
-            } else {
-                WorktreeError::CheckedOut
-            }
-        } else {
-            WorktreeError::CheckedOut
-        });
+        if let Some(base) = requested_base
+            && !is_ancestor(context, base, head, cancel)?
+        {
+            branch_behind_base_warning(&request.branch, head, base);
+        }
+        return Err(WorktreeError::CheckedOut);
     }
     if entries
         .iter()
@@ -722,17 +784,16 @@ fn create_with_default(
     }
     let branch_tips = read_branch_tips(context, cancel)?;
     let existing = branch_tips.get(&branch).copied();
+    let mut behind_base = None;
     if let Some(existing_head) = existing
-        && let Some(base) = request.base.as_deref()
+        && let Some(base) = requested_base
+        && !is_ancestor(context, base, existing_head, cancel)?
     {
-        let base_oid = pin_revision(context, facts, base, cancel)?;
-        if !is_ancestor(context, base_oid, existing_head, cancel)? {
-            return Err(WorktreeError::BranchExistsWithBase {
-                branch: request.branch.clone(),
-                head: existing_head,
-                base: base_oid,
-            });
-        }
+        behind_base = Some(branch_behind_base_warning(
+            &request.branch,
+            existing_head,
+            base,
+        ));
     }
     let create_branch = existing.is_none();
     if create_branch && request.base.is_none() && default.is_none() {
@@ -742,7 +803,11 @@ fn create_with_default(
         // Network discovery does not need to hold this worktree's custody.
         // The recursive call reacquires it before repeating every collision check.
         drop(_writer);
-        let default = default_creation_base(context, facts, cancel)?;
+        // The one remote for this creation, resolved here and passed down. An
+        // absent remote is an absence, not an `origin` guess.
+        // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+        let forge_remote = super::forge_remote(context)?;
+        let default = default_creation_base(context, facts, cancel, forge_remote.as_deref())?;
         return create_with_default(context, request, cancel, Some(default), naming_warnings);
     }
 
@@ -769,8 +834,8 @@ fn create_with_default(
     }
     let base = if let Some(existing) = existing {
         existing
-    } else if let Some(base) = request.base.as_deref() {
-        pin_revision(context, facts, base, cancel)?
+    } else if let Some(base) = requested_base {
+        base
     } else {
         default.as_ref().ok_or(WorktreeError::InvalidRequest)?.0
     };
@@ -829,6 +894,9 @@ fn create_with_default(
     // here; a failed ownership record leaves this branch unobserved, which
     // only ever retains it.
     let mut warnings = naming_warnings;
+    if let Some(message) = behind_base {
+        warnings.push(message);
+    }
     if let Err(error) = creation_record {
         warnings.push(format!(
             "could not record worktree creation: {error}; it is retained as foreign"
@@ -865,6 +933,9 @@ fn create_with_default(
         primary: false,
         reused: false,
         occupancy: combine_occupancy(&target, Occupancy::Available, writer),
+        lane: None,
+        attempt: None,
+        base: requested_base.map(|oid| oid.to_string()),
     })
 }
 
@@ -873,28 +944,31 @@ pub fn default_creation_base(
     context: &WorktreeContext<'_>,
     facts: &RepoFacts,
     cancel: &CancelToken,
+    remote: Option<&str>,
 ) -> Result<(GitOid, Vec<String>), WorktreeError> {
-    match crate::utility::fetch_missing_remote_branch(
-        context.executor,
-        context.repo,
-        context.utility,
-        context.home,
-        "origin/HEAD",
-        context.mutation_budget,
-        cancel,
-    ) {
-        Ok(crate::utility::RemoteBase::Found(oid)) => {
-            let revision =
-                GitRevision::new(oid.to_string()).map_err(|_| WorktreeError::InvalidOutput)?;
-            if let Ok(pinned) = facts.resolve_revision(context, revision, cancel) {
-                return Ok((pinned, Vec::new()));
+    if let Some(remote) = remote {
+        match crate::utility::fetch_missing_remote_branch(
+            context.executor,
+            context.repo,
+            context.utility,
+            context.home,
+            &format!("{remote}/HEAD"),
+            context.mutation_budget,
+            cancel,
+        ) {
+            Ok(crate::utility::RemoteBase::Found(oid)) => {
+                let revision =
+                    GitRevision::new(oid.to_string()).map_err(|_| WorktreeError::InvalidOutput)?;
+                if let Ok(pinned) = facts.resolve_revision(context, revision, cancel) {
+                    return Ok((pinned, Vec::new()));
+                }
             }
+            Err(crate::utility::UtilityError::Cancelled)
+            | Err(crate::utility::UtilityError::Execution(
+                provenant_os::exec::ExecError::Cancelled,
+            )) => return Err(crate::utility::UtilityError::Cancelled.into()),
+            _ => {}
         }
-        Err(crate::utility::UtilityError::Cancelled)
-        | Err(crate::utility::UtilityError::Execution(provenant_os::exec::ExecError::Cancelled)) => {
-            return Err(crate::utility::UtilityError::Cancelled.into());
-        }
-        _ => {}
     }
     let head = GitRevision::new("HEAD").map_err(|_| WorktreeError::InvalidRequest)?;
     let oid = facts
@@ -906,20 +980,24 @@ pub fn default_creation_base(
                 error
             }
         })?;
-    let warning = default_base_warning(oid);
-    let _ = write_default_base_warning(&mut std::io::stderr().lock(), oid);
+    let warning = default_base_warning(oid, remote);
+    use provenant_records::warning::{DEFAULT_BASE_FALLBACK, Warning, warn};
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    warn(
+        Warning::new(DEFAULT_BASE_FALLBACK, warning.clone())
+            .subject(oid.to_string())
+            .once_per_change(),
+    );
     Ok((oid, vec![warning]))
 }
 
-fn default_base_warning(oid: GitOid) -> String {
-    format!("could not fetch origin's default branch; using local HEAD {oid}")
-}
-
-pub(super) fn write_default_base_warning(
-    output: &mut impl std::io::Write,
-    oid: GitOid,
-) -> std::io::Result<()> {
-    writeln!(output, "warning: {}", default_base_warning(oid))
+fn default_base_warning(oid: GitOid, remote: Option<&str>) -> String {
+    match remote {
+        Some(remote) => {
+            format!("could not fetch {remote}'s default branch; using local HEAD {oid}")
+        }
+        None => format!("this checkout has no remote; using local HEAD {oid}"),
+    }
 }
 
 /// Report whether a failed `worktree add` left no observable artifacts.
@@ -1439,6 +1517,9 @@ pub(super) fn remove_tree_when_before_delete_locked(
         primary: false,
         reused: false,
         occupancy: Occupancy::Available,
+        lane: None,
+        attempt: None,
+        base: None,
     };
     let writer = locked.writer.take().ok_or(WorktreeError::UnknownWriter)?;
     Ok(RemovedTree {
@@ -1479,9 +1560,13 @@ pub(super) fn refresh_census_under_custody(
     }
 }
 
-#[allow(clippy::print_stderr)]
 pub(super) fn warn_cache_removal(error: &crate::permissions::PermissionError) {
-    eprintln!("warning: could not remove worktree lane cache: {error}");
+    use provenant_records::warning::{CACHE_REMOVAL_FAILED, Warning, warn};
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    warn(Warning::new(
+        CACHE_REMOVAL_FAILED,
+        format!("could not remove worktree lane cache: {error}"),
+    ));
 }
 
 /// Pins an integration ref given by name. A local branch wins, then a
@@ -1895,11 +1980,15 @@ pub(super) fn remove_merged_candidate(
                             branch: Some(branch.as_str().to_owned()),
                             head: tip,
                             dirty: WorktreeCondition::Clean,
-                            owner: Ok(owner),
+                            owner: Ok(owner.clone()),
                             primary: false,
                             reused: false,
                             occupancy: Occupancy::Available,
-                        };
+                            lane: None,
+                            attempt: None,
+                            base: None,
+                        }
+                        .with_owner_identity();
                         record_started = Some(super::gc::begin_worktree_retirement(
                             context, port, &lane, verified, decision, cancel,
                         )?);
@@ -2319,11 +2408,15 @@ fn remove_with_owner(
                                         .map(|branch| branch.as_str().to_owned()),
                                     head: tip,
                                     dirty: WorktreeCondition::Clean,
-                                    owner: Ok(owner),
+                                    owner: Ok(owner.clone()),
                                     primary: false,
                                     reused: false,
                                     occupancy: Occupancy::Available,
-                                };
+                                    lane: None,
+                                    attempt: None,
+                                    base: None,
+                                }
+                                .with_owner_identity();
                                 retirement_record = Some(super::gc::begin_worktree_retirement(
                                     context, port, &lane, verified, decision, cancel,
                                 )?);

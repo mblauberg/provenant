@@ -10,6 +10,10 @@ use std::{env, error::Error, fs, path::Path, path::PathBuf};
 type BuildResult<T> = Result<T, Box<dyn Error>>;
 
 /// The sorted `.rs` files directly under `dir`.
+#[allow(
+    clippy::print_stdout,
+    reason = "cargo: directives in a build script are the build protocol itself"
+)]
 fn rust_files(dir: &Path) -> BuildResult<Vec<PathBuf>> {
     println!("cargo:rerun-if-changed={}", dir.display());
     let mut files = Vec::new();

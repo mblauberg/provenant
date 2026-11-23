@@ -14,6 +14,7 @@ use provenant_quota::{
     schedule::{self, Detection, QuotaQuery, QuotaTick},
     *,
 };
+use provenant_records::warning::{LIVE_RECORD_FORMAT_CHANGED, Warning, warn};
 use provenant_records::{CommandError, CommandResult, Outcome};
 use std::{
     ffi::OsStr,
@@ -22,7 +23,7 @@ use std::{
 };
 use thiserror::Error;
 
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct Filter {
     /// Restrict to this adapter
     #[arg(long)]
@@ -58,7 +59,7 @@ pub enum Power {
     Battery,
     Low,
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Quota {
     /// Show recorded provider quota
     Show(Filter),
@@ -1005,17 +1006,21 @@ fn older_readiness_version(bytes: &[u8]) -> Option<u64> {
 
 /// One note per process and account for a dropped older readiness file.
 fn note_dropped_readiness(adapter: &str, key: &str, version: u64) {
-    use std::io::Write;
     static NOTED: std::sync::Mutex<std::collections::BTreeSet<(String, String)>> =
         std::sync::Mutex::new(std::collections::BTreeSet::new());
     let first = NOTED
         .lock()
         .is_ok_and(|mut noted| noted.insert((adapter.to_owned(), key.to_owned())));
     if first {
-        let _ = writeln!(
-            io::stderr().lock(),
-            "Note: readiness for {adapter}/{key} is from an older release (schema {version}, now {}); dropped until the next observation",
-            provenant_quota::READINESS_SCHEMA_VERSION
+        warn(
+            Warning::new(
+                LIVE_RECORD_FORMAT_CHANGED,
+                format!(
+                    "readiness for {adapter}/{key} is from an older release (schema {version}, now {}); dropped until the next observation",
+                    provenant_quota::READINESS_SCHEMA_VERSION
+                ),
+            )
+            .subject(format!("{adapter}/{key}")),
         );
     }
 }
@@ -1101,11 +1106,10 @@ pub(crate) fn state_freshness(state: &Path) -> provenant_quota::FreshnessPolicy 
     match provenant_config::read_domain::<provenant_quota::Settings>(state, "quota") {
         Ok(settings) => provenant_quota::FreshnessPolicy::from_settings(settings.freshness),
         Err(error) => {
-            use std::io::Write;
-            let _ = writeln!(
-                io::stderr().lock(),
-                "Warning: quota freshness settings unavailable ({error}); using defaults"
-            );
+            warn(Warning::new(
+                provenant_records::warning::CONFIG_UNAVAILABLE,
+                format!("quota freshness settings unavailable ({error}); using defaults"),
+            ));
             provenant_quota::FreshnessPolicy::default()
         }
     }
@@ -1118,11 +1122,10 @@ fn catalogue_pools(roots: &Roots) -> impl Fn(&str, &str) -> Vec<String> {
     let catalogue = match crate::route::effective_catalogue(roots) {
         Ok(catalogue) => Some(catalogue),
         Err(error) => {
-            use std::io::Write;
-            let _ = writeln!(
-                io::stderr().lock(),
-                "Warning: model catalogue unavailable ({error}); model pools are not applied"
-            );
+            warn(Warning::new(
+                provenant_records::warning::MODEL_CATALOGUE_UNAVAILABLE,
+                format!("model catalogue unavailable ({error}); model pools are not applied"),
+            ));
             None
         }
     };
@@ -1366,11 +1369,10 @@ fn write_intent_at(
     }
     // The account commit remains authoritative if derived publication fails.
     if let Err(error) = sync_readiness(state, intent, now) {
-        use std::io::Write;
-        let _ = writeln!(
-            io::stderr().lock(),
-            "Warning: could not sync quota readiness: {error}"
-        );
+        warn(Warning::new(
+            provenant_records::warning::QUOTA_READINESS_UNSYNCED,
+            format!("could not sync quota readiness: {error}"),
+        ));
     }
     signal_quota(state);
     Ok(())
@@ -2437,11 +2439,10 @@ pub(crate) fn execute(
             &clock,
         )
     {
-        use std::io::Write;
-        let _ = writeln!(
-            io::stderr().lock(),
-            "Warning: could not deliver login expiry notice: {error}"
-        );
+        warn(Warning::new(
+            provenant_records::warning::LOGIN_RECORD_UNRETAINED,
+            format!("could not deliver login expiry notice: {error}"),
+        ));
     }
     Ok(shown)
 }
@@ -3142,13 +3143,24 @@ fn shared_pool_exhaustions(snapshot: &provenant_quota::QuotaSnapshot) -> Option<
         .collect();
     (!exhausted.is_empty()).then(|| exhausted.join(", "))
 }
-/// Counts by state, then the accounts that need attention, then the command
-/// that shows the rest.
-fn quota_summary(report: &QuotaReport) -> crate::Summary {
+/// Counts by state, then the accounts that need attention, then the typed next
+/// step that shows the rest.
+fn quota_summary(
+    report: &QuotaReport,
+) -> (
+    crate::Summary,
+    Option<provenant_records::command_result::NextStep>,
+) {
     quota_summary_at(report, jiff::tz::TimeZone::system())
 }
 
-fn quota_summary_at(report: &QuotaReport, time_zone: jiff::tz::TimeZone) -> crate::Summary {
+fn quota_summary_at(
+    report: &QuotaReport,
+    time_zone: jiff::tz::TimeZone,
+) -> (
+    crate::Summary,
+    Option<provenant_records::command_result::NextStep>,
+) {
     let state = |row: &provenant_quota::AccountRow| {
         serde_json::to_value(row.status)
             .ok()
@@ -3230,16 +3242,23 @@ fn quota_summary_at(report: &QuotaReport, time_zone: jiff::tz::TimeZone) -> crat
         .accounts
         .iter()
         .any(|row| !matches!(row.status, QuotaStatus::Available | QuotaStatus::CreditOnly))
-        .then(|| "provenant quota tick".to_owned());
-    crate::Summary::new(
-        format!(
-            "quota {}/{} current{}{}",
-            report.coverage.known,
-            report.coverage.total,
-            if tally.is_empty() { "" } else { ": " },
-            tally
+        .then(|| {
+            provenant_records::command_result::NextStep::from_command(
+                "provenant quota tick",
+                "refresh the current quota observations",
+            )
+        });
+    (
+        crate::Summary::new(
+            format!(
+                "quota {}/{} current{}{}",
+                report.coverage.known,
+                report.coverage.total,
+                if tally.is_empty() { "" } else { ": " },
+                tally
+            ),
+            rows,
         ),
-        rows,
         next,
     )
 }
@@ -3266,6 +3285,7 @@ pub fn run(
     };
     let started = std::time::Instant::now();
     let mut summary = None;
+    let mut next_steps: Vec<provenant_records::command_result::NextStep> = Vec::new();
     let result = match &command {
         Quota::History {
             account,
@@ -3332,13 +3352,18 @@ pub fn run(
                 data["model_discovery"] = serde_json::to_value(changes)?;
             }
             if matches!(command, Quota::Show(_)) {
-                summary = Some(quota_summary(&report));
+                let (owner_summary, next) = quota_summary(&report);
+                summary = Some(owner_summary);
+                next_steps.extend(next);
             }
             Ok((data, human))
         }),
     };
-    let (envelope, human) = match result {
-        Ok((report, human)) => (CommandResult::new(name, Outcome::Ok, Some(report)), human),
+    let (mut envelope, human) = match result {
+        Ok((report, human)) => (
+            CommandResult::new(name, Outcome::Ok, Some(report)).with_next(next_steps),
+            human,
+        ),
         Err(error) => {
             let status = match &error {
                 EdgeError::Config(provenant_config::ConfigError::Read { .. }) => Outcome::Error,
@@ -3392,14 +3417,9 @@ pub fn run(
         matches!(command, Quota::Show(_) | Quota::History { .. }),
         summary.as_ref(),
     );
-    let outcome = crate::render_or_publish(
-        &envelope,
-        mode,
-        &mut io::stdout().lock(),
-        &mut io::stderr().lock(),
-        publish,
-        crate::OverflowPolicy::Refuse,
-    );
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    let outcome =
+        crate::render_command_result(&mut envelope, mode, publish, crate::OverflowPolicy::Refuse);
     outcome.map_or(3, |outcome| crate::exit_status(&outcome))
 }
 
@@ -4160,7 +4180,7 @@ mod tests {
             display: Default::default(),
             display_icon_warning: Some("warning".into()),
         };
-        let summary = quota_summary(&report);
+        let (summary, next) = quota_summary(&report);
         assert_eq!(summary.lines.len(), 5); // headline, warning, and all three accounts
         assert!(
             summary
@@ -4181,16 +4201,24 @@ mod tests {
                 .any(|line| line.contains("Exhausted [test]: exhausted"))
         );
         assert_eq!(summary.omitted, 0);
-        assert_eq!(summary.next.as_deref(), Some("provenant quota tick"));
+        assert_eq!(
+            next.expect("an exhausted account recommends a typed next step")
+                .argv,
+            ["provenant", "quota", "tick"]
+        );
         for _ in 0..14 {
             report.accounts.push(row(QuotaStatus::Stale));
         }
         report.coverage.total = report.accounts.len().try_into().unwrap();
-        let summary = quota_summary(&report);
+        let (summary, next) = quota_summary(&report);
         assert_eq!(summary.lines.len(), 1 + crate::limits::SUMMARY_ROWS);
         assert_eq!(summary.omitted, 18 - crate::limits::SUMMARY_ROWS);
         assert!(summary.lines[0].contains("quota 3/17"));
-        assert_eq!(summary.next.as_deref(), Some("provenant quota tick"));
+        assert_eq!(
+            next.expect("a stale account recommends a typed next step")
+                .argv,
+            ["provenant", "quota", "tick"]
+        );
     }
 
     #[test]
@@ -4248,7 +4276,7 @@ mod tests {
             !human.contains("unknown [opencode]: EXHAUSTED until"),
             "{human}"
         );
-        let compact = quota_summary_at(&today, zone.clone());
+        let (compact, _) = quota_summary_at(&today, zone.clone());
         assert!(
             compact.lines.iter().any(|line| line
                 == "zen [opencode]: exhausted until 10:11 (source: provider retry-after)")
@@ -4298,7 +4326,7 @@ mod tests {
                 .contains("recorded refusal for opencode/beam-pro in pool opencode-go until 10:11 (source: provider retry-after)"),
             "{human}"
         );
-        let compact = quota_summary_at(&scoped, zone.clone());
+        let (compact, _) = quota_summary_at(&scoped, zone.clone());
         assert!(compact.lines.iter().any(|line| {
             line == "unknown [opencode]: available (recorded refusal for opencode/beam-pro in pool opencode-go until 10:11 (source: provider retry-after))"
         }));
@@ -4446,7 +4474,7 @@ mod tests {
             "{human}"
         );
         assert!(!human.contains("EXHAUSTED"), "{human}");
-        let summary = quota_summary(&report);
+        let (summary, _) = quota_summary(&report);
         assert!(
             summary
                 .lines
@@ -4463,7 +4491,7 @@ mod tests {
             human.contains("; gemini pool exhausted (shared), claude pool exhausted (shared)"),
             "{human}"
         );
-        let summary = quota_summary(&report);
+        let (summary, _) = quota_summary(&report);
         assert!(summary.lines.iter().any(|line| line == "agy [agy]: exhausted (gemini pool exhausted (shared), claude pool exhausted (shared))"), "{summary:?}");
         Ok(())
     }
@@ -6479,6 +6507,7 @@ mod tests {
         assert!(pool_states(snapshot).unwrap().contains("five_hour >=43%"));
         assert!(
             quota_summary(&report)
+                .0
                 .lines
                 .iter()
                 .any(|line| line.contains("five_hour >=43%"))

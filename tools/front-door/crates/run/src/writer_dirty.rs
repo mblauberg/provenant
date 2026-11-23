@@ -1,12 +1,14 @@
 //! What a writer dispatch does when its worktree still holds uncommitted
-//! edits (`lanes.writer_dirty`). Advisory except for credential and Git
-//! internal roots: the effective value and the layer that set it are named in
-//! every refusal and warning.
+//! edits (`lanes.writer_dirty`). Advisory except for a worktree another lane
+//! holds, and credential and Git internal roots: the effective value and the
+//! layer that set it are named in every refusal and warning.
 //!
-//! The default is `refuse`: an immediate, token-free refusal at graph
-//! submission. `wip_commit` preserves the edits in a local WIP commit before
-//! any plan node launches. `continue_in_place` lets the writer keep the edits
-//! and warns. Credential and Git internal roots are always a hard refusal.
+//! The default is `wip_commit`: the preflight preserves the edits of an unheld
+//! worktree in a local WIP commit before any plan node launches and warns with
+//! `WORKTREE_ADOPTED_DIRTY`. `refuse` is an immediate, token-free refusal at
+//! graph submission. `continue_in_place` lets the writer keep the edits and
+//! warns. A worktree another lane holds is always refused (boundary 2), as are
+//! credential and Git internal roots.
 
 /// The registry knob.
 pub const KNOB: &str = "lanes.writer_dirty";
@@ -15,9 +17,10 @@ pub const KNOB: &str = "lanes.writer_dirty";
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum WriterDirty {
     /// Refuse at graph submission, before a plan node spends tokens.
-    #[default]
     Refuse,
-    /// Commit the retained edits locally before any plan node launches.
+    /// Commit the retained edits locally before any plan node launches. This
+    /// is the default for a worktree no live writer holds.
+    #[default]
     WipCommit,
     /// Keep the edits in place and warn.
     ContinueInPlace,
@@ -52,7 +55,7 @@ pub struct ResolvedWriterDirty {
 impl ResolvedWriterDirty {
     /// Resolve from a knob value and its already-rendered source (`default`,
     /// `host`, `launch`, ...). A missing or unknown value is the registry
-    /// default, `refuse`.
+    /// default, `wip_commit`.
     pub fn resolve(value: Option<&str>, source: &str) -> Self {
         Self {
             value: value.and_then(WriterDirty::parse).unwrap_or_default(),
@@ -74,7 +77,7 @@ impl ResolvedWriterDirty {
     /// the decision. Used only for the hard `refuse` case.
     pub fn refusal(&self, paths: &[String]) -> String {
         format!(
-            "writer worktree has uncommitted edits: {}; set {} to wip_commit or continue_in_place to allow a continued draft",
+            "writer worktree has uncommitted edits: {}; the setting is {}; set it to wip_commit or continue_in_place to allow a continued draft",
             paths.join(", "),
             self.setting()
         )
@@ -126,13 +129,36 @@ pub fn preflight(resolved: &ResolvedWriterDirty, paths: &[String]) -> Preflight 
     }
 }
 
+/// A worktree another lane holds is never adopted: committing or moving that
+/// lane's uncommitted work would cross boundary 2. This refusal is
+/// unconditional and does not depend on `lanes.writer_dirty`.
+pub fn held_refusal(lanes: &[String], path: &str) -> String {
+    format!(
+        "worktree {path} is in use by {}; refusing to adopt another lane's uncommitted work",
+        lanes.join(", ")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // Spec: docs/specs/run.md#writer-pin-and-re-pin
     #[test]
-    fn a_dirty_worktree_is_refused_by_default_and_names_paths_and_setting() {
+    fn an_unheld_dirty_worktree_is_wip_committed_by_default() {
         let resolved = ResolvedWriterDirty::resolve(None, "default");
+        assert_eq!(resolved.value, WriterDirty::WipCommit);
+        let paths = vec!["src/main.rs".to_owned(), "docs/run.md".to_owned()];
+        assert_eq!(preflight(&resolved, &paths), Preflight::WipCommit);
+        // The setting stays visible with its source even on the default path.
+        assert!(resolved.setting().contains(KNOB));
+        assert!(resolved.setting().contains("source: default"));
+    }
+
+    // Spec: docs/specs/run.md#writer-pin-and-re-pin
+    #[test]
+    fn an_explicit_refuse_setting_still_refuses_and_names_paths_and_setting() {
+        let resolved = ResolvedWriterDirty::resolve(Some("refuse"), "host");
         assert_eq!(resolved.value, WriterDirty::Refuse);
         let paths = vec!["src/main.rs".to_owned(), "docs/run.md".to_owned()];
         match preflight(&resolved, &paths) {
@@ -140,26 +166,44 @@ mod tests {
                 assert!(reason.contains("src/main.rs"), "{reason}");
                 assert!(reason.contains("docs/run.md"), "{reason}");
                 assert!(reason.contains(KNOB), "{reason}");
-                assert!(reason.contains("source: default"), "{reason}");
+                assert!(reason.contains("source: host"), "{reason}");
             }
             other => panic!("expected a refusal, got {other:?}"),
         }
     }
 
+    // Spec: docs/specs/run.md#writer-pin-and-re-pin
+    #[test]
+    fn a_held_worktree_is_never_adopted() {
+        let lanes = vec!["w3/other (attempt 4)".to_owned()];
+        let reason = held_refusal(&lanes, ".worktrees/writer");
+        assert!(reason.contains(".worktrees/writer"), "{reason}");
+        assert!(reason.contains("w3/other"), "{reason}");
+        assert!(reason.contains("another lane"), "{reason}");
+    }
+
+    // Spec: docs/specs/run.md#writer-pin-and-re-pin
     #[test]
     fn every_setting_is_overridable_with_its_source() {
         for (value, source, expected) in [
-            ("refuse", "host", WriterDirty::Refuse),
-            ("wip_commit", "launch", WriterDirty::WipCommit),
-            ("continue_in_place", "project", WriterDirty::ContinueInPlace),
+            (None, "default", WriterDirty::WipCommit),
+            (Some("refuse"), "host", WriterDirty::Refuse),
+            (Some("wip_commit"), "launch", WriterDirty::WipCommit),
+            (
+                Some("continue_in_place"),
+                "project",
+                WriterDirty::ContinueInPlace,
+            ),
         ] {
-            let resolved = ResolvedWriterDirty::resolve(Some(value), source);
+            let resolved = ResolvedWriterDirty::resolve(value, source);
             assert_eq!(resolved.value, expected);
             assert!(resolved.setting().contains(source));
             assert!(resolved.setting().contains(KNOB));
+            assert!(resolved.setting().contains("source:"));
         }
     }
 
+    // Spec: docs/specs/run.md#writer-pin-and-re-pin
     #[test]
     fn wip_commit_and_continue_only_apply_to_ordinary_paths() {
         let ordinary = vec!["src/main.rs".to_owned()];
@@ -191,6 +235,7 @@ mod tests {
         }
     }
 
+    // Spec: docs/specs/run.md#writer-pin-and-re-pin
     #[test]
     fn a_clean_worktree_is_always_allowed() {
         for value in ["refuse", "wip_commit", "continue_in_place"] {

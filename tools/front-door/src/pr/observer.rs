@@ -18,35 +18,28 @@ use super::gh::Response;
 use super::gh::rate_limit_reset;
 use provenant_config::ports::Request;
 use provenant_config::{Forge, ForgePort};
+pub(crate) mod journal;
 mod port;
+mod retry;
 use provenant_os::fs::{Directory, LockMode, PublishMode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::{
     ffi::{OsStr, OsString},
-    io::Write,
     path::{Path, PathBuf},
     time::Duration,
 };
 
-/// The interval of waiters that set none of their own.
-pub(crate) const POLL: Duration = Duration::from_secs(5);
+/// The interval of waiters that set none of their own. It is the default of
+/// the one sourced retry family, not a private copy in a caller.
+pub(crate) const POLL: Duration = retry::DEFAULT_POLL;
 const PAGE: usize = 100;
-const RETRY_FIRST: Duration = Duration::from_secs(1);
-const RETRY_LAST: Duration = Duration::from_secs(15);
-/// The longest a retry pause runs before it looks at cancellation again.
-const PAUSE_SLICE: Duration = Duration::from_millis(50);
 const RATE_FILE: &str = "rate-limit.json";
 const RATE_LOCK: &str = "rate-limit.lock";
 const CACHE_LIMIT: u64 = 16 * 1024 * 1024;
 const REPOSITORY_CONTEXT_PATH: &str = "repos/{owner}/{repo}";
 const RECENT_CACHE_LIMIT: usize = 64;
 const RUN_HISTORY_LIMIT: usize = 512;
-/// GitHub computes mergeability asynchronously; a reread settles UNKNOWN. The
-/// bound keeps a conflicting head from being diagnosed as "no checks" forever.
-const MERGEABLE_UNKNOWN_RETRIES: u8 = 3;
-/// Pause between bounded UNKNOWN mergeability rereads.
-const MERGEABLE_UNKNOWN_PAUSE: Duration = Duration::from_secs(1);
 
 /// One reported check run or the latest state of one status context.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -429,6 +422,7 @@ pub(crate) struct Observer<F, C> {
     forge: F,
     clock: C,
     cadence: Cadence,
+    retry: retry::Retry,
     history: Vec<RunDuration>,
     next_poll_interval: Duration,
 }
@@ -484,9 +478,12 @@ impl<F: Forge, C: Clock> Observer<F, C> {
         let history = match cached_run_history(&dir) {
             Some(history) => history,
             None => {
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: recent CI duration cache unavailable; using slower observation cadence"
+                provenant_records::warning::warn(
+                    provenant_records::warning::Warning::new(
+                        provenant_records::warning::CI_DURATION_CACHE_UNAVAILABLE,
+                        "recent CI duration cache unavailable; using slower observation cadence",
+                    )
+                    .subject(repository),
                 );
                 Vec::new()
             }
@@ -504,6 +501,7 @@ impl<F: Forge, C: Clock> Observer<F, C> {
             forge,
             clock,
             cadence,
+            retry: retry::Retry::default(),
             history,
             next_poll_interval,
         })
@@ -635,9 +633,9 @@ impl<F: Forge, C: Clock> Observer<F, C> {
 
     /// Read a pull request's mergeability before diagnosing its missing checks.
     /// `first` is the resource the caller already read; only an UNKNOWN result
-    /// rereads, at most [`MERGEABLE_UNKNOWN_RETRIES`] times, within the caller's
-    /// request. A still-UNKNOWN result stays UNKNOWN rather than being mistaken
-    /// for a mergeable head.
+    /// rereads, at most the sourced `mergeable_attempts` times, within the
+    /// caller's request. A still-UNKNOWN result stays UNKNOWN rather than being
+    /// mistaken for a mergeable head.
     pub(crate) fn pull_merge_state(
         &mut self,
         number: u64,
@@ -647,17 +645,19 @@ impl<F: Forge, C: Clock> Observer<F, C> {
         let path = format!("pulls/{number}");
         let mut value = first;
         let mut retries = 0_u8;
+        let attempts = self.retry.mergeable_attempts.value;
+        let pause = self.retry.mergeable_pause.value;
         loop {
             let state = merge_state(&value);
             if state != MergeState::Unknown
-                || retries >= MERGEABLE_UNKNOWN_RETRIES
+                || retries >= attempts
                 || request.remaining().is_zero()
                 || request.is_cancelled()
             {
                 return Ok((state, value));
             }
             retries = retries.saturating_add(1);
-            self.clock.sleep(MERGEABLE_UNKNOWN_PAUSE);
+            self.clock.sleep(pause);
             value = self.resource(&path, Duration::ZERO, request)?;
         }
     }
@@ -776,9 +776,12 @@ impl<F: Forge, C: Clock> Observer<F, C> {
                     }
                     Err(Fetch::Transient(message)) => {
                         drop(guard);
-                        let delay = RETRY_FIRST
+                        let delay = self
+                            .retry
+                            .first
+                            .value
                             .saturating_mul(2_u32.saturating_pow(retries))
-                            .min(RETRY_LAST);
+                            .min(self.retry.last.value);
                         let left = Duration::try_from(deadline.duration_since(self.clock.now()))
                             .unwrap_or_default();
                         if left <= delay {
@@ -807,14 +810,22 @@ impl<F: Forge, C: Clock> Observer<F, C> {
     }
 
     /// Pause between retries on the observer's clock, ending early when the
-    /// request is cancelled.
-    fn pause(&self, delay: Duration, request: &Request) {
+    /// request is cancelled. The slice between cancellation checks comes from
+    /// the one sourced retry family. Callers that wait on CI use this rather
+    /// than sleeping themselves, so every pause is cancellable.
+    pub(crate) fn pause(&self, delay: Duration, request: &Request) {
         let mut left = delay;
         while !left.is_zero() && !request.is_cancelled() {
-            let slice = left.min(PAUSE_SLICE);
+            let slice = left.min(self.retry.slice.value);
             self.clock.sleep(slice);
             left = left.saturating_sub(slice);
         }
+    }
+
+    /// The one sourced retry family every CI reader shares.
+    #[allow(dead_code, reason = "callers report the cadence they observed")]
+    pub(crate) fn retry(&self) -> &retry::Retry {
+        &self.retry
     }
 
     /// Record a rate limit's reset, keeping the later of it and any already
@@ -951,6 +962,70 @@ impl<F: Forge, C: Clock> Observer<F, C> {
             ))),
         }
     }
+}
+
+/// One reading from a CI waiter. `Skipped` is a rate-limited read whose caller
+/// has already warned: pause on the observer's cadence and try again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Observation {
+    Settled,
+    Pending(Duration),
+    Skipped(Duration),
+}
+
+impl Observation {
+    fn interval(self) -> Option<Duration> {
+        match self {
+            Self::Settled => None,
+            Self::Pending(interval) | Self::Skipped(interval) => Some(interval),
+        }
+    }
+}
+
+/// How a bounded wait ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AwaitOutcome {
+    Settled,
+    /// The bound was reached after this much waiting; the caller decides how
+    /// to report and whether a later submission resumes.
+    TimedOut(Duration),
+}
+
+/// The one wait driver every CI reader uses. The caller supplies the reading
+/// (through the observer or the journal) and the pause; this function owns the
+/// cadence and the bound, so no waiter keeps a private sleep loop.
+///
+/// Spec: docs/specs/cli.md#ci-observations
+pub(crate) fn await_ci<E>(
+    mut observe: impl FnMut() -> Result<Observation, E>,
+    patience: Duration,
+    pause: &dyn Fn(Duration),
+) -> Result<AwaitOutcome, E> {
+    let mut waited = Duration::ZERO;
+    loop {
+        let Some(interval) = observe()?.interval() else {
+            return Ok(AwaitOutcome::Settled);
+        };
+        let remaining = patience.saturating_sub(waited);
+        if remaining.is_zero() {
+            return Ok(AwaitOutcome::TimedOut(waited));
+        }
+        let slice = interval.min(remaining);
+        pause(slice);
+        waited = waited.saturating_add(slice);
+    }
+}
+
+/// The sourced retry family for readers that resolve no observer of their own
+/// (for example review subject selection). The `ci.retry.*` knobs supply each
+/// value with its layer and origin; an unreadable config keeps the compiled
+/// defaults.
+/// Spec: docs/specs/cli.md#ci-observations
+pub(crate) fn retry(roots: &provenant_core::Roots) -> retry::Retry {
+    let knobs = provenant_config::read_knobs(roots)
+        .map(|config| config.knobs)
+        .unwrap_or_default();
+    retry::Retry::from_knobs(&knobs)
 }
 
 fn identity(body: Value) -> Value {
@@ -1673,7 +1748,7 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
         assert_eq!(state, MergeState::Unknown);
         assert_eq!(
             shared.requests(),
-            usize::from(MERGEABLE_UNKNOWN_RETRIES) + 1,
+            usize::from(retry::Retry::default().mergeable_attempts.value) + 1,
             "UNKNOWN stops at the configured bound"
         );
     }
@@ -1969,6 +2044,76 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
                 other => panic!("unexpected gate result {other:?}"),
             };
             assert_eq!((status, gate), expected);
+        }
+    }
+
+    /// Spec: docs/specs/cli.md#ci-observations
+    #[test]
+    fn one_fake_forge_drives_pending_to_green_and_red_through_both_waiters() {
+        let dir = state();
+        for (final_run, expected) in [
+            (
+                run("build", "completed", Some("success")),
+                ("ready", "passed"),
+            ),
+            (
+                run("build", "completed", Some("failure")),
+                ("failing", "failed"),
+            ),
+        ] {
+            let shared = Shared::new();
+            let mut observer = shared.observer(dir.path());
+            let request = Request::within(Duration::from_secs(60));
+            let reads = std::cell::Cell::new(0_usize);
+            let pauses: std::cell::RefCell<Vec<Duration>> = std::cell::RefCell::new(Vec::new());
+            let outcome = super::await_ci(
+                || {
+                    let index = reads.get();
+                    reads.set(index + 1);
+                    let run = if index == 0 {
+                        run("build", "in_progress", None)
+                    } else {
+                        final_run.clone()
+                    };
+                    shared.with(|world| {
+                        world.runs.insert(HEAD.into(), page(vec![run]));
+                    });
+                    let checks = observer
+                        .checks(HEAD, Duration::ZERO, &request)
+                        .unwrap_or_default();
+                    let status = crate::pr::status::class_of(HEAD, &checks);
+                    let gate = match crate::pr::landing::adapters::gate_checks(checks).1 {
+                        crate::pr::landing::model::GateResult::Passed => "passed",
+                        crate::pr::landing::model::GateResult::Failed => "failed",
+                        crate::pr::landing::model::GateResult::Pending => "pending",
+                        other => panic!("unexpected gate result {other:?}"),
+                    };
+                    // Read 0 deliberately injects an in-progress run, so both
+                    // waiters must agree on `pending` there; the final state
+                    // is checked on the settled read.
+                    let read_expected = if index == 0 {
+                        ("pending", "pending")
+                    } else {
+                        expected
+                    };
+                    assert_eq!(
+                        (status, gate),
+                        read_expected,
+                        "the landing gate and wait --pr must agree on read {index}"
+                    );
+                    Ok::<_, ()>(if index == 0 {
+                        Observation::Pending(Duration::from_millis(1))
+                    } else {
+                        Observation::Settled
+                    })
+                },
+                Duration::from_secs(5),
+                &|duration| pauses.borrow_mut().push(duration),
+            )
+            .unwrap();
+            assert_eq!(outcome, AwaitOutcome::Settled);
+            assert_eq!(reads.get(), 2);
+            assert_eq!(pauses.borrow().as_slice(), &[Duration::from_millis(1)]);
         }
     }
 

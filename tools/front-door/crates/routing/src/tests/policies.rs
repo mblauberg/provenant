@@ -504,7 +504,7 @@ fn exact_unknown_is_retained_but_requires_availability() -> Result<(), Box<dyn s
     ));
     assert!(matches!(
         resolve(&request("invented/id")?, &context),
-        Err(RoutingError::UnknownAdapter)
+        Err(RoutingError::UnknownAdapter { .. })
     ));
     Ok(())
 }
@@ -869,13 +869,31 @@ fn opencode_effort_normalisation_is_visible_in_exact_pool_and_launch_routes()
         }
         query.choice = RouteChoice::Model(entry.model.clone());
         query.effort = Some("invented".into());
-        // A well-formed effort the model does not record is dropped with a
-        // visible warning, never refused.
-        let route = resolve(&query, &ctx)?;
-        assert!(route.effort.is_none());
-        let warning = route.diagnostics.effort_warning.ok_or("effort warning")?;
-        assert_eq!(warning.requested, "invented");
-        assert!(warning.applied.is_none());
+        // A declared variant set is authoritative: an unknown effort refuses
+        // at resolution with close matches. Without recorded variants there is
+        // nothing to validate, so the adapter's drop still applies with a
+        // visible warning.
+        if entry.efforts.is_empty() {
+            let route = resolve(&query, &ctx)?;
+            assert!(route.effort.is_none());
+            let warning = route.diagnostics.effort_warning.ok_or("effort warning")?;
+            assert_eq!(warning.requested, "invented");
+            assert!(warning.applied.is_none());
+        } else {
+            let error = resolve(&query, &ctx).expect_err("unknown variant must refuse");
+            match error {
+                RoutingError::UnsupportedEffort {
+                    model: refused,
+                    effort,
+                    support,
+                } => {
+                    assert_eq!(refused, entry.model.as_str());
+                    assert_eq!(effort, "invented");
+                    assert!(support.contains("unknown variant `invented`"), "{support}");
+                }
+                other => panic!("unexpected routing error {}", other.code()),
+            }
+        }
     }
     Ok(())
 }

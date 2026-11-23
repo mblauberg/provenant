@@ -695,7 +695,7 @@
         let (data, text) = preview(&request, &roots)?;
         assert_ne!(data["adapter"], "claude");
         assert_eq!(data["allow_unknown_partial_headroom"]["value"], false);
-        assert_eq!(data["allow_unknown_partial_headroom"]["source"], "default");
+        assert_eq!(data["allow_unknown_partial_headroom"]["layer"], "default");
         for candidate in data["pool_selection"]["candidates"]
             .as_array()
             .ok_or("pool candidates")?
@@ -718,10 +718,10 @@
             true
         );
         assert_eq!(
-            override_data["allow_unknown_partial_headroom"]["source"],
-            "override"
+            override_data["allow_unknown_partial_headroom"]["layer"],
+            "host"
         );
-        assert!(override_text.contains("allow unknown partial headroom: true (source: Override)"));
+        assert!(override_text.contains("allow unknown partial headroom: true (source: host)"));
         assert!(
             text.contains("claude/claude-haiku-5-5: excluded by flag: provider claude"),
             "{text}"

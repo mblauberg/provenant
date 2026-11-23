@@ -267,6 +267,8 @@ pub(super) fn gc_collects_bound_bare_worktrees() -> Result {
             ],
         )
         .map_err(|error| format!("add bare checkout: {error}"))?;
+        // A clone --bare has `remote.origin.url` but no remote-tracking refs:
+        // GC's fetch must record the advertised default itself.
         rig.project = linked;
         let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
         inputs.state_dir = Some(rig.state.clone());
@@ -319,8 +321,11 @@ pub(super) fn gc_collects_bound_bare_worktrees() -> Result {
         ok(&rig, args)?;
         assert!(path.exists(), "held bare worktree removed ({mode})");
         drop(held);
-        ok(&rig, args)?;
-        assert!(!path.exists(), "bound bare worktree retained ({mode})");
+        let report = ok(&rig, args)?;
+        assert!(
+            !path.exists(),
+            "bound bare worktree retained ({mode}): {report}"
+        );
     }
     Ok(())
 }
@@ -1697,6 +1702,15 @@ pub(super) fn completion_and_sweep_retain_unlanded_or_dirty_lanes() -> Result {
     for dirty in [false, true] {
         let fixture = crate::fabric::peer_tests::SettlementFixture::resumed_with_lane_commit()?;
         let rig = &fixture.rig;
+        // One resolved forge context lets the later sweep collect the clean lane.
+        git(
+            rig,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/heads/main",
+            ],
+        )?;
         if dirty {
             let merged = merged_upstream(rig, &fixture.worktree)?;
             publish_upstream(rig, &merged)?;
@@ -1755,10 +1769,17 @@ pub(super) fn gc_reports_settled_lane_store_error_and_continues() -> Result {
     let output = command(rig, &["gc", "--apply", "--json"])?;
     // Provider retention reads the same unreadable store and reports it as an
     // incomplete retention, so the exit status is not asserted here.
-    let stderr = String::from_utf8_lossy(&output.stderr.bytes);
+    let value: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    let warnings = value["warnings"].as_array().ok_or("envelope warnings")?;
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
     assert!(
-        stderr.contains("warning: settled lane collection failed for"),
-        "stderr must contain settled lane collection warning: {stderr}"
+        warnings.iter().any(|warning| {
+            warning["code"] == "SETTLED_LANE_COLLECTION_FAILED"
+                && warning["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("settled lane collection failed"))
+        }),
+        "envelope must carry the settled lane collection warning: {warnings:?}"
     );
     Ok(())
 }

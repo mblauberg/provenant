@@ -14,27 +14,19 @@ use provenant_supervisor::custody::{
 use rusqlite::params;
 use std::{
     ffi::OsString,
-    io::Write as _,
     path::{Path, PathBuf},
 };
 
 fn sandbox_mode_receipt(
     mode: &provenant_confinement::run_config::SandboxMode,
 ) -> provenant_records::run::SandboxModeReceipt {
-    use provenant_confinement::run_config::SandboxSource;
-    use provenant_records::run::SandboxSourceReceipt as ReceiptSource;
-    let source = match mode.source {
-        SandboxSource::Parent => ReceiptSource::Parent,
-        SandboxSource::Route => ReceiptSource::Route,
-        SandboxSource::Restriction => ReceiptSource::Restriction,
-        SandboxSource::Platform => ReceiptSource::Platform,
-        SandboxSource::Knob => ReceiptSource::Knob,
-        SandboxSource::Default => ReceiptSource::Default,
-    };
     provenant_records::run::SandboxModeReceipt {
         requested: mode.requested,
         effective: mode.effective,
-        source,
+        // The preparation edge records the knob's actual layer on the sibling
+        // admission receipt; the supervisor rebind keeps the host-layer default.
+        source: mode.source,
+        constraint: mode.constraint,
         warning: mode.warning.clone(),
         extra: Default::default(),
     }
@@ -143,7 +135,6 @@ impl PreparedLaunch {
         policy: &provenant_records::policy::Policy,
     ) -> Result<()> {
         use provenant_core::consumer_env::SANDBOX;
-        use std::io::Write as _;
         let Some(confinement) = self.confinement.as_mut() else {
             return Ok(());
         };
@@ -172,7 +163,12 @@ impl PreparedLaunch {
                     )
                     .message()
                 {
-                    let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+                    use provenant_records::warning::{SANDBOX_UNAVAILABLE, Warning, warn};
+                    // Spec: docs/specs/cli.md#warnings-are-typed-values
+                    warn(
+                        Warning::new(SANDBOX_UNAVAILABLE, message)
+                            .subject("LAUNCH_SANDBOX_UNAVAILABLE_NONE"),
+                    );
                 }
                 self.environment.retain(|(name, _)| name != SANDBOX);
                 self.environment
@@ -185,7 +181,9 @@ impl PreparedLaunch {
         }
         let mode = &confinement.sandbox;
         if let Some(warning) = &mode.warning {
-            let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+            use provenant_records::warning::{SANDBOX_UNAVAILABLE, Warning, warn};
+            // Spec: docs/specs/cli.md#warnings-are-typed-values
+            warn(Warning::new(SANDBOX_UNAVAILABLE, warning.clone()));
         }
         self.environment.retain(|(name, _)| name != SANDBOX);
         self.environment
@@ -261,8 +259,9 @@ fn applied_write_grants(
             },
         ));
     }
-    if let Some(message) = effect.message() {
-        eprintln!("warning: {message}");
+    if let provenant_records::policy::Effect::Warn(warning) = &effect {
+        // Spec: docs/specs/cli.md#warnings-are-typed-values
+        provenant_records::warning::warn(warning.clone());
     }
     let git_grants_digest = match &permissions.mode {
         provenant_confinement::permissions::AccessMode::ReadOnly => None,
@@ -548,8 +547,9 @@ fn check_launch_policy(
     match policy.check(code, Facts::violation(&refusal.message)) {
         Effect::Proceed => Ok(()),
         Effect::Warn(message) => {
-            use std::io::Write;
-            let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+            use provenant_records::warning::warn;
+            // Spec: docs/specs/cli.md#warnings-are-typed-values
+            warn(message);
             Ok(())
         }
         Effect::Refuse(_) | Effect::Stop(_) => Err(refusal),
@@ -746,13 +746,13 @@ impl RunStore {
 #[derive(Clone, Copy, Debug)]
 pub struct WriteGrantLimit {
     pub bytes: u64,
-    pub origin: provenant_records::diagnostic::SettingSource,
+    pub origin: provenant_records::diagnostic::Layer,
 }
 impl Default for WriteGrantLimit {
     fn default() -> Self {
         Self {
             bytes: provenant_records::run::MAX_WRITE_GRANT_BYTES,
-            origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
+            origin: provenant_records::diagnostic::Layer::Default,
         }
     }
 }
@@ -769,8 +769,9 @@ impl WriteGrantLimit {
                     self.origin.description()
                 )),
             ) {
-                use std::io::Write;
-                let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+                use provenant_records::warning::warn;
+                // Spec: docs/specs/cli.md#warnings-are-typed-values
+                warn(message);
             }
             Self::default()
         }
@@ -781,12 +782,12 @@ impl WriteGrantLimit {
             key: "domains.run.write_grant_limit_bytes".into(),
             value: self.bytes,
             origin: match self.origin {
-                provenant_records::diagnostic::SettingSource::Configuration => {
-                    WriteGrantLimitOrigin::Configuration
-                }
-                provenant_records::diagnostic::SettingSource::ShippedDefault => {
+                provenant_records::diagnostic::Layer::Host => WriteGrantLimitOrigin::Configuration,
+                provenant_records::diagnostic::Layer::Default => {
                     WriteGrantLimitOrigin::CompiledDefault
                 }
+                // Only shipped-default and configured values reach this receipt.
+                _ => WriteGrantLimitOrigin::Configuration,
             },
             extra: Default::default(),
         }
@@ -1385,10 +1386,12 @@ impl RunStore {
             Ok(provenant_config::PortCommandPublication::VisibleDurabilityUnconfirmed {
                 cause,
             }) => {
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: admission receipt is visible but durability is unconfirmed: {cause}"
-                );
+                use provenant_records::warning::{ADMISSION_RECEIPT_UNCONFIRMED, Warning, warn};
+                // Spec: docs/specs/cli.md#warnings-are-typed-values
+                warn(Warning::new(
+                    ADMISSION_RECEIPT_UNCONFIRMED,
+                    format!("admission receipt is visible but durability is unconfirmed: {cause}"),
+                ));
                 true
             }
             Err(_) => false,
@@ -1483,10 +1486,12 @@ impl RunStore {
         if binding.phase == RepositoryAdmissionPhase::ReleasePending {
             let released = self.release_admission_with_phase(&record, call, run_phase);
             if !released {
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: repository admission release remains pending; attempt remains queued"
-                );
+                use provenant_records::warning::{ADMISSION_RELEASE_PENDING, Warning, warn};
+                // Spec: docs/specs/cli.md#warnings-are-typed-values
+                warn(Warning::new(
+                    ADMISSION_RELEASE_PENDING,
+                    "repository admission release remains pending; attempt remains queued",
+                ));
             }
             return (
                 self.record(record.attempt_id, call).unwrap_or(record),
@@ -1534,10 +1539,12 @@ impl RunStore {
         if acquired {
             let released = self.release_admission_with_phase(&current, call, run_phase);
             if !released {
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: repository admission release failed after a concurrent terminal change"
-                );
+                use provenant_records::warning::{ADMISSION_RELEASE_PENDING, Warning, warn};
+                // Spec: docs/specs/cli.md#warnings-are-typed-values
+                warn(Warning::new(
+                    ADMISSION_RELEASE_PENDING,
+                    "repository admission release failed after a concurrent terminal change",
+                ));
             }
             return (
                 self.record(current.attempt_id, call).unwrap_or(current),
@@ -1554,10 +1561,12 @@ impl RunStore {
         };
         let released = self.release_admission_with_phase(&current, call, run_phase);
         if !released {
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: repository admission release failed after an unsuccessful acquire"
-            );
+            use provenant_records::warning::{ADMISSION_RELEASE_PENDING, Warning, warn};
+            // Spec: docs/specs/cli.md#warnings-are-typed-values
+            warn(Warning::new(
+                ADMISSION_RELEASE_PENDING,
+                "repository admission release failed after an unsuccessful acquire",
+            ));
         }
         (
             self.record(current.attempt_id, call).unwrap_or(current),
@@ -1620,10 +1629,12 @@ impl RunStore {
             return true;
         };
         if !binding.valid() {
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: stored repository admission binding digest is invalid; release was not run"
-            );
+            use provenant_records::warning::{ADMISSION_RELEASE_PENDING, Warning, warn};
+            // Spec: docs/specs/cli.md#warnings-are-typed-values
+            warn(Warning::new(
+                ADMISSION_RELEASE_PENDING,
+                "stored repository admission binding digest is invalid; release was not run",
+            ));
             return false;
         }
         if binding.phase == RepositoryAdmissionPhase::Released {
@@ -1681,10 +1692,12 @@ impl RunStore {
         let request = match self.request(record.attempt_id, call) {
             Ok(request) => request,
             Err(_) => {
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: repository admission release could not read the stored request"
-                );
+                use provenant_records::warning::{ADMISSION_RELEASE_PENDING, Warning, warn};
+                // Spec: docs/specs/cli.md#warnings-are-typed-values
+                warn(Warning::new(
+                    ADMISSION_RELEASE_PENDING,
+                    "repository admission release could not read the stored request",
+                ));
                 return false;
             }
         };
@@ -1695,10 +1708,12 @@ impl RunStore {
             RepositoryAdmissionPhase::ReleasePending,
             &provenant_core::CancelToken::new(),
         ) {
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: repository admission release failed; reconcile will retry the idempotent command"
-            );
+            use provenant_records::warning::{ADMISSION_RELEASE_PENDING, Warning, warn};
+            // Spec: docs/specs/cli.md#warnings-are-typed-values
+            warn(Warning::new(
+                ADMISSION_RELEASE_PENDING,
+                "repository admission release failed; reconcile will retry the idempotent command",
+            ));
             return false;
         }
         if matches!(current.state, AttemptState::Terminal { .. }) {
@@ -1796,6 +1811,10 @@ impl RunStore {
         Ok(true)
     }
 
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "preparation diagnostics use the launch command's stderr output seam"
+    )]
     fn start_inner(
         &self,
         attempt: AttemptId,
@@ -1898,22 +1917,27 @@ impl RunStore {
             // Freeze the repository command while the attempt is still queued,
             // then publish Starting under the launcher's liveness lock before
             // running any repository command or provider preparation.
-            let (bound_record, admission_binding) =
-                match self.admission_binding(&request, &record, call) {
-                    Ok(value) => value,
-                    Err(reason) => {
-                        use std::io::Write as _;
-                        let _ = writeln!(
-                            std::io::stderr().lock(),
-                            "warning: repository admission skipped {id}: {reason}"
-                        );
-                        started.push(Started::Skipped {
-                            attempt: id,
-                            reason: reason.to_owned(),
-                        });
-                        continue;
-                    }
-                };
+            let (bound_record, admission_binding) = match self
+                .admission_binding(&request, &record, call)
+            {
+                Ok(value) => value,
+                Err(reason) => {
+                    use provenant_records::warning::{REPOSITORY_ADMISSION_SKIPPED, Warning, warn};
+                    // Spec: docs/specs/cli.md#warnings-are-typed-values
+                    warn(
+                        Warning::new(
+                            REPOSITORY_ADMISSION_SKIPPED,
+                            format!("repository admission skipped {id}: {reason}"),
+                        )
+                        .subject(format!("attempt {id}")),
+                    );
+                    started.push(Started::Skipped {
+                        attempt: id,
+                        reason: reason.to_owned(),
+                    });
+                    continue;
+                }
+            };
             record = bound_record;
             let attempt_dir = self.attempt_dir(id, true)?;
             let _launcher = match attempt_dir.try_lock(
@@ -1983,10 +2007,14 @@ impl RunStore {
                     Err(RunError::Conflict) => {}
                     Err(error) => return Err(error),
                 }
-                use std::io::Write as _;
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: repository admission skipped {id}: {reason}"
+                use provenant_records::warning::{REPOSITORY_ADMISSION_SKIPPED, Warning, warn};
+                // Spec: docs/specs/cli.md#warnings-are-typed-values
+                warn(
+                    Warning::new(
+                        REPOSITORY_ADMISSION_SKIPPED,
+                        format!("repository admission skipped {id}: {reason}"),
+                    )
+                    .subject(format!("attempt {id}")),
                 );
                 started.push(Started::Skipped {
                     attempt: id,
@@ -2117,9 +2145,15 @@ impl RunStore {
             };
             let priority = providers.priority(task).unwrap_or_else(|reason| {
                 let fallback = provenant_records::run::default_lane_priority(task.writer.is_some(), task.build_heavy);
-                use std::io::Write;
-                let _ = writeln!(std::io::stderr().lock(),
-                    "warning: lane priority unavailable ({reason}); using compiled domains.fabric.lanes.priority default {fallback}");
+                use provenant_records::warning::{LANE_PRIORITY_FALLBACK, Warning, warn};
+                // Spec: docs/specs/cli.md#warnings-are-typed-values
+                warn(
+                    Warning::new(
+                        LANE_PRIORITY_FALLBACK,
+                        format!("lane priority unavailable ({reason}); using compiled domains.fabric.lanes.priority default {fallback}"),
+                    )
+                    .once_per_change(),
+                );
                 fallback
             });
             let launch_policy = check_launch_policy(providers, task, &policy);
@@ -2709,8 +2743,9 @@ fn process_tree_interval(
                     "domains.run settings unavailable ({error}); no process-tree sampling"
                 )),
             ) {
-                use std::io::Write;
-                let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+                use provenant_records::warning::warn;
+                // Spec: docs/specs/cli.md#warnings-are-typed-values
+                warn(message.once_per_change());
             }
             return None;
         }
@@ -2718,14 +2753,10 @@ fn process_tree_interval(
     if configured > 0 {
         return Some(std::time::Duration::from_millis(configured));
     }
-    provenant_config::ResolvedAdmissionClass::resolve_all(
-        state,
-        Some(project),
-        provenant_config::project_key_for(project).as_deref(),
-    )
-    .into_values()
-    .any(|class| class.memory_per_slot_bytes.is_some())
-    .then_some(provenant_supervisor::process_tree::DEFAULT_SAMPLE_INTERVAL)
+    provenant_config::ResolvedAdmissionClass::resolve_all(state, Some(project))
+        .into_values()
+        .any(|class| class.memory_per_slot_bytes.is_some())
+        .then_some(provenant_supervisor::process_tree::DEFAULT_SAMPLE_INTERVAL)
 }
 
 /// How long the guardian may retain custody of an unresolved exit, resolved
@@ -2743,8 +2774,12 @@ fn retained_custody_ms(state: &std::path::Path, policy: &provenant_records::poli
                     "domains.run settings unavailable ({error}); retained custody keeps the shipped {seconds} s limit"
                 )),
             ) {
-                use std::io::Write;
-                let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+                use provenant_records::warning::warn;
+                // Spec: docs/specs/cli.md#warnings-are-typed-values
+                warn(
+                    message
+                        .once_per_change(),
+                );
             }
             seconds
         }
@@ -2766,8 +2801,9 @@ fn lane_port_plan_or_warn(
                 )),
             );
             if let provenant_records::policy::Effect::Warn(message) = effect {
-                use std::io::Write;
-                let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+                use provenant_records::warning::warn;
+                // Spec: docs/specs/cli.md#warnings-are-typed-values
+                warn(message.once_per_change());
             }
             None
         }
@@ -2974,7 +3010,8 @@ mod policy_reporting_tests {
             applied.sandbox = Some(provenant_records::run::SandboxModeReceipt {
                 requested: true,
                 effective: true,
-                source: provenant_records::run::SandboxSourceReceipt::Knob,
+                source: provenant_records::Layer::Host,
+                constraint: None,
                 warning: None,
                 extra: Default::default(),
             });
@@ -3201,7 +3238,7 @@ mod resource_status_tests {
     use crate::tests::{call, clock, context, input};
     use provenant_core::CancelToken;
     use provenant_records::diagnostic::{
-        LaneLimit, PressureLevel, PressureThreshold, ResourceFact, SettingSource,
+        LaneLimit, Layer, PressureLevel, PressureThreshold, ResourceFact,
     };
     use provenant_records::wire::LaneRow;
 
@@ -3258,13 +3295,13 @@ mod resource_status_tests {
                             active: 2,
                             limit: 2,
                             kind: LaneLimit::HostTotal,
-                            origin: SettingSource::Configuration,
+                            origin: Layer::Host,
                         }
                     } else {
                         AdmissionError::MemoryPressure {
                             level: PressureLevel::Critical,
                             threshold: PressureThreshold::Warning,
-                            origin: SettingSource::Configuration,
+                            origin: Layer::Host,
                         }
                     }))
                 },
@@ -3406,7 +3443,7 @@ mod admission_port_lifecycle_tests {
         std::fs::write(&project_ports, declaration("repo-gate-old", "project"))?;
         std::fs::write(
             context.state_root.as_path().join("ports.json"),
-            r#"{"schema_version":2}"#,
+            r#"{"schema_version":3}"#,
         )?;
 
         let mut prepared = input();
@@ -3426,7 +3463,7 @@ mod admission_port_lifecycle_tests {
             .map_err(|error| std::io::Error::other(error.to_owned()))?;
         let binding = binding
             .ok_or_else(|| std::io::Error::other("project admission command was not bound"))?;
-        assert_eq!(binding.source, provenant_records::PortSource::Project);
+        assert_eq!(binding.source, provenant_records::Layer::Project);
         assert_eq!(binding.phase, RepositoryAdmissionPhase::AcquirePending);
         assert!(record.repository_admission_binding.is_some());
 
@@ -3453,17 +3490,14 @@ mod admission_port_lifecycle_tests {
 
         // The release retry and the next acquisition still use the bound project
         // command after the effective source rotates to the host declaration.
-        std::fs::write(&project_ports, r#"{"schema_version":2}"#)?;
+        std::fs::write(&project_ports, r#"{"schema_version":3}"#)?;
         std::fs::write(
             context.state_root.as_path().join("ports.json"),
             declaration("repo-gate-new", "host"),
         )?;
         let effective =
             provenant_config::PortTable::read_for(Some(&project), context.state_root.as_path())?;
-        assert_eq!(
-            effective.admission.source,
-            provenant_records::PortSource::Host
-        );
+        assert_eq!(effective.admission.source, provenant_records::Layer::Host);
         let rotated_program = match effective.admission.backend {
             provenant_config::PortBackend::Command { command } => command.argv[0].clone(),
             _ => return Err(std::io::Error::other("host admission command was not active").into()),
@@ -3591,7 +3625,7 @@ mod admission_port_lifecycle_tests {
         std::fs::write(&project_ports, declaration("repo-gate-bound", "project"))?;
         std::fs::write(
             context.state_root.as_path().join("ports.json"),
-            r#"{"schema_version":2}"#,
+            r#"{"schema_version":3}"#,
         )?;
 
         let mut input = input();
@@ -3621,7 +3655,7 @@ mod admission_port_lifecycle_tests {
 
         // A configuration rotation after the owner claim cannot replace the
         // declaration already bound to this attempt.
-        std::fs::write(&project_ports, r#"{"schema_version":2}"#)?;
+        std::fs::write(&project_ports, r#"{"schema_version":3}"#)?;
         std::fs::write(
             context.state_root.as_path().join("ports.json"),
             declaration("repo-gate-rotated", "host"),
@@ -3772,8 +3806,7 @@ mod admission_port_lifecycle_tests {
                 other: provenant_records::ExitDisposition::Refused,
             },
         };
-        let binding =
-            RepositoryAdmissionBinding::new(provenant_records::PortSource::Project, &command);
+        let binding = RepositoryAdmissionBinding::new(provenant_records::Layer::Project, &command);
         store.record_admission_binding(&queued, binding, &call)?;
         let terminal = store
             .withdraw(

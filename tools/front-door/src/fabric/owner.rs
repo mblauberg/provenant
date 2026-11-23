@@ -1,5 +1,5 @@
 use super::*;
-use std::io::Write as _;
+use provenant_records::warning::{BRANCH_BEHIND_BASE, SETTING_LAYER_IGNORED, Warning, warn};
 
 pub(crate) struct BoundGraphOwner<'a> {
     /// Active node's sealed launch allowance, independent of settlement observation.
@@ -333,9 +333,12 @@ impl BoundGraphOwner<'_> {
         if crate::settlement::post_operation_refusal(operation, &self.factory.context, store, call)
             .is_err()
         {
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "refusal notice could not be delivered; run `provenant reconcile`"
+            warn(
+                Warning::new(
+                    provenant_records::warning::REFUSAL_NOTICE_UNDELIVERED,
+                    "refusal notice could not be delivered",
+                )
+                .repair("run `provenant reconcile`"),
             );
         }
     }
@@ -738,15 +741,9 @@ pub(crate) fn load_graph_prices_layered(
     roots: &provenant_core::Roots,
 ) -> Result<provenant_telemetry::PriceTable, String> {
     let project = roots.checkout();
-    let key = provenant_config::project_key_for(project);
-    provenant_telemetry::prices_overlay::load(
-        assets,
-        roots.state.as_path(),
-        Some(project),
-        key.as_deref(),
-    )
-    .map(|layered| layered.table)
-    .map_err(|error| error.to_string())
+    provenant_telemetry::prices_overlay::load(assets, roots.state.as_path(), Some(project))
+        .map(|layered| layered.table)
+        .map_err(|error| error.to_string())
 }
 
 pub(crate) fn graph_attempt_usage(
@@ -756,11 +753,11 @@ pub(crate) fn graph_attempt_usage(
 ) -> provenant_fabric_runtime::graph::AttemptUsage {
     let usage = &record.usage;
     let categories = [
-        usage.uncached_input,
-        usage.cache_read,
-        usage.cache_write,
-        usage.output_excluding_reasoning,
-        usage.reasoning,
+        usage.tokens.input,
+        usage.tokens.cache_read,
+        usage.tokens.cache_write,
+        usage.tokens.output,
+        usage.tokens.reasoning,
     ];
     // Reasoning is counted inside output, so providers never report it apart.
     let tokens_partial = categories[..4].iter().any(Option::is_none);
@@ -1402,7 +1399,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 )
                 .map_err(|_| "repair review route is invalid; correct reviewer tier settings")?;
                 for warning in warnings {
-                    let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+                    provenant_records::warning::warn(warning);
                 }
                 if let Some(family) = slot
                     .satisfied_family
@@ -1455,27 +1452,34 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             ),
             Err(error) => {
                 let error = provenant_records::diagnostic::safe_text(&error.to_string());
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: graph admission policy unavailable ({error}); using compiled defaults"
+                warn(
+                    Warning::new(
+                        provenant_records::warning::CONFIG_UNAVAILABLE,
+                        format!(
+                            "full config unavailable ({error}); using the owner's resolved policy"
+                        ),
+                    )
+                    .subject(project.clone()),
                 );
-                provenant_records::policy::Policy::default()
+                provenant_config::policy::read(
+                    self.factory.context.roots.state.as_path(),
+                    &project,
+                    &Default::default(),
+                )
             }
         }
     }
 
     fn launch_retry_policy(&self) -> provenant_fabric_runtime::graph::LaunchRetryPolicy {
-        use provenant_config::KnobSource;
         let mut policy = provenant_fabric_runtime::graph::LaunchRetryPolicy::default();
         let config = match provenant_cli::config_reads::read_for(&self.factory.context.roots, "run")
         {
             Ok(config) => config,
             Err(error) => {
-                use std::io::Write;
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: graph launch retry settings unavailable: {error}; using defaults"
-                );
+                warn(Warning::new(
+                    provenant_records::warning::CONFIG_UNAVAILABLE,
+                    format!("graph launch retry settings unavailable: {error}; using defaults"),
+                ));
                 return policy;
             }
         };
@@ -1483,12 +1487,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             if let Some(value) = knob.value.as_u64().and_then(|n| u8::try_from(n).ok()) {
                 policy.limit = value;
             }
-            policy.limit_source = match knob.source {
-                KnobSource::Default => "default",
-                KnobSource::Profile => "profile",
-                KnobSource::Override => "override",
-            }
-            .into();
+            policy.limit_source = knob.source.layer.as_str().into();
         }
         if let Some(value) = config
             .knobs
@@ -1603,6 +1602,27 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         reference: &str,
         default_base: bool,
     ) -> Result<Option<String>, Self::Error> {
+        // The one forge context for this command, resolved here and passed to
+        // both creation paths; neither rediscovers the remote.
+        // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+        let state = self.factory.context.roots.state.as_path();
+        // Forge metadata lives at the checkout root. The invoking cwd may be a
+        // plain subdirectory of that checkout, which has no `.git` of its own;
+        // hand the resolved toplevel to every Git-metadata reader. Keep the
+        // Git worktree contexts below on the cwd, which resolve subdirectories.
+        // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+        let project = self
+            .factory
+            .graph_checkout()
+            .map_err(|_| FacadeError::io("forge context Git metadata"))?;
+        let ports = &self.factory.context.port_table;
+        let policy = provenant_config::operation_policy(state, &project, ports);
+        let config = provenant_config::ForgeConfig::new(ports, (*policy).clone());
+        let git = provenant_config::ForgeGit::new(&project)
+            .map_err(|_| FacadeError::io("forge context Git metadata"))?;
+        let forge_remote = provenant_config::ForgeContext::remote_if_any(&config, &git)
+            .map_err(|_| FacadeError::io("forge context resolution"))?
+            .map(|remote| remote.value);
         // Only a new top-level writer may prefer a remote-only branch. Child
         // provisioning and recovery always use their checkpointed source.
         let remote_tip = provenant_confinement::worktrees::with_context_using_facts(
@@ -1617,6 +1637,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     context,
                     branch,
                     self.cancel,
+                    forge_remote.as_deref(),
                 )
             },
         )
@@ -1626,7 +1647,11 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 let warning = format!(
                     "ignoring --base {reference} for --branch {branch}; using remote tip {tip}"
                 );
-                let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+                warn(
+                    Warning::new(BRANCH_BEHIND_BASE, warning.clone())
+                        .subject(branch.to_string())
+                        .repair(format!("use --base {tip}")),
+                );
                 self.launch_warnings.push(warning);
             }
             return Ok(Some(tip.to_string()));
@@ -1644,12 +1669,16 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                         context,
                         &self.repo_facts,
                         self.cancel,
+                        forge_remote.as_deref(),
                     )
                 },
             )
             .map_err(git_facts::repository_fact_error)?;
             for warning in warnings {
-                let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+                warn(Warning::new(
+                    provenant_records::warning::BASE_FALLBACK_ADVISORY,
+                    warning.clone(),
+                ));
                 self.launch_warnings.push(warning);
             }
             return Ok(Some(base.to_string()));
@@ -2086,9 +2115,25 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     disk: None,
                     reason: "an integration source requires graph.integration_branch".into(),
                 })?;
-        let reference = match branch.strip_prefix("origin/") {
-            Some(branch) => format!("refs/remotes/origin/{branch}"),
-            None => format!("refs/heads/{branch}"),
+        let state = self.factory.context.roots.state.as_path();
+        let ports = &self.factory.context.port_table;
+        let policy = provenant_config::operation_policy(state, self.factory.cwd.as_path(), ports);
+        let config = provenant_config::ForgeConfig::new(ports, (*policy).clone());
+        let git = provenant_config::ForgeGit::new(self.factory.cwd.as_path())
+            .map_err(|_| FacadeError::io("forge context Git metadata"))?;
+        // A local integration branch needs no remote: resolving one here would
+        // refuse a read-only base lookup in a checkout that declares none. Only
+        // a remote-qualified branch needs the resolved remote name.
+        // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+        let forge_remote = provenant_config::ForgeContext::remote_if_any(&config, &git)
+            .map_err(|_| FacadeError::io("forge context resolution"))?
+            .map(|remote| remote.value);
+        let reference = if let Some(remote) = forge_remote.as_deref()
+            && let Some(branch) = branch.strip_prefix(&format!("{remote}/"))
+        {
+            format!("refs/remotes/{remote}/{branch}")
+        } else {
+            format!("refs/heads/{branch}")
         };
         self.factory
             .resolve_base(&self.factory.cwd, &reference, &self.repo_facts, self.cancel)
@@ -2105,11 +2150,22 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         document: &provenant_fabric_runtime::graph::GraphDocument,
         _checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
     ) -> Result<(), Self::Error> {
+        let ports = &self.factory.context.port_table;
+        // One context for this expansion, resolved only when a delivery target
+        // check first needs it. A read-only expansion delivers nothing, so it
+        // must not be refused in a checkout without a resolvable remote.
+        // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+        let forge = provenant_run::ForgeOnce::new(
+            self.factory.context.roots.state.as_path(),
+            self.factory.cwd.as_path(),
+            ports,
+        );
         for node in &document.nodes {
             if let Some(provenant_records::run::DeliveryMode::Integrate(target)) = &node.delivery {
                 provenant_run::HostDeliveryContext::validate_integration_target(
                     &self.factory.cwd,
                     target,
+                    forge.get().map_err(run_error)?,
                 )
                 .map_err(run_error)?;
             }
@@ -2306,6 +2362,12 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             }
         }
         body.push_str(&provenant_cli::pr_body::independent_review_rows(&reviews));
+        let forge = provenant_run::resolve_forge(
+            self.factory.context.roots.state.as_path(),
+            self.factory.cwd.as_path(),
+            &self.factory.context.port_table,
+        )
+        .map_err(run_error)?;
         let url = provenant_run::HostDeliveryContext::capture()
             .with_repo_facts(&self.repo_facts)
             .deliver_graph_pr(
@@ -2315,6 +2377,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     .and_then(|bases| bases.integration)
                     .ok_or(FacadeError::Conflict)?,
                 &body,
+                &forge,
             )
             .map_err(run_error)?;
         Ok(Some(url))
@@ -2955,7 +3018,7 @@ impl BoundGraphOwner<'_> {
             (None, None)
         };
         if let Some(warning) = repin_warning.take() {
-            let _ = writeln!(std::io::stderr().lock(), "{warning}");
+            warn(Warning::new(BRANCH_BEHIND_BASE, warning.clone()));
             submission_prompt.push_str("\n\n");
             submission_prompt.push_str(&warning);
         }
@@ -3049,7 +3112,7 @@ impl BoundGraphOwner<'_> {
                             spec.budget_sources
                                 .get(field)
                                 .copied()
-                                .unwrap_or(provenant_records::LimitSource::Template),
+                                .unwrap_or(provenant_records::Layer::Template),
                         );
                     }
                 }
@@ -3295,12 +3358,25 @@ impl BoundGraphOwner<'_> {
                     ),
                 });
             }
-            provenant_run::HostDeliveryContext::destination(mode.clone(), &branch)
-                .map_err(run_error)?
-                .map(|mut request| {
-                    request.fast_forward_only = replay.fast_forward_only;
-                    request
-                })
+            // A writer with no delivery never needs a forge: `destination`
+            // returns `None` for `DeliveryMode::None` before reading any
+            // remote. Resolving one here refuses a valid launch in a checkout
+            // that declares none, leaving the sealed attempt without a
+            // reference. Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+            if matches!(&mode, provenant_records::run::DeliveryMode::None) {
+                None
+            } else {
+                let state = self.factory.context.roots.state.as_path();
+                let ports = &self.factory.context.port_table;
+                let forge = provenant_run::resolve_forge(state, self.factory.cwd.as_path(), ports)
+                    .map_err(run_error)?;
+                provenant_run::HostDeliveryContext::destination(mode.clone(), &branch, &forge)
+                    .map_err(run_error)?
+                    .map(|mut request| {
+                        request.fast_forward_only = replay.fast_forward_only;
+                        request
+                    })
+            }
         } else {
             None
         };
@@ -3342,7 +3418,10 @@ impl BoundGraphOwner<'_> {
                 &exclude,
                 &self.factory.context.roots,
             ) {
-                let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+                warn(Warning::new(
+                    provenant_records::warning::EXCLUSION_ADVISORY,
+                    warning.clone(),
+                ));
                 self.launch_warnings.push(warning);
             }
         }
@@ -3574,9 +3653,10 @@ impl BoundGraphOwner<'_> {
                     .source_root
                     .as_deref()
                     .unwrap_or(self.factory.context.selected_project()),
+                &provenant_cli::run::ReadSourceChoice::automatic(),
             )
         {
-            let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+            warn(Warning::new(SETTING_LAYER_IGNORED, warning.clone()));
             self.launch_warnings.push(warning);
         }
         if !accepted {
@@ -3622,7 +3702,13 @@ impl BoundGraphOwner<'_> {
                 "model {} is not in the catalogue; {repair}; the provider will check it",
                 model.as_str()
             );
-            let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+            warn(
+                Warning::new(
+                    provenant_records::warning::MODEL_SEGMENT_ADVISORY,
+                    warning.clone(),
+                )
+                .subject(model.as_str()),
+            );
             self.launch_warnings.push(warning);
         }
         let receipt = owner.submit_with_access(
@@ -3706,14 +3792,26 @@ impl BoundGraphOwner<'_> {
                 if name == "postgres" {
                     true
                 } else {
-                    provenant_cli::run::warn_ignored_capability("node or project ", name);
+                    provenant_records::warning::warn(
+                        provenant_records::warning::Warning::new(
+                            provenant_records::warning::CONFIG_KEY_IGNORED,
+                            format!("ignored unknown node or project capability {name}"),
+                        )
+                        .subject(name.clone()),
+                    );
                     false
                 }
             });
             if access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite {
                 for capability in &self.capability_overrides.0 {
                     if capability != "postgres" {
-                        provenant_cli::run::warn_ignored_capability("flag ", capability);
+                        provenant_records::warning::warn(
+                            provenant_records::warning::Warning::new(
+                                provenant_records::warning::CONFIG_KEY_IGNORED,
+                                format!("ignored unknown flag capability {capability}"),
+                            )
+                            .subject(capability.clone()),
+                        );
                         continue;
                     }
                     if !capabilities.contains(capability) {
@@ -5320,7 +5418,7 @@ mod recovery_rebuild_tests {
                                     .insert("lanes.sandbox_floor".into(), "strict".into());
                                 profile.knob_sources.insert(
                                     "lanes.sandbox_floor".into(),
-                                    provenant_records::LimitSource::Host,
+                                    provenant_records::Layer::Host,
                                 );
                                 if spec.confidential {
                                     profile.confidential = true;

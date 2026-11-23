@@ -4,7 +4,7 @@ use crate::{
 };
 use provenant_core::{AttemptId, ProjectId};
 use provenant_os::clock::SystemClock;
-use provenant_records::{AttemptOutcome, RouteFact, Usage, WorkKey};
+use provenant_records::{AttemptOutcome, RouteFact, Usage, UsageSource, WorkKey};
 use std::path::PathBuf;
 
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -309,4 +309,144 @@ fn settle_all(state: &Path, rows: &[Row]) -> Result<Appended> {
         &SystemClock::new(),
         &CancelToken::new(),
     )?)
+}
+
+/// Spec: docs/specs/telemetry.md#usage-merges-by-declared-semantics
+#[test]
+fn usage_ledger_v4_round_trips_a_v3_fixture_and_is_idempotent() -> Result {
+    let (_temp, state) = state()?;
+    let directory = state.join(DIRECTORY);
+    std::fs::create_dir_all(&directory)?;
+    let segment = "2026-10-01.jsonl";
+    let v3 = serde_json::json!({
+        "format": V3_FORMAT,
+        "source": "settlement",
+        "project": "11111111111111111111111111111111",
+        "graph": "g", "node": "n", "attempt": "a",
+        "identity": serde_json::to_value(AccountIdentity::unknown())?,
+        "outcome": "succeeded",
+        "finished": "2026-10-01T00:00:00.000000Z",
+        "tokens": {"uncached_input": 12, "cache_read": 3, "extra": {}},
+    });
+    let unmappable = {
+        let mut value = v3.clone();
+        value["source"] = serde_json::json!("future-source");
+        value
+    };
+    let v4 = {
+        let mut value = v3.clone();
+        value["format"] = serde_json::json!(FORMAT);
+        value["source"] = serde_json::json!("session_store");
+        value
+    };
+    let lines = [
+        serde_json::to_vec(&v3)?,
+        serde_json::to_vec(&unmappable)?,
+        serde_json::to_vec(&v4)?,
+    ];
+    let mut bytes = Vec::new();
+    for line in &lines {
+        bytes.extend_from_slice(line);
+        bytes.push(b'\n');
+    }
+    std::fs::write(directory.join(segment), &bytes)?;
+
+    let migrated = migrate_to_v4(&state)?;
+    assert_eq!(migrated.unmapped.len(), 1);
+    assert_eq!(migrated.unmapped[0].line, Some(2));
+    let rewritten = std::fs::read(directory.join(segment))?;
+    let values: Vec<serde_json::Value> = serde_json::Deserializer::from_slice(&rewritten)
+        .into_iter::<serde_json::Value>()
+        .map(|value| value.map_err(Into::into))
+        .collect::<Result<Vec<_>>>()?;
+    assert_eq!(values.len(), 3);
+    assert_eq!(values[0]["format"], serde_json::json!(FORMAT));
+    assert_eq!(values[0]["source"], serde_json::json!("session_store"));
+    assert_eq!(values[0]["tokens"]["uncached_input"], serde_json::json!(12));
+    assert_eq!(values[1], unmappable, "an unmappable line is not guessed");
+    assert_eq!(values[2], v4, "a v4 line carries over unchanged");
+    let sidecar = std::fs::read(directory.join(format!("{segment}.v3-unmapped")))?;
+    assert_eq!(
+        sidecar,
+        lines[1].iter().copied().chain(*b"\n").collect::<Vec<u8>>()
+    );
+
+    let again = migrate_to_v4(&state)?;
+    assert!(again.changed.is_empty(), "a second run changes nothing");
+    Ok(())
+}
+
+/// Settlement reads a store after the attempt; it is not a cross-host ingest.
+/// Spec: docs/specs/telemetry.md#attribution-is-detected-never-guessed
+#[test]
+fn a_settlement_row_is_a_session_store_observation() -> Result {
+    let prices = prices()?;
+    let row = row(&fact(1, 20_000, "m", Some(1))?, &key(1)?, Some(&prices))?;
+    assert_eq!(row.source, UsageSource::SessionStore);
+    assert_eq!(
+        serde_json::to_value(row.source)?,
+        serde_json::json!("session_store")
+    );
+    Ok(())
+}
+
+/// A v3 line written after install by an older process must not stay rejected
+/// by the strict reader: the next write migrates it under the append lock.
+/// Spec: docs/specs/state.md#format-changes-migrate-once-at-install
+#[test]
+fn a_stray_v3_row_is_migrated_when_the_ledger_is_opened_for_writing() -> Result {
+    let (_temp, state) = state()?;
+    let prices = prices()?;
+    let first = row(&fact(1, 20_000, "m", Some(1))?, &key(1)?, Some(&prices))?;
+    settle(&state, &first)?;
+    let segment = first.segment();
+    let v3 = serde_json::json!({
+        "format": V3_FORMAT,
+        "source": "settlement",
+        "project": "11111111111111111111111111111111",
+        "graph": "v3-graph", "node": "v3-node", "attempt": "stray",
+        "identity": serde_json::to_value(AccountIdentity::unknown())?,
+        "outcome": "succeeded",
+        "finished": "2026-10-01T00:00:00.000000Z",
+        "tokens": {"uncached_input": 12, "extra": {}},
+    });
+    let path = state.join(DIRECTORY).join(&segment);
+    let mut bytes = std::fs::read(&path)?;
+    bytes.extend_from_slice(&serde_json::to_vec(&v3)?);
+    bytes.push(b'\n');
+    std::fs::write(&path, &bytes)?;
+
+    // Before a write, the strict reader reports the stray line.
+    assert_eq!(read(&state)?.unrecognised.len(), 1);
+
+    let second = row(&fact(2, 20_000, "m", Some(2))?, &key(2)?, Some(&prices))?;
+    let appended = settle(&state, &second)?;
+    assert_eq!(appended.added, 1);
+    let ledger = read(&state)?;
+    assert!(
+        ledger.unrecognised.is_empty(),
+        "the stray v3 row was migrated, not rejected forever: {:?}",
+        ledger.unrecognised
+    );
+    assert_eq!(ledger.rows.len(), 3, "{:?}", ledger.rows);
+    assert_eq!(
+        ledger.rows[1].source,
+        UsageSource::SessionStore,
+        "settlement rows keep the store source"
+    );
+    Ok(())
+}
+
+/// The one-shot rewrite must take the same lock appends take, or a row added
+/// between read and replace is lost.
+/// Spec: docs/specs/state.md#format-changes-migrate-once-at-install
+#[test]
+fn the_v4_rewrite_refuses_to_run_while_a_writer_holds_the_lock() -> Result {
+    let (_temp, state) = state()?;
+    std::fs::create_dir_all(state.join(DIRECTORY))?;
+    let root = Directory::open_anchor(&state)?;
+    let _held = root.try_lock(OsStr::new(LOCK), LockMode::Exclusive)?;
+    let result = migrate_to_v4(&state);
+    assert!(result.is_err(), "a rewrite must not clobber a live writer");
+    Ok(())
 }

@@ -192,7 +192,7 @@ fn unavailable_sources(state: &mut SessionState, want: &Want, reason: String) {
 #[allow(clippy::disallowed_methods)]
 pub fn collect(globals: &Globals, cwd: &Path, want: &Want, deadline: Instant) -> SessionState {
     let mut state = SessionState {
-        commands: CommandPrefix::new(globals.state_dir.as_deref(), cwd),
+        commands: crate::output::command_prefix(globals, cwd),
         ..Default::default()
     };
     let executor = match SystemExecutor::new(COLLECTION_EXECUTOR_CONCURRENCY) {

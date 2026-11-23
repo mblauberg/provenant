@@ -173,13 +173,18 @@ pub fn revalidate_with_reasons(
 
 /// Only request the lowest unmerged stack member: an async request for an
 /// upper member would also merge its downstack members without their gates.
+/// `grant` and `reviewed` come from the candidate that already passed land's
+/// own gate: an admin retry is never a way around a red gate or a missing
+/// independent review.
 pub fn merge_member(
     forge: &mut dyn Forge,
     number: u64,
     head: &str,
     method: MergeMethod,
+    grant: &PublicationGrant,
+    reviewed: bool,
 ) -> Result<String, LandingError> {
-    if let Some(stack) = forge.pull_request(number)?.stack {
+    let result = if let Some(stack) = forge.pull_request(number)?.stack {
         let members = forge.stack_members(stack.number)?;
         let position = members
             .iter()
@@ -197,6 +202,18 @@ pub fn merge_member(
         forge.merge_stack(number, head, method)
     } else {
         forge.merge(number, head, method)
+    };
+    match result {
+        Err(LandingError::RefusedWith {
+            cause: "REVIEW_REQUIRED",
+            ..
+        }) if reviewed && grant.allows_review_unavailable() => {
+            // The only 405 this grant may answer. The gate has passed, the
+            // member carries independent review evidence, and the owner gave
+            // host-layer permission; the admin call still uses their authority.
+            forge.merge_admin(number, head, method)
+        }
+        other => other,
     }
 }
 /// Advance the target from the candidate base with an expected-old-value push.
@@ -237,6 +254,7 @@ pub fn rest_ordered(
     target: &str,
     candidate: &Candidate,
     method: MergeMethod,
+    grant: &PublicationGrant,
     landed: &mut Vec<String>,
     before_dispatch: &mut dyn FnMut(u64) -> Result<(), LandingError>,
 ) -> Result<PublishResult, LandingError> {
@@ -266,7 +284,15 @@ pub fn rest_ordered(
             return Err(LandingError::PullRequestChanged(step.pr.number));
         }
         before_dispatch(step.pr.number)?;
-        expected = merge_member(forge, step.pr.number, &step.pr.head, method)?;
+        let reviewed = !step.pr.approval_evidence.is_empty();
+        expected = merge_member(
+            forge,
+            step.pr.number,
+            &step.pr.head,
+            method,
+            grant,
+            reviewed,
+        )?;
         landed.push(expected.clone());
     }
     // The final landed commit is durable evidence for the later tree comparison.
@@ -291,6 +317,15 @@ mod tests {
 
     fn candidate() -> Candidate {
         LandingFixture::ordered_candidate()
+    }
+    fn host_grant(mode: provenant_cli::domains::AdminPublication) -> PublicationGrant {
+        PublicationGrant {
+            mode,
+            source: provenant_records::provenance::Source {
+                layer: provenant_records::Layer::Host,
+                origin: Some("host.toml#domains.pr.land.admin_publication".into()),
+            },
+        }
     }
     fn prepare(forge: &mut FakeForge) {
         use crate::pr::landing::ports::{PullRequestInfo, PullRequestState};
@@ -360,18 +395,43 @@ mod tests {
             .mode,
             PublishMode::RestOrdered
         );
-        let error = merge_member(&mut forge, 2, "head-2", MergeMethod::Merge).unwrap_err();
+        let error = merge_member(
+            &mut forge,
+            2,
+            "head-2",
+            MergeMethod::Merge,
+            &PublicationGrant::default(),
+            true,
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("#1"));
         assert!(forge.merge_attempts.is_empty());
         assert_eq!(
-            merge_member(&mut forge, 1, "head-1", MergeMethod::Squash)?,
+            merge_member(
+                &mut forge,
+                1,
+                "head-1",
+                MergeMethod::Squash,
+                &PublicationGrant::default(),
+                true
+            )?,
             "landed-1"
         );
         assert_eq!(forge.stack_merge_attempts, vec![1]);
         assert_eq!(forge.merges[0].2, MergeMethod::Squash);
         assert_eq!(forge.pull_requests[&2].base_branch, "main");
         forge.heads.insert(2, "moved".into());
-        assert!(merge_member(&mut forge, 2, "head-2", MergeMethod::Merge).is_err());
+        assert!(
+            merge_member(
+                &mut forge,
+                2,
+                "head-2",
+                MergeMethod::Merge,
+                &PublicationGrant::default(),
+                true
+            )
+            .is_err()
+        );
         assert_eq!(forge.merges.len(), 1);
         Ok(())
     }
@@ -623,6 +683,7 @@ mod tests {
                 "main",
                 &candidate(),
                 MergeMethod::Merge,
+                &PublicationGrant::default(),
                 &mut Vec::new(),
                 &mut |_| Ok(())
             ),
@@ -662,6 +723,7 @@ mod tests {
                 "main",
                 &candidate(),
                 MergeMethod::Merge,
+                &PublicationGrant::default(),
                 &mut Vec::new(),
                 &mut |_| Ok(())
             ),
@@ -687,6 +749,7 @@ mod tests {
             "main",
             &candidate(),
             MergeMethod::Squash,
+            &PublicationGrant::default(),
             &mut Vec::new(),
             &mut |_| Ok(()),
         )?;
@@ -700,5 +763,63 @@ mod tests {
         assert_eq!(result.landed, vec!["landed-1", "landed-2"]);
         assert!(result.alarms.is_empty());
         Ok(())
+    }
+
+    // Spec: docs/specs/cli.md#landing-adds-no-merge-authority
+    #[test]
+    fn review_requirement_405_retries_with_admin_after_the_gate_with_a_host_grant()
+    -> Result<(), LandingError> {
+        use provenant_cli::domains::AdminPublication;
+        let mut forge = FakeForge {
+            review_required_merge: Some(1),
+            ..Default::default()
+        };
+        prepare(&mut forge);
+        let grant = host_grant(AdminPublication::WhenReviewUnavailable);
+        assert_eq!(
+            merge_member(&mut forge, 1, "head-1", MergeMethod::Merge, &grant, true)?,
+            "landed-1"
+        );
+        assert_eq!(forge.admin_merges, vec![1]);
+        Ok(())
+    }
+
+    // Spec: docs/specs/cli.md#landing-adds-no-merge-authority
+    #[test]
+    fn admin_retry_never_bypasses_missing_grant_other_layers_or_missing_review() {
+        use provenant_cli::domains::AdminPublication;
+        let grant = host_grant(AdminPublication::WhenReviewUnavailable);
+        let non_host = PublicationGrant {
+            mode: AdminPublication::WhenReviewUnavailable,
+            source: provenant_records::provenance::Source {
+                layer: provenant_records::Layer::Project,
+                origin: Some(".provenant/config.toml".into()),
+            },
+        };
+        for (name, grant, reviewed, refuse) in [
+            ("no grant", PublicationGrant::default(), true, true),
+            ("never", host_grant(AdminPublication::Never), true, true),
+            ("project layer", non_host, true, true),
+            ("no review evidence", grant.clone(), false, true),
+            ("other 405 cause", grant.clone(), true, false),
+        ] {
+            let mut forge = FakeForge {
+                review_required_merge: refuse.then_some(1),
+                refuse_merge: (!refuse).then_some(1),
+                ..Default::default()
+            };
+            prepare(&mut forge);
+            let error = merge_member(
+                &mut forge,
+                1,
+                "head-1",
+                MergeMethod::Merge,
+                &grant,
+                reviewed,
+            )
+            .unwrap_err();
+            assert!(error.is_refusal(), "{name}: {error}");
+            assert!(forge.admin_merges.is_empty(), "{name}");
+        }
     }
 }

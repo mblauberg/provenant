@@ -1,26 +1,30 @@
 //! A lane or graph limit with where its value came from and whether the host
 //! enforces it. The lane preamble states only what the host will enforce.
+pub use crate::Layer;
+use crate::{Precedence, Source, Sourced};
 use serde::{Deserialize, Serialize};
 
-/// Where a limit's value was set. The nearest setting to the work wins:
-/// `Launch`, then `Template`, then `Tier`, then `Project`, then `Host`, then `Default`
-/// (see [`Limit::resolve`]).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LimitSource {
-    /// The built-in default.
-    #[default]
-    Default,
-    /// The host configuration.
-    Host,
-    /// The project configuration.
-    Project,
-    /// The template the node expands from.
-    Template,
-    /// The risk tier selected for this lane.
-    Tier,
-    /// The launch request, set by the chair or the owner.
-    Launch,
+/// The layers a limit accepts, lowest first. One declaration drives the merge
+/// and every explanation (Spec: docs/specs/state.md#every-setting-reports-its-layer).
+pub const LIMIT_PRECEDENCE: Precedence = Precedence(&[
+    Layer::Default,
+    Layer::Host,
+    Layer::Project,
+    Layer::Tier,
+    Layer::Template,
+    Layer::Launch,
+]);
+
+/// Pair a layer with the value it declares for the shared merge. The origin is
+/// absent here because the callers already collapse each layer to one value.
+fn sourced<T>(layer: Layer, value: T) -> Sourced<T> {
+    Sourced {
+        value,
+        source: Source {
+            layer,
+            origin: None,
+        },
+    }
 }
 
 /// What reaching the limit does.
@@ -56,7 +60,7 @@ pub struct BudgetWrapUpRefused {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Limit {
     pub value: u64,
-    pub source: LimitSource,
+    pub source: Layer,
     pub strength: LimitStrength,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overrun: Option<BudgetOverrun>,
@@ -67,31 +71,6 @@ pub struct Limit {
     pub wrap_up_target: Option<Box<Limit>>,
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
-}
-
-impl LimitSource {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Default => "default",
-            Self::Host => "host",
-            Self::Project => "project",
-            Self::Template => "template",
-            Self::Tier => "tier",
-            Self::Launch => "launch",
-        }
-    }
-
-    /// Higher wins.
-    fn precedence(self) -> u8 {
-        match self {
-            Self::Default => 0,
-            Self::Host => 1,
-            Self::Project => 2,
-            Self::Tier => 3,
-            Self::Template => 4,
-            Self::Launch => 5,
-        }
-    }
 }
 
 /// What the host does when a writer passes its token budget.
@@ -212,9 +191,9 @@ impl<'de> Deserialize<'de> for BudgetGrace {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BudgetPolicy {
     pub action: BudgetAction,
-    pub action_source: LimitSource,
+    pub action_source: Layer,
     pub grace: BudgetGrace,
-    pub grace_source: LimitSource,
+    pub grace_source: Layer,
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
 }
@@ -223,9 +202,9 @@ impl Default for BudgetPolicy {
     fn default() -> Self {
         Self {
             action: BudgetAction::default(),
-            action_source: LimitSource::Default,
+            action_source: Layer::Default,
             grace: BudgetGrace::default(),
-            grace_source: LimitSource::Default,
+            grace_source: Layer::Default,
             extra: Default::default(),
         }
     }
@@ -235,23 +214,29 @@ impl BudgetPolicy {
     /// Resolve each policy field from its nearest configured layer. The order
     /// is launch, template, tier, project, host, then the compiled default.
     pub fn resolve(
-        actions: impl IntoIterator<Item = (LimitSource, BudgetAction)>,
-        graces: impl IntoIterator<Item = (LimitSource, BudgetGrace)>,
+        actions: impl IntoIterator<Item = (Layer, BudgetAction)>,
+        graces: impl IntoIterator<Item = (Layer, BudgetGrace)>,
     ) -> Self {
         let mut policy = Self::default();
-        if let Some((source, action)) = actions
-            .into_iter()
-            .max_by_key(|(source, _)| source.precedence())
-        {
-            policy.action = action;
-            policy.action_source = source;
+        let actions = LIMIT_PRECEDENCE.merge(
+            actions
+                .into_iter()
+                .map(|(layer, value)| sourced(layer, value)),
+        );
+        crate::warn_ignored(&actions.ignored, "budget action");
+        if let Some(winner) = actions.winner {
+            policy.action = winner.value;
+            policy.action_source = winner.source.layer;
         }
-        if let Some((source, grace)) = graces
-            .into_iter()
-            .max_by_key(|(source, _)| source.precedence())
-        {
-            policy.grace = grace;
-            policy.grace_source = source;
+        let graces = LIMIT_PRECEDENCE.merge(
+            graces
+                .into_iter()
+                .map(|(layer, value)| sourced(layer, value)),
+        );
+        crate::warn_ignored(&graces.ignored, "budget grace");
+        if let Some(winner) = graces.winner {
+            policy.grace = winner.value;
+            policy.grace_source = winner.source.layer;
         }
         policy
     }
@@ -264,7 +249,7 @@ pub struct CeilingError {
 }
 
 impl Limit {
-    pub fn new(value: u64, source: LimitSource, strength: LimitStrength) -> Self {
+    pub fn new(value: u64, source: Layer, strength: LimitStrength) -> Self {
         Self {
             value,
             source,
@@ -278,13 +263,18 @@ impl Limit {
 
     /// The setting from the nearest source wins; `None` when nothing sets it.
     pub fn resolve(
-        layers: impl IntoIterator<Item = (LimitSource, u64)>,
+        layers: impl IntoIterator<Item = (Layer, u64)>,
         strength: LimitStrength,
     ) -> Option<Self> {
-        layers
-            .into_iter()
-            .max_by_key(|(source, _)| source.precedence())
-            .map(|(source, value)| Self::new(value, source, strength))
+        let merge = LIMIT_PRECEDENCE.merge(
+            layers
+                .into_iter()
+                .map(|(layer, value)| sourced(layer, value)),
+        );
+        crate::warn_ignored(&merge.ignored, "limit");
+        merge
+            .winner
+            .map(|winner| Self::new(winner.value, winner.source.layer, strength))
     }
 
     /// The host stops or refuses at this limit.
@@ -301,7 +291,7 @@ impl Limit {
         if self.strength == LimitStrength::Ceiling {
             return Err(CeilingError { value: self.value });
         }
-        let mut raised = Self::new(value.max(self.value), LimitSource::Launch, self.strength);
+        let mut raised = Self::new(value.max(self.value), Layer::Launch, self.strength);
         raised.wrap_up_target = self.wrap_up_target.clone();
         Ok(raised)
     }
@@ -349,7 +339,7 @@ pub struct TokenBudgetUsage {
     /// The budget's value in that unit.
     pub limit: u64,
     /// The layer that set the budget.
-    pub source: LimitSource,
+    pub source: Layer,
     /// Fresh tokens counted for this attempt; absent when the provider
     /// reported no usage, never a guessed zero.
     pub counted: Option<u64>,
@@ -511,7 +501,7 @@ mod tests {
             ),
         ] {
             let mut wire =
-                serde_json::to_value(Limit::new(100, LimitSource::Launch, LimitStrength::Default))
+                serde_json::to_value(Limit::new(100, Layer::Launch, LimitStrength::Default))
                     .unwrap();
             wire[field] = value;
             let bytes = serde_json::to_vec(&wire).unwrap();
@@ -537,40 +527,100 @@ mod tests {
         assert_eq!(serde_json::to_value(&decoded).unwrap(), wire);
     }
 
+    /// Spec: docs/specs/state.md#every-setting-reports-its-layer
+    #[test]
+    fn every_limit_layer_reports_the_same_winner_and_shadowed_order() {
+        let candidates = [
+            (Layer::Default, 1),
+            (Layer::Host, 2),
+            (Layer::Project, 3),
+            (Layer::Tier, 4),
+            (Layer::Template, 5),
+            (Layer::Launch, 6),
+        ];
+        let merge = LIMIT_PRECEDENCE.merge(
+            candidates
+                .into_iter()
+                .map(|(layer, value)| sourced(layer, value)),
+        );
+        assert_eq!(merge.winner.as_ref().map(|winner| winner.value), Some(6));
+        assert_eq!(
+            merge
+                .shadowed
+                .iter()
+                .map(|candidate| candidate.value)
+                .collect::<Vec<_>>(),
+            [1, 2, 3, 4, 5]
+        );
+        assert!(merge.ignored.is_empty());
+    }
+
+    /// Spec: docs/specs/state.md#every-setting-reports-its-layer
+    #[test]
+    fn a_profile_candidate_is_ignored_and_warned_by_the_production_resolver() {
+        let (limit, warnings) = crate::warning::capture(|| {
+            Limit::resolve(
+                [(Layer::Profile, 42), (Layer::Host, 7)],
+                LimitStrength::Default,
+            )
+        });
+        let limit = limit.expect("a limit resolves");
+        assert_eq!((limit.value, limit.source), (7, Layer::Host));
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].code.as_ref(), "SETTING_LAYER_IGNORED");
+        assert_eq!(
+            warnings[0].source.as_ref().map(|source| source.layer),
+            Some(Layer::Profile)
+        );
+
+        let (policy, warnings) = crate::warning::capture(|| {
+            BudgetPolicy::resolve(
+                [(Layer::Profile, BudgetAction::Warn)],
+                [(Layer::Profile, BudgetGrace::default())],
+            )
+        });
+        assert_eq!(policy.action_source, Layer::Default);
+        assert_eq!(policy.grace_source, Layer::Default);
+        assert_eq!(warnings.len(), 2);
+    }
+
     #[test]
     fn the_nearest_source_wins_and_a_ceiling_cannot_be_raised() {
         let layers = [
-            (LimitSource::Default, 500),
-            (LimitSource::Project, 900),
-            (LimitSource::Host, 700),
-            (LimitSource::Template, 800),
+            (Layer::Default, 500),
+            (Layer::Project, 900),
+            (Layer::Host, 700),
+            (Layer::Template, 800),
         ];
         let limit = Limit::resolve(layers, LimitStrength::Default).unwrap();
-        assert_eq!((limit.value, limit.source), (800, LimitSource::Template));
+        assert_eq!((limit.value, limit.source), (800, Layer::Template));
         let raised = limit.extend(1000).unwrap();
-        assert_eq!((raised.value, raised.source), (1000, LimitSource::Launch));
+        assert_eq!((raised.value, raised.source), (1000, Layer::Launch));
         assert_eq!(limit.extend(10).unwrap().value, 800);
-        let ceiling = Limit::new(60, LimitSource::Host, LimitStrength::Ceiling);
+        let ceiling = Limit::new(60, Layer::Host, LimitStrength::Ceiling);
         assert_eq!(ceiling.extend(120), Err(CeilingError { value: 60 }));
     }
 
     #[test]
     fn budget_usage_names_the_unit_beside_the_provider_totals() {
         let limits = LaneLimits {
-            token_budget: Some(Limit::new(1_000, LimitSource::Host, LimitStrength::Default)),
+            token_budget: Some(Limit::new(1_000, Layer::Host, LimitStrength::Default)),
             ..LaneLimits::default()
         };
         let usage = crate::run::UsageRecord {
-            uncached_input: Some(100),
-            cache_read: Some(5_000),
-            cache_write: Some(20),
-            output_excluding_reasoning: Some(30),
-            reasoning: Some(10),
+            tokens: crate::Tokens {
+                input: Some(100),
+                cache_read: Some(5_000),
+                cache_write: Some(20),
+                output: Some(30),
+                reasoning: Some(10),
+                ..crate::Tokens::default()
+            },
             ..Default::default()
         };
         let codex = limits.budget_usage(&usage, Some("codex")).unwrap();
         assert_eq!(codex.unit, "fresh_tokens");
-        assert_eq!((codex.limit, codex.source), (1_000, LimitSource::Host));
+        assert_eq!((codex.limit, codex.source), (1_000, Layer::Host));
         // Cache reads are in the provider's figure and out of the budget's.
         assert_eq!(codex.counted, Some(160));
         assert_eq!(codex.reported_input, Some(5_120));
@@ -594,13 +644,9 @@ mod tests {
     #[test]
     fn the_preamble_states_only_enforced_limits_with_the_resolved_numbers() {
         let limits = LaneLimits {
-            token_budget: Some(Limit::new(123, LimitSource::Host, LimitStrength::Default)),
-            deadline_seconds: Some(Limit::new(60, LimitSource::Host, LimitStrength::Ceiling)),
-            repair_cycles: Some(Limit::new(
-                3,
-                LimitSource::Template,
-                LimitStrength::Advisory,
-            )),
+            token_budget: Some(Limit::new(123, Layer::Host, LimitStrength::Default)),
+            deadline_seconds: Some(Limit::new(60, Layer::Host, LimitStrength::Ceiling)),
+            repair_cycles: Some(Limit::new(3, Layer::Template, LimitStrength::Advisory)),
             ..LaneLimits::default()
         };
         let preamble = limits.preamble();

@@ -537,20 +537,16 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
             item: Item::Answer { text },
         } => vec![E::MessageStart, E::Text(text)],
         Event::Completed { usage } => vec![
-            E::Usage {
-                // Codex counts cache reads and writes inside `input_tokens`;
-                // the recorded categories are disjoint.
-                input: usage.input_tokens.saturating_sub(
-                    usage
-                        .cached_input_tokens
-                        .unwrap_or(0)
-                        .saturating_add(usage.cache_write_input_tokens.unwrap_or(0)),
-                ),
-                output: usage.output_tokens,
+            // Codex counts cache reads and writes inside `input_tokens`. The
+            // raw buckets travel in the report; the accumulator normalises
+            // input once, using the adapter's declared semantics.
+            E::Usage(crate::usage::UsageReport::step(provenant_records::Tokens {
+                input: Some(usage.input_tokens),
+                output: Some(usage.output_tokens),
                 cache_read: usage.cached_input_tokens,
                 cache_write: usage.cache_write_input_tokens,
-                cache_write_1h: None,
-            },
+                ..provenant_records::Tokens::default()
+            })),
             E::Terminal,
         ],
         Event::Error { message } => {

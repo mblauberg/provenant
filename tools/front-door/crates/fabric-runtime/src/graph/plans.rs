@@ -1206,7 +1206,7 @@ fn fragment(
             layers
                 .get(&name)
                 .copied()
-                .unwrap_or(super::template::Layer::Inline),
+                .unwrap_or(super::template::Layer::Launch),
             &name,
             template,
         )?;
@@ -1847,8 +1847,8 @@ pub(super) fn settle(
                         .and_then(|value| {
                             let warnings = super::refusal::input_warnings(&value, policy);
                             for warning in warnings {
-                                if !checkpoint.nodes[index].warnings.contains(&warning) {
-                                    checkpoint.nodes[index].warnings.push(warning);
+                                if !checkpoint.nodes[index].warnings.contains(&warning.message) {
+                                    checkpoint.nodes[index].warnings.push(warning.message);
                                 }
                             }
                             normalise_fragment(&json).inspect(|json| {

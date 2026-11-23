@@ -7,8 +7,8 @@
 //! it, and the setting's source appears beside its value. No setting here is
 //! strict: an unknown value warns with the layer that supplied it and keeps the
 //! documented default, so a typo never silently chooses a policy.
-use crate::{KnobSource, KnobValue};
-use provenant_records::{LimitSource, run::HarnessProfile};
+use provenant_records::warning::{CONFIG_MALFORMED, Warning, warn};
+use provenant_records::{Layer, Sourced, run::HarnessProfile};
 use serde_json::Value;
 use std::{collections::BTreeMap, fmt};
 
@@ -113,7 +113,7 @@ fn rewrite(text: &str) -> Option<DefaultBranchRewrite> {
 /// The warning for an explicit value outside a setting's values. It names the
 /// setting, the value and the layer that supplied it, so a typo is repairable,
 /// and the documented default that stands in for it.
-fn unknown_value(name: &str, text: &str, source: LimitSource, default: &str) -> String {
+fn unknown_value(name: &str, text: &str, source: Layer, default: &str) -> String {
     format!(
         "{name} = {text} (source: {}) is not a value of this setting; using {default} (source: default)",
         source.as_str()
@@ -128,22 +128,25 @@ fn unknown_value(name: &str, text: &str, source: LimitSource, default: &str) -> 
 fn resolve_setting<T: HistoryValue>(
     name: &str,
     text: Option<&str>,
-    source: LimitSource,
+    source: Layer,
     parse: impl Fn(&str) -> Option<T>,
 ) -> Setting<T> {
     match text {
         Some(text) => match parse(text) {
             Some(value) => Setting { value, source },
             None => {
-                use std::io::Write as _;
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: {}",
-                    unknown_value(name, text, source, T::default().as_str())
+                warn(
+                    Warning::new(
+                        CONFIG_MALFORMED,
+                        unknown_value(name, text, source, T::default().as_str()),
+                    )
+                    .subject(name.to_owned())
+                    .repair(format!("set {name} to a declared value"))
+                    .once_per_change(),
                 );
                 Setting {
                     value: T::default(),
-                    source: LimitSource::Default,
+                    source: Layer::Default,
                 }
             }
         },
@@ -158,7 +161,7 @@ fn resolve_setting<T: HistoryValue>(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Setting<T> {
     pub value: T,
-    pub source: LimitSource,
+    pub source: Layer,
 }
 
 impl<T: HistoryValue> Setting<T> {
@@ -176,7 +179,7 @@ impl<T: HistoryValue> Default for Setting<T> {
     fn default() -> Self {
         Self {
             value: T::default(),
-            source: LimitSource::Default,
+            source: Layer::Default,
         }
     }
 }
@@ -194,14 +197,15 @@ fn profile_text<'a>(profile: &'a HarnessProfile, name: &str) -> Option<&'a str> 
     profile.knobs.get(name).and_then(Value::as_str)
 }
 
-fn knob_text<'a>(knobs: &'a BTreeMap<String, KnobValue>, name: &str) -> Option<&'a str> {
+fn knob_text<'a>(knobs: &'a BTreeMap<String, Sourced<Value>>, name: &str) -> Option<&'a str> {
     knobs.get(name).and_then(|knob| knob.value.as_str())
 }
 
-fn knob_limit_source(source: KnobSource) -> LimitSource {
+fn knob_limit_source(source: Layer) -> Layer {
     match source {
-        KnobSource::Default => LimitSource::Default,
-        KnobSource::Profile | KnobSource::Override => LimitSource::Host,
+        // A preset and a host `[knobs]` entry both count as host configuration.
+        Layer::Profile | Layer::Host => Layer::Host,
+        other => other,
     }
 }
 
@@ -240,11 +244,11 @@ impl LaneHistory {
 
     /// Resolve from effective host configuration, as the pre-push hook reads
     /// it. Presets and `[knobs]` both count as the host layer.
-    pub fn from_knobs(knobs: &BTreeMap<String, KnobValue>) -> Self {
+    pub fn from_knobs(knobs: &BTreeMap<String, Sourced<Value>>) -> Self {
         let source = |name: &str| {
             knobs
                 .get(name)
-                .map_or(LimitSource::Default, |knob| knob_limit_source(knob.source))
+                .map_or(Layer::Default, |knob| knob_limit_source(knob.source.layer))
         };
         Self {
             rebase: resolve_setting(REBASE, knob_text(knobs, REBASE), source(REBASE), rebase),
@@ -291,6 +295,7 @@ impl fmt::Display for DefaultBranchRewrite {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use provenant_records::Source;
 
     #[test]
     fn defaults_allow_rebasing_and_warn_about_unusual_history() {
@@ -302,7 +307,7 @@ mod tests {
             history.default_branch_rewrite.value,
             DefaultBranchRewrite::Refuse
         );
-        assert_eq!(history.unrooted_tip.source, LimitSource::Default);
+        assert_eq!(history.unrooted_tip.source, Layer::Default);
     }
 
     #[test]
@@ -310,12 +315,10 @@ mod tests {
         for (text, expected) in [("allow", Rebase::Allow), ("refuse", Rebase::Refuse)] {
             let mut profile = HarnessProfile::default();
             profile.knobs.insert(REBASE.into(), Value::from(text));
-            profile
-                .knob_sources
-                .insert(REBASE.into(), LimitSource::Launch);
+            profile.knob_sources.insert(REBASE.into(), Layer::Launch);
             let history = LaneHistory::resolve(&profile);
             assert_eq!(history.rebase.value, expected);
-            assert_eq!(history.rebase.source, LimitSource::Launch);
+            assert_eq!(history.rebase.source, Layer::Launch);
             assert!(history.rebase.setting(REBASE).contains("source: launch"));
         }
         for (text, expected) in [
@@ -346,14 +349,17 @@ mod tests {
     fn host_knobs_report_the_host_layer() {
         let knobs = BTreeMap::from([(
             CONFLICT_MARKERS.to_owned(),
-            KnobValue {
+            Sourced {
                 value: Value::from("refuse"),
-                source: KnobSource::Override,
+                source: Source {
+                    layer: Layer::Host,
+                    origin: None,
+                },
             },
         )]);
         let history = LaneHistory::from_knobs(&knobs);
         assert_eq!(history.conflict_markers.value, HistoryEffect::Refuse);
-        assert_eq!(history.conflict_markers.source, LimitSource::Host);
+        assert_eq!(history.conflict_markers.source, Layer::Host);
     }
 
     #[test]
@@ -363,14 +369,12 @@ mod tests {
         // says which layer supplied the text and that the default now stands.
         let mut profile = HarnessProfile::default();
         profile.knobs.insert(REBASE.into(), Value::from("permit"));
-        profile
-            .knob_sources
-            .insert(REBASE.into(), LimitSource::Host);
+        profile.knob_sources.insert(REBASE.into(), Layer::Host);
         let history = LaneHistory::resolve(&profile);
         assert_eq!(history.rebase.value, Rebase::Allow);
-        assert_eq!(history.rebase.source, LimitSource::Default);
+        assert_eq!(history.rebase.source, Layer::Default);
         assert_eq!(
-            unknown_value(REBASE, "permit", LimitSource::Host, Rebase::Allow.as_str()),
+            unknown_value(REBASE, "permit", Layer::Host, Rebase::Allow.as_str()),
             "lanes.history.rebase = permit (source: host) is not a value of this setting; using allow (source: default)"
         );
 
@@ -385,19 +389,22 @@ mod tests {
             history.default_branch_rewrite.value,
             DefaultBranchRewrite::Refuse
         );
-        assert_eq!(history.default_branch_rewrite.source, LimitSource::Default);
+        assert_eq!(history.default_branch_rewrite.source, Layer::Default);
 
         // Host configuration reads resolve the same way: an unknown value
         // reports the default layer, never the layer that typed it.
         let knobs = BTreeMap::from([(
             REBASE.to_owned(),
-            KnobValue {
+            Sourced {
                 value: Value::from("alloww"),
-                source: KnobSource::Override,
+                source: Source {
+                    layer: Layer::Host,
+                    origin: None,
+                },
             },
         )]);
         let history = LaneHistory::from_knobs(&knobs);
         assert_eq!(history.rebase.value, Rebase::Allow);
-        assert_eq!(history.rebase.source, LimitSource::Default);
+        assert_eq!(history.rebase.source, Layer::Default);
     }
 }

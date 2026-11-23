@@ -7,7 +7,7 @@
 
 pub mod admission;
 pub use admission::{
-    AdmissionClassConfig, AdmissionSource, DEFAULT_CLASS, DEFAULT_WAIT_SECONDS,
+    ADMISSION_PRECEDENCE, AdmissionClassConfig, DEFAULT_CLASS, DEFAULT_WAIT_SECONDS,
     ResolvedAdmissionClass,
 };
 mod account_sync;
@@ -43,7 +43,7 @@ mod managed;
 pub use harness::{InstallSettings, TargetSettings, apply_install_config_with_domains};
 pub const NATIVE_CAPABILITY_UNAVAILABLE: &str = "native_capability_unavailable";
 pub mod overlays;
-pub use overlays::{OverlayLayer, OverlaySource, OverlayWarning};
+pub use overlays::{OVERLAY_PRECEDENCE, OverlayLayer, OverlayWarning};
 pub mod policy;
 mod presets;
 mod providers;
@@ -51,19 +51,24 @@ pub use providers::{
     OutOfScopePin, ProviderSettings, ProviderUpdate, defaults as provider_defaults,
 };
 pub mod detect;
+pub mod forge;
+pub use forge::{
+    Config as ForgeConfig, ForgeContext, ForgeContextError, ForgeProbe, Git as ForgeGit,
+    NoForgeProbe, operation_policy, resolve_for, resolve_in,
+};
 pub mod ports;
 mod project_binding;
 pub use ports::{
     Adapter, BuildClean, BuildOffload, BuildOverflow, BuildPort, BuildPriority, BuildSoakPort,
     BuildStrategyName, CommandExitCodes, DEFAULT_PORT_COMMAND_RECEIPT_AGE_DAYS, ExitDisposition,
-    Forge, ForgeOperation, ForgePort, ForgeResponse, HeadersObservation, Integration, LandBackend,
-    LandPort, PORTS_CONFIG, PORTS_SCHEMA_VERSION, PackagePath, Port, PortBackend, PortBackendKind,
-    PortCommand, PortCommandBackend, PortCommandDisposition, PortCommandExecution,
+    Forge, ForgeOperation, ForgePort, ForgeResponse, GitPort, HeadersObservation, Integration,
+    LandBackend, LandPort, PORTS_CONFIG, PORTS_SCHEMA_VERSION, PackagePath, Port, PortBackend,
+    PortBackendKind, PortCommand, PortCommandBackend, PortCommandDisposition, PortCommandExecution,
     PortCommandPublication, PortCommandReceipt, PortCommandReceiptCollectionLock,
     PortCommandReceiptEntry, PortCommandReceiptInventory, PortCommandReceiptProof, PortError,
-    PortEvidenceError, PortExecution, PortReceiptIssue, PortReceiptLifetime, PortSource, PortTable,
-    ResolvedBuildValue, TierCommand, VerifyAffectedPort, VerifyPort, VerifySelection, VerifyTier,
-    WorktreeLayoutPort, dispatch_port_backend, execute_port_command,
+    PortEvidenceError, PortExecution, PortReceiptIssue, PortReceiptLifetime, PortTable,
+    ResolvedBuildValue, TierCommand, VerifyAffectedPort, VerifyFormat, VerifyPort, VerifySelection,
+    VerifyStaticCheck, VerifyTier, WorktreeLayoutPort, dispatch_port_backend, execute_port_command,
     execute_port_command_with_input, infer_verify_base, land_backend, port_command_environment,
     port_command_receipt_proof, port_command_receipts, port_declaration_warnings,
     port_source_layer, project_key, project_key_for, record_port_command,
@@ -74,10 +79,12 @@ pub mod repository_files;
 mod repository_policy;
 pub use repository_policy::{REPOSITORY_CONFIG, RepositoryPolicy, read_declaration, read_land};
 mod retention;
+mod warning;
 mod worktrees;
 pub use worktrees::{ProjectWorktreeSettings, WorktreeSettings, WorktreeSetup};
 pub mod shared_settings;
 pub use retention::{ProjectRetentionSettings, RetentionSettings};
+pub use warning::{WarningsSettings, warnings_dedup_retention_days};
 #[cfg(test)]
 mod edit_tests;
 mod splice;
@@ -94,7 +101,7 @@ pub use domains::{
 };
 pub use edit::{EditOptions, Edited, edit_config, revision_of, show};
 pub use history::{FieldChange, HistoryEntry, HistoryLimits, history};
-pub use knobs::{KnobEdit, KnobSource, KnobValue, knob_source};
+pub use knobs::{KNOB_PRECEDENCE, KnobEdit, knob_source};
 pub use lane_history::{
     CONFLICT_MARKERS, DEFAULT_BRANCH_REWRITE, DefaultBranchRewrite, HistoryEffect, HistoryValue,
     LaneHistory, REBASE, Rebase, Setting, UNROOTED_TIP,
@@ -110,10 +117,10 @@ pub use project_binding::{
     registered_gc_project_selection, registered_gc_project_selection_with_progress,
     registered_gc_projects, registered_projects, retire_vanished_projects, transient_location,
 };
-pub use provenant_records::Finding;
+pub use provenant_records::{Finding, Layer};
 pub use schema::{
-    DEDICATED_COMMANDS, DeclaredEnum, Layer, Schema, SchemaField, apply_edit, apply_patch,
-    declared_enums, dedicated_command, probe_field, schema,
+    DEDICATED_COMMANDS, DeclaredEnum, SCHEMA_PRECEDENCE, Schema, SchemaField, apply_edit,
+    apply_patch, declared_enums, dedicated_command, probe_field, schema,
 };
 
 use serde::Serialize;
@@ -291,8 +298,13 @@ pub struct ResolvedConfig<D = NoDomains> {
     pub worktrees: WorktreeSettings,
     pub providers: BTreeMap<String, ProviderSettings>,
     /// Effective knobs with the layer that set each; not part of `origins`.
-    pub knobs: BTreeMap<String, KnobValue>,
+    pub knobs: BTreeMap<String, provenant_records::Sourced<serde_json::Value>>,
     pub origins: BTreeMap<String, Origin>,
+    /// Per-change warning memory. Skipped from the serialised config because
+    /// `warnings` above is already the key for ignored-setting findings; the
+    /// effective value and its source are published by `config schema`.
+    #[serde(skip_serializing)]
+    pub warning_dedup: WarningsSettings,
     /// Every ignored user setting, ordered by source location.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<Finding>,

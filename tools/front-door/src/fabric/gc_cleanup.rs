@@ -201,9 +201,12 @@ fn delivered_removal_evidence(
         {
             return false;
         }
-        let Ok(Some(destination)) =
-            provenant_run::HostDeliveryContext::destination(request.mode.clone(), &request.branch)
-        else {
+        let forge = provenant_run::forge_for(&request.remote, &request.remote, &[]);
+        let Ok(Some(destination)) = provenant_run::HostDeliveryContext::destination(
+            request.mode.clone(),
+            &request.branch,
+            &forge,
+        ) else {
             return false;
         };
         let remote = destination.remote;
@@ -410,11 +413,15 @@ fn release_settled_cache(
             .map_err(|error| crate::worktrees::Error::Permissions(*error.source))
         },
     ) {
-        use std::io::Write;
-        let _ = writeln!(
-            std::io::stderr().lock(),
-            "warning: private cache release for {}: {error}",
-            writer.worktree.display()
+        provenant_records::warning::warn(
+            provenant_records::warning::Warning::new(
+                provenant_records::warning::PRIVATE_CACHE_RELEASE_FAILED,
+                format!(
+                    "private cache release for {}: {error}",
+                    writer.worktree.display()
+                ),
+            )
+            .subject(writer.worktree.display().to_string()),
         );
     }
     Ok(())
@@ -570,11 +577,15 @@ pub(crate) fn collect_unsettled(
                 cancel,
             );
             if let Err(error) = collected {
-                use std::io::Write;
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: settled lane collection failed for {}: {error}",
-                    worktree.display()
+                provenant_records::warning::warn(
+                    provenant_records::warning::Warning::new(
+                        provenant_records::warning::SETTLED_LANE_COLLECTION_FAILED,
+                        format!(
+                            "settled lane collection failed for {}: {error}",
+                            worktree.display()
+                        ),
+                    )
+                    .subject(worktree.display().to_string()),
                 );
             }
             if cancel.is_cancelled() || should_stop() {

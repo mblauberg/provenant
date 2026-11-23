@@ -39,31 +39,25 @@ use serde_json::Value;
 
 /// The effective writer-dirty setting and the layer that set it, read once at
 /// graph submission. An unreadable host config is advisory: warn and use the
-/// compiled default (`refuse`) rather than refusing to observe the setting.
+/// compiled default (`wip_commit`) rather than refusing to observe the setting.
 fn writer_dirty_setting(
     factory: &super::Factory,
 ) -> provenant_run::writer_dirty::ResolvedWriterDirty {
-    use provenant_config::KnobSource;
-    use std::io::Write;
     let (value, source) = match provenant_cli::config_reads::read_for(&factory.context.roots, "run")
     {
         Ok(config) => match config.knobs.get(provenant_run::writer_dirty::KNOB) {
-            Some(knob) => {
-                let source = match knob.source {
-                    KnobSource::Default => "default",
-                    KnobSource::Profile => "host",
-                    KnobSource::Override => "launch",
-                };
-                (knob.value.as_str().map(str::to_owned), source.to_owned())
-            }
+            Some(knob) => (
+                knob.value.as_str().map(str::to_owned),
+                knob.source.layer.as_str().to_owned(),
+            ),
             None => (None, "default".to_owned()),
         },
         Err(error) => {
             let safe = provenant_records::diagnostic::safe_text(&error.to_string());
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: writer dirty setting unavailable ({safe}); using default refuse"
-            );
+            provenant_records::warning::warn(provenant_records::warning::Warning::new(
+                provenant_records::warning::CONFIG_UNAVAILABLE,
+                format!("writer dirty setting unavailable ({safe}); using default wip_commit"),
+            ));
             (None, "default".to_owned())
         }
     };
@@ -71,8 +65,10 @@ fn writer_dirty_setting(
 }
 
 /// Preflight every existing writer worktree at graph submission, before any
-/// plan node can spend tokens. WIP and continued-edit outcomes are recorded
-/// on the node so they reach the graph events.
+/// plan node can spend tokens. An unheld dirty tree is adopted as a WIP commit
+/// and warned with `WORKTREE_ADOPTED_DIRTY`; a tree another lane holds is
+/// refused (boundary 2). WIP and continued-edit outcomes are recorded on the
+/// node so they reach the graph events.
 fn preflight_writer_worktrees(
     factory: &super::Factory,
     facts: &provenant_confinement::worktrees::RepoFacts,
@@ -81,7 +77,6 @@ fn preflight_writer_worktrees(
 ) -> Result<Vec<(String, String, String)>, FacadeError> {
     use provenant_fabric_runtime::graph::AccessMode;
     use provenant_run::writer_dirty::{self, Preflight};
-    use std::io::Write;
     let resolved = writer_dirty_setting(factory);
     let git =
         provenant_os::git::git_executable().ok_or_else(|| FacadeError::io("git for preflight"))?;
@@ -141,15 +136,15 @@ fn preflight_writer_worktrees(
         }
         canonical_paths.insert(canonical, path.to_owned());
         // Another lane's edits in a shared worktree are that lane's work, not
-        // leftovers: refusing or committing them would act on someone else's
-        // files. Skip the dirty check for this path and say why.
+        // leftovers: committing or moving them would act on someone else's
+        // files. Boundary 2 refuses the whole graph instead of adopting them.
         let attached = writer.attached_lanes().map_err(run_error)?;
         if !attached.is_empty() {
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: worktree {path} is in use by {}; skipping the dirty-worktree preflight for it",
-                attached.join(", ")
-            );
+            refusals.push((
+                node.id.clone(),
+                path.to_owned(),
+                writer_dirty::held_refusal(&attached, path),
+            ));
             outcomes.insert(path.to_owned(), (None, None));
             continue;
         }
@@ -177,7 +172,13 @@ fn preflight_writer_worktrees(
                 outcomes.insert(path.to_owned(), (None, None));
             }
             Preflight::ContinueInPlace(warning) => {
-                let _ = writeln!(std::io::stderr().lock(), "{warning}");
+                provenant_records::warning::warn(
+                    provenant_records::warning::Warning::new(
+                        provenant_records::warning::PREFLIGHT_CONTINUE_IN_PLACE,
+                        warning.clone(),
+                    )
+                    .subject(path.to_owned()),
+                );
                 outcomes.insert(path.to_owned(), (None, Some(warning)));
             }
         }
@@ -201,7 +202,24 @@ fn preflight_writer_worktrees(
         let head = writer
             .commit_wip(&git, &message, &paths)
             .map_err(run_error)?;
-        outcomes.insert(path, (Some(head.to_string()), None));
+        let commit = head.to_string();
+        // An unheld tree is adopted as WIP: say so, naming the commit and the
+        // setting (with its source) that chose this outcome.
+        let warning = format!(
+            "adopted unheld worktree {path} with uncommitted edits as WIP commit {commit}; set {} to refuse or continue_in_place to change this",
+            resolved.setting()
+        );
+        provenant_records::warning::warn(
+            provenant_records::warning::Warning::new(
+                provenant_records::warning::WORKTREE_ADOPTED_DIRTY,
+                warning,
+            )
+            .subject(path.clone()),
+        );
+        // The typed warning is the record; do not set `writer_dirty_warning`
+        // here, because that would mark the launch as tolerating further
+        // edits. The WIP commit leaves a clean tree for the normal launch path.
+        outcomes.insert(path, (Some(commit), None));
     }
     for (alias, original) in aliases {
         if let Some(outcome) = outcomes.get(&original).cloned() {
@@ -289,17 +307,28 @@ pub(crate) fn validate_new_submission(
 
 /// The read-only form of the same checks for `run --explain`. It must not
 /// allocate product state or a writer Git home, so it reads the checkout
-/// branch directly and checks a protected target with project-only ports.
+/// branch directly and checks a protected target with the command's one
+/// resolved port table.
 pub(crate) fn validate_explain_submission(
     factory: &super::Factory,
     document: &provenant_fabric_runtime::graph::GraphDocument,
     expanded: &provenant_fabric_runtime::graph::GraphDocument,
 ) -> Result<(), FacadeError> {
     validate_static_submission(factory, document)?;
+    // One context for this read-only validation, resolved when a target check
+    // first needs it and shared by the rest. Use the command's one resolved
+    // port table so a host-layer declaration is visible here just as it is to
+    // launch; a project-only table would make explain refuse a graph launch
+    // admits.
+    // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    let ports = &factory.context.port_table;
+    let forge =
+        provenant_run::ForgeOnce::new(factory.context.roots.state.as_path(), &factory.cwd, ports);
     if let Some(branch) = &document.integration_branch {
         provenant_run::HostDeliveryContext::validate_integration_target_read_only(
             &factory.cwd,
             branch,
+            forge.get().map_err(run_error)?,
         )
         .map_err(run_error)?;
     }
@@ -311,6 +340,7 @@ pub(crate) fn validate_explain_submission(
             provenant_run::HostDeliveryContext::validate_integration_target_read_only(
                 &factory.cwd,
                 target,
+                forge.get().map_err(run_error)?,
             )
             .map_err(run_error)?;
         }
@@ -325,11 +355,15 @@ pub(crate) fn validate_explain_submission(
             provenant_run::HostDeliveryContext::validate_integration_target_read_only(
                 &factory.cwd,
                 &read_only_worktree_branch(factory, node, path)?,
+                forge.get().map_err(run_error)?,
             )
             .map_err(run_error)?;
         }
         if let Some(provenant_records::run::DeliveryMode::Integrate(target)) = &node.delivery
-            && !target.starts_with("origin/")
+            && !target.starts_with(&format!(
+                "{}/",
+                forge.get().map_err(run_error)?.remote.value
+            ))
             && let Some(path) = node.worktree.as_deref()
             && read_only_worktree_branch(factory, node, path)? == *target
         {
@@ -413,6 +447,15 @@ pub(crate) fn validate_delivery_targets(
     admitted: bool,
 ) -> Result<(), FacadeError> {
     use provenant_fabric_runtime::graph::GraphNode;
+    // One context for all delivery-target checks in this validation.
+    // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    let ports = provenant_config::PortTable::read_for(
+        Some(factory.cwd.as_path()),
+        factory.context.roots.state.as_path(),
+    )
+    .map_err(|error| FacadeError::io(error.to_string()))?;
+    let forge =
+        provenant_run::ForgeOnce::new(factory.context.roots.state.as_path(), &factory.cwd, &ports);
     let writer_branch = |node: &GraphNode, path: &str| -> Result<String, FacadeError> {
         if let Some(new) = node
             .attempt
@@ -447,8 +490,12 @@ pub(crate) fn validate_delivery_targets(
             continue;
         }
         if let Some(provenant_records::run::DeliveryMode::Integrate(target)) = &node.delivery {
-            provenant_run::HostDeliveryContext::validate_integration_target(&factory.cwd, target)
-                .map_err(run_error)?;
+            provenant_run::HostDeliveryContext::validate_integration_target(
+                &factory.cwd,
+                target,
+                forge.get().map_err(run_error)?,
+            )
+            .map_err(run_error)?;
         }
         // A planned writer cannot be on either branch until the host creates
         // its checkout; provisioning verifies the actual branch and head.
@@ -463,6 +510,7 @@ pub(crate) fn validate_delivery_targets(
             provenant_run::HostDeliveryContext::check_delivery_branch(
                 &factory.cwd,
                 &writer_branch(node, path)?,
+                forge.get().map_err(run_error)?,
             )
             .map_err(|_| FacadeError::ConfinementRefused { resource: None })?;
         }
@@ -470,7 +518,10 @@ pub(crate) fn validate_delivery_targets(
         // advanced by compare-and-swap, so refuse the graph before any attempt
         // rather than at delivery.
         if let Some(provenant_records::run::DeliveryMode::Integrate(target)) = &node.delivery
-            && !target.starts_with("origin/")
+            && !target.starts_with(&format!(
+                "{}/",
+                forge.get().map_err(run_error)?.remote.value
+            ))
             && let Some(path) = node.worktree.as_deref()
             && writer_branch(node, path)? == *target
         {
@@ -1030,6 +1081,16 @@ impl Factory {
                 )
             })?;
         let resume = matches!(&input, GraphInput::Resume { .. });
+        // The one context for this graph launch, resolved by the owner when a
+        // delivery check first needs it.
+        // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+        let ports = provenant_config::PortTable::read_for(
+            Some(self.cwd.as_path()),
+            self.context.roots.state.as_path(),
+        )
+        .map_err(|error| FacadeError::io(error.to_string()))?;
+        let forge =
+            provenant_run::ForgeOnce::new(self.context.roots.state.as_path(), &self.cwd, &ports);
         let mut scratch_source = None;
         let mut submission_refusals = Vec::new();
         let document = match &input {
@@ -1065,7 +1126,9 @@ impl Factory {
                 };
                 if let Some(branch) = &document.integration_branch {
                     provenant_run::HostDeliveryContext::validate_integration_target(
-                        &self.cwd, branch,
+                        &self.cwd,
+                        branch,
+                        forge.get().map_err(run_error)?,
                     )
                     .map_err(run_error)?;
                 }
@@ -1474,8 +1537,9 @@ impl Factory {
                     .and_then(|checkpoint| checkpoint.bases)
                     .and_then(|bases| bases.integration)
             } else if let Some(branch) = &document.integration_branch {
-                let reference = match branch.strip_prefix("origin/") {
-                    Some(branch) => format!("refs/remotes/origin/{branch}"),
+                let remote = &forge.get().map_err(run_error)?.remote.value;
+                let reference = match branch.strip_prefix(&format!("{remote}/")) {
+                    Some(branch) => format!("refs/remotes/{remote}/{branch}"),
                     None => format!("refs/heads/{branch}"),
                 };
                 let git = provenant_os::git::git_executable()
@@ -1484,7 +1548,7 @@ impl Factory {
                 // measured from, rather than refusing the graph.
                 // The shared ref ledger records whether this graph made the
                 // branch or found it, so cleanup never claims a human's ref.
-                if !branch.starts_with("origin/") {
+                if !branch.starts_with(&format!("{remote}/")) {
                     let start = document
                         .review_base
                         .as_deref()
@@ -1763,7 +1827,7 @@ impl Factory {
         })
     }
 
-    fn graph_checkout(&self) -> Result<PathBuf, provenant_os::fs::FsError> {
+    pub(crate) fn graph_checkout(&self) -> Result<PathBuf, provenant_os::fs::FsError> {
         provenant_os::git::repository_path(&self.cwd, provenant_os::git::RepositoryPath::Toplevel)
             .map_err(|source| provenant_os::fs::FsError::Io {
                 operation: "locate graph checkout",

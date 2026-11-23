@@ -14,7 +14,10 @@ use provenant_core::{Clock, Roots, WallTime};
 use provenant_os::clock::SystemClock;
 use provenant_os::fs::FsError;
 use provenant_providers::{AvailabilityRecord, REGISTRY};
-use provenant_records::{CommandError, CommandResult, Outcome, RouteReadiness};
+use provenant_records::{
+    CommandError, CommandResult, Outcome, RouteReadiness,
+    warning::{CONFIG_KEY_IGNORED, Warning, warn},
+};
 use provenant_routing::{
     AccessContext, BoundedModels, Catalogue, Fallback, ModelId, PacingPolicy, QuotaObservation,
     RouteChoice, RouteName, RoutePoolMember, RoutingContext, RoutingError,
@@ -59,7 +62,7 @@ pub fn provider_check_routes(
     .map_err(|error| error.to_string())
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Route {
     /// Show the catalogue, pools, configured weights and pacing policy.
     List(RouteListRequest),
@@ -79,12 +82,12 @@ pub enum Route {
     /// Manage persistent exact-model exclusions from pools.
     Exclude(RouteExclude),
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct RouteExclude {
     #[command(subcommand)]
     pub command: RouteExcludeCommand,
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum RouteExcludeCommand {
     /// Exclude a model until removed or expired.
     Add(ExcludeAdd),
@@ -93,7 +96,7 @@ pub enum RouteExcludeCommand {
     /// List exact-model exclusions.
     List,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct ExcludeAdd {
     /// Exact model in ADAPTER/ID form.
     pub model: Model,
@@ -101,17 +104,17 @@ pub struct ExcludeAdd {
     #[arg(long)]
     pub until: Option<String>,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct ExcludeRemove {
     /// Exact model in ADAPTER/ID form.
     pub model: Model,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct RouteOverride {
     #[command(subcommand)]
     pub command: RouteOverrideCommand,
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum RouteOverrideCommand {
     /// Record a pacing override for one scope and echo the recorded rule.
     Set(OverrideSet),
@@ -120,13 +123,13 @@ pub enum RouteOverrideCommand {
     /// Remove pacing overrides: one scope's, or every one without a selector.
     Clear(OverrideClear),
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct OverrideList {
     /// Include expired overrides.
     #[arg(long)]
     pub all: bool,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 #[command(group(clap::ArgGroup::new("scope").args(["account", "provider", "all"])))]
 pub struct OverrideSet {
     /// Apply the override to this account (label, entry or adapter/key).
@@ -163,7 +166,7 @@ pub struct OverrideSet {
     #[arg(long)]
     pub tz: Option<String>,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct OverrideClear {
     /// Clear only this account's override.
     #[arg(long, conflicts_with = "provider")]
@@ -177,7 +180,7 @@ pub struct OverrideClear {
     #[arg(long, catalog_requires = "risk_tier", conflicts_with_all = ["account", "provider"])]
     pub task_kind: Option<String>,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct RouteListRequest {
     /// List catalogued model/effort pairs accepted by the resolver (no live probe).
     #[arg(long)]
@@ -189,7 +192,7 @@ pub struct RouteListRequest {
     #[arg(long)]
     pub pool: Option<String>,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct RouteSet {
     /// Pool name to update or create.
     pub pool: String,
@@ -205,14 +208,14 @@ pub struct RouteSet {
     #[arg(long, value_delimiter = ',', action = clap::ArgAction::Set)]
     pub efforts: Vec<String>,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct RouteRemove {
     /// Pool name to update.
     pub pool: String,
     /// Exact catalogue model to remove.
     pub model: Model,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct RouteReset {
     /// Bundled pool whose user override should be cleared.
     pub pool: String,
@@ -234,14 +237,14 @@ impl From<PacingChoice> for PacingPolicy {
         }
     }
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct RoutePacing {
     /// Registered provider ID.
     pub provider: String,
     /// Default pacing policy for the provider.
     pub policy: PacingChoice,
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct RouteResolve {
     /// Preview a route that needs write access.
     #[arg(long)]
@@ -456,8 +459,12 @@ pub(crate) fn task_exclusion_rules(
                 Err(EdgeError::Routing(RoutingError::UnknownExclusion { .. }))
                     if source == provenant_routing::ExclusionSource::Graph =>
                 {
-                    eprintln!(
-                        "warning: dropping unrecognised carried graph exclusion {selector:?}"
+                    warn(
+                        Warning::new(
+                            CONFIG_KEY_IGNORED,
+                            "dropping unrecognised carried graph exclusion",
+                        )
+                        .subject(format!("{selector:?}")),
                     );
                 }
                 Err(error) => return Err(error),
@@ -546,29 +553,32 @@ fn match_name(
     }
     Err(close_matches(&lower, routes, models))
 }
-/// Up to eight routes and models that share the name as a substring or a
-/// prefix, or are one or two edits away.
+/// The routes and models close to `name`, ranked by the shared ranker.
+///
+/// A model is offered under both its id (what an operator types) and its full
+/// `adapter/id` ref (what the catalogue lists), so a typo in the id still finds
+/// the model. The route catalogue keeps its historical eight-candidate cap.
 fn close_matches(lower: &str, routes: &BTreeSet<String>, models: &[String]) -> Vec<String> {
-    let near = |candidate: &str| {
-        let candidate = candidate.to_ascii_lowercase();
-        let id = candidate.split_once('/').map_or(&*candidate, |(_, id)| id);
-        let prefix = lower
-            .chars()
-            .zip(id.chars())
-            .take_while(|(a, b)| a == b)
-            .count();
-        id.contains(lower)
-            || lower.contains(id)
-            || prefix >= 3
-            || crate::edit_distance(lower, id) <= 2
-            || crate::edit_distance(lower, &candidate) <= 2
-    };
-    routes
+    let by_id: Vec<(&str, &str)> = models
         .iter()
-        .chain(models)
-        .filter(|candidate| near(candidate))
-        .take(8)
-        .cloned()
+        .map(|model| {
+            let id = model.rsplit_once('/').map_or(model.as_str(), |(_, id)| id);
+            (id, model.as_str())
+        })
+        .collect();
+    let mut universe: Vec<&str> = routes.iter().map(String::as_str).collect();
+    universe.extend(by_id.iter().map(|(id, _)| *id));
+    universe.extend(models.iter().map(String::as_str));
+    let mut seen = std::collections::BTreeSet::new();
+    provenant_core::close_matches_with_cap(lower, universe, 8)
+        .into_iter()
+        .filter_map(|candidate| {
+            let full = by_id
+                .iter()
+                .find(|(id, _)| *id == candidate)
+                .map_or(candidate, |(_, full)| *full);
+            seen.insert(full).then(|| full.to_owned())
+        })
         .collect()
 }
 fn close(matches: &[String]) -> String {
@@ -609,8 +619,13 @@ fn resolve_request(
         match match_name(name, &routes, &models).map_err(|close| unresolved(name, close))? {
             Named::Route(route) => request.route = Some(route),
             Named::Model(model) => {
-                request.model =
-                    Some(Model::from_str(&model).map_err(|_| unresolved(name, Vec::new()))?)
+                let parsed = Model::from_str(&model).map_err(|_| {
+                    unresolved(
+                        &model,
+                        close_matches(&model.to_ascii_lowercase(), &routes, &models),
+                    )
+                })?;
+                request.model = Some(parsed)
             }
         }
     } else if let Some(route) = request.route.as_deref()
@@ -954,7 +969,7 @@ fn override_value(row: &provenant_routing::PacingOverride) -> toml_edit::Value {
 }
 #[derive(Serialize)]
 pub struct RoutePreview {
-    pub allow_unknown_partial_headroom: provenant_config::KnobValue,
+    pub allow_unknown_partial_headroom: provenant_records::Sourced<serde_json::Value>,
     /// Persisted exclusion rows that were repaired or ignored on reading.
     pub exclusion_notes: Vec<String>,
     pub model_policy: provenant_routing::EffectiveModelPolicy,
@@ -970,9 +985,6 @@ pub struct RoutePreview {
     /// Accounts withheld because their recorded offer list lacks the model.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub offered_exclusions: Vec<String>,
-    /// Pinned accounts attempted despite a recorded offer list lacking the model.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub offered_warnings: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub login_diagnostic: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1000,7 +1012,44 @@ mod route_tests {
         ResolvedRoute, RouteAlternatives, RouteConfidentiality, RouteEligibility, RouteReadiness,
         RouteSelectionCandidate, RouteSelectionReceipt,
     };
+    use std::collections::BTreeSet;
     use std::error::Error;
+
+    #[test]
+    // Spec: docs/specs/cli.md#every-name-refusal-lists-close-matches
+    fn close_matches_ranks_a_one_edit_typo_first() {
+        let routes = BTreeSet::from(["utility".to_owned()]);
+        let models = vec!["opencode/opencode/hy4-flash-free".to_owned()];
+        let matches = super::close_matches("utilty", &routes, &models);
+        assert_eq!(matches.first().map(String::as_str), Some("utility"));
+    }
+
+    #[test]
+    // Spec: docs/specs/cli.md#every-name-refusal-lists-close-matches
+    fn close_matches_ranks_an_id_typo_first() {
+        let routes = BTreeSet::new();
+        let models = vec![
+            "opencode/opencode/hy4-model-00".to_owned(),
+            "opencode/opencode/hy4-flash-free".to_owned(),
+        ];
+        let matches = super::close_matches("hy4-flsh-free", &routes, &models);
+        assert_eq!(
+            matches.first().map(String::as_str),
+            Some("opencode/opencode/hy4-flash-free"),
+            "{matches:?}"
+        );
+    }
+
+    #[test]
+    // Spec: docs/specs/cli.md#every-name-refusal-lists-close-matches
+    fn close_matches_keeps_the_eight_candidate_cap() {
+        let routes = BTreeSet::new();
+        let models: Vec<String> = (0..12)
+            .map(|index| format!("opencode/opencode/hy4-model-{index:02}"))
+            .collect();
+        let matches = super::close_matches("hy4", &routes, &models);
+        assert_eq!(matches.len(), 8, "{matches:?}");
+    }
 
     include!("route/tests_1.rs");
     include!("route/tests_2.rs");

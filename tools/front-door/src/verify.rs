@@ -3,10 +3,11 @@ use crate::{emit, fail, roots};
 use provenant_cli::Globals;
 use provenant_config::{
     CommandExitCodes, ExitDisposition, PortCommand, PortCommandDisposition, PortCommandExecution,
-    PortSource, PortTable,
+    PortTable,
 };
 use provenant_core::CancelToken;
 use provenant_os::exec::{CapturedStream, ExecOutcome, Termination};
+use provenant_records::Layer;
 use provenant_records::{CanonicalV1, CommandError, CommandResult, Outcome};
 use provenant_run::build::{self, Job, JobKind, Origin, Output, Priority, SnapshotSource, Step};
 use serde::Serialize;
@@ -26,7 +27,7 @@ use provenant_core::consumer_env::{
 struct Report {
     tier: String,
     backend: &'static str,
-    source: PortSource,
+    source: Layer,
     /// Set when verification was skipped rather than run; names the reason.
     skipped: Option<String>,
     disposition: Option<PortCommandDisposition>,
@@ -77,7 +78,13 @@ pub fn run(tier: Option<&str>, commit: Option<&str>, affected: bool, globals: &G
     };
     let full_after = ports.verify_affected_full_after_duration();
     for warning in &full_after.warnings {
-        let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+        provenant_records::warning::warn(
+            provenant_records::warning::Warning::new(
+                provenant_records::warning::PORT_DURATION_INVALID,
+                warning.clone(),
+            )
+            .once_per_change(),
+        );
     }
     let declaration = ports.verify.clone();
     let tier = tier.unwrap_or(&declaration.default_tier).to_owned();
@@ -307,10 +314,10 @@ pub fn run(tier: Option<&str>, commit: Option<&str>, affected: bool, globals: &G
                 "the effective verify port is disabled (source: {:?})",
                 declaration.source
             );
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: [VERIFY_UNAVAILABLE] {reason}; skipping verification"
-            );
+            provenant_records::warning::warn(provenant_records::warning::Warning::new(
+                provenant_records::warning::VERIFY_UNAVAILABLE,
+                format!("[VERIFY_UNAVAILABLE] {reason}; skipping verification"),
+            ));
             return render(
                 Report {
                     tier: tier.clone(),
@@ -402,14 +409,25 @@ pub fn run(tier: Option<&str>, commit: Option<&str>, affected: bool, globals: &G
                 .unwrap_or("HEAD");
             match provenant_select::select_with_object_dir(&site.root.join(workspace), &base, head, &policy, &state, &project_key, SystemTime::now(), if site.slot.is_none() { selection_objects.as_deref() } else { None }) {
                 Ok(selection) => extra.push((OsString::from(VERIFY_SELECTION), OsString::from(serde_json::json!({"packages": selection.packages, "full": selection.full, "reason": selection.reason.to_string()}).to_string()))),
-                Err(error) => { let _ = writeln!(std::io::stderr().lock(), "warning: affected selection unavailable: {error}"); },
+                Err(error) => {
+                    provenant_records::warning::warn(
+                        provenant_records::warning::Warning::new(
+                            provenant_records::warning::AFFECTED_SELECTION_UNAVAILABLE,
+                            format!("affected selection unavailable: {error}"),
+                        )
+                        .once_per_change(),
+                    );
+                },
             }
         }
         Ok(extra)
     });
     let priority = context.port.priority_for("tier");
     for warning in &priority.warnings {
-        let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+        provenant_records::warning::warn(provenant_records::warning::Warning::new(
+            provenant_records::warning::BUILD_PRIORITY_ADVISORY,
+            warning.clone(),
+        ));
     }
     let priority = match priority.value {
         provenant_config::BuildPriority::Interactive => Priority::Interactive,
@@ -710,10 +728,15 @@ impl Drop for DetachedCheckout {
             .arg(&self.path)
             .output();
         if !matches!(result, Ok(output) if output.status.success()) {
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: failed to remove temporary checkout {}",
-                self.path.display()
+            provenant_records::warning::warn(
+                provenant_records::warning::Warning::new(
+                    provenant_records::warning::TEMP_CHECKOUT_RETAINED,
+                    format!(
+                        "failed to remove temporary checkout {}",
+                        self.path.display()
+                    ),
+                )
+                .subject(self.path.display().to_string()),
             );
         }
     }
@@ -732,7 +755,7 @@ fn substitute_tier(command: &PortCommand, tier: &str) -> PortCommand {
 fn report(
     tier: &str,
     backend: &'static str,
-    source: PortSource,
+    source: Layer,
     execution: &PortCommandExecution,
     build_outcome: Option<&build::JobOutcome>,
 ) -> Report {
@@ -788,6 +811,8 @@ fn failure_message(disposition: PortCommandDisposition) -> Option<(&'static str,
     Some((code, message.into()))
 }
 
+// In human mode the command's captured streams are forwarded verbatim to the terminal.
+#[allow(clippy::disallowed_methods)]
 fn render(
     report: Report,
     status: Outcome,

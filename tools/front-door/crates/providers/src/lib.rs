@@ -36,6 +36,8 @@ pub use launch::{
     PreparedToolRequirement, Session, SessionStateLocation, SetupStep, Stdin,
 };
 pub use stream::*;
+pub mod usage;
+pub use usage::{UsageAccumulator, UsageReport, UsageSemantics};
 
 #[cfg(feature = "fixture")]
 pub fn bare_spec(path: &str) -> LaunchSpec {

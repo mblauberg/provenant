@@ -44,6 +44,21 @@ A value that can normalise two ways is rejected at the wire boundary.
 - Why: two spellings let one record alias another.
 - Owner: `crates/core/src/`
 
+### Host-project state has one key
+
+Host-project state lives only in the ProjectId binding directory
+`<state>/projects/<ProjectId>`. The port layer, config overlays, admission
+classes and GitHub policy resolve that directory through
+`project_binding::host_project_dir` or `project_binding_dir`; the obsolete
+64-hex `project_key` directory is never read. Upgrade moves settings filed
+there with the `host-project-dirs` install migration: it moves a directory only
+when the binding directory is absent, and a conflict warns with both paths and
+leaves both in place.
+- Why: two directory keys split one project's settings and silently hide the
+  layer a user believes they configured.
+- Owner: `crates/config/src/project_binding.rs`, `crates/config/src/overlays.rs`,
+  `crates/config/src/admission.rs`, `src/install/migrations.rs`
+
 ### Wall time has one stated bound
 
 `WallTime::MAX` is the single greatest instant the wire accepts. A consumer that
@@ -168,6 +183,76 @@ from the event's own recorded cause, and disclose remote paths only through an
 approved anchor.
 - Why: errors need visible remedies without expanding authority.
 - Owner: `crates/config/src/`
+
+### Every setting reports its layer
+
+Every setting value travels with the layer it came from and, when it has one,
+the exact origin. One vocabulary names the layers for every family, so a warning
+or receipt never invents a second spelling. A family declares its precedence
+once, lowest first; the merge takes the candidate from the highest listed layer,
+keeps the last given on a tie, and returns every other listed candidate as
+shadowed. A candidate from a layer the family does not list is ignored and
+reported, so the caller can warn with its source. The merge and every
+explanation read that one declaration, and a limit receipt keeps its bytes
+because the overlapping layer names are the same spelling.
+- Why: one vocabulary lets every explanation name a source the next reader can
+  act on, and a family cannot rank the same setting two ways.
+- Owner: `crates/records/src/provenance.rs`, each family's precedence constant
+
+The full set of families, each declaring its precedence once, lowest first,
+beside the type it owns, is:
+
+- Limits use `LIMIT_PRECEDENCE`: default, host, project, tier, template, launch.
+  The shared layer spellings match the old `LimitSource` bytes, so digest-sealed
+  run requests keep their exact wire form and need no rewrite.
+- Ports use `PORT_PRECEDENCE`: default (formerly `builtin`), detected, host,
+  host-project, project. Stored receipts and port tables rewrite `builtin` to
+  `default` once at install.
+- Pressure thresholds use `PRESSURE_PRECEDENCE`: default (formerly
+  `shipped_default`), host (formerly `configuration`).
+- Admission classes use `ADMISSION_PRECEDENCE`: default, host, host-project,
+  project. This is distinct from pressure thresholds; admission class config
+  resolves with its own declaration, not `PRESSURE_PRECEDENCE`.
+- Lane access uses `LANE_ACCESS_PRECEDENCE`: default, host, project, tier,
+  template, route (formerly `route_policy`), launch. The resolved route policy
+  is a `route` candidate and outranks the template or tier inputs that selected
+  it.
+- Sandbox mode uses `SANDBOX_PRECEDENCE`: default, host, route, parent. A knob
+  records its actual layer; a platform or restriction is a `constraint` beside
+  the layer, not a source of the value.
+- Knobs use `KNOB_PRECEDENCE`: default, profile, host. A launch flag is recorded
+  separately in the sealed profile and is not a configuration layer.
+- Config overlays use `OVERLAY_PRECEDENCE`: default, host, project. Host-project
+  state reports as the host layer to owners.
+- Editable schema fields use `SCHEMA_PRECEDENCE`: default, profile, host.
+- Land policies use `LAND_PRECEDENCE`: default, host, project.
+- Graph templates use `TEMPLATE_PRECEDENCE`: default, host, project, launch.
+- Pool weights use `WEIGHT_PRECEDENCE`: default, host, project.
+- Observation retry uses `RETRY_PRECEDENCE`: default, profile, host, project,
+  launch. The `ci.retry.*` values are one family shared by every CI reader.
+- Admin publication grants use `ADMIN_PUBLICATION_PRECEDENCE`: default, host. A
+  grant from another layer is ignored and warned with its source.
+
+Every production resolver builds its candidates and merges them with its own
+const; the const is the single declaration of order, and a candidate from a
+layer the family does not list is ignored and warned with its source.
+
+The run store's base-13-to-14 migration (`crates/run/src/migration_13_14.sql`)
+is the one rewrite for these renames. On a writable open it rewrites each stored
+attempt record: `route_policy` becomes `route`, a sandbox `restriction` or
+`platform` becomes a `constraint` beside the `host` layer and a `knob` becomes
+`host`, a resource fact's `configuration` becomes `host` and `shipped_default`
+becomes `default`, and a port binding's `builtin` becomes `default`. The
+`lane_ports` and `pacing_reserve` facts are exceptions: their origins are a
+`PortSettingSource` (`configuration`, `shipped_default`, `recorded_plan`) and a
+`PacingSettingSource` (`configuration`, `shipped_default`, `unresolved`), not
+`Layer`s, so those names stay byte-identical. The same migration moves v2.8.2
+flat usage buckets (`uncached_input`,
+`output_excluding_reasoning`, `cache_read`, `cache_write`, `cache_write_1h`,
+`reasoning`, including a retained session total) under `tokens` and maps the old
+free-form source to the typed `stream` source, preserving every stated number.
+A malformed row is skipped so it fails only its own decode; a row already in the
+new shape is left byte-identical. No decoder accepts a retired spelling.
 
 ### One sourced port table
 
@@ -327,6 +412,22 @@ A partial install lists applied and remaining actions, and rerunning `install`
 recovers it, even with no receipt. There are no rollback journals.
 - Why: one idempotent path is easier to trust than a rollback engine.
 - Owner: `crates/config/src/managed.rs`
+
+### Format changes migrate once at install
+
+An install-time migration step owns a change to non-SQLite state: files,
+ledgers, receipts and metadata that no SQLite store owns. SQLite stores migrate
+themselves on writable open and are not wrapped here. Steps run in declaration order after
+the live-attempt advisory and before any release is swapped in, each only when
+the install receipt does not already record its id. An id is recorded only
+after that step succeeds; a failed step warns `MIGRATION_STEP_FAILED` with the
+state path, leaves the receipt unchanged, and the install proceeds. Every step
+is idempotent, so a rerun after a partial failure finishes the job, and a step
+is deleted in the release after the one that ships it. A first install has no
+state to migrate; the receipt it publishes records any later step's id.
+- Why: state a store does not own still changes shape, and one recorded
+  crossing keeps retries safe without a permanent decoder.
+- Owner: `crates/records/src/migrate.rs`, `src/install/migrations.rs`
 
 ## Typed host metadata in format 2
 

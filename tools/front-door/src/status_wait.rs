@@ -155,17 +155,17 @@ fn settle_states(sources: &[Source], latest: &[Option<Reading>], done: bool) -> 
     }
 }
 
-/// The one next command, paired with the states in the summary's `next` line.
-fn final_line(
+/// The one next command, paired with the settle states as its `why`. The edge
+/// renders this typed step once for human output; JSON carries the same argv.
+fn final_step(
     sources: &[Source],
     latest: &[Option<Reading>],
     done: bool,
     superseding: &[String],
-) -> String {
-    format!(
-        "next: {}; {}\n",
+) -> provenant_records::command_result::NextStep {
+    provenant_records::command_result::NextStep::from_command(
+        &next_command(sources, latest, superseding),
         settle_states(sources, latest, done),
-        next_command(sources, latest, superseding)
     )
 }
 
@@ -442,7 +442,9 @@ fn read(
                 repository,
                 *number,
                 &forge_request(deadline, cancel, pr_read_timeout),
-                crate::pr::observer::POLL,
+                // Spec: docs/specs/cli.md#ci-observations — the PR path reads
+                // through the one observer and its one sourced retry family.
+                crate::pr::observer::retry(edge.roots).poll.value,
             ) {
                 Ok(line) => {
                     let mut line = gate_line(line, watch_head.as_deref());
@@ -1265,7 +1267,6 @@ fn emit_child_wait(
     } else {
         summary_lines.join(", ")
     };
-    human.push_str(&format!("next: {states}; provenant status\n"));
     if let Some(error) = write_error {
         return crate::fail(
             "wait",
@@ -1277,17 +1278,17 @@ fn emit_child_wait(
         );
     }
     let outcome = child_wait_outcome(children, mode, settled_order);
-    let summary = provenant_cli::Summary::new(
-        mode_heading(mode).trim_end().to_owned(),
-        summary_lines,
-        Some(format!("{states}; next: provenant status")),
-    );
+    let summary =
+        provenant_cli::Summary::new(mode_heading(mode).trim_end().to_owned(), summary_lines);
+    let step =
+        provenant_records::command_result::NextStep::from_command("provenant status", states);
     crate::emit_summarised(
         &provenant_records::CommandResult::new(
             "wait",
             outcome,
             terminal_data(mode, rows, false, Some(&observation)),
-        ),
+        )
+        .with_next(vec![step]),
         globals,
         &human,
         true,
@@ -1668,10 +1669,16 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                 .ok()?;
                 let local = local_branch_tip(edge.cwd, &reported.branch)?;
                 (local != reported.sha).then(|| {
-                    crate::event_delivery::warn(&format!(
-                        "#{number}: local tip {local} differs from GitHub head {}; waiting for the local tip",
-                        reported.sha
-                    ));
+                    provenant_records::warning::warn(
+                        provenant_records::warning::Warning::new(
+                            provenant_records::warning::BRANCH_BEHIND_BASE,
+                            format!(
+                                "#{number}: local tip {local} differs from GitHub head {}; waiting for the local tip",
+                                reported.sha
+                            ),
+                        )
+                        .subject(reported.branch.clone()),
+                    );
                     local
                 })
             });
@@ -2002,8 +2009,11 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                 // Each subscription owns its replay cursor. No target can
                 // consume another target's events from a shared cursor.
                 let setup =
-                    (|| -> Result<crate::event_delivery::Journal, Box<dyn std::error::Error>> {
-                        let journal = crate::event_delivery::Journal::open(
+                    (|| -> Result<crate::pr::observer::journal::PrJournal, Box<dyn std::error::Error>> {
+                        // The observer module owns both transports: this journal
+                        // supplies a current PR observation when one exists, and
+                        // `read` falls back to the forge through the observer.
+                        let journal = crate::pr::observer::journal::PrJournal::open(
                             edge.roots.state.as_path(),
                             edge.cwd,
                         )?;
@@ -2013,15 +2023,16 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                             ..
                         } = source
                         {
-                            journal.register_pr(repository, *number, None)?;
+                            journal.register(repository, *number, None)?;
                         }
                         Ok(journal)
                     })();
                 let mut event_reader = match setup {
                     Ok(journal) => Some(journal),
                     Err(error) => {
-                        crate::event_delivery::warn(&format!(
-                            "PR journal unavailable; reconciling after gaps: {error}"
+                        provenant_records::warning::warn(provenant_records::warning::Warning::new(
+                            provenant_records::warning::PR_JOURNAL_UNAVAILABLE,
+                            format!("PR journal unavailable; reconciling after gaps: {error}"),
                         ));
                         None
                     }
@@ -2065,7 +2076,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                                 repository: Ok(repository),
                                 ..
                             },
-                        ) => match journal.next_pr(
+                        ) => match journal.next(
                             repository,
                             *number,
                             Duration::from_secs(60)
@@ -2282,19 +2293,14 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
             }
         }
     }
-    human.push_str(&final_line(&sources, &latest, done, &superseding));
-    // Compact output keeps an owner summary, not a head-only truncation, so
-    // the settle states and the next command stay on its last line.
+    let step = final_step(&sources, &latest, done, &superseding);
+    // Compact output keeps an owner summary. The settle states and the next
+    // command now travel as one typed step on the envelope, not as two strings.
     let mut summary = provenant_cli::Summary::new(
         mode_heading(mode).trim_end().to_owned(),
         rows.iter()
             .map(|row| row["line"].as_str().unwrap_or("").to_owned())
             .collect(),
-        Some(format!(
-            "{}; {}",
-            settle_states(&sources, &latest, done),
-            next_command(&sources, &latest, &superseding)
-        )),
     );
     // Completion reports must retain every failing check and its link in compact output.
     for (source, reading) in sources.iter().zip(&latest) {
@@ -2316,7 +2322,8 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                 !done,
                 (!graph_indices.is_empty()).then_some(observation.as_str()),
             ),
-        ),
+        )
+        .with_next(vec![step]),
         globals,
         &human,
         true,
@@ -2825,7 +2832,7 @@ mod tests {
             Some(reading(Pending)),
         ];
         assert_eq!(
-            final_line(&sources, &mixed, false, &[]),
+            final_human(&sources, &mixed, false, &[]),
             "next: fixed settled ok, broken failed, input needs input, slow still running at timeout; provenant wait slow\n"
         );
         let settled = vec![
@@ -2835,18 +2842,32 @@ mod tests {
             Some(reading(Succeeded)),
         ];
         assert_eq!(
-            final_line(&sources, &settled, true, &[]),
+            final_human(&sources, &settled, true, &[]),
             "next: fixed settled ok, broken failed, input needs input, slow settled ok; provenant status fixed broken input slow\n"
         );
         assert_eq!(
-            final_line(&[], &[], true, &[]),
+            final_human(&[], &[], true, &[]),
             "next: nothing to wait for; provenant status\n"
         );
         // A superseded target keeps its states; the next command names the newer handle.
         assert_eq!(
-            final_line(&sources, &settled, true, &["slow-2".to_owned()]),
+            final_human(&sources, &settled, true, &["slow-2".to_owned()]),
             "next: fixed settled ok, broken failed, input needs input, slow settled ok; provenant wait slow-2\n"
         );
+    }
+
+    /// The human last line is the edge rendering the typed step; this pins the
+    /// two views to the same `why` and `argv`.
+    fn final_human(
+        sources: &[Source],
+        latest: &[Option<Reading>],
+        done: bool,
+        superseding: &[String],
+    ) -> String {
+        provenant_cli::next_steps_text(
+            &[final_step(sources, latest, done, superseding)],
+            &provenant_workflow::session::CommandPrefix::default(),
+        )
     }
 
     fn reading(settle: Settle) -> Reading {

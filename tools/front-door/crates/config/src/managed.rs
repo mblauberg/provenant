@@ -1416,6 +1416,13 @@ pub fn plan_install(
         harnesses,
         harness_targets: resolved_targets.into_values().collect(),
         entries,
+        // Install does not invent migration ids; the runner records them on the
+        // receipt and a rebuild carries them forward.
+        migrations: snapshots
+            .receipt
+            .as_ref()
+            .map(|receipt| receipt.migrations.clone())
+            .unwrap_or_default(),
     };
     let receipt_path = targets.roots.state.as_path().join("install/receipt.json");
     let bytes = provenant_records::encode(&receipt)?;

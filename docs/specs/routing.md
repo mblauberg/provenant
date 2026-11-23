@@ -373,6 +373,19 @@ scoped to the declared free pool.
 
 - Why: misattribution can spend or expose the wrong account.
 
+### Account references
+
+Every command resolves an account reference through one
+`providers::accounts::resolve` catalogue: a registry entry id, a label, an exact
+account key, a harness-qualified `adapter/key` reference and a harness local
+login all resolve to the same typed identity (adapter, key, entry id, label).
+Each calling context declares the forms it accepts and projects that identity to
+its own canonical output; no caller re-matches the reference. A reference that
+matches more than one account is ambiguous in every context, with the matching
+labels named as the repair. A miss lists close matching labels only — never
+another account's directory, key or credential value; the setting path the
+operator wrote is echoed.
+
 ## Launch route and role tiers
 
 A role-specific route applies to matching graph nodes; other nodes keep their

@@ -8,14 +8,16 @@ use provenant_confinement::{
         WorktreeRemove,
     },
 };
-use provenant_core::{CancelToken, Clock, DurationMicros, GitOid, ProjectId, WaitBudget};
+use provenant_core::{
+    CancelToken, Clock, DurationMicros, GitOid, NameRefusal, ProjectId, WaitBudget, WallTime,
+};
 use provenant_os::{
     clock::SystemClock,
     exec::SystemExecutor,
-    fs::{Directory, FileKind, FsError},
+    fs::{Directory, FileKind, FsError, ledger::Ledger},
 };
 use provenant_records::{
-    CommandResult, Outcome,
+    CommandResult, Outcome, StructuredPathWire,
     custody::{
         LandedEvidence, LandingPredicate, LandingSource, RemovalRecord, Subject, SubjectKind,
     },
@@ -63,6 +65,8 @@ pub(crate) enum Error {
     Exec(#[from] provenant_os::exec::ExecError),
     #[error(transparent)]
     GitConfigRead(Box<provenant_os::git_config::ConfigError<Error>>),
+    #[error("cannot resolve forge context: {0}")]
+    ForgeContextUnresolved(provenant_config::ForgeContextError),
     #[error("Git executable unavailable")]
     GitUnavailable,
     #[error("cannot establish worktree lock budget")]
@@ -77,6 +81,8 @@ pub(crate) enum Error {
     DiskSpace(std::io::Error),
     #[error("invalid worktree removal scope")]
     InvalidScope,
+    #[error("worktree locate refused: {0}")]
+    Locate(NameRefusal),
     #[error("{0}")]
     Settlement(String),
 }
@@ -88,9 +94,26 @@ fn note_kept_unmerged() {
     );
 }
 
-#[allow(clippy::print_stderr)]
 fn warn_fetch(error: &Error) {
-    eprintln!("warning: {error}; using the current integration resolution");
+    use provenant_records::warning::{Warning, warn};
+
+    // A forge refusal keeps its typed cause (the remotes seen and close
+    // matches) and carries a declaration the operator can make; other fetch
+    // failures keep the generic code. The warning is the public boundary, so
+    // the repair travels with the cause instead of being dropped at the caller.
+    // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    let warning = match error {
+        Error::ForgeContextUnresolved(_) => Warning::new(
+            provenant_records::warning::FORGE_CONTEXT_UNRESOLVED,
+            format!("{error}; using the current integration resolution"),
+        )
+        .repair(error.repair()),
+        _ => Warning::new(
+            provenant_records::warning::REMOTE_FETCH_FAILED,
+            format!("{error}; using the current integration resolution"),
+        ),
+    };
+    warn(warning.once_per_change());
 }
 
 pub(crate) fn local_worktree_message(error: &WorktreeError) -> String {
@@ -135,6 +158,9 @@ impl Error {
             Self::CacheGc(..) | Self::RetentionCollection(_) | Self::GcObservation(_) => {
                 "resolve the reported collection error, then rerun `provenant gc`"
             }
+            Self::ForgeContextUnresolved(_) => {
+                "declare `git.remote` in .provenant/ports.json (or the host ports), then rerun `provenant gc`"
+            }
             Self::Utility(_) => "correct the reported utility error and retry the worktree command",
             Self::Config(_) | Self::GitConfigRead(_) => crate::REPAIR_CONFIG,
             Self::Fs(_) | Self::Exec(_) | Self::DiskSpace(_) => crate::REPAIR_IO,
@@ -146,6 +172,9 @@ impl Error {
             Self::InvalidScope => {
                 "name a worktree or pass --all to `provenant worktree remove`"
             }
+            Self::Locate(_) => {
+                "run `provenant worktree list` to see the branches, lanes and attempts to locate"
+            }
             Self::Settlement(_) => "wait for the writer to settle, then retry the worktree command",
         }
     }
@@ -154,12 +183,12 @@ impl Error {
         match self {
             Self::Root(roots::RootError::Checkout | roots::RootError::State(_))
             | Self::InvalidScope
+            | Self::Locate(_)
             | Self::Worktree(
                 WorktreeError::InvalidRequest
                 | WorktreeError::AmbiguousName { .. }
                 | WorktreeError::NotFound
                 | WorktreeError::CheckedOut
-                | WorktreeError::BranchExistsWithBase { .. }
                 | WorktreeError::BranchCollision { .. },
             ) => Outcome::Invalid,
             Self::Worktree(
@@ -200,13 +229,86 @@ impl Error {
     }
 }
 
+/// One durable row of `<state>/worktrees/removed.jsonl`. Field order is a
+/// persisted-format contract (`provenant.worktree-removed.v1`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct RemovedRecord {
+    pub schema: &'static str,
+    pub branch: String,
+    pub tip: GitOid,
+    pub path: StructuredPathWire,
+    pub at: WallTime,
+}
+
+const REMOVED_SCHEMA: &str = "provenant.worktree-removed.v1";
+
+/// Append one bounded record per removed checkout and return the rows so the
+/// command can print exactly what it recorded. A record is only written for a
+/// worktree with a known branch and path; the removal itself already succeeded.
+fn record_removals(
+    state: &Path,
+    outcome: &worktrees::RemoveOutcome,
+    clock: &dyn Clock,
+) -> Result<Vec<RemovedRecord>, Error> {
+    let Some(at) = clock.wall_now().ok() else {
+        return Ok(Vec::new());
+    };
+    let records: Vec<_> = outcome
+        .removed
+        .iter()
+        .filter_map(|info| {
+            let branch = info.branch.clone()?;
+            let path = StructuredPathWire::from_path(&info.path).ok()?;
+            Some(RemovedRecord {
+                schema: REMOVED_SCHEMA,
+                branch,
+                tip: info.head,
+                path,
+                at,
+            })
+        })
+        .collect();
+    if records.is_empty() {
+        return Ok(records);
+    }
+    let directory = state.join("worktrees");
+    std::fs::create_dir_all(&directory).map_err(Error::DiskSpace)?;
+    let directory = Directory::open_anchor(&directory).map_err(Error::Fs)?;
+    let name = OsStr::new("removed.jsonl");
+    let ledger = Ledger::new(&directory, name);
+    for record in &records {
+        let mut line = serde_json::to_vec(record).map_err(|_| Error::InvalidScope)?;
+        line.push(b'\n');
+        ledger.append(&line).map_err(Error::Fs)?;
+    }
+    Ok(records)
+}
+
+#[derive(Serialize)]
+struct RemovedData {
+    #[serde(flatten)]
+    outcome: worktrees::RemoveOutcome,
+    records: Vec<RemovedRecord>,
+}
+
 #[derive(Serialize)]
 #[serde(untagged)]
 enum Data {
     Created(Box<worktrees::WorktreeInfo>),
     Listed(Vec<worktrees::WorktreeInfo>),
+    Located(Located),
     Diagnosed(Box<worktrees::WorktreeDiagnosis>),
-    Removed(worktrees::RemoveOutcome),
+    Removed(RemovedData),
+}
+
+/// The envelope for `worktree locate`. The path stays inside the structured
+/// path envelope in JSON; human mode prints it alone for `cd "$(...)"`.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct Located {
+    pub path: StructuredPathWire,
+    pub branch: Option<String>,
+    pub lane: Option<String>,
+    pub base: Option<String>,
 }
 
 pub fn run(command: Worktree, globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
@@ -216,11 +318,15 @@ pub fn run(command: Worktree, globals: &Globals, workers: &dyn WorkerObserver) -
     let name = match &command {
         Worktree::Create { .. } => "worktree create",
         Worktree::List => "worktree list",
+        Worktree::Locate { .. } => "worktree locate",
         Worktree::Doctor { .. } => "worktree doctor",
         Worktree::SessionList => unreachable!(),
         Worktree::Remove(_) => "worktree remove",
     };
-    let read_only = matches!(command, Worktree::List | Worktree::Doctor { .. });
+    let read_only = matches!(
+        command,
+        Worktree::List | Worktree::Locate { .. } | Worktree::Doctor { .. }
+    );
     match execute(command, globals, workers) {
         Ok(data) => match serde_json::to_value(&data) {
             Ok(value) => {
@@ -230,6 +336,11 @@ pub fn run(command: Worktree, globals: &Globals, workers: &dyn WorkerObserver) -
                         text.push_str(&worktree_list_stranded_human(globals, workers));
                         text
                     }
+                    Data::Located(located) => located
+                        .path
+                        .to_path_buf()
+                        .map(|path| format!("{}\n", path.display()))
+                        .unwrap_or_else(|_| human(value)),
                     _ => human(value),
                 };
                 emit(
@@ -367,6 +478,18 @@ fn execute(
                     Data::Created(Box::new(info))
                 }
                 Worktree::List => Data::Listed(worktrees::list(context, cancel)?),
+                Worktree::Locate { query } => {
+                    let rows = worktrees::list(context, cancel)?;
+                    let found = worktrees::locate(&query, &rows).map_err(Error::Locate)?;
+                    let path = StructuredPathWire::from_path(&found.path)
+                        .map_err(|_| Error::InvalidScope)?;
+                    Data::Located(Located {
+                        path,
+                        branch: found.branch.clone(),
+                        lane: found.lane.clone(),
+                        base: found.base.clone(),
+                    })
+                }
                 Worktree::Doctor { path } => {
                     let snapshot =
                         crate::gc_support::lane_states(roots, context.binding.project_id(), cancel)
@@ -460,7 +583,11 @@ fn execute(
                     {
                         note_kept_unmerged();
                     }
-                    Data::Removed(removed)
+                    let records = record_removals(roots.state.as_path(), &removed, context.clock)?;
+                    Data::Removed(RemovedData {
+                        outcome: removed,
+                        records,
+                    })
                 }
             })
         },
@@ -469,6 +596,8 @@ fn execute(
 
 /// The hook reads complete newline-delimited records even when its child
 /// deadline stops this command before the inventory is complete.
+// The hook reads newline-delimited records from stdout as its wire protocol.
+#[allow(clippy::disallowed_methods)]
 fn session_list(globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
     use std::io::Write;
     let result = (|| -> Result<(), Error> {
@@ -1729,11 +1858,16 @@ fn gc_project(
 /// backstop keeps them all. Warn and let the rest of the sweep run: failing the
 /// project here would skip settled-lane collection and the path-based pass.
 fn warn_import_pin_collection(project: &Path, error: &(impl std::fmt::Display + ?Sized)) {
-    use std::io::Write;
-    let _ = writeln!(
-        std::io::stderr().lock(),
-        "warning: import pin collection failed for {}: {error}",
-        project.display()
+    provenant_records::warning::warn(
+        provenant_records::warning::Warning::new(
+            provenant_records::warning::IMPORT_PIN_COLLECTION_FAILED,
+            format!(
+                "import pin collection failed for {}: {error}",
+                project.display()
+            ),
+        )
+        .subject(project.display().to_string())
+        .once_per_change(),
     );
 }
 
@@ -1748,6 +1882,25 @@ pub(crate) struct LandWorktree {
     pub branch_deleted: bool,
     /// Why the worktree or branch was kept, when it was.
     pub kept: Option<String>,
+}
+
+/// The remote reference the branch-scratch spawn should record. Self-describing
+/// landing evidence names its own reference, so the forge is asked only for the
+/// fallback; an unresolved context yields no source and the spawn is skipped.
+fn retention_scratch_source(
+    evidence: &LandedEvidence,
+    forge: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    match &evidence.source {
+        LandingSource::IntegrationTarget { reference, .. }
+        | LandingSource::TreeEquivalent { reference, .. } => Some(
+            reference
+                .strip_prefix("refs/remotes/")
+                .unwrap_or(reference)
+                .to_owned(),
+        ),
+        _ => forge(),
+    }
 }
 
 /// Remove the registered worktree of a merged branch through the same removal
@@ -1849,6 +2002,13 @@ pub(crate) fn retention_event(
                 context.clock,
                 cancel,
             )?;
+            // Self-describing evidence names its own reference; an unresolved
+            // fallback context simply skips the scratch spawn.
+            let scratch_source = retention_scratch_source(evidence, || {
+                worktrees::forge_context(context)
+                    .ok()
+                    .map(|forge| format!("{}/{}", forge.remote.value, forge.default_branch.value))
+            });
             let policy = worktrees::WorktreeGcPolicy {
                 mode: worktrees::CollectionMode::LandingCleanup,
                 proof: Some(evidence),
@@ -1884,6 +2044,7 @@ pub(crate) fn retention_event(
                             .as_deref()
                             .and_then(|branch| branch.strip_prefix("refs/heads/"))
                             && let Some(Some(ids)) = attempts.get(&lane.path)
+                            && let Some(source) = scratch_source.as_deref()
                         {
                             let _ = crate::provider_retention::spawn_branch_scratch(
                                 &resolved.roots,
@@ -1891,13 +2052,7 @@ pub(crate) fn retention_event(
                                 &resolved.project,
                                 branch,
                                 lane.head,
-                                match &evidence.source {
-                                    LandingSource::IntegrationTarget { reference, .. }
-                                    | LandingSource::TreeEquivalent { reference, .. } => {
-                                        reference.strip_prefix("refs/remotes/").unwrap_or(reference)
-                                    }
-                                    _ => "origin/HEAD",
-                                },
+                                source,
                                 ids,
                             );
                         }
@@ -2909,15 +3064,15 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
     // Stale open graphs are advisory: gc always warns and only stops them when
     // the caller explicitly asked to apply changes.
     use provenant_fabric_runtime::graph::{CancellationTarget, FileJournal};
-    use provenant_records::diagnostic::SettingSource;
+    use provenant_records::diagnostic::Layer;
     let stale_age_seconds = config.gc.stale_graph_age_seconds().unwrap_or(86_400);
     let stale_source = if matches!(
         config.origins.get("gc.stale_graph_age"),
         Some(provenant_config::Origin::User { .. })
     ) {
-        SettingSource::Configuration
+        Layer::Host
     } else {
-        SettingSource::ShippedDefault
+        Layer::Default
     };
     let now_micros = i64::try_from(now_ns / 1_000).unwrap_or(i64::MAX);
     let clock = SystemClock::new();
@@ -3310,11 +3465,15 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                             &mut should_stop,
                         )
                         .unwrap_or_else(|error| {
-                            use std::io::Write;
-                            let _ = writeln!(
-                                std::io::stderr().lock(),
-                                "warning: settled lane collection failed for {}: {error}",
-                                project.path.display()
+                            provenant_records::warning::warn(
+                                provenant_records::warning::Warning::new(
+                                    provenant_records::warning::SETTLED_LANE_COLLECTION_FAILED,
+                                    format!(
+                                        "settled lane collection failed for {}: {error}",
+                                        project.path.display()
+                                    ),
+                                )
+                                .subject(project.path.display().to_string()),
                             );
                             crate::fabric::gc_cleanup::UnsettledCollection::default()
                         })
@@ -4383,8 +4542,36 @@ mod human_tests {
             occupancy: worktrees::Occupancy::Observed { process: None },
             owner: Err("worktree registration was not observed".into()),
             primary: false,
+            lane: None,
+            attempt: None,
+            base: None,
             reused: false,
         })
+    }
+
+    // Spec: docs/specs/supervisor.md#shared-occupancy-removal-never-forces
+    #[test]
+    fn removal_record_persists_schema_branch_tip_path_and_time() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("lane");
+        let outcome = worktrees::RemoveOutcome {
+            removed: vec![info(path.to_str().expect("utf8 path")).expect("worktree info")],
+            ..Default::default()
+        };
+        let records = record_removals(temp.path(), &outcome, &SystemClock::new()).expect("record");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].schema, "provenant.worktree-removed.v1");
+        let stored = std::fs::read_to_string(temp.path().join("worktrees/removed.jsonl"))
+            .expect("removed.jsonl");
+        let row: serde_json::Value = serde_json::from_str(stored.trim()).expect("record row");
+        assert_eq!(row["schema"], "provenant.worktree-removed.v1");
+        assert_eq!(row["branch"], "refs/heads/master");
+        assert_eq!(
+            row["tip"],
+            GitOid::parse(&"4a".repeat(20)).unwrap().to_string()
+        );
+        assert!(row["path"].is_object());
+        assert!(row["at"].is_string());
     }
 
     #[allow(dead_code)]
@@ -4867,6 +5054,9 @@ mod gc_preview_tests {
             occupancy: worktrees::Occupancy::Available,
             owner: Ok(None),
             primary: false,
+            lane: None,
+            attempt: None,
+            base: None,
             reused: false,
         };
         let mut report = worktrees::WorktreeGcReport::default();
@@ -4924,6 +5114,8 @@ mod gc_preview_tests {
     }
 
     #[test]
+    // This fixture measures its own stderr byte count as the reported contract.
+    #[allow(clippy::disallowed_methods)]
     fn gc_default_output_aggregates_routine_rows_and_keeps_exceptions() {
         use provenant_confinement::cache::{CacheGcEntry, CacheGcReason};
         let mut data = GcData::default();
@@ -5092,6 +5284,24 @@ mod gc_subpass_removal_tests {
     use provenant_records::custody::{RefEndpoint, RefOrigin, RefOwnership};
 
     #[test]
+    // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    fn a_forge_fetch_refusal_keeps_its_cause_and_repair_in_the_warning() {
+        let error = Error::ForgeContextUnresolved(provenant_config::ForgeContextError::NoRemote {
+            remotes: vec!["alpha".into(), "beta".into()],
+            close: vec!["alpha".into(), "beta".into()],
+        });
+        let (_, warnings) = provenant_records::capture(|| warn_fetch(&error));
+        let warning = warnings
+            .iter()
+            .find(|warning| warning.code.as_ref() == "FORGE_CONTEXT_UNRESOLVED")
+            .expect("a typed forge refusal warning");
+        assert!(warning.message.contains("alpha"), "{}", warning.message);
+        assert!(warning.message.contains("beta"), "{}", warning.message);
+        let repair = warning.repair.as_deref().expect("an actionable repair");
+        assert!(repair.contains("git.remote"), "{repair}");
+    }
+
+    #[test]
     fn actual_gc_lifts_unsettled_branch_removal_and_preview_keeps_none() {
         let project = provenant_core::ProjectId::from_bytes([8; 16]);
         let tip = GitOid::parse(&"a1".repeat(20)).unwrap();
@@ -5136,5 +5346,39 @@ mod gc_subpass_removal_tests {
         };
         append_gc_subpass_removals(&mut preview, vec![record]);
         assert!(preview.removals.is_empty());
+    }
+
+    #[test]
+    fn retention_scratch_source_is_lazy_and_skips_an_unresolved_forge() {
+        let self_describing = LandedEvidence {
+            predicate: LandingPredicate::Landed,
+            source: LandingSource::IntegrationTarget {
+                reference: "refs/remotes/origin/main".into(),
+                commit: GitOid::parse(&"b2".repeat(20)).unwrap(),
+            },
+        };
+        let source = retention_scratch_source(&self_describing, || {
+            panic!("self-describing evidence must not resolve the forge")
+        });
+        assert_eq!(source.as_deref(), Some("origin/main"));
+
+        let fallback = LandedEvidence {
+            predicate: LandingPredicate::Landed,
+            source: LandingSource::ForgeMerged {
+                pr: "42".into(),
+                head: GitOid::parse(&"a1".repeat(20)).unwrap(),
+                merge_commit: None,
+            },
+        };
+        let calls = std::cell::Cell::new(0);
+        let source = retention_scratch_source(&fallback, || {
+            calls.set(calls.get() + 1);
+            Some("origin/trunk".into())
+        });
+        assert_eq!(source.as_deref(), Some("origin/trunk"));
+        assert_eq!(calls.get(), 1);
+
+        let unresolved = retention_scratch_source(&fallback, || None);
+        assert_eq!(unresolved, None);
     }
 }

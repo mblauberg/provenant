@@ -215,10 +215,15 @@ impl HeadlineArg {
         }
     }
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Accounts {
     /// List registered accounts
     List,
+    /// Print one registered account by entry id or unique label
+    Show {
+        /// Entry id or unique label of the account
+        name: String,
+    },
     /// Register an account for an adapter
     Register {
         /// Account label
@@ -290,36 +295,35 @@ pub enum Accounts {
     },
 }
 
-/// Resolves an entry id, or a label unique across adapters, to the entry id.
+/// Resolves an account reference to its registry entry id.
 pub fn resolve(settings: &Settings, account: &str) -> Result<String, String> {
-    resolve_typed(settings, account).map_err(|(_, message)| message)
+    resolve_entry(settings, account).map_err(|(_, message)| message)
 }
 
-fn resolve_typed(
+/// The same resolution, carrying the stable error kind used by `accounts set`.
+fn resolve_entry(
     settings: &Settings,
     account: &str,
 ) -> Result<String, (Option<provenant_run::ErrorKind>, String)> {
-    if settings.entries.contains_key(account) {
-        return Ok(account.to_owned());
-    }
-    let mut matches = settings
-        .entries
-        .iter()
-        .filter(|(_, e)| e.label == account)
-        .map(|(id, _)| id.clone());
-    match (matches.next(), matches.next()) {
-        (Some(id), None) => Ok(id),
-        (Some(_), Some(_)) => Err((
-            None,
-            format!(
-                "account `{account}` is ambiguous; use the entry id (see `provenant accounts list`)"
-            ),
-        )),
-        _ => Err((
-            Some(provenant_run::ErrorKind::UnknownAccount),
-            format!("unknown account `{account}`"),
-        )),
-    }
+    use provenant_providers::accounts::{ReferenceForms, ambiguous_labels};
+    let forms = ReferenceForms::REGISTRY;
+    provenant_providers::accounts::resolve(settings, account, forms)
+        .map(|resolved| resolved.item.entry_id)
+        .map_err(|refusal| {
+            let ambiguous = !ambiguous_labels(settings, account, forms).is_empty();
+            let kind = (!ambiguous).then_some(provenant_run::ErrorKind::UnknownAccount);
+            let message = if ambiguous {
+                format!(
+                    "account `{account}` is ambiguous: {}; use an entry id (see `provenant accounts list`)",
+                    refusal.candidates.join(", ")
+                )
+            } else {
+                format!(
+                    "{refusal}; use an entry id or a unique label (see `provenant accounts list`)"
+                )
+            };
+            (kind, message)
+        })
 }
 /// Account configuration directories, in entry order. Only adapters whose
 /// accounts are separate configuration directories (`account_config_dir`:
@@ -381,6 +385,15 @@ fn execute_inner(
         })?
         .domains
         .accounts;
+    if let Accounts::Show { name } = command {
+        let id = resolve_entry(&settings, name).map_err(|(cause, message)| {
+            *kind = cause;
+            message
+        })?;
+        let mut shown = settings.clone();
+        shown.entries.retain(|entry, _| entry == &id);
+        return Ok(shown);
+    }
     if let Accounts::Set {
         account,
         display_name,
@@ -393,7 +406,7 @@ fn execute_inner(
             return Err("accounts set requires at least one option".into());
         }
         return edit_accounts(roots, |mut settings| {
-            let id = resolve_typed(&settings, account).map_err(|(cause, message)| {
+            let id = resolve_entry(&settings, account).map_err(|(cause, message)| {
                 *kind = cause;
                 message
             })?;
@@ -995,5 +1008,42 @@ mod tests {
         assert_eq!(homes.len(), 1, "{homes:?}");
         assert_eq!(homes[0].home, real);
         Ok(())
+    }
+
+    // Spec: docs/specs/routing.md#account-references
+    #[test]
+    fn account_references_project_to_the_registry_entry_id() {
+        let mut settings = Settings::default();
+        settings.entries.insert(
+            "claude-work".into(),
+            registration("claude", "work", "/fixture/claude-work"),
+        );
+        settings.entries.insert(
+            "codex-home".into(),
+            registration("codex", "home", "/fixture/codex-home"),
+        );
+        for reference in ["claude-work", "work"] {
+            assert_eq!(
+                resolve(&settings, reference).unwrap(),
+                "claude-work",
+                "{reference}"
+            );
+        }
+        let unknown = resolve(&settings, "wokk").unwrap_err();
+        assert!(unknown.contains("unknown account"), "{unknown}");
+        assert!(unknown.contains("close matches"), "{unknown}");
+        assert!(!unknown.contains("claude-work"), "{unknown}");
+
+        settings.entries.insert(
+            "other-work".into(),
+            registration("codex", "work", "/fixture/codex-other"),
+        );
+        let ambiguous = resolve(&settings, "work").unwrap_err();
+        assert!(ambiguous.contains("ambiguous"), "{ambiguous}");
+        assert_eq!(
+            resolve_entry(&settings, "work").unwrap_err().0,
+            None,
+            "ambiguity has no unknown-account code"
+        );
     }
 }

@@ -56,10 +56,19 @@ pub fn lane(command: crate::Lane, edge: &Edge<'_>) -> Reply {
                 session.store.repo_facts(),
             )?;
             let branch = launch.branch.as_str().trim_start_matches("refs/heads/");
+            // One forge context for this pickup, resolved by the owner.
+            // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+            let state = edge.roots.state.as_path();
+            let ports =
+                provenant_config::PortTable::read_for(Some(writer.project.as_path()), state)
+                    .map_err(|error| {
+                        Fail::new(Status::Error, ErrorKind::Config, error.to_string())
+                    })?;
+            let forge = run::resolve_forge(state, &writer.project, &ports)?;
             let destination = match deliver {
-                Some(mode) => override_destination(mode, branch, task.deliver.as_ref())?,
+                Some(mode) => override_destination(mode, branch, task.deliver.as_ref(), &forge)?,
                 None if task.deliver.is_none() => {
-                    run::HostDeliveryContext::destination(run::DeliveryMode::Push, branch)?
+                    run::HostDeliveryContext::destination(run::DeliveryMode::Push, branch, &forge)?
                 }
                 None => None,
             };
@@ -94,8 +103,9 @@ fn override_destination(
     mode: run::DeliveryMode,
     branch: &str,
     recorded: Option<&run::WriterDeliveryRequest>,
+    forge: &provenant_config::ForgeContext,
 ) -> Result<Option<run::WriterDeliveryRequest>, run::RunError> {
-    let mut destination = run::HostDeliveryContext::destination(mode, branch)?;
+    let mut destination = run::HostDeliveryContext::destination(mode, branch, forge)?;
     if let (Some(request), Some(recorded)) = (destination.as_mut(), recorded)
         && recorded.fast_forward_only
         && recorded.mode == request.mode
@@ -113,6 +123,7 @@ mod resume_delivery_tests {
         let mut request = run::HostDeliveryContext::destination(
             run::DeliveryMode::Integrate(target.into()),
             "attempt/branch",
+            &provenant_run::forge_for("origin", "main", &[]),
         )
         .unwrap()
         .unwrap();
@@ -128,6 +139,7 @@ mod resume_delivery_tests {
             run::DeliveryMode::Integrate(target.into()),
             "attempt/branch",
             recorded,
+            &provenant_run::forge_for("origin", "main", &[]),
         )
         .unwrap()
         .unwrap()

@@ -34,14 +34,14 @@ pub struct Install {
     pub upgrade_preflight: bool,
 }
 
-#[derive(Debug, clap::Args)]
+#[derive(Clone, Debug, clap::Args)]
 pub struct Uninstall {
     /// Harness to remove (repeatable)
     #[arg(long, required = true, value_parser = harness_parser())]
     pub harness: Vec<Harness>,
 }
 
-#[derive(Debug, clap::Args)]
+#[derive(Clone, Debug, clap::Args)]
 pub struct Upgrade {
     /// Accept the pinned toolchain install
     #[arg(long)]

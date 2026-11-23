@@ -912,12 +912,14 @@ fn session_save_warns_and_uses_explicit_project() -> Result {
             .join(format!("workflow/projects/{cwd_project}/sessions/conflict"))
             .exists()
     );
-    let warnings = saved["data"]["warnings"].as_array().ok_or("warnings")?;
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    let warnings = saved["warnings"].as_array().ok_or("envelope warnings")?;
     assert!(
-        warnings
-            .iter()
-            .filter_map(Value::as_str)
-            .any(|warning| warning.contains(cwd_path) && warning.contains(selected_path)),
+        warnings.iter().any(|warning| {
+            warning["message"].as_str().is_some_and(|message| {
+                message.contains(cwd_path) && message.contains(selected_path)
+            })
+        }),
         "{warnings:?}"
     );
 
@@ -932,7 +934,8 @@ fn session_save_warns_and_uses_explicit_project() -> Result {
         selected_path,
     ])?;
     assert_eq!(code(&human), 0);
-    let text = String::from_utf8(human.stdout.bytes)?;
+    // Human mode prints each warning to stderr as it arrives, not into stdout.
+    let text = String::from_utf8(human.stderr.bytes)?;
     assert!(text.contains("warning:"), "{text}");
     assert!(
         text.contains(cwd_path) && text.contains(selected_path),
@@ -991,12 +994,14 @@ fn session_save_explicit_project_warns_and_wins_over_registered_session() -> Res
             ))
             .exists()
     );
-    let warnings = saved["data"]["warnings"].as_array().ok_or("warnings")?;
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    let warnings = saved["warnings"].as_array().ok_or("envelope warnings")?;
     assert!(
-        warnings
-            .iter()
-            .filter_map(Value::as_str)
-            .any(|warning| warning.contains(cwd_path) && warning.contains(selected_path)),
+        warnings.iter().any(|warning| {
+            warning["message"].as_str().is_some_and(|message| {
+                message.contains(cwd_path) && message.contains(selected_path)
+            })
+        }),
         "{warnings:?}"
     );
     Ok(())
@@ -1162,7 +1167,7 @@ fn session_save_discovery_restart() -> Result {
             ],
             0,
         )?;
-        assert_eq!(rebound["data"]["warnings"], json!([]));
+        assert_eq!(rebound["warnings"], json!([]));
         let rebound: Value = serde_json::from_slice(&std::fs::read(&discovery_path)?)?;
         assert_ne!(rebound["chair_actor"], discovery["chair_actor"]);
         assert_eq!(
@@ -1290,7 +1295,8 @@ fn checkpoint_warning_tracks_the_project_soft_budget() -> Result {
     };
     let check = |bytes: usize, warns: bool| -> Result<Value> {
         let saved = save(bytes)?;
-        let warnings = saved["data"]["warnings"].as_array().ok_or("warnings")?;
+        // Spec: docs/specs/cli.md#warnings-are-typed-values
+        let warnings = saved["warnings"].as_array().ok_or("envelope warnings")?;
         assert_eq!(warnings.is_empty(), !warns);
         Ok(saved)
     };
@@ -1393,14 +1399,19 @@ fn session_save_warns_once_only_when_disk_is_low() -> Result {
             }
             let output = rig.command(&args)?;
             assert_eq!(code(&output), 0);
-            assert!(output.stderr.bytes.is_empty());
+            // Spec: docs/specs/cli.md#warnings-are-typed-values
             let warning_count = if json {
-                serde_json::from_slice::<Value>(&output.stdout.bytes)?["data"]["warnings"]
+                let stderr = String::from_utf8_lossy(&output.stderr.bytes);
+                assert!(
+                    !stderr.contains("warning:"),
+                    "bare warning leaked: {stderr}"
+                );
+                serde_json::from_slice::<Value>(&output.stdout.bytes)?["warnings"]
                     .as_array()
-                    .ok_or("warnings")?
+                    .ok_or("envelope warnings")?
                     .len()
             } else {
-                String::from_utf8_lossy(&output.stdout.bytes)
+                String::from_utf8_lossy(&output.stderr.bytes)
                     .lines()
                     .filter(|line| line.starts_with("warning: "))
                     .count()

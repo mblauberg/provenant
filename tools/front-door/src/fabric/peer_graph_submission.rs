@@ -1,6 +1,26 @@
 #[allow(unused_imports)]
 use super::*;
 
+/// Give a local-only settlement fixture the one forge context its delivery
+/// checks need. The batch resolves that context lazily and never guesses a
+/// remote or default branch, so a delivery graph in a checkout without a Git
+/// remote must declare both.
+/// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+fn declare_forge(
+    fixture: &SettlementFixture,
+    default_branch: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    std::fs::create_dir_all(fixture.rig.project.join(".provenant"))?;
+    std::fs::write(
+        fixture.rig.project.join(provenant_config::PORTS_CONFIG),
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version": provenant_config::PORTS_SCHEMA_VERSION,
+            "git": {"remote": "origin", "default_branch": default_branch, "protected": []},
+        }))?,
+    )?;
+    Ok(())
+}
+
 #[test]
 fn graph_owner_submits_sibling_families_as_a_preference_and_alias_retry_exclusions()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -138,6 +158,18 @@ fn graph_submission_refuses_a_push_to_main_before_admission()
     use provenant_confinement::worktrees::{self, WorktreeCreate};
     use provenant_fabric_runtime::graph::FileJournal;
     let fixture = SettlementFixture::resumed()?;
+    declare_forge(&fixture, "main")?;
+    // The batch removed the compiled-in `main` default: name it through the
+    // remote HEAD so the protected-target check refuses the push to main.
+    // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    let git = provenant_os::git::git_executable().ok_or("git")?;
+    for args in [
+        vec!["remote", "add", "origin", fixture.rig.project.to_str().ok_or("project")?],
+        vec!["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"],
+    ] {
+        let output = fixture.rig.execute(&git, &args, None)?;
+        assert_eq!(crate::worktree_tests::support::code(&output), 0);
+    }
     let cancel = CancelToken::new();
     let info = worktrees::with_context(
         &fixture.roots,
@@ -218,6 +250,7 @@ fn graph_submission_refuses_a_worktree_on_its_integration_branch_before_admissio
         return Ok(());
     }
     let fixture = SettlementFixture::resumed()?;
+    declare_forge(&fixture, "main")?;
     let (result, admitted) = integrate_graph(&fixture, "integrate-own-branch", "resumed-lane")?;
     assert!(!admitted, "graph was admitted: {result:?}");
     let Err(FacadeError::DispatchRefused { reason, .. }) = result else {
@@ -239,6 +272,7 @@ fn graph_submission_admits_a_worktree_on_a_separate_branch()
         return Ok(());
     }
     let fixture = SettlementFixture::resumed()?;
+    declare_forge(&fixture, "main")?;
     let (result, admitted) = integrate_graph(&fixture, "integrate-separate", "batch/graph")?;
     assert!(admitted, "graph was refused: {result:?}");
     assert!(result.is_ok(), "{result:?}");
@@ -305,6 +339,7 @@ fn graph_submission_replays_an_accepted_push_after_protection_changes()
         return Ok(());
     }
     let fixture = SettlementFixture::resumed()?;
+    declare_forge(&fixture, "main")?;
     let factory = Factory {
         context: Context::open(
             fixture.roots.clone(),
@@ -390,6 +425,7 @@ fn graph_submission_pins_the_integration_base_across_replay()
     }
     use provenant_fabric_runtime::graph::FileJournal;
     let fixture = SettlementFixture::resumed()?;
+    declare_forge(&fixture, "main")?;
     let git = provenant_os::git::git_executable().ok_or("git")?;
     let output = fixture
         .rig

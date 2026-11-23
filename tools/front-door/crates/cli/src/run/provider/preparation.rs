@@ -1,4 +1,5 @@
 use super::*;
+use provenant_records::warning::{Warning, warn};
 
 /// Resolve a provider or named command through the filtered requester PATH.
 pub(super) fn preparation_executable(
@@ -55,52 +56,76 @@ fn select_account<'a>(
     selector: &str,
     requested_adapter: Option<&str>,
 ) -> Result<&'a provenant_providers::accounts::Registration, PrepareError> {
-    // Exact keys identify credentials; only use labels when no exact key
-    // exists. This keeps the synthetic `local` identity distinct from any
-    // registered account that happens to use the same label.
-    let candidates = |by_key: bool| {
-        entries.iter().filter(move |entry| {
-            (if by_key {
-                entry.key == selector
-            } else {
-                entry.label == selector
-            }) && requested_adapter.is_none_or(|adapter| entry.adapter == adapter)
-        })
+    use provenant_providers::accounts::{
+        ReferenceForms, Settings as AccountSettings, ambiguous_labels,
     };
-    let by_key = entries.iter().any(|entry| {
-        entry.key == selector && requested_adapter.is_none_or(|adapter| entry.adapter == adapter)
-    });
-    let mut matching = candidates(by_key);
-    let entry = matching.next().ok_or_else(|| PrepareError::Refusal {
-        message: "the selected account is not registered for the requested route; run `provenant accounts list`".into(),
-        cause: provenant_records::run::TerminalCause::UnregisteredAccount,
-        note: None,
+    let settings = AccountSettings {
+        entries: entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| requested_adapter.is_none_or(|adapter| entry.adapter == adapter))
+            .map(|(index, entry)| (index.to_string(), (*entry).clone()))
+            .collect(),
+        ..Default::default()
+    };
+    let forms = ReferenceForms::SELECTION;
+    let resolved =
+        provenant_providers::accounts::resolve(&settings, selector, forms).map_err(|refusal| {
+            if !ambiguous_labels(&settings, selector, forms).is_empty() {
+                PrepareError::Other(format!("{refusal}; use the exact registered key"))
+            } else {
+                PrepareError::Refusal {
+                    message: format!("{refusal}; run `provenant accounts list`"),
+                    cause: provenant_records::run::TerminalCause::UnregisteredAccount,
+                    note: None,
                     fallback_outcome: None,
-    })?;
-    if matching.any(|other| other.key != entry.key || other.adapter != entry.adapter) {
-        return Err(PrepareError::Other(
-            "account alias is ambiguous; use its exact registered key".into(),
-        ));
-    }
-    Ok(entry)
+                }
+            }
+        })?;
+    entries
+        .iter()
+        .find(|entry| entry.adapter == resolved.item.adapter && entry.key == resolved.item.key)
+        .ok_or_else(|| PrepareError::Refusal {
+            message: "the selected account is not registered for the requested route; run `provenant accounts list`".into(),
+            cause: provenant_records::run::TerminalCause::UnregisteredAccount,
+            note: None,
+            fallback_outcome: None,
+        })
 }
 
 fn select_retained_account<'a>(
     entries: &'a [provenant_providers::accounts::Registration],
     identity: RetainedIdentity<'_>,
 ) -> Result<Option<&'a provenant_providers::accounts::Registration>, PrepareError> {
+    use provenant_providers::accounts::{ReferenceForms, Settings as AccountSettings};
     let Some(key) = identity.account_key else {
         return Ok(None);
     };
+    let settings = AccountSettings {
+        entries: entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.adapter == identity.provider)
+            .map(|(index, entry)| (index.to_string(), (*entry).clone()))
+            .collect(),
+        ..Default::default()
+    };
+    let resolved = provenant_providers::accounts::resolve(&settings, key, ReferenceForms::RETAINED)
+        .map_err(|_| PrepareError::Refusal {
+            message: "the prior attempt's account is not registered for its applied provider; cannot continue it".into(),
+            cause: provenant_records::run::TerminalCause::UnregisteredAccount,
+            note: None,
+            fallback_outcome: None,
+        })?;
     entries
         .iter()
-        .find(|entry| entry.adapter == identity.provider && entry.key == key)
+        .find(|entry| entry.adapter == resolved.item.adapter && entry.key == resolved.item.key)
         .map(Some)
         .ok_or_else(|| PrepareError::Refusal {
             message: "the prior attempt's account is not registered for its applied provider; cannot continue it".into(),
             cause: provenant_records::run::TerminalCause::UnregisteredAccount,
             note: None,
-                    fallback_outcome: None,
+            fallback_outcome: None,
         })
 }
 
@@ -528,11 +553,10 @@ fn publish_preparation_login_failure(
     if let Err(error) =
         crate::quota::persist_preparation_login_failure(state, &account, reason, now)
     {
-        use std::io::Write;
-        let _ = writeln!(
-            std::io::stderr().lock(),
-            "warning: could not publish preparation login failure: {error}"
-        );
+        warn(Warning::new(
+            provenant_records::warning::LOGIN_RECORD_UNRETAINED,
+            format!("could not publish preparation login failure: {error}"),
+        ));
     }
 }
 
@@ -870,12 +894,11 @@ fn prepare_writer_dependencies_with_policy(
             &dependency_preparation_warning(error.clone(), enabled, profile),
             4096,
         );
-        if let provenant_records::policy::Effect::Warn(message) = policy.check(
+        if let provenant_records::policy::Effect::Warn(warning) = policy.check(
             "PREPARATION_PREPARE_WRITER_DEPENDENCIES_NONE",
             provenant_records::policy::Facts::violation(detail),
         ) {
-            use std::io::Write;
-            let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+            warn(warning);
         }
     }
     result
@@ -1521,7 +1544,7 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
     let prompt = PrepareError::Prompt(LaunchPromptError::Provider(
         provenant_providers::ProviderError::PromptTooLarge {
             limit: 32,
-            origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
+            origin: provenant_records::diagnostic::Layer::Default,
         },
     ))
     .into_refusal();
@@ -1653,7 +1676,7 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
     let mut resources = std::collections::BTreeMap::new();
     let fact = provenant_records::diagnostic::ResourceFact::ArgvPromptLimit {
         limit: 3,
-        origin: provenant_records::diagnostic::SettingSource::Configuration,
+        origin: provenant_records::diagnostic::Layer::Host,
     };
     resources.insert(0, fact.clone());
     assert_eq!(uniform_candidate_resource(1, &resources), Some(fact));
@@ -1747,7 +1770,7 @@ impl From<&str> for PrepareError {
 #[test]
 fn mixed_candidate_guard_facts_survive_fallback_without_source_text()
 -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_records::diagnostic::{BoundaryClass, ResourceFact, SettingSource};
+    use provenant_records::diagnostic::{BoundaryClass, Layer, ResourceFact};
     let mut reasons = vec![
         skip("a", SkipKind::Refused, "TOKEN_SENTINEL"),
         skip("b", SkipKind::Refused, "TOKEN_SENTINEL"),
@@ -1757,7 +1780,7 @@ fn mixed_candidate_guard_facts_survive_fallback_without_source_text()
         1,
         ResourceFact::ArgvPromptLimit {
             limit: 3,
-            origin: SettingSource::Configuration,
+            origin: Layer::Host,
         },
     )]
     .into_iter()
@@ -3011,9 +3034,9 @@ pub(super) fn prepare_candidates_inner(
         Some(Ok(config)) => {
             let origin = config.origins.get(ARGV_LIMIT_KEY);
             let label = if matches!(origin, Some(provenant_config::Origin::User { .. })) {
-                provenant_records::diagnostic::SettingSource::Configuration
+                provenant_records::diagnostic::Layer::Host
             } else {
-                provenant_records::diagnostic::SettingSource::ShippedDefault
+                provenant_records::diagnostic::Layer::Default
             };
             (
                 config.domains.run.argv_prompt_limit_bytes,
@@ -3022,20 +3045,19 @@ pub(super) fn prepare_candidates_inner(
             )
         }
         Some(Err(error)) => {
-            use std::io::Write;
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: {ARGV_LIMIT_KEY} unavailable ({error}); using compiled default"
-            );
+            warn(Warning::new(
+                provenant_records::warning::CONFIG_UNAVAILABLE,
+                format!("{ARGV_LIMIT_KEY} unavailable ({error}); using compiled default"),
+            ));
             (
                 default_limit,
-                provenant_records::diagnostic::SettingSource::ShippedDefault,
+                provenant_records::diagnostic::Layer::Default,
                 origin_receipt(None),
             )
         }
         None => (
             default_limit,
-            provenant_records::diagnostic::SettingSource::ShippedDefault,
+            provenant_records::diagnostic::Layer::Default,
             origin_receipt(None),
         ),
     };
@@ -3143,10 +3165,10 @@ pub(super) fn prepare_candidates_inner(
         match publishing_executable(&locate) {
             Ok(gh) => Some(gh),
             Err(cause) => {
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: GitHub publishing unavailable: {cause}"
-                );
+                warn(Warning::new(
+                    provenant_records::warning::GH_PUBLISHING_UNAVAILABLE,
+                    format!("GitHub publishing unavailable: {cause}"),
+                ));
                 None
             }
         }
@@ -3512,10 +3534,10 @@ pub(super) fn prepare_candidates_inner(
                                 &recovered,
                                 login_observed_at,
                             ) {
-                                let _ = writeln!(
-                                    std::io::stderr().lock(),
-                                    "warning: could not publish login recovery: {error}"
-                                );
+                                warn(Warning::new(
+                                    provenant_records::warning::LOGIN_RECORD_UNRETAINED,
+                                    format!("could not publish login recovery: {error}"),
+                                ));
                             }
                             let interval = record
                                 .expires_unix_seconds
@@ -3982,15 +4004,19 @@ pub(super) fn prepare_candidates_inner(
                 }
             ) {
                 let diagnostic = run::ErrorKind::StaleReadiness.diagnostic();
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning [{}]: {}; next: {}",
-                    diagnostic.code,
-                    diagnostic
-                        .detail
-                        .as_deref()
-                        .unwrap_or("account readiness is stale"),
-                    diagnostic.next.as_deref().unwrap_or("re-probe the account")
+                warn(
+                    Warning::new(
+                        provenant_records::warning::ACCOUNT_READINESS_STALE,
+                        format!(
+                            "[{}] {}",
+                            diagnostic.code,
+                            diagnostic
+                                .detail
+                                .as_deref()
+                                .unwrap_or("account readiness is stale")
+                        ),
+                    )
+                    .repair(diagnostic.next.as_deref().unwrap_or("re-probe the account")),
                 );
             }
         }
@@ -4597,12 +4623,8 @@ pub(super) fn prepare_candidates_inner(
                     .and_then(|provider| provider.runtime_deadline_seconds),
             },
         );
-        let build_class = provenant_config::ResolvedAdmissionClass::resolve(
-            "build",
-            state_root,
-            Some(&source),
-            provenant_config::project_key_for(&source).as_deref(),
-        );
+        let build_class =
+            provenant_config::ResolvedAdmissionClass::resolve("build", state_root, Some(&source));
         let model_id =
             provenant_routing::ModelId::parse(&label).map_err(|error| error.to_string())?;
         let exact_model = resolved_launch_model(&catalogue, &model_id);
@@ -4622,6 +4644,36 @@ pub(super) fn prepare_candidates_inner(
             provider.source = Some(format!("domains.fabric.host_native.{name}"));
             provider.host_native = Some(name.to_owned());
         }
+        let project_root = writer
+            .as_ref()
+            .and_then(|writer| writer.project_root())
+            .or(registry.cwd);
+        let launch_preamble =
+            (provenant_config::knob_source(&task.profile, run::BRIEF_PREAMBLE_KNOB)
+                == provenant_records::Layer::Launch)
+                .then(|| {
+                    task.profile
+                        .knobs
+                        .get(run::BRIEF_PREAMBLE_KNOB)
+                        .and_then(|value| value.as_str())
+                        .map(PathBuf::from)
+                })
+                .flatten();
+        let mut brief = run::BriefPreamble::read(
+            Some(&state_root.join("config.toml")),
+            project_root,
+            launch_preamble.as_deref(),
+        );
+        let role = if writer.is_some() {
+            run::BriefRole::Writer
+        } else if matches!(&task.route, run::RequestedRoute::Review { .. }) {
+            run::BriefRole::Review
+        } else {
+            run::BriefRole::ReadOnly
+        };
+        if let Ok(ports) = provenant_config::PortTable::read_for(project_root, state_root) {
+            brief.set_static_checks_from_ports(&ports, role);
+        }
         let extras = run::PreambleExtras {
             route: Some(provider.clone()),
             location: writer.as_ref().map(|writer| run::LaneLocation {
@@ -4635,6 +4687,8 @@ pub(super) fn prepare_candidates_inner(
                 prompt_text,
             )),
             build_cap: Some(run::BuildCap::from(&build_class)),
+            brief: Some(brief),
+            role,
         };
         let text = format!(
             "{}\n{text}",
@@ -4752,11 +4806,11 @@ pub(super) fn prepare_candidates_inner(
                     lane_access.access.as_str(),
                     lane_access.source.as_str()
                 );
-                if let provenant_records::policy::Effect::Warn(message) = launch_policy.check(
+                if let provenant_records::policy::Effect::Warn(warning) = launch_policy.check(
                     "LAUNCH_NATIVE_AUTH_NONE",
                     provenant_records::policy::Facts::violation(detail),
                 ) {
-                    provider.launch_warnings.push(format!("warning: {message}"));
+                    warn(warning);
                 }
             }
         }
@@ -5130,9 +5184,12 @@ pub(super) fn prepare_candidates_inner(
         );
         let gh_permitted = github_auth_permitted(&plan, &spec.profile.spec);
         if publishing && !gh_permitted {
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: {label}: GitHub publishing credentials withheld by the access policy"
+            warn(
+                Warning::new(
+                    provenant_records::warning::GH_CREDENTIALS_WITHHELD,
+                    "GitHub publishing credentials withheld by the access policy",
+                )
+                .subject(label.as_str()),
             );
             gh_selection = super::gh_auth::Selection::new(
                 if sandbox.effective {
@@ -5164,16 +5221,13 @@ pub(super) fn prepare_candidates_inner(
                 ));
             }
             Some(Err(error)) => {
-                if let Some(message) = launch_policy
-                    .check(
-                        "PREPARATION_GITHUB_POLICY_NONE",
-                        provenant_records::policy::Facts::violation(format!(
-                            "{label}: GitHub policy unreadable, the gh wrapper applies no deny list: {error}"
-                        )),
-                    )
-                    .message()
-                {
-                    let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+                if let provenant_records::policy::Effect::Warn(warning) = launch_policy.check(
+                    "PREPARATION_GITHUB_POLICY_NONE",
+                    provenant_records::policy::Facts::violation(format!(
+                        "{label}: GitHub policy unreadable, the gh wrapper applies no deny list: {error}"
+                    )),
+                ) {
+                    warn(warning);
                 }
                 provenant_config::GithubPolicy::default()
             }
@@ -5203,7 +5257,10 @@ pub(super) fn prepare_candidates_inner(
             ) {
                 Ok(origin) => super::gh_auth::Delivery::Injected(origin),
                 Err(warning) => {
-                    let _ = writeln!(std::io::stderr().lock(), "warning: {label}: {warning}");
+                    warn(
+                        Warning::new(provenant_records::warning::GH_LOGIN_UNAVAILABLE, warning)
+                            .subject(label.to_string()),
+                    );
                     super::gh_auth::Delivery::None("login lookup failed".into())
                 }
             };
@@ -5230,16 +5287,13 @@ pub(super) fn prepare_candidates_inner(
             let mediated = match spec.configure_gh_shim(scratch, gh, &host_config.path, &gh_shim) {
                 Ok(()) => true,
                 Err(error) => {
-                    if let Some(message) = launch_policy
-                        .check(
-                            "PREPARATION_GH_SHIM_NONE",
-                            provenant_records::policy::Facts::violation(format!(
-                                "{label}: gh wrapper unavailable, gh runs uncounted: {error}"
-                            )),
-                        )
-                        .message()
-                    {
-                        let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+                    if let provenant_records::policy::Effect::Warn(warning) = launch_policy.check(
+                        "PREPARATION_GH_SHIM_NONE",
+                        provenant_records::policy::Facts::violation(format!(
+                            "{label}: gh wrapper unavailable, gh runs uncounted: {error}"
+                        )),
+                    ) {
+                        warn(warning);
                     }
                     false
                 }
@@ -5472,9 +5526,18 @@ pub(super) fn prepare_candidates_inner(
             spec.model_observation == provenant_records::ModelObservation::SessionDatabase
         }) {
             let message = opencode_access_message(&lane_access);
-            let _ = writeln!(std::io::stderr().lock(), "{message}");
+            warn(Warning::new(
+                provenant_records::warning::LAUNCH_ACCESS_PROFILE,
+                message.clone(),
+            ));
             for warning in spec.warnings.iter().chain(continuation_warning.iter()) {
-                let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+                let text = warning
+                    .strip_prefix("warning: ")
+                    .unwrap_or(warning.as_str());
+                warn(Warning::new(
+                    provenant_records::warning::LAUNCH_ACCESS_PROFILE,
+                    text.to_string(),
+                ));
             }
             provider.launch_warnings.push(message);
         }
@@ -5538,7 +5601,10 @@ pub(super) fn prepare_candidates_inner(
             ) {
                 Ok(origin) => super::gh_auth::Delivery::Injected(origin),
                 Err(warning) => {
-                    let _ = writeln!(std::io::stderr().lock(), "warning: {label}: {warning}");
+                    warn(
+                        Warning::new(provenant_records::warning::GH_LOGIN_UNAVAILABLE, warning)
+                            .subject(label.to_string()),
+                    );
                     super::gh_auth::Delivery::None("login lookup failed".into())
                 }
             };
@@ -5773,50 +5839,59 @@ pub(super) fn resolve_lane_access(
     task: &run::TaskRequest,
     model_policy: &provenant_routing::ModelPolicy,
 ) -> provenant_records::LaneAccessReceipt {
-    use provenant_records::{LaneAccess, LaneAccessReceipt, LaneAccessSource, LimitSource};
-    const KEY: &str = "lanes.access";
-    let source = task
-        .profile
-        .knob_sources
-        .get(KEY)
-        .copied()
-        .unwrap_or_default();
-    let explicit = matches!(
-        source,
-        LimitSource::Launch | LimitSource::Template | LimitSource::Tier
-    );
-    if !explicit && let Some(access) = model_policy.lane.access {
-        return LaneAccessReceipt {
-            access,
-            source: LaneAccessSource::RoutePolicy,
-            key: model_policy
-                .lane
-                .access_key
-                .clone()
-                .unwrap_or_else(|| "defaults.lane.access".into()),
-            extra: Default::default(),
-        };
-    }
-    let receipt_source = match source {
-        LimitSource::Default => LaneAccessSource::Default,
-        LimitSource::Host => LaneAccessSource::Host,
-        LimitSource::Project => LaneAccessSource::Project,
-        LimitSource::Template => LaneAccessSource::Template,
-        LimitSource::Tier => LaneAccessSource::Tier,
-        LimitSource::Launch => LaneAccessSource::Launch,
+    use provenant_records::{
+        LANE_ACCESS_PRECEDENCE, LaneAccess, LaneAccessReceipt, Layer, Source, Sourced,
     };
-    let access = match task.profile.knobs.get(KEY) {
-        None => LaneAccess::Host,
-        Some(value) => match value.as_str() {
-            Some("host") => LaneAccess::Host,
+    const KEY: &str = "lanes.access";
+    let mut candidates: Vec<Sourced<LaneAccess>> = Vec::new();
+
+    // The knob at the layer that actually set it (launch, template, tier, ...).
+    if task.profile.knobs.contains_key(KEY) || task.profile.knob_sources.contains_key(KEY) {
+        let layer = task
+            .profile
+            .knob_sources
+            .get(KEY)
+            .copied()
+            .unwrap_or_default();
+        let access = match task.profile.knobs.get(KEY).and_then(|value| value.as_str()) {
             Some("isolated") => LaneAccess::Isolated,
             _ => LaneAccess::Host,
-        },
-    };
+        };
+        candidates.push(Sourced {
+            value: access,
+            source: Source {
+                layer,
+                origin: Some(KEY.into()),
+            },
+        });
+    }
+
+    // The resolved route's policy. Route outranks the template and tier inputs
+    // that selected it, so it must win whenever present.
+    if let Some(access) = model_policy.lane.access {
+        candidates.push(Sourced {
+            value: access,
+            source: Source {
+                layer: Layer::Route,
+                origin: Some(
+                    model_policy
+                        .lane
+                        .access_key
+                        .clone()
+                        .unwrap_or_else(|| "defaults.lane.access".into()),
+                ),
+            },
+        });
+    }
+
+    // The compiled floor: an ambient launch runs with host access.
+    let resolved = LANE_ACCESS_PRECEDENCE.merge_over_default(LaneAccess::Host, candidates);
+    provenant_records::warn_ignored(&resolved.ignored, KEY);
+    let winner = resolved.winner;
     LaneAccessReceipt {
-        access,
-        source: receipt_source,
-        key: KEY.into(),
+        access: winner.value,
+        source: winner.source.layer,
+        key: winner.source.origin.unwrap_or_else(|| KEY.into()),
         extra: Default::default(),
     }
 }
@@ -5825,7 +5900,7 @@ pub(super) fn lane_access_warning(
     task: &run::TaskRequest,
     receipt: &provenant_records::LaneAccessReceipt,
 ) -> Option<String> {
-    (receipt.source != provenant_records::LaneAccessSource::RoutePolicy
+    (receipt.source != provenant_records::Layer::Route
         && task
             .profile
             .knobs
@@ -5842,11 +5917,10 @@ pub(super) fn lane_access_warning(
 #[cfg(test)]
 mod lane_access_tests {
     use super::*;
-    use provenant_records::{LaneAccess, LaneAccessSource, LimitSource};
+    use provenant_records::{LaneAccess, Layer};
 
-    #[test]
-    fn precedence_and_invalid_values() {
-        let mut task = run::TaskRequest {
+    fn test_task() -> run::TaskRequest {
+        run::TaskRequest {
             context: None,
             extra: Default::default(),
             limit_extensions: Default::default(),
@@ -5872,50 +5946,58 @@ mod lane_access_tests {
             provider_timeout_seconds: 20,
             delivery_id: None,
             access: Default::default(),
-        };
+        }
+    }
+
+    #[test]
+    fn precedence_and_invalid_values() {
+        let mut task = test_task();
         let mut policy = provenant_routing::ModelPolicy::default();
         let cases = [
+            (None, None, None, LaneAccess::Host, Layer::Default),
             (
-                None,
-                None,
-                None,
-                LaneAccess::Host,
-                LaneAccessSource::Default,
-            ),
-            (
-                Some(LimitSource::Host),
+                Some(Layer::Host),
                 Some("isolated"),
                 None,
                 LaneAccess::Isolated,
-                LaneAccessSource::Host,
+                Layer::Host,
             ),
             (
-                Some(LimitSource::Host),
+                Some(Layer::Host),
                 Some("isolated"),
                 Some(LaneAccess::Host),
                 LaneAccess::Host,
-                LaneAccessSource::RoutePolicy,
+                Layer::Route,
             ),
             (
-                Some(LimitSource::Launch),
+                Some(Layer::Launch),
                 Some("isolated"),
                 Some(LaneAccess::Host),
                 LaneAccess::Isolated,
-                LaneAccessSource::Launch,
+                Layer::Launch,
+            ),
+            // Route outranks the template and tier inputs that selected it.
+            (
+                Some(Layer::Template),
+                Some("host"),
+                Some(LaneAccess::Isolated),
+                LaneAccess::Isolated,
+                Layer::Route,
             ),
             (
-                Some(LimitSource::Template),
+                Some(Layer::Tier),
+                Some("host"),
+                Some(LaneAccess::Isolated),
+                LaneAccess::Isolated,
+                Layer::Route,
+            ),
+            // An invalid knob value falls back to host; the route still wins.
+            (
+                Some(Layer::Template),
                 Some("invalid"),
-                None,
-                LaneAccess::Host,
-                LaneAccessSource::Template,
-            ),
-            (
-                Some(LimitSource::Tier),
-                Some("isolated"),
-                Some(LaneAccess::Host),
+                Some(LaneAccess::Isolated),
                 LaneAccess::Isolated,
-                LaneAccessSource::Tier,
+                Layer::Route,
             ),
         ];
         for (source, value, route, expected, expected_source) in cases {
@@ -5938,6 +6020,31 @@ mod lane_access_tests {
                 (expected, expected_source)
             );
         }
+    }
+
+    /// Spec: docs/specs/state.md#every-setting-reports-its-layer
+    #[test]
+    fn an_undeclared_knob_layer_is_ignored_and_warned() {
+        let mut task = test_task();
+        task.profile
+            .knob_sources
+            .insert("lanes.access".into(), Layer::Profile);
+        task.profile
+            .knobs
+            .insert("lanes.access".into(), "host".into());
+        let policy = provenant_routing::ModelPolicy::default();
+        let (receipt, warnings) =
+            provenant_records::warning::capture(|| resolve_lane_access(&task, &policy));
+        assert_eq!(
+            (receipt.access, receipt.source),
+            (LaneAccess::Host, Layer::Default)
+        );
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].code.as_ref(), "SETTING_LAYER_IGNORED");
+        assert_eq!(
+            warnings[0].source.as_ref().map(|source| source.layer),
+            Some(Layer::Profile)
+        );
     }
 }
 
@@ -6239,17 +6346,17 @@ fn user_skills_exposure(
 #[cfg(test)]
 #[test]
 fn opencode_access_message_reports_value_and_source() {
-    use provenant_records::{LaneAccess, LaneAccessReceipt, LaneAccessSource};
+    use provenant_records::{LaneAccess, LaneAccessReceipt, Layer};
     let default = opencode_access_message(&LaneAccessReceipt {
         access: LaneAccess::Host,
-        source: LaneAccessSource::Default,
+        source: Layer::Default,
         key: "lanes.access".into(),
         extra: Default::default(),
     });
     assert!(default.contains("profile=host") && default.contains("source: default"));
     let configured = opencode_access_message(&LaneAccessReceipt {
         access: LaneAccess::Isolated,
-        source: LaneAccessSource::Host,
+        source: Layer::Host,
         key: "lanes.access".into(),
         extra: Default::default(),
     });
@@ -6721,7 +6828,7 @@ mod refusal_cause_tests {
 #[test]
 fn oversized_argv_prompt_spills_to_private_attempt_state() -> Result<(), Box<dyn std::error::Error>>
 {
-    use provenant_records::diagnostic::SettingSource;
+    use provenant_records::diagnostic::Layer;
     let temp = tempfile::tempdir()?;
     let root = std::fs::canonicalize(temp.path())?;
     let paths = run::LaunchPaths {
@@ -6737,15 +6844,7 @@ fn oversized_argv_prompt_spills_to_private_attempt_state() -> Result<(), Box<dyn
     };
     let policy = provenant_records::policy::Policy::default();
     let text = "PROMPT_SECRET_SENTINEL";
-    let prompt = launch_prompt(
-        text,
-        &paths,
-        &root,
-        "cursor",
-        1,
-        SettingSource::Configuration,
-        &policy,
-    )?;
+    let prompt = launch_prompt(text, &paths, &root, "cursor", 1, Layer::Host, &policy)?;
     let file = prompt
         .file()
         .ok_or("oversized argv prompt was not spilled")?;
@@ -7441,7 +7540,7 @@ mod route_launch_boundary_regressions {
             &[],
             Some(&provenant_records::LaneAccessReceipt {
                 access: provenant_records::LaneAccess::Isolated,
-                source: provenant_records::LaneAccessSource::Default,
+                source: provenant_records::Layer::Default,
                 key: "lanes.access".into(),
                 extra: Default::default(),
             }),
@@ -7474,7 +7573,7 @@ mod route_launch_boundary_regressions {
                 &[&registered.directory.join("workspace")],
                 Some(&provenant_records::LaneAccessReceipt {
                     access: provenant_records::LaneAccess::Isolated,
-                    source: provenant_records::LaneAccessSource::Default,
+                    source: provenant_records::Layer::Default,
                     key: "lanes.access".into(),
                     extra: Default::default()
                 }),
@@ -7518,12 +7617,12 @@ mod route_launch_boundary_regressions {
         let labelled_collision = agy_entry("local", "agy-other", &home.join(".agy-other"));
         let mut colliding_candidates = vec![labelled_collision];
         colliding_candidates.push(agy_entry(spec.local_account.0, spec.local_account.1, &home));
-        assert_eq!(
-            select_account(&colliding_candidates, spec.local_account.1, Some("agy"))
-                .map_err(|error| error.to_string())?
-                .key,
-            spec.local_account.1
-        );
+        // Spec: docs/specs/routing.md#account-references
+        // A key and a label collision is ambiguous, never silently key-first.
+        assert!(matches!(
+            select_account(&colliding_candidates, spec.local_account.1, Some("agy")),
+            Err(PrepareError::Other(_))
+        ));
         Ok(())
     }
 

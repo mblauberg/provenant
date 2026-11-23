@@ -31,6 +31,10 @@ class ExtraFieldsOwnership(unittest.TestCase):
             'fn f(record: Record) { record.extra /* comment */ .get ("owned"); }',
             'fn f(record: Record) { let preceding = ""; record.extra.get("owned"); }',
             'fn f(record: Record) { let preceding = b""; record.extra.get("owned"); }',
+            # A quote char literal or a lifetime must not desync the lexer.
+            'fn f(record: Record) { let quote = \'"\'; record.extra.get("owned"); }',
+            'fn f(record: Record) { let quote = \'\\\'\'; record.extra.get("owned"); }',
+            "fn f<'a>(record: &'a Record) { record.extra.get(\"owned\"); }",
         ]
         with tempfile.TemporaryDirectory() as temporary:
             source = Path(temporary) / "production.rs"

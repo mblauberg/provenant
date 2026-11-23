@@ -7,7 +7,7 @@ pub(super) fn install(library: &mut TemplateLibrary) -> Result<(), String> {
         toml_edit::de::from_str(include_str!("../../assets/templates/composites.toml"))
             .map_err(|error| format!("bundled composites: {error}"))?;
     for (name, template) in templates {
-        library.insert(Layer::Bundled, &name, template)?;
+        library.insert(Layer::Default, &name, template)?;
     }
     Ok(())
 }

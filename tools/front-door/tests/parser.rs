@@ -371,13 +371,28 @@ fn config_show_names_verify_port_layers_and_survives_a_malformed_project_layer()
     let value: serde_json::Value = serde_json::from_slice(&shown.stdout.bytes)?;
     let ports = &value["data"]["ports"];
     assert_eq!(ports["verify.remote"]["value"], "origin");
-    assert_eq!(ports["verify.remote"]["source"], "builtin");
-    assert!(
-        ports["verify.base"]["source"]
-            .as_str()
-            .is_some_and(|source| source.starts_with("inferred from") || source == "unresolved"),
-        "{ports}"
-    );
+    // Each port leaf reports its winning layer with the shared vocabulary.
+    // Spec: docs/specs/state.md#every-setting-reports-its-layer
+    assert_eq!(ports["verify.remote"]["layer"], "default");
+    // An unset base is a detected leaf: inferred from the remote HEAD with its
+    // origin, or unresolved with a repair. Spec: docs/specs/state.md#one-sourced-port-table
+    assert_eq!(ports["verify.base"]["layer"], "detected");
+    let base = &ports["verify.base"];
+    if base["origin"].is_null() {
+        assert!(
+            base["remedy"]
+                .as_str()
+                .is_some_and(|remedy| remedy.contains("verify.base")),
+            "{ports}"
+        );
+    } else {
+        assert!(
+            base["origin"]
+                .as_str()
+                .is_some_and(|origin| origin.contains("HEAD")),
+            "{ports}"
+        );
+    }
 
     // A partial project overlay sets only verify.base and keeps its source.
     std::fs::create_dir_all(rig.project.join(".provenant"))?;
@@ -392,7 +407,7 @@ fn config_show_names_verify_port_layers_and_survives_a_malformed_project_layer()
         value["data"]["ports"]["verify.base"]["value"],
         "origin/master"
     );
-    assert_eq!(value["data"]["ports"]["verify.base"]["source"], "project");
+    assert_eq!(value["data"]["ports"]["verify.base"]["layer"], "project");
 
     // A malformed project layer is warned and skipped: config show needs no
     // verify port and still runs, with the file and key in the warning.
@@ -402,9 +417,21 @@ fn config_show_names_verify_port_layers_and_survives_a_malformed_project_layer()
     )?;
     let shown = rig.command(&["config", "show", "--json"])?;
     assert_eq!(code(&shown), 0, "{shown:?}");
-    let stderr = String::from_utf8_lossy(&shown.stderr.bytes);
-    assert!(stderr.contains("ports.json"), "{stderr}");
-    assert!(stderr.contains("verify"), "{stderr}");
+    // A typed warning reaches the JSON envelope, never bare stderr.
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    let envelope: serde_json::Value = serde_json::from_slice(&shown.stdout.bytes)?;
+    assert!(
+        envelope["warnings"]
+            .as_array()
+            .ok_or("warnings")?
+            .iter()
+            .any(|warning| {
+                warning["message"].as_str().is_some_and(|message| {
+                    message.contains("ports.json") && message.contains("verify")
+                })
+            }),
+        "{envelope}"
+    );
     Ok(())
 }
 
@@ -443,13 +470,23 @@ fn config_show_reads_typed_defaults_warns_on_unknown_keys_and_restricts_authorit
         rig.state.join("config.toml"),
         "schema_version=1\nunknown='private-marker'\n",
     )?;
-    // An unknown key warns by name without echoing its value.
+    // An unknown key warns by name in the envelope without echoing its value.
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
     let unknown = rig.command(&["config", "show", "--json"])?;
     assert_eq!(code(&unknown), 0);
-    let stderr = String::from_utf8_lossy(&unknown.stderr.bytes);
+    let warned: serde_json::Value = serde_json::from_slice(&unknown.stdout.bytes)?;
     assert!(
-        stderr.contains("unknown") && stderr.contains("unknown configuration key"),
-        "{stderr}"
+        warned["warnings"]
+            .as_array()
+            .ok_or("warnings")?
+            .iter()
+            .any(|warning| {
+                warning["code"] == "CONFIG_KEY_IGNORED"
+                    && warning["message"].as_str().is_some_and(|message| {
+                        message.contains("unknown") && message.contains("unknown configuration key")
+                    })
+            }),
+        "{warned}"
     );
     for stream in [&unknown.stdout.bytes, &unknown.stderr.bytes] {
         assert!(!String::from_utf8_lossy(stream).contains("private-marker"));
@@ -467,8 +504,18 @@ fn config_show_reads_typed_defaults_warns_on_unknown_keys_and_restricts_authorit
     );
     let shown: serde_json::Value = serde_json::from_slice(&invalid.stdout.bytes)?;
     assert_eq!(shown["data"]["knobs"]["lanes.publish"]["value"], false);
-    let stderr = String::from_utf8_lossy(&invalid.stderr.bytes);
-    assert!(stderr.contains("lanes.publish"), "{stderr}");
+    // The invalid-knob warning also reaches the envelope, not bare stderr.
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    assert!(
+        shown["warnings"]
+            .as_array()
+            .ok_or("warnings")?
+            .iter()
+            .any(|warning| warning["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("lanes.publish"))),
+        "{shown}"
+    );
     for stream in [&invalid.stdout.bytes, &invalid.stderr.bytes] {
         assert!(!String::from_utf8_lossy(stream).contains("private-marker"));
     }
@@ -487,7 +534,11 @@ fn config_show_reads_typed_defaults_warns_on_unknown_keys_and_restricts_authorit
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&rig.state, std::fs::Permissions::from_mode(0o700))?;
     }
+    // Under --json a warning rides in the envelope, never bare stderr. A
+    // per-change key is remembered, so the typo names once across both reads.
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
     let mut stderr = String::new();
+    let mut shown = 0;
     for args in [&["config", "show", "--json"][..], &["status", "--json"][..]] {
         let output = rig.command(args)?;
         assert_eq!(
@@ -496,13 +547,22 @@ fn config_show_reads_typed_defaults_warns_on_unknown_keys_and_restricts_authorit
             "{args:?} {}",
             String::from_utf8_lossy(&output.stdout.bytes)
         );
+        let envelope: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+        shown += envelope["warnings"]
+            .as_array()
+            .ok_or("warnings")?
+            .iter()
+            .filter(|warning| {
+                warning["code"] == "CONFIG_KEY_IGNORED"
+                    && warning["message"]
+                        .as_str()
+                        .is_some_and(|message| message.contains("lanes.max_concurency"))
+            })
+            .count();
         stderr.push_str(&String::from_utf8_lossy(&output.stderr.bytes));
     }
-    assert_eq!(
-        stderr.matches("lanes.max_concurency").count(),
-        1,
-        "{stderr}"
-    );
+    assert_eq!(shown, 1, "{stderr}");
+    assert!(!stderr.contains("warning:"), "{stderr}");
     assert!(!stderr.contains("PathWire"), "{stderr}");
     rig.assert_v1_root_untouched()
 }
@@ -611,7 +671,7 @@ fn config_set_reports_only_the_changed_effective_setting() -> Result {
     assert_eq!(result["data"]["key"], key);
     assert_eq!(result["data"]["previous"], before["data"]["knobs"][key]);
     assert_eq!(result["data"]["effective"]["value"], 300000);
-    assert!(result["data"]["effective"]["source"].is_string());
+    assert!(result["data"]["effective"]["layer"].is_string());
     assert!(result["data"].get("domains").is_none());
     Ok(())
 }
@@ -776,8 +836,14 @@ fn config_check_and_doctor_report_pool_effort_warnings_as_advice() -> Result {
     let checked: serde_json::Value = serde_json::from_slice(&checked.stdout.bytes)?;
     assert_eq!(checked["status"], "ok");
     assert_eq!(checked["data"]["count"], 0);
-    let warning = checked["data"]["warnings"][0].as_str().ok_or("warning")?;
-    assert!(warning.contains("pool trial"), "{warning}");
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    let warning = checked["warnings"]
+        .as_array()
+        .ok_or("envelope warnings")?
+        .iter()
+        .filter_map(|warning| warning["message"].as_str())
+        .find(|message| message.contains("pool trial"))
+        .ok_or("pool effort warning")?;
     assert!(warning.contains("effort retired"), "{warning}");
     assert!(warning.contains("codex/gpt-6-luna"), "{warning}");
     assert!(warning.contains("pool source: config.toml"), "{warning}");
@@ -880,4 +946,28 @@ fn hosts_doctor_uses_non_billing_status_and_preserves_identity_selection() -> Re
         2
     );
     rig.assert_v1_root_untouched()
+}
+
+// Spec: docs/specs/cli.md#warnings-are-typed-values
+#[test]
+fn a_capitalised_target_warns_only_in_the_json_envelope() -> Result {
+    let rig = TestRig::new()?;
+    // The target is folded by a clap value parser, before dispatch installs the
+    // sink. Under --json that warning must reach the envelope, not stderr.
+    let out = rig.command(&["stop", "Fix-Login", "--json"])?;
+    let stderr = String::from_utf8_lossy(&out.stderr.bytes);
+    assert!(
+        !stderr.contains("warning:"),
+        "bare warning leaked: {stderr}"
+    );
+    let envelope: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
+    assert!(
+        envelope["warnings"]
+            .as_array()
+            .ok_or("warnings")?
+            .iter()
+            .any(|warning| warning["code"] == "NAME_CASE_FOLDED"),
+        "{envelope}"
+    );
+    Ok(())
 }

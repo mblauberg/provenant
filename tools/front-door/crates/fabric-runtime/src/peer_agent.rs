@@ -193,6 +193,10 @@ pub fn forward(state: &Path, request: &[u8]) -> Result<Forward, AgentError> {
 }
 
 /// One line on stderr, which the LaunchAgent sends to its log.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the LaunchAgent log line is the peer agent's diagnostic output seam"
+)]
 pub fn log(message: &str) {
     let _ = io::stderr()
         .lock()
@@ -664,7 +668,10 @@ struct Projects {
 pub type RegistryName = fn(&Path) -> OsString;
 
 impl Projects {
-    #[allow(clippy::print_stderr)]
+    #[allow(
+        clippy::print_stderr,
+        reason = "notes explain which PATH entries the LaunchAgent skips; they are log output"
+    )]
     fn registered(roots: &Roots, registry_name: RegistryName) -> Result<Self, AgentError> {
         let mut common_dirs = Vec::new();
         let mut project_roots = Vec::new();
@@ -797,7 +804,10 @@ fn provider_executables(search: &OsStr, projects: &Projects) -> Vec<PathBuf> {
     )
 }
 
-#[allow(clippy::print_stderr)]
+#[allow(
+    clippy::print_stderr,
+    reason = "notes explain which executables the LaunchAgent skips; they are log output"
+)]
 fn resolved_executables<'a>(
     search: &OsStr,
     projects: &Projects,

@@ -33,7 +33,12 @@ pub(super) fn graph_ci_waiting<'a>(
     dead_code,
     reason = "the custom worktree driver omits libtest functions"
 )]
-pub(super) fn graph_summary(run: &serde_json::Value) -> provenant_cli::Summary {
+pub(super) fn graph_summary(
+    run: &serde_json::Value,
+) -> (
+    provenant_cli::Summary,
+    Option<provenant_records::command_result::NextStep>,
+) {
     let text = |value: &serde_json::Value, key: &str| {
         value
             .get(key)
@@ -243,12 +248,20 @@ pub(super) fn graph_summary(run: &serde_json::Value) -> provenant_cli::Summary {
     }
     let next = match status.as_str() {
         "complete" | "cancelled" => None,
-        "paused" => Some(format!("provenant retry {id}")),
-        _ => Some(format!("provenant status {id}")),
+        "paused" => Some(provenant_records::command_result::NextStep::from_args(
+            &["provenant", "retry", &id],
+            "resume the paused graph",
+        )),
+        _ => Some(provenant_records::command_result::NextStep::from_args(
+            &["provenant", "status", &id],
+            "re-read the graph",
+        )),
     };
-    provenant_cli::Summary::new(
-        format!("graph {id} {status}: {} nodes ({tally})", nodes.len()),
-        rows,
+    (
+        provenant_cli::Summary::new(
+            format!("graph {id} {status}: {} nodes ({tally})", nodes.len()),
+            rows,
+        ),
         next,
     )
 }
@@ -510,7 +523,7 @@ mod spec_chair_tests {
             (None, None, "data_loss", true),
             (None, None, "none", false),
         ] {
-            let summary = super::graph_summary(&serde_json::json!({
+            let (summary, _) = super::graph_summary(&serde_json::json!({
                 "status":"complete", "checkpoint":{"graph_id":"g","nodes":[
                     {"id":"review", "state":"succeeded", "outputs":{"findings":[{
                         "id":"F1", "severity":"high", "file":"a.rs", "status":"open",
@@ -539,7 +552,7 @@ mod spec_chair_tests {
 
     #[test]
     fn completed_writer_spec_concerns_and_review_spec_defects_reach_chair_summary() {
-        let summary = super::graph_summary(&serde_json::json!({
+        let (summary, _) = super::graph_summary(&serde_json::json!({
             "status":"complete", "checkpoint":{"graph_id":"g","nodes":[
                 {"id":"writer","state":"succeeded","outputs":{"spec_concerns":[{
                     "criterion":"old reader", "claim":"format retired", "evidence":"approved scope",
@@ -556,15 +569,14 @@ mod spec_chair_tests {
         assert!(text.contains("remove reader") && text.contains("diverged"));
         assert!(text.contains("1 spec defects"));
         assert!(text.contains("criterion conflicts with scope"));
-        let clipped = super::graph_summary(&serde_json::json!({
+        let (clipped, _) = super::graph_summary(&serde_json::json!({
             "status":"complete", "checkpoint":{"graph_id":"g","nodes":[
                 {"id":"writer","state":"succeeded","outputs":{
                     "spec_concerns":[],"spec_concern_count":2,"result":{"path":"/attempt/result.md"}
                 }}
             ]}
-        }))
-        .lines
-        .join("\n");
+        }));
+        let clipped = clipped.lines.join("\n");
         assert!(clipped.contains("2 spec concerns") && clipped.contains("0 retained"));
         assert!(clipped.contains("/attempt/result.md"));
     }

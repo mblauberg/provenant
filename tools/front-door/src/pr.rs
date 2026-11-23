@@ -142,14 +142,8 @@ pub(crate) fn forge_execute(
         return Err("forge operation must name the builtin forge executable".into());
     }
     let ports = provenant_config::PortTable::read_for(Some(project), state)?;
-    let mut forge = provenant_config::ForgePort::new(
-        ports.forge,
-        "forge",
-        project,
-        state,
-        // TODO(#3371 seam): caller owner supplies the operation-scoped policy.
-        std::sync::Arc::new(provenant_records::policy::Policy::default()),
-    )?;
+    let policy = provenant_config::operation_policy(state, project, &ports);
+    let mut forge = provenant_config::ForgePort::new(ports.forge, "forge", project, state, policy)?;
     provenant_confinement::publication::install_forge(
         &mut forge,
         project.to_owned(),
@@ -519,6 +513,21 @@ fn merge_failure_from_output(
             Some(msg) => format!("pull request is not mergeable: {msg}"),
             None => "pull request is not mergeable".to_owned(),
         };
+        // A ruleset that demands a review the authenticated owner cannot give
+        // is the one 405 admin publication may retry. Every other 405 keeps its
+        // existing cause; the gate still decides whether a retry is allowed.
+        let lowered = message.to_ascii_lowercase();
+        if [
+            "review required",
+            "required review",
+            "approving review",
+            "reviews",
+        ]
+        .iter()
+        .any(|needle| lowered.contains(needle))
+        {
+            return wait::failure("REVIEW_REQUIRED", message);
+        }
         return wait::failure("MERGE_NOT_ALLOWED", message);
     }
     format!("merge request failed: {error}").into()
@@ -526,11 +535,14 @@ fn merge_failure_from_output(
 
 /// Merge a pull request pinned to `head` with `method`, returning the commit
 /// GitHub created. A moved head (409) and a refused merge (405) are named.
+/// `admin` adds the `admin=true` field `gh pr merge --admin` sends, exercising
+/// the owner's own admin authority rather than granting new authority.
 fn merge_with(
     reader: &wait::Reader<'_>,
     number: &str,
     head: GitOid,
     method: MergeMethod,
+    admin: bool,
 ) -> Result<Option<String>> {
     let method = match method {
         MergeMethod::Merge => "merge_method=merge",
@@ -539,12 +551,14 @@ fn merge_with(
     };
     let endpoint = format!("{}/merge", pull_endpoint(number));
     let sha = format!("sha={head}");
-    let output = reader.request(
-        &[
-            "gh", "api", "--method", "PUT", &endpoint, "-f", &sha, "-f", method,
-        ],
-        true,
-    )?;
+    let mut args = vec![
+        "gh", "api", "--method", "PUT", &endpoint, "-f", &sha, "-f", method,
+    ];
+    if admin {
+        // `gh pr merge --admin` sends this field in the same PUT body.
+        args.extend(["-f", "admin=true"]);
+    }
+    let output = reader.request(&args, true)?;
     if output.termination != Termination::Exit(0) {
         return Err(merge_failure_from_output(&output, head));
     }

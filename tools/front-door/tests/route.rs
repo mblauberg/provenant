@@ -608,7 +608,7 @@ fn override_list_shows_active_future_and_expired_schedules() -> Result {
 }
 
 #[test]
-fn fallback_warnings_are_revision_scoped() -> Result {
+fn fallback_warnings_show_once_until_their_key_changes() -> Result {
     let rig = rig()?;
     fs::create_dir_all(&rig.state)?;
     let config = "schema_version=1\n[domains.routing]\n[domains.routing.model_policy.defaults.result]\nfallback='codex/not-catalogued'\n";
@@ -619,9 +619,13 @@ fn fallback_warnings_are_revision_scoped() -> Result {
     assert_eq!(stderr.matches("unknown_fallback").count(), 1);
     let second = rig.command(&["route", "list"])?;
     assert!(second.stderr.bytes.is_empty());
+    // A per-change key hashes the warning's code, subject and message, so the
+    // warning returns when its subject moves — appending a comment keeps the
+    // setting's line and therefore its key. Prepend a line to change the line.
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
     fs::write(
         rig.state.join("config.toml"),
-        format!("{config}\n# revision\n"),
+        format!("# revision\n{config}"),
     )?;
     let third = rig.command(&["route", "list"])?;
     let stderr = String::from_utf8(third.stderr.bytes)?;
@@ -748,10 +752,19 @@ fn pacing_profile_account_labels_resolve_and_unknown_names_fail() -> Result {
         list["data"]["configured_free"]["opencode"]["deadline"]["reset_of"],
         "claude/opaque-one"
     );
-    for profile in [
-        "[domains.routing.pacing.accounts.missing]\npolicy='pace'\n",
-        "[domains.routing.pacing.accounts.opaque-one]\ndeadline={reset_of='missing'}\n",
-        "[domains.routing.pacing.free.opencode]\ndeadline={reset_of='missing'}\n",
+    for (profile, field) in [
+        (
+            "[domains.routing.pacing.accounts.missing]\npolicy='pace'\n",
+            "pacing.accounts.missing",
+        ),
+        (
+            "[domains.routing.pacing.accounts.opaque-one]\ndeadline={reset_of='missing'}\n",
+            "pacing.accounts.opaque-one.deadline.reset_of",
+        ),
+        (
+            "[domains.routing.pacing.free.opencode]\ndeadline={reset_of='missing'}\n",
+            "pacing.free.opencode.deadline.reset_of",
+        ),
     ] {
         fs::write(&config, format!("{registrations}{profile}"))?;
         let result = call(&rig, &["route", "list"], 2)?;
@@ -762,12 +775,16 @@ fn pacing_profile_account_labels_resolve_and_unknown_names_fail() -> Result {
                 .unwrap()
                 .contains("provenant accounts list")
         );
-        let message = result["error"]["message"].as_str().ok_or("error")?;
-        assert!(
-            message.contains("missing")
-                && message.contains("michael")
-                && message.contains("opaque-one"),
-            "{message}"
+        // A miss names the setting it came from and the reference that was
+        // supplied. Any close matches are labels only, never a key, directory
+        // or the full account catalogue. The field prefix can therefore name a
+        // key the operator wrote in their own config without leaking one.
+        // Spec: docs/specs/routing.md#account-references
+        assert_eq!(
+            result["error"]["message"],
+            format!("{field}: unknown account `missing`"),
+            "{}",
+            result["error"]["message"]
         );
     }
     fs::write(
@@ -807,7 +824,7 @@ fn pacing_profile_account_labels_resolve_and_unknown_names_fail() -> Result {
 }
 
 #[test]
-fn pacing_profiles_warn_on_unknown_keys_and_list_accounts() -> Result {
+fn pacing_profiles_warn_on_unknown_keys_and_refuse_unknown_accounts() -> Result {
     let rig = rig()?;
     fs::create_dir_all(&rig.state)?;
     fs::write(
@@ -815,19 +832,29 @@ fn pacing_profiles_warn_on_unknown_keys_and_list_accounts() -> Result {
         "schema_version=1\n[domains.routing.pacing.accounts.pro]\nwindow=['five_hour']\n",
     )?;
     // The misspelt key is tuning, so it warns and is ignored; the profile
-    // still names an unregistered account, which refuses and lists choices.
+    // still names an unregistered account, which refuses with one name refusal.
     let out = rig.command(&["route", "list", "--json"])?;
     assert_eq!(code(&out), 2);
-    let stderr = String::from_utf8_lossy(&out.stderr.bytes);
-    assert!(
-        stderr.contains("domains.routing.pacing.accounts.pro.window")
-            && stderr.contains("unknown configuration key"),
-        "{stderr}"
-    );
     let output: Value = serde_json::from_slice(&out.stdout.bytes)?;
-    let message = output["error"]["message"].as_str().ok_or("config error")?;
+    // The misspelt key's warning reaches the JSON envelope, never stderr.
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
     assert!(
-        message.contains("unknown account `pro`") && message.contains("valid accounts"),
+        output["warnings"]
+            .as_array()
+            .ok_or("warnings")?
+            .iter()
+            .any(|warning| warning["code"] == "CONFIG_KEY_IGNORED"
+                && warning["message"].as_str().is_some_and(|message| {
+                    message.contains("domains.routing.pacing.accounts.pro.window")
+                        && message.contains("unknown configuration key")
+                })),
+        "{output}"
+    );
+    assert!(!String::from_utf8_lossy(&out.stderr.bytes).contains("warning:"));
+    let message = output["error"]["message"].as_str().ok_or("config error")?;
+    // Spec: docs/specs/routing.md#account-references
+    assert!(
+        message.contains("unknown account `pro`") && !message.contains("valid accounts"),
         "{message}"
     );
     Ok(())
@@ -1046,12 +1073,22 @@ pools = { junior = [{ model = "codex/gpt-6-luna", weight = 101, effort = "high",
     )?;
     let out = rig.command(&["route", "list", "--pool", "junior", "--json"])?;
     assert_eq!(code(&out), 0);
-    let stderr = String::from_utf8_lossy(&out.stderr.bytes);
-    assert!(
-        stderr.contains("domains.routing.pools.junior") && stderr.contains("weight"),
-        "{stderr}"
-    );
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
     let recovered: Value = serde_json::from_slice(&out.stdout.bytes)?;
+    assert!(
+        recovered["warnings"]
+            .as_array()
+            .ok_or("warnings")?
+            .iter()
+            .any(
+                |warning| warning["message"].as_str().is_some_and(|message| {
+                    message.contains("domains.routing.pools.junior") && message.contains("weight")
+                })
+            ),
+        "{recovered}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr.bytes);
+    assert!(!stderr.contains("warning:"), "{stderr}");
     assert!(
         !recovered["data"]["pools"]["junior"]
             .as_array()
@@ -1067,10 +1104,21 @@ pools = { junior = [{ model = "codex/gpt-6-luna", weight = 101, effort = "high",
     )?;
     let out = rig.command(&["route", "list", "--pool", "junior", "--json"])?;
     assert_eq!(code(&out), 0);
-    let stderr = String::from_utf8_lossy(&out.stderr.bytes);
+    // A typed warning reaches the JSON envelope, never bare stderr.
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    let envelope: Value = serde_json::from_slice(&out.stdout.bytes)?;
     assert!(
-        stderr.contains("routing") && stderr.contains("unknown configuration key"),
-        "{stderr}"
+        envelope["warnings"]
+            .as_array()
+            .ok_or("warnings")?
+            .iter()
+            .any(|warning| {
+                warning["code"] == "CONFIG_KEY_IGNORED"
+                    && warning["message"].as_str().is_some_and(|message| {
+                        message.contains("routing") && message.contains("unknown configuration key")
+                    })
+            }),
+        "{envelope}"
     );
     Ok(())
 }
@@ -1219,8 +1267,16 @@ fn duplicate_primary_fallback_warns_and_is_dropped() -> Result {
     assert_eq!(resolved["data"]["adapter"], "codex");
     assert_eq!(resolved["data"]["model"], "a");
     assert_eq!(resolved["data"]["alternatives"], serde_json::json!([]));
-    let stderr = String::from_utf8_lossy(&output.stderr.bytes);
-    assert!(stderr.contains("ROUTING_ALTERNATIVES"), "{stderr}");
+    // Under --json the typed warning rides in the envelope, not stderr.
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    assert!(
+        resolved["warnings"]
+            .as_array()
+            .ok_or("warnings")?
+            .iter()
+            .any(|warning| warning["code"] == "ROUTING_ALTERNATIVES"),
+        "{resolved}"
+    );
     assert!(!rig.home.join("provider-started").exists());
     rig.assert_v1_root_untouched()?;
     assert!(!rig.state.exists());
@@ -1318,13 +1374,13 @@ fn route_list_attributes_a_bundled_weight_to_the_bundled_layer() -> Result {
                 .find(|member| member["model"] == "codex/gpt-6-luna")
         })
         .ok_or("bundled junior member")?;
-    assert_eq!(member["weight_layer"], "bundled");
+    assert_eq!(member["weight_layer"], "default");
     let human = rig.command(&["route", "list", "--pool", "junior", "--full"])?;
     let human = String::from_utf8_lossy(&human.stdout.bytes);
     assert!(
         human.contains("codex/gpt-6-luna source=bundled weight=")
-            && human.contains("weight_layer=bundled"),
-        "human route list must name the bundled weight layer: {human}"
+            && human.contains("weight_layer=default"),
+        "human route list must name the default weight layer: {human}"
     );
     Ok(())
 }
@@ -1346,11 +1402,11 @@ fn route_list_attributes_an_overridden_weight_to_host_config() -> Result {
         })
         .ok_or("configured junior member")?;
     assert_eq!(member["weight"], 7);
-    assert_eq!(member["weight_layer"], "host config");
+    assert_eq!(member["weight_layer"], "host");
     let human = rig.command(&["route", "list", "--pool", "junior", "--full"])?;
     let human = String::from_utf8_lossy(&human.stdout.bytes);
     assert!(
-        human.contains("codex/gpt-6-luna source=user weight=7 weight_layer=host config"),
+        human.contains("codex/gpt-6-luna source=user weight=7 weight_layer=host"),
         "human route list must name the overriding config layer: {human}"
     );
     Ok(())

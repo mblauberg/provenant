@@ -10,7 +10,8 @@
 use crate::{
     BillingKind, ConfiguredModel, ConfiguredPrices, PriceError, PriceTable, Rates, validate_prices,
 };
-use provenant_config::{OverlaySource, OverlayWarning};
+use provenant_config::OverlayWarning;
+use provenant_records::Layer;
 use serde::Deserialize;
 use std::{
     io,
@@ -89,7 +90,6 @@ pub fn load(
     assets: &Path,
     state: &Path,
     project: Option<&Path>,
-    project_key: Option<&str>,
 ) -> Result<LayeredPrices, PriceLoadError> {
     let path = assets.join("config/telemetry-prices.toml");
     let text = std::fs::read_to_string(&path).map_err(|source| PriceLoadError::Read {
@@ -101,8 +101,7 @@ pub fn load(
             path: path.clone(),
             message: error.to_string(),
         })?;
-    let (layers, mut warnings) =
-        provenant_config::overlays::read_layers(state, project, project_key, "prices");
+    let (layers, mut warnings) = provenant_config::overlays::read_layers(state, project, "prices");
     let mut sources = std::collections::BTreeMap::new();
     for layer in &layers {
         let document: toml_edit::DocumentMut = match layer.text.parse() {
@@ -156,7 +155,7 @@ pub fn load(
                     } else {
                         config.models.push(model);
                     }
-                    if layer.source != OverlaySource::Bundled {
+                    if layer.source != Layer::Default {
                         sources.insert(pair, layer.source.as_str().to_owned());
                     }
                 }

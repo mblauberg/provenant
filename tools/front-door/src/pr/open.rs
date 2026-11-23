@@ -45,25 +45,78 @@ struct Plan {
     remote: String,
 }
 
+#[derive(Deserialize)]
+struct Repository {
+    #[serde(rename = "defaultBranchRef")]
+    branch: Named,
+}
+#[derive(Deserialize)]
+struct Named {
+    name: String,
+}
+
+/// The forge API half of context resolution. It is authoritative for the
+/// default branch: a local remote `HEAD` symref can be stale after a rename,
+/// so the probe is asked before the local symref is trusted.
+struct RepositoryForge<'a> {
+    state: &'a Path,
+    project: &'a Path,
+}
+impl provenant_config::ForgeProbe for RepositoryForge<'_> {
+    fn default_branch(&self, _remote: &str) -> Option<String> {
+        let bytes = super::forge_execute(
+            self.state,
+            self.project,
+            &["gh", "repo", "view", "--json", "defaultBranchRef"],
+            &provenant_config::ports::Request::within(Duration::from_secs(60)),
+            false,
+            None,
+        )
+        .ok()?;
+        let bytes = successful(bytes).ok()?;
+        serde_json::from_slice::<Repository>(&bytes)
+            .ok()
+            .map(|repository| repository.branch.name)
+    }
+}
+
+/// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
 fn default_branch(state: &Path, project: &Path) -> Result<String> {
-    #[derive(Deserialize)]
-    struct Repository {
-        #[serde(rename = "defaultBranchRef")]
-        branch: Named,
+    let ports = provenant_config::PortTable::read_for(Some(project), state)?;
+    let policy = provenant_config::operation_policy(state, project, &ports);
+    let config = provenant_config::ForgeConfig::new(&ports, (*policy).clone());
+    let probe = RepositoryForge { state, project };
+    // Ask the forge first: it is authoritative for the default branch and
+    // ignores the remote, so an ambiguous local remote must not stop the one
+    // answer Git metadata cannot give. A renamed default branch also makes the
+    // local symref stale, but the forge names the branch the PR must target.
+    if let Some(branch) = provenant_config::ForgeProbe::default_branch(&probe, "") {
+        return Ok(branch);
     }
-    #[derive(Deserialize)]
-    struct Named {
-        name: String,
+    // The forge did not answer. The local symref is the only source left, so
+    // resolve the remote it belongs to only now.
+    let git = provenant_config::ForgeGit::new(project).map_err(|error| {
+        format!("cannot read the checkout's Git metadata for the default branch: {error}")
+    })?;
+    let remote = provenant_config::ForgeContext::remote(&config, &git)
+        .map_err(|error| {
+            format!("cannot resolve the forge remote for the default branch: {error}")
+        })?
+        .value;
+    if let Some(branch) = git.remote_head(&remote) {
+        provenant_records::warning::warn(
+            provenant_records::Warning::new(
+                provenant_records::warning::DEFAULT_BASE_FALLBACK,
+                format!("the forge did not name a default branch for {remote}; using the local remote HEAD symref"),
+            )
+            .once_per_change(),
+        );
+        return Ok(branch);
     }
-    let bytes = successful(super::forge_execute(
-        state,
-        project,
-        &["gh", "repo", "view", "--json", "defaultBranchRef"],
-        &provenant_config::ports::Request::within(Duration::from_secs(60)),
-        false,
-        None,
-    )?)?;
-    Ok(serde_json::from_slice::<Repository>(&bytes)?.branch.name)
+    Err(format!(
+        "cannot resolve the repository's default branch: neither the forge nor {remote}/HEAD named one"
+    )
+    .into())
 }
 
 /// Resolve the remote-tracking base through the command's bounded facts session.
@@ -244,13 +297,14 @@ pub(super) fn run(command: PrOpen, globals: &Globals) -> u8 {
     let created = (|| -> Result<Vec<u8>> {
         let ports =
             provenant_config::PortTable::read_for(Some(&project), resolved.roots.state.as_path())?;
+        let policy =
+            provenant_config::operation_policy(resolved.roots.state.as_path(), &project, &ports);
         let mut forge = provenant_config::ForgePort::new(
             ports.forge,
             "forge",
             &project,
             resolved.roots.state.as_path(),
-            // TODO(#3371 seam): caller owner supplies the operation-scoped policy.
-            std::sync::Arc::new(provenant_records::policy::Policy::default()),
+            policy,
         )?;
         provenant_confinement::publication::install_forge(
             &mut forge,
@@ -318,6 +372,69 @@ pub(super) fn run(command: PrOpen, globals: &Globals) -> u8 {
 mod tests {
     #[allow(unused_imports)] // The PR test driver includes this module without libtest.
     use super::*;
+
+    #[test]
+    fn default_branch_reports_the_real_metadata_failure() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let state = temp.path().join("state");
+        provenant_os::fixture::private_state_dir(&state)?;
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&project)?;
+        let error = default_branch(&state, &project).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot read the checkout's Git metadata"),
+            "{error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn default_branch_asks_the_forge_before_an_ambiguous_remote_is_resolved() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let state = temp.path().join("state");
+        std::fs::create_dir_all(&state)?;
+        provenant_os::fixture::private_state_dir(&state)?;
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&project)?;
+        provenant_os::fixture::run_git(&project, &["init", "-q"])?;
+        // Two remotes with no declared git.remote make local resolution
+        // ambiguous; the forge must still be able to name the default branch.
+        for remote in ["alpha", "beta"] {
+            provenant_os::fixture::run_git(
+                &project,
+                &[
+                    "remote",
+                    "add",
+                    remote,
+                    &format!("https://example.invalid/{remote}.git"),
+                ],
+            )?;
+        }
+        let script = temp.path().join("gh.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nprintf '%s\\n' '{\"defaultBranchRef\":{\"name\":\"trunk\"}}'\n",
+        )?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))?;
+        let command = serde_json::json!({
+            "argv": [script.to_string_lossy()],
+            "exit_codes": {"success": [0], "unknown": [75], "other": "refused"}
+        });
+        let port = serde_json::json!({
+            "source": "host",
+            "backend": {"kind": "command", "command": command}
+        });
+        let document = serde_json::json!({
+            "schema_version": provenant_config::PORTS_SCHEMA_VERSION,
+            "forge": port
+        });
+        std::fs::write(state.join("ports.json"), serde_json::to_vec(&document)?)?;
+        assert_eq!(default_branch(&state, &project)?, "trunk");
+        Ok(())
+    }
 
     #[test]
     fn base_commit_uses_bounded_repository_facts() -> Result<()> {

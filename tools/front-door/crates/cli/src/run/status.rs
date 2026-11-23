@@ -1,5 +1,56 @@
 use super::*;
 
+/// The worktree facts attached to a `status --json` lane row. The path stays
+/// inside the structured path envelope; the base is the owner's pinned commit.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct LaneWorktree {
+    pub path: provenant_records::StructuredPathWire,
+    pub base: String,
+}
+
+/// The Git common directory for a primary checkout or a linked worktree.
+fn worktree_common(project: &Path) -> Option<PathBuf> {
+    let dotgit = project.join(".git");
+    if dotgit.is_dir() {
+        return Some(dotgit);
+    }
+    let text = std::fs::read_to_string(&dotgit).ok()?;
+    let relative = text.lines().next()?.strip_prefix("gitdir: ")?.trim();
+    let gitdir = if Path::new(relative).is_absolute() {
+        PathBuf::from(relative)
+    } else {
+        project.join(relative)
+    };
+    gitdir.parent()?.parent().map(Path::to_path_buf)
+}
+
+/// Join each attempt to the checkout recorded in `provenant-owner.json`. A
+/// missing or unreadable index yields no facts; status never guesses a path.
+pub fn worktree_index(
+    project: &Path,
+) -> std::collections::BTreeMap<provenant_core::AttemptId, LaneWorktree> {
+    let Some(common) = worktree_common(project) else {
+        return std::collections::BTreeMap::new();
+    };
+    let Ok(owners) = provenant_confinement::worktrees::worktree_owner_index(&common) else {
+        return std::collections::BTreeMap::new();
+    };
+    owners
+        .into_iter()
+        .filter_map(|(path, owner)| {
+            let attempt = owner.attempt_id?;
+            let path = provenant_records::StructuredPathWire::from_path(&path).ok()?;
+            Some((
+                attempt,
+                LaneWorktree {
+                    path,
+                    base: owner.base,
+                },
+            ))
+        })
+        .collect()
+}
+
 fn full_wait_reason(reason: &str) -> String {
     reason.to_owned()
 }
@@ -107,6 +158,14 @@ pub fn status_evidence(
         ))
     });
     json!({"provider_error": provider_error, "handoff": handoff})
+}
+
+/// `status --full` renders the same one projection that `output` and `result`
+/// use: host facts first, then the lane's handoff and verify labelled as
+/// claims. An unobserved exit code stays unknown.
+/// Spec: docs/specs/lane-contracts.md#result-projection
+pub fn status_full_summary(row: &Value, attempt: AttemptId) -> String {
+    output::result_projection(row, attempt).render()
 }
 
 pub fn project_lane(
@@ -458,9 +517,9 @@ fn project_lane_inner(
                 )
                 .exists(),
             cache_read_share: provenant_routing::cache_read_share(
-                usage.uncached_input,
-                usage.cache_read,
-                usage.cache_write,
+                usage.tokens.input,
+                usage.tokens.cache_read,
+                usage.tokens.cache_write,
             ),
             ..Default::default()
         },
@@ -906,5 +965,25 @@ mod tests {
         lane.started_at = None;
         let queued = project_lane(&lane, &[], temp.path(), None, false);
         assert_eq!(queued.last_event_source, Some(LastEventSource::Queued));
+    }
+
+    // Spec: docs/specs/lane-contracts.md#result-projection
+    #[test]
+    fn status_full_summary_renders_facts_before_claims() {
+        let row = json!({
+            "kind": "attempt",
+            "attempt_id": ID,
+            "head": "abc123",
+            "exit_code": null,
+            "handoff": {"Ok": {
+                "schema_version": 2, "status": "done", "note": "finished",
+                "remaining": [], "decisions": [], "verify": ["ran tests"]
+            }}
+        });
+        let text = status_full_summary(&row, ID.parse().unwrap());
+        let facts = text.find("host facts").expect("facts header");
+        let claims = text.find("lane claims").expect("claims header");
+        assert!(facts < claims, "{text}");
+        assert!(text.contains("verify: ran tests"), "{text}");
     }
 }

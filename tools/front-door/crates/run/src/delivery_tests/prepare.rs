@@ -174,7 +174,7 @@ fn transport_protects_sandboxed_lane_configuration()
         // so opt into isolation here rather than relying on the old default.
         let access = sandboxed.then(|| provenant_records::LaneAccessReceipt {
             access: provenant_records::LaneAccess::Isolated,
-            source: provenant_records::LaneAccessSource::Launch,
+            source: provenant_records::Layer::Launch,
             key: "lanes.access".into(),
             extra: Default::default(),
         });
@@ -196,7 +196,7 @@ fn host_transport_trusts_its_own_checkout_but_not_another_lanes_worktree()
             .with_lane_access(
                 Some(provenant_records::LaneAccessReceipt {
                     access: provenant_records::LaneAccess::Host,
-                    source: provenant_records::LaneAccessSource::Launch,
+                    source: provenant_records::Layer::Launch,
                     key: "lanes.access".into(),
                     extra: Default::default(),
                 }),
@@ -775,6 +775,7 @@ fn automatic_integration_does_not_hold_application_locks_during_git()
     fixture.request = HostDeliveryContext::destination(
         DeliveryMode::Integrate("origin/integration".into()),
         "lane",
+        &crate::forge_for("origin", "main", &[]),
     )?
     .ok_or("destination")?;
     let native = provenant_os::git::git_executable().ok_or("Git unavailable")?;
@@ -813,7 +814,14 @@ fn automatic_integration_does_not_hold_application_locks_during_git()
     std::fs::write(&armed, b"ready")?;
     std::thread::scope(
         |scope| -> std::result::Result<(), Box<dyn std::error::Error>> {
-            let worker = scope.spawn(|| host.integrate(&fixture.writer, &fixture.request, head));
+            let worker = scope.spawn(|| {
+                host.integrate(
+                    &fixture.writer,
+                    &fixture.request,
+                    head,
+                    &crate::forge_for("origin", "main", &[]),
+                )
+            });
             let pipe = provenant_test_support::wait_for(
                 "integration fetch to wait for release",
                 Duration::from_secs(5),

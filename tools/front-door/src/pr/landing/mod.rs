@@ -19,7 +19,7 @@ pub(crate) mod test_support;
 pub enum LandingError {
     #[error("landing port is disabled (source: {port_source:?})")]
     PortUnavailable {
-        port_source: provenant_config::PortSource,
+        port_source: provenant_records::Layer,
     },
     #[error("landing {id} unavailable: {reason}")]
     Unavailable {
@@ -134,8 +134,9 @@ pub struct Options {
     pub numbers: Vec<u64>,
     pub strategy: Option<provenant_records::landing::Strategy>,
     pub target: Option<String>,
-    /// Any object name that resolves to one commit; resolved before landing.
-    pub head: Option<String>,
+    /// Pinned reviewed heads: a bare object name for one pull request, or
+    /// `N=SHA` to pin member N of a batch. Resolved before landing.
+    pub head: Vec<String>,
     pub wait: Option<u64>,
     pub poll: Option<u64>,
     pub explain: bool,
@@ -336,6 +337,42 @@ fn batch_response(
     response
 }
 
+/// Parse `--head` values into per-member reviewed head pins. A bare object name
+/// keeps the single-pull-request form; `N=SHA` pins member N of a batch.
+/// Spec: docs/specs/cli.md#landing-adds-no-merge-authority
+fn parse_head_pins(
+    values: &[String],
+    numbers: &[u64],
+) -> Result<std::collections::BTreeMap<u64, String>, Box<dyn std::error::Error>> {
+    let mut pins = std::collections::BTreeMap::new();
+    for value in values {
+        if let Some((number, name)) = value.split_once('=') {
+            let number: u64 = number
+                .parse()
+                .map_err(|_| format!("--head {value}: member must be a pull request number"))?;
+            if !numbers.contains(&number) {
+                return Err(format!(
+                    "--head {value}: pull request #{number} is not in this landing"
+                )
+                .into());
+            }
+            if name.is_empty() {
+                return Err(format!("--head {value}: empty object name").into());
+            }
+            pins.insert(number, name.to_owned());
+        } else {
+            if numbers.len() != 1 {
+                return Err(
+                    "--head without N= pins one pull request; land a batch with --head N=SHA"
+                        .into(),
+                );
+            }
+            pins.insert(numbers[0], value.clone());
+        }
+    }
+    Ok(pins)
+}
+
 /// Resolve a checkout's optional project binding for landing policy consumers.
 pub(crate) fn project_id(
     roots: &provenant_core::Roots,
@@ -408,9 +445,47 @@ pub(crate) fn prepare(
     poll: Option<u64>,
     strategy: Option<provenant_records::landing::Strategy>,
     target: Option<&str>,
+    members: &[u64],
 ) -> Result<Prepared, Box<dyn std::error::Error>> {
     let resolved = resolve_checkout(globals)?;
-    prepare_resolved(resolved, tier, poll, strategy, target)
+    prepare_resolved(resolved, tier, poll, strategy, target, members)
+}
+
+/// Derive the batch target from the members' base branches (#3191). The base
+/// shared by the most members wins; members on another base remain in the
+/// request and the candidate selector excludes them, naming both bases in the
+/// exclusion reason. The target's source records that it was detected.
+/// Spec: docs/specs/cli.md#landing-adds-no-merge-authority
+fn derive_target_from_members(
+    forge: &mut dyn ports::Forge,
+    members: &[u64],
+) -> Result<provenant_records::provenance::Sourced<String>, Box<dyn std::error::Error>> {
+    use provenant_records::{Layer, Source, Sourced};
+    let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut order = Vec::new();
+    for number in members {
+        let base = forge.pull_request(*number)?.base_branch;
+        if !counts.contains_key(&base) {
+            order.push(base.clone());
+        }
+        *counts.entry(base).or_default() += 1;
+    }
+    let chosen = order
+        .into_iter()
+        .max_by_key(|base| counts[base])
+        .ok_or("no members to derive a landing target from")?;
+    let detail = counts
+        .iter()
+        .map(|(base, count)| format!("{base} ({count})"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Ok(Sourced {
+        value: branch_name(&chosen)?,
+        source: Source {
+            layer: Layer::Detected,
+            origin: Some(format!("member bases: {detail}")),
+        },
+    })
 }
 
 fn resolve_checkout(
@@ -445,6 +520,7 @@ fn prepare_resolved(
     poll: Option<u64>,
     strategy: Option<provenant_records::landing::Strategy>,
     target: Option<&str>,
+    members: &[u64],
 ) -> Result<Prepared, Box<dyn std::error::Error>> {
     use provenant_cli::domains::LandOverride;
     let publication_port =
@@ -508,14 +584,41 @@ fn prepare_resolved(
     };
     let mut target = target.map(branch_name).transpose()?;
     let (mut policy, mut effective) = validate_policy(resolve_policy(target.as_deref())?)?;
+    let mut target_source = target
+        .as_ref()
+        .map(|value| provenant_records::provenance::Sourced {
+            value: value.clone(),
+            source: provenant_records::provenance::Source {
+                layer: provenant_records::Layer::Launch,
+                origin: Some("--target".into()),
+            },
+        });
     if target.is_none() {
         use ports::Forge as _;
-        let default = adapters::GhForge::new(&resolved.project, resolved.roots.state.as_path())
-            .target_branch()?;
-        target = Some(branch_name(&default)?);
+        let mut forge = adapters::GhForge::new(&resolved.project, resolved.roots.state.as_path());
+        target_source = Some(if members.is_empty() {
+            let default = forge.target_branch()?;
+            provenant_records::provenance::Sourced {
+                value: branch_name(&default)?,
+                source: provenant_records::provenance::Source {
+                    layer: provenant_records::Layer::Detected,
+                    origin: Some("repository default branch".into()),
+                },
+            }
+        } else {
+            derive_target_from_members(&mut forge, members)?
+        });
+        target = Some(
+            target_source
+                .as_ref()
+                .ok_or("landing target is unavailable")?
+                .value
+                .clone(),
+        );
         (policy, effective) = validate_policy(resolve_policy(target.as_deref())?)?;
     }
     let target = target.ok_or("landing target is unavailable")?;
+    policy.target_source = target_source;
     let tier_warning = tier
         .filter(|tier| !config.domains.pr.land.tiers.contains_key(*tier))
         .map(|tier| {
@@ -664,28 +767,29 @@ fn run_inner(
     if !options.explain && options.numbers.is_empty() {
         return Err("supply at least one pull request number".into());
     }
-    if !options.explain && options.head.is_some() && options.numbers.len() > 1 {
-        return Err("--head pins one pull request; land a batch without it".into());
-    }
-    let resolved = resolve_checkout(globals)?;
-    let head = if options.explain {
-        None
+    let head_pins = if options.explain {
+        std::collections::BTreeMap::new()
     } else {
-        options
-            .head
-            .as_deref()
-            .map(|name| {
-                super::git::Git::new(resolved.roots.state.as_path())?
-                    .resolve_commit(&resolved.project, name)
-            })
-            .transpose()?
+        parse_head_pins(&options.head, &options.numbers)?
     };
+    let resolved = resolve_checkout(globals)?;
+    let mut resolved_heads = std::collections::BTreeMap::new();
+    if !head_pins.is_empty() {
+        let git = super::git::Git::new(resolved.roots.state.as_path())?;
+        for (number, name) in &head_pins {
+            resolved_heads.insert(
+                *number,
+                git.resolve_commit(&resolved.project, name)?.to_string(),
+            );
+        }
+    }
     let prepared = prepare_resolved(
         resolved,
         options.tier.as_deref(),
         options.poll,
         options.strategy,
         options.target.as_deref(),
+        &options.numbers,
     )?;
     let (policy, effective) = (&prepared.policy, &prepared.effective);
     if options.explain {
@@ -727,7 +831,7 @@ fn run_inner(
         };
         let plan = policy.plan(capabilities, &prepared.review_scope)?;
         let unavailable = plan.strategy.ensure_executable(&plan.plan).err();
-        let value = serde_json::json!({"repository": repository, "target": prepared.target, "resolved_plan": plan, "unavailable": unavailable, "publication_port": policy.publication_port, "fields": policy.fields, "budget_rate_micros_per_minute": policy.budget_rate_micros_per_minute, "ci_patience_seconds": patience, "ci_patience_source": if options.wait.is_some() { "--wait" } else { "gate.timeout_seconds" }, "warnings": warnings});
+        let value = serde_json::json!({"repository": repository, "target": prepared.target, "target_source": policy.target_source, "resolved_plan": plan, "unavailable": unavailable, "publication_port": policy.publication_port, "fields": policy.fields, "budget_rate_micros_per_minute": policy.budget_rate_micros_per_minute, "ci_patience_seconds": patience, "ci_patience_source": if options.wait.is_some() { "--wait" } else { "gate.timeout_seconds" }, "warnings": warnings});
         let text = format!("{}\n", serde_json::to_string_pretty(&value)?);
         return Ok(crate::emit(
             &CommandResult::new("land", Outcome::Ok, value),
@@ -748,7 +852,7 @@ fn run_inner(
             .iter()
             .map(|number| provenant_records::landing::LandMember {
                 pr: *number,
-                head: head.map(|head| head.to_string()),
+                head: resolved_heads.get(number).cloned(),
                 base: None,
                 review_proof: review_proof.clone(),
             })
@@ -953,5 +1057,60 @@ mod response_tests {
         );
         assert_eq!(refused.status, provenant_records::Outcome::Refused);
         assert_eq!(refused.error.unwrap().code, "LAND_REFUSED");
+    }
+
+    // Spec: docs/specs/cli.md#landing-adds-no-merge-authority
+    #[test]
+    fn head_pins_accept_single_and_per_member_forms() -> Result<(), Box<dyn std::error::Error>> {
+        use std::collections::BTreeMap;
+        assert_eq!(
+            parse_head_pins(&["abc".into()], &[7])?,
+            BTreeMap::from([(7, "abc".into())])
+        );
+        assert_eq!(
+            parse_head_pins(&["1=abc".into(), "2=def".into()], &[1, 2])?,
+            BTreeMap::from([(1, "abc".into()), (2, "def".into())])
+        );
+        assert!(parse_head_pins(&["abc".into()], &[1, 2]).is_err());
+        assert!(parse_head_pins(&["3=abc".into()], &[1, 2]).is_err());
+        assert!(parse_head_pins(&["1=".into()], &[1]).is_err());
+        Ok(())
+    }
+
+    // Spec: docs/specs/cli.md#landing-adds-no-merge-authority
+    #[test]
+    fn batch_target_derives_from_the_consensus_member_base()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::pr::landing::fakes::FakeForge;
+        use crate::pr::landing::ports::{Forge as _, PullRequestInfo, PullRequestState};
+        use provenant_records::Layer;
+        let mut forge = FakeForge::default();
+        for (number, base) in [(1, "release"), (2, "release"), (3, "main")] {
+            forge.pull_requests.insert(
+                number,
+                PullRequestInfo {
+                    number,
+                    head: format!("h{number}"),
+                    base_branch: base.into(),
+                    author: "author".into(),
+                    state: PullRequestState::Open,
+                    merged_commit: None,
+                    stack: None,
+                    draft: false,
+                },
+            );
+        }
+        let derived = derive_target_from_members(&mut forge, &[1, 2, 3])?;
+        assert_eq!(derived.value, "release");
+        assert_eq!(derived.source.layer, Layer::Detected);
+        assert!(
+            derived
+                .source
+                .origin
+                .as_ref()
+                .is_some_and(|origin| origin.contains("main") && origin.contains("release")),
+            "{derived:?}"
+        );
+        Ok(())
     }
 }

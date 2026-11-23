@@ -9,7 +9,11 @@ use provenant_core::{
     UtcMicros, WaitBudget,
 };
 use provenant_os::clock::SystemClock;
-use provenant_records::{CommandError, CommandResult, Outcome, workflow::*};
+use provenant_records::{
+    CommandError, CommandResult, Outcome,
+    warning::{CONFIG_KEY_IGNORED, Warning, warn},
+    workflow::*,
+};
 use provenant_run::{AttemptReader, ExecutionContext, Request, RunStore};
 use provenant_workflow::{
     bind::{self, ReviewClaim},
@@ -30,7 +34,7 @@ const WAIT_SECONDS: u64 = 30;
 /// under a tight project budget.
 const CHECKPOINT_WARN_BYTES: u64 = 8 * 1024;
 
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Workflow {
     /// Check bound reviews against the receipt's risk tier.
     Review(Input),
@@ -41,13 +45,13 @@ pub enum Workflow {
     #[command(subcommand)]
     Session(Session),
 }
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct Input {
     /// Request JSON file, or `-` for standard input.
     #[arg(long)]
     pub request: String,
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Receipt {
     /// Show a delivery receipt
     Show {
@@ -65,7 +69,7 @@ pub enum Receipt {
         input: Input,
     },
 }
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Session {
     /// Save a session checkpoint (up to 256 KiB); requires a checkout or --project
     Save {
@@ -119,7 +123,7 @@ Terminal did not open, the command fails with LAUNCH_FAILED, keeps the lease her
 launch script to run on the peer.";
 /// `workflow session handoff`. The binary composes it: it needs worktree and
 /// peer owners that this crate does not hold.
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct Handoff {
     /// Peer host, by label or host ID
     #[arg(long)]
@@ -325,11 +329,19 @@ fn request<T: serde::de::DeserializeOwned + Serialize>(
         .map_err(|e| invalid(format!("invalid request: {e}")))
 }
 
-fn input_warnings(data: &mut Value, warnings: Vec<provenant_records::InputWarning>) {
-    if !warnings.is_empty() {
-        data["warnings"] =
-            serde_json::json!(warnings.iter().map(ToString::to_string).collect::<Vec<_>>());
+fn report_input_warnings(warnings: Vec<provenant_records::InputWarning>) {
+    for warning in warnings {
+        warn(Warning::new(CONFIG_KEY_IGNORED, warning.to_string()).subject(warning.key));
     }
+}
+
+/// An advisory collected by an owner travels through the typed warning seam;
+/// it is no longer duplicated into the command's data payload.
+fn report_text_warning(message: impl Into<String>) {
+    warn(Warning::new(
+        provenant_records::warning::SESSION_ADVISORY,
+        message,
+    ));
 }
 
 struct Edge {
@@ -522,8 +534,8 @@ fn execute(
                 .ok_or(Error::Missing)?;
             let facts = edge.bind(&req.reviews, stored.subject(), req.delivery_id)?;
             let report = edge.report(&stored, &facts, req.blockers)?;
-            let mut data = serde_json::to_value(report).map_err(|e| invalid(e.to_string()))?;
-            input_warnings(&mut data, warnings);
+            let data = serde_json::to_value(report).map_err(|e| invalid(e.to_string()))?;
+            report_input_warnings(warnings);
             Ok(data)
         }
         Workflow::Receipt(Receipt::Show { delivery_id }) => {
@@ -538,8 +550,8 @@ fn execute(
             input,
         }) => {
             let (request, warnings) = request(&input.request)?;
-            let mut data = save(&edge, delivery_id, expected_revision, request)?;
-            input_warnings(&mut data, warnings);
+            let data = save(&edge, delivery_id, expected_revision, request)?;
+            report_input_warnings(warnings);
             Ok(data)
         }
         Workflow::Session(Session::Save {
@@ -559,7 +571,9 @@ fn execute(
                 .with_rebind(rebind)
                 .with_revisions(keep)
                 .save_revision(&text, edge.budget()?, &edge.cancel, &edge.clock)?;
-            let mut warnings = saved.warnings;
+            for warning in saved.warnings {
+                report_text_warning(warning);
+            }
             let references = checkpoint_references(std::str::from_utf8(&text).unwrap_or_default());
             let closed = std::thread::scope(|scope| {
                 let tasks: Vec<_> = references
@@ -572,11 +586,13 @@ fn execute(
                     .filter_map(|(number, closed)| closed.then_some(number))
                     .collect::<Vec<_>>()
             });
-            warnings.extend(checkpoint_warnings(
+            for warning in checkpoint_warnings(
                 &text,
                 checkpoint_soft_bytes(&edge.roots, &project),
                 |number| closed.contains(&number),
-            ));
+            ) {
+                report_text_warning(warning);
+            }
             Ok(serde_json::json!({
                 "project": project,
                 "saved_bytes": text.len(),
@@ -586,7 +602,6 @@ fn execute(
                 "unchanged": saved.unchanged,
                 "retained": saved.retained,
                 "keep": keep,
-                "warnings": warnings,
             }))
         }
         Workflow::Session(Session::Show { .. } | Session::Diff { .. }) => unreachable_read(),
@@ -1143,11 +1158,12 @@ fn save(
     struct Saved {
         receipt: DeliveryReceipt,
         clock_regression: Option<bool>,
-        warnings: Vec<String>,
+    }
+    for warning in warnings {
+        report_text_warning(warning);
     }
     serde_json::to_value(Saved {
         receipt: saved.receipt,
-        warnings,
         clock_regression: saved.clock_regression.map(|_| true),
     })
     .map_err(|e| invalid(e.to_string()))
@@ -1193,22 +1209,7 @@ fn human_text(command: &str, data: &Value) -> String {
         }
     };
     match command {
-        "workflow session save" => {
-            let mut summary = data.clone();
-            if let Some(object) = summary.as_object_mut() {
-                object.remove("warnings");
-            }
-            let mut text = crate::terse(&summary);
-            for warning in data["warnings"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-            {
-                text.push_str(&format!("warning: {warning}\n"));
-            }
-            with_newline(&text)
-        }
+        "workflow session save" => with_newline(&crate::terse(data)),
         "workflow session diff" => match data["text"].as_str() {
             Some("") => "no differences\n".to_owned(),
             Some(text) => with_newline(text),
@@ -1248,12 +1249,10 @@ pub fn session_revisions(roots: &Roots) -> u64 {
         })
 }
 
-fn add_session_warnings(data: &mut Value, warnings: Vec<String>) {
-    if let Some(values) = data.get_mut("warnings").and_then(Value::as_array_mut) {
-        values.extend(warnings.into_iter().map(Value::String));
-    }
-}
-
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the binary edge's output seam writes the command result to stdout and diagnostics to stderr"
+)]
 pub fn run(
     cmd: Workflow,
     globals: &Globals,
@@ -1306,7 +1305,9 @@ pub fn run(
         }
     };
     if command == "workflow session save" && out.error.is_none() {
-        add_session_warnings(&mut out.data, session_warnings());
+        for warning in session_warnings() {
+            report_text_warning(warning);
+        }
     }
     // Incomplete or failed coverage is a result, not an error.
     if command == "workflow review"
@@ -1321,11 +1322,10 @@ pub fn run(
         String::new()
     };
     let mode = globals.render_mode(&human, read_only, None);
-    match crate::render_or_publish(
-        &out,
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    match crate::render_command_result(
+        &mut out,
         mode,
-        &mut io::stdout().lock(),
-        &mut io::stderr().lock(),
         |_| Err(io::Error::other("result too large")),
         crate::OverflowPolicy::Refuse,
     ) {
@@ -1494,19 +1494,24 @@ mod tests {
         assert!(serde_json::from_value::<super::DecisionInput>(invalid).is_err());
     }
 
+    /// Spec: docs/specs/cli.md#warnings-are-typed-values
     #[test]
-    fn human_save_output_includes_discovery_warnings() {
-        let text = super::human_text(
-            "workflow session save",
-            &serde_json::json!({
-                "saved_bytes": 5, "warnings": ["repeat the same command (including --rebind) to repair discovery"]
-            }),
+    fn discovery_warning_uses_the_typed_warning_seam() {
+        let ((), warnings) = provenant_records::warning::capture(|| {
+            super::report_text_warning(
+                "repeat the same command (including --rebind) to repair discovery",
+            );
+        });
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(
+            warnings[0].code.as_ref(),
+            provenant_records::warning::SESSION_ADVISORY.as_str()
         );
-        assert!(text.contains("warning: repeat the same command (including --rebind)"));
     }
 
+    /// Spec: docs/specs/cli.md#warnings-are-typed-values
     #[test]
-    fn session_warnings_are_once_in_save_data_and_human_output() {
+    fn session_warnings_are_reported_once_each() {
         let disk = "Disk pressure: 1 byte free; run `provenant disk report` or `provenant gc`.";
         let project = "working directory resolves to /cwd, but --project resolves to /project; saving the checkpoint under the selected project";
         for observed in [
@@ -1514,15 +1519,14 @@ mod tests {
             vec![disk.to_owned()],
             vec![disk.to_owned(), project.to_owned()],
         ] {
-            let mut data = serde_json::json!({"saved_bytes": 5, "warnings": []});
-            super::add_session_warnings(&mut data, observed.clone());
-            let rendered = super::human_text("workflow session save", &data);
-            assert_eq!(
-                data["warnings"].as_array().map(Vec::len),
-                Some(observed.len())
-            );
-            for warning in observed {
-                assert_eq!(rendered.matches(warning.as_str()).count(), 1);
+            let ((), warnings) = provenant_records::warning::capture(|| {
+                for warning in observed.clone() {
+                    super::report_text_warning(warning);
+                }
+            });
+            assert_eq!(warnings.len(), observed.len());
+            for (reported, expected) in warnings.iter().zip(&observed) {
+                assert_eq!(reported.message, *expected);
             }
         }
     }

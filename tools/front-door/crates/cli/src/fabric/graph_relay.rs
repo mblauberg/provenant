@@ -15,6 +15,7 @@ use provenant_fabric_runtime::graph::{
     template::{Layer, TemplateLibrary},
 };
 use provenant_fabric_runtime::relay::{FacadeError, ServiceError};
+use provenant_records::warning::{Warning, warn};
 use serde_json::{Value, json};
 
 fn refused(code: &str, message: impl Into<String>) -> ServiceError {
@@ -448,9 +449,12 @@ fn serve_authorised(
             ),
             Err(error) => {
                 let error = provenant_records::diagnostic::safe_text(&error.to_string());
-                eprintln!(
-                    "warning: graph admission policy unavailable ({error}); using compiled defaults"
-                );
+                warn(Warning::new(
+                    provenant_records::warning::CONFIG_UNAVAILABLE,
+                    format!(
+                        "graph admission policy unavailable ({error}); using compiled defaults"
+                    ),
+                ));
                 Default::default()
             }
         }
@@ -1019,7 +1023,7 @@ fn serve_authorised(
 
 /// Add this request's advisory input warnings to any durable admission
 /// warnings already on the reply, sorted and deduplicated.
-fn merge_warnings(value: &mut Value, extra: &[String]) {
+fn merge_warnings(value: &mut Value, extra: &[provenant_records::warning::Warning]) {
     if extra.is_empty() {
         return;
     }
@@ -1034,7 +1038,7 @@ fn merge_warnings(value: &mut Value, extra: &[String]) {
                 .collect()
         })
         .unwrap_or_default();
-    all.extend(extra.iter().cloned());
+    all.extend(extra.iter().map(|warning| warning.message.clone()));
     all.sort();
     all.dedup();
     value["warnings"] = json!(all);
@@ -1382,7 +1386,6 @@ fn recover_provisioning(
                     | WorktreeError::InvalidRequest
                     | WorktreeError::WorktreeExists { .. }
                     | WorktreeError::BranchCollision { .. }
-                    | WorktreeError::BranchExistsWithBase { .. }
                     | WorktreeError::RemoteOnlyBranch { .. }
                     | WorktreeError::BaseNotFound { .. }
                     | WorktreeError::BaseUnverified { .. }
@@ -1635,7 +1638,7 @@ fn relay_child_review_subjects(
 ) -> Result<Vec<Option<provenant_fabric_runtime::graph::SourceBinding>>, String> {
     let launch = request.launch.as_ref();
     let library = match launch {
-        Some(launch) => library.with(Layer::Inline, &launch.templates)?,
+        Some(launch) => library.with(Layer::Launch, &launch.templates)?,
         None => library.clone(),
     };
     let node = match launch {
@@ -1651,7 +1654,7 @@ fn relay_patch_review_subjects(
     patch: &provenant_fabric_runtime::graph::patch::Patch,
     library: &TemplateLibrary,
 ) -> Result<Vec<Option<provenant_fabric_runtime::graph::SourceBinding>>, String> {
-    let library = library.with(Layer::Inline, &patch.templates)?;
+    let library = library.with(Layer::Launch, &patch.templates)?;
     let mut subjects = Vec::new();
     for node in patch.nodes.iter().chain(&patch.replace) {
         collect_relay_review_subjects(node, None, &library, &mut Vec::new(), &mut subjects)?;
@@ -1963,10 +1966,7 @@ fn launch_resolvers_with(
     for slot in panel.slots {
         let (key, mut route, warnings) = tier_route(&slot.lens, &slot.tier, None, true, catalogue)?;
         for warning in warnings {
-            let _ = std::io::Write::write_all(
-                &mut std::io::stderr().lock(),
-                format!("warning: {warning}\n").as_bytes(),
-            );
+            provenant_records::warning::warn(warning);
         }
         if let Some(family) = slot
             .satisfied_family
@@ -2135,8 +2135,11 @@ fn resolve_managed_writer_path(
     let expected = ports
         .managed_writer_path(branch)
         .map_err(WorktreeError::PortConfiguration)?;
-    let requested = project_root.join(path);
-    let expected = project_root.join(expected);
+    // A declared root may be parent-relative or absolute; compare canonical
+    // paths so `../outside/<branch>` matches the registered checkout path.
+    let canonical = |value: std::path::PathBuf| std::fs::canonicalize(&value).unwrap_or(value);
+    let requested = canonical(project_root.join(path));
+    let expected = canonical(project_root.join(expected));
     if requested == expected {
         Ok(expected)
     } else {
@@ -2472,8 +2475,8 @@ fn layered_templates(
     repository: &std::path::Path,
 ) -> Result<TemplateLibrary, String> {
     let mut library = TemplateLibrary::bundled();
-    library.load_dir(Layer::User, user)?;
-    library.load_dir(Layer::Repository, repository)?;
+    library.load_dir(Layer::Host, user)?;
+    library.load_dir(Layer::Project, repository)?;
     Ok(library)
 }
 
@@ -2691,7 +2694,7 @@ mod tests {
         assert_eq!(warnings.len(), 1);
         assert_eq!(
             warnings[0].code,
-            provenant_records::warning::ROUTE_MODEL_NOT_CATALOGUED
+            provenant_records::warning::ROUTE_MODEL_NOT_CATALOGUED.as_str()
         );
         assert!(provenant_routing::ModelId::parse(route["model"].as_str().unwrap()).is_ok());
 

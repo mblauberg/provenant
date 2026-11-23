@@ -194,12 +194,13 @@ pub(crate) fn advance_graphs_after_settlement(
                 )
                 .map_err(|failure| std::io::Error::other(failure.message))?;
                 if waited > 0 {
-                    use std::io::Write as _;
-                    let _ = writeln!(
-                        std::io::stderr().lock(),
-                        "warning: steer restart staggered by {} ms (source: {source})",
-                        waited / 1_000
-                    );
+                    provenant_records::warning::warn(provenant_records::warning::Warning::new(
+                        provenant_records::warning::STEER_RESTART_STAGGERED,
+                        format!(
+                            "steer restart staggered by {} ms (source: {source})",
+                            waited / 1_000
+                        ),
+                    ));
                 }
             }
             let edge = provenant_cli::run::Edge {
@@ -509,10 +510,14 @@ pub(crate) fn settle_owned_worktree(
     )?;
     // One attempt. A miss records nothing; the gc sweep walks every lane.
     if let Err(error) = super::gc_cleanup::spawn(settled, delivery_override) {
-        use std::io::Write;
-        let _ = writeln!(
-            std::io::stderr().lock(),
-            "warning: completion GC did not start: {error}; the next gc sweep collects the worktree"
+        provenant_records::warning::warn(
+            provenant_records::warning::Warning::new(
+                provenant_records::warning::GC_SCHEDULE_FAILED,
+                format!(
+                    "completion GC did not start: {error}; the next gc sweep collects the worktree"
+                ),
+            )
+            .repair("the next gc sweep collects the worktree"),
         );
     }
     Ok(())

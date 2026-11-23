@@ -3,7 +3,10 @@
 //! a published artefact whose pointer keeps the result's original status.
 use crate::limits;
 pub use crate::limits::MAX_RESULT_BYTES;
+use provenant_records::command_result::NextStep;
+use provenant_records::warning::{RESULT_TOO_LARGE, Warning};
 use provenant_records::{CommandResult, Outcome};
+use provenant_workflow::session::CommandPrefix;
 use serde::Serialize;
 use std::io::{self, Write};
 use thiserror::Error;
@@ -13,20 +16,91 @@ use thiserror::Error;
 /// compact output summarises it to one row.
 const ERROR_CAUSE_BYTES: usize = 4 * 1024;
 
+/// The binary edge owns the warning sink and the standard streams. A library
+/// command surface never writes a warning itself: it hands its finished result
+/// to the one seam below, which moves the warnings raised while the command ran
+/// onto the envelope before it is rendered. Under `--json` the sink holds them,
+/// so they travel in `envelope[warnings]` and none reaches stderr; in human
+/// mode the sink prints them as they arrive. A second install is ignored so a
+/// nested dispatch cannot replace the edge's seam.
+///
+/// Spec: docs/specs/cli.md#warnings-are-typed-values
+/// The edge's standard output and error writers.
+pub type Streams = (Box<dyn Write>, Box<dyn Write>);
+
+pub struct CommandSeam {
+    /// Drain the warnings raised while the command ran.
+    pub take: fn() -> Vec<Warning>,
+    /// Record per-change keys once the envelope reached the reader.
+    pub remember: fn(&[Warning]),
+    /// Return undelivered warnings so the edge's guard shows them on exit.
+    pub give_back: fn(Vec<Warning>),
+    /// The edge's standard output and error, the only writers a command
+    /// surface renders to.
+    pub streams: fn() -> Streams,
+}
+
+static COMMAND_SEAM: std::sync::OnceLock<CommandSeam> = std::sync::OnceLock::new();
+
+/// Install the binary edge's drain for command warnings. Called once before any
+/// command is dispatched.
+///
+/// Spec: docs/specs/cli.md#warnings-are-typed-values
+pub fn install_command_seam(seam: CommandSeam) {
+    let _ = COMMAND_SEAM.set(seam);
+}
+
+/// The one emit path for a library command surface: move the command's held
+/// warnings onto its result before rendering, remember their per-change keys
+/// only after the envelope reached the reader, and hand them back to the edge
+/// on a write failure so its guard shows them on exit instead of swallowing
+/// them. Rendering and overflow policy stay with the existing seam.
+///
+/// Spec: docs/specs/cli.md#warnings-are-typed-values
+pub fn render_command_result<T: Serialize>(
+    result: &mut CommandResult<T>,
+    mode: RenderMode<'_>,
+    publish: impl FnOnce(&CommandResult<T>) -> io::Result<provenant_records::AbsolutePath>,
+    policy: OverflowPolicy,
+) -> Result<Outcome, RenderError> {
+    let seam = COMMAND_SEAM.get();
+    result.warnings = seam.map(|seam| (seam.take)()).unwrap_or_default();
+    // The one renderer (`render_within`) turns the envelope's typed next steps
+    // into human lines for both human and compact modes, so a compact summary
+    // cannot drop the line the JSON array carries.
+    // Without an installed edge (a library caller or a test) there is no
+    // reader, so the rendered bytes go nowhere rather than to process streams.
+    let (mut out, mut err): Streams = match seam {
+        Some(seam) => (seam.streams)(),
+        None => (Box::new(io::sink()), Box::new(io::sink())),
+    };
+    let rendered = render_or_publish(result, mode, &mut out, &mut err, publish, policy);
+    drop((out, err));
+    if let Some(seam) = seam {
+        if rendered.is_ok() {
+            (seam.remember)(&result.warnings);
+        } else {
+            (seam.give_back)(std::mem::take(&mut result.warnings));
+        }
+    }
+    rendered
+}
+
 /// The compact view an owner supplies for the default human output: a headline
-/// of counts, then the rows that need action first, and the one typed next
-/// command. The generic truncator is only a fallback for owners without one.
+/// of counts, then the rows that need action first. Suggested commands are not
+/// part of a summary: the owner puts them on the envelope's `next` array and the
+/// binary edge renders that array once. The generic truncator is only a fallback
+/// for owners without a summary.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Summary {
     pub lines: Vec<String>,
-    pub next: Option<String>,
     /// Rows the owner held back; the renderer says so and names `--full`.
     pub omitted: usize,
 }
 impl Summary {
     /// A headline, then `rows` in the owner's priority order, bounded by the
     /// shared row limits. Rows past the limit are counted, not dropped silently.
-    pub fn new(headline: impl Into<String>, rows: Vec<String>, next: Option<String>) -> Self {
+    pub fn new(headline: impl Into<String>, rows: Vec<String>) -> Self {
         let omitted = rows.len().saturating_sub(limits::SUMMARY_ROWS);
         let lines = std::iter::once(headline.into())
             .chain(
@@ -35,25 +109,13 @@ impl Summary {
                     .map(|row| bounded_text(row, limits::SUMMARY_ROW_BYTES)),
             )
             .collect();
-        Self {
-            lines,
-            next,
-            omitted,
-        }
+        Self { lines, omitted }
     }
     /// Text the owner has already bounded; shown as it is.
-    pub fn verbatim(text: &str, next: Option<String>) -> Self {
+    pub fn verbatim(text: &str) -> Self {
         Self {
             lines: text.lines().map(str::to_owned).collect(),
-            next,
             omitted: 0,
-        }
-    }
-    /// Only a next command; the body falls back to the generic truncator.
-    pub fn next_only(next: Option<String>) -> Self {
-        Self {
-            next,
-            ..Self::default()
         }
     }
     /// `3 running, 1 failed` in the order given, skipping zero counts.
@@ -65,6 +127,29 @@ impl Summary {
             .collect::<Vec<_>>()
             .join(", ")
     }
+}
+
+/// The one formatter that turns the envelope's typed next steps into human
+/// lines. Every edge calls it with the command prefix appropriate to its caller;
+/// JSON never calls it and carries the argv arrays instead. A step's `why` and
+/// its rendered `argv` are both derived from the same typed value.
+/// Spec: docs/specs/cli.md#one-bounded-envelope-clipped-with-a-warning
+pub fn next_steps_text(steps: &[NextStep], prefix: &CommandPrefix) -> String {
+    let mut out = String::new();
+    for step in steps {
+        match prefix.render_argv(&step.argv) {
+            Some(command) if !command.is_empty() => {
+                let why = bounded_text(&step.why, limits::SUMMARY_ROW_BYTES);
+                if why.is_empty() {
+                    out.push_str(&format!("next: {command}\n"));
+                } else {
+                    out.push_str(&format!("next: {why}; {command}\n"));
+                }
+            }
+            _ => out.push_str("next: [this command cannot be shown safely]\n"),
+        }
+    }
+    out
 }
 
 #[derive(Clone, Copy)]
@@ -277,7 +362,7 @@ fn fallback_text(command: &str, text: &str) -> String {
     out
 }
 fn compact_text(command: &str, text: &str, summary: Option<&Summary>) -> String {
-    let mut out = match summary.filter(|summary| !summary.lines.is_empty()) {
+    match summary.filter(|summary| !summary.lines.is_empty()) {
         Some(summary) => {
             let mut body = summary.lines.join("\n");
             body.push('\n');
@@ -290,11 +375,7 @@ fn compact_text(command: &str, text: &str, summary: Option<&Summary>) -> String 
             body
         }
         None => fallback_text(command, text),
-    };
-    if let Some(next) = summary.and_then(|summary| summary.next.as_deref()) {
-        out.push_str(&format!("next: {next}\n"));
     }
-    out
 }
 #[derive(Debug, Error)]
 pub enum RenderError {
@@ -350,6 +431,8 @@ pub fn render_within<T: Serialize>(
         status: result.status,
         data: &result.data,
         error,
+        warnings: result.warnings.clone(),
+        next: result.next.clone(),
     };
     let mut buffer = Buffer {
         bytes: Vec::new(),
@@ -410,28 +493,37 @@ pub fn render_within<T: Serialize>(
                             RenderMode::Json => {}
                         }
                     }
+                    // The repair is a typed field of the error envelope, not an
+                    // owner suggestion: JSON carries it at `error.repair` and
+                    // this renders that same field once for a human reader.
                     text.push_str(&format!(
                         "next: {}\n",
                         error.repair.as_deref().unwrap_or_default()
                     ));
                     text
                 }
-                None => match mode {
-                    RenderMode::Compact { text, summary, .. } => {
-                        compact_text(&result.command, text, summary)
-                    }
-                    RenderMode::Human { text, summary, .. } => {
-                        let mut full = text.to_owned();
-                        if let Some(next) = summary.and_then(|summary| summary.next.as_deref()) {
-                            if !full.is_empty() && !full.ends_with('\n') {
-                                full.push('\n');
-                            }
-                            full.push_str(&format!("next: {next}\n"));
+                None => {
+                    let body = match mode {
+                        RenderMode::Compact { text, summary, .. } => {
+                            compact_text(&result.command, text, summary)
                         }
-                        full
-                    }
-                    RenderMode::Json => String::new(),
-                },
+                        RenderMode::Human { text, .. } => text.to_owned(),
+                        RenderMode::Json => String::new(),
+                    };
+                    // The envelope's typed next steps become human lines here,
+                    // after the compact summary, so a summarised view never
+                    // drops the command the JSON array still carries. The one
+                    // formatter derives both the why and the command from the
+                    // same typed value.
+                    // Spec: docs/specs/cli.md#one-bounded-envelope-clipped-with-a-warning
+                    let next = match mode {
+                        RenderMode::Json => String::new(),
+                        RenderMode::Human { .. } | RenderMode::Compact { .. } => {
+                            next_steps_text(&result.next, &CommandPrefix::default())
+                        }
+                    };
+                    format!("{body}{next}")
+                }
             };
             buffer
                 .write_all(text.as_bytes())
@@ -565,13 +657,12 @@ pub fn terse(value: &serde_json::Value) -> String {
 mod tests {
     use super::*;
     #[test]
-    fn compact_uses_the_owner_summary_and_one_typed_next() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn compact_uses_the_owner_summary_without_rendering_next()
+    -> Result<(), Box<dyn std::error::Error>> {
         let text = "detail\n".repeat(500);
         let summary = Summary::new(
             "3 lanes: 1 failed, 2 running",
             vec!["aaaa failed".into(), "bbbb running".into()],
-            Some("provenant output aaaa".into()),
         );
         let result = CommandResult::new("lanes", Outcome::Ok, ());
         let mut bytes = Vec::new();
@@ -584,9 +675,39 @@ mod tests {
             },
             &mut bytes,
         )?;
+        // Suggested commands are rendered by the binary edge from the envelope's
+        // next array, never by the summary renderer.
         assert_eq!(
             String::from_utf8(bytes)?,
-            "3 lanes: 1 failed, 2 running\naaaa failed\nbbbb running\nnext: provenant output aaaa\n"
+            "3 lanes: 1 failed, 2 running\naaaa failed\nbbbb running\n"
+        );
+        Ok(())
+    }
+    #[test]
+    // Spec: docs/specs/cli.md#one-bounded-envelope-clipped-with-a-warning
+    fn compact_renders_the_envelope_next_after_the_summary()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let summary = Summary::new("wait mode: all", vec!["peer pending".into()]);
+        let result =
+            CommandResult::new("wait", Outcome::Waiting, ()).with_next(vec![NextStep::from_args(
+                &["provenant", "wait", "peer"],
+                "peer still running at timeout",
+            )]);
+        let mut bytes = Vec::new();
+        render(
+            &result,
+            RenderMode::Compact {
+                text: "peer pending\n",
+                read_only: true,
+                summary: Some(&summary),
+            },
+            &mut bytes,
+        )?;
+        // The summary renderer owns only the headline and rows. The one edge
+        // appends the typed next line, so a compact view keeps what JSON carries.
+        assert_eq!(
+            String::from_utf8(bytes)?,
+            "wait mode: all\npeer pending\nnext: peer still running at timeout; provenant wait peer\n"
         );
         Ok(())
     }
@@ -595,7 +716,7 @@ mod tests {
         let rows = (0..limits::SUMMARY_ROWS + 5)
             .map(|n| format!("row {n}"))
             .collect();
-        let summary = Summary::new("head", rows, None);
+        let summary = Summary::new("head", rows);
         assert_eq!(summary.omitted, 5);
         let result = CommandResult::new("lanes", Outcome::Ok, ());
         let mut bytes = Vec::new();
@@ -686,8 +807,8 @@ mod tests {
         assert!(omitted > 0 && omitted < text.len());
     }
     #[test]
-    fn full_shows_the_owner_text_then_the_typed_next() -> Result<(), Box<dyn std::error::Error>> {
-        let summary = Summary::next_only(Some("provenant output aaaa".into()));
+    fn full_shows_the_owner_text_without_rendering_next() -> Result<(), Box<dyn std::error::Error>>
+    {
         let result = CommandResult::new("lanes", Outcome::Ok, ());
         let mut bytes = Vec::new();
         render(
@@ -695,14 +816,11 @@ mod tests {
             RenderMode::Human {
                 text: "body\n",
                 read_only: true,
-                summary: Some(&summary),
+                summary: None,
             },
             &mut bytes,
         )?;
-        assert_eq!(
-            String::from_utf8(bytes)?,
-            "body\nnext: provenant output aaaa\n"
-        );
+        assert_eq!(String::from_utf8(bytes)?, "body\n");
         Ok(())
     }
     #[test]
@@ -1095,6 +1213,8 @@ pub fn render_or_publish<T: Serialize>(
             status: result.status,
             data: &result.data,
             error: None,
+            warnings: Vec::new(),
+            next: Vec::new(),
         };
         (|| {
             let mut receipt_bytes = Vec::new();
@@ -1140,6 +1260,7 @@ pub fn render_or_publish<T: Serialize>(
                     };
                     let mut failure =
                         CommandResult::new(&result.command, Outcome::Error, Overflow { artifact });
+                    failure.warnings = result.warnings.clone();
                     failure.error = Some(provenant_records::CommandError::new(
                         code, message, None, repair,
                     ));
@@ -1185,18 +1306,6 @@ pub fn render_or_publish<T: Serialize>(
                         // a command failure.
                         let path_text =
                             serde_json::to_string(&path).map_err(RenderError::Encode)?;
-                        let _ = writeln!(
-                            stderr,
-                            "warning: [RESULT_TOO_LARGE] {} exceeds 1 MiB (source: COMMAND_RESULT_MAX_BYTES); paged to the owner-published artefact; proceeding",
-                            result.command
-                        );
-                        let paged = CommandResult::new(
-                            &result.command,
-                            result.status,
-                            Overflow {
-                                artifact: Some(path),
-                            },
-                        );
                         // Human transport names the pointer in the same typed
                         // path record; JSON carries it in data.artifact.
                         let human =
@@ -1211,6 +1320,33 @@ pub fn render_or_publish<T: Serialize>(
                                 }
                             }
                         };
+                        // The paged envelope keeps every warning the reader
+                        // already has and the one the page itself raises. Under
+                        // --json the cap notice is typed in that envelope, never
+                        // written to stderr; human mode routes it through warn.
+                        let mut paged = CommandResult::new(
+                            &result.command,
+                            result.status,
+                            Overflow {
+                                artifact: Some(path),
+                            },
+                        );
+                        paged.warnings = result.warnings.clone();
+                        let notice = Warning::new(
+                            RESULT_TOO_LARGE,
+                            format!(
+                                "[RESULT_TOO_LARGE] {} exceeds 1 MiB (source: COMMAND_RESULT_MAX_BYTES); paged to the owner-published artefact; proceeding",
+                                result.command
+                            ),
+                        )
+                        .repair(
+                            "Read the published artifact named in data.artifact for the full result; request a smaller page.",
+                        );
+                        if matches!(mode, RenderMode::Json) {
+                            paged.warnings.push(notice);
+                        } else {
+                            provenant_records::warning::warn(notice);
+                        }
                         render(&paged, fallback_mode, writer)?;
                         Ok(result.status)
                     }
@@ -1377,8 +1513,16 @@ mod overflow_tests {
         assert_eq!(value["status"], "ok");
         assert!(value["error"].is_null());
         assert!(value["data"]["artifact"].is_object());
-        let warning = String::from_utf8(errors)?;
-        assert!(warning.contains("warning: [RESULT_TOO_LARGE]"), "{warning}");
+        assert!(
+            value["warnings"]
+                .as_array()
+                .ok_or("warnings")?
+                .iter()
+                .any(|warning| warning["code"] == "RESULT_TOO_LARGE"),
+            "{value}"
+        );
+        let stderr = String::from_utf8(errors)?;
+        assert!(stderr.is_empty(), "{stderr}");
         Ok(())
     }
 }

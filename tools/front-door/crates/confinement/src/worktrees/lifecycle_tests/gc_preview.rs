@@ -237,6 +237,7 @@ fn gc_verdict(report: &WorktreeGcReport, lane: &WorktreeInfo) -> GcVerdict {
 fn gc_preview_verdict_matches_apply_for_every_worktree_state() -> Result<(), Box<dyn Error>> {
     // Spec: docs/specs/supervisor.md#pruning-and-gc-need-proof
     let fixture = Fixture::new()?;
+    declare_forge_default(&fixture)?;
     let test = TestContext::new(&fixture)?;
     let context = test.context();
     let retirement = HostRetirementFixture::new(&test)?;

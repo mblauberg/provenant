@@ -21,6 +21,7 @@ use provenant_records::custody::{
     RemovalOutcome, RemovalRecord, RemovalUncertainty, RetirementDecision, RetirementRecord,
     RetirementStep, RetirementStepState,
 };
+use provenant_records::warning::{self, GIT_OPERATION_RETAINED, Warning};
 use std::time::Duration;
 
 const REMOTE_READ: Duration = Duration::from_secs(30);
@@ -72,14 +73,30 @@ fn ref_removal(
     })
 }
 
-fn warn(outcome: &ArtefactOutcome) {
-    if outcome.outcome == ArtefactState::Failed {
-        use std::io::Write;
-        let _ = writeln!(
-            std::io::stderr().lock(),
-            "warning: could not remove {}: {}; it is retained",
+fn removal_warning(outcome: &ArtefactOutcome) -> Warning {
+    Warning::new(
+        GIT_OPERATION_RETAINED,
+        format!(
+            "could not remove {}: {}; it is retained",
             outcome.name,
             outcome.reason.as_deref().unwrap_or("unknown error")
+        ),
+    )
+    .subject(outcome.name.clone())
+}
+
+fn warn(outcome: &ArtefactOutcome) {
+    if outcome.outcome == ArtefactState::Failed {
+        provenant_records::warning::warn(
+            provenant_records::warning::Warning::new(
+                provenant_records::warning::CACHE_REMOVAL_FAILED,
+                format!(
+                    "could not remove {}: {}; it is retained",
+                    outcome.name,
+                    outcome.reason.as_deref().unwrap_or("unknown error")
+                ),
+            )
+            .subject(outcome.name.to_string()),
         );
     }
 }
@@ -434,7 +451,9 @@ pub(crate) fn sweep_local(
         None,
         cancel,
     );
-    warn(&outcome);
+    if outcome.outcome == ArtefactState::Failed {
+        warning::warn(removal_warning(&outcome));
+    }
     outcome
 }
 
@@ -841,6 +860,9 @@ pub(crate) fn sweep_remote(
     retirement: &dyn RetirementPort,
     cancel: &CancelToken,
 ) -> Vec<ArtefactOutcome> {
+    // Supply the same scope the production sweep passes, so `None` keeps its
+    // one meaning: the worktree inventory could not be read.
+    let scope = worktrees::local_retirement_scope(context, target, cancel).ok();
     let outcomes = remote_outcomes(
         context,
         ledger,
@@ -850,7 +872,7 @@ pub(crate) fn sweep_remote(
         sweep,
         &PortLookup(retirement),
         Some(retirement),
-        None,
+        scope.as_ref(),
         None,
         cancel,
     );
@@ -896,9 +918,12 @@ fn remote_outcomes(
         return vec![out(ArtefactState::Retained).with_reason("invalid_ref")];
     };
     // `target` names the fetched default branch and covers the normal apply
-    // path. The scope adds the origin/HEAD and `main` fallback, so the default
-    // branch is still protected in dry-run and when `remote_default` failed.
-    if scope.is_some_and(|scope| !scope.permits(&reference)) {
+    // path. The scope adds the default branch from the one resolved forge
+    // context, so it is still protected in dry-run and when `remote_default`
+    // failed. A missing scope means inventory could not be read, so fail
+    // closed and exclude every remote record rather than retiring an
+    // unprotected default. Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    if scope.is_none_or(|scope| !scope.permits(&reference)) {
         return vec![out(ArtefactState::Retained).with_reason(EXCLUDED_REASON)];
     }
     if target.is_some_and(|target| target.reference.as_ref() == Some(&reference)) {
@@ -1718,7 +1743,9 @@ pub(crate) fn collect(
                 cached_base_refs.as_deref(),
                 cancel,
             );
-            warn(&outcome);
+            if outcome.outcome == ArtefactState::Failed {
+                warning::warn(removal_warning(&outcome));
+            }
             outcomes.push(outcome);
         }
     }
@@ -1735,7 +1762,9 @@ pub(crate) fn collect(
                 cached_base_refs.as_deref(),
                 cancel,
             );
-            warn(&outcome);
+            if outcome.outcome == ArtefactState::Failed {
+                warning::warn(removal_warning(&outcome));
+            }
             outcomes.push(outcome);
         }
     }
@@ -1787,6 +1816,12 @@ pub(crate) fn settle_integrated(
         previous: integration.previous,
         integrated: integration.integrated,
     }];
+    // A `None` scope now means the worktree inventory could not be read, so
+    // `remote_outcomes` retains every record. Settle with the same declared
+    // local retirement scope the production sweep uses, or this lane's own
+    // remote branch is never retired after its integration receipt proves it
+    // landed. Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    let scope = worktrees::local_retirement_scope(context, Some(&root), cancel).ok();
     let outcomes = remote_outcomes(
         context,
         &ledger,
@@ -1796,7 +1831,7 @@ pub(crate) fn settle_integrated(
         sweep,
         &PortLookup(retirement),
         Some(retirement),
-        None,
+        scope.as_ref(),
         None,
         cancel,
     );
@@ -1882,6 +1917,12 @@ mod tests {
             run_git(
                 &project,
                 &["push", "bound", "main", "lane/old", "lane/changed"],
+            )?;
+            // One resolved forge context needs a default branch; name it through
+            // the remote's HEAD symref so retirement is not fail-closed in tests.
+            run_git(
+                &project,
+                &["symbolic-ref", "refs/remotes/bound/HEAD", "refs/heads/main"],
             )?;
             let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
             inputs.state_dir = Some(state);
@@ -2093,7 +2134,7 @@ mod tests {
             &fixture.project,
             &[
                 "update-ref",
-                "refs/remotes/origin/trunk",
+                "refs/remotes/bound/trunk",
                 &fixture.landed.to_string(),
             ],
         )?;
@@ -2101,8 +2142,8 @@ mod tests {
             &fixture.project,
             &[
                 "symbolic-ref",
-                "refs/remotes/origin/HEAD",
-                "refs/remotes/origin/trunk",
+                "refs/remotes/bound/HEAD",
+                "refs/remotes/bound/trunk",
             ],
         )?;
         run_git(
@@ -2184,13 +2225,13 @@ mod tests {
         use provenant_os::fixture::run_git;
 
         let fixture = CleanupFixture::new()?;
-        // `origin/HEAD` names `trunk` as the default; no target is resolved in
+        // The bound remote's HEAD names `trunk` as the default; no target is resolved in
         // dry-run, so the scope is the only protection for the remote record.
         run_git(
             &fixture.project,
             &[
                 "update-ref",
-                "refs/remotes/origin/trunk",
+                "refs/remotes/bound/trunk",
                 &fixture.landed.to_string(),
             ],
         )?;
@@ -2198,8 +2239,8 @@ mod tests {
             &fixture.project,
             &[
                 "symbolic-ref",
-                "refs/remotes/origin/HEAD",
-                "refs/remotes/origin/trunk",
+                "refs/remotes/bound/HEAD",
+                "refs/remotes/bound/trunk",
             ],
         )?;
         fixture.with_context(|context, cancel| {
@@ -2242,7 +2283,7 @@ mod tests {
             &fixture.project,
             &[
                 "update-ref",
-                "refs/remotes/origin/trunk",
+                "refs/remotes/bound/trunk",
                 &fixture.landed.to_string(),
             ],
         )?;
@@ -2250,8 +2291,8 @@ mod tests {
             &fixture.project,
             &[
                 "symbolic-ref",
-                "refs/remotes/origin/HEAD",
-                "refs/remotes/origin/trunk",
+                "refs/remotes/bound/HEAD",
+                "refs/remotes/bound/trunk",
             ],
         )?;
         fixture.with_context(|context, cancel| {
@@ -2286,6 +2327,166 @@ mod tests {
                 .ok_or(worktrees::WorktreeError::InvalidRequest)?;
             assert_eq!(retained.outcome, ArtefactState::Retained, "{outcomes:?}");
             assert_eq!(retained.reason.as_deref(), Some(EXCLUDED_REASON));
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    #[test]
+    // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    fn a_missing_scope_retains_every_remote_record() -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_os::fixture::run_git;
+
+        let fixture = CleanupFixture::new()?;
+        run_git(
+            &fixture.project,
+            &[
+                "update-ref",
+                "refs/remotes/bound/main",
+                &fixture.landed.to_string(),
+            ],
+        )?;
+        run_git(
+            &fixture.project,
+            &[
+                "symbolic-ref",
+                "refs/remotes/bound/HEAD",
+                "refs/remotes/bound/main",
+            ],
+        )?;
+        fixture.with_context(|context, cancel| {
+            let ledger = RefLedger::for_context(context)?;
+            let record = record_old_ref(
+                context,
+                &ledger,
+                fixture.endpoint(),
+                "main",
+                fixture.landed,
+                cancel,
+            )?;
+            // Inventory could not be read, so no scope reached this record.
+            // A remote record naming the default branch must still be kept.
+            let outcomes = remote_outcomes(
+                context,
+                &ledger,
+                &record,
+                None,
+                &[],
+                &remote_fixture_sweep(),
+                &EmptyRetirementLookup,
+                None,
+                None,
+                None,
+                cancel,
+            );
+            let retained = outcomes
+                .iter()
+                .find(|outcome| outcome.artefact == Artefact::RemoteBranch)
+                .ok_or(worktrees::WorktreeError::InvalidRequest)?;
+            assert_eq!(retained.outcome, ArtefactState::Retained, "{outcomes:?}");
+            assert_eq!(retained.reason.as_deref(), Some(EXCLUDED_REASON));
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    #[test]
+    // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    fn a_declared_protected_branch_is_excluded_from_retirement()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_os::fixture::run_git;
+
+        let fixture = CleanupFixture::new()?;
+        run_git(
+            &fixture.project,
+            &[
+                "symbolic-ref",
+                "refs/remotes/bound/HEAD",
+                "refs/remotes/bound/main",
+            ],
+        )?;
+        let mut ports = provenant_config::PortTable::builtin();
+        ports.git.protected = vec!["refs/heads/protected".to_owned()];
+        ports.git.source = provenant_records::Layer::Project;
+        std::fs::create_dir_all(fixture.project.join(".provenant"))?;
+        std::fs::write(
+            fixture.project.join(provenant_config::PORTS_CONFIG),
+            serde_json::to_vec(&ports)?,
+        )?;
+        fixture.with_context(|context, cancel| {
+            let scope = worktrees::local_retirement_scope(context, None, cancel)?;
+            assert!(!scope.unresolved());
+            let protected = GitRefName::branch("protected").expect("branch");
+            let default = GitRefName::branch("main").expect("branch");
+            assert!(!scope.permits(&protected), "declared protected branch");
+            assert!(!scope.permits(&default), "default branch");
+            assert!(
+                scope.permits(&GitRefName::branch("lane/old").expect("branch")),
+                "ordinary branch"
+            );
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    #[test]
+    // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    fn an_unresolvable_forge_context_permits_no_retirement()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_os::fixture::run_git;
+
+        let fixture = CleanupFixture::new()?;
+        // No remote declaration and no remote-tracking refs: the one forge
+        // context cannot name a remote, so GC must fail closed.
+        run_git(&fixture.project, &["remote", "remove", "bound"])?;
+        std::fs::remove_dir_all(fixture.project.join(".git/refs/remotes"))?;
+        fixture.with_context(|context, cancel| {
+            let (scope, warnings) = provenant_records::capture(|| {
+                worktrees::local_retirement_scope(context, None, cancel)
+            });
+            let scope = scope?;
+            assert!(scope.unresolved(), "{warnings:?}");
+            let refusal = warnings
+                .iter()
+                .find(|warning| warning.code.as_ref() == "FORGE_CONTEXT_UNRESOLVED")
+                .expect("a fail-closed forge refusal");
+            let repair = refusal.repair.as_deref().expect("an actionable repair");
+            assert!(repair.contains("git.remote"), "{repair}");
+            assert!(repair.contains("provenant gc"), "{repair}");
+            for branch in ["main", "lane/old", "lane/changed"] {
+                let reference = GitRefName::branch(branch).expect("branch");
+                assert!(!scope.permits(&reference), "{branch} must not be retired");
+            }
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    #[test]
+    // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    fn a_missing_remote_head_warns_with_a_followable_repair()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = CleanupFixture::new()?;
+        // The checkout has a remote but no `refs/remotes/<remote>/HEAD` and no
+        // declared default branch: the context is unresolved and GC fails closed.
+        std::fs::remove_file(fixture.project.join(".git/refs/remotes/bound/HEAD"))?;
+        fixture.with_context(|context, cancel| {
+            let (scope, warnings) = provenant_records::capture(|| {
+                worktrees::local_retirement_scope(context, None, cancel)
+            });
+            let scope = scope?;
+            assert!(scope.unresolved(), "{warnings:?}");
+            let refusal = warnings
+                .iter()
+                .find(|warning| warning.code.as_ref() == "FORGE_CONTEXT_UNRESOLVED")
+                .expect("a fail-closed forge refusal");
+            let repair = refusal.repair.as_deref().expect("an actionable repair");
+            assert!(
+                repair.contains("git remote set-head bound --auto"),
+                "{repair}"
+            );
+            assert!(repair.contains("git.default_branch"), "{repair}");
+            assert!(repair.contains("provenant gc"), "{repair}");
             Ok(())
         })?;
         Ok(())

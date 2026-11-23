@@ -294,9 +294,12 @@ fn switch(
     );
     let (target, reason) = match decision {
         SwitchDecision::Stay => {
-            let _ = writeln!(
-                io::stderr().lock(),
-                "chair switch: current quota below threshold or unavailable/stale; continuing"
+            provenant_records::warning::warn(
+                provenant_records::warning::Warning::new(
+                    provenant_records::warning::CHAIR_SWITCH_QUOTA_STALE,
+                    "chair switch: current quota below threshold or unavailable/stale; continuing",
+                )
+                .once_per_change(),
             );
             return Ok(None);
         }
@@ -1013,8 +1016,12 @@ fn session_identity(context: &Context) -> provenant_telemetry::usage::AccountIde
         adapter.adapter.session_identity(&live, &directory)
     })();
     identity.unwrap_or_else(|_| {
-        eprintln!(
-            "provenant: warning: Claude account identity could not be verified; usage is attributed as unknown"
+        provenant_records::warning::warn(
+            provenant_records::warning::Warning::new(
+                provenant_records::warning::ACCOUNT_IDENTITY_UNVERIFIED,
+                "Claude account identity could not be verified; usage is attributed as unknown",
+            )
+            .once_per_change(),
         );
         AccountIdentity::unknown()
     })
@@ -1048,6 +1055,7 @@ fn record_start(context: &Context, input: &Input) {
     );
 }
 // The hook protocol imposes real wall-time input and execution caps.
+// The hook's switch outcome is reported on stderr for the caller that keys on its exit code.
 #[allow(clippy::disallowed_methods)]
 pub fn hook(start: bool, globals: &Globals) -> u8 {
     // Stay inside the registered 5s SessionStart and 10s prompt timeouts.

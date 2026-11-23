@@ -20,7 +20,7 @@ use support::{Result, TestRig, code};
 fn isolated_writer_access_receipt() -> provenant_records::LaneAccessReceipt {
     provenant_records::LaneAccessReceipt {
         access: provenant_records::LaneAccess::Isolated,
-        source: provenant_records::LaneAccessSource::Default,
+        source: provenant_records::Layer::Default,
         key: "lanes.access".into(),
         extra: Default::default(),
     }
@@ -233,11 +233,15 @@ pub fn main() -> std::process::ExitCode {
         Some("--admission-only") => {
             let args = args.into_iter().skip(1);
             ExitCode::from(provenant_cli::run::with_deferred_provider_launch(|| {
-                crate::dispatch(provenant_cli::parse(args), &Fixture)
+                let (parsed, warnings) =
+                    provenant_records::warning::capture(|| provenant_cli::parse(args));
+                crate::dispatch(parsed, &Fixture, warnings)
             }))
         }
         Some("--state-dir" | "internal" | "admit") => {
-            let code = crate::dispatch(provenant_cli::parse(args), &Fixture);
+            let (parsed, warnings) =
+                provenant_records::warning::capture(|| provenant_cli::parse(args));
+            let code = crate::dispatch(parsed, &Fixture, warnings);
             // A fixture-only observation after the real command has rendered.
             if let Some(path) = std::env::var_os("FIXTURE_LAND_CWD_FILE") {
                 let result = std::env::current_dir()
@@ -296,10 +300,11 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "writer_dispatch_edits_a_linked_worktree",
             "shared_holders_both_launch_and_removal_refused_while_holder_is_live",
             "writer_settlement_merges_upstream_advance",
-            "writer_terminal_refuses_sequencer_state",
+            "writer_terminal_retains_sequencer_state",
             "writer_production_plan_denies_outside_writes",
-            "writer_reconcile_refuses_unfinished_cherry_pick_and_releases",
+            "writer_reconcile_keeps_unfinished_cherry_pick_and_releases",
             "recreated_worktree_accepts_writer_after_settlement",
+            "existing_branch_behind_base_warns_and_keeps_its_tip",
             "existing_branch_with_base_names_the_repair_in_json_and_human_output",
             "create_reuses_a_clean_worktree_and_names_an_existing_conflict",
             "create_from_remote_base_reports_ok_and_exists",
@@ -405,20 +410,20 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 "writer_settlement_merges_upstream_advance" => {
                     writer_settlement_merges_upstream_advance()
                 }
-                "writer_terminal_refuses_sequencer_state" => {
-                    writer_terminal_refuses_sequencer_state()
+                "writer_terminal_retains_sequencer_state" => {
+                    writer_terminal_retains_sequencer_state()
                 }
                 "writer_production_plan_denies_outside_writes" => {
                     writer_production_plan_denies_outside_writes()
                 }
-                "writer_reconcile_refuses_unfinished_cherry_pick_and_releases" => {
-                    writer_reconcile_refuses_unfinished_cherry_pick_and_releases()
+                "writer_reconcile_keeps_unfinished_cherry_pick_and_releases" => {
+                    writer_reconcile_keeps_unfinished_cherry_pick_and_releases()
                 }
                 "recreated_worktree_accepts_writer_after_settlement" => {
                     recreated_worktree_accepts_writer_after_settlement()
                 }
-                "existing_branch_with_base_names_the_repair_in_json_and_human_output" => {
-                    existing_branch_with_base_names_the_repair_in_json_and_human_output()
+                "existing_branch_behind_base_warns_and_keeps_its_tip" => {
+                    existing_branch_behind_base_warns_and_keeps_its_tip()
                 }
                 "create_reuses_a_clean_worktree_and_names_an_existing_conflict" => {
                     create_reuses_a_clean_worktree_and_names_an_existing_conflict()
@@ -1059,7 +1064,7 @@ impl provenant_run::Providers for WriterProvider {
                 limits: provenant_records::LaneLimits {
                     deadline_seconds: Some(provenant_records::Limit::new(
                         task.provider_timeout_seconds,
-                        provenant_records::LimitSource::Launch,
+                        provenant_records::Layer::Launch,
                         provenant_records::LimitStrength::Default,
                     )),
                     ..Default::default()
@@ -1086,7 +1091,7 @@ impl provenant_run::Providers for WriterProvider {
                     sandbox: provenant_confinement::run_config::SandboxMode::required(
                         true,
                         true,
-                        provenant_confinement::run_config::SandboxSource::Knob,
+                        provenant_records::Layer::Host,
                         None,
                     ),
                     backend: None,

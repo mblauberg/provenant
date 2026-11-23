@@ -237,12 +237,12 @@ fn apply_to(
                         let receipt = context.lane_access;
                         if !receipt.access.is_isolated()
                             && let Some(root) = context.credential_roots.refusal(&grant.path, if grant.scope == PathScope::Subtree { provenant_core::CredentialScope::Subtree } else { provenant_core::CredentialScope::Exact }, is_exec)
-                            && let Some(message) = context.policy.check(
+                            && let provenant_records::policy::Effect::Warn(warning) = context.policy.check(
                                 "PROJECT_PATHS_CREDENTIAL_NONE",
                                 provenant_records::policy::Facts::violation(format!("configured project path {} overlaps credential root {} (declaration: {}; lanes.access={}, source: {})", grant.path.display(), root.path.display(), root.source, receipt.access.as_str(), receipt.source.as_str())),
-                            ).message()
+                            )
                         {
-                            warnings.push(json!({"code": "project_credential_overlap", "policy_code": "PROJECT_PATHS_CREDENTIAL_NONE", "key": key, "path": grant.path.to_string_lossy(), "policy_message": message}));
+                            warnings.push(json!({"code": "project_credential_overlap", "policy_code": "PROJECT_PATHS_CREDENTIAL_NONE", "key": key, "path": grant.path.to_string_lossy(), "policy_message": warning.message}));
                         }
                         for (config, source) in agent_configuration_overlaps(&grant.path, primary) {
                             warnings.push(json!({
@@ -263,7 +263,7 @@ fn apply_to(
                         }
                     }
                     Err(reason) => {
-                        if let provenant_records::policy::Effect::Warn(message) =
+                        if let provenant_records::policy::Effect::Warn(warning) =
                             context.policy.check(
                                 "PROJECT_PATHS_RESOLVE_NONE",
                                 provenant_records::policy::Facts::violation(format!(
@@ -277,7 +277,7 @@ fn apply_to(
                                 "source": format!("{:?}", context.policy.rule("PROJECT_PATHS_RESOLVE_NONE").source),
                                 "key": key,
                                 "reason": reason,
-                                "policy_message": message,
+                                "policy_message": warning.message,
                                 "credential_source": (reason == "credential_root")
                                     .then(|| credential_source(entry, is_exec, primary, &context))
                                     .flatten(),
@@ -410,7 +410,7 @@ mod tests {
                     credential_roots: &credential_roots,
                     lane_access: &provenant_records::LaneAccessReceipt {
                         access: provenant_records::LaneAccess::Isolated,
-                        source: provenant_records::LaneAccessSource::Default,
+                        source: provenant_records::Layer::Default,
                         key: "lanes.access".into(),
                         extra: Default::default(),
                     },
@@ -504,7 +504,7 @@ mod tests {
                 assert_eq!(credential_warning["credential_source"], declared_source);
                 let receipt = provenant_records::LaneAccessReceipt {
                     access: provenant_records::LaneAccess::Host,
-                    source: provenant_records::LaneAccessSource::Default,
+                    source: provenant_records::Layer::Default,
                     key: "lanes.access".into(),
                     extra: Default::default(),
                 };
@@ -612,7 +612,7 @@ mod tests {
                 credential_roots: &provenant_core::CredentialRoots::for_home(&home),
                 lane_access: &provenant_records::LaneAccessReceipt {
                     access: provenant_records::LaneAccess::Isolated,
-                    source: provenant_records::LaneAccessSource::Default,
+                    source: provenant_records::Layer::Default,
                     key: "lanes.access".into(),
                     extra: Default::default(),
                 },
@@ -709,7 +709,7 @@ mod tests {
                     credential_roots: &provenant_core::CredentialRoots::for_home(&home),
                     lane_access: &provenant_records::LaneAccessReceipt {
                         access: provenant_records::LaneAccess::Isolated,
-                        source: provenant_records::LaneAccessSource::Default,
+                        source: provenant_records::Layer::Default,
                         key: "lanes.access".into(),
                         extra: Default::default(),
                     },
@@ -796,7 +796,7 @@ mod tests {
                 credential_roots: &provenant_core::CredentialRoots::for_home(&home),
                 lane_access: &provenant_records::LaneAccessReceipt {
                     access: provenant_records::LaneAccess::Isolated,
-                    source: provenant_records::LaneAccessSource::Default,
+                    source: provenant_records::Layer::Default,
                     key: "lanes.access".into(),
                     extra: Default::default(),
                 },
@@ -922,7 +922,7 @@ mod tests {
                     credential_roots: &provenant_core::CredentialRoots::for_home(&home),
                     lane_access: &provenant_records::LaneAccessReceipt {
                         access: provenant_records::LaneAccess::Isolated,
-                        source: provenant_records::LaneAccessSource::Default,
+                        source: provenant_records::Layer::Default,
                         key: "lanes.access".into(),
                         extra: Default::default(),
                     },
@@ -1078,7 +1078,7 @@ mod tests {
                 credential_roots: &provenant_core::CredentialRoots::for_home(&home),
                 lane_access: &provenant_records::LaneAccessReceipt {
                     access: provenant_records::LaneAccess::Isolated,
-                    source: provenant_records::LaneAccessSource::Default,
+                    source: provenant_records::Layer::Default,
                     key: "lanes.access".into(),
                     extra: Default::default(),
                 },

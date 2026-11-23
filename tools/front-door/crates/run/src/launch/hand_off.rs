@@ -1,5 +1,4 @@
 use super::*;
-use std::io::Write;
 
 #[cfg(test)]
 thread_local! {
@@ -393,9 +392,22 @@ impl RunStore {
                     .strip_prefix("refs/heads/")
                     .ok_or(RunError::Validation("writer needs a local branch"))?;
                 let mut holder: HolderContext = decode(&holder_context)?;
-                let request =
-                    crate::HostDeliveryContext::destination(crate::DeliveryMode::Push, branch)?
-                        .ok_or(RunError::Validation("stop publication destination missing"))?;
+                let state = self.context.state_root.as_path();
+                let ports = provenant_config::PortTable::read_for(
+                    Some(writer_request.project.as_path()),
+                    state,
+                )
+                .map_err(|error| RunError::Input {
+                    kind: crate::ErrorKind::Invalid,
+                    message: error.to_string(),
+                })?;
+                let forge = crate::resolve_forge(state, &writer_request.project, &ports)?;
+                let request = crate::HostDeliveryContext::destination(
+                    crate::DeliveryMode::Push,
+                    branch,
+                    &forge,
+                )?
+                .ok_or(RunError::Validation("stop publication destination missing"))?;
                 let host = holder.host_delivery.take().unwrap_or_else(|| {
                     crate::HostDeliveryContext::capture()
                         .with_repo_facts(self.repo_facts())
@@ -411,6 +423,7 @@ impl RunStore {
                             .or(Some(false)),
                     )
                     .with_policy(policy.clone())
+                    .with_forge(&forge)
                     .prepare_stop_publish(writer_request, &request)?;
                 host.seal_stop_publish_binding(&self.attempt_dir(id, false)?, scope)?;
                 holder.host_delivery = Some(host);
@@ -419,10 +432,12 @@ impl RunStore {
             match prepared {
                 Ok(context) => holder_context = context,
                 Err(error) => {
-                    let _ = writeln!(
-                        std::io::stderr().lock(),
-                        "warning: stop publication is unavailable: {error}"
-                    );
+                    use provenant_records::warning::{STOP_PUBLICATION_UNAVAILABLE, Warning, warn};
+                    // Spec: docs/specs/cli.md#warnings-are-typed-values
+                    warn(Warning::new(
+                        STOP_PUBLICATION_UNAVAILABLE,
+                        format!("stop publication is unavailable: {error}"),
+                    ));
                 }
             }
         }

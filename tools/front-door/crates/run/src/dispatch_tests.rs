@@ -188,7 +188,7 @@ impl Providers for Confined {
             sandbox: provenant_confinement::run_config::SandboxMode::required(
                 false,
                 false,
-                provenant_confinement::run_config::SandboxSource::Knob,
+                provenant_records::Layer::Host,
                 None,
             ),
             backend: None,

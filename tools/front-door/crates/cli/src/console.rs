@@ -20,7 +20,7 @@ pub mod tree_peer;
 
 pub use overview::summary_comparison;
 
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Console {
     /// Read local owner change generations
     Changes {
@@ -139,7 +139,12 @@ fn detail_reference(
 ) -> Result<String, Error> {
     use crate::target::{ResolveError, Want, resolve};
     for project in projects(roots, selected)? {
-        let resolved = resolve(target, Want::Attempt { settled: false }, |name| {
+        let names = provenant_fabric_runtime::graph::FileJournal::reserved_graph_ids(
+            &roots.state,
+            project.project_id,
+        )
+        .unwrap_or_default();
+        let resolved = resolve(target, Want::Attempt { settled: false }, &names, |name| {
             provenant_fabric_runtime::graph::FileJournal::read_status_checkpoint(
                 &roots.state,
                 project.project_id,
@@ -147,7 +152,7 @@ fn detail_reference(
             )
         });
         match resolved {
-            Err(ResolveError::NotFound(_)) => continue,
+            Err(ResolveError::NotFound { .. }) => continue,
             Err(ResolveError::Read(error)) => return Err(Error::Target(error.to_string())),
             Err(error) => return Err(Error::Target(error.to_string())),
             Ok(resolved) => {

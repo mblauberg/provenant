@@ -407,7 +407,7 @@ fn every_declared_credential_root_protects_grants_and_enclosing_paths() {
         }
         let host = provenant_records::LaneAccessReceipt {
             access: provenant_records::LaneAccess::Host,
-            source: provenant_records::LaneAccessSource::Default,
+            source: provenant_records::Layer::Default,
             key: "lanes.access".into(),
             extra: Default::default(),
         };

@@ -169,7 +169,7 @@ fn delta_ack_replay_cap_and_cursor_recovery_never_lose_source() {
     }
     let first = page(&board, read(Scope::Project, "r", None, Some(1)));
     assert!(first.truncated);
-    assert_eq!(first.read_cap.source, LimitSource::Launch);
+    assert_eq!(first.read_cap.source, Layer::Launch);
     assert_eq!(first.next, 1);
     // No ACK means the same page is redelivered after reconnect.
     let retry = page(
@@ -400,7 +400,7 @@ fn every_accepted_note_fits_replay_and_oversize_rejection_has_no_effect() {
         default_read_cap(),
         Sourced {
             value: limit * 2,
-            source: LimitSource::Host,
+            source: Layer::Host,
         },
     )
     .unwrap();

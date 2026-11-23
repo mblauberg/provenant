@@ -30,9 +30,12 @@ const LAYERS: &[(&str, &[&str])] = &[
     ("test-support", &["core"]),
     ("records", &["core"]),
     ("config", &["core", "records", "os", "redact"]),
-    ("os", &["core"]),
+    // The typed warning facade lives in records::warning; every library routes
+    // warnings through it (Spec: docs/specs/cli.md#warnings-are-typed-values). The edge is acyclic
+    // because records depends only on core.
+    ("os", &["core", "records"]),
     // Per-byte redaction, built optimised in dev and test profiles.
-    ("redact", &["core", "os"]),
+    ("redact", &["core", "records", "os"]),
     // Port-plan tests read the default lane settings from config (a sibling
     // layer), so the edge is acyclic.
     ("supervisor", &["core", "records", "os", "config", "redact"]),
@@ -63,8 +66,13 @@ const LAYERS: &[(&str, &[&str])] = &[
         ],
     ),
     ("quota", &["core", "records", "config"]),
-    // Price overlays read host and project layers through config.
-    ("telemetry", &["core", "records", "config", "routing", "os"]),
+    // Price overlays read host and project layers through config. The ingest
+    // store merges usage through the accumulator owned by providers
+    // (Spec: docs/specs/telemetry.md#usage-merges-by-declared-semantics); providers does not depend on telemetry.
+    (
+        "telemetry",
+        &["core", "records", "config", "routing", "os", "providers"],
+    ),
     (
         "routing",
         &["core", "records", "config", "quota", "providers"],
@@ -1578,6 +1586,332 @@ fn owned_helpers_have_one_definition() -> Result<(), Box<dyn Error>> {
     assert!(
         violations.is_empty(),
         "shared helpers must have one owner:\n{}",
+        violations.join("\n")
+    );
+    Ok(())
+}
+
+// Spec: docs/specs/rust-workspace.md#one-owner-per-command-domain
+#[test]
+fn every_grammar_leaf_has_exactly_one_registry_verb() -> Result<(), Box<dyn Error>> {
+    provenant::commands::install();
+    let grammar: std::collections::BTreeSet<String> =
+        provenant_cli::command_verbs().into_iter().collect();
+    let mut registered = Vec::new();
+    let mut domain_names = std::collections::BTreeSet::new();
+    for domain in provenant::commands::DOMAINS {
+        assert!(
+            domain_names.insert(domain.name),
+            "domain `{}` is declared twice",
+            domain.name
+        );
+        for verb in domain.verbs {
+            assert!(!verb.path.is_empty(), "a verb has an empty path");
+            assert!(
+                verb.path
+                    .iter()
+                    .all(|part| !part.is_empty() && !part.contains(' ')),
+                "a verb path segment must be one grammar word: {:?}",
+                verb.path
+            );
+            registered.push(verb.path.join(" "));
+        }
+    }
+    let unique: std::collections::BTreeSet<String> = registered.iter().cloned().collect();
+    assert_eq!(
+        unique.len(),
+        registered.len(),
+        "two registry entries share a path: {registered:?}"
+    );
+    assert_eq!(
+        unique, grammar,
+        "every grammar leaf needs exactly one registry verb and every verb a grammar leaf"
+    );
+    Ok(())
+}
+
+// Spec: docs/specs/rust-workspace.md#one-owner-per-command-domain
+// The usage verb strings are persisted telemetry units, so their set is a
+// contract and may not change without a migration.
+#[test]
+fn usage_verbs_keep_their_persisted_spelling() {
+    provenant::commands::install();
+    let expected: std::collections::BTreeSet<&str> = [
+        "accounts list",
+        "accounts register",
+        "accounts set",
+        "accounts show",
+        "accounts sync",
+        "admit",
+        "adopt",
+        "answer",
+        "ask",
+        "build maintain",
+        "build report",
+        "build reset",
+        "build status",
+        "chair log append",
+        "chair log list",
+        "chair message",
+        "chair summary diff",
+        "chair summary show",
+        "chair summary update",
+        "chair switch",
+        "check config",
+        "check install",
+        "check providers",
+        "check release",
+        "check writing",
+        "ci failures",
+        "ci failures pr",
+        "ci failures run",
+        "cloud collect",
+        "cloud launch",
+        "config apply",
+        "config check",
+        "config detect",
+        "config history",
+        "config path",
+        "config ports",
+        "config schema",
+        "config set",
+        "config show",
+        "config unset",
+        "console board",
+        "console changes",
+        "console detail",
+        "console open",
+        "console overview",
+        "console projects",
+        "console search",
+        "console sessions",
+        "console tree",
+        "disk report",
+        "edit",
+        "events",
+        "fabric claim acquire",
+        "fabric claim list",
+        "fabric claim release",
+        "fabric claim renew",
+        "fabric claim verify",
+        "fabric events note",
+        "fabric events read",
+        "fabric identity",
+        "fabric mail mark-read",
+        "fabric mail read",
+        "fabric mail send",
+        "fabric peer",
+        "fabric peer-agent",
+        "gc",
+        "help",
+        "hook git pre-push",
+        "hosts",
+        "hosts doctor",
+        "inbox",
+        "inbox acknowledge",
+        "inbox close",
+        "init",
+        "install",
+        "internal event-listen",
+        "internal lane-cleanup",
+        "internal launch",
+        "internal provider-updates",
+        "internal settle",
+        "internal supervise",
+        "internal tick-gc",
+        "land",
+        "lane deliver",
+        "native end",
+        "native start",
+        "notes add",
+        "notes read",
+        "output",
+        "parse",
+        "pr contributions",
+        "pr open",
+        "pr status",
+        "pr sync",
+        "process-tree",
+        "quota",
+        "quota clear",
+        "quota display",
+        "quota history",
+        "quota show",
+        "quota tick",
+        "reconcile",
+        "release",
+        "result",
+        "retry",
+        "root",
+        "route exclude add",
+        "route exclude list",
+        "route exclude remove",
+        "route list",
+        "route override clear",
+        "route override list",
+        "route override set",
+        "route pacing",
+        "route remove",
+        "route reset",
+        "route resolve",
+        "route set",
+        "run",
+        "status",
+        "steer",
+        "stop",
+        "telemetry cost",
+        "telemetry experiments show",
+        "telemetry ingest",
+        "telemetry mileage",
+        "telemetry prices refresh",
+        "telemetry stats",
+        "telemetry trace",
+        "telemetry value",
+        "templates",
+        "templates show",
+        "tick",
+        "trace",
+        "tracker lint",
+        "uninstall",
+        "upgrade",
+        "verify",
+        "version",
+        "wait",
+        "workflow receipt save",
+        "workflow receipt show",
+        "workflow review",
+        "workflow session diff",
+        "workflow session handoff",
+        "workflow session save",
+        "workflow session show",
+        "worktree create",
+        "worktree doctor",
+        "worktree list",
+        "worktree locate",
+        "worktree remove",
+        "worktree session-list",
+    ]
+    .into_iter()
+    .collect();
+    let actual: std::collections::BTreeSet<String> =
+        provenant_cli::usage_verbs().into_iter().collect();
+    let expected: std::collections::BTreeSet<String> =
+        expected.into_iter().map(str::to_owned).collect();
+    let added: Vec<_> = actual.difference(&expected).cloned().collect();
+    let removed: Vec<_> = expected.difference(&actual).cloned().collect();
+    assert!(
+        added.is_empty() && removed.is_empty(),
+        "persisted usage verbs changed; added {added:?}, removed {removed:?}. The unit strings are a \
+         persisted contract: keep the spelling, or migrate recorded usage in the same PR"
+    );
+}
+
+// Spec: docs/specs/rust-workspace.md#one-owner-per-command-domain
+// A ceiling is an overridable default: raise a file's entry in the same PR that
+// makes the growth deliberate, and split rather than raise where a module has
+// become an owner of unrelated mechanisms.
+#[test]
+fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Error>> {
+    const DEFAULT_CEILING: usize = 2_000;
+    const CEILINGS: &[(&str, usize)] = &[
+        ("crates/cli/src/fabric/graph_relay.rs", 5173),
+        ("crates/cli/src/lib.rs", 3830),
+        ("crates/cli/src/quota.rs", 6943),
+        ("crates/cli/src/run.rs", 2521),
+        ("crates/cli/src/run/provider/confinement.rs", 2658),
+        ("crates/cli/src/run/provider/preparation.rs", 7791),
+        ("crates/config/src/loader.rs", 2796),
+        ("crates/config/src/managed.rs", 3120),
+        ("crates/config/src/ports.rs", 3885),
+        ("crates/config/src/project_binding.rs", 2236),
+        ("crates/confinement/src/cache.rs", 3962),
+        ("crates/confinement/src/repo.rs", 2027),
+        ("crates/confinement/src/utility.rs", 6582),
+        ("crates/confinement/src/worktrees/census.rs", 2342),
+        ("crates/confinement/src/worktrees/gc.rs", 3229),
+        ("crates/confinement/src/worktrees/lifecycle.rs", 2685),
+        ("crates/fabric-runtime/src/coordination/facade.rs", 2356),
+        ("crates/fabric-runtime/src/graph.rs", 4199),
+        ("crates/fabric-runtime/src/graph/journal.rs", 2518),
+        ("crates/fabric-runtime/src/graph/model.rs", 2738),
+        ("crates/fabric-runtime/src/graph/outputs.rs", 2352),
+        ("crates/fabric-runtime/src/graph/patch.rs", 2192),
+        ("crates/fabric-runtime/src/graph/plans.rs", 2169),
+        ("crates/fabric-runtime/src/graph/template.rs", 3128),
+        ("crates/fabric-runtime/src/graph/transitions.rs", 2463),
+        ("crates/fabric-runtime/src/hosts.rs", 3673),
+        ("crates/os/src/sys/pid.rs", 2562),
+        ("crates/providers/src/lane.rs", 3529),
+        ("crates/providers/src/launch.rs", 2670),
+        ("crates/providers/src/opencode.rs", 2947),
+        ("crates/providers/src/package_cache.rs", 2295),
+        ("crates/quota/src/admission.rs", 2341),
+        ("crates/quota/src/schedule.rs", 2812),
+        ("crates/records/src/adapters.rs", 2273),
+        ("crates/records/src/run.rs", 4073),
+        ("crates/redact/src/lib.rs", 2273),
+        ("crates/routing/src/catalog.rs", 3214),
+        ("crates/routing/src/resolve.rs", 4249),
+        ("crates/routing/src/review.rs", 2671),
+        ("crates/run/src/build_dir_gc.rs", 6032),
+        ("crates/run/src/controls.rs", 8901),
+        ("crates/run/src/delivery.rs", 4932),
+        ("crates/run/src/git_context.rs", 2841),
+        ("crates/run/src/holder.rs", 9271),
+        ("crates/run/src/launch.rs", 3886),
+        ("crates/run/src/retention.rs", 4898),
+        ("crates/run/src/settlement.rs", 4165),
+        ("crates/run/src/store.rs", 2504),
+        ("crates/run/src/writer.rs", 5436),
+        ("crates/supervisor/src/custody.rs", 3845),
+        ("crates/supervisor/src/guardian.rs", 2991),
+        ("crates/workflow/src/session.rs", 3252),
+        ("src/ci.rs", 2243),
+        ("src/fabric/graph_execution.rs", 2263),
+        ("src/fabric/interface.rs", 8304),
+        ("src/fabric/owner.rs", 5533),
+        ("src/fabric/peer.rs", 2594),
+        ("src/fabric/run_owner.rs", 2748),
+        ("src/fabric/unified.rs", 6636),
+        ("src/hooks.rs", 2636),
+        ("src/install.rs", 3986),
+        ("src/lane_cleanup.rs", 3148),
+        ("src/pr/landing/adapters.rs", 2984),
+        ("src/pr/landing/driver.rs", 3967),
+        ("src/pr/observer.rs", 2445),
+        ("src/status_wait.rs", 3286),
+        ("src/worktrees.rs", 5384),
+    ];
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut sources = Vec::new();
+    for path in source_roots() {
+        rust_sources(&path, &mut sources)?;
+    }
+    let mut violations = Vec::new();
+    for path in sources {
+        let relative = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if is_test_source(&relative) {
+            continue;
+        }
+        let lines = fs::read_to_string(&path)?.lines().count();
+        let ceiling = CEILINGS
+            .iter()
+            .find(|(file, _)| *file == relative.as_str())
+            .map_or(DEFAULT_CEILING, |(_, ceiling)| *ceiling);
+        if lines > ceiling {
+            violations.push(format!(
+                "{relative} is {lines} lines, over its ceiling of {ceiling}; split the file, or raise \
+                 its ceiling in this test in the same PR that justifies the growth"
+            ));
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "production files grew past their line ceilings:\n{}",
         violations.join("\n")
     );
     Ok(())

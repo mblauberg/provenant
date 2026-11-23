@@ -635,19 +635,25 @@ fn ladder_facts() -> DepletionFacts {
 
 // Spec: docs/specs/fabric.md#one-model-spelling-per-route
 #[test]
-fn a_declared_relative_route_equal_to_the_handoff_target_appears_once() {
+fn a_route_equal_to_the_handoff_appears_once_but_its_account_and_effort_variants_stay() {
     let full = "opencode/opencode/deepseek-v4.1-flash-free";
     let document = document("worktree_write", serde_json::Value::Null);
     let plan = validate_flat_plan(&document, &Default::default())
         .unwrap()
         .0;
     let mut node = plan.nodes[0].clone();
-    // The host entry point already fixed the spelling of the node's routes.
-    // The second route was declared provider-relative and carries a different
-    // account, so whole-route comparison would still offer it beside the
-    // ladder's hand-off to the same model.
+    // The ladder hands off to `full` on the ready "spare" account. The host
+    // entry point already fixed the spelling, so a declared route equal to
+    // that target (canonical id, account and effort) is already offered and
+    // must appear once. A route that differs only by account or by effort is
+    // a real alternative and stays beside the hand-off.
     node.routes = vec![
-        serde_json::from_value(json!({"adapter":"opencode","model":full})).unwrap(),
+        serde_json::from_value(json!({"adapter":"opencode","model":full,"account":"spare"}))
+            .unwrap(),
+        serde_json::from_value(
+            json!({"adapter":"opencode","model":full,"account":"spare","effort":"high"}),
+        )
+        .unwrap(),
         serde_json::from_value(json!({"adapter":"opencode","model":full,"account":"other"}))
             .unwrap(),
         serde_json::from_value(json!({"adapter":"second","model":"second/model"})).unwrap(),
@@ -682,10 +688,19 @@ fn a_declared_relative_route_equal_to_the_handoff_target_appears_once() {
         successor
             .routes
             .iter()
-            .map(|route| route.model.as_deref())
+            .map(|route| (
+                route.model.as_deref(),
+                route.account.as_deref(),
+                route.effort.as_deref()
+            ))
             .collect::<Vec<_>>(),
-        [Some(full), Some("second/model")],
-        "a declared route equal to the hand-off target must not be offered twice"
+        [
+            (Some(full), Some("spare"), None),
+            (Some(full), Some("spare"), Some("high")),
+            (Some(full), Some("other"), None),
+            (Some("second/model"), None, None),
+        ],
+        "a route equal to the hand-off target is offered once; account and effort variants stay"
     );
 }
 

@@ -483,11 +483,14 @@ fn sync_one(
                 let brief = format!(
                     "Merge base {base_ref} at {base_head} into this pull request branch, resolve the conflicts in {conflicts}, commit the resolution, and leave the worktree clean."
                 );
-                let next = format!(
-                    "provenant run implement --worktree {} --brief {}",
+                let rest = format!(
+                    "run implement --worktree {} --brief {}",
                     quote_if_needed(&path.to_string_lossy()),
                     quote(&brief)
                 );
+                let next = provenant_workflow::session::CommandPrefix::default()
+                    .runnable(&rest)
+                    .unwrap_or_else(|| format!("provenant {rest}"));
                 if !no_lane {
                     if let Some(held) = writer.take() {
                         held.withdraw_unlaunched()?;
@@ -538,6 +541,7 @@ fn sync_one(
                     current_head: current_head.clone(),
                     base_head,
                     kind: provenant_cli::domains::ApprovalCarry::CleanMerge,
+                    format_source: None,
                     extra: Default::default(),
                 },
             )?;
@@ -639,14 +643,23 @@ fn branch_worktree(
     }
     let ports = provenant_config::PortTable::read_for(Some(layout_root), state)?;
     let relative = ports.managed_writer_path(branch)?;
-    if !relative
-        .components()
-        .all(|component| matches!(component, std::path::Component::Normal(_)))
-    {
-        return Err("configured worktree path is not project relative".into());
-    }
     let layout_root = std::fs::canonicalize(layout_root)?;
-    let configured = layout_root.join(relative);
+    // Every declared root, including absolute and parent-relative ones, is an
+    // allowed parent for a repair checkout. The project root remains allowed
+    // so the default `.worktrees/<branch>` layout keeps its existing bound.
+    let allowed: Vec<std::path::PathBuf> = ports
+        .worktree_roots_under(&layout_root)
+        .into_iter()
+        .map(|root| std::fs::canonicalize(&root).unwrap_or(root))
+        .collect();
+    let under_root = |path: &std::path::Path| {
+        path.starts_with(&layout_root) || allowed.iter().any(|root| path.starts_with(root))
+    };
+    let configured = if relative.is_absolute() {
+        relative
+    } else {
+        layout_root.join(&relative)
+    };
     let parent = configured
         .parent()
         .ok_or("invalid configured worktree path")?;
@@ -656,13 +669,13 @@ fn branch_worktree(
             .parent()
             .ok_or("configured worktree path has no existing ancestor")?;
     }
-    if !std::fs::canonicalize(existing)?.starts_with(&layout_root) {
-        return Err("configured worktree path resolves outside the project root".into());
+    if !under_root(&std::fs::canonicalize(existing)?) {
+        return Err("configured worktree path resolves outside a declared worktree root".into());
     }
     std::fs::create_dir_all(parent)?;
     let parent = std::fs::canonicalize(parent)?;
-    if !parent.starts_with(&layout_root) {
-        return Err("configured worktree path resolves outside the project root".into());
+    if !under_root(&parent) {
+        return Err("configured worktree path resolves outside a declared worktree root".into());
     }
     let path = parent.join(
         configured

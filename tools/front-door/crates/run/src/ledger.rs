@@ -115,7 +115,7 @@ pub(crate) fn lease_with_policy(
     owner: &LeaseOwner,
     configured: LaneCaps,
     policy: &provenant_records::policy::Policy,
-) -> Result<(Option<WallTime>, Vec<String>)> {
+) -> Result<(Option<WallTime>, Vec<provenant_records::warning::Warning>)> {
     let (project, class) = (ticket.project_id, ticket.lane_class);
     let id = ticket.attempt_id.to_string();
     immediate(db, request, |tx| {
@@ -152,7 +152,7 @@ pub(crate) fn lease_with_policy(
                 Facts::violation(format!("active={}, limit={}", hit.active, hit.limit)),
             ) {
                 Effect::Proceed => {}
-                Effect::Warn(message) => warnings.push(message),
+                Effect::Warn(warning) => warnings.push(warning),
                 Effect::Refuse(_) | Effect::Stop(_) => {
                     return Err(RunError::Admission(AdmissionError::LaneCap {
                         active: hit.active,
@@ -294,10 +294,10 @@ pub(crate) struct LaneCaps {
     pub project_writers: u64,
     host_total: u64,
     project_total: u64,
-    host_total_source: provenant_records::diagnostic::SettingSource,
-    project_total_source: provenant_records::diagnostic::SettingSource,
-    host_source: provenant_records::diagnostic::SettingSource,
-    project_source: provenant_records::diagnostic::SettingSource,
+    host_total_source: provenant_records::diagnostic::Layer,
+    project_total_source: provenant_records::diagnostic::Layer,
+    host_source: provenant_records::diagnostic::Layer,
+    project_source: provenant_records::diagnostic::Layer,
 }
 impl LaneCaps {
     pub(crate) fn under_strength(
@@ -348,24 +348,24 @@ impl LaneCaps {
             host_total: settings.total_lanes(),
             project_total: settings.project_total_lanes(),
             host_total_source: if settings.max_lanes.is_some() {
-                provenant_records::diagnostic::SettingSource::Configuration
+                provenant_records::diagnostic::Layer::Host
             } else {
-                provenant_records::diagnostic::SettingSource::ShippedDefault
+                provenant_records::diagnostic::Layer::Default
             },
             project_total_source: if settings.max_project_lanes.is_some() {
-                provenant_records::diagnostic::SettingSource::Configuration
+                provenant_records::diagnostic::Layer::Host
             } else {
-                provenant_records::diagnostic::SettingSource::ShippedDefault
+                provenant_records::diagnostic::Layer::Default
             },
             host_source: if settings.max_writer_lanes.is_some() {
-                provenant_records::diagnostic::SettingSource::Configuration
+                provenant_records::diagnostic::Layer::Host
             } else {
-                provenant_records::diagnostic::SettingSource::ShippedDefault
+                provenant_records::diagnostic::Layer::Default
             },
             project_source: if settings.max_project_writer_lanes.is_some() {
-                provenant_records::diagnostic::SettingSource::Configuration
+                provenant_records::diagnostic::Layer::Host
             } else {
-                provenant_records::diagnostic::SettingSource::ShippedDefault
+                provenant_records::diagnostic::Layer::Default
             },
         }
     }
@@ -376,7 +376,7 @@ pub(crate) struct CapHit {
     pub active: u64,
     pub limit: u64,
     pub kind: provenant_records::diagnostic::LaneLimit,
-    pub origin: provenant_records::diagnostic::SettingSource,
+    pub origin: provenant_records::diagnostic::Layer,
 }
 /// Whether a lease of `class` for `project` would exceed a limit. Every lane
 /// counts against the configured host and project caps; writers also count
@@ -490,9 +490,16 @@ fn prune(tx: &Connection, time: &dyn Clock, resources: &dyn Resources) -> Result
     }
     Ok(())
 }
-#[allow(clippy::print_stderr)]
 fn malformed_row(rowid: i64) {
-    eprintln!("admission: malformed lease row {rowid}");
+    use provenant_records::warning::{ADMISSION_RECORD_MALFORMED, Warning, warn};
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    warn(
+        Warning::new(
+            ADMISSION_RECORD_MALFORMED,
+            format!("admission: malformed lease row {rowid}"),
+        )
+        .subject(format!("row {rowid}")),
+    );
 }
 #[allow(clippy::print_stderr)]
 fn released(
@@ -575,10 +582,10 @@ mod tests {
 
     #[test]
     fn lane_cap_identifies_writer_and_total_settings_with_sources() {
-        use provenant_records::diagnostic::{LaneLimit, ResourceFact, SettingSource};
+        use provenant_records::diagnostic::{LaneLimit, Layer, ResourceFact};
         let defaults = LaneCaps::of(&provenant_config::LaneBuildSettings::default());
-        assert_eq!(defaults.host_source, SettingSource::ShippedDefault);
-        assert_eq!(defaults.project_source, SettingSource::ShippedDefault);
+        assert_eq!(defaults.host_source, Layer::Default);
+        assert_eq!(defaults.project_source, Layer::Default);
         let db = Connection::open_in_memory().unwrap();
         db.execute_batch(SCHEMA.sql).unwrap();
         let project = ProjectId::from_bytes([1; 16]);
@@ -603,7 +610,7 @@ mod tests {
         assert_eq!(hit.kind, LaneLimit::ProjectTotal);
         assert_eq!(hit.limit, PROJECT_ACTIVE);
         assert_eq!(hit.kind.setting(), "domains.fabric.lanes.max_project_lanes");
-        assert_eq!(hit.origin, SettingSource::Configuration);
+        assert_eq!(hit.origin, Layer::Host);
         // The projection names the governing setting and where it came from.
         let projection = ResourceFact::LaneCap {
             active: hit.active,
@@ -628,7 +635,7 @@ mod tests {
             .unwrap();
         assert_eq!(hit.kind, LaneLimit::ProjectTotal);
         assert_eq!(hit.limit, 10);
-        assert_eq!(hit.origin, SettingSource::Configuration);
+        assert_eq!(hit.origin, Layer::Host);
         let other = ProjectId::from_bytes([2; 16]);
         for index in PROJECT_ACTIVE..HOST_ACTIVE {
             db.execute(
@@ -653,7 +660,7 @@ mod tests {
             .unwrap();
         assert_eq!(hit.kind, LaneLimit::HostTotal);
         assert_eq!(hit.limit, HOST_ACTIVE);
-        assert_eq!(hit.origin, SettingSource::Configuration);
+        assert_eq!(hit.origin, Layer::Host);
     }
 
     #[test]

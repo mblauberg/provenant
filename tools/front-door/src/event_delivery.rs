@@ -12,6 +12,7 @@ use provenant_records::{
     lane_contract::{
         Coverage, ObservationCursor, ObservationEvent, ObservationKind, ObservationLineage,
     },
+    warning::{Warning, warn},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -20,28 +21,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub(crate) fn warn(message: &str) {
-    use std::io::Write;
-    let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
-}
-/// Warn once per process for each distinct message. A wait is one process, so a
-/// condition that repeats on every poll is reported once per wait.
-pub(crate) fn warn_once(message: &str) {
-    static SEEN: std::sync::Mutex<std::collections::BTreeSet<String>> =
-        std::sync::Mutex::new(std::collections::BTreeSet::new());
-    if SEEN
-        .lock()
-        .is_ok_and(|mut seen| remember(&mut seen, message))
-    {
-        warn(message);
-    }
-}
-/// Whether `message` is new. A bounded set keeps a stream of distinct errors
-/// from growing without limit; a full set reports nothing further.
-fn remember(seen: &mut std::collections::BTreeSet<String>, message: &str) -> bool {
-    const MAX_REMEMBERED: usize = 64;
-    seen.len() < MAX_REMEMBERED && seen.insert(message.to_owned())
-}
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const LIMIT: u64 = 4 * 1024 * 1024;
 const REPLAY_PAGE: u64 = 100;
@@ -446,10 +425,16 @@ pub(crate) fn tick(resolved: &crate::roots::Resolved) -> Result<()> {
                         ) {
                             Ok(repository) => repository,
                             Err(error) => {
-                                warn(&format!(
-                                    "forge discovery unavailable for {project}: {error}; local journal sources continue; {}",
-                                    origin.describe("domains.wait.forge_source")
-                                ));
+                                warn(
+                                    Warning::new(
+                                        provenant_records::warning::FORGE_DISCOVERY_UNAVAILABLE,
+                                        format!(
+                                            "forge discovery unavailable for {project}: {error}; local journal sources continue; {}",
+                                            origin.describe("domains.wait.forge_source")
+                                        ),
+                                    )
+                                    .subject(project.to_string()),
+                                );
                                 return Ok(());
                             }
                         };
@@ -481,8 +466,11 @@ pub(crate) fn tick(resolved: &crate::roots::Resolved) -> Result<()> {
                                     &repository,
                                 )
                             {
-                                warn(&format!(
-                                    "forwarder unavailable: {error}; conditional reconciliation continues"
+                                warn(Warning::new(
+                                    provenant_records::warning::FORWARDER_UNAVAILABLE,
+                                    format!(
+                                        "forwarder unavailable: {error}; conditional reconciliation continues"
+                                    ),
                                 ));
                             }
                             poll_repository(
@@ -545,8 +533,9 @@ pub(crate) fn tick(resolved: &crate::roots::Resolved) -> Result<()> {
                                 &subscription.repository,
                             )
                         {
-                            warn(&format!(
-                                "forwarder unavailable: {error}; using conditional poller"
+                            warn(Warning::new(
+                                provenant_records::warning::FORWARDER_UNAVAILABLE,
+                                format!("forwarder unavailable: {error}; using conditional poller"),
                             ));
                             selected = "poll".into();
                         }
@@ -693,19 +682,29 @@ fn continue_after_index<T>(
 ) -> Result<T> {
     if let Err(error) = graphs() {
         let quarantined = error.is::<provenant_fabric_runtime::graph::UnreadableCheckpointNotice>();
-        warn(&format!(
-            "graph observation indexing failed for {project}: {error}{}",
-            if quarantined {
-                "; quarantined, skipped on later ticks"
-            } else {
-                "; will retry"
-            }
-        ));
+        warn(
+            Warning::new(
+                provenant_records::warning::GRAPH_OBSERVATION_DEFERRED,
+                format!(
+                    "graph observation indexing failed for {project}: {error}{}",
+                    if quarantined {
+                        "; quarantined, skipped on later ticks"
+                    } else {
+                        "; will retry"
+                    }
+                ),
+            )
+            .subject(project.to_string()),
+        );
     }
     if let Err(error) = notes() {
-        warn(&format!(
-            "note observation indexing failed for {project}: {error}; will retry"
-        ));
+        warn(
+            Warning::new(
+                provenant_records::warning::NOTE_OBSERVATION_DEFERRED,
+                format!("note observation indexing failed for {project}: {error}; will retry"),
+            )
+            .subject(project.to_string()),
+        );
     }
     forge()
 }
@@ -895,7 +894,10 @@ fn source(
     selection.warning = warning.map(str::to_owned);
 
     if let Some(warning) = &selection.warning {
-        warn(&format!("{warning}; {origin}"));
+        warn(Warning::new(
+            provenant_records::warning::FORGE_SOURCE_UNRESOLVED,
+            format!("{warning}; {origin}"),
+        ));
     }
     use std::io::Write;
     let _ = writeln!(
@@ -935,8 +937,9 @@ pub(crate) fn listen(repository: &str, globals: &provenant_cli::Globals) -> u8 {
     match listen_inner(repository, globals) {
         Ok(()) => 0,
         Err(error) => {
-            warn(&format!(
-                "forge forwarder: {error}; host reconciliation continues"
+            warn(Warning::new(
+                provenant_records::warning::FORWARDER_UNAVAILABLE,
+                format!("forge forwarder: {error}; host reconciliation continues"),
             ));
             1
         }
@@ -1216,22 +1219,6 @@ fn index_notes(roots: &Roots, project: ProjectId) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_repeated_warning_is_reported_once_and_the_memory_is_bounded() {
-        let mut seen = std::collections::BTreeSet::new();
-        assert!(remember(&mut seen, "Actions runs unavailable"));
-        assert!(!remember(&mut seen, "Actions runs unavailable"));
-        assert!(remember(&mut seen, "another condition"));
-        for n in 0..200 {
-            remember(&mut seen, &format!("distinct {n}"));
-        }
-        assert!(seen.len() <= 64, "{}", seen.len());
-        assert!(!remember(
-            &mut seen,
-            "never seen before, but the set is full"
-        ));
-    }
 
     #[allow(dead_code)] // The custom worktree driver compiles without a test harness.
     fn fixture() -> (tempfile::TempDir, Roots, ProjectId) {

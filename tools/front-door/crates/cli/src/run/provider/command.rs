@@ -60,12 +60,21 @@ pub(super) fn prepare_command(
     if !AdapterSpec::get(provider)
         .is_some_and(|spec| spec.named_entry == provenant_records::NamedEntry::Command)
     {
+        let hint =
+            provenant_routing::close_matches_hint(&provenant_routing::adapter_candidates(provider));
         return Err(unavailable(format!(
-            "{provider} has no named model-less entries"
+            "{provider} has no named model-less entries{hint}"
         )));
     }
     AdapterSpec::get(provider)
-        .ok_or("unknown adapter")?
+        .ok_or_else(|| {
+            format!(
+                "unknown adapter `{provider}`{}",
+                provenant_routing::close_matches_hint(&provenant_routing::adapter_candidates(
+                    provider
+                ))
+            )
+        })?
         .check_launch(&provenant_records::LaunchRequest {
             resume: resume.is_some(),
             write: run::Service::has_writes(task.writer.is_some(), &task.access.write_roots),
@@ -185,7 +194,14 @@ pub(super) fn prepare_command(
     // With no API endpoints, provider-only reach is network off.
     access.network.get_or_insert(
         AdapterSpec::get(provider)
-            .ok_or("unknown adapter")?
+            .ok_or_else(|| {
+                format!(
+                    "unknown adapter `{provider}`{}",
+                    provenant_routing::close_matches_hint(&provenant_routing::adapter_candidates(
+                        provider
+                    ))
+                )
+            })?
             .launch
             .default_network,
     );

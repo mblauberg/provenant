@@ -18,9 +18,10 @@ pub mod snapshot;
 pub mod store;
 
 pub use context::BuildContext;
-use provenant_config::{BuildPort, PortSource};
+use provenant_config::BuildPort;
 use provenant_core::CancelToken;
 use provenant_core::consumer_env;
+use provenant_records::Layer;
 use provenant_supervisor::census::{ProcessObservation, SystemProcessObserver};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -33,7 +34,7 @@ use std::{
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Resolved<T> {
     pub value: T,
-    pub source: PortSource,
+    pub source: Layer,
     pub warnings: Vec<String>,
 }
 
@@ -48,7 +49,7 @@ pub enum StrategyName {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Strategy {
     pub name: StrategyName,
-    pub source: PortSource,
+    pub source: Layer,
     pub port: BuildPort,
 }
 
@@ -59,7 +60,7 @@ pub fn strategy(port: &BuildPort) -> Resolved<Strategy> {
     let source = if resolved.warnings.is_empty() {
         resolved.source
     } else {
-        PortSource::Builtin
+        Layer::Default
     };
     Resolved {
         value: Strategy {

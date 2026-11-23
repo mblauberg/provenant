@@ -30,6 +30,18 @@ refuse exactly the values of its declared syntax.
 
 - Why: an action must address the intended work.
 
+## Every name refusal lists close matches
+
+Models, adapters, templates, knobs and graph names share one close-match ranker
+(`core::names`). An unknown name refuses with its close matches carried in the
+typed error, never in prose alone, and a caller never recomputes them. A name
+that differs only by case is folded to lower case and reported with the
+`NAME_CASE_FOLDED` warning instead of being refused; no secret value is echoed in
+a refusal.
+
+- Why: a person can correct a typo from the error they see, and a name typed
+  with capitals is the same name.
+
 ## Parsing
 
 Help and version inspection need no project state. Paths keep their native
@@ -97,9 +109,23 @@ that cannot publish a result carries a bounded marker in `data` (`truncated`,
 `omitted_bytes`, `source`, `repair`) with a warning, beside the result's typed
 error. Paged reads bind the cursor to the input, terminal text escapes control
 sequences, unknown facts stay unknown, and `--json` always preserves the envelope.
-
+The envelope is version 2: it always carries a `warnings` array (empty when the
+command raised none). Under `--json` no warning is written to stderr; human mode
+prints `warning: <message>` and its repair to stderr as each warning arrives and
+collapses repeats by key. Per-change keys are remembered in the state root, so a
+warning shows once until its key changes. The envelope also always carries a
+`next` array of suggested commands: each value has an `argv` array of literal
+arguments and a `why` sentence stating the reason from the state the owner
+holds. The binary edge renders these once for human output through the one
+command formatter, after the body in both full and compact views, which omits
+`--state-dir` and `--project` when they equal what the caller's environment
+resolves by default; JSON keeps the argv arrays so consumers never scrape a
+printed line.
 - Why: a script branches on the exit code, and an operator must see that output
-  was bounded rather than mistake a clipped view for the whole result.
+  was bounded rather than mistake a clipped view for the whole result. A consumer
+  must be able to read warnings and next steps without scraping stderr or human
+  text, and a copied next command must reach the same store without a default
+  state-dir flag.
 
 ### Each refusal has a stable code
 
@@ -109,6 +135,33 @@ read outside a project returns `NOT_FOUND` and names running from a checkout or
 passing `--project PATH` as the repair.
 
 - Why: consumers can act on a refusal without depending on prose.
+
+### Warnings are typed values
+
+A warning is a typed value: a stable UPPER_SNAKE code from one of the two
+declared catalogues, a one-sentence message, and optional subject, source and
+repair.
+Library code never writes a warning itself: one function routes each warning to
+the innermost thread-local capture on this thread, then to the command's process
+sink, then to stderr as `warning: <message>` when neither is installed. A sink
+guard restores the previous sink when it is dropped. Codes follow the same
+stability rules as refusal codes, so a consumer branches on the code and never
+on the prose, and adding a code is additive. A repeated key collapses per
+invocation or per change; a per-change key hashes the code, subject and message
+and is remembered in the state root. Each code names one event; there are no
+catch-all codes, so `CONFIG_MALFORMED` means a configuration file or value was
+malformed and nothing else. The const catalogue in
+`crates/records/src/warning.rs` declares the library's codes: every const carries
+a one-line meaning and the upper-snake test derives its list from those consts.
+Policy rule codes are the second catalogue, declared in the compiled policy
+table `run/assets/policy.toml` and read by `crates/records/src/policy.rs`; a
+violated rule warns under its own rule code and reaches the same sink and
+envelope. Both catalogues follow the same stability rules: a code names one event
+for the lifetime of its declaration and adding a code is additive.
+- Why: a consumer needs to act on a warning without matching text, and a
+  command that returns warnings as data must not also print them.
+- Owner: `crates/records/src/warning.rs`, `run/assets/policy.toml`, the binary
+  edge that installs the sink
 
 ### Run refusals keep their own code at the facade
 
@@ -256,6 +309,17 @@ the same policy. The publication lock fences landing identity, generation and
 snapshot revision before dispatch, so a superseded generation cannot publish,
 including during recovery.
 
+Admin publication does not move authority to land: it only lets land exercise
+the owner's own admin authority, and only when the owner grants it in the
+**host** layer with `domains.pr.land.admin_publication =
+"when_review_unavailable"`. A grant from any other layer warns
+`SETTING_LAYER_IGNORED` with its source and is ignored. After land's gate
+passed — green CI on the exact candidate plus independent review evidence — a
+405 whose cause is a review requirement the owner cannot satisfy is retried
+through the admin API `gh pr merge --admin` uses. Red CI, a missing review
+receipt and every other 405 cause are never bypassed; the receipt records the
+grant and its source.
+
 Repository, host, project, target-rule, risk-tier and invocation settings
 resolve into one saved plan with sources (`land --explain --json`). An
 unavailable execution returns its landing record ID and typed alternatives and
@@ -344,6 +408,16 @@ worktree links are read without following them through the host filesystem.
 
 ## CI observations
 
+One reader owns check state for a pull request or a candidate:
+`src/pr/observer.rs`. It reads the event journal when a current observation is
+available and the forge through the resolved `ForgeContext` otherwise, and it
+owns the bounded wait, cadence and sourced retry family. `pr status`, the landing
+gate's `await_pr_ci`, `ci failures` and review-subject selection call that one
+reader instead of running `gh` themselves. Retry and backoff values are one
+sourced family (`ci.retry.*`), registered in `config/harness-knobs.json` and
+set with `provenant config set` or under `[knobs]`, so a pause names the layer
+and place that set it.
+
 `pr status` reports each pull request's head, check rollup and failed check
 names from one batched GraphQL read when available, and falls back between
 GraphQL and REST when either is unavailable or rate limited. A wait's
@@ -392,7 +466,9 @@ unreadable log is reported as unreadable evidence, never as zero failures.
 A `wait --pr` reading of a head with no reported checks names why before it
 suggests an action. The observer reads `mergeable` and `mergeStateStatus` from
 the PR resource first and rereads an UNKNOWN mergeability a bounded number of
-times (`MERGEABLE_UNKNOWN_RETRIES` in `src/pr/observer.rs`) before choosing:
+times (the sourced `ci.retry.mergeable_attempts` setting, default 3, registered
+in `config/harness-knobs.json` and resolved in `src/pr/observer/retry.rs`)
+before choosing:
 
 - `merge_conflict`: GitHub reports the head as conflicting. It starts no
   `pull_request` workflows for a conflicting head, so the next step is to merge

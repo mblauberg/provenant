@@ -36,6 +36,30 @@ fn fabric_and_quota_load_one_domain_config() -> Result {
 }
 
 #[test]
+// Spec: docs/specs/cli.md#warnings-are-typed-values
+fn show_carries_config_warnings_in_the_envelope_not_on_stderr() -> Result {
+    let rig = quota_rig()?;
+    std::fs::write(
+        rig.state.join("config.toml"),
+        "schema_version = 1\n[routing.pacing]\ncodex = \"spend\"\n",
+    )?;
+    let out = rig.command(&["quota", "show", "--json"])?;
+    assert_eq!(code(&out), 0);
+    let envelope: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
+    assert!(
+        envelope["warnings"]
+            .as_array()
+            .ok_or("warnings")?
+            .iter()
+            .any(|warning| warning["code"] == "CONFIG_KEY_IGNORED"),
+        "{envelope}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr.bytes);
+    assert!(!stderr.contains("warning:"), "{stderr}");
+    Ok(())
+}
+
+#[test]
 // Spec: docs/specs/routing.md#provider-model-discovery
 fn show_is_read_only_and_tick_publishes_partial_coverage() -> Result {
     let rig = quota_rig()?;
@@ -228,11 +252,19 @@ fn readiness_write_failure_warns_and_keeps_the_account_commit() -> Result {
     std::fs::write(rig.state.join("readiness"), b"blocked directory")?;
     let output = rig.command(&["quota", "tick", "--json"])?;
     assert_eq!(code(&output), 0);
-    assert!(
-        String::from_utf8_lossy(&output.stderr.bytes)
-            .contains("Warning: could not sync quota readiness:")
-    );
     let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+    // A typed warning reaches the JSON envelope, never bare stderr.
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    assert!(
+        report["warnings"]
+            .as_array()
+            .ok_or("warnings")?
+            .iter()
+            .any(|warning| warning["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("could not sync quota readiness:"))),
+        "{report}"
+    );
     let key = report["data"]["accounts"][0]["account"]["account_key"]
         .as_str()
         .ok_or("key")?;
@@ -666,7 +698,7 @@ cat "$HOME/agy-usage"
 }
 
 #[test]
-fn agy_quota_reports_rebind_failure_and_recovery_on_stderr() -> Result {
+fn agy_quota_reports_rebind_failure_and_recovery_in_the_envelope() -> Result {
     use std::{fs, os::unix::fs::PermissionsExt};
     let mut rig = quota_rig()?;
     support::clear_accounts(&rig)?;
@@ -711,16 +743,26 @@ cat "$HOME/agy-usage"
     )?;
     let out = rig.command(&["quota", "tick", "--adapter", "agy", "--json"])?;
     assert_eq!(code(&out), 0);
+    // Under --json the typed warning travels in the envelope, never on stderr.
+    let envelope: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
+    let failure = envelope["warnings"]
+        .as_array()
+        .ok_or("warnings")?
+        .iter()
+        .find(|warning| warning["code"] == "ACCOUNT_SWITCH_RECONCILE_FAILED")
+        .ok_or("account switch reconciliation warning")?;
+    let message = failure["message"].as_str().ok_or("warning message")?;
+    assert!(
+        message.contains("failed to reconcile agy account switch"),
+        "{message}"
+    );
+    assert!(
+        message.contains("agy identity is already registered"),
+        "{message}"
+    );
+    assert!(message.contains("provenant accounts list"), "{message}");
     let stderr = String::from_utf8(out.stderr.bytes)?;
-    assert!(
-        stderr.contains("failed to reconcile agy account switch"),
-        "{stderr}"
-    );
-    assert!(
-        stderr.contains("agy identity is already registered"),
-        "{stderr}"
-    );
-    assert!(stderr.contains("provenant accounts list"), "{stderr}");
+    assert!(!stderr.contains("warning:"), "{stderr}");
     let refused: serde_json::Value = serde_json::from_slice(&fs::read(
         rig.state.join("quota").join(&old).join("agy.json"),
     )?)?;
@@ -1348,8 +1390,8 @@ fn discovery_tick_respects_eligibility_knob_and_deadline() -> Result {
         false
     );
     assert_eq!(
-        shown["data"]["knobs"]["quota.model_discovery"]["source"],
-        "override"
+        shown["data"]["knobs"]["quota.model_discovery"]["layer"],
+        "host"
     );
     assert_eq!(
         code(&rig.command(&["quota", "tick", "--power", "ac", "--json"])?),

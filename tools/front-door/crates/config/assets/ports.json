@@ -1,7 +1,7 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "verify": {
-    "source": "builtin",
+    "source": "default",
     "backend": {
       "kind": "builtin"
     },
@@ -125,19 +125,19 @@
     }
   },
   "land": {
-    "source": "builtin",
+    "source": "default",
     "backend": {
       "kind": "builtin"
     }
   },
   "ci_observation": {
-    "source": "builtin",
+    "source": "default",
     "backend": {
       "kind": "builtin"
     }
   },
   "worktree_layout": {
-    "source": "builtin",
+    "source": "default",
     "backend": {
       "kind": "builtin"
     },
@@ -147,43 +147,52 @@
     "default": ".worktrees/<branch>"
   },
   "naming": {
-    "source": "builtin",
+    "source": "default",
     "backend": {
       "kind": "builtin"
     }
   },
   "post_create": {
-    "source": "builtin",
+    "source": "default",
     "backend": {
       "kind": "builtin"
     }
   },
   "tracker": {
-    "source": "builtin",
+    "source": "default",
     "backend": {
       "kind": "builtin"
     }
   },
   "release": {
-    "source": "builtin",
+    "source": "default",
     "backend": {
       "kind": "builtin"
     }
   },
   "admission": {
-    "source": "builtin",
+    "source": "default",
     "backend": {
       "kind": "builtin"
     }
   },
   "forge": {
-    "source": "builtin",
+    "source": "default",
     "backend": {
       "kind": "builtin"
     }
   },
+  "git": {
+    "source": "default",
+    "backend": {
+      "kind": "builtin"
+    },
+    "remote": "",
+    "default_branch": "",
+    "protected": []
+  },
   "build": {
-    "source": "builtin",
+    "source": "default",
     "prepare": [],
     "strategy": "slots",
     "offload": "auto",

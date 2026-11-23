@@ -342,7 +342,7 @@ pub(super) fn writer_settlement_merges_upstream_advance() -> Result {
     Ok(())
 }
 
-pub(super) fn writer_terminal_refuses_sequencer_state() -> Result {
+pub(super) fn writer_terminal_retains_sequencer_state() -> Result {
     if !writer_backend_available()? {
         return Ok(());
     }
@@ -382,28 +382,32 @@ pub(super) fn writer_terminal_refuses_sequencer_state() -> Result {
     let holder = holder_context(&rig, &roots, &context);
     let started = start_writer(&store, record.attempt_id, &provider, &holder, &call)?;
     assert!(matches!(started.as_slice(), [provenant_run::Started::Launched(id)] if *id == attempt));
+    // Spec: docs/specs/run-settlement.md — an unfinished operation in the
+    // lane's own Git is retained and named; settlement publishes the committed
+    // tip instead of refusing the attempt.
     let terminal = await_terminal(&store, attempt, &call)?;
-    let provenant_run::AttemptState::Terminal {
-        outcome, reason, ..
-    } = terminal.state
-    else {
-        return Err("writer attempt was not terminal".into());
-    };
-    assert_eq!(outcome, provenant_run::Outcome::Failed);
+    assert_terminal_outcome(&terminal, provenant_run::Outcome::Uncommitted)?;
     assert!(
-        reason
-            .as_deref()
-            .is_some_and(|text| text.contains("writer terminal check"))
+        matches!(
+            terminal.settlement_receipts,
+            Some(provenant_run::SettlementReceipts {
+                git_import: provenant_run::EffectDisposition::Done,
+                ..
+            })
+        ),
+        "unexpected settlement receipts: {:?}",
+        terminal.settlement_receipts
+    );
+    assert!(
+        writer
+            .worktree
+            .repo()
+            .private_git_dir()
+            .join("CHERRY_PICK_HEAD")
+            .is_file(),
+        "settlement must not reset or clean the lane's unfinished operation"
     );
     assert!(path.join(".git").is_file());
-    let quarantine = context
-        .state_root
-        .as_path()
-        .join("attempts")
-        .join(attempt.to_string())
-        .join("quarantine");
-    let manifest: Value = serde_json::from_slice(&fs::read(quarantine.join("manifest.json"))?)?;
-    assert_eq!(manifest["disposition"], "writer_settled");
     wait_for_writer_release(&store)?;
 
     // A private rewind may publish through CAS.
@@ -546,7 +550,7 @@ pub(super) fn writer_production_plan_denies_outside_writes() -> Result {
     Ok(())
 }
 
-pub(super) fn writer_reconcile_refuses_unfinished_cherry_pick_and_releases() -> Result {
+pub(super) fn writer_reconcile_keeps_unfinished_cherry_pick_and_releases() -> Result {
     if !writer_backend_available()? {
         return Ok(());
     }
@@ -644,24 +648,36 @@ pub(super) fn writer_reconcile_refuses_unfinished_cherry_pick_and_releases() -> 
         b"unfinished cherry-pick",
     )?;
     let found = store.reconcile_for_fixture(record.attempt_id, &provider, &call)?;
-    // Recovery refuses the unfinished operation, settles once and releases custody.
+    // The lane owns its unfinished operation: recovery publishes the committed
+    // tip, leaves the in-progress state for a person to resume, settles once
+    // and releases custody. The terminal outcome follows the lane's own
+    // uncommitted edits, not the retained operation.
     assert!(matches!(
         found.as_slice(),
         [(reconciled_attempt, provenant_run::Reconciled::WriterLeaseReleased { locks })]
             if *reconciled_attempt == attempt && !locks.is_empty()
     ));
     let terminal = store.record(attempt, &call)?;
-    assert_terminal_outcome(&terminal, provenant_run::Outcome::Failed)?;
+    assert_terminal_outcome(&terminal, provenant_run::Outcome::Uncommitted)?;
     assert!(
         matches!(
             terminal.settlement_receipts,
             Some(provenant_run::SettlementReceipts {
-                git_import: provenant_run::EffectDisposition::Failed { ref reason, retryable: false },
+                git_import: provenant_run::EffectDisposition::Done,
                 ..
-            }) if reason.contains("in-progress Git operation")
+            })
         ),
         "unexpected settlement receipts: {:?}",
         terminal.settlement_receipts
+    );
+    assert!(
+        writer
+            .worktree
+            .repo()
+            .private_git_dir()
+            .join("CHERRY_PICK_HEAD")
+            .is_file(),
+        "settlement must not reset or clean the lane's unfinished operation"
     );
     assert!(attempt_path.join("release.json").is_file());
     assert!(store.writer_fences()?.is_empty());

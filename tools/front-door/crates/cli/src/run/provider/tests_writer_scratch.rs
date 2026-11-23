@@ -1,7 +1,7 @@
 fn isolated_writer_access_receipt() -> provenant_records::LaneAccessReceipt {
     provenant_records::LaneAccessReceipt {
         access: provenant_records::LaneAccess::Isolated,
-        source: provenant_records::LaneAccessSource::Default,
+        source: provenant_records::Layer::Default,
         key: "lanes.access".into(),
         extra: Default::default(),
     }
@@ -266,7 +266,7 @@ fn writer_preparation_steps(
             .into(),
             knob_sources: [(
                 "lanes.access".into(),
-                provenant_records::LimitSource::Launch,
+                provenant_records::Layer::Launch,
             )]
             .into(),
             ..Default::default()
@@ -807,10 +807,7 @@ fn writer_preparation_steps(
     // Exercise the actual adapter, sandbox compiler and fixture executable in both lane modes.
     #[cfg(target_os = "macos")]
     {
-        use provenant_confinement::permissions::{
-            AccessMode, AnchoredDirectory, Anchors, BackendContext, prepare_writer_directories,
-            required_anchors, system_backend,
-        };
+        use provenant_confinement::permissions::{AccessMode, AnchoredDirectory, Anchors, BackendContext, prepare_writer_directories, required_anchors, system_backend, };
         let skill_root = home.join(".gemini/skills");
         let login = home.join("Library/Keychains/login.keychain-db");
         std::fs::create_dir_all(login.parent().unwrap())?;
@@ -1958,7 +1955,7 @@ printf 'agy 1.0.0\n'
     applied.sandbox = Some(run::SandboxModeReceipt {
         requested: true,
         effective: true,
-        source: run::SandboxSourceReceipt::Route,
+        source: run::Layer::Route,
         ..Default::default()
     });
     prior.applied_route = Some(applied);

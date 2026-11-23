@@ -1075,6 +1075,18 @@ fn graph_run_controls_reach_the_sealed_attempt() -> Result<(), Box<dyn std::erro
                 rig.project.to_str().ok_or("project path")?,
             ],
         )?;
+        // The one forge context names its default from the remote HEAD; a
+        // remote without one must not make a delivery graph's explain and
+        // launch refuse to resolve it.
+        // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+        crate::worktree_tests::git(
+            &rig,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        )?;
         let write_root = rig.root.join("extra-write");
         std::fs::create_dir(&write_root)?;
         let write_root = write_root.canonicalize()?;

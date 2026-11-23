@@ -588,6 +588,21 @@ impl GraphProject {
     fn state(&self) -> PathBuf {
         self.temp.path().join("state")
     }
+    /// Declare the one forge context a delivery graph needs. The batch resolves
+    /// it lazily and never guesses a remote or default branch, so a graph that
+    /// checks a delivery target in a local-only fixture must declare both.
+    /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    fn declare_forge(&self, default_branch: &str) -> Result {
+        std::fs::create_dir_all(self.project.join(".provenant"))?;
+        std::fs::write(
+            self.project.join(provenant_config::PORTS_CONFIG),
+            serde_json::to_vec(&json!({
+                "schema_version": provenant_config::PORTS_SCHEMA_VERSION,
+                "git": {"remote": "origin", "default_branch": default_branch, "protected": []},
+            }))?,
+        )?;
+        Ok(())
+    }
     /// A runnable Codex lane: an isolated login home and a fake `codex` first
     /// on PATH. The route is a real, catalogued model, so admission is not
     /// decided by a placeholder adapter.
@@ -804,8 +819,11 @@ fn corrupt_graph_listing_gives_a_working_retirement_command() -> Result {
             .any(|row| row["name"] == "healthy")
     );
     assert!(!listing.to_string().contains("PRIVATE_CONTENT_SENTINEL"));
+    // Spec: docs/specs/cli.md#warnings-are-typed-values -- under the v2 envelope
+    // typed warnings legitimately carry paths in their subject. The corrupt
+    // record must not echo a host path into the command's data.
     assert!(
-        !listing
+        !listing["data"]
             .to_string()
             .contains(&rig.state().display().to_string())
     );
@@ -813,7 +831,7 @@ fn corrupt_graph_listing_gives_a_working_retirement_command() -> Result {
     assert!(output.status.success(), "{status}");
     assert!(!status.to_string().contains("PRIVATE_CONTENT_SENTINEL"));
     assert!(
-        !status
+        !status["data"]
             .to_string()
             .contains(&rig.state().display().to_string())
     );
@@ -1014,6 +1032,7 @@ fn every_bundled_template_is_listed_and_compiles_with_its_declared_parameters() 
     use provenant_fabric_runtime::graph::template::{Compiler, TemplateLibrary};
 
     let rig = GraphProject::new()?;
+    rig.declare_forge("master")?;
     let (output, value) = rig.run(&["templates"])?;
     assert!(output.status.success(), "{value}");
     let listed = value["data"]["templates"].as_array().ok_or("templates")?;
@@ -1185,6 +1204,11 @@ fn every_bundled_template_is_listed_and_compiles_with_its_declared_parameters() 
 #[test]
 fn batch_item_exact_model_matches_run_model_route() -> Result {
     let rig = GraphProject::new()?;
+    // The bundled batch expands a repair loop that checks its
+    // `integrate:<integration_branch>` delivery target. That check needs the
+    // one forge context; a local-only fixture must declare it rather than let
+    // resolution guess a remote. Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    rig.declare_forge("master")?;
     let model = "opencode/opencode/hy4-flash-free";
     let worktree = rig.project.to_str().ok_or("worktree path")?;
     let integration_branch = "batch/exact-model-route";
@@ -1284,6 +1308,7 @@ fn node_route_table_reaches_explain_with_one_full_model_spelling() -> Result {
 fn batch_launch_provisions_planned_slice_worktrees_and_explains_same_admission() -> Result {
     let mut rig = GraphProject::new()?;
     rig.enable_codex_fixture()?;
+    rig.declare_forge("master")?;
     let document = rig.document(&json!({
         "schema_version": support::GRAPH_DOCUMENT_SCHEMA_VERSION,
         "graph_id": "batch-provision",
@@ -1458,6 +1483,7 @@ fn batch_launch_provisions_planned_slice_worktrees_and_explains_same_admission()
 #[test]
 fn explain_refuses_a_writer_on_the_integration_branch_like_launch() -> Result {
     let rig = GraphProject::new()?;
+    rig.declare_forge("master")?;
     let writer = rig.project.join(".worktrees/integration-writer");
     let output = provenant_os::fixture::git_command()
         .current_dir(&rig.project)
@@ -1514,6 +1540,7 @@ fn explain_refuses_a_writer_on_the_integration_branch_like_launch() -> Result {
 fn explain_previews_a_new_writer_without_creating_its_checkout() -> Result {
     let mut rig = GraphProject::new()?;
     rig.enable_codex_fixture()?;
+    rig.declare_forge("master")?;
     // Push delivery needs a remote; a local bare repository stands in for it.
     let remote = rig.temp.path().join("origin.git");
     for args in [
@@ -2073,7 +2100,7 @@ fn a_named_run_replays_its_input_and_a_changed_input_takes_the_next_name() -> Re
             .ok_or("graph id")?
             .to_owned();
         assert!(
-            provenant_fabric_runtime::graph::template::graph_name_fault(&id).is_none(),
+            provenant_fabric_runtime::graph::template::fold_graph_name(&id).is_ok(),
             "{id}"
         );
         assert!(id.starts_with("stamp-"), "{id}");
@@ -2118,7 +2145,7 @@ fn a_changed_brief_leads_the_launch_with_the_new_handle_and_json_field() -> Resu
     );
     assert!(
         text.lines()
-            .any(|line| line.starts_with("next: provenant ") && line.ends_with("once-3")),
+            .any(|line| line.starts_with("next: ") && line.ends_with("provenant output once-3")),
         "{text}"
     );
     Ok(())
@@ -2186,7 +2213,9 @@ fn status_on_a_superseded_name_points_at_the_newer_handle() -> Result {
     let text = String::from_utf8_lossy(&output.stdout);
     let warning = String::from_utf8_lossy(&output.stderr);
     assert!(
-        text.contains("next: provenant status status-once-2\n"),
+        text.lines()
+            .any(|line| line.starts_with("next: ")
+                && line.ends_with("provenant status status-once-2")),
         "{text}"
     );
     assert!(
@@ -2771,16 +2800,126 @@ fn steer_graph_and_node_refuse_an_unlaunched_attempt_before_reading_stdin() -> R
     )?;
     journal.save(&checkpoint)?;
     drop(journal);
+    // Spec: docs/specs/fabric.md#session-ready-steering
+    // The default `lanes.steer_settled=queue` keeps the note for the next
+    // follow-up and names it in the output instead of refusing.
     let (output, value) =
         rig.run(&["steer", "steer-ambiguous/accept", "--brief", "amended work"])?;
-    assert!(!output.status.success(), "{value}");
-    let message = value["error"]["message"].as_str().ok_or("message")?;
-    assert!(message.contains("settled"), "{message}");
-    assert!(
-        value["error"]["repair"]
-            .as_str()
-            .is_some_and(|next| next.contains("retry steer-ambiguous/accept --brief-file")),
+    assert!(output.status.success(), "{value}");
+    assert_eq!(value["status"], "ok", "{value}");
+    assert_eq!(value["data"]["queued"], true, "{value}");
+    assert_eq!(
+        value["data"]["follow_up"], "steer-ambiguous/accept",
         "{value}"
+    );
+    // The queued note reaches the follow-up as a scoped shared note.
+    let (output, notes) = rig.run(&[
+        "notes",
+        "read",
+        "--scope",
+        "steer-ambiguous/accept",
+        "--replay",
+    ])?;
+    assert!(output.status.success(), "{notes}");
+    let events = notes["data"]["events"].as_array().ok_or("notes events")?;
+    assert!(
+        events.iter().any(|event| {
+            event["detail"]["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("amended work"))
+        }),
+        "{notes}"
+    );
+    Ok(())
+}
+
+// Spec: docs/specs/fabric.md#session-ready-steering
+#[test]
+fn steer_on_a_settled_lane_warns_without_effect_when_configured() -> Result {
+    let rig = GraphProject::new()?;
+    let path = rig.document(&json!({"schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":"steer-settled-warn","nodes":[{"id":"accept","kind":"gate","access":"read_only","condition":{"type":"budget"}}]}))?;
+    let output = rig.command().args(["run", "--file"]).arg(path).output()?;
+    assert!(output.status.success(), "{output:?}");
+    std::fs::write(
+        rig.state().join("config.toml"),
+        "schema_version=1\n[knobs]\n'lanes.steer_settled'='warn'\n",
+    )?;
+    let checkpoint_path = graph_records(&rig.state())?
+        .into_iter()
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| name == "graph-steer-settled-warn.json")
+        })
+        .ok_or("checkpoint")?;
+    use provenant_core::{CancelToken, Clock, RootInputs, StateRoot, WaitBudget};
+    use provenant_fabric_runtime::graph::{
+        AttemptOutcome, AttemptState, FileJournal, GraphJournal, NodeState,
+    };
+    let mut inputs = RootInputs::new(rig.temp.path().to_path_buf(), rig.root.clone());
+    inputs.state_dir = Some(rig.state());
+    let state = StateRoot::resolve(&inputs, &provenant_os::fs::SystemPathResolver)?;
+    let project = checkpoint_path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .ok_or("project id")?
+        .parse()?;
+    let execution =
+        FileJournal::execution(&state, project, "steer-settled-warn")?.ok_or("execution")?;
+    let mut checkpoint =
+        FileJournal::read_checkpoint(&state, project, "steer-settled-warn")?.ok_or("checkpoint")?;
+    let attempt = json!({"key":{"graph_id":"steer-settled-warn","node_id":"accept","route_index":0, "attempt": 1},
+        "launched":false,"route":{"alias":"senior"},"state":"starting","attempt_ref":null,
+        "outcome":null,"launch_actor":"fixture"});
+    checkpoint.nodes[0].state = NodeState::Succeeded;
+    checkpoint.nodes[0].attempts = serde_json::from_value(json!([attempt]))?;
+    checkpoint.nodes[0].attempts[0].state = AttemptState::Terminal;
+    checkpoint.nodes[0].attempts[0].outcome = Some(AttemptOutcome::Succeeded);
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = CancelToken::new();
+    let mut journal = FileJournal::open(
+        &state,
+        project,
+        "steer-settled-warn",
+        WaitBudget::cli(clock.mono_now(), 5)?,
+        &cancel,
+        &clock,
+    )?;
+    journal.bind(execution)?;
+    journal.save(&checkpoint)?;
+    drop(journal);
+    let (output, value) = rig.run(&[
+        "steer",
+        "steer-settled-warn/accept",
+        "--brief",
+        "ignored steer note",
+    ])?;
+    assert!(output.status.success(), "{value}");
+    assert_eq!(value["status"], "ok", "{value}");
+    assert_eq!(value["data"]["queued"], false, "{value}");
+    assert!(
+        value["warnings"].as_array().is_some_and(|warnings| {
+            warnings
+                .iter()
+                .any(|warning| warning["code"] == "STEER_TARGET_SETTLED")
+        }),
+        "{value}"
+    );
+    // warn mode writes no note for the follow-up.
+    let (output, notes) = rig.run(&[
+        "notes",
+        "read",
+        "--scope",
+        "steer-settled-warn/accept",
+        "--replay",
+    ])?;
+    assert!(output.status.success(), "{notes}");
+    let events = notes["data"]["events"].as_array().ok_or("notes events")?;
+    assert!(
+        events.iter().all(|event| !event["detail"]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("ignored steer note"))),
+        "{notes}"
     );
     Ok(())
 }
@@ -3258,13 +3397,18 @@ fn shape_and_exact_retry_credential_warnings_allow_retry() -> Result {
         output.status.success(),
         "exact credential retry must proceed: {reply}"
     );
-    let warning = String::from_utf8_lossy(&output.stderr);
+    let warnings = reply["warnings"].as_array().ok_or("warning envelope")?;
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
     assert!(
-        warning.contains("declared credential value rule"),
-        "{warning}"
+        warnings.iter().any(|warning| {
+            warning["message"].as_str().is_some_and(|message| {
+                message.contains("declared credential value rule")
+                    && message.contains("matching a known credential")
+            })
+        }),
+        "{reply}"
     );
-    assert!(warning.contains("matching a known credential"), "{warning}");
-    assert!(!warning.contains(credential));
+    assert!(!reply["warnings"].to_string().contains(credential));
     let after_credential = snapshot()?;
     assert_ne!(after_credential, after_shape);
 
@@ -3339,7 +3483,7 @@ fn placeholder_and_oversized_ambient_credentials_allow_retry() -> Result {
     );
 
     // An out-of-bounds ambient credential variable (>16 KiB) is skipped only
-    // for retry admission, with a generic warning and no disclosed name/value.
+    // for retry admission, with one typed warning and no disclosed name/value.
     let oversized = "x".repeat(16 * 1024 + 1);
     let output = rig
         .command()
@@ -3351,25 +3495,36 @@ fn placeholder_and_oversized_ambient_credentials_allow_retry() -> Result {
         output.status.success(),
         "out-of-bounds ambient credentials must not refuse: {reply}"
     );
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("retry admission skipped out-of-bounds ambient credentials"),
-        "expected the retry admission warning in stderr: {stderr}"
+        stderr.is_empty(),
+        "--json carries warnings in the envelope, never on stderr: {stderr}"
     );
+    let warnings = reply["warnings"].as_array().ok_or("warning envelope")?;
+    let skipped: Vec<&Value> = warnings
+        .iter()
+        .filter(|warning| warning["code"] == "RETRY_CREDENTIALS_SKIPPED")
+        .collect();
     assert_eq!(
-        stderr
-            .matches("retry admission skipped out-of-bounds ambient credentials")
-            .count(),
+        skipped.len(),
         1,
-        "warning should be emitted once per process: {stderr}"
+        "one typed retry-admission warning per invocation: {reply}"
     );
     assert!(
-        !stderr.contains("FIXTURE_API_KEY"),
-        "warning must omit variable names: {stderr}"
+        skipped[0]["message"]
+            .as_str()
+            .is_some_and(|message| message
+                .contains("retry admission skipped out-of-bounds ambient credentials")),
+        "{reply}"
     );
     assert!(
-        !stderr.contains(&oversized),
-        "warning must omit credential values: {stderr}"
+        !reply["warnings"].to_string().contains("FIXTURE_API_KEY"),
+        "warning must omit variable names: {reply}"
+    );
+    assert!(
+        !reply["warnings"].to_string().contains(&oversized),
+        "warning must omit credential values: {reply}"
     );
     Ok(())
 }

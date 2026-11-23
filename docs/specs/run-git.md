@@ -37,6 +37,24 @@ Host seeding copies or clones shared stores rather than hard-linking them; lane 
 the [permission policy](supervisor.md#permission-policy).
 - Why: a writable link must not mutate shared data outside the checkout.
 
+## One resolved forge context per command
+
+Exactly one `ForgeContext` is resolved by the owner that needs a forge or a remote, then passed
+down; no consumer rebuilds it. It carries the remote, default branch, protected set and operation
+policy, each with the layer and key that produced the value.
+- Why: three independent discoveries of `origin`/`main` could disagree within one command, and a
+  policy resolved by the owner was replaced by a compiled default at the forge port.
+
+The remote is the declared `git.remote`, else the current branch's upstream remote, else the sole
+remote. A refusal lists the remotes seen with close matches, never an assumed `origin`. The default
+branch is the declared `git.default_branch`, else `refs/remotes/<remote>/HEAD`, else the forge API;
+protected branches are declared, else the default branch plus forge-reported protection.
+- Why: a hidden guess can retire the wrong branch or push to the wrong repository.
+
+The owner resolves the context when a delivery or target check first needs it (`ForgeOnce`), so a
+command that delivers nothing, such as a read-only graph, runs in a checkout with no remote.
+- Why: an eager resolution refused read-only work for a remote it never used.
+
 ## Delivery
 
 Under `host` access, `HostDeliveryContext` accepts host-configured Git transport helpers and URL

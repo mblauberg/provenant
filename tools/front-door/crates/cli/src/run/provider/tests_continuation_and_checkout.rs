@@ -283,7 +283,7 @@ fn read_only_checkout_warning_reports_a_local_read_for_an_unpinned_checkout()
 
     // Behind the remote default: the warning names the count, the checkout and the commit read.
     run(&checkout, &["reset", "-q", "--hard", &stale])?;
-    let warning = confinement::read_only_checkout_warning(&state, &checkout)
+    let warning = confinement::read_only_checkout_warning(&state, &checkout, &crate::run::ReadSourceChoice::automatic())
         .ok_or("behind checkout did not warn")?;
     assert!(warning.contains("1 commit behind"), "{warning}");
     assert!(warning.contains(&stale), "{warning}");
@@ -296,9 +296,9 @@ fn read_only_checkout_warning_reports_a_local_read_for_an_unpinned_checkout()
 
     // Level with, or ahead of, the default: no warning.
     run(&checkout, &["reset", "-q", "--hard", &default])?;
-    assert!(confinement::read_only_checkout_warning(&state, &checkout).is_none());
+    assert!(confinement::read_only_checkout_warning(&state, &checkout, &crate::run::ReadSourceChoice::automatic()).is_none());
     run(&checkout, &["commit", "-q", "--allow-empty", "-m", "three"])?;
-    assert!(confinement::read_only_checkout_warning(&state, &checkout).is_none());
+    assert!(confinement::read_only_checkout_warning(&state, &checkout, &crate::run::ReadSourceChoice::automatic()).is_none());
 
     // Without a configured upstream or origin/HEAD, the remote's advertised
     // default is the advisory stand-in, not origin/main.
@@ -309,7 +309,7 @@ fn read_only_checkout_warning_reports_a_local_read_for_an_unpinned_checkout()
         &checkout,
         &["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"],
     )?;
-    let warning = confinement::read_only_checkout_warning(&state, &checkout)
+    let warning = confinement::read_only_checkout_warning(&state, &checkout, &crate::run::ReadSourceChoice::automatic())
         .ok_or("advertised default did not warn")?;
     assert!(warning.contains("1 commit behind"), "{warning}");
     assert!(warning.contains("refs/remotes/origin/master"), "{warning}");
@@ -319,7 +319,7 @@ fn read_only_checkout_warning_reports_a_local_read_for_an_unpinned_checkout()
         &checkout,
         &["remote", "set-url", "origin", "../missing.git"],
     )?;
-    assert!(confinement::read_only_checkout_warning(&state, &checkout).is_none());
+    assert!(confinement::read_only_checkout_warning(&state, &checkout, &crate::run::ReadSourceChoice::automatic()).is_none());
     Ok(())
 }
 
@@ -396,7 +396,7 @@ fn read_only_source_ref_names_the_fetched_upstream_head_of_a_behind_checkout()
 
     // The selected tree is the fetched upstream head, named by its ref, and
     // the stale local head is kept in the advisory warning.
-    let selected = confinement::read_only_source_ref(&state, &checkout)
+    let selected = confinement::read_only_source_ref(&state, &checkout, &crate::run::ReadSourceChoice::automatic())
         .ok_or("behind checkout did not resolve an upstream source")?;
     assert_eq!(selected.commit, provenant_core::GitOid::parse(&default)?);
     assert_eq!(selected.head, provenant_core::GitOid::parse(&stale)?);
@@ -406,16 +406,16 @@ fn read_only_source_ref_names_the_fetched_upstream_head_of_a_behind_checkout()
         "{}",
         selected.reference
     );
-    let warning = crate::run::read_only_source_warning(&checkout, &selected);
+    let warning = crate::run::read_only_source_warning(&checkout, &selected, &crate::run::ReadSourceChoice::automatic());
     assert!(warning.contains(&selected.reference), "{warning}");
     assert!(warning.contains(&default), "{warning}");
     assert!(warning.contains(&stale), "{warning}");
 
     // Level with or ahead of the default keeps the local tree: no pin.
     run(&checkout, &["reset", "-q", "--hard", &default])?;
-    assert!(confinement::read_only_source_ref(&state, &checkout).is_none());
+    assert!(confinement::read_only_source_ref(&state, &checkout, &crate::run::ReadSourceChoice::automatic()).is_none());
     run(&checkout, &["commit", "-q", "--allow-empty", "-m", "three"])?;
-    assert!(confinement::read_only_source_ref(&state, &checkout).is_none());
+    assert!(confinement::read_only_source_ref(&state, &checkout, &crate::run::ReadSourceChoice::automatic()).is_none());
     Ok(())
 }
 
@@ -501,7 +501,7 @@ fn read_only_source_ref_uses_the_checked_out_branch_upstream_not_the_default_bra
         &["checkout", "-q", "-b", "feature", "--track", "origin/feature"],
     )?;
     run(&checkout, &["reset", "-q", "--hard", &base])?;
-    let selected = confinement::read_only_source_ref(&state, &checkout)
+    let selected = confinement::read_only_source_ref(&state, &checkout, &crate::run::ReadSourceChoice::automatic())
         .ok_or("stale feature checkout did not resolve its upstream")?;
     assert_eq!(selected.commit, provenant_core::GitOid::parse(&feature)?);
     assert_eq!(selected.head, provenant_core::GitOid::parse(&base)?);
@@ -516,7 +516,7 @@ fn read_only_source_ref_uses_the_checked_out_branch_upstream_not_the_default_bra
         &["branch", "--set-upstream-to=origin/feature", "master"],
     )?;
     assert_eq!(run(&checkout, &["rev-parse", "HEAD"])?, master);
-    let selected = confinement::read_only_source_ref(&state, &checkout)
+    let selected = confinement::read_only_source_ref(&state, &checkout, &crate::run::ReadSourceChoice::automatic())
         .ok_or("contained default hid the branch's own upstream")?;
     assert_eq!(selected.reference, "refs/remotes/origin/feature");
     assert_eq!(selected.commit, provenant_core::GitOid::parse(&feature)?);
@@ -524,7 +524,7 @@ fn read_only_source_ref_uses_the_checked_out_branch_upstream_not_the_default_bra
     // A detached HEAD has no configured upstream: the origin default is the
     // advisory stand-in and names the ref actually used.
     run(&checkout, &["checkout", "-q", "--detach", &base])?;
-    let selected = confinement::read_only_source_ref(&state, &checkout)
+    let selected = confinement::read_only_source_ref(&state, &checkout, &crate::run::ReadSourceChoice::automatic())
         .ok_or("detached checkout did not fall back to the origin default")?;
     assert_eq!(selected.reference, "refs/remotes/origin/HEAD");
     assert_eq!(selected.commit, provenant_core::GitOid::parse(&master)?);
@@ -542,7 +542,7 @@ fn read_only_warning_text_distinguishes_a_pin_from_a_local_read() {
         head,
     };
     let source = Path::new("/repo/checkout");
-    let pinned = crate::run::read_only_source_warning(source, &selected);
+    let pinned = crate::run::read_only_source_warning(source, &selected, &crate::run::ReadSourceChoice::automatic());
     assert!(pinned.contains("will read refs/remotes/origin/feature"), "{pinned}");
     assert!(pinned.contains("instead of local"), "{pinned}");
     let local = crate::run::read_only_local_checkout_warning(source, &selected);
@@ -736,9 +736,7 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable()
 -> Result<(), Box<dyn std::error::Error>> {
     // Spec: docs/specs/fabric.md#session-ready-steering
     use provenant_core::{AttemptId, Digest};
-    use provenant_records::{
-        FileDigest, RouteAlternatives, RouteConfidentiality, RouteEligibility, RouteReadiness,
-    };
+    use provenant_records::{FileDigest, RouteAlternatives, RouteConfidentiality, RouteEligibility, RouteReadiness, };
     for adapter in ["cursor", "opencode", "claude", "codex"] {
         let route = ResolvedRoute {
             selection_context: Default::default(),
@@ -1051,7 +1049,7 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable()
                 Some(
                     provenant_records::diagnostic::ResourceFact::ContinuationCopy {
                         limit: 1,
-                        origin: provenant_records::diagnostic::SettingSource::Configuration,
+                        origin: provenant_records::diagnostic::Layer::Host,
                         setting: provenant_records::diagnostic::ContinuationCopyLimit::Entries,
                         ..
                     }
@@ -1167,9 +1165,7 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable()
 fn opencode_host_continuation_uses_the_recorded_host_store_by_session_id()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_core::{AttemptId, Digest, ProjectId};
-    use provenant_records::{
-        FileDigest, RouteAlternatives, RouteConfidentiality, RouteEligibility, RouteReadiness,
-    };
+    use provenant_records::{FileDigest, RouteAlternatives, RouteConfidentiality, RouteEligibility, RouteReadiness, };
 
     let temp = tempfile::tempdir()?;
     let base = temp.path().canonicalize()?;
@@ -1617,5 +1613,69 @@ fn retained_state_copy_refuses_trees_past_its_entry_and_depth_budget()
     }
     let error = copy_state_within(&wide, &base.join("wide-copy"), limits, false).unwrap_err();
     assert!(error.contains("domains.run.continuation_copy_entries is 4"));
+    Ok(())
+}
+
+#[test]
+// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+fn read_only_source_ref_resolves_the_remote_instead_of_assuming_origin()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let state = temp.path().join("state");
+    let checkout = temp.path().join("checkout");
+    let remote = temp.path().join("forge.git");
+    std::fs::create_dir_all(&state)?;
+    std::fs::create_dir_all(&checkout)?;
+    let remote_path = remote.to_str().ok_or("remote path")?;
+    provenant_os::fixture::run_git(temp.path(), &["init", "--bare", "-q", remote_path])?;
+    provenant_os::fixture::run_git(&remote, &["symbolic-ref", "HEAD", "refs/heads/main"])?;
+    provenant_os::fixture::run_git(&checkout, &["init", "-q", "-b", "main"])?;
+    for args in [
+        vec!["config", "user.name", "Test"],
+        vec!["config", "user.email", "test@example.invalid"],
+    ] {
+        provenant_os::fixture::run_git(&checkout, &args)?;
+    }
+    std::fs::write(checkout.join("file"), "one\n")?;
+    provenant_os::fixture::run_git(&checkout, &["add", "file"])?;
+    provenant_os::fixture::run_git(&checkout, &["commit", "-qm", "one"])?;
+    std::fs::write(checkout.join("file"), "two\n")?;
+    provenant_os::fixture::run_git(&checkout, &["add", "file"])?;
+    provenant_os::fixture::run_git(&checkout, &["commit", "-qm", "two"])?;
+    let default = String::from_utf8(provenant_os::fixture::run_git(
+        &checkout,
+        &["rev-parse", "HEAD"],
+    )?)?
+    .trim()
+    .to_owned();
+    // A checkout with only a non-`origin` remote and no branch upstream: the
+    // advisory pin must follow the resolved remote's HEAD, not a compiled
+    // `origin` that does not exist here.
+    provenant_os::fixture::run_git(&checkout, &["remote", "add", "forge", remote_path])?;
+    provenant_os::fixture::run_git(&checkout, &["push", "-q", "forge", "main"])?;
+    provenant_os::fixture::run_git(&checkout, &["fetch", "-q", "forge"])?;
+    provenant_os::fixture::run_git(
+        &checkout,
+        &[
+            "symbolic-ref",
+            "refs/remotes/forge/HEAD",
+            "refs/remotes/forge/main",
+        ],
+    )?;
+    provenant_os::fixture::run_git(&checkout, &["reset", "-q", "--hard", "HEAD~1"])?;
+
+    let selected = confinement::read_only_source_ref(&state, &checkout, &crate::run::ReadSourceChoice::automatic())
+        .ok_or("behind checkout did not resolve a source")?;
+    assert!(
+        selected.reference.contains("refs/remotes/forge/"),
+        "{}",
+        selected.reference
+    );
+    assert!(
+        !selected.reference.contains("origin"),
+        "{}",
+        selected.reference
+    );
+    assert_eq!(selected.commit, provenant_core::GitOid::parse(&default)?);
     Ok(())
 }

@@ -12,6 +12,7 @@ mod check_providers;
 mod checks;
 mod ci;
 mod cloud;
+pub mod commands;
 #[cfg(test)]
 mod compose_tests;
 mod console;
@@ -20,6 +21,7 @@ mod disk;
 mod disk_guard;
 mod fabric;
 mod notes;
+mod output;
 mod tick;
 mod tick_agent;
 mod tracker;
@@ -61,7 +63,7 @@ mod verify;
 #[cfg(test)]
 pub mod worktree_tests;
 mod worktrees;
-use provenant_cli::{Command, ParseOutcome, RenderError, RenderMode};
+use provenant_cli::{Command, ParseOutcome};
 use provenant_records::{CommandError, CommandResult, Outcome, VersionInfo};
 use roots::{Product, Workspace};
 use serde::Serialize;
@@ -70,38 +72,12 @@ use std::{
     io::{self, Write},
 };
 
-/// Process-wide seams the entry point selects once. The defaults observe the
-/// real system; the worktree driver substitutes its fixtures.
-pub trait Process {
-    /// Host admission observations used by the composed guardian.
-    fn admission_resources(&self) -> &dyn provenant_run::Resources {
-        &provenant_run::SystemResources
-    }
-    /// The guardian's clock, sampled at the process edge.
-    fn clock(&self) -> &dyn provenant_core::Clock {
-        &provenant_os::clock::SystemClock
-    }
-    /// Observes whether a worktree's writer is alive.
-    fn workers(&self) -> &'static dyn provenant_confinement::worktrees::WorkerObserver {
-        &provenant_confinement::worktrees::SystemWorkerObserver
-    }
-    /// Hands Run's terminal holder to the guardian composition.
-    fn holder(
-        &self,
-        holder: &dyn provenant_supervisor::Holder,
-        guard: &mut dyn FnMut(&dyn provenant_supervisor::Holder) -> u8,
-    ) -> u8 {
-        guard(holder)
-    }
-    /// Runs the guardian with the composed hooks.
-    fn supervise(
-        &self,
-        descriptors: &[OsString],
-        hooks: provenant_supervisor::GuardianHooks<'_>,
-    ) -> provenant_supervisor::custody::Result<()> {
-        provenant_supervisor::supervise(descriptors, hooks)
-    }
-}
+pub(crate) use output::{emit, emit_summarised, emit_unpublished, emit_with_writers};
+
+/// Process-wide seams the entry point selects once. The trait lives in the CLI
+/// crate because a registry `Call` carries it; the binary re-exports it
+/// so `provenant::Process` stays the name the entry point and fixtures use.
+pub use provenant_cli::Process;
 /// The installed binary's seams.
 pub struct System;
 impl Process for System {}
@@ -141,247 +117,6 @@ fn human_inbox(
         ),
     }
 }
-fn emit<T: Serialize>(
-    result: &CommandResult<T>,
-    globals: &provenant_cli::Globals,
-    human: &str,
-    read_only: bool,
-) -> u8 {
-    emit_summarised(result, globals, human, read_only, None)
-}
-/// `emit` for an owner that supplies its own compact view.
-pub(crate) fn emit_summarised<T: Serialize>(
-    result: &CommandResult<T>,
-    globals: &provenant_cli::Globals,
-    human: &str,
-    read_only: bool,
-    summary: Option<&provenant_cli::Summary>,
-) -> u8 {
-    emit_with_writers(
-        result,
-        globals,
-        &mut io::stdout().lock(),
-        &mut io::stderr().lock(),
-        human,
-        read_only,
-        summary,
-    )
-}
-
-/// The emission seam shared by production and targeted tests: a refusal's
-/// rendered bytes go to the supplied writers, so a test can drive the same
-/// `fail_with_cause` path instead of hand-building a `CommandResult`.
-pub(crate) fn emit_with_writers<T: Serialize, Wout: Write, Werr: Write>(
-    result: &CommandResult<T>,
-    globals: &provenant_cli::Globals,
-    stdout: &mut Wout,
-    stderr: &mut Werr,
-    human: &str,
-    read_only: bool,
-    summary: Option<&provenant_cli::Summary>,
-) -> u8 {
-    let explanation = if summary.is_none() && result.command == "land" {
-        serde_json::to_value(&result.data)
-            .ok()
-            .and_then(|data| land_explanation(&data, globals))
-    } else {
-        None
-    };
-    let summary = summary.or(explanation.as_ref());
-    let mode = if !globals.json && matches!(result.command.as_str(), "help" | "version") {
-        RenderMode::Human {
-            text: human,
-            read_only,
-            summary: None,
-        }
-    } else {
-        globals.render_mode(human, read_only, summary)
-    };
-    let rendered = provenant_cli::render_or_publish(
-        result,
-        mode,
-        stdout,
-        stderr,
-        |value| overflow::publish(value, globals),
-        // A published overflow keeps the result's status in its envelope, so
-        // the exit code matches it; only a real render/IO failure exits 3.
-        provenant_cli::OverflowPolicy::Proceed,
-    );
-    match rendered {
-        Ok(status) => provenant_cli::exit_status(&status),
-        Err(_) => {
-            let _ = io::stderr().write_all(b"provenant: IO: cannot write command result\n");
-            3
-        }
-    }
-}
-
-/// A policy explanation is a structured result; compact output names omitted rows.
-fn land_explanation(
-    data: &serde_json::Value,
-    globals: &provenant_cli::Globals,
-) -> Option<provenant_cli::Summary> {
-    let fields = data.get("fields")?.as_object()?;
-    let mut rows = Vec::new();
-    for (key, label) in [
-        ("gate.kind", "gate"),
-        ("gate.checks", "checks"),
-        ("gate.commands", "commands"),
-        ("approval_sources", "approval"),
-        ("approval_tier", "approval tier"),
-        ("approval_carry", "approval carry"),
-        ("local_gate.mode", "local gate"),
-        ("integration", "integration"),
-        ("publish", "publication"),
-        ("budget.advisory_micros", "budget advisory (millionths)"),
-        ("budget.cap_micros", "budget cap (millionths)"),
-    ] {
-        if let Some(field) = fields.get(key) {
-            let value = field.get("value")?;
-            let value = value
-                .as_str()
-                .map(str::to_owned)
-                .unwrap_or_else(|| value.to_string());
-            let source = field
-                .pointer("/source/layer")
-                .and_then(serde_json::Value::as_str)?;
-            rows.push(format!("{label}: {value} ({source})"));
-        }
-    }
-    if let Some(patience) = data.get("ci_patience_seconds") {
-        let source = data["ci_patience_source"].as_str()?;
-        rows.push(format!("CI patience: {patience}s ({source})"));
-    }
-    if let Some(warnings) = data["warnings"].as_array() {
-        rows.splice(
-            0..0,
-            warnings
-                .iter()
-                .filter_map(serde_json::Value::as_str)
-                .map(|warning| format!("warning: {warning}")),
-        );
-    }
-    let mut detail = String::from("provenant");
-    for (flag, path) in [
-        ("--state-dir", globals.state_dir.as_ref()),
-        ("--project", globals.project.as_ref()),
-    ] {
-        if let Some(path) = path {
-            detail.push_str(&format!(
-                " {flag} '{}'",
-                path.to_string_lossy().replace('\'', "'\\''")
-            ));
-        }
-    }
-    detail.push_str(" land --explain --json");
-    Some(provenant_cli::Summary::new(
-        "Landing policy",
-        rows,
-        Some(detail),
-    ))
-}
-/// `emit_summarised` for a result the caller narrows rather than reads from an
-/// artefact: an oversized result is bounded with a warning, never published, so
-/// no file is left in the results area on any path.
-fn emit_unpublished<T: Serialize>(
-    result: &CommandResult<T>,
-    globals: &provenant_cli::Globals,
-    human: &str,
-    read_only: bool,
-    summary: Option<&provenant_cli::Summary>,
-) -> u8 {
-    let rendered = render_unpublished(
-        result,
-        globals,
-        human,
-        read_only,
-        summary,
-        provenant_cli::MAX_RESULT_BYTES,
-        &mut io::stdout().lock(),
-        &mut io::stderr().lock(),
-    );
-    const REPAIR: &str = "narrow it with --since and --until";
-    match rendered {
-        Ok(omitted) => {
-            if omitted > 0 {
-                let _ = writeln!(
-                    io::stderr().lock(),
-                    "warning: [RESULT_TOO_LARGE] {} exceeds 1 MiB (source: COMMAND_RESULT_MAX_BYTES); showing a bounded view with {omitted} bytes omitted; {REPAIR}",
-                    result.command
-                );
-            }
-            provenant_cli::exit_status(&result.status)
-        }
-        Err(RenderError::TooLarge) => {
-            // JSON cannot be clipped mid-object: emit a bounded marker instead.
-            let omitted = serde_json::to_vec(result)
-                .map(|bytes| bytes.len().saturating_sub(provenant_cli::MAX_RESULT_BYTES))
-                .unwrap_or_default();
-            let _ = writeln!(
-                io::stderr().lock(),
-                "warning: [RESULT_TOO_LARGE] {} exceeds 1 MiB (source: COMMAND_RESULT_MAX_BYTES); showing a bounded view with {omitted} bytes omitted; {REPAIR}",
-                result.command
-            );
-            let marker = serde_json::json!({
-                "truncated": true,
-                "omitted_bytes": omitted,
-                "source": "COMMAND_RESULT_MAX_BYTES",
-                "repair": REPAIR,
-            });
-            let mut bounded = CommandResult::new(&result.command, result.status, marker);
-            // The marker replaces the oversized data, not the refusal. Keep the
-            // original typed error so an oversized failure still carries its
-            // code, repair and diagnostic, as the console and disk edges do.
-            bounded.error = result
-                .error
-                .as_ref()
-                .map(|error| provenant_cli::bounded_error(error, 512));
-            let _ = provenant_cli::render(&bounded, RenderMode::Json, &mut io::stdout().lock());
-            provenant_cli::exit_status(&result.status)
-        }
-        Err(_) => {
-            let _ = io::stderr().write_all(b"provenant: IO: cannot write command result\n");
-            3
-        }
-    }
-}
-/// Render a result within `limit`, bounding the human view with an explicit
-/// omitted-size marker when it is larger. Returns the bytes omitted from the
-/// owner's text (zero when the result fit).
-#[allow(clippy::too_many_arguments)]
-fn render_unpublished<T: Serialize>(
-    result: &CommandResult<T>,
-    globals: &provenant_cli::Globals,
-    human: &str,
-    read_only: bool,
-    summary: Option<&provenant_cli::Summary>,
-    limit: usize,
-    stdout: &mut impl Write,
-    stderr: &mut impl Write,
-) -> Result<usize, RenderError> {
-    let full_bytes = serde_json::to_vec(result)
-        .map(|bytes| bytes.len())
-        .unwrap_or(0);
-    // The size bounds the result, not its presentation: a compact view of an
-    // oversized result is still an oversized result.
-    let oversized = !globals.json && full_bytes > limit;
-    let clipped;
-    let mut omitted = 0;
-    let mode = if oversized {
-        let (text, count) = provenant_cli::clip_for_output(human, limit);
-        clipped = text;
-        omitted = count;
-        globals.render_mode(&clipped, read_only, summary)
-    } else {
-        globals.render_mode(human, read_only, summary)
-    };
-    if !globals.json && result.error.is_some() {
-        provenant_cli::render_within(result, mode, stderr, limit)?;
-    } else {
-        provenant_cli::render_within(result, mode, stdout, limit)?;
-    }
-    Ok(omitted)
-}
 /// Accounts by adapter, then the registered rows; none needs action.
 fn accounts_summary(settings: &provenant_providers::accounts::Settings) -> provenant_cli::Summary {
     let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
@@ -411,7 +146,7 @@ fn accounts_summary(settings: &provenant_providers::accounts::Settings) -> prove
             )
         })
         .collect();
-    provenant_cli::Summary::new(headline, rows, None)
+    provenant_cli::Summary::new(headline, rows)
 }
 /// Reusable next steps for the common refusals. Every `fail` call supplies a
 /// repair explicitly, so the renderer never has to synthesise one.
@@ -453,6 +188,8 @@ fn fail_with_repair(
 }
 /// `fail_with_repair` with a cause the operator needs to see, such as the
 /// bounded output of a failing `build.prepare` command.
+// Refusal emission writes the mapped command result to the two output streams.
+#[allow(clippy::disallowed_methods)]
 fn fail_with_cause(
     command: &str,
     status: Outcome,
@@ -502,6 +239,8 @@ pub(crate) fn fail_with_cause_with_writers<Wout: Write, Werr: Write>(
 
 /// Emit an already-mapped refusal. Owners with a typed error use this with
 /// [`crate::worktrees::Error::command_error`] so the mapping lives in one place.
+// Refusal emission writes the mapped command result to the two output streams.
+#[allow(clippy::disallowed_methods)]
 pub(crate) fn fail_with_command_error(
     command: &str,
     status: Outcome,
@@ -824,11 +563,60 @@ fn read_patch(path: &std::path::Path) -> Result<serde_json::Value, Box<dyn std::
     }
     Ok(serde_json::from_slice(&bytes)?)
 }
-/// The effective verify port for `config show`: each value with the layer that
-/// supplied it. An unset base is inferred from the effective remote's HEAD and
+/// Render one leaf's winning `Sourced` as wire JSON. Under `--full` the
+/// layers it shadowed are appended, lowest first, so an explanation shows
+/// both the effective source and the candidates it replaced.
+fn sourced_leaf_json<T: serde::Serialize>(
+    winner: &provenant_records::Sourced<T>,
+    shadowed: &[provenant_records::Sourced<serde_json::Value>],
+    full: bool,
+) -> serde_json::Value {
+    let mut value = serde_json::to_value(winner).unwrap_or_default();
+    if full && !shadowed.is_empty() {
+        value["shadowed"] = serde_json::to_value(shadowed).unwrap_or_default();
+    }
+    value
+}
+
+/// One dotted port leaf as its winning `Sourced`, using the effective value
+/// (which may have been derived after the layer walk) and the winner's own
+/// layer and origin. A port-level label is never printed for a leaf.
+fn config_port_leaf(
+    table: &provenant_config::PortTable,
+    leaf: &str,
+    value: serde_json::Value,
+    full: bool,
+) -> serde_json::Value {
+    let candidates = table.sourced_leaf(leaf);
+    let Some((winner, shadowed)) = candidates.split_last() else {
+        return serde_json::to_value(provenant_records::Sourced {
+            value,
+            source: provenant_records::Source {
+                layer: provenant_records::Layer::Default,
+                origin: None,
+            },
+        })
+        .unwrap_or_default();
+    };
+    sourced_leaf_json(
+        &provenant_records::Sourced {
+            value,
+            source: winner.source.clone(),
+        },
+        shadowed,
+        full,
+    )
+}
+
+/// The effective verify port for `config show`: each leaf with its own layer
+/// and origin. An unset base is inferred from the effective remote's HEAD and
 /// labelled with the ref it came from; a port table that cannot be read stays
 /// a warning instead of stopping a command that does not need verify.
-fn config_show_ports(project: &std::path::Path, state: &std::path::Path) -> serde_json::Value {
+fn config_show_ports(
+    project: &std::path::Path,
+    state: &std::path::Path,
+    full: bool,
+) -> serde_json::Value {
     use provenant_os::exec::{SystemExecutor, Termination};
     let ports = match provenant_config::PortTable::read_for_inspection(Some(project), state) {
         Ok(ports) => ports,
@@ -869,48 +657,77 @@ fn config_show_ports(project: &std::path::Path, state: &std::path::Path) -> serd
                 .and_then(|target| provenant_config::infer_verify_base(&remote, &target))
         };
         match inferred {
-            Some((base, source)) => serde_json::json!({
-                "value": base,
-                "source": format!("inferred from {source}"),
-            }),
-            None => serde_json::json!({
-                "value": serde_json::Value::Null,
-                "source": "unresolved",
-                "remedy": provenant_config::verify_base_unset_error().to_string(),
-            }),
+            Some((base, origin)) => sourced_leaf_json(
+                &provenant_records::Sourced {
+                    value: base,
+                    source: provenant_records::Source {
+                        layer: provenant_records::Layer::Detected,
+                        origin: Some(origin),
+                    },
+                },
+                &[],
+                full,
+            ),
+            None => {
+                let mut value = sourced_leaf_json(
+                    &provenant_records::Sourced {
+                        value: serde_json::Value::Null,
+                        source: provenant_records::Source {
+                            layer: provenant_records::Layer::Detected,
+                            origin: None,
+                        },
+                    },
+                    &[],
+                    full,
+                );
+                value["remedy"] = provenant_config::verify_base_unset_error()
+                    .to_string()
+                    .into();
+                value
+            }
         }
     } else {
-        serde_json::json!({
-            "value": ports.verify.base,
-            "source": provenant_config::port_source_layer(ports.verify.source),
-        })
+        config_port_leaf(
+            &ports,
+            "verify.base",
+            serde_json::Value::String(ports.verify.base.clone()),
+            full,
+        )
     };
     serde_json::json!({
         "verify.base": base,
-        "verify.remote": {
-            "value": remote,
-            "source": provenant_config::port_source_layer(ports.verify.source),
-        },
+        "verify.remote": config_port_leaf(
+            &ports,
+            "verify.remote",
+            serde_json::Value::String(remote),
+            full,
+        ),
+        // Spec: docs/specs/state.md#one-sourced-port-table
+        // Each declared root is reported with the layer and origin that set it.
+        "worktree_layout.roots": config_port_leaf(
+            &ports,
+            "worktree_layout.roots",
+            serde_json::to_value(&ports.worktree_layout.roots).unwrap_or_default(),
+            full,
+        ),
     })
 }
 
-/// The effective `build.prepare` list with the leaf's own source. A port's
-/// label follows its highest leaf, which may be a different key, so read the
-/// provenance of `build.prepare` rather than `table.build.source`.
-fn config_ports_prepare(table: &provenant_config::PortTable) -> serde_json::Value {
-    let source = table
-        .provenance()
-        .get("build.prepare")
-        .copied()
-        .unwrap_or(table.build.source);
-    serde_json::json!({
-        "value": table.build.prepare,
-        "source": provenant_config::port_source_layer(source),
-    })
+/// The effective `build.prepare` list with the leaf's own layer and origin.
+/// A port's label follows its highest leaf, which may be a different key, so
+/// read the source history of `build.prepare` rather than `table.build.source`.
+fn config_ports_prepare(table: &provenant_config::PortTable, full: bool) -> serde_json::Value {
+    config_port_leaf(
+        table,
+        "build.prepare",
+        serde_json::to_value(&table.build.prepare).unwrap_or_default(),
+        full,
+    )
 }
 
 #[cfg(test)]
 mod config_ports_tests {
+    /// Spec: docs/specs/state.md#every-setting-reports-its-layer
     #[test]
     fn reports_effective_prepare_with_its_own_leaf_source() {
         let temp = tempfile::tempdir().unwrap();
@@ -928,9 +745,16 @@ mod config_ports_tests {
         )
         .unwrap();
         let table = provenant_config::PortTable::read_for(Some(&project), &state).unwrap();
-        let value = super::config_ports_prepare(&table);
-        assert_eq!(value["source"], "host_project");
+        let value = super::config_ports_prepare(&table, false);
+        assert_eq!(value["layer"], "host_project");
+        assert!(
+            value["origin"]
+                .as_str()
+                .unwrap()
+                .ends_with("ports.json#build.prepare")
+        );
         assert_eq!(value["value"][0][1], "gen.mjs");
+        assert!(value.get("shadowed").is_none());
 
         // A higher layer setting a different leaf must not relabel prepare.
         std::fs::write(
@@ -940,8 +764,86 @@ mod config_ports_tests {
         .unwrap();
         let table = provenant_config::PortTable::read_for(Some(&project), &state).unwrap();
         assert_eq!(
-            super::config_ports_prepare(&table)["source"],
+            super::config_ports_prepare(&table, false)["layer"],
             "host_project"
+        );
+
+        // --full also shows the layers this leaf shadowed.
+        let full = super::config_ports_prepare(&table, true);
+        let shadowed = full["shadowed"].as_array().unwrap();
+        assert!(
+            shadowed
+                .iter()
+                .any(|candidate| candidate["layer"] == "default")
+        );
+    }
+
+    /// Spec: docs/specs/state.md#every-setting-reports-its-layer
+    #[test]
+    fn config_show_ports_reports_per_leaf_sources_and_full_shadowed_layers() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::create_dir_all(project.join(".git")).unwrap();
+        std::fs::create_dir_all(project.join(".provenant")).unwrap();
+        let keyed = provenant_config::host_project_dir(&state, &project).unwrap();
+        std::fs::create_dir_all(&keyed).unwrap();
+        // verify.remote is declared at both host and project; verify.base only
+        // at project, so neither leaf needs the port-level label.
+        std::fs::write(
+            state.join("ports.json"),
+            r#"{"verify":{"remote":"host-remote"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            project.join(".provenant/ports.json"),
+            r#"{"verify":{"remote":"project-remote","base":"project/main"}}"#,
+        )
+        .unwrap();
+
+        let shown = super::config_show_ports(&project, &state, false);
+        let remote = &shown["verify.remote"];
+        assert_eq!(remote["value"], "project-remote");
+        assert_eq!(remote["layer"], "project");
+        assert_eq!(
+            remote["origin"].as_str().unwrap(),
+            ".provenant/ports.json#verify.remote"
+        );
+        assert!(remote.get("shadowed").is_none());
+        assert_eq!(shown["verify.base"]["layer"], "project");
+
+        let full = super::config_show_ports(&project, &state, true);
+        let shadowed = full["verify.remote"]["shadowed"].as_array().unwrap();
+        assert!(shadowed.iter().any(|candidate| {
+            candidate["layer"] == "host" && candidate["value"] == "host-remote"
+        }));
+    }
+
+    // Spec: docs/specs/state.md#every-setting-reports-its-layer
+    #[test]
+    fn config_show_ports_reports_declared_worktree_roots_with_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::create_dir_all(project.join(".git")).unwrap();
+        std::fs::create_dir_all(project.join(".provenant")).unwrap();
+        std::fs::write(
+            state.join("ports.json"),
+            r#"{"worktree_layout":{"roots":["../host-writers"],"default":"../host-writers/<branch>"}}"#,
+        )
+        .unwrap();
+
+        let shown = super::config_show_ports(&project, &state, false);
+        let roots = &shown["worktree_layout.roots"];
+        assert_eq!(roots["value"][0], "../host-writers");
+        assert_eq!(roots["layer"], "host");
+        assert!(
+            roots["origin"]
+                .as_str()
+                .unwrap()
+                .ends_with("ports.json#worktree_layout.roots")
         );
     }
 }
@@ -996,8 +898,19 @@ fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::
                 serde_json::json!({
                     "schema_version": table.schema_version,
                     "ports": ports,
+                    // Spec: docs/specs/state.md#one-sourced-port-table
+                    // Effective worktree roots carry the layer and origin that
+                    // declared them, including roots outside the checkout.
+                    "worktree_layout": {
+                        "roots": config_port_leaf(
+                            &table,
+                            "worktree_layout.roots",
+                            serde_json::to_value(&table.worktree_layout.roots).unwrap_or_default(),
+                            globals.full,
+                        ),
+                    },
                     "build": {
-                        "prepare": config_ports_prepare(&table),
+                        "prepare": config_ports_prepare(&table, globals.full),
                     },
                 })
             }
@@ -1017,7 +930,6 @@ fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::
                     serde_json::to_value(config::ResolvedAdmissionClass::resolve_all(
                         roots.state.as_path(),
                         Some(&context.project),
-                        provenant_config::project_key_for(&context.project).as_deref(),
                     ))?;
                 let policy = resolved.domains.policy.resolve_with_knobs(
                     &provenant_os::git::repository_path(
@@ -1038,30 +950,38 @@ fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::
                 );
                 value["policy"] = serde_json::to_value(&policy)?;
                 value["policy_render"] = policy.render().into();
-                value["ports"] = config_show_ports(&context.project, roots.state.as_path());
+                // Every config-owned leaf carries the same `Sourced` shape a
+                // knob already has: a value beside its layer and exact origin.
+                let setting_sources: serde_json::Map<String, serde_json::Value> = resolved
+                    .origins
+                    .iter()
+                    .filter_map(|(field, origin)| {
+                        let pointer = format!("/{}", field.replace('.', "/"));
+                        let leaf = value.pointer(&pointer)?.clone();
+                        let sourced = provenant_records::Sourced {
+                            value: leaf,
+                            source: provenant_cli::config_reads::origin_source(Some(origin), field),
+                        };
+                        Some((
+                            field.clone(),
+                            serde_json::to_value(sourced).unwrap_or_default(),
+                        ))
+                    })
+                    .collect();
+                value["setting_sources"] = setting_sources.into();
+                value["ports"] =
+                    config_show_ports(&context.project, roots.state.as_path(), globals.full);
                 if globals.full {
                     let table = config::PortTable::read_for_inspection(
                         Some(&context.project),
                         roots.state.as_path(),
                     )?;
-                    let serialized = serde_json::to_value(&table)?;
                     let leaves: serde_json::Map<String, serde_json::Value> = table
-                        .provenance()
+                        .sourced_leaves()
                         .iter()
-                        .filter(|(key, _)| {
-                            key.starts_with("build.")
-                                || key.starts_with("verify.tiers.")
-                                || *key == "verify.default_tier"
-                        })
-                        .filter_map(|(key, source)| {
-                            let mut v = &serialized;
-                            for part in key.split('.') {
-                                v = v.get(part)?;
-                            }
-                            Some((
-                                key.clone(),
-                                serde_json::json!({"value": v, "source": source}),
-                            ))
+                        .filter_map(|(key, candidates)| {
+                            let (winner, shadowed) = candidates.split_last()?;
+                            Some((key.clone(), sourced_leaf_json(winner, shadowed, true)))
                         })
                         .collect();
                     value["port_leaves"] = leaves.into();
@@ -1139,7 +1059,12 @@ fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::
                         .map(|object| {
                             object
                                 .keys()
-                                .filter(|key| !matches!(key.as_str(), "origins" | "policy_render"))
+                                .filter(|key| {
+                                    !matches!(
+                                        key.as_str(),
+                                        "origins" | "policy_render" | "setting_sources"
+                                    )
+                                })
                                 .map(String::as_str)
                                 .collect::<Vec<_>>()
                                 .join(", ")
@@ -1356,17 +1281,19 @@ fn supervise(descriptors: &[u64], globals: &provenant_cli::Globals, process: &dy
 }
 fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
     let globals = &inv.globals;
-    let command = match inv.command {
-        Command::Hook(hook) => return hooks::run(hook, globals),
-        Command::ProcessTree { root } => return process_tree::run(root, globals),
-        command => command,
-    };
+    let command = &inv.command;
+    if let Command::Hook(hook) = command {
+        return hooks::run(hook.clone(), globals);
+    }
+    if let Command::ProcessTree { root } = command {
+        return process_tree::run(*root, globals);
+    }
     // Lanes may read quota and routing state (`quota show`, `quota history`
     // and `route resolve`), but must not mutate account state: the mutating
     // commands run provider probes with the chair's credentials and write the
     // chair's quota record. Each refusal names the command to run outside the
     // lane instead of sending the agent in a circle.
-    let mutating_quota_repair = match &command {
+    let mutating_quota_repair = match command {
         Command::Quota {
             command: Some(provenant_cli::Quota::Tick { .. }),
         } => Some("run `provenant quota tick` from the chair's session"),
@@ -1391,12 +1318,12 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         );
     }
     let session_save = matches!(
-        &command,
+        command,
         Command::Workflow(provenant_cli::Workflow::Session(
             provenant_cli::workflow::Session::Save { .. }
         ))
     );
-    if matches!(&command, Command::Install(_)) {
+    if matches!(command, Command::Install(_)) {
         let selected_state = globals
             .state_dir
             .as_deref()
@@ -1449,712 +1376,25 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             globals,
         );
     }
-    match command {
-        Command::ProcessTree { .. } => unreachable!("process-tree returned before root validation"),
-        Command::Hosts { command: None } => fabric::hosts(globals, process.workers()),
-        Command::Hosts {
-            command: Some(command),
-        } => hosts::run(command, globals, process.workers()),
-        Command::Accounts(provenant_cli::accounts::Accounts::Sync {
-            dry_run,
-            adopt,
-            force_settings,
-            prune_orphans,
-        }) => install::run_sync(
-            dry_run,
-            adopt.as_deref(),
-            force_settings,
-            prune_orphans,
-            globals,
-        ),
-        Command::Accounts(command) => {
-            run_edge(
-                &inv.leaf,
-                globals,
-                |edge| match provenant_cli::accounts::execute(&command, edge.roots, edge.home) {
-                    Ok(data) => {
-                        let listing = matches!(command, provenant_cli::accounts::Accounts::List);
-                        let mut reply = provenant_cli::run::Reply {
-                            human: data
-                                .entries
-                                .values()
-                                .map(|e| format!("{} {} {}\n", e.adapter, e.label, e.key))
-                                .collect(),
-                            summary: listing.then(|| accounts_summary(&data)),
-                            read_only: listing,
-                            result: CommandResult::new(
-                                &inv.leaf,
-                                Outcome::Ok,
-                                serde_json::json!(data),
-                            ),
-                        };
-                        match command {
-                            provenant_cli::accounts::Accounts::Register {
-                                ref adapter,
-                                ref label,
-                                ..
-                            } => {
-                                sync_registered_account(globals, &mut reply);
-                                probe_registered_account(edge, &data, adapter, label, &mut reply);
-                            }
-                            provenant_cli::accounts::Accounts::List => {
-                                report_account_sync(globals, &data, &mut reply);
-                            }
-                            _ => {}
-                        }
-                        reply
-                    }
-                    Err((kind, message)) => {
-                        let mut result = CommandResult::new(
-                            &inv.leaf,
-                            Outcome::Refused,
-                            serde_json::Value::Null,
-                        );
-                        let projection = kind.map(|kind| kind.diagnostic());
-                        let mut error = CommandError::new(
-                            kind.map_or("ACCOUNT", |kind| kind.code()),
-                            message,
-                            None,
-                            projection
-                                .as_ref()
-                                .and_then(|diagnostic| diagnostic.next.as_deref())
-                                .unwrap_or("run `provenant accounts sync` and retry"),
-                        );
-                        error.diagnostic = projection.as_ref().map(Into::into);
-                        result.error = Some(error);
-                        provenant_cli::run::Reply {
-                            result,
-                            human: String::new(),
-                            summary: None,
-                            read_only: false,
-                        }
-                    }
-                },
-            )
-        }
-        Command::Root => {
-            #[derive(Serialize)]
-            struct RootInfo {
-                assets: provenant_records::AbsolutePath,
-                state_directory: provenant_records::AbsolutePath,
-                project: provenant_records::AbsolutePath,
-                package_version: &'static str,
-                installation: VersionInfo,
-            }
-            let result = (|| -> Result<_, Box<dyn std::error::Error>> {
-                let roots::Resolved {
-                    assets,
-                    project,
-                    roots,
-                    ..
-                } = roots::resolve(&inv.globals, Workspace::Project, Product::Required)?;
-                let data = RootInfo {
-                    assets: provenant_records::AbsolutePath::new(&assets)?,
-                    state_directory: provenant_records::AbsolutePath::new(roots.state.as_path())?,
-                    project: provenant_records::AbsolutePath::new(&project)?,
-                    package_version: env!("CARGO_PKG_VERSION"),
-                    installation: identity()?,
-                };
-                Ok((
-                    data,
-                    match assets.to_str() {
-                        Some(path) => format!("{path}\n"),
-                        None => {
-                            format!("{}\n", assets.as_os_str().as_encoded_bytes().escape_ascii())
-                        }
-                    },
-                ))
-            })();
-            match result {
-                Ok((data, human)) => emit(
-                    &CommandResult::new("root", Outcome::Ok, data),
-                    globals,
-                    &human,
-                    true,
-                ),
-                Err(error) => fail(
-                    "root",
-                    Outcome::Error,
-                    "ROOT",
-                    &error.to_string(),
-                    REPAIR_ROOT,
-                    globals,
-                ),
-            }
-        }
-        Command::Internal(provenant_cli::Internal::Supervise { descriptors }) => {
-            supervise(&descriptors, globals, process)
-        }
-        // Handled in `dispatch` before roots and telemetry; it never gets here.
-        Command::Admit { .. } => fail(
+    let Some(verb) = commands::find(&inv.leaf) else {
+        return fail(
             &inv.leaf,
             Outcome::Error,
             "INTERNAL",
-            "admit is dispatched before the command table",
+            "the parsed command has no registry verb",
             "report this internal dispatch error; rerun the command",
             globals,
-        ),
-        Command::Internal(provenant_cli::Internal::Settle { request }) => {
-            // Recovery commits terminal state without a live guardian, so it
-            // drains the settlement reactions itself.
-            let result = (|| -> Result<(), String> {
-                let parsed = provenant_run::settlement::ResumeRequest::parse(&request)
-                    .map_err(|error| error.to_string())?;
-                let mut inputs = provenant_core::RootInputs::new(
-                    parsed.roots().home.clone(),
-                    parsed.roots().checkout.clone(),
-                );
-                inputs.state_dir = Some(parsed.roots().state_root.clone());
-                let roots = inputs
-                    .resolve(&provenant_os::fs::SystemPathResolver)
-                    .map_err(|error| error.to_string())?;
-                let subject = settlement::Subject {
-                    home: parsed.roots().home.clone(),
-                    checkout: parsed.roots().checkout.clone(),
-                    state_root: parsed.roots().state_root.clone(),
-                    project: parsed.project(),
-                    actor: parsed.actor(),
-                    attempt: parsed.attempt(),
-                };
-                let registry = provenant_cli::run::Registry {
-                    roots: Some(&roots),
-                    ..Default::default()
-                };
-                provenant_run::settlement::resume(&request, &registry)
-                    .map_err(|error| error.to_string())?;
-                fabric::settlement_reactions(&subject, None, process.workers())
-                    .map_err(|error| error.to_string())
-            })();
-            match result {
-                Ok(()) => 0,
-                Err(error) => fail(
-                    &inv.leaf,
-                    Outcome::Error,
-                    "SETTLEMENT",
-                    &error,
-                    "rerun `provenant reconcile` to finish settlement",
-                    globals,
-                ),
-            }
-        }
-        Command::Internal(provenant_cli::Internal::LaneCleanup { request }) => {
-            match fabric::gc_cleanup::run(&request, process.workers()) {
-                Ok(()) => 0,
-                Err(error) => fail(
-                    &inv.leaf,
-                    Outcome::Error,
-                    "LANE_CLEANUP",
-                    &error.to_string(),
-                    "rerun lane cleanup after the writer releases custody",
-                    globals,
-                ),
-            }
-        }
-        Command::Internal(provenant_cli::Internal::TickGc) => {
-            tick::gc_worker(globals, process.workers())
-        }
-        Command::Internal(provenant_cli::Internal::EventListen { repository }) => {
-            event_delivery::listen(&repository, globals)
-        }
-        Command::Internal(provenant_cli::Internal::Launch {
-            attempt,
-            provider_lease_wait,
-        }) => {
-            let receipt_globals = provenant_cli::Globals {
-                json: true,
-                full: globals.full,
-                state_dir: globals.state_dir.clone(),
-                project: globals.project.clone(),
-            };
-            run_edge(&inv.leaf, &receipt_globals, |edge| {
-                provenant_cli::run::launch_worker(attempt, provider_lease_wait, edge)
-            })
-        }
-        Command::Internal(provenant_cli::Internal::ProviderUpdates) => {
-            match roots::resolve(globals, Workspace::Project, Product::Required) {
-                Ok(resolved) => match provenant_cli::provider_updates::housekeep(
-                    &resolved.roots,
-                    &resolved.home,
-                    &resolved.project,
-                ) {
-                    Ok(()) => 0,
-                    Err(error) => fail(
-                        &inv.leaf,
-                        Outcome::Error,
-                        "PROVIDER_UPDATE",
-                        &error,
-                        "rerun `provenant tick` after the reported cause is resolved",
-                        globals,
-                    ),
-                },
-                Err(error) => fail(
-                    &inv.leaf,
-                    Outcome::Error,
-                    "ROOT",
-                    &error.to_string(),
-                    REPAIR_ROOT,
-                    globals,
-                ),
-            }
-        }
-        Command::Help { .. } => fail(
-            "help",
-            Outcome::Invalid,
-            "INVALID",
-            "help must be resolved by the parser",
-            "report this internal parser error; rerun `provenant help`",
-            globals,
-        ),
-        Command::Config(provenant_cli::Config::Ports) => {
-            config_command("config ports", ConfigAction::Ports, globals)
-        }
-        Command::Config(provenant_cli::Config::Detect) => {
-            config_command("config detect", ConfigAction::Detect, globals)
-        }
-        Command::Config(provenant_cli::Config::Path { dir }) => config_command(
-            "config path",
-            ConfigAction::Path {
-                dir: dir.as_deref(),
-            },
-            globals,
-        ),
-        Command::Config(provenant_cli::Config::Check(page)) => checks::config(page, globals),
-        Command::Config(provenant_cli::Config::Show) => {
-            config_command("config show", ConfigAction::Show, globals)
-        }
-        Command::Config(provenant_cli::Config::Schema { all }) => {
-            config_command("config schema", ConfigAction::Schema { all }, globals)
-        }
-        Command::Config(provenant_cli::Config::Apply {
-            file,
-            expect_revision,
-            dry_run,
-        }) => config_command(
-            "config apply",
-            ConfigAction::Apply {
-                patch: &file,
-                revision: &expect_revision,
-                dry_run,
-            },
-            globals,
-        ),
-        Command::Config(provenant_cli::Config::History { since, limit }) => config_command(
-            "config history",
-            ConfigAction::History {
-                since,
-                limit: limit as usize,
-            },
-            globals,
-        ),
-        Command::Config(provenant_cli::Config::Set { name, value }) => config_command(
-            "config set",
-            ConfigAction::Edit(if name == "profile" {
-                provenant_config::KnobEdit::Profile(&value)
-            } else {
-                provenant_config::KnobEdit::Set {
-                    name: &name,
-                    value: &value,
-                }
-            }),
-            globals,
-        ),
-        Command::Config(provenant_cli::Config::Unset { name }) => config_command(
-            "config unset",
-            ConfigAction::Edit(provenant_config::KnobEdit::Unset(&name)),
-            globals,
-        ),
-        Command::Ask(args) => human_inbox(
-            provenant_cli::inbox::HumanCommand::Ask(args),
-            &inv.leaf,
-            globals,
-        ),
-        Command::Inbox(args) => human_inbox(
-            provenant_cli::inbox::HumanCommand::Inbox(*args),
-            &inv.leaf,
-            globals,
-        ),
-        Command::Answer(args) => human_inbox(
-            provenant_cli::inbox::HumanCommand::Answer(*args),
-            &inv.leaf,
-            globals,
-        ),
-        Command::Fabric(provenant_cli::Fabric::Peer { in_process }) => {
-            fabric::peer(globals, in_process, process.workers())
-        }
-        Command::Fabric(provenant_cli::Fabric::PeerAgent) => peer_agent(globals),
-        Command::Fabric(provenant_cli::Fabric::Events(provenant_cli::fabric::Events::Read {
-            page,
-            wait,
-        })) => fabric::events(page, wait, globals, process.workers()),
-        Command::Fabric(cmd) => {
-            match roots::resolve(globals, Workspace::Project, Product::Required) {
-                Ok(resolved) => provenant_cli::fabric::run(
-                    cmd,
-                    globals,
-                    &resolved.roots,
-                    &resolved.home,
-                    &resolved.project,
-                ),
-                Err(error) => {
-                    let status = match error {
-                        roots::RootError::Checkout | roots::RootError::State(_) => Outcome::Invalid,
-                        _ => Outcome::Error,
-                    };
-                    fail(
-                        &inv.leaf,
-                        status,
-                        "ROOT",
-                        &error.to_string(),
-                        REPAIR_ROOT,
-                        globals,
-                    )
-                }
-            }
-        }
-        Command::Install(args) => install::run_install(args, globals),
-        Command::Upgrade(args) => install::run_upgrade(args, globals),
-        Command::Uninstall(args) => install::run_uninstall(args, globals),
-        Command::Route(command) => {
-            match roots::resolve(globals, Workspace::Project, Product::Required) {
-                Ok(resolved) => {
-                    provenant_cli::route::run(command, globals, &resolved.roots, |result| {
-                        crate::overflow::publish(result, globals)
-                    })
-                }
-                Err(error) => fail(
-                    &inv.leaf,
-                    Outcome::Error,
-                    "ROOT",
-                    &error.to_string(),
-                    REPAIR_ROOT,
-                    globals,
-                ),
-            }
-        }
-        Command::Run(cmd) => graph_interface::run(*cmd, globals, process.workers()),
-        Command::Edit(cmd) => graph_interface::edit(cmd, globals, process.workers()),
-        Command::Templates(cmd) => graph_interface::templates(cmd, globals, process.workers()),
-        Command::Trace(cmd) => fabric::unified_graph_trace(&cmd.target, globals, process.workers()),
-        Command::Adopt { subject } => custody::command(globals, subject, false),
-        Command::Release { subject } => custody::command(globals, subject, true),
-        Command::Status(cmd) if cmd.mine => custody::status(&cmd, globals),
-        Command::Status(cmd) if cmd.session_stream => run_edge(&inv.leaf, globals, |edge| {
-            provenant_cli::run::status_session_stream(cmd, edge, &mut io::stdout().lock())
-        }),
-        Command::Status(cmd) if cmd.targets.is_empty() && !provenant_cli::fabric::in_lane() => {
-            fabric::graph_listing(&cmd, globals, process.workers())
-        }
-        Command::Status(cmd) => fabric::unified_graph_command(
-            &cmd.targets,
-            fabric::GraphCommand::Status,
-            globals,
-            process.workers(),
-        ),
-        Command::Wait(cmd) => status_wait::run(cmd, globals),
-        Command::Events {
-            from,
-            follow,
-            consumer,
-        } => events::run(from.unwrap_or(0), follow, consumer.as_deref(), globals),
-        Command::Land {
-            numbers,
-            strategy,
-            target,
-            head,
-            wait,
-            poll,
-            explain,
-            shadow,
-            tier,
-            accept_delta,
-        } => pr::landing::run(
-            pr::landing::Options {
-                numbers,
-                strategy,
-                target,
-                head,
-                wait,
-                poll,
-                explain,
-                shadow,
-                tier,
-                accept_delta,
-            },
-            globals,
-            process.workers(),
-        ),
-        Command::Output(cmd) => run_edge(&inv.leaf, globals, |edge| {
-            fabric::unified_graph_output(&cmd, edge, globals, process.workers())
-        }),
-        Command::Result { target } => run_edge(&inv.leaf, globals, |edge| {
-            fabric::unified_graph_result(&target, edge)
-        }),
-        Command::Stop(cmd) if provenant_cli::fabric::in_lane() => {
-            run_edge(&inv.leaf, globals, |_| {
-                provenant_cli::run::stop_from_lane(&cmd.target)
-            })
-        }
-        Command::Stop(cmd) => fabric::unified_graph_command(
-            std::slice::from_ref(&cmd.target),
-            fabric::GraphCommand::Stop {
-                reason: cmd.reason.as_deref(),
-            },
-            globals,
-            process.workers(),
-        ),
-        Command::Retry(cmd) => fabric::unified_graph_command(
-            std::slice::from_ref(&cmd.target),
-            fabric::GraphCommand::Retry {
-                extend: &cmd.extend,
-                brief: cmd.brief.as_deref(),
-                brief_file: cmd.brief_file.as_deref(),
-            },
-            globals,
-            process.workers(),
-        ),
-        Command::Lane(cmd) => run_edge(&inv.leaf, globals, |edge| {
-            let mut reply = provenant_cli::run::lane(cmd, edge);
-            if let Err(error) =
-                fabric::settle_delivered_attempt(edge, &mut reply, process.workers())
-            {
-                reply
-                    .human
-                    .push_str(&format!("worktree retained: {error}\n"));
-                reply.result.data["worktree_settlement_error"] =
-                    serde_json::json!(error.to_string());
-            }
-            reply
-        }),
-        Command::Reconcile(cmd) => run_edge(&inv.leaf, globals, |edge| {
-            let all = cmd.targets.is_empty() && cmd.abandon.is_none();
-            let mut reply = provenant_cli::run::reconcile(cmd, edge);
-            if all {
-                let issue = match settlement::reconcile_refusal_notices(edge) {
-                    Ok(false) => None,
-                    Ok(true) => {
-                        reply.human.push_str("some refusal notices could not be delivered; inspect their chair bindings and inbox access\n");
-                        reply.result.data["refusal_notice_recovery_pending"] =
-                            serde_json::json!(true);
-                        None
-                    }
-                    Err(_) => Some(
-                        "refusal notice recovery failed; restore inbox access and rerun `provenant reconcile`",
-                    ),
-                };
-                if let Some(message) = issue {
-                    reply.human.push_str(&format!("{message}\n"));
-                    reply.result.data["refusal_notice_recovery_pending"] = serde_json::json!(true);
-                    if reply.result.error.is_none() {
-                        reply.result.status = provenant_records::Outcome::Failed;
-                        reply.result.error = Some(provenant_records::CommandError::new(
-                            "RECONCILE_INCOMPLETE",
-                            message,
-                            None,
-                            "rerun `provenant reconcile`",
-                        ));
-                    }
-                }
-            }
-            reply
-        }),
-        Command::Telemetry(provenant_cli::Telemetry::Stats(cmd)) => {
-            if cmd.usage {
-                usage::run(&cmd, globals)
-            } else {
-                run_edge_emitting(&inv.leaf, globals, Workspace::Project, false, |edge| {
-                    provenant_cli::run::stats(cmd, edge)
-                })
-            }
-        }
-        Command::Telemetry(provenant_cli::Telemetry::Trace(cmd)) => {
-            run_edge(&inv.leaf, globals, |edge| {
-                provenant_cli::run::trace(cmd, edge)
-            })
-        }
-        Command::Telemetry(provenant_cli::Telemetry::Prices {
-            command: provenant_cli::Prices::Refresh(cmd),
-        }) => run_edge(&inv.leaf, globals, |edge| {
-            provenant_cli::run::prices_refresh(cmd, edge)
-        }),
-        Command::Telemetry(provenant_cli::Telemetry::Ingest(cmd)) => usage::ingest(&cmd, globals),
-        Command::Native(cmd) => usage::native(cmd, globals),
-        Command::Telemetry(provenant_cli::Telemetry::Mileage(cmd)) => {
-            run_edge(&inv.leaf, globals, |edge| {
-                provenant_cli::mileage::run(cmd, edge)
-            })
-        }
-        Command::Telemetry(provenant_cli::Telemetry::Value(cmd)) => {
-            run_edge(&inv.leaf, globals, |edge| {
-                provenant_cli::telemetry_value::value(cmd, edge)
-            })
-        }
-        Command::Telemetry(provenant_cli::Telemetry::Cost(cmd)) => {
-            run_edge(&inv.leaf, globals, |edge| {
-                provenant_cli::telemetry_value::cost(cmd, edge)
-            })
-        }
-        Command::Steer(args) => fabric::unified_graph_steer(&args, globals, process.workers()),
-        Command::Chair(provenant_cli::Chair::Message(args)) => human_inbox(
-            provenant_cli::inbox::HumanCommand::ChairMessage(args),
-            &inv.leaf,
-            globals,
-        ),
-        Command::Telemetry(provenant_cli::Telemetry::Experiments(
-            provenant_cli::Experiments::Show(cmd),
-        )) => run_edge_workspace(&inv.leaf, globals, Workspace::Project, |edge| {
-            let stats = provenant_cli::Stats {
-                outcomes: true,
-                suggest: false,
-                pipeline: cmd.pipeline,
-                usage: false,
-                since: None,
-                until: None,
-            };
-            let mut reply = provenant_cli::run::stats(stats, edge);
-            if let Some(pipeline) = reply.result.data.get("pipeline") {
-                match provenant_telemetry::experiments::show(pipeline, &cmd.id) {
-                    Ok(report) => {
-                        reply.result.command = "telemetry experiments show".into();
-                        reply.result.data = report;
-                        reply.human = format!(
-                            "Experiment {}: {} arms; {} comparisons\n",
-                            cmd.id,
-                            reply.result.data["arms"].as_array().map_or(0, Vec::len),
-                            reply.result.data["suggestions"]
-                                .as_array()
-                                .map_or(0, Vec::len),
-                        );
-                    }
-                    Err(message) => {
-                        reply.result.status = Outcome::Invalid;
-                        reply.result.error = Some(CommandError::new(
-                            "EXPERIMENT_REPORT",
-                            message,
-                            None,
-                            "use a non-empty experiment id without ':' and rerun `provenant telemetry experiments show`",
-                        ));
-                    }
-                }
-            }
-            reply
-        }),
-        Command::Chair(cmd) => chair::run(cmd, globals),
-        Command::Console(cmd) => console::run(cmd, globals),
-        Command::Notes(cmd) => notes::run(cmd, globals),
-        Command::Quota { command } => {
-            let cmd = command.unwrap_or(provenant_cli::Quota::Show(provenant_cli::quota::Filter {
-                adapter: None,
-            }));
-            match roots::resolve(globals, Workspace::Project, Product::Required) {
-                Ok(resolved) => match live_quota(&resolved) {
-                    Ok(effects) => {
-                        let housekeeping = matches!(cmd, provenant_cli::Quota::Tick { .. });
-                        let result = provenant_cli::quota::run(
-                            cmd,
-                            globals,
-                            &resolved.roots,
-                            provenant_providers::REGISTRY,
-                            &effects,
-                            |result| crate::overflow::publish(result, globals),
-                        );
-                        if housekeeping {
-                            let _ = provenant_cli::provider_updates::schedule(
-                                &resolved.roots,
-                                &resolved.project,
-                            );
-                        }
-                        result
-                    }
-                    Err(_) => fail(
-                        &inv.leaf,
-                        Outcome::Invalid,
-                        "QUOTA_CONFIG",
-                        "invalid quota accounts configuration",
-                        "run `provenant check config --json` and correct the accounts configuration",
-                        globals,
-                    ),
-                },
-                Err(error) => fail(
-                    &inv.leaf,
-                    Outcome::Error,
-                    "ROOT",
-                    &error.to_string(),
-                    REPAIR_ROOT,
-                    globals,
-                ),
-            }
-        }
-        Command::Workflow(provenant_cli::Workflow::Session(
-            provenant_cli::workflow::Session::Handoff(args),
-        )) => handoff::run(*args, globals, process.workers()),
-        Command::Workflow(cmd) => {
-            let session_save = matches!(
-                cmd,
-                provenant_cli::Workflow::Session(provenant_cli::workflow::Session::Save { .. })
-            );
-            let workspace = if session_save {
-                Workspace::SessionSave
-            } else {
-                Workspace::Project
-            };
-            let project_warning = if session_save {
-                roots::session_project_warning(globals.project.as_deref())
-            } else {
-                None
-            };
-            match roots::resolve(globals, workspace, Product::Required) {
-                Ok(resolved) => {
-                    let state = resolved.roots.state.as_path().to_owned();
-                    let home = resolved.home.clone();
-                    let project = resolved.project.clone();
-                    provenant_cli::workflow::run(
-                        cmd,
-                        globals,
-                        &resolved.roots,
-                        &resolved.home,
-                        &resolved.project,
-                        move || {
-                            let mut warnings: Vec<String> = Vec::new();
-                            warnings.extend(project_warning);
-                            warnings.extend(bounded_session_warning(move || {
-                                disk_guard::session_warning(&state, &home, &project)
-                            }));
-                            warnings
-                        },
-                    )
-                }
-                Err(error) => {
-                    let outcome = match error {
-                        roots::RootError::SessionProjectMissing => Outcome::Refused,
-                        _ => Outcome::Error,
-                    };
-                    fail(
-                        &inv.leaf,
-                        outcome,
-                        error.code(),
-                        &error.to_string(),
-                        REPAIR_ROOT,
-                        globals,
-                    )
-                }
-            }
-        }
-        Command::Worktree(worktree) => worktrees::run(worktree, globals, process.workers()),
-        Command::Pr(command) => pr::run(command, globals, process.workers()),
-        Command::Ci(command) => ci::run(command, globals),
-        Command::Tick => tick::run(globals, process.workers()),
-        Command::Gc(command) => worktrees::run_gc(command, globals, process.workers()),
-        Command::Disk(provenant_cli::Disk::Report) => disk::run(globals),
-        Command::Cloud(command) => cloud::run(command, globals),
-        Command::Tracker(command) => tracker::run(command, globals),
-        Command::Verify {
-            tier,
-            commit,
-            affected,
-        } => verify::run(tier.as_deref(), commit.as_deref(), affected, globals),
-        Command::Build(command) => build_cmd::run(command, globals),
-        Command::Check(check) => checks::run(check, globals, process.workers()),
-        Command::Hook(hook) => hooks::run(hook, globals),
+        );
+    };
+    let invocation = provenant_cli::Call {
+        command,
+        globals,
+        leaf: inv.leaf.as_str(),
+        process,
+    };
+    match (verb.run)(&invocation) {
+        Ok(outcome) => provenant_cli::exit_status(&outcome),
+        Err(error) => fail_with_command_error(&inv.leaf, Outcome::Error, error, globals),
     }
 }
 
@@ -2192,7 +1432,12 @@ mod session_warning_tests {
 /// Run one parsed command line and count it, returning the exit status.
 // CLI reporting measures real elapsed time for operational diagnostics.
 #[allow(clippy::disallowed_methods)]
-pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
+pub fn dispatch(
+    parsed: ParseOutcome,
+    process: &dyn Process,
+    parse_warnings: Vec<provenant_records::warning::Warning>,
+) -> u8 {
+    commands::install();
     let started = std::time::Instant::now();
     // Lets attempt context match an installed release without hashing the
     // executable on the launch path; an unparsable identity stays unknown.
@@ -2210,6 +1455,16 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
         ParseOutcome::Version { globals } => ("version", globals),
     };
     let verb = verb.to_owned();
+    // One sink for the whole command: warnings raised while resolving roots or
+    // loading config reach it, and the guard restores the previous sink on exit.
+    let _command_sink = output::install_command_sink(globals.json);
+    // The CLI crate's command surfaces drain this sink through one shared seam
+    // so warnings raised while a command runs reach its envelope, not stderr.
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    provenant_cli::install_command_seam(output::command_seam());
+    // Warnings raised by Clap's value parsers happened before the sink existed;
+    // replay them now so they reach the same envelope as every other warning.
+    output::replay_warnings(parse_warnings);
     // A command admitted under an admission class runs directly under that slot:
     // it needs no roots, telemetry or result envelope, and ends with the command's exit code.
     if let ParseOutcome::Invocation(inv) = &parsed
@@ -2228,14 +1483,16 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
                     class,
                     state,
                     Some(&resolved.project),
-                    provenant_config::project_key_for(&resolved.project).as_deref(),
                 );
                 if let Err(error) =
                     provenant_os::admission::AdmissionSlots::provision(state, class, config.slots)
                 {
-                    let _ = writeln!(
-                        io::stderr().lock(),
-                        "provenant: admission slots unavailable; command may proceed without them: {error}"
+                    provenant_records::warning::warn(
+                        provenant_records::warning::Warning::new(
+                            provenant_records::warning::ADMISSION_SLOTS_UNAVAILABLE,
+                            format!("admission slots unavailable; command may proceed without them: {error}"),
+                        )
+                        .once_per_change(),
                     );
                 }
                 env.push((
@@ -2390,7 +1647,10 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
 }
 
 #[cfg(test)]
+#[allow(dead_code, unused_imports)]
 mod unpublished_result_tests {
+    use crate::output::{land_explanation, render_unpublished};
+
     #[test]
     fn landing_explanation_projects_sourced_facts_and_preserves_warnings() {
         let data = serde_json::json!({
@@ -2402,7 +1662,7 @@ mod unpublished_result_tests {
             "ci_patience_source": "--wait",
             "warnings": ["inspect the selected gate"]
         });
-        let summary = super::land_explanation(&data, &provenant_cli::Globals::default()).unwrap();
+        let (summary, step) = land_explanation(&data, &provenant_cli::Globals::default()).unwrap();
         let text = summary.lines.join("\n");
         for field in data["fields"].as_object().unwrap().values() {
             assert!(text.contains(field["source"]["layer"].as_str().unwrap()));
@@ -2410,11 +1670,12 @@ mod unpublished_result_tests {
         for warning in data["warnings"].as_array().unwrap() {
             assert!(text.contains(warning.as_str().unwrap()));
         }
-        assert!(
-            summary
-                .next
-                .as_deref()
-                .is_some_and(|next| next.ends_with("land --explain --json"))
+        assert_eq!(
+            step.argv,
+            ["provenant", "land", "--explain", "--json"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
         );
         assert_eq!(summary.omitted, 0);
     }
@@ -2436,7 +1697,7 @@ mod unpublished_result_tests {
             ..Default::default()
         };
         let (mut out, mut err) = (Vec::new(), Vec::new());
-        let rendered = super::render_unpublished(
+        let rendered = render_unpublished(
             &result, &globals, &text, false, None, limit, &mut out, &mut err,
         );
         let omitted = rendered.expect("an oversized human result is bounded, not refused");
@@ -2452,7 +1713,7 @@ mod unpublished_result_tests {
             ..Default::default()
         };
         let (mut out, mut err) = (Vec::new(), Vec::new());
-        let rendered = super::render_unpublished(
+        let rendered = render_unpublished(
             &result, &globals, &text, false, None, limit, &mut out, &mut err,
         );
         assert!(
@@ -2474,7 +1735,7 @@ mod unpublished_result_tests {
             ..Default::default()
         };
         let mut out = Vec::new();
-        super::render_unpublished(
+        render_unpublished(
             &result,
             &globals,
             "",

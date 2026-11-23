@@ -5,6 +5,7 @@ pub(crate) use crate::capture::{Frames, Pump};
 use crate::identity::Signal;
 use crate::sys::{raw_exec::OwnedPid as RawChild, reaper::Reaper, resources::ProcessBudget};
 use provenant_core::CancelToken;
+use provenant_records::warning::{PROCESS_BUDGET_PROBE_FAILED, Warning, warn};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::io::{self, Read, Write};
@@ -493,7 +494,6 @@ fn receipt_until<T: Copy + Ord>(
 /// Refuse a detached worker when the user's process table has no headroom. A
 /// failed probe does not block: the limit is unknown, and the spawn itself
 /// still fails if the table is full.
-#[allow(clippy::print_stderr)]
 fn check_process_budget(probe: io::Result<ProcessBudget>) -> Result<(), ExecError> {
     match probe {
         Ok(budget) if !budget.has_room() => Err(ExecError::ProcessBudget {
@@ -501,7 +501,10 @@ fn check_process_budget(probe: io::Result<ProcessBudget>) -> Result<(), ExecErro
             limit: budget.limit,
         }),
         Err(error) => {
-            eprintln!("detached worker: process budget probe failed: {error}");
+            warn(Warning::new(
+                PROCESS_BUDGET_PROBE_FAILED,
+                format!("detached worker: process budget probe failed: {error}"),
+            ));
             Ok(())
         }
         _ => Ok(()),

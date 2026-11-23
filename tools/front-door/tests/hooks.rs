@@ -574,9 +574,14 @@ fn check_push_policy(rig: &TestRig) -> Result {
         Some(input.as_bytes()),
     )?;
     assert_eq!(code(&output), 0);
+    // The typed emitter prints `warning: <message>`; the hook's own prefix is
+    // now part of the warning message, not a second warning prefix.
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
     assert!(
         String::from_utf8_lossy(&output.stderr.bytes)
-            .contains("pre-push: warning: conflict markers in pushed commits")
+            .contains("warning: pre-push: conflict markers in pushed commits"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr.bytes)
     );
     let config_path = rig.state.join("config.toml");
     let original = fs::read_to_string(&config_path)?;
@@ -991,13 +996,16 @@ fn hook_recovers_committed_offers_and_advances_past_an_oversized_head_page() -> 
     let context = wire["hookSpecificOutput"]["additionalContext"]
         .as_str()
         .ok_or("context")?;
+    // The one command formatter drops --state-dir when it equals what this
+    // hook's environment already resolves, so the acknowledgement stays
+    // runnable without a redundant flag. Spec: docs/specs/cli.md#one-bounded-envelope-clipped-with-a-warning
     assert!(
-        context.contains(&format!(
-            "provenant --state-dir '{}' inbox acknowledge",
-            rig.state.display()
-        )),
+        context.contains(
+            "provenant inbox acknowledge REQUEST_ID --answer ANSWER_ID --session TARGET_SESSION --operation-id UNIQUE_ACK_ID"
+        ),
         "{context}"
     );
+    assert!(!context.contains("--state-dir '"), "{context}");
     json_command(
         &rig,
         &[
