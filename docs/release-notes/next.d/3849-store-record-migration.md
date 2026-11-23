@@ -8,7 +8,8 @@
   the free-form source maps to the typed `stream` source; `route_policy` becomes
   `route`, a sandbox `restriction` or `platform` becomes a `constraint` beside
   the `host` layer and a `knob` becomes `host`, and resource-fact,
-  setting-origin and port-binding spellings become their shared layer names.
+  setting-origin and port-binding spellings become their shared layer names;
+  the `lane_ports` fact keeps its `PortSettingSource` names unchanged.
   Without this, status, resume and settlement failed to decode those rows. A
   malformed row is skipped and still fails only its own decode; a row already in
   the new shape is left byte-identical. No decoder accepts a retired spelling.

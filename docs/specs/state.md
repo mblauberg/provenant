@@ -242,8 +242,11 @@ is the one rewrite for these renames. On a writable open it rewrites each stored
 attempt record: `route_policy` becomes `route`, a sandbox `restriction` or
 `platform` becomes a `constraint` beside the `host` layer and a `knob` becomes
 `host`, a resource fact's `configuration` becomes `host` and `shipped_default`
-becomes `default`, and a port binding's `builtin` becomes `default`. The same
-migration moves v2.8.2 flat usage buckets (`uncached_input`,
+becomes `default`, and a port binding's `builtin` becomes `default`. The
+`lane_ports` fact is the exception: its origin is a `PortSettingSource`
+(`configuration`, `shipped_default`, `recorded_plan`), not a `Layer`, so those
+three names stay byte-identical. The same migration moves v2.8.2 flat usage
+buckets (`uncached_input`,
 `output_excluding_reasoning`, `cache_read`, `cache_write`, `cache_write_1h`,
 `reasoning`, including a retained session total) under `tokens` and maps the old
 free-form source to the typed `stream` source, preserving every stated number.

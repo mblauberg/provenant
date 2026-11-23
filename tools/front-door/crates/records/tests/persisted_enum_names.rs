@@ -656,7 +656,7 @@ fn attempt_record_enum_names_are_a_deliberate_contract() -> TestResult {
             ),
             (
                 "lane_ports",
-                json!({"kind": "lane_ports", "blocks": 1, "origin": "host"}),
+                json!({"kind": "lane_ports", "blocks": 1, "origin": "configuration"}),
             ),
             (
                 "pacing_reserve",
