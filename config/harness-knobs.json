@@ -15,6 +15,7 @@
       "lanes.ci_scope",
       "lanes.verification",
       "lanes.writer_dirty",
+      "lanes.steer_settled",
       "lanes.gh_budget",
       "lanes.isolation",
       "lanes.receipts",
@@ -946,6 +947,15 @@
       "reader": "tools/front-door/crates/run/src/writer_dirty.rs, tools/front-door/src/fabric/graph_execution.rs",
       "effect": "What a writer dispatch does when its worktree holds uncommitted edits. refuse (default) refuses at graph submission before any plan node spends tokens, naming the dirty paths and this setting. wip_commit preserves the edits in a local WIP commit before launch and records its id in the graph events. continue_in_place keeps the edits and warns. Credential and Git-internal roots stay a hard refusal under every value. The effective value and its source appear in the refusal and warning. Set per run with --knob lanes.writer_dirty=wip_commit or under [knobs].",
       "trade_off": "refuse protects token spend but blocks a continued draft until the operator commits or overrides; wip_commit preserves work automatically but creates a commit before the plan node; continue_in_place is cheapest but leaves the writer to respect the edits."
+    },
+    "lanes.steer_settled": {
+      "type": "enum",
+      "values": ["queue", "warn"],
+      "default": "queue",
+      "status": "wired",
+      "reader": "tools/front-door/src/fabric/unified.rs",
+      "effect": "What `provenant steer` does when its target lane has already settled. queue (the default) records the steering note as a shared note scoped to the settled graph node, so it reaches that node's next follow-up, and names the follow-up in the output. warn emits a typed warning naming this setting and its source, then exits 0 without effect. The effective value and its source appear in the output. Set per run with --knob lanes.steer_settled=warn or under [knobs].",
+      "trade_off": "queue keeps an operator instruction for work that has not finished; warn avoids writing state when the instruction is no longer actionable."
     },
     "lanes.gh_budget": {
       "type": "int",

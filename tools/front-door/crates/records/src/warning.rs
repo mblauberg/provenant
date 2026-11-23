@@ -205,6 +205,8 @@ pub const WRITER_UNPUSHED_WORK: WarningCode = WarningCode("WRITER_UNPUSHED_WORK"
 pub const PRIMARY_POSITION_UNRECORDED: WarningCode = WarningCode("PRIMARY_POSITION_UNRECORDED");
 /// A stored admission lease row was malformed and skipped.
 pub const ADMISSION_RECORD_MALFORMED: WarningCode = WarningCode("ADMISSION_RECORD_MALFORMED");
+/// A steer targeted a settled lane and was handled by the sourced setting.
+pub const STEER_TARGET_SETTLED: WarningCode = WarningCode("STEER_TARGET_SETTLED");
 
 // Event-specific codes added when the warning slices named each site.
 /// An advisory finding supplied by a subsystem was reported to the operator.
