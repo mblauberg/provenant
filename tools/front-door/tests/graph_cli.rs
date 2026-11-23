@@ -1252,7 +1252,7 @@ fn batch_item_exact_model_matches_run_model_route() -> Result {
 #[test]
 fn node_route_table_reaches_explain_with_one_full_model_spelling() -> Result {
     let rig = GraphProject::new()?;
-    let full = "opencode/opencode/glm-5.3-flash-free";
+    let full = "opencode/opencode/hy4-flash-free";
     let document = rig.document(&json!({
         "schema_version": support::GRAPH_DOCUMENT_SCHEMA_VERSION,
         "graph_id": "node-exact-model-route",
@@ -1260,7 +1260,7 @@ fn node_route_table_reaches_explain_with_one_full_model_spelling() -> Result {
             {"id":"exact","prompt":"inspect","access":"read_only",
              "route":{"adapter":"opencode","model":full}},
             {"id":"relative","prompt":"inspect","access":"read_only",
-             "route":{"adapter":"opencode","model":"opencode/glm-5.3-flash-free"}},
+             "route":{"adapter":"opencode","model":"opencode/hy4-flash-free"}},
         ]
     }))?;
     let (_, explained) = rig.run(&[

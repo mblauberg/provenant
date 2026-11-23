@@ -2659,11 +2659,11 @@ mod tests {
     #[test]
     fn relative_model_tier_tables_and_lists_lower_to_full_ids() {
         let catalogue = provenant_routing::Catalogue::bundled().unwrap();
-        let table = json!({"adapter":"opencode", "model":"opencode/glm-5.3-flash-free"});
+        let table = json!({"adapter":"opencode", "model":"opencode/hy4-flash-free"});
         let (key, route, warnings) =
             tier_route("review", &table, None, true, Some(&catalogue)).unwrap();
         assert_eq!(key, "route");
-        assert_eq!(route["model"], "opencode/opencode/glm-5.3-flash-free");
+        assert_eq!(route["model"], "opencode/opencode/hy4-flash-free");
         assert!(warnings.is_empty(), "{warnings:?}");
 
         // A bare model on a non-namespaced adapter still becomes a parseable
@@ -2683,7 +2683,7 @@ mod tests {
             tier_route("review", &json!([table]), None, true, Some(&catalogue)).unwrap();
         assert_eq!(key, "routes");
         assert_eq!(
-            routes[0]["model"], "opencode/opencode/glm-5.3-flash-free",
+            routes[0]["model"], "opencode/opencode/hy4-flash-free",
             "route list members canonicalise too"
         );
         assert!(warnings.is_empty(), "{warnings:?}");

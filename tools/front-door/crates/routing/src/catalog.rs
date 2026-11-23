@@ -2322,19 +2322,21 @@ pub fn canonical_route_model(
     if let Some(parsed) = &declared
         && parsed.adapter() == adapter
     {
-        // A full id that names this adapter is final, catalogued or not. A
-        // short form is the one exception: it names one catalogued full id.
         if catalogue.model(parsed).is_some() {
             return (model.to_owned(), None);
         }
-        let candidates = catalogue.namespaced_candidates(parsed);
-        if candidates.len() == 1 {
-            return (candidates[0].as_str().to_owned(), None);
+        // A full id that names this adapter is final, catalogued or not. On a
+        // namespaced adapter (OpenCode's PROVIDER/MODEL) an id whose model
+        // has no `/` is a short PROVIDER/NAME form instead: it resolves below
+        // through the adapter-qualified catalogue match first.
+        let namespaced =
+            provenant_records::AdapterSpec::get(adapter).is_some_and(|spec| spec.namespaced_models);
+        if !namespaced || parsed.model().contains('/') {
+            return (
+                model.to_owned(),
+                Some(catalogue_warning(adapter, model, Some(parsed), catalogue)),
+            );
         }
-        return (
-            model.to_owned(),
-            Some(catalogue_warning(adapter, model, Some(parsed), catalogue)),
-        );
     }
     let qualified_id = ModelId::parse(&qualified).ok();
     if qualified_id
@@ -3072,22 +3074,19 @@ mod tests {
     fn canonical_route_model_resolves_a_relative_opencode_id()
     -> Result<(), Box<dyn std::error::Error>> {
         let catalogue = Catalogue::bundled()?;
-        let (full, warning) = super::canonical_route_model(
+        let (full, warning) =
+            super::canonical_route_model("opencode", "opencode/hy4-flash-free", Some(&catalogue));
+        assert_eq!(full, "opencode/opencode/hy4-flash-free");
+        assert!(warning.is_none(), "{warning:?}");
+        // The provider segment selects the catalogued provider: the Go
+        // account's id is a different, equally exact, route.
+        let (go, warning) = super::canonical_route_model(
             "opencode",
-            "opencode/glm-5.3-flash-free",
+            "opencode-go/hy4-flash-free",
             Some(&catalogue),
         );
-        assert_eq!(full, "opencode/opencode/glm-5.3-flash-free");
+        assert_eq!(go, "opencode/opencode-go/hy4-flash-free");
         assert!(warning.is_none(), "{warning:?}");
-        // A short form two providers serve is ambiguous: it is kept as
-        // declared and warns, never silently bound to one provider.
-        let (kept, warning) =
-            super::canonical_route_model("opencode", "opencode/hy4-flash-free", Some(&catalogue));
-        assert_eq!(kept, "opencode/hy4-flash-free");
-        assert_eq!(
-            warning.map(|warning| warning.code),
-            Some(ROUTE_MODEL_NOT_CATALOGUED)
-        );
         // A bare relative model with a non-namespaced adapter becomes a full
         // id (parseable downstream) and warns, rather than staying bare.
         let (full, warning) =

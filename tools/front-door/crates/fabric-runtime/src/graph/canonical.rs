@@ -96,7 +96,7 @@ mod tests {
                             "id": "fallback-node",
                             "access": "read_only",
                             "prompt": "fallback",
-                            "route": {"adapter":"opencode","model":"opencode/glm-5.3-flash-free"}
+                            "route": {"adapter":"opencode","model":"opencode/hy4-flash-free"}
                         }],
                         "exports": []
                     }
@@ -116,7 +116,7 @@ mod tests {
                 .route
                 .as_ref()
                 .and_then(|route| route.model.as_deref()),
-            Some("opencode/opencode/glm-5.3-flash-free")
+            Some("opencode/opencode/hy4-flash-free")
         );
     }
 
@@ -155,7 +155,7 @@ mod tests {
                 "id": "added",
                 "access": "read_only",
                 "prompt": "added",
-                "route": {"adapter":"opencode","model":"opencode/glm-5.3-flash-free"}
+                "route": {"adapter":"opencode","model":"opencode/hy4-flash-free"}
             })],
             ..Default::default()
         };
@@ -188,7 +188,7 @@ mod tests {
                 .route
                 .as_ref()
                 .and_then(|route| route.model.as_deref()),
-            Some("opencode/opencode/glm-5.3-flash-free")
+            Some("opencode/opencode/hy4-flash-free")
         );
     }
 
