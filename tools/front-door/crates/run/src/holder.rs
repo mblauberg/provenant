@@ -7153,7 +7153,9 @@ mod writer_recovery_tests {
             )?;
             assert_eq!(report["code"], "WRITE_SCOPE");
             assert_eq!(report["strength"], "refuse");
-            assert_eq!(report["source"], "project");
+            // The strict scope comes from the request's sealed dispatch
+            // override, not a project rule.
+            assert_eq!(report["source"], "dispatch");
             assert!(
                 !report["out_of_scope_paths"]
                     .as_array()

@@ -1,46 +1,42 @@
--- Base 13: attempts carry no launch policy and no retired lane-cache grant.
+-- Base 13: attempts carry no retired lane-cache grant.
 --
--- Base 12 rows copied the resolved policy into profile.launch_policy, whose
--- boundary vocabulary changed (git_isolation and data_integrity became
--- other_work), and recorded the lane Cargo cache as a write grant after #3802
--- removed it. Rewrite only what the current types cannot read: drop the policy
--- snapshot, and filter lane_cache grants without touching another grant (a
--- grant with no source keeps its own decode failure). Rows that are already
--- valid JSON but need no change are left byte-identical. A malformed row is
--- skipped so it fails only its own decode instead of aborting every writable
--- open. Terminal rows are immutable to ordinary writers, so the trigger is
--- lifted only inside the migration transaction.
+-- Base 12 rows recorded the lane Cargo cache as a write grant after #3802
+-- removed it. Rewrite only what the current types cannot read: filter
+-- lane_cache grants without touching another grant (a grant with no source
+-- keeps its own decode failure). The retired profile.launch_policy snapshot is
+-- left in place: the current type decodes it as an extra field and the sealed
+-- request keeps the authoritative copy. The grant walk is total for any valid
+-- JSON: only an array is walked and only object elements are inspected. Rows
+-- that are already valid JSON but need no change are left byte-identical. A
+-- malformed row is skipped so it fails only its own decode instead of aborting
+-- every writable open. Terminal rows are immutable to ordinary writers, so the
+-- trigger is lifted only inside the migration transaction.
 DROP TRIGGER IF EXISTS immutable_terminal_update;
 UPDATE attempts
 SET record = CAST(
-    CASE
-        WHEN EXISTS (
-            SELECT 1
+    json_set(
+        CAST(record AS TEXT),
+        '$.write_grants',
+        json(COALESCE((
+            SELECT json_group_array(json(json_each.value))
             FROM json_each(CAST(record AS TEXT), '$.write_grants')
-            WHERE json_extract(value, '$.source') IS 'lane_cache'
-        )
-        THEN json_remove(
-            json_set(
-                CAST(record AS TEXT),
-                '$.write_grants',
-                json((
-                    SELECT json_group_array(json(value))
-                    FROM json_each(CAST(record AS TEXT), '$.write_grants')
-                    WHERE json_extract(value, '$.source') IS NOT 'lane_cache'
-                ))
-            ),
-            '$.profile.launch_policy'
-        )
-        ELSE json_remove(CAST(record AS TEXT), '$.profile.launch_policy')
-    END AS BLOB)
+            WHERE CASE WHEN json_each.type = 'object'
+                       THEN json_extract(json_each.value, '$.source') IS NOT 'lane_cache'
+                       ELSE 0
+                       END
+        ), '[]'))
+    ) AS BLOB)
 WHERE record IS NOT NULL
   AND CASE
       WHEN json_valid(CAST(record AS TEXT)) THEN
-          json_type(CAST(record AS TEXT), '$.profile.launch_policy') IS NOT NULL
-          OR EXISTS (
+          json_type(CAST(record AS TEXT), '$.write_grants') IS 'array'
+          AND EXISTS (
               SELECT 1
               FROM json_each(CAST(record AS TEXT), '$.write_grants')
-              WHERE json_extract(value, '$.source') IS 'lane_cache'
+              WHERE CASE WHEN json_each.type = 'object'
+                         THEN json_extract(json_each.value, '$.source') IS 'lane_cache'
+                         ELSE 0
+                         END
           )
       ELSE 0
       END;

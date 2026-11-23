@@ -104,9 +104,10 @@ then records the new base; a second open does not run it again. A read-only open
 of an older base refuses and names the writable open that migrates it. A binary
 that predates the new base refuses the store, so the migration is the one
 crossing and there is no compatibility path afterwards. Owners keep the SQL
-narrow: rewrite only the rows and fields the new types cannot read. A row whose
-stored bytes are not valid JSON is skipped by the rewrite and fails only its own
-decode, because one damaged row must not block every writable open.
+narrow: rewrite only the rows and fields the new types cannot read, and make
+every walk total for any valid JSON. A row whose stored bytes are not valid JSON
+is skipped by the rewrite and fails only its own decode, because one damaged row
+must not block every writable open.
 - Why: additive changes preserve stored state, while a single declared rewrite
   lets a vocabulary change reach existing rows without a permanent decoder
   shim.

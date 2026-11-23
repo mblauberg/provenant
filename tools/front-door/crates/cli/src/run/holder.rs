@@ -1430,6 +1430,34 @@ mod tests {
         Ok(())
     }
 
+    // Spec: docs/specs/fabric.md#bounded-graphs-and-route-fallback
+    #[test]
+    fn recovery_stream_without_host_context_applies_the_sealed_dispatch_override()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_providers::Adapter;
+        use provenant_records::policy::{Source, Strength};
+        let dir = tempfile::tempdir()?;
+        let (_, mut child) = child_fixture(dir.path(), &SystemClock::new())?;
+        child
+            .request
+            .task
+            .profile
+            .policy_overrides
+            .insert("STREAM_IDENTITY_MISMATCH".into(), Strength::Refuse);
+        let recovered = super::super::settlement_policy(None, Some(&child.request.task));
+        let stream = provenant_providers::codex::Codex
+            .stream_for_continuation("session", "model", &recovered)?;
+        assert_eq!(
+            stream.policy.rule("STREAM_IDENTITY_MISMATCH").rule.strength,
+            Strength::Refuse
+        );
+        assert_eq!(
+            stream.policy.rule("STREAM_IDENTITY_MISMATCH").source,
+            Source::Dispatch
+        );
+        Ok(())
+    }
+
     fn child_fixture(
         base: &Path,
         clock: &SystemClock,

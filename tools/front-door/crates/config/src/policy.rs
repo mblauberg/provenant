@@ -71,8 +71,9 @@ impl Settings {
         policy
     }
 }
-/// Resolve one immutable launch snapshot. Invalid optional policy settings warn
-/// and retain compiled defaults, without changing the boundaries or operation errors.
+/// Resolve current host and project policy overlaid with the request's sealed
+/// dispatch overrides. Invalid optional policy settings warn and retain compiled
+/// defaults, without changing the boundaries or operation errors.
 pub fn read(state: &Path, project: &str, dispatch: &BTreeMap<String, Strength>) -> Policy {
     read_reporting(state, project, dispatch, |error| {
         use std::io::Write;

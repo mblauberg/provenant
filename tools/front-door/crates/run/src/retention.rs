@@ -2355,7 +2355,8 @@ mod tests {
     }
 
     #[test]
-    fn a_base_twelve_attempt_with_retired_names_and_a_lane_cache_grant_migrates() -> TestResult {
+    fn a_base_twelve_attempt_keeps_its_retired_policy_as_an_extra_and_drops_a_lane_cache_grant()
+    -> TestResult {
         let (_temp, context, store, input, _attempt) = seeded()?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
@@ -2425,7 +2426,16 @@ mod tests {
         let store = RunStore::open(&context, &call)?;
         assert_eq!(provenant_sqlite::stored_version(&store.db)?, 13);
         let record = store.record(input.attempt_id, &call)?;
-        assert!(!record.profile.extra.contains_key("launch_policy"));
+        // The current type reads the retired snapshot as an extra field, so
+        // the migration leaves it in place; the sealed request keeps the
+        // authoritative copy.
+        let policy = record
+            .profile
+            .extra
+            .get("launch_policy")
+            .ok_or("retained launch policy")?;
+        assert_eq!(policy["rules"][0]["boundary"], "git_isolation");
+        assert_eq!(policy["rules"][1]["boundary"], "data_integrity");
         assert_eq!(record.write_grants.len(), 1);
         assert!(matches!(
             record.write_grants[0].source,
@@ -2456,6 +2466,19 @@ mod tests {
              WHEN OLD.terminal=1
              BEGIN SELECT RAISE(ABORT,'terminal attempt is immutable'); END;
              PRAGMA user_version=12;",
+        )?;
+        Ok(())
+    }
+
+    fn insert_base_twelve_record(
+        store: &RunStore,
+        source: AttemptId,
+        id: AttemptId,
+        record: &serde_json::Value,
+    ) -> TestResult {
+        store.db.execute(
+            "INSERT INTO attempts (id,project,graph,node,attempt,digest,actor,operation,number,operation_record,revision,terminal,record) SELECT ?1,project,graph,node,attempt+1000,digest,actor,operation,number+1,operation_record,revision,1,?2 FROM attempts WHERE id=?3",
+            rusqlite::params![id.to_string(), serde_json::to_vec(record)?, source.to_string()],
         )?;
         Ok(())
     }
@@ -2511,12 +2534,11 @@ mod tests {
 
         let migrated = stored_record_after_migration(&context, &call, input.attempt_id)?;
         assert!(migrated.get("write_grants").is_none());
-        assert!(
-            migrated["profile"]
-                .as_object()
-                .ok_or("profile")?
-                .get("launch_policy")
-                .is_none()
+        // The retired snapshot decodes as an extra field, so the rewrite leaves
+        // it byte-identical rather than treating it as unreadable.
+        assert_eq!(
+            migrated["profile"]["launch_policy"],
+            serde_json::json!({"rules": []})
         );
         assert_eq!(
             migrated["future_attempt_field"],
@@ -2587,6 +2609,18 @@ mod tests {
             "INSERT INTO attempts (id,project,graph,node,attempt,digest,actor,operation,number,operation_record,revision,terminal,record) SELECT ?1,project,graph,node,attempt+1000,digest,actor,operation,number+1,operation_record,revision,1,?2 FROM attempts WHERE id=?3",
             rusqlite::params![broken.to_string(), b"{malformed JSON".as_slice(), input.attempt_id.to_string()],
         )?;
+        // Valid JSON with the wrong shape must also skip the grant walk instead
+        // of aborting the migration.
+        let mut shaped = base_twelve_record(&store, input.attempt_id)?;
+        shaped["schema_version"] = 2.into();
+        let string_grants = AttemptId::from_bytes([10; 16]);
+        let mut string_record = shaped.clone();
+        string_record["write_grants"] = serde_json::json!("abc");
+        insert_base_twelve_record(&store, input.attempt_id, string_grants, &string_record)?;
+        let array_grants = AttemptId::from_bytes([11; 16]);
+        let mut array_record = shaped;
+        array_record["write_grants"] = serde_json::json!(["abc"]);
+        insert_base_twelve_record(&store, input.attempt_id, array_grants, &array_record)?;
         store.db.execute_batch("PRAGMA user_version=12;")?;
         drop(store);
 
@@ -2594,6 +2628,8 @@ mod tests {
         assert_eq!(provenant_sqlite::stored_version(&store.db)?, 13);
         assert!(store.record(input.attempt_id, &call).is_ok());
         assert!(store.record(broken, &call).is_err());
+        assert!(store.record(string_grants, &call).is_err());
+        assert!(store.record(array_grants, &call).is_err());
         Ok(())
     }
 
