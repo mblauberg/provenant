@@ -272,8 +272,8 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
         "{}",
         String::from_utf8_lossy(&opened.stdout.bytes)
     );
-    let warnings = warnings(&opened)?;
-    assert!(warnings.iter().any(|warning| {
+    let opened_warnings = warnings(&opened)?;
+    assert!(opened_warnings.iter().any(|warning| {
         warning["code"] == "PR_CONTRIBUTION_BINDING_FAILED"
             && warning["repair"]
                 .as_str()

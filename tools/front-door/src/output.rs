@@ -877,7 +877,7 @@ mod tests {
             full: true,
             ..Default::default()
         };
-        let sink = install_command_sink(false);
+        let _sink = install_command_sink(false);
         let mut human_out = Vec::new();
         let mut err = Vec::new();
         emit_with_writers(

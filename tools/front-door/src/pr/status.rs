@@ -1294,19 +1294,17 @@ fn summarise(
         })
         .collect();
     let quiet = lines.len() - action.len();
-    let next = match action.first() {
+    let command = match action.first() {
         Some(line) if line.class() == "failing" => {
-            Some(format!("provenant ci failures pr {}", line.number))
+            format!("provenant ci failures pr {}", line.number)
         }
-        Some(line) if line.class() == "pending" => {
-            Some(format!("provenant wait --pr {}", line.number))
-        }
-        Some(line) => Some(format!("provenant pr status {} --full", line.number)),
+        Some(line) if line.class() == "pending" => format!("provenant wait --pr {}", line.number),
+        Some(line) => format!("provenant pr status {} --full", line.number),
         None => lines
             .iter()
             .find(|line| line.display_class() == "ready")
             .map(|line| format!("provenant land {} --wait", line.number))
-            .or_else(|| Some("provenant status".to_owned())),
+            .unwrap_or_else(|| "provenant status".to_owned()),
     };
     let mut headline = format!(
         "{} PRs: {}",
@@ -1316,7 +1314,6 @@ fn summarise(
     if quiet > 0 && !action.is_empty() {
         headline.push_str(&format!(" ({quiet} need nothing)"));
     }
-    let command = next.expect("every PR view offers a next command");
     let why = match command.as_str() {
         command if command.starts_with("provenant ci failures") => "inspect the failing checks",
         command if command.starts_with("provenant wait") => "wait for the pending PR",

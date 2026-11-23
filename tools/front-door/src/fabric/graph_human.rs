@@ -575,9 +575,8 @@ mod spec_chair_tests {
                     "spec_concerns":[],"spec_concern_count":2,"result":{"path":"/attempt/result.md"}
                 }}
             ]}
-        }))
-        .lines
-        .join("\n");
+        }));
+        let clipped = clipped.lines.join("\n");
         assert!(clipped.contains("2 spec concerns") && clipped.contains("0 retained"));
         assert!(clipped.contains("/attempt/result.md"));
     }

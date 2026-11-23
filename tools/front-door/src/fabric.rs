@@ -10,10 +10,10 @@ mod refusal_detail;
 mod review_subject;
 mod unified;
 pub(crate) use unified::{
-    GraphCommand, check_targets, command_fail, final_status_rows, graph_listing, read_lane_graph,
-    read_status_rows, status_line, superseded_notice, superseding_handle, unified_graph_command,
-    unified_graph_output, unified_graph_result, unified_graph_steer, unified_graph_trace,
-    unsettled_graphs,
+    GraphCommand, check_targets, command_fail, final_status_rows, graph_listing, graph_status_next,
+    read_lane_graph, read_status_rows, status_line, superseded_notice, superseding_handle,
+    unified_graph_command, unified_graph_output, unified_graph_result, unified_graph_steer,
+    unified_graph_trace, unsettled_graphs,
 };
 pub(crate) mod gc_cleanup;
 pub(crate) mod git_facts;

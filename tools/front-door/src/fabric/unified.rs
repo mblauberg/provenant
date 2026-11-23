@@ -654,7 +654,7 @@ pub(crate) fn graph_status_next(
     let lines: Vec<_> = if nodes.is_empty() {
         rows.iter().filter(|row| row["kind"] == "attempt").collect()
     } else {
-        nodes.iter().map(|node| *node).collect()
+        nodes.iter().copied().collect()
     };
     let command = graphs
         .iter()
@@ -1658,6 +1658,15 @@ fn lane_graph_read(input: Value) -> Result<Value, FacadeError> {
     .map_err(super::interface::relay_error)
 }
 
+/// What a graph command reports before it is emitted: data, human text, the
+/// owner's next steps and a superseded-name step that replaces them.
+type GraphCommandReply = (
+    Value,
+    String,
+    Vec<provenant_records::command_result::NextStep>,
+    Option<provenant_records::command_result::NextStep>,
+);
+
 /// Read or control graph targets. Every target resolves before any is read
 /// or changed, so one unknown target changes nothing. Inside a lane the host
 /// resolves the target, and an empty list reads the lane's own graph.
@@ -1672,10 +1681,7 @@ pub(crate) fn unified_graph_command(
         GraphCommand::Stop { .. } => "stop",
         GraphCommand::Retry { .. } => "retry",
     };
-    let result = (|| -> Result<
-        (Value, String, Vec<provenant_records::command_result::NextStep>, Option<provenant_records::command_result::NextStep>),
-        Box<dyn std::error::Error>,
-    > {
+    let result = (|| -> Result<GraphCommandReply, Box<dyn std::error::Error>> {
         // A lane reads through the host, which holds the configuration.
         let lane_read = matches!(command, GraphCommand::Status) && provenant_cli::fabric::in_lane();
         let factory = if lane_read {
