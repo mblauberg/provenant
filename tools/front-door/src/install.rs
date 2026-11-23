@@ -4130,6 +4130,10 @@ mod tests {
         Ok(())
     }
 
+    #[allow(
+        dead_code,
+        reason = "the custom worktree driver omits libtest functions"
+    )]
     fn fixture_upgrade_host(host: &str, success: bool, output: &str) -> super::HostUpgrade {
         super::HostUpgrade {
             host: host.into(),
@@ -4140,6 +4144,10 @@ mod tests {
         }
     }
 
+    #[allow(
+        dead_code,
+        reason = "the custom worktree driver omits libtest functions"
+    )]
     fn fixture_smoke_host(success: bool, output: &str) -> super::HostUpgrade {
         super::HostUpgrade {
             host: "smoke".into(),
