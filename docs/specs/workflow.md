@@ -9,6 +9,17 @@ Workflow checks review coverage and keeps receipts, session checkpoints and
 chair logs. It grants no merge, install or release authority. Paths are
 relative to `tools/front-door/`.
 
+## One accountable chair
+
+Coordination has one accountable chair. Lanes, native sub-agents and nested
+chairs narrow authority from it and never become a second owner of the same
+work. The [orchestrate skill](../../skills/orchestrate/SKILL.md#one-accountable-chair)
+owns the rule; this spec records only the chair identity that receipts,
+checkpoints and delivery readers depend on.
+- Why: acceptance, merge and release authority must name one owner, or
+  concurrent agents can each believe they may land the same work.
+- Owner: `skills/orchestrate/SKILL.md`
+
 ## Findings need one disposition each
 
 Every selected upstream finding needs exactly one disposition and reason; an

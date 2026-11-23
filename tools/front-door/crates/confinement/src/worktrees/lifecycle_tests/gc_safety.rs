@@ -163,8 +163,8 @@ fn removal_preserves_staged_attempt_index_when_native_index_is_clean() -> Result
     let test = TestContext::new(&fixture)?;
     let context = test.context();
     let lane = gc_merged_worktree(&test, &context, "private-index")?;
-    let branch = lane.branch.as_deref().ok_or("fixture lane has no branch")?;
-    let branch_ref = format!("refs/heads/{branch}");
+    // `WorktreeInfo::branch` is already the full ref.
+    let branch_ref = lane.branch.clone().ok_or("fixture lane has no branch")?;
     let verified = verify_worktree(context.repo, &lane.path)?;
     let slot = writer_directory(context.project_state, &lane.path)?;
     let scope = provenant_records::custody::Scope {

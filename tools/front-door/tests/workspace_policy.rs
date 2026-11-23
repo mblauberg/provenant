@@ -88,7 +88,8 @@ const LAYERS: &[(&str, &[&str])] = &[
     ("fabric-store", &["core", "records", "os", "sqlite"]),
     (
         "fabric-runtime",
-        // Graph patches use confinement scanners.
+        // Graph patches use confinement scanners. Template tests resolve
+        // smoke tiers against the provider registry routing already reads.
         &[
             "core",
             "records",
@@ -98,6 +99,7 @@ const LAYERS: &[(&str, &[&str])] = &[
             "confinement",
             "fabric-store",
             "routing",
+            "providers",
         ],
     ),
     // Chair logs use the lower-level SQLite helper for their durable receipt store.

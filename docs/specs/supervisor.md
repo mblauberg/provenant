@@ -484,6 +484,12 @@ Pruning proves subsumption or landing from declared retained-ref,
 tree-equivalent, integration or forge evidence, and revalidates it at mutation.
 Reference deletion needs landed evidence and the expected old OID; worktree-only
 retirement preserves the branch, and retained-ref subsumption always chooses it.
+One retirement scope names the default branch from the fetched upstream,
+`origin/HEAD` or `main`, and every checked-out branch. No GC path retires or
+modifies the default branch: the scope protects local and remote ledger records
+even when no target was fetched, and a linked worktree checked out on the
+default branch is never retired. Excluded branches report as Retained with a
+reason instead of dropping out of the preview.
 GC keeps anything in doubt: a held writer lock keeps a cache, and foreign,
 detached or idle worktree collection needs the declared retention policy and
 complete current custody, run and process evidence. Shallow history, conflicted

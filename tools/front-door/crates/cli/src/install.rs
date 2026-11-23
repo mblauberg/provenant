@@ -55,7 +55,10 @@ pub struct Upgrade {
     /// Run the bundled smoke graph after upgrading
     #[arg(long)]
     pub verify: bool,
-    /// Show the smoke graph without upgrading or launching it (requires --verify)
+    /// Run only the installed binary's post-upgrade verification (installer use only)
+    #[arg(long, hide = true, requires = "verify")]
+    pub verify_only: bool,
+    /// Show the smoke graph the running binary would launch, without upgrading (requires --verify)
     #[arg(long, requires = "verify")]
     pub dry_run: bool,
     /// Place the smoke graph on this Fabric peer

@@ -39,6 +39,7 @@ pub mod provider_updates;
 mod render;
 pub mod telemetry_args;
 pub mod telemetry_value;
+use clap::builder::ArgExt;
 use clap::{Arg, ArgAction, ArgGroup, CommandFactory, FromArgMatches};
 pub use grammar::*;
 use provenant_records::{HelpArgument, HelpCatalogue, HelpCommand, HelpErrorCode, HelpGroup};
@@ -208,35 +209,26 @@ fn parse_with_models(
         };
     }
     if let Command::Help { command, all } = &invocation.command {
-        let scope = format!("provenant {}", command.join(" "));
-        let mut expanded = if *all || (!command.is_empty() && !is_core_scope(&model, &scope)) {
+        let requested = format!("provenant {}", command.join(" "));
+        let mut expanded = if *all || (!command.is_empty() && !is_core_scope(&model, &requested)) {
             models(false, true)
         } else {
             models(false, false)
         };
-        let mut selected = &mut expanded;
-        let mut scope = String::from("provenant");
-        for component in command {
-            selected = match selected.find_subcommand_mut(component) {
-                Some(child) if !child.is_hide_set() || scope == "provenant quota" => {
-                    *child = child.clone().hide(false);
-                    scope = format!("{scope} {}", child.get_name());
-                    child
-                }
-                _ => {
+        let (text, scope) = if command.is_empty() && !all {
+            (core_help(&model), String::from("provenant"))
+        } else if command.is_empty() && *all {
+            (all_command_help(&expanded), String::from("provenant"))
+        } else {
+            match resolved_help_text(command, &mut expanded) {
+                Ok(resolved) => resolved,
+                Err(error) => {
                     return ParseOutcome::Invalid {
-                        error: CliError::invalid("unknown help command"),
+                        error,
                         globals: invocation.globals,
                     };
                 }
-            };
-        }
-        let text = if command.is_empty() && !all {
-            core_help(&model)
-        } else if command.is_empty() && *all {
-            all_command_help(selected)
-        } else {
-            selected.render_long_help().to_string()
+            }
         };
         let text = if !command.is_empty() && !all && is_core_scope(&model, &scope) {
             append_child_index(text, &scope)
@@ -646,6 +638,45 @@ fn core_help(model: &clap::Command) -> String {
     );
     text
 }
+/// Tags an argument added as a global option, so the all-help view can hide
+/// inherited copies without hiding a local flag that shares its id, such as
+/// `build reset --full`.
+#[derive(Clone, Debug)]
+struct GlobalOption;
+impl ArgExt for GlobalOption {}
+/// A display-only copy of the grammar for `help --all`. Global options belong
+/// to the root alone, so they render once at the top instead of repeating in
+/// every command's usage block. Parsing still uses the unmodified model.
+fn help_all_model(model: &clap::Command) -> clap::Command {
+    fn strip(mut command: clap::Command) -> clap::Command {
+        let inherited: Vec<_> = command
+            .get_arguments()
+            .filter(|arg| arg.get::<GlobalOption>().is_some())
+            .map(|arg| arg.get_id().clone())
+            .collect();
+        for id in inherited {
+            command = command.mut_arg(id, |arg| arg.hide(true));
+        }
+        let children: Vec<_> = command.get_subcommands().cloned().collect();
+        for child in children {
+            let name = child.get_name().to_owned();
+            command = command.mut_subcommand(name.as_str(), |_| strip(child));
+        }
+        command
+    }
+    let mut display = model.clone();
+    // Keep the root's own listing, but stop clap from propagating --help and
+    // --version into subcommands on the next build.
+    for id in ["help", "version"] {
+        display = display.mut_arg(id, |arg| arg.global(false));
+    }
+    let children: Vec<_> = display.get_subcommands().cloned().collect();
+    for child in children {
+        let name = child.get_name().to_owned();
+        display = display.mut_subcommand(name.as_str(), |_| strip(child));
+    }
+    display
+}
 fn all_command_help(model: &clap::Command) -> String {
     fn append(command: &clap::Command, path: String, text: &mut String) {
         if command.is_hide_set() {
@@ -665,8 +696,9 @@ fn all_command_help(model: &clap::Command) -> String {
             append(child, format!("{path} {}", child.get_name()), text);
         }
     }
+    let display = help_all_model(model);
     let mut text = String::new();
-    append(model, model.get_name().to_owned(), &mut text);
+    append(&display, display.get_name().to_owned(), &mut text);
     text.push_str("\nFor focused command help, run provenant help COMMAND.\n");
     text
 }
@@ -688,9 +720,6 @@ fn build_model(passive: bool, advanced: bool) -> clap::Command {
             format!("{parent} {}", command.get_name())
         };
         for global in globals {
-            if path == "provenant config path" && global.get_id() == "project" {
-                continue;
-            }
             if command
                 .get_arguments()
                 .any(|arg| arg.get_id() == global.get_id())
@@ -749,7 +778,7 @@ fn build_model(passive: bool, advanced: bool) -> clap::Command {
             )
         })
         .cloned()
-        .map(|arg| arg.global(false))
+        .map(|arg| arg.global(false).add(GlobalOption))
         .collect();
     let mut command = configure(base, &globals, "", advanced)
         .arg(
@@ -757,6 +786,7 @@ fn build_model(passive: bool, advanced: bool) -> clap::Command {
                 .long("help")
                 .help("Print help")
                 .global(true)
+                .add(GlobalOption)
                 .action(if passive {
                     ArgAction::SetTrue
                 } else {
@@ -768,6 +798,7 @@ fn build_model(passive: bool, advanced: bool) -> clap::Command {
                 .long("version")
                 .help("Print version")
                 .global(true)
+                .add(GlobalOption)
                 .action(if passive {
                     ArgAction::SetTrue
                 } else {
@@ -870,6 +901,53 @@ fn expanded_scoped_help(scope: &str, mut model: clap::Command) -> (String, HelpC
     let text = selected.render_long_help().to_string();
     let catalogue = scoped(catalog(&model), scope);
     (text, catalogue)
+}
+/// Render the long help of the command `path` names against `model`, with the
+/// scope the walk resolved. Words after a command that takes positional
+/// arguments are its arguments (`help run implement` is `run`'s help). Any
+/// other unmatched or hidden component is an unknown help command, and the
+/// error names the valid children at that level. Explicit quota maintenance
+/// stays addressable even though the compact listing hides it.
+fn resolved_help_text(
+    path: &[String],
+    model: &mut clap::Command,
+) -> Result<(String, String), CliError> {
+    let mut scope = String::from("provenant");
+    // Resolve the path read-only first: a mutable walk that can stop early
+    // keeps its last borrow alive past the loop.
+    let mut names = Vec::new();
+    let mut current: &clap::Command = model;
+    for component in path {
+        let visible = current
+            .find_subcommand(component)
+            .filter(|child| !child.is_hide_set() || scope == "provenant quota");
+        let Some(child) = visible else {
+            if current.get_positionals().next().is_some() {
+                break;
+            }
+            let children: Vec<_> = current
+                .get_subcommands()
+                .filter(|child| !child.is_hide_set())
+                .map(clap::Command::get_name)
+                .collect();
+            return Err(CliError::invalid(format!(
+                "unknown help command `{component}` under `{scope}`; commands: {}",
+                children.join(", ")
+            )));
+        };
+        scope = format!("{scope} {}", child.get_name());
+        names.push(child.get_name().to_string());
+        current = child;
+    }
+    let mut selected = model;
+    for name in &names {
+        let Some(child) = selected.find_subcommand_mut(name) else {
+            return Ok((String::new(), scope));
+        };
+        *child = child.clone().hide(false);
+        selected = child;
+    }
+    Ok((selected.render_long_help().to_string(), scope))
 }
 // Explicit help can address quota maintenance without advertising it in the
 // default catalogue. Only the validated scope is revealed, never its siblings.
@@ -1485,6 +1563,11 @@ mod tests {
                 .get_arguments()
                 .filter(|argument| argument.is_hide_set())
             {
+                // Globals are hidden here only for the all-help view; their
+                // names may still occur in prose such as wait's JSON contract.
+                if argument.get::<GlobalOption>().is_some() {
+                    continue;
+                }
                 let Some(long) = argument.get_long() else {
                     continue;
                 };
@@ -1505,12 +1588,18 @@ mod tests {
         }
 
         let model = expanded_model();
+        let display = help_all_model(&model);
         let parse = reusable_parser();
         let ParseOutcome::Help { text: all_help, .. } = parsed(&["help", "--all"]) else {
             panic!("expected help --all")
         };
         let mut paths = Vec::new();
-        check(&model, model.get_name().to_owned(), &all_help, &mut paths);
+        check(
+            &display,
+            display.get_name().to_owned(),
+            &all_help,
+            &mut paths,
+        );
         for path in paths {
             let args = path
                 .split_whitespace()
@@ -1552,6 +1641,105 @@ mod tests {
             }
         }
     }
+    #[test]
+    // Spec: docs/specs/cli.md#parsing
+    fn help_tree_resolves_nested_paths_and_lists_globals_once() {
+        // A fully resolved nested path shows that command's scoped help.
+        let ParseOutcome::Help { catalog, .. } = parsed(&["help", "config", "path"]) else {
+            panic!("nested help")
+        };
+        assert!(
+            catalog
+                .commands
+                .iter()
+                .any(|command| command.command == "provenant config path")
+        );
+
+        // A template name is not a subcommand, so the path stops at `run`.
+        let ParseOutcome::Help { catalog, .. } = parsed(&["help", "run", "implement"]) else {
+            panic!("run help")
+        };
+        assert!(
+            catalog
+                .commands
+                .iter()
+                .any(|command| command.command == "provenant run")
+        );
+        assert!(
+            !catalog
+                .commands
+                .iter()
+                .any(|command| command.command == "provenant config")
+        );
+
+        // An unknown component is refused, and the error names the valid
+        // children at the deepest matched level from the same command model.
+        let ParseOutcome::Invalid { error, .. } = parsed(&["help", "config", "no-such-command"])
+        else {
+            panic!("unknown help path")
+        };
+        let text = error.to_string();
+        let model = expanded_model();
+        let children: Vec<_> = model
+            .find_subcommand("config")
+            .unwrap()
+            .get_subcommands()
+            .filter(|child| !child.is_hide_set())
+            .map(|child| child.get_name().to_owned())
+            .collect();
+        assert!(!children.is_empty());
+        for child in children {
+            assert!(text.contains(child.as_str()), "missing {child} from {text}");
+        }
+
+        // Each global option is declared once, not repeated per usage block.
+        // `build reset --full` is a separate local flag with the same spelling.
+        let ParseOutcome::Help { text: all, .. } = parsed(&["help", "--all"]) else {
+            panic!("help --all")
+        };
+        for (flag, expected) in [
+            ("--json", 1),
+            ("--full", 2),
+            ("--state-dir", 1),
+            ("--project", 1),
+        ] {
+            let lines: Vec<_> = all
+                .lines()
+                .filter(|line| line.split_whitespace().next() == Some(flag))
+                .collect();
+            assert_eq!(
+                lines.len(),
+                expected,
+                "{flag} appears {} times in help --all: {lines:#?}",
+                lines.len()
+            );
+        }
+    }
+
+    #[test]
+    // Spec: docs/specs/cli.md#parsing
+    fn config_path_takes_an_optional_directory_without_a_project_flag() {
+        let Command::Config(Config::Path { dir }) = valid(&["config", "path", "."]).command else {
+            panic!("config path .")
+        };
+        assert_eq!(dir.as_deref(), Some(std::path::Path::new(".")));
+        let Command::Config(Config::Path { dir }) = valid(&["config", "path"]).command else {
+            panic!("config path")
+        };
+        assert_eq!(dir, None);
+        // The deleted bool has no alias: --project is the global directory option.
+        invalid(&["config", "path", "--project"]);
+        let invocation = valid(&["config", "path", "--project", "."]);
+        let Command::Config(Config::Path { dir }) = invocation.command else {
+            panic!("config path --project .")
+        };
+        assert_eq!(dir, None);
+        assert_eq!(
+            invocation.globals.project.as_deref(),
+            Some(std::path::Path::new("."))
+        );
+    }
+
     #[test]
     fn catalogue_paths_exist_in_command_model() {
         let model = expanded_model();

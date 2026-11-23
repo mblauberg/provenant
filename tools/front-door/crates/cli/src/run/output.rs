@@ -24,6 +24,25 @@ pub fn render_output(command: Output, read: Result<(Value, String), Fail>) -> Re
     let mut out = reply(
         "output",
         read.and_then(|(mut data, mut text)| {
+            // A live attempt has no decoded result artifact yet. When nothing
+            // is returned the caller labels the page as no-result-yet: an empty
+            // page is not evidence that the attempt produced nothing.
+            if headed
+                && let Some(state) = data["state"].as_str()
+                && matches!(state, "queued" | "starting" | "running" | "settling")
+            {
+                let state = state.to_owned();
+                data["status"] = json!(state);
+                if data["length"].as_u64().unwrap_or(0) == 0 {
+                    data["result"] = json!("pending");
+                    text = format!(
+                        "{state}\nno result yet: the result is not sealed while the attempt is {state}\n{text}"
+                    );
+                } else {
+                    data["result"] = json!("partial");
+                    text = format!("{state}\npartial result\n{text}");
+                }
+            }
             if let Some(lines) = receipt_tail {
                 text =
                     text[tail_start(text.as_bytes(), lines.min(limits::TAIL_LINES))..].to_owned();
@@ -215,38 +234,31 @@ pub(super) fn output_summary(
             ("base", "writer_base"),
             ("committed head", "writer_head"),
             ("publication", "publication"),
+            ("residual tree state", "residual_tree"),
         ] {
-            lines.push(format!(
-                "{label}: {}",
-                data[key].as_str().unwrap_or("unavailable")
-            ));
-        }
-        lines.push(format!(
-            "residual tree state: {}",
-            data["residual_tree"].as_str().unwrap_or("unavailable")
-        ));
-    }
-    if headed && let Some(files) = data.get("changed_files") {
-        lines.push(match files.as_array() {
-            Some(paths) => {
-                let total = data["changed_files_total"]
-                    .as_u64()
-                    .map_or(paths.len(), |total| total as usize);
-                let more = total.saturating_sub(paths.len());
-                let listed = paths
-                    .iter()
-                    .filter_map(structured_path_text)
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let more = if more > 0 {
-                    format!(" (+{more} more)")
-                } else {
-                    String::new()
-                };
-                format!("changed files ({total}): {listed}{more}")
+            // A present key with a null value is absent evidence, not a line
+            // saying so: only real values render a header.
+            if let Some(value) = data[key].as_str() {
+                lines.push(format!("{label}: {value}"));
             }
-            None => "changed files: unavailable".into(),
-        });
+        }
+    }
+    if headed && let Some(paths) = data.get("changed_files").and_then(Value::as_array) {
+        let total = data["changed_files_total"]
+            .as_u64()
+            .map_or(paths.len(), |total| total as usize);
+        let more = total.saturating_sub(paths.len());
+        let listed = paths
+            .iter()
+            .filter_map(structured_path_text)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let more = if more > 0 {
+            format!(" (+{more} more)")
+        } else {
+            String::new()
+        };
+        lines.push(format!("changed files ({total}): {listed}{more}"));
     }
     // An empty result uses its safe diagnostic as human text. The settlement
     // header already contains that detail, so render it only once.
@@ -1062,7 +1074,7 @@ mod tests {
     }
 
     use super::{
-        add_planner_fallback, fallback_reason_for_graph, output_summary,
+        Status, add_planner_fallback, fallback_reason_for_graph, output_summary,
         provider_error_from_result, provider_error_from_stderr,
     };
     use serde_json::json;
@@ -1102,6 +1114,81 @@ mod tests {
         }
     }
 
+    // Spec: docs/specs/cli.md#output-references-and-bounded-tails
+    #[test]
+    fn a_running_result_envelope_is_ok_and_labels_partial_or_pending() {
+        let command = crate::Output {
+            target: "repair/writer#2".parse().unwrap(),
+            part: crate::Part::Result,
+            to: None,
+            path: false,
+            offset: 0,
+            tail: None,
+            max_bytes: 65536,
+        };
+        // An unsealed result with no bytes is a typed pending page, never an
+        // empty partial result.
+        let pending = json!({
+            "attempt_id": "22222222222222222222222222222222",
+            "state": "running",
+            "reason": null,
+            "part": "result",
+            "offset": 0, "next_offset": 0, "length": 0,
+            "eof": true, "clipped": false, "complete": false,
+            "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            "bytes": {"encoding": "utf8", "data": ""},
+        });
+        let reply = super::render_output(command.clone(), Ok((pending, String::new())));
+        assert_eq!(reply.result.status, Status::Ok);
+        assert_eq!(reply.result.data["status"], "running");
+        assert_eq!(reply.result.data["state"], "running");
+        assert_eq!(reply.result.data["result"], "pending");
+        assert!(
+            reply
+                .human
+                .starts_with("running\nno result yet: the result is not sealed"),
+            "{}",
+            reply.human
+        );
+        assert!(!reply.human.contains("partial result"), "{}", reply.human);
+
+        // Bytes that did arrive before settlement are labelled partial.
+        let partial = json!({
+            "attempt_id": "22222222222222222222222222222222",
+            "state": "running",
+            "reason": null,
+            "part": "result",
+            "offset": 0, "next_offset": 13, "length": 13,
+            "eof": true, "clipped": false, "complete": false,
+            "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            "bytes": {"encoding": "utf8", "data": "half a result"},
+        });
+        let reply = super::render_output(command.clone(), Ok((partial, "half a result".into())));
+        assert_eq!(reply.result.status, Status::Ok);
+        assert_eq!(reply.result.data["result"], "partial");
+        assert!(reply.human.starts_with("running\npartial result\n"));
+        assert!(reply.human.contains("half a result"));
+        let summary = reply
+            .summary
+            .expect("a headed result has a summary")
+            .lines
+            .join("\n");
+        assert!(summary.contains("partial result"), "{summary}");
+
+        let settled = json!({
+            "attempt_id": "22222222222222222222222222222222",
+            "state": "succeeded",
+            "part": "result",
+            "eof": true, "complete": true,
+            "bytes": {"encoding": "utf8", "data": "all of it"},
+        });
+        let reply = super::render_output(command, Ok((settled, "all of it".into())));
+        assert!(reply.result.data.get("status").is_none());
+        assert!(reply.result.data.get("result").is_none());
+        assert!(!reply.human.contains("partial result"));
+        assert!(!reply.human.contains("no result yet"));
+    }
+
     #[test]
     fn output_summary_reports_stopped_commits_and_dirty_paths() {
         let unpushed = serde_json::json!({
@@ -1123,6 +1210,58 @@ mod tests {
                 .lines
                 .iter()
                 .any(|line| line == "2 commits pushed at abcdef0123456789")
+        );
+    }
+
+    // Spec: docs/specs/cli.md#output-references-and-bounded-tails
+    #[test]
+    fn output_summary_prints_headers_only_for_non_null_values() {
+        let null_headers = json!({
+            "state":"succeeded",
+            "writer_base":null, "writer_head":null, "publication":null,
+            "residual_tree":null, "changed_files":null
+        });
+        let summary = output_summary(&null_headers, "answer", true, None);
+        for key in [
+            "base",
+            "committed head",
+            "publication",
+            "residual tree state",
+            "changed files",
+        ] {
+            let prefix = format!("{key}:");
+            assert!(
+                !summary.lines.iter().any(|line| line.starts_with(&prefix)),
+                "null {key} still rendered a header: {:?}",
+                summary.lines
+            );
+        }
+
+        let real_headers = json!({
+            "state":"succeeded",
+            "writer_base":"aaaa", "writer_head":"bbbb", "publication":"pushed",
+            "residual_tree":"clean (current observation)",
+            "changed_files":["src/main.rs"], "changed_files_total":1
+        });
+        let summary = output_summary(&real_headers, "", true, None);
+        for (label, value) in [
+            ("base", "aaaa"),
+            ("committed head", "bbbb"),
+            ("publication", "pushed"),
+            ("residual tree state", "clean (current observation)"),
+        ] {
+            let expected = format!("{label}: {value}");
+            assert!(
+                summary.lines.contains(&expected),
+                "non-null {label} lost its header: {:?}",
+                summary.lines
+            );
+        }
+        assert!(
+            summary
+                .lines
+                .iter()
+                .any(|line| line.starts_with("changed files (1):"))
         );
     }
 

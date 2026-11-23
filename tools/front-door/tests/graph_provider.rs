@@ -4001,7 +4001,9 @@ fn output_names_the_attempt_it_reads_and_writes_or_locates_parts() -> Result {
     assert_eq!(code(&output), 0, "{data}");
     assert!(data["data"]["changed_files"].is_null(), "{data}");
     let human = rig.command(&["output", &target])?;
-    assert!(String::from_utf8_lossy(&human.stdout.bytes).contains("changed files: unavailable"));
+    // A null header is omitted from the human summary rather than printed as
+    // unavailable (#3807).
+    assert!(!String::from_utf8_lossy(&human.stdout.bytes).contains("changed files"));
     assert_eq!(data["data"]["state"], "failed");
     assert_eq!(
         data["data"]["provider_error"],

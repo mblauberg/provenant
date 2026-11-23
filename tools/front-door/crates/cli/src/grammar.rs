@@ -211,7 +211,7 @@ pub enum Command {
     /// Create, list and remove worktrees
     #[command(subcommand)]
     Worktree(Worktree),
-    /// Watch pull request CI and merge a verified head
+    /// Sync, open and inspect pull requests
     #[command(subcommand)]
     Pr(Pr),
     /// Read CI evidence for pull requests and Actions runs
@@ -561,9 +561,8 @@ pub enum Config {
     Detect,
     /// Print the host-project configuration path.
     Path {
-        /// Select the project-specific layer
-        #[arg(long = "project", required = true)]
-        project_layer: bool,
+        /// Directory whose configuration path to print (defaults to the current project)
+        dir: Option<PathBuf>,
     },
     /// List configuration warnings with their source file and key.
     Check(Page),
@@ -1061,7 +1060,7 @@ pub enum Worktree {
     Create {
         /// New branch name
         branch: String,
-        /// Base ref; the current head when omitted
+        /// Base ref for the new branch; the remote default when omitted
         #[arg(long)]
         base: Option<String>,
     },

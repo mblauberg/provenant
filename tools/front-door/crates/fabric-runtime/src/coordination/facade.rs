@@ -268,7 +268,7 @@ impl GraphRelayCause {
                 "writer composite children require explicit per-node worktree bindings"
             }
             Self::TargetOutsideGraph => {
-                "the target is outside the calling lane's graph or permitted subtree"
+                "the target is outside the calling lane's graph or the graphs of its chair session"
             }
             Self::RelayUnavailable => {
                 "this attempt is not a running graph node; launch through a graph host relay"

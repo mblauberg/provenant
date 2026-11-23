@@ -34,7 +34,7 @@ The first 2.0 install copies only owner configuration into an absent or empty
 default root, never migrates 1.x state and never writes the old root; a selected
 root with the 1.x layout is refused with `STATE_FORMAT_BREAK`. Install owns only
 its declared Provenant artifact names and never reads a 1.x receipt. Procedure:
-[first 2.0 install after 1.x](../runbooks/install.md#first-20-install-after-1x).
+[first 2.0 install after 1.x](../runbooks/install.md#migrating-from-1x).
 - Why: install cannot infer ownership from a receipt of another state format.
 - Owner: `src/state_handoff.rs`, `src/install.rs`, `crates/core/src/roots.rs`
 

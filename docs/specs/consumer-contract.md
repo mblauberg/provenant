@@ -125,7 +125,7 @@ names another. The default root does not warn because the workspace is the home
 directory or its ancestor, and an unusual root's advisory overlaps are reported
 once per state-root digest. The previous major's root,
 `~/.local/share/provenant/v1`, is never written
-([install runbook](../runbooks/install.md#first-20-install-after-1x)). This tier
+([install runbook](../runbooks/install.md#migrating-from-1x)). This tier
 is evolving.
 
 - Why: two majors must be able to coexist without touching each other's state.

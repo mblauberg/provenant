@@ -37,6 +37,7 @@ fixture = [
 
 [dev-dependencies]
 rusqlite = { workspace = true }
+provenant-providers = { workspace = true }
 provenant-core = { workspace = true, features = ["fixture"] }
 provenant-test-support = { path = "../test-support", features = ["fixture"] }
 provenant-os = { workspace = true, features = ["fixture"] }

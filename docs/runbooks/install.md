@@ -4,9 +4,10 @@ Anchor: [`managed.rs`](../../tools/front-door/crates/config/src/managed.rs); [`s
 
 Invariants are in the [state spec](../specs/state.md); flags are in
 `provenant help --all`. Install writes its receipt last, so rerunning `install`
-recovers any partial or crashed install.
+recovers any partial or crashed install. For the shortest path from a fresh host
+to a first lane, follow the [quickstart](../quickstart.md).
 
-## Bootstrap and upgrade
+## Install
 
 `./install.sh` installs the release for the checkout's exact tag, else the latest.
 `--tag vX.Y.Z` selects one; `--source [DIR]` builds a checkout with its pinned
@@ -27,7 +28,48 @@ with a receipt skip the prompts. A bare `provenant install --source "$RELEASE"`
 targets every detected client CLI and `~/.claude-*` directory; with a receipt it
 reuses the recorded targets and binary directory.
 
-### First 2.0 install after 1.x
+Read the preview for the native configuration files it will write, and keep
+clients and editors that rewrite those files closed from the preview through
+`check install`: the installer checks for drift before each write, but that is not
+an atomic compare-and-swap. In particular quit Claude Code when the plan writes
+`~/.claude.json`. Managed instruction or skill links alone need no client closed.
+Claude accounts live in exactly `~/.claude-$LABEL`; sign in there before
+registering. `~/.claude` is a sign-in source, never an account.
+
+```sh
+PROVENANT="$RELEASE/bin/provenant"
+STATE="$HOME/.local/share/provenant/v2"
+"$PROVENANT" --state-dir "$STATE" install --source "$RELEASE" --harness claude --dry-run
+"$PROVENANT" --state-dir "$STATE" install --source "$RELEASE" --harness claude
+"$PROVENANT" --state-dir "$STATE" check install --source "$RELEASE"
+LABEL=work
+CLAUDE_CONFIG_DIR=~/.claude-$LABEL claude    # sign in, then exit
+"$PROVENANT" --state-dir "$STATE" accounts register "$LABEL" --adapter claude --directory "$HOME/.claude-$LABEL"
+"$PROVENANT" --state-dir "$STATE" quota tick
+```
+
+Repeat `--harness` per client (`claude`, `codex`, `cursor`, `agy`, `opencode`) and
+`accounts register` per account (`--adapter codex` for Codex). Dispatch needs
+registered accounts, and `quota tick` initialises quota state.
+
+- A failed preview prevents writes.
+- Hooks stay off on a first install. `--hooks on` registers each selected
+  harness's declared native events ([hook behaviour](claude-hooks.md)). Omitting
+  `--hooks` keeps owned hooks and refreshes unchanged ones; `--hooks off` removes
+  unchanged ones and releases edited ones. An edited managed hook is preserved:
+  follow the reported recovery before replacing it.
+- Supported global instruction files link the release's instruction asset.
+  Findings name the reason and source for any unavailable native integration.
+  Provenant registers no MCP server; agents use the CLI.
+- Occupied or foreign entries are refused. If the preview shows an exact match you
+  accept, rerun with `--adopt-existing`.
+- A directory that is not a registered account needs `install --harness claude`
+  with `CLAUDE_CONFIG_DIR` set (`CODEX_HOME` for Codex); each directory is a
+  separate target in the one receipt.
+- `check install` compares binary, assets, receipt and owned entries for every
+  target without repairing.
+
+## Migrating from 1.x
 
 Wind down every lane first. The installer validates the release and staged
 install before publishing, then installs into the fresh v2 root. It copies
@@ -40,7 +82,34 @@ the 1.x root and client configuration yourself: leftovers outside the declared
 names are yours to remove. A custom 1.x root is not copied; use a fresh custom root
 and configure it by hand.
 
-### Upgrade
+## Account sync
+
+Every registered account directory holds the same managed skill links, managed
+hooks and allow-listed shared Claude settings. `install`, `accounts register` and
+`accounts sync` apply them; credentials, identity fields and user-owned entries
+are never synced. An edited managed hook stays in place and is reported as
+`relinquished_modified_entry`; an account with no managed hooks has relinquished
+them until `--hooks on`.
+
+Set the shared keys under `[domains.accounts.shared_settings]`. When
+`check install` reports a settings conflict, `provenant accounts sync --adopt
+ACCOUNT` makes that account the source and `--force-settings` replaces its values
+from the source. For other account drift, follow the reported repair: preview with
+`accounts sync --dry-run`, resolve unmanaged conflicts, then run
+`provenant accounts sync`. After a partial write, rerun the command.
+
+## Background agents
+
+On macOS, the default-state install manages the peer and tick LaunchAgents; check
+them with `provenant hosts doctor`. If a modified plist blocks install, move it
+aside, boot out the agent with `launchctl` and rerun install. Peer setup is in
+[Fabric hosts](fabric-hosts.md#macos-peers-and-the-login-keychain) and scheduled
+collection in [GC](gc.md).
+
+On Linux, the default-state install enables a user timer. To run it while logged
+out, run `loginctl enable-linger $USER`.
+
+## Upgrade
 
 ```sh
 provenant upgrade
@@ -72,7 +141,10 @@ you to rerun the original install command with its original options (`--source`,
 
 `provenant upgrade --verify` then runs the bundled smoke graph (`--host PEER`
 places it on a peer; `--route` and repeatable `--set NAME=VALUE` override its
-routes and parameters), and adding `--dry-run` previews it without upgrading. The
+routes and parameters), and adding `--dry-run` previews it without upgrading.
+The preview runs the currently installed binary's own `run smoke --explain`, not
+the candidate, so it shows the graph shape and route resolution that binary
+would launch; the candidate's graph is exercised only after it installs. The
 scratch fixture commits a base and a fixture change, and both verification modes
 bind that commit as the review nodes' `diff_base`, so the review nodes have a
 non-empty range; its write node runs in a worktree the verification creates on a
@@ -148,76 +220,6 @@ unset CARGO_TARGET_DIR RUSTC_WRAPPER
 The packager refuses an existing output directory, asset drift, or a binary whose
 embedded source digest differs from the current source, so rebuild after any
 source change. `--binary PATH` packages another build.
-
-## Install
-
-Read the preview for the native configuration files it will write, and keep
-clients and editors that rewrite those files closed from the preview through
-`check install`: the installer checks for drift before each write, but that is not
-an atomic compare-and-swap. In particular quit Claude Code when the plan writes
-`~/.claude.json`. Managed instruction or skill links alone need no client closed.
-Claude accounts live in exactly `~/.claude-$LABEL`; sign in there before
-registering. `~/.claude` is a sign-in source, never an account.
-
-```sh
-PROVENANT="$RELEASE/bin/provenant"
-STATE="$HOME/.local/share/provenant/v2"
-"$PROVENANT" --state-dir "$STATE" install --source "$RELEASE" --harness claude --dry-run
-"$PROVENANT" --state-dir "$STATE" install --source "$RELEASE" --harness claude
-"$PROVENANT" --state-dir "$STATE" check install --source "$RELEASE"
-LABEL=work
-CLAUDE_CONFIG_DIR=~/.claude-$LABEL claude    # sign in, then exit
-"$PROVENANT" --state-dir "$STATE" accounts register "$LABEL" --adapter claude --directory "$HOME/.claude-$LABEL"
-"$PROVENANT" --state-dir "$STATE" quota tick
-```
-
-Repeat `--harness` per client (`claude`, `codex`, `cursor`, `agy`, `opencode`) and
-`accounts register` per account (`--adapter codex` for Codex). Dispatch needs
-registered accounts, and `quota tick` initialises quota state.
-
-- A failed preview prevents writes.
-- Hooks stay off on a first install. `--hooks on` registers each selected
-  harness's declared native events ([hook behaviour](claude-hooks.md)). Omitting
-  `--hooks` keeps owned hooks and refreshes unchanged ones; `--hooks off` removes
-  unchanged ones and releases edited ones. An edited managed hook is preserved:
-  follow the reported recovery before replacing it.
-- Supported global instruction files link the release's instruction asset.
-  Findings name the reason and source for any unavailable native integration.
-  Provenant registers no MCP server; agents use the CLI.
-- Occupied or foreign entries are refused. If the preview shows an exact match you
-  accept, rerun with `--adopt-existing`.
-- A directory that is not a registered account needs `install --harness claude`
-  with `CLAUDE_CONFIG_DIR` set (`CODEX_HOME` for Codex); each directory is a
-  separate target in the one receipt.
-- `check install` compares binary, assets, receipt and owned entries for every
-  target without repairing.
-
-## Account sync
-
-Every registered account directory holds the same managed skill links, managed
-hooks and allow-listed shared Claude settings. `install`, `accounts register` and
-`accounts sync` apply them; credentials, identity fields and user-owned entries
-are never synced. An edited managed hook stays in place and is reported as
-`relinquished_modified_entry`; an account with no managed hooks has relinquished
-them until `--hooks on`.
-
-Set the shared keys under `[domains.accounts.shared_settings]`. When
-`check install` reports a settings conflict, `provenant accounts sync --adopt
-ACCOUNT` makes that account the source and `--force-settings` replaces its values
-from the source. For other account drift, follow the reported repair: preview with
-`accounts sync --dry-run`, resolve unmanaged conflicts, then run
-`provenant accounts sync`. After a partial write, rerun the command.
-
-## Background agents
-
-On macOS, the default-state install manages the peer and tick LaunchAgents; check
-them with `provenant hosts doctor`. If a modified plist blocks install, move it
-aside, boot out the agent with `launchctl` and rerun install. Peer setup is in
-[Fabric hosts](fabric-hosts.md#macos-peers-and-the-login-keychain) and scheduled
-collection in [GC](gc.md).
-
-On Linux, the default-state install enables a user timer. To run it while logged
-out, run `loginctl enable-linger $USER`.
 
 ## Uninstall
 

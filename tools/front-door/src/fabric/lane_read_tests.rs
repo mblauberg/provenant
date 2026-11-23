@@ -135,12 +135,19 @@ fn settled_attempt(
         read_prompts: false,
     };
     let store = provenant_run::RunStore::open(&execution, &call)?;
-    let number = if graph != "lane-read-children" {
-        54
-    } else if success {
-        51
+    // Every graph owns its attempts: the host checks each attempt's work key
+    // against the graph node that names it, so graphs cannot share fixtures.
+    let (success_number, failure_number) = match graph {
+        "lane-read-children" => (51, 52),
+        "lane-read-sibling" => (53, 54),
+        "lane-read-foreign" => (55, 56),
+        "lane-read-other-project" => (57, 58),
+        _ => return Err(format!("no fixture attempts reserved for {graph}").into()),
+    };
+    let number = if success {
+        success_number
     } else {
-        52
+        failure_number
     };
     let id = AttemptId::from_bytes([number; 16]);
     let prompt = "fixture child";
@@ -254,6 +261,103 @@ fn settled_attempt(
     Ok(id)
 }
 
+/// Seal the submitting chair on a graph's custody record, as graph submission
+/// does. The lane read scope compares this session across graphs.
+fn seal_graph_chair(
+    context: &Context,
+    project: provenant_core::ProjectId,
+    graph: &str,
+    session: &str,
+) -> Result<()> {
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let chair_call = provenant_fabric_runtime::chairs::Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let proposal = provenant_records::run::CanonicalRequest {
+        extra: Default::default(),
+        chair: Some(provenant_records::custody::Chair {
+            host: context.identity.inbox.host,
+            actor: context.identity.inbox.actor,
+            session: Some(session.into()),
+            process: None,
+            extra: Default::default(),
+        }),
+        fresh_continuation: None,
+        schema_version: 1,
+        task: serde_json::from_value(json!({
+            "prompt_digest": provenant_core::Digest::from_bytes([4; 32]),
+            "route": {"kind":"model","provider":"fixture","model":"fixture/model"},
+            "authority_digest": provenant_core::Digest::from_bytes([5; 32]),
+            "provider_timeout_seconds": 30,
+            "delivery_id": null
+        }))?,
+        parent: None,
+        lane_depth: None,
+        parent_attempt: None,
+    };
+    provenant_fabric_runtime::chairs::ChairIndex::open(&context.roots.state, &chair_call)?.submit(
+        project,
+        graph,
+        &proposal,
+        &chair_call,
+    )?;
+    Ok(())
+}
+
+/// Bind a graph whose settled nodes name their own settled attempts, so a lane
+/// can read output, status and trace from it once its chair session is
+/// admitted. The attempts' work keys must match this graph's nodes.
+fn bind_sibling_graph(
+    context: &Context,
+    rig: &TestRig,
+    project: provenant_core::ProjectId,
+    directory: &std::path::Path,
+    graph: &str,
+) -> Result<()> {
+    let success = settled_attempt(context, rig, true, graph)?;
+    let failure = settled_attempt(context, rig, false, graph)?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 30)?;
+    let mut journal = FileJournal::open(
+        &context.roots.state,
+        project,
+        graph,
+        budget,
+        &cancel,
+        &clock,
+    )?;
+    let reference = |id: AttemptId| format!("{}/{id}", context.identity.host);
+    let document: GraphDocument = serde_json::from_value(json!({
+        "schema_version":2,"graph_id":graph,"template_library":{},"nodes":[
+            {"id":"parent--success","access":"read_only","prompt":"child","route":{"alias":"junior"}},
+            {"id":"parent--failure","access":"read_only","prompt":"child","route":{"alias":"junior"}}
+        ]
+    }))?;
+    let mut checkpoint: GraphCheckpoint = serde_json::from_value(json!({
+        "schema_version":2,"graph_id":graph,"plan_digest":"fixture",
+        "nodes":[
+            {"id":"parent--success","state":"succeeded","attempts":[{"key":{"graph_id":graph,"node_id":"parent--success","route_index":0,"attempt":1},"launched":true,"route":{"alias":"junior"},"state":"terminal","attempt_ref":reference(success),"launch_actor":"fixture","outcome":"succeeded"}]},
+            {"id":"parent--failure","state":"failed","advance_error_code":"launch_refused","advance_owner_code":"command_unavailable","advance_error":"configure the fixture provider command","attempts":[{"key":{"graph_id":graph,"node_id":"parent--failure","route_index":0,"attempt":1},"launched":true,"route":{"alias":"junior"},"state":"terminal","attempt_ref":reference(failure),"launch_actor":"fixture","outcome":"task_failed"}]}
+        ]
+    }))?;
+    journal.bind(GraphExecution {
+        peer_origin_context: None,
+        peer_submission_digest: None,
+        requester_path: None,
+        extra: Default::default(),
+        bases: None,
+        directory: directory.to_path_buf(),
+        document,
+    })?;
+    journal.prepare_fixture_checkpoint(&mut checkpoint)?;
+    journal.save(&checkpoint)?;
+    Ok(())
+}
+
+// Spec: docs/specs/fabric.md#lane-graph-read-scope
 #[test]
 fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Result {
     let name = "fabric::lane_read_tests::parent_reads_child_result_failure_status_and_trace_through_host_relay";
@@ -306,6 +410,39 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
     journal.prepare_fixture_checkpoint(&mut checkpoint)?;
     journal.save(&checkpoint)?;
     drop(journal);
+    // Two more graphs: a sibling from the same chair session, and one from a
+    // different session. Both are otherwise readable by this host.
+    seal_graph_chair(&context, context.identity.project, graph, "chair-a")?;
+    let sibling_graph = "lane-read-sibling";
+    bind_sibling_graph(
+        &context,
+        &rig,
+        context.identity.project,
+        &rig.project,
+        sibling_graph,
+    )?;
+    seal_graph_chair(&context, context.identity.project, sibling_graph, "chair-a")?;
+    let foreign_graph = "lane-read-foreign";
+    bind_sibling_graph(
+        &context,
+        &rig,
+        context.identity.project,
+        &rig.project,
+        foreign_graph,
+    )?;
+    seal_graph_chair(&context, context.identity.project, foreign_graph, "chair-b")?;
+    // The chair index is project-scoped: a graph from another project stays
+    // outside this lane even when the same session submitted it.
+    let other_project = provenant_core::ProjectId::from_bytes([9; 16]);
+    let other_project_graph = "lane-read-other-project";
+    bind_sibling_graph(
+        &context,
+        &rig,
+        other_project,
+        &rig.project,
+        other_project_graph,
+    )?;
+    seal_graph_chair(&context, other_project, other_project_graph, "chair-a")?;
     let mut holder = provenant_run::HolderContext {
         schema_version: 1,
         roots: provenant_run::RootSeed {
@@ -355,11 +492,11 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
     holder.launch.as_mut().ok_or("host launch")?.graph_directory = Some(rig.project.clone());
     // Exercise the real host reader even when the enclosing lane cannot bind
     // a second attempt socket. The native/CLI half below runs on configured hosts.
-    let read = |input| {
+    let relay = |arguments: serde_json::Value| {
         provenant_cli::fabric::graph_relay::serve_with_read(
             &context,
             &caller.to_string(),
-            json!({"op":"read","input":input}),
+            arguments,
             budget,
             &cancel,
             &clock,
@@ -374,6 +511,7 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
             },
         )
     };
+    let read = |input| relay(json!({"op":"read","input":input}));
     // A child provider may work in another repository while remaining in
     // this graph. Host journal identity must outlive that cwd change.
     let foreign = rig.root.join("foreign-project");
@@ -459,7 +597,79 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
                 .all(|event| event["subject"] == "parent--success")
         );
     }
-    assert!(read(json!({"op":"output","id":"another-graph/parent"})).is_err());
+    // A graph from this lane's chair session is readable: full output, status
+    // and trace, with no new flag or grant. Spec: docs/specs/fabric.md#lane-graph-read-scope
+    let sibling_output =
+        read(json!({"op":"output","id":format!("{sibling_graph}/parent--success")}))?;
+    assert_eq!(
+        sibling_output["bytes"]["data"], "child result reached parent",
+        "{sibling_output}"
+    );
+    let sibling_status = read(json!({"op":"status","id":sibling_graph}))?;
+    assert!(
+        sibling_status["rows"]
+            .as_array()
+            .ok_or("sibling status rows")?
+            .iter()
+            .any(|row| row["node_id"] == "parent--success" && row["state"] == "succeeded")
+    );
+    let sibling_trace = read(json!({"op":"trace","id":sibling_graph}))?;
+    assert!(
+        !sibling_trace["events"]
+            .as_array()
+            .ok_or("sibling trace events")?
+            .is_empty()
+    );
+    // A graph from another chair session stays not_found even though the host
+    // can read it. Spec: docs/specs/fabric.md#lane-graph-read-scope
+    let cross_session =
+        read(json!({"op":"output","id":format!("{foreign_graph}/parent--success")}));
+    assert!(
+        matches!(
+            &cross_session,
+            Err(ServiceError::Facade(FacadeError::GraphRelayRefused { refusal_code, .. }))
+                if refusal_code == "not_found"
+        ),
+        "cross-session graph must be not_found"
+    );
+    let cross_project = read(json!({
+        "op": "output",
+        "id": format!("{other_project_graph}/parent--success"),
+    }));
+    assert!(
+        matches!(
+            &cross_project,
+            Err(ServiceError::Facade(FacadeError::GraphRelayRefused { refusal_code, .. }))
+                if refusal_code == "not_found"
+        ),
+        "another project's graph must be not_found"
+    );
+    // Writes never follow the read scope: a target naming the sibling graph is
+    // refused, and the sibling graph cannot be edited or stopped. Add and wait
+    // bind the calling node, so they cannot name another graph at all.
+    let read_sibling = format!("{sibling_graph}/parent--success");
+    let edit = relay(json!({
+        "op": "edit",
+        "id": sibling_graph,
+        "patch": {"schema_version": 1},
+    }));
+    assert!(
+        matches!(
+            &edit,
+            Err(ServiceError::Facade(FacadeError::GraphRelayRefused { refusal_code, .. }))
+                if refusal_code == "not_found"
+        ),
+        "editing a sibling graph must be refused: {edit:?}"
+    );
+    let stop = relay(json!({"op": "stop", "node": read_sibling}));
+    assert!(
+        matches!(
+            &stop,
+            Err(ServiceError::Facade(FacadeError::GraphRelayRefused { refusal_code, .. }))
+                if refusal_code == "confinement_refused"
+        ),
+        "stopping a sibling graph's node must be refused: {stop:?}"
+    );
     let relay = provenant_fabric_runtime::relay::HostRelay::start_with_graph(
         provenant_providers::LaneRuntime::fabric_socket(caller),
         Default::default(),
@@ -581,7 +791,30 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
             .ok_or("trace events")?
             .is_empty()
     );
-    let denied = lane_command(&rig, &["output", "another-graph/parent", "--json"], 3)?;
+    // The native lane CLI path follows the same chair-session rule.
+    // Spec: docs/specs/fabric.md#lane-graph-read-scope
+    let sibling_result = lane_command(
+        &rig,
+        &[
+            "output",
+            &format!("{sibling_graph}/parent--success"),
+            "--json",
+        ],
+        0,
+    )?;
+    assert_eq!(
+        sibling_result["data"]["bytes"]["data"],
+        "child result reached parent"
+    );
+    let denied = lane_command(
+        &rig,
+        &[
+            "output",
+            &format!("{foreign_graph}/parent--success"),
+            "--json",
+        ],
+        3,
+    )?;
     assert!(
         denied["error"]["message"]
             .as_str()

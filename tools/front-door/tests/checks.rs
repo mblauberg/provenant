@@ -95,8 +95,9 @@ fn config_and_install_defects_are_findings_but_escape_is_an_error() -> Result {
     rig.assert_v1_root_untouched()
 }
 
-#[test]
-fn check_install_smokes_a_staged_binary_with_private_home_and_keeps_scan_status() -> Result {
+/// Install a staged release through the real installer, recording roots under
+/// `rig.home`. Returns the source digest that names its release tree.
+fn install_staged_release(rig: &TestRig) -> Result<provenant_records::SourceDigest> {
     use provenant_config::{
         InstallContext, InstallReporter, ReleaseSmoke, Snapshots, Targets, package_release,
         plan_install,
@@ -130,7 +131,6 @@ fn check_install_smokes_a_staged_binary_with_private_home_and_keeps_scan_status(
         }
     }
 
-    let rig = check_rig()?;
     let source = rig.root.join("staged-release");
     fs::create_dir_all(source.join("bin"))?;
     fs::create_dir_all(source.join("skills/example"))?;
@@ -153,6 +153,7 @@ fn check_install_smokes_a_staged_binary_with_private_home_and_keeps_scan_status(
         record_schema_version: 1,
         config_schema_version: 1,
     };
+    let digest = version.source_digest;
     let marker = rig.root.join("smoke-home.txt");
     let mut version_data = serde_json::to_value(&version)?;
     version_data["package_version"] = env!("CARGO_PKG_VERSION").into();
@@ -206,7 +207,15 @@ fn check_install_smokes_a_staged_binary_with_private_home_and_keeps_scan_status(
         cancel: &cancel,
     };
     provenant_config::install(&plan, &context, &mut Reporter, &FixedSmoke(version), false)?;
+    Ok(digest)
+}
 
+#[test]
+fn check_install_smokes_a_staged_binary_with_private_home_and_keeps_scan_status() -> Result {
+    use std::{fs, path::PathBuf};
+
+    let rig = check_rig()?;
+    install_staged_release(&rig)?;
     let output = rig.command(&["check", "install", "--json"])?;
     assert_eq!(
         code(&output),
@@ -214,6 +223,7 @@ fn check_install_smokes_a_staged_binary_with_private_home_and_keeps_scan_status(
         "{}",
         String::from_utf8_lossy(&output.stdout.bytes)
     );
+    let marker = rig.root.join("smoke-home.txt");
     let home = PathBuf::from(fs::read_to_string(&marker)?.trim());
     assert_ne!(home, rig.home);
     assert!(home.starts_with(&rig.root));
@@ -226,6 +236,45 @@ fn check_install_smokes_a_staged_binary_with_private_home_and_keeps_scan_status(
         stderr.contains("warning") && stderr.contains("private check directory"),
         "{stderr}"
     );
+    Ok(())
+}
+
+// Spec: docs/specs/cli.md#check-install-uses-recorded-roots
+#[test]
+fn check_install_reads_recorded_roots_when_home_is_an_account_directory() -> Result {
+    use std::fs;
+
+    let mut rig = check_rig()?;
+    let digest = install_staged_release(&rig)?;
+    let lane_home = rig.root.join("lane-home");
+    fs::create_dir_all(&lane_home)?;
+    // The caller's context is a lane: its HOME is an account directory and its
+    // state variable names the lane's store, not the host install. Only the
+    // installed release tree still names the receipt's recorded roots.
+    rig.env
+        .retain(|(key, _)| key != "PROVENANT_ROOT" && key != "PROVENANT_STATE_DIR");
+    if let Some((_, home)) = rig.env.iter_mut().find(|(key, _)| key == "HOME") {
+        *home = lane_home.as_os_str().to_owned();
+    }
+    let release_root = provenant_config::release_root(&rig.state, digest);
+    rig.env
+        .push(("PROVENANT_ROOT".into(), release_root.as_os_str().to_owned()));
+    let output = rig.command(&["check", "install", "--json"])?;
+    let page = json(&output)?;
+    assert_eq!(
+        code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stdout.bytes)
+    );
+    let findings = page["data"]["findings"].as_array().ok_or("findings")?;
+    assert!(
+        findings
+            .iter()
+            .all(|finding| finding["rule"] != "missing_receipt"),
+        "{findings:?}"
+    );
+    assert!(findings.is_empty(), "{findings:?}");
     Ok(())
 }
 

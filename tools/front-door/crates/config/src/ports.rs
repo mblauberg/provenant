@@ -328,7 +328,9 @@ pub enum VerifySelection {
 /// A command run from the effective verify workspace joined with `cwd`.
 /// The whole argv elements `{packages}`, `{integration_args}`, and
 /// `{quarantine_args}` expand to zero or more arguments; no shell splitting occurs.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// A plain string is shorthand for the table form: it is split into argv
+/// elements with shell-word rules, leaving `stack` and `cwd` at their defaults.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct TierCommand {
     #[serde(default)]
     pub stack: String,
@@ -340,6 +342,117 @@ pub struct TierCommand {
 
 fn tier_command_cwd() -> PathBuf {
     PathBuf::from(".")
+}
+
+/// Split a declared command string into argv elements as a shell would tokenise
+/// it, without running one. Quotes group an element and a backslash escapes the
+/// next character; an unterminated quote or trailing escape is malformed.
+fn split_tier_command_words(command: &str) -> Option<Vec<String>> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut started = false;
+    for ch in command.chars() {
+        if escaped {
+            word.push(ch);
+            escaped = false;
+        } else if let Some(delimiter) = quote {
+            if delimiter == '"' && ch == '\\' {
+                // Inside double quotes a backslash escapes the next character,
+                // as it does outside quotes; single quotes take it literally.
+                escaped = true;
+                started = true;
+            } else if ch == delimiter {
+                quote = None;
+            } else {
+                word.push(ch);
+            }
+        } else {
+            match ch {
+                '\\' => {
+                    escaped = true;
+                    started = true;
+                }
+                '\'' | '"' => {
+                    quote = Some(ch);
+                    started = true;
+                }
+                ch if ch.is_whitespace() => {
+                    if started {
+                        words.push(std::mem::take(&mut word));
+                        started = false;
+                    }
+                }
+                ch => {
+                    word.push(ch);
+                    started = true;
+                }
+            }
+        }
+    }
+    if quote.is_some() || escaped {
+        return None;
+    }
+    if started {
+        words.push(word);
+    }
+    Some(words)
+}
+
+#[derive(Deserialize)]
+struct TierCommandTable {
+    #[serde(default)]
+    stack: String,
+    #[serde(default = "tier_command_cwd")]
+    cwd: PathBuf,
+    #[serde(default)]
+    argv: Vec<String>,
+}
+
+struct TierCommandVisitor;
+
+impl<'de> serde::de::Visitor<'de> for TierCommandVisitor {
+    type Value = TierCommand;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a command string or a tier command table")
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        let argv = split_tier_command_words(value)
+            .ok_or_else(|| E::custom("command string has an unbalanced quote or escape"))?;
+        Ok(TierCommand {
+            stack: String::new(),
+            cwd: tier_command_cwd(),
+            argv,
+        })
+    }
+
+    fn visit_map<M>(self, map: M) -> Result<Self::Value, M::Error>
+    where
+        M: serde::de::MapAccess<'de>,
+    {
+        let table =
+            TierCommandTable::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+        Ok(TierCommand {
+            stack: table.stack,
+            cwd: table.cwd,
+            argv: table.argv,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for TierCommand {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_any(TierCommandVisitor)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1414,7 +1527,7 @@ pub fn port_declaration_warnings(project: Option<&Path>, host_state: &Path) -> V
                 keys.join(", ")
             };
             warnings.push(format!(
-                "{}: {declared} (target-seed key {key}): host-project ports layers use the binding directory {}; move this file to {} (config path --project prints it)",
+                "{}: {declared} (target-seed key {key}): host-project ports layers use the binding directory {}; move this file to {} (config path prints it)",
                 misplaced.display(),
                 dir.display(),
                 dir.join("ports.json").display(),
@@ -2104,6 +2217,143 @@ mod tests {
             assert_eq!(warnings.len(), 1);
             assert_eq!(warnings[0].0, path);
             assert!(warnings[0].1.contains("verify.tiers.0") && warnings[0].1.contains(reason));
+        }
+    }
+
+    // Spec: docs/specs/state.md#one-sourced-port-table
+    #[test]
+    fn tier_command_string_and_table_forms_decode_equal() {
+        let text = "cargo fmt {packages} -- --check";
+        let argv = ["cargo", "fmt", "{packages}", "--", "--check"];
+        let from_string: TierCommand = serde_json::from_value(serde_json::json!(text)).unwrap();
+        let from_table: TierCommand =
+            serde_json::from_value(serde_json::json!({"argv": argv})).unwrap();
+        assert_eq!(from_string, from_table);
+        assert_eq!(
+            from_string,
+            serde_json::from_value::<TierCommand>(serde_json::json!({
+                "stack": "",
+                "cwd": ".",
+                "argv": argv,
+            }))
+            .unwrap()
+        );
+        assert_eq!(from_string.argv, argv);
+        assert!(from_string.stack.is_empty());
+        assert_eq!(from_string.cwd, PathBuf::from("."));
+
+        // The pre-decode filter accepts the shorthand, so it survives the
+        // layer walk and serialises back in the table shape.
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join(".provenant")).unwrap();
+        let path = root.path().join(PORTS_CONFIG);
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({
+                "verify": {"tiers": {
+                    "0": {"commands": [text], "selection": "packages"},
+                }},
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut warnings = Vec::new();
+        let table = PortTable::read_layers(
+            Some(root.path()),
+            None,
+            |_, _| {},
+            |file, error| warnings.push((file.to_owned(), error.to_string())),
+        )
+        .unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(table.verify.tiers["0"].commands, [from_string]);
+        assert_eq!(
+            table.provenance()["verify.tiers.0.commands"],
+            PortSource::Project
+        );
+        let value = serde_json::to_value(&table).unwrap();
+        assert!(value["verify"]["tiers"]["0"]["commands"][0].is_object());
+        // Provenance is derived from the layer walk and never serialised, so
+        // the decoded table carries the same ports but not the labels' history.
+        let decoded = serde_json::from_value::<PortTable>(value.clone()).unwrap();
+        assert_eq!(decoded.verify, table.verify);
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), value);
+    }
+
+    // Spec: docs/specs/state.md#one-sourced-port-table
+    #[test]
+    fn tier_command_string_honours_quotes_and_escapes() {
+        let words = |text: &str| -> Vec<String> {
+            serde_json::from_value::<TierCommand>(serde_json::json!(text))
+                .unwrap()
+                .argv
+        };
+        // Double quotes honour a backslash before a quote or another backslash;
+        // single quotes keep a backslash literally.
+        assert_eq!(
+            words(r#"tool "say \"hi\"" "back\\slash" 'a\b' 'single "quote"'"#),
+            [
+                "tool",
+                "say \"hi\"",
+                "back\\slash",
+                "a\\b",
+                "single \"quote\""
+            ]
+        );
+        // A doubled backslash immediately before the closing quote is a literal
+        // backslash, not an escaped delimiter.
+        assert_eq!(words(r#"tool "ends\\""#), ["tool", "ends\\"]);
+        assert_eq!(words(r"tool back\\slash"), ["tool", "back\\slash"]);
+    }
+
+    // Spec: docs/specs/state.md#one-sourced-port-table
+    #[test]
+    fn unterminated_tier_command_string_warns_and_falls_back() {
+        for text in [
+            "cargo fmt 'unbalanced",
+            "cargo fmt \"unbalanced",
+            "cargo fmt trailing\\",
+            "cargo fmt \"trailing\\",
+        ] {
+            assert!(
+                serde_json::from_value::<TierCommand>(serde_json::json!(text)).is_err(),
+                "{text}"
+            );
+            let root = tempfile::tempdir().unwrap();
+            std::fs::create_dir(root.path().join(".provenant")).unwrap();
+            let path = root.path().join(PORTS_CONFIG);
+            std::fs::write(
+                &path,
+                serde_json::to_vec(&serde_json::json!({
+                    "verify": {"tiers": {
+                        "0": {"commands": [text, "cargo check"], "selection": "all"},
+                        "1": {"commands": ["cargo check", {"argv": ["true"]}]},
+                    }},
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            let mut warnings = Vec::new();
+            let table = PortTable::read_layers(
+                Some(root.path()),
+                None,
+                |_, _| {},
+                |file, error| warnings.push((file.to_owned(), error.to_string())),
+            )
+            .unwrap();
+            assert!(table.validate().is_ok());
+            assert_eq!(
+                table.verify.tiers["0"],
+                PortTable::builtin().verify.tiers["0"]
+            );
+            assert_eq!(table.verify.tiers["1"].commands[0].argv, ["cargo", "check"]);
+            assert_eq!(table.verify.tiers["1"].commands[1].argv, ["true"]);
+            assert_eq!(warnings.len(), 1, "{warnings:?}");
+            assert_eq!(warnings[0].0, path);
+            assert!(
+                warnings[0].1.contains("verify.tiers.0.commands[0]"),
+                "{warnings:?}"
+            );
         }
     }
 

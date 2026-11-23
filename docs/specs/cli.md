@@ -38,6 +38,12 @@ flag relationships and child commands from the parser and declares each
 command's configuration domains; every catalogued command resolves to scoped
 help carrying that metadata. Clap parse errors never echo a fence token.
 
+`provenant help A B …` walks the command path. Words after a command that
+takes positional arguments are its arguments, so `help run implement` shows
+`run`'s help. Any other unknown or hidden component is refused, and the error
+lists the visible commands at that level; explicit quota maintenance stays
+addressable.
+
 - Why: inspection must be safe outside a checkout and paths must not change in
   transit.
 
@@ -313,6 +319,16 @@ Release checks inspect the artifact to be distributed as well as Git evidence.
 
 - Why: an inspection must not change its subject or certify an uninspected
   artifact.
+
+### Check install uses recorded roots
+
+`check install` builds its targets from the roots recorded in the install
+receipt, including the state root named by the installed release tree. A
+caller whose `HOME` is a lane account directory therefore checks the host
+installation and reports no findings when it is healthy.
+
+- Why: a lane's private `HOME` must not make a healthy host install look broken.
+- Owner: `tools/front-door/src/checks.rs`, `tools/front-door/crates/config/src/managed.rs`, `tools/front-door/crates/cli/src/check/mod.rs`
 
 ### Release symlinks
 

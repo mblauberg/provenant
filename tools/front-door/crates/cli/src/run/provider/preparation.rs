@@ -286,6 +286,20 @@ fn has_alternative_account(
     })
 }
 
+/// The recorded refusals a pin may answer with an advisory attempt. Every other
+/// cause excluded the route for a reason an attempt cannot outvote, such as a
+/// missing login or a confinement refusal (issue #3764).
+fn pinned_advisory_reason(reason: &provenant_records::RouteExclusionReason) -> bool {
+    use provenant_records::RouteExclusionReason;
+    matches!(
+        reason,
+        RouteExclusionReason::Exhausted
+            | RouteExclusionReason::PacingReserve
+            | RouteExclusionReason::ProviderRefused
+            | RouteExclusionReason::FreeTierRefused
+    )
+}
+
 /// Compose the warning for a recorded quota or pacing refusal on a model the
 /// owner named exactly (issue #3551). The source and expiry come from the
 /// record behind the refusal, never from a fabricated default; with no such
@@ -369,6 +383,7 @@ fn pinned_refusal_warning(
                     .windows
                     .iter()
                     .filter_map(|window| window.resets_unix_seconds)
+                    .filter(|reset| *reset > now)
                     .max()
             })
         })
@@ -378,6 +393,7 @@ fn pinned_refusal_warning(
                 .find(|candidate| {
                     candidate.adapter == route.adapter
                         && candidate.account_key.as_deref() == route.account_key.as_deref()
+                        && candidate.expires_unix_seconds > now
                 })
                 .map(|candidate| candidate.expires_unix_seconds)
         })?;
@@ -390,6 +406,67 @@ fn pinned_refusal_warning(
         ),
         expiry,
     ))
+}
+
+/// A pinned route held back while a model-only pin redraws to another account.
+struct DeferredPinnedAttempt {
+    route: ResolvedRoute,
+    warning: String,
+}
+
+/// A model-only pin whose own account admission refused redraws to another
+/// account that offers the model. That account can still be unable to serve the
+/// intent, for example under an account-scoped read-only model policy, so hold
+/// the refused pinned route and attempt it once when the redraw drains
+/// (issue #3764). Only an advisory recorded refusal qualifies: another cause
+/// excluded the route on evidence a retry cannot supersede.
+fn deferred_pinned_attempt(
+    choice: &provenant_routing::RouteChoice,
+    route: &ResolvedRoute,
+    selected: Option<&str>,
+    alternative_account: bool,
+    cause: &provenant_records::RouteExclusionReason,
+    warning: Option<String>,
+) -> Option<DeferredPinnedAttempt> {
+    if !pinned_advisory_reason(cause) {
+        return None;
+    }
+    if pinned_advisory_candidate(choice, route, selected, alternative_account) {
+        return None;
+    }
+    let warning = warning?;
+    pinned_candidate(choice, route).then_some(DeferredPinnedAttempt {
+        route: route.clone(),
+        warning,
+    })
+}
+
+/// Queue a deferred pinned route for its one advisory attempt, untried again.
+fn resume_deferred_pinned(
+    queue: &mut std::collections::VecDeque<ResolvedRoute>,
+    deferred: DeferredPinnedAttempt,
+    rejected: &mut Vec<provenant_routing::ModelId>,
+) -> String {
+    let label = format!("{}/{}", deferred.route.adapter, deferred.route.model);
+    if let Ok(model) = provenant_routing::ModelId::parse(&label) {
+        rejected.retain(|tried| *tried != model);
+    }
+    queue.push_back(deferred.route);
+    deferred.warning
+}
+
+/// The typed cause a redraw records for its refused account. Admission's own
+/// block keeps its provider, free-tier or mismatch cause instead of collapsing
+/// every redraw into exhaustion (issue #3764).
+fn redraw_exclusion_reason(
+    error: &crate::route::EdgeError,
+    fallback: Option<&provenant_records::RouteExclusionReason>,
+) -> provenant_records::RouteExclusionReason {
+    use provenant_records::RouteExclusionReason;
+    match error {
+        crate::route::EdgeError::Quota(error) => crate::route::admission::exclusion_reason(error),
+        _ => fallback.cloned().unwrap_or(RouteExclusionReason::Exhausted),
+    }
 }
 
 /// Warn when an ignore file the routed adapter declares, in the writer's
@@ -3645,6 +3722,10 @@ pub(super) fn prepare_candidates_inner(
         .collect();
     let mut reprobed_accounts = std::collections::BTreeSet::new();
     let mut refused_accounts = std::collections::BTreeSet::<(String, String)>::new();
+    // A model-only pin redraws to another account, but keeps its refused route
+    // for one advisory attempt if that redraw cannot serve the intent.
+    let mut deferred_pinned: Option<DeferredPinnedAttempt> = None;
+    let mut forced_advisory: Option<String> = None;
     let mut candidate = 0usize;
     // A login resolved for one route serves every later route and the reader path.
     let mut gh_login: super::gh_auth::LoginCache = None;
@@ -3667,6 +3748,7 @@ pub(super) fn prepare_candidates_inner(
                             .flat_map(candidates)
                             .collect::<Vec<_>>()
                     }
+                    Err(_) if deferred_pinned.is_some() => Vec::new(),
                     Err(crate::route::DispatchError::Edge(error))
                         if matches!(
                             error.as_ref(),
@@ -3696,6 +3778,14 @@ pub(super) fn prepare_candidates_inner(
                 provenant_routing::ModelId::parse(&format!("{}/{}", route.adapter, route.model))
                     .is_ok_and(|model| !rejected.contains(&model))
             }));
+            if queue.is_empty()
+                && let Some(deferred) = deferred_pinned.take()
+            {
+                // The redraw found no route that can serve the intent. A
+                // model-only pin is still attempted once on its refused account
+                // with the warning the advisory redraw deferred (issue #3764).
+                forced_advisory = Some(resume_deferred_pinned(&mut queue, deferred, &mut rejected));
+            }
             if queue.is_empty() {
                 if previous_outcome == provenant_routing::FallbackOutcome::AuthRequired
                     && let Some(last) = reasons.last_mut()
@@ -3705,6 +3795,7 @@ pub(super) fn prepare_candidates_inner(
                 break;
             }
         }
+        let forced_advisory = forced_advisory.take();
         let Some(mut route) = next_permitted_candidate(
             &mut queue,
             &mut rejected,
@@ -3716,6 +3807,9 @@ pub(super) fn prepare_candidates_inner(
         else {
             continue;
         };
+        if let Some(warning) = &forced_advisory {
+            push_launch_warning(&mut route, warning.clone());
+        }
         let current_candidate = candidate;
         candidate += 1;
         previous_outcome = provenant_routing::FallbackOutcome::Other;
@@ -3909,13 +4003,7 @@ pub(super) fn prepare_candidates_inner(
         let mut pinned_refusal_reason = None;
         if pinned_candidate(&task_request.choice, &route)
             && let provenant_records::RouteReadiness::Unavailable { reason, .. } = &route.readiness
-            && matches!(
-                reason,
-                provenant_records::RouteExclusionReason::Exhausted
-                    | provenant_records::RouteExclusionReason::PacingReserve
-                    | provenant_records::RouteExclusionReason::ProviderRefused
-                    | provenant_records::RouteExclusionReason::FreeTierRefused
-            )
+            && pinned_advisory_reason(reason)
         {
             pinned_refusal_reason = Some(reason.clone());
             if let Some((warning, expiry)) = pinned_refusal_warning(
@@ -4129,14 +4217,35 @@ pub(super) fn prepare_candidates_inner(
                 selected,
                 alternative_account,
             );
-            let advisory = if pinned_advisory_route {
+            let refusal_cause = redraw_exclusion_reason(&error, pinned_refusal_reason.as_ref());
+            let deferred_warning = if pinned_candidate(&task_request.choice, &route)
+                && !pinned_advisory_route
+                && pinned_advisory_reason(&refusal_cause)
+            {
+                pinned_advisory.clone().or_else(|| {
+                    pinned_refusal_warning(
+                        &route,
+                        &availability,
+                        &diagnostic_records,
+                        &refusal_cause,
+                        clock.unix_seconds(),
+                        &freshness,
+                    )
+                    .map(|(warning, _)| warning)
+                })
+            } else {
+                None
+            };
+            let advisory = if let Some(warning) = forced_advisory {
+                Some(warning)
+            } else if pinned_advisory_route {
                 pinned_advisory.clone().or_else(|| {
                     if spent {
                         pinned_refusal_warning(
                             &route,
                             &availability,
                             &diagnostic_records,
-                            &provenant_records::RouteExclusionReason::Exhausted,
+                            &refusal_cause,
                             clock.unix_seconds(),
                             &freshness,
                         )
@@ -4150,6 +4259,19 @@ pub(super) fn prepare_candidates_inner(
             };
             if let Some(warning) = &advisory {
                 push_launch_warning(&mut route, warning.clone());
+            }
+            if advisory.is_none()
+                && deferred_pinned.is_none()
+                && let Some(deferred) = deferred_pinned_attempt(
+                    &task_request.choice,
+                    &route,
+                    selected,
+                    alternative_account,
+                    &refusal_cause,
+                    deferred_warning,
+                )
+            {
+                deferred_pinned = Some(deferred);
             }
             let recoverable_account_refusal = spent
                 || matches!(
@@ -4176,11 +4298,10 @@ pub(super) fn prepare_candidates_inner(
                         SkipKind::Account,
                         format!("account {name}: {error}"),
                     );
-                    skipped.set_cause(provenant_records::RouteExclusionReason::Exhausted);
+                    skipped.set_cause(refusal_cause.clone());
                     reasons.push(skipped);
-                    previous_outcome = provenant_routing::FallbackOutcome::from_exclusion(
-                        &provenant_records::RouteExclusionReason::Exhausted,
-                    );
+                    previous_outcome =
+                        provenant_routing::FallbackOutcome::from_exclusion(&refusal_cause);
                     refused_accounts.insert((route.adapter.clone(), key));
                     let remaining = without_refused_accounts(&availability, &refused_accounts);
                     if let Ok(model) = provenant_routing::ModelId::parse(&label)
@@ -6776,6 +6897,197 @@ mod candidate_walk_regressions {
             Some("spent"),
             true
         ));
+    }
+
+    // Spec: docs/specs/routing.md#unknown-never-means-ready
+    #[test]
+    fn advisory_redraw_defers_the_pinned_route_for_one_final_attempt() {
+        use provenant_records::RouteExclusionReason;
+        let pinned = route("legacy", "spent");
+        let choice = provenant_routing::RouteChoice::Model(
+            provenant_routing::ModelId::parse("cursor/legacy").expect("model"),
+        );
+        let deferred = deferred_pinned_attempt(
+            &choice,
+            &pinned,
+            None,
+            true,
+            &RouteExclusionReason::Exhausted,
+            Some("recorded exhaustion".into()),
+        )
+        .expect("a model-only pin with another account defers");
+        assert_eq!(deferred.route.account_key.as_deref(), Some("spent"));
+        // A non-advisory cause is never deferred: a missing login or a policy
+        // refusal is not evidence that an attempt would succeed.
+        assert!(
+            deferred_pinned_attempt(
+                &choice,
+                &pinned,
+                None,
+                true,
+                &RouteExclusionReason::AuthRequired,
+                Some("warning".into())
+            )
+            .is_none()
+        );
+        assert!(
+            deferred_pinned_attempt(
+                &choice,
+                &pinned,
+                None,
+                true,
+                &RouteExclusionReason::ConfinementUnavailable,
+                Some("warning".into())
+            )
+            .is_none()
+        );
+        // An exact account pin, a pin with no other account, and a pin with no
+        // recorded source are attempted directly or cannot warn truthfully.
+        assert!(
+            deferred_pinned_attempt(
+                &choice,
+                &pinned,
+                Some("spent"),
+                true,
+                &RouteExclusionReason::Exhausted,
+                Some("warning".into())
+            )
+            .is_none()
+        );
+        assert!(
+            deferred_pinned_attempt(
+                &choice,
+                &pinned,
+                None,
+                false,
+                &RouteExclusionReason::Exhausted,
+                Some("warning".into())
+            )
+            .is_none()
+        );
+        assert!(
+            deferred_pinned_attempt(
+                &choice,
+                &pinned,
+                None,
+                true,
+                &RouteExclusionReason::Exhausted,
+                None
+            )
+            .is_none()
+        );
+
+        // A drained redraw re-queues exactly the refused pinned route with its
+        // warning and makes its model tryable again.
+        let mut queue = std::collections::VecDeque::new();
+        let mut rejected =
+            vec![provenant_routing::ModelId::parse("cursor/legacy").expect("recorded rejection")];
+        assert_eq!(
+            resume_deferred_pinned(&mut queue, deferred, &mut rejected),
+            "recorded exhaustion"
+        );
+        assert_eq!(queue.len(), 1);
+        assert!(rejected.is_empty());
+        assert_eq!(queue[0].account_key.as_deref(), Some("spent"));
+    }
+
+    // Spec: docs/specs/routing.md#unknown-never-means-ready
+    #[test]
+    fn redraw_records_the_admission_block_cause() {
+        use provenant_records::RouteExclusionReason;
+        let blocked =
+            |block| crate::route::EdgeError::Quota(provenant_quota::QuotaError::Blocked(block));
+        assert_eq!(
+            redraw_exclusion_reason(&blocked(provenant_quota::AccountBlock::ScopedRefusal), None),
+            RouteExclusionReason::ProviderRefused
+        );
+        assert_eq!(
+            redraw_exclusion_reason(
+                &blocked(provenant_quota::AccountBlock::FreeTierRefusal),
+                None
+            ),
+            RouteExclusionReason::FreeTierRefused
+        );
+        assert_eq!(
+            redraw_exclusion_reason(&blocked(provenant_quota::AccountBlock::Mismatch), None),
+            RouteExclusionReason::AccountMismatch
+        );
+        assert_eq!(
+            redraw_exclusion_reason(
+                &crate::route::EdgeError::Quota(provenant_quota::QuotaError::AllowanceExhausted),
+                Some(&RouteExclusionReason::ProviderRefused),
+            ),
+            RouteExclusionReason::Exhausted
+        );
+        assert_eq!(
+            redraw_exclusion_reason(
+                &crate::route::EdgeError::Admission("unclassified".into()),
+                Some(&RouteExclusionReason::ProviderRefused),
+            ),
+            RouteExclusionReason::ProviderRefused
+        );
+    }
+
+    // Spec: docs/specs/routing.md#unknown-never-means-ready
+    #[test]
+    fn advisory_expiry_must_be_in_the_future() {
+        let mut pinned = route("legacy", "spent");
+        pinned.diagnostics.allowance_warning =
+            Some(provenant_records::route_selection::AllowanceWarning {
+                extra: Default::default(),
+                warning: "allowance spent".into(),
+                source: "quota:fixture".into(),
+            });
+        let availability = [provenant_providers::AvailabilityRecord {
+            schema_version: 1,
+            adapter: pinned.adapter.clone(),
+            executable: "/fixture/cursor".into(),
+            version: "fixture".into(),
+            last_update: None,
+            fixture_ref: "fixture".into(),
+            catalogue_revision: "fixture".into(),
+            account_key: pinned.account_key.clone(),
+            plan: None,
+            observed_models: vec![],
+            observed_unix_seconds: 0,
+            expires_unix_seconds: 3700,
+        }];
+        let reason = provenant_records::RouteExclusionReason::Exhausted;
+        assert!(
+            pinned_refusal_warning(
+                &pinned,
+                &availability,
+                &[],
+                &reason,
+                3700,
+                &provenant_quota::DEFAULT_FRESHNESS,
+            )
+            .is_none(),
+            "an availability expiry at the current second is not in the future"
+        );
+        assert!(
+            pinned_refusal_warning(
+                &pinned,
+                &availability,
+                &[],
+                &reason,
+                4000,
+                &provenant_quota::DEFAULT_FRESHNESS,
+            )
+            .is_none(),
+            "an expired availability record is not evidence for an advisory launch"
+        );
+        assert!(
+            pinned_refusal_warning(
+                &pinned,
+                &availability,
+                &[],
+                &reason,
+                3699,
+                &provenant_quota::DEFAULT_FRESHNESS,
+            )
+            .is_some()
+        );
     }
 
     #[test]

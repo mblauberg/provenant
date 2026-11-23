@@ -554,6 +554,7 @@ dependencies = [
  "provenant-core",
  "provenant-fabric-store",
  "provenant-os",
+ "provenant-providers",
  "provenant-records",
  "provenant-redact",
  "provenant-routing",

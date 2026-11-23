@@ -1345,3 +1345,65 @@ fn create_with_prunable_registration_for_same_branch() -> Result<(), Box<dyn Err
     assert!(matches!(error_recreated, WorktreeError::StaleRegistration));
     Ok(())
 }
+
+#[test]
+// Spec: docs/specs/supervisor.md#pruning-and-gc-need-proof
+fn gc_never_retires_a_linked_worktree_on_the_default_branch() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let lane = gc_merged_worktree(&test, &context, "gc-default-lane")?;
+    // `WorktreeInfo::branch` is the full ref; the tracking name needs the short one.
+    let branch = lane
+        .branch
+        .as_deref()
+        .and_then(|branch| branch.strip_prefix("refs/heads/"))
+        .ok_or("fixture lane has no local branch")?;
+    // Name this linked worktree's branch as the default through origin/HEAD
+    // while the primary checkout stays on the repository's initial branch.
+    let tracking = format!("refs/remotes/origin/{branch}");
+    fixture.run(&["update-ref", &tracking, &lane.head.to_string()])?;
+    fixture.run(&["symbolic-ref", "refs/remotes/origin/HEAD", &tracking])?;
+
+    let retirement = HostRetirementFixture::new(&test)?;
+    retirement.seed_lane(&context, &lane)?;
+    let evidence = gc_landing_evidence(&fixture, fixture.head()?)?;
+    let report = collect(
+        &context,
+        std::slice::from_ref(&lane),
+        &WorktreeGcPolicy {
+            upstream: None,
+            upstream_reference: None,
+            mode: CollectionMode::Worktrees,
+            proof: Some(&evidence),
+            terminal: &|_| true,
+            no_live_lanes: &|_| true,
+            regenerable: &[],
+            keep: &[],
+            written_before_ns: i128::MAX,
+            dry_run: false,
+            include_foreign: false,
+            retirement_port: Some(&retirement),
+            retirement_feeds: Some(&retirement),
+            integration_patterns: &[],
+            excluded_paths: &[],
+        },
+        &cancel(),
+    )?;
+
+    assert!(
+        report.worktrees.removed.is_empty(),
+        "{:?}",
+        report.worktrees
+    );
+    assert!(
+        report.candidates.iter().any(|candidate| {
+            candidate.path == lane.path
+                && candidate.detail.as_deref() == Some("default branch is never retired")
+        }),
+        "{:?}",
+        report.candidates
+    );
+    assert!(lane.path.is_dir());
+    Ok(())
+}
