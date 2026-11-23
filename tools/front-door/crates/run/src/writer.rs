@@ -4055,7 +4055,10 @@ impl WriterLaunch {
                 |tip| settlement.set_publication_tip(tip),
             )?;
             let ancestor = &published.ancestor;
-            if let Some(warning) = ancestor.warning(self.branch.as_str(), base, published.tip) {
+            // The ancestry judged is the lane head's, before any host merge, so the
+            // warning names that head rather than a merge that descends from the
+            // host branch.
+            if let Some(warning) = ancestor.warning(self.branch.as_str(), base, verified_tip) {
                 // Publication already wrote the unrooted warning to stderr with
                 // the setting that decided it. Only a known ancestor's warning
                 // is raised here; both are recorded with the same text so the
