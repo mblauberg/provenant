@@ -8,7 +8,7 @@ These items touch no shared seam and can land now, before the batch, as one
 independent: one that fails review or conflicts is dropped from the run,
 without blocking the rest.
 
-All use Hy (`opencode/opencode-go/hy4-flash-free`) except where noted. Lanes run `cargo fmt` only. Each
+All use Hy (`opencode/opencode/hy4-flash-free`). Lanes run `cargo fmt` only. Each
 item adds a fragment, `docs/release-notes/next.d/<issue>-<slug>.md`. This page
 is transient, like [the design](next-batch.md).
 
@@ -123,7 +123,7 @@ Issues: #3768.
 
 ## qw-pinned-redraw-fidelity: Pinned exhausted route: advisory attempt, true cause, future expiry
 
-Issues: #3764. Uses DeepSeek: routing judgement. Lands before w3-accounts, which edits the same file.
+Issues: #3764. Lands before w3-accounts, which edits the same file.
 
 - Outcome: F1: when the queue drains after an advisory redraw, the pinned route is attempted once on its refused account, with the warning. F2: a provider-refusal redraw records its real exclusion reason, not Exhausted. F3: an advisory expiry is used only when it is in the future.
 - Acceptance: As in the issue's rescope comment.

@@ -705,16 +705,16 @@ costs one warm clippy run.
 ### Wave 1: seam cores (9 slices, about 5500 lines)
 | Slice | Issues | Model | Lines | After | Outcome |
 |---|---|---|---|---|---|
-| w1-interfaces | #3777 #3778 #3808 #3709 | DeepSeek | 550 | none | Shared seam types and the migration registry |
-| w1-registry | #3774 | DeepSeek | 800 | none | Command registry replaces the dispatch match |
-| w1-envelope | #3778 #3813 #3812 | DeepSeek | 650 | w1-interfaces, w1-registry | One warning emitter and envelope v2 |
-| w1-provenance | #3777 | DeepSeek | 700 | w1-interfaces | Persisted source families onto Layer |
+| w1-interfaces | #3777 #3778 #3808 #3709 | Hy | 550 | none | Shared seam types and the migration registry |
+| w1-registry | #3774 | Hy | 800 | none | Command registry replaces the dispatch match |
+| w1-envelope | #3778 #3813 #3812 | Hy | 650 | w1-interfaces, w1-registry | One warning emitter and envelope v2 |
+| w1-provenance | #3777 | Hy | 700 | w1-interfaces | Persisted source families onto Layer |
 | ~~w1-record-migration~~ | #3801 follow-up | - | - | - | Done by #3822 (aliases deleted; base-12 stores rewritten on open); dropped from wave 1 |
-| w1-names | #3808 | DeepSeek | 500 | w1-interfaces | One close-match ranker and name refusal |
-| w1-forge | #3288 #3505 | DeepSeek | 750 | w1-interfaces | ForgeContext: one remote, default branch, protected set and policy |
-| w1-usage | #3709 (seam half) | DeepSeek | 750 | w1-interfaces | UsageReport, declared semantics and one accumulator |
-| w1-project-dirs | #3777 (bug) | DeepSeek | 350 | w1-interfaces | One host-project directory key |
-| w1-writer-settlement | #3407 | DeepSeek | 450 | none | Writer settlement decides Git-operation state before publication |
+| w1-names | #3808 | Hy | 500 | w1-interfaces | One close-match ranker and name refusal |
+| w1-forge | #3288 #3505 | Hy | 750 | w1-interfaces | ForgeContext: one remote, default branch, protected set and policy |
+| w1-usage | #3709 (seam half) | Hy | 750 | w1-interfaces | UsageReport, declared semantics and one accumulator |
+| w1-project-dirs | #3777 (bug) | Hy | 350 | w1-interfaces | One host-project directory key |
+| w1-writer-settlement | #3407 | Hy | 450 | none | Writer settlement decides Git-operation state before publication |
 
 ### Wave 2: move every caller (7 slices, about 3500 lines)
 | Slice | Issues | Model | Lines | After | Outcome |
@@ -732,27 +732,29 @@ costs one warm clippy run.
 |---|---|---|---|---|---|
 | w3-next-steps | #3814 | Hy | 450 | none | Next steps are envelope data with one formatter |
 | w3-names-targets | #3808 | Hy | 550 | none | Close matches for graph, node, attempt, host, adapter, exclusion and help targets |
-| w3-accounts | #3506 | DeepSeek | 650 | none | One account reference resolver |
-| w3-worktree | #3810 | DeepSeek | 650 | none | worktree locate, carried paths and a remove that chairs can use |
-| w3-ci-observer | #3510 | DeepSeek | 600 | none | One CI observation transport |
-| w3-implement-pr | #3500 #3644 | DeepSeek | 700 | w3-ci-observer | run implement --pr N; an existing branch behind its base warns |
-| w3-writer-dirty | #3649 | DeepSeek | 350 | none | Adopt unheld uncommitted work by default |
-| w3-land | #3191 + admin publication | DeepSeek | 700 | w3-ci-observer | land: owner-granted admin publication, per-member heads, derived target |
+| w3-accounts | #3506 | Hy | 650 | none | One account reference resolver |
+| w3-worktree | #3810 | Hy | 650 | none | worktree locate, carried paths and a remove that chairs can use |
+| w3-ci-observer | #3510 | Hy | 600 | none | One CI observation transport |
+| w3-implement-pr | #3500 #3644 | Hy | 700 | w3-ci-observer | run implement --pr N; an existing branch behind its base warns |
+| w3-writer-dirty | #3649 | Hy | 350 | none | Adopt unheld uncommitted work by default |
+| w3-land | #3191 + admin publication | Hy | 700 | w3-ci-observer | land: owner-granted admin publication, per-member heads, derived target |
 | w3-approval-carry | #3540 | Hy | 350 | w3-land | Approval carry reads the format command from the port table |
-| w3-opencode-stream | #3706 #3708 #3709 | DeepSeek | 550 | none | OpenCode stream parity: step usage and cost, retry, 5xx |
-| w3-opencode-variants | #3707 | DeepSeek | 450 | w3-opencode-stream | OpenCode variants: classify and validate effort |
-| w3-result-projection | #3444 #3807 | DeepSeek | 700 | none | One result projection: facts first, verdict-first default |
-| w3-init | #3814 | DeepSeek | 600 | none | provenant init |
+| w3-opencode-stream | #3706 #3708 #3709 | Hy | 550 | none | OpenCode stream parity: step usage and cost, retry, 5xx |
+| w3-opencode-variants | #3707 | Hy | 450 | w3-opencode-stream | OpenCode variants: classify and validate effort |
+| w3-result-projection | #3444 #3807 | Hy | 700 | none | One result projection: facts first, verdict-first default |
+| w3-init | #3814 | Hy | 600 | none | provenant init |
 | w3-preamble | #3498 #3652 | Hy | 450 | none | Layered brief preamble with static checks |
-| w3-read-source | #3512 #3360 | DeepSeek | 600 | w3-implement-pr | Read-only source as a sourced setting; plan binds --base |
+| w3-read-source | #3512 #3360 | Hy | 600 | w3-implement-pr | Read-only source as a sourced setting; plan binds --base |
 | w3-steer-settled | #3809 | Hy | 300 | none | Steer on a settled lane queues or warns, by setting |
 | w3-worktree-roots | #3285 | Hy | 400 | w3-worktree | Worktree layout roots outside the checkout |
 | w3-config-show | #3777 | Hy | 300 | none | config show and --explain print per-leaf sources |
 
-Models:
-- Hy (`opencode/opencode-go/hy4-flash-free`) for mechanical codemods and well-specified features.
-- DeepSeek (`opencode/opencode-go/deepseek-v4.1-flash`) for slices that touch a persisted format, a boundary,
-  or a seam's core.
+Models: every slice and repair lane writes with Hy 4 Flash free
+(`opencode/opencode/hy4-flash-free`, the free Zen route). Lanes run format
+only, so the chair's integrated compile check is the oracle for each merge;
+wave 1 showed that a wide rename spills past its write scope and the chair
+repairs it before the next slice starts. DeepSeek stays available for a slice
+that fails twice on Hy.
 
 ### Chair steps
 
@@ -770,7 +772,7 @@ Models:
    background.
 4. **The gate.** Run the integrated clippy check on the integration head and
    push `batch/next`; open a draft PR after wave 1 so CI runs. Clippy errors
-   go to a DeepSeek repair lane on the integration branch. CI failures feed
+   go to a Hy repair lane on the integration branch. CI failures feed
    the next wave as repair slices, or the final repair round.
 5. **Waves 2 and 3.** These adopt the existing branch, so they start from
    its tip. Before launching each one, set `review_base` in its document to
@@ -796,7 +798,7 @@ reviews its own slice. The panel has four lenses, chosen by risk.
 | Correctness by area | Sonnet x3 | (a) warnings, names, output, init; (b) settings, forge, worktree, landing, CI; (c) usage, OpenCode, run, writer. Tests pin invariants, not prose or counts. |
 | Mechanical sweep | Haiku x2 | Residue searches: `"origin"` literals, `Policy::default()` at forge sites, distance functions, `io::stderr` outside the emitter, deleted symbols. One release-note fragment per slice. Area spec sections added and this page's invariants folded in. `scripts/check-doc-truth --binary` is clean. |
 
-Findings go to DeepSeek repair lanes. The same lens then re-reviews only the
+Findings go to Hy repair lanes. The same lens then re-reviews only the
 changed hunks, with a fresh agent. The batch is accepted when CI is green on
 the exact head and no finding of high severity is open.
 
