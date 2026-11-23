@@ -82,6 +82,16 @@ fn create_reused(data: &serde_json::Value) -> bool {
     data["reused"].as_bool() == Some(true)
 }
 
+/// One gate for both paths that can hand a checkout to Claude: `create`'s
+/// reuse on success and `reusable`'s adoption after a create failure. A tree
+/// another writer holds is never handed over. `Observed` renders as `live`
+/// and `Held` (an active writer lease) as `busy`; `unknown` is common and is
+/// not an occupied writer, so it is not refused here.
+fn live_writer_refusal(entry: &serde_json::Value) -> Option<&'static str> {
+    matches!(entry["writer"].as_str(), Some("live" | "busy"))
+        .then_some("a writer is live or holds a lease in it")
+}
+
 /// Claude's suggested slug becomes the branch `claude/<slug>`. The name reaches
 /// a branch and a directory, so anything outside a plain slug (1-64 letters,
 /// digits, '.', '_' or '-') is rewritten to one, never refused. A plain slug is
@@ -125,9 +135,10 @@ fn entry_path(entry: &serde_json::Value) -> Option<PathBuf> {
 /// The worktree already holding `branch` that this hook can reuse. A clean,
 /// idle worktree is adopted with a warning even when it is off the hook's usual
 /// path or carries no ownership record: those are preferences, not boundaries.
-/// The primary checkout, a live or held writer, uncommitted files and an unknown
-/// path or layout stay refused. `Err(None)` means no worktree holds the branch,
-/// so the create failure stands alone.
+/// Ignored build output is not uncommitted work; the primary checkout, a live or
+/// held writer, tracked or untracked changes and an unknown path or layout stay
+/// refused. `Err(None)` means no worktree holds the branch, so the create
+/// failure stands alone.
 fn reusable(
     state: &Path,
     list: &serde_json::Value,
@@ -154,14 +165,14 @@ fn reusable(
     };
     // `unknown` is common (any process the owner cannot inspect makes every
     // writer unknown), so only an actually occupied writer refuses here.
-    // `Observed` renders as `live` and `Held` (an active writer lease) as
-    // `busy`; both mean another writer owns the tree, a real boundary.
     // Ownership and path are the hook's own preferences, adopted below.
-    if matches!(holder["writer"].as_str(), Some("live" | "busy")) {
-        return refuse("a writer is live or holds a lease in it");
+    if let Some(reason) = live_writer_refusal(holder) {
+        return refuse(reason);
     }
-    if holder["dirty"] != "clean" {
-        return refuse("it has uncommitted or ignored files");
+    // Ignored output (declared build output) is not uncommitted work and does
+    // not block a hand-off; tracked or untracked changes still do.
+    if !matches!(holder["dirty"].as_str(), Some("clean" | "ignored")) {
+        return refuse("it has uncommitted files");
     }
     if path != expected {
         warn_adopt(
@@ -296,15 +307,22 @@ pub fn create(globals: &Globals) -> u8 {
             Ok(data) => {
                 let path = entry_path(&data).ok_or("worktree create returned no path")?;
                 let head = data["head"].as_str().unwrap_or_default();
-                // An occupied managed path is now reused rather than refused. A
-                // reused tree this hook did not create, or whose record no longer
-                // describes it, is adopted: warn before re-marking it. A fresh
-                // creation has no record by definition and is not an adoption.
-                if create_reused(&data) && !hook_owned(&state, &path, &branch, head) {
-                    warn_adopt(
-                        "worktree-create",
-                        &format!("{path:?} carries no ownership record from this hook"),
-                    );
+                // An occupied managed path is now reused rather than refused,
+                // but a reused tree another live writer holds is never handed
+                // to Claude: fail as the failure-path adoption does, before
+                // re-marking it as this hook's own. A reused tree this hook did
+                // not create, or whose record no longer describes it, is
+                // adopted with a warning; a fresh creation is not an adoption.
+                if create_reused(&data) {
+                    if let Some(reason) = live_writer_refusal(&data) {
+                        return Err(reason.into());
+                    }
+                    if !hook_owned(&state, &path, &branch, head) {
+                        warn_adopt(
+                            "worktree-create",
+                            &format!("{path:?} carries no ownership record from this hook"),
+                        );
+                    }
                 }
                 if let Err(error) = mark_owned(&state, &path, &branch, head) {
                     // Without the mark a later call cannot reuse this tree.
@@ -459,6 +477,7 @@ mod tests {
         assert_eq!(entry_path(&json!({"path":"/bare"})), None);
     }
 
+    // Spec: docs/specs/cli.md#worktree-hooks-respect-ownership
     #[test]
     fn reusable_adopts_a_clean_idle_tree_and_refuses_dirty_or_occupied() {
         use super::*;
@@ -484,22 +503,39 @@ mod tests {
             PathBuf::from("/adopted"),
             "a clean, idle tree is adopted even off-path and unowned"
         );
+        // Ignored (declared build) output is not uncommitted work and does not
+        // block a hand-off.
+        let ignored = json!([
+            primary.clone(),
+            entry("adopted", branch, "ignored", "unknown")
+        ]);
+        assert_eq!(
+            reusable(state, &ignored, branch).unwrap(),
+            PathBuf::from("/adopted"),
+            "ignored-only output is adopted like a clean tree"
+        );
         // "dirty" is the real WorktreeCondition label in `worktree list`.
         let dirty = json!([
             primary.clone(),
             entry("adopted", branch, "dirty", "unknown")
         ]);
-        assert!(
-            reusable(state, &dirty, branch).is_err(),
+        assert_eq!(
+            reusable(state, &dirty, branch).err().flatten().as_deref(),
+            Some("it has uncommitted files"),
             "dirty tree stays refused"
         );
         // "live" is Observed; "busy" is Held, an active writer lease. Both
-        // mean another writer owns the tree and must stay refused.
+        // mean another writer owns the tree and must stay refused by the same
+        // gate the success path uses.
         for writer in ["live", "busy"] {
             let occupied = json!([primary.clone(), entry("adopted", branch, "clean", writer)]);
-            assert!(
-                reusable(state, &occupied, branch).is_err(),
-                "writer={writer} stays refused"
+            assert_eq!(
+                reusable(state, &occupied, branch)
+                    .err()
+                    .flatten()
+                    .as_deref(),
+                live_writer_refusal(&entry("adopted", branch, "clean", writer)),
+                "writer={writer} stays refused with the shared reason"
             );
         }
     }

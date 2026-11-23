@@ -822,6 +822,39 @@ fn worktree_hooks_sanitise_bad_names_and_refuse_the_primary_and_foreign_paths() 
     Ok(())
 }
 
+// Spec: docs/specs/cli.md#worktree-hooks-respect-ownership
+#[test]
+fn worktree_create_refuses_a_reused_checkout_with_a_live_writer() -> Result {
+    struct Child(std::process::Child);
+    impl Drop for Child {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let rig = TestRig::new()?;
+    commit_file(&rig)?;
+    let path = made_tree(&rig, "occupied")?;
+    // A process with its cwd inside the clean checkout makes its writer
+    // `live`; a second create must not hand that checkout to Claude.
+    let _child = Child(
+        std::process::Command::new("/bin/sh")
+            .args(["-c", "read line"])
+            .current_dir(&path)
+            .stdin(std::process::Stdio::piped())
+            .spawn()?,
+    );
+    let output = run_hook(&rig, "worktree-create", &worktree_input(&rig, "occupied"))?;
+    let stderr = String::from_utf8_lossy(&output.stderr.bytes).into_owned();
+    assert_eq!(code(&output), 2, "{stderr}");
+    assert!(
+        stderr.contains("a writer is live or holds a lease in it"),
+        "{stderr}"
+    );
+    assert!(output.stdout.bytes.is_empty());
+    Ok(())
+}
+
 fn made_tree(rig: &TestRig, name: &str) -> Result<PathBuf> {
     let made = run_hook(rig, "worktree-create", &worktree_input(rig, name))?;
     assert_eq!(
@@ -1093,6 +1126,36 @@ fn worktree_create_refuses_primary_and_dirty_but_adopts_unowned_or_misplaced_tre
             }
         }
     }
+    Ok(())
+}
+
+// Spec: docs/specs/cli.md#worktree-hooks-respect-ownership
+#[test]
+fn worktree_create_reuses_an_off_path_tree_with_only_ignored_output() -> Result {
+    let rig = TestRig::new()?;
+    fs::write(rig.project.join(".gitignore"), "target/\n")?;
+    git(&rig, &["add", ".gitignore"])?;
+    commit_file(&rig)?;
+    // An off-path checkout on the hook's branch makes `worktree create` fail,
+    // so the hook's adoption path decides reuse. Ignored build output is not
+    // uncommitted work and must not block that adoption.
+    let path = rig.root.join("elsewhere-built");
+    git(
+        &rig,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "claude/built",
+            path.to_str().ok_or("path")?,
+        ],
+    )?;
+    fs::create_dir(path.join("target"))?;
+    fs::write(path.join("target/out.o"), "object")?;
+    let adopted = adopted_create(&rig, "built")?;
+    assert_eq!(adopted, path);
+    assert!(path.join("target/out.o").is_file());
     Ok(())
 }
 

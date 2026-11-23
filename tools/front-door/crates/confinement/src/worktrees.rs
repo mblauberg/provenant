@@ -448,7 +448,7 @@ impl WorktreeError {
         Some(match self {
             Self::StaleRegistration => "run `git worktree prune`, then retry",
             Self::WorktreeExists { .. } => {
-                "run `provenant worktree list` to inspect the existing checkout, then remove it with `provenant worktree remove NAME` or retry with a matching clean tree"
+                "run `provenant worktree list` to inspect the existing checkout, then remove it with `provenant worktree remove NAME` or retry with a matching clean tree; for a base conflict, omit --base or pick a matching base"
             }
             Self::GitEntryHeld { locked: true } => "run `git worktree unlock <path>`, then retry",
             Self::GitEntryHeld { locked: false } => {

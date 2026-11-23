@@ -550,9 +550,12 @@ fn reuse_existing_worktree(
         .ok_or_else(|| conflict("the checkout has no HEAD".to_owned()))?;
     if let Some(base) = request.base.as_deref() {
         let base_oid = pin_revision(context, context.facts, base, cancel)?;
-        if base_oid != head {
+        // Admission on an occupied path must match a free path: a base that
+        // the checkout's HEAD descends from is already satisfied. Only a base
+        // outside that history is a conflict.
+        if !is_ancestor(context, base_oid, head, cancel)? {
             return Err(conflict(format!(
-                "base {base} resolves to {base_oid} but the checkout is at {head}"
+                "base {base} at {base_oid} does not contain the checkout at {head}; omit --base or pick a base at or before that commit"
             )));
         }
     }

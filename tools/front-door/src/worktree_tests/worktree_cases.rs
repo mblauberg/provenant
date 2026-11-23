@@ -546,7 +546,41 @@ pub(super) fn create_reuses_a_clean_worktree_and_names_an_existing_conflict() ->
     let listed = ok(&rig, &["worktree", "list", "--json"])?;
     assert_eq!(listed["data"].as_array().map(Vec::len), Some(2));
 
-    git(&rig, &["commit", "--allow-empty", "-qm", "advance"])?;
+    // A checkout advanced past --base is admitted on the occupied path just
+    // as it would be on a free path: the base is an ancestor of its HEAD.
+    let path_text = path.to_str().ok_or("worktree path text")?.to_owned();
+    git(
+        &rig,
+        &[
+            "-C",
+            &path_text,
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "advance",
+        ],
+    )?;
+    let tip = git(&rig, &["-C", &path_text, "rev-parse", "HEAD"])?;
+    assert_ne!(tip, base);
+    let advanced = ok(
+        &rig,
+        &[
+            "worktree",
+            "create",
+            "feature/reuse",
+            "--base",
+            &base,
+            "--json",
+        ],
+    )?;
+    assert_eq!(advanced["data"]["path"], created["data"]["path"]);
+    assert_eq!(advanced["data"]["head"], tip);
+    assert_eq!(advanced["data"]["reused"], true);
+
+    // A base that is not an ancestor of the checkout HEAD stays refused and
+    // names both the path and the repair.
+    git(&rig, &["commit", "--allow-empty", "-qm", "sibling"])?;
+    let sibling = git(&rig, &["rev-parse", "HEAD"])?;
     let conflict = command(
         &rig,
         &[
@@ -554,7 +588,7 @@ pub(super) fn create_reuses_a_clean_worktree_and_names_an_existing_conflict() ->
             "create",
             "feature/reuse",
             "--base",
-            "HEAD",
+            &sibling,
             "--json",
         ],
     )?;
@@ -562,12 +596,11 @@ pub(super) fn create_reuses_a_clean_worktree_and_names_an_existing_conflict() ->
     let value = json(&conflict)?;
     let message = value["error"]["message"].as_str().ok_or("error message")?;
     assert!(message.contains("feature/reuse"), "{value}");
-    assert!(
-        message.contains(path.to_str().ok_or("worktree path text")?),
-        "{value}"
-    );
+    assert!(message.contains(path_text.as_str()), "{value}");
     let cause = value["error"]["cause"].as_str().ok_or("named cause")?;
-    assert!(cause.contains("base HEAD resolves to"), "{value}");
+    assert!(cause.contains("omit --base"), "{value}");
+    let repair = value["error"]["repair"].as_str().ok_or("repair")?;
+    assert!(repair.contains("matching base"), "{value}");
 
     fs::write(path.join("uncommitted"), "work in progress")?;
     let dirty = command(
