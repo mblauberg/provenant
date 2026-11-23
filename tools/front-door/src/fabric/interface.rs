@@ -960,9 +960,12 @@ impl Factory {
                     )
                 }
             };
-        Ok(provenant_fabric_runtime::graph::refusal::input_warnings(
-            value, &policy,
-        ))
+        Ok(
+            provenant_fabric_runtime::graph::refusal::input_warnings(value, &policy)
+                .into_iter()
+                .map(|warning| warning.message)
+                .collect(),
+        )
     }
 
     fn validate_host_placement(
