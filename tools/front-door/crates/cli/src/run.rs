@@ -48,16 +48,11 @@ pub use key::{resolve_fail, resolve_target};
 pub use launch::*;
 pub use output::*;
 pub use steer_pacing::pace_steer_restart;
-/// Why an adapter that should report usage did not. Kept beside the typed
-/// source as evidence, not as a substitute for it.
-const USAGE_ABSENCE_REASON: &str = "usage_absence_reason";
-
 fn absent_usage(reason: &str) -> run::UsageRecord {
-    let mut usage = run::UsageRecord::default();
-    usage
-        .extra
-        .insert(USAGE_ABSENCE_REASON.into(), json!(reason));
-    usage
+    run::UsageRecord {
+        absence_reason: Some(reason.to_owned()),
+        ..Default::default()
+    }
 }
 
 pub fn provider_executable(name: &str) -> Result<PathBuf, String> {
@@ -1315,13 +1310,13 @@ impl Registry<'_> {
                 serde_json::from_slice::<serde_json::Value>(line)
                     .is_ok_and(|event| event["type"] == "result")
             });
-            decoded.usage.extra.insert(
-                USAGE_ABSENCE_REASON.into(),
-                json!(if has_result {
+            decoded.usage.absence_reason = Some(
+                if has_result {
                     "absent: result event has no usage"
                 } else {
                     "absent: no result event"
-                }),
+                }
+                .to_owned(),
             );
         }
         let failure_cause = if events.contains(&ProviderEvent::AuthRequired) {

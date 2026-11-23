@@ -1090,11 +1090,7 @@ fn claude_absent_usage_names_its_reason() {
     assert_eq!(decoded.usage.tokens.input, None);
     assert_eq!(decoded.usage.source, provenant_records::UsageSource::Stream);
     assert_eq!(
-        decoded
-            .usage
-            .extra
-            .get("usage_absence_reason")
-            .and_then(|v| v.as_str()),
+        decoded.usage.absence_reason.as_deref(),
         Some("absent: no result event")
     );
 
@@ -1112,11 +1108,7 @@ fn claude_absent_usage_names_its_reason() {
         .unwrap();
     assert_eq!(decoded_no_usage.usage.tokens.input, None);
     assert_eq!(
-        decoded_no_usage
-            .usage
-            .extra
-            .get("usage_absence_reason")
-            .and_then(|v| v.as_str()),
+        decoded_no_usage.usage.absence_reason.as_deref(),
         Some("absent: result event has no usage")
     );
 

@@ -1228,6 +1228,10 @@ pub struct UsageRecord {
     pub session_total: Option<Box<UsageRecord>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gh_invocations: Option<GhInvocationReceipt>,
+    /// Why an adapter that should report usage did not: evidence beside the
+    /// typed source, never a substitute for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub absence_reason: Option<String>,
 }
 
 impl Default for UsageRecord {
@@ -1241,6 +1245,7 @@ impl Default for UsageRecord {
             per_attempt: None,
             session_total: None,
             gh_invocations: None,
+            absence_reason: None,
         }
     }
 }
