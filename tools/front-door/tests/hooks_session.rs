@@ -310,11 +310,23 @@ fn restart_hook_reports_in_flight_lanes_and_prs_named_by_the_chair() -> Result {
 #[test]
 fn hints_from_a_hook_on_a_custom_store_carry_its_state_dir() -> Result {
     let rig = TestRig::new()?;
-    save(
-        &store(&rig, "custom-session")?,
-        "Chair notes: delivered PR #7.",
-    )?;
-    let state = rig.state.to_str().ok_or("state path is not UTF-8")?;
+    // The rig's env resolves rig.state by default, so use a different store:
+    // only a non-default --state-dir belongs in the rendered commands.
+    let custom_state = rig.root.join("custom-state");
+    provenant_os::fixture::private_state_dir(&custom_state)?;
+    let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
+    inputs.state_dir = Some(custom_state.clone());
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let common = fs::canonicalize(rig.project.join(".git"))?;
+    let bound =
+        provenant_config::bind_project(&roots, provenant_config::ProjectLocation::new(common)?)?;
+    let custom_store = SessionStore::new(
+        roots.state,
+        bound.project_id(),
+        HostSessionId::parse("custom-session")?,
+    );
+    save(&custom_store, "Chair notes: delivered PR #7.")?;
+    let state = custom_state.to_str().ok_or("state path is not UTF-8")?;
     let input = serde_json::to_vec(&start(&rig, "custom-session", "resume"))?;
     let output = rig.execute(
         Path::new(BINARY),
@@ -357,7 +369,16 @@ fn hook_save_round_trips_from_a_non_git_project_directory() -> Result {
     let hook = run_hook(&rig, "session-start", &input)?;
     assert_eq!(code(&hook), 0, "{:?}", hook.stderr.bytes);
     let hook_context = context(&hook)?;
-    assert!(hook_context.contains("--project '"), "{hook_context}");
+    // The formatter drops --project when it equals the environment default:
+    // this hook's event cwd is the non-Git directory itself. The save hint is
+    // still complete and runnable from there.
+    assert!(
+        hook_context.contains(
+            "Save: provenant workflow session save non-git-session --file <checkpoint.md> --client claude"
+        ),
+        "{hook_context}"
+    );
+    assert!(!hook_context.contains("--project '"), "{hook_context}");
 
     let file = rig.root.join("checkpoint.md");
     fs::write(&file, "Chair notes from a non-Git directory.")?;
@@ -904,8 +925,12 @@ fn worktree_remove_adopts_a_clean_idle_tree_without_a_hook_record() -> Result {
         "{}",
         String::from_utf8_lossy(&output.stderr.bytes)
     );
+    // Both adoptions raise the same typed warning (code, subject and message),
+    // so the per-change key recorded by the first one suppresses the second.
+    let stderr = String::from_utf8_lossy(&output.stderr.bytes);
     assert!(
-        String::from_utf8_lossy(&output.stderr.bytes).contains("warning: adopting clean worktree")
+        !stderr.contains("warning: adopting clean worktree"),
+        "{stderr}"
     );
     assert!(!Path::new(hand).is_dir());
     Ok(())

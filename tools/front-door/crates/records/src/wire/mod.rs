@@ -9,10 +9,10 @@
 //!
 //! [`ENVELOPE_VERSION`] is the `schema_version` the CLI emits today
 //! (`CommandResult::new`), and the published command schemas require it, so
-//! they accept current `--json` output. [`SCHEMA_VERSION`] (2) is the planned
-//! typed generation, which is not emitted yet: it will be bumped to in one
-//! change with the callers, with no dual-emit period (chair decision, 2 Nov
-//! 2026). The one exception to "accepts current output" is `status`: its `data`
+//! they accept current `--json` output. Version 2 is the emitted generation:
+//! every envelope carries `warnings` and `next`, with no tolerant reader for
+//! version 1. [`SCHEMA_VERSION`] tracks the current typed generation.
+//! The one exception to "accepts current output" is `status`: its `data`
 //! schema is the planned lane-row shape, while the CLI still emits raw attempt
 //! records and a numeric cursor.
 //!

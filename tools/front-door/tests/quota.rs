@@ -698,7 +698,7 @@ cat "$HOME/agy-usage"
 }
 
 #[test]
-fn agy_quota_reports_rebind_failure_and_recovery_on_stderr() -> Result {
+fn agy_quota_reports_rebind_failure_and_recovery_in_the_envelope() -> Result {
     use std::{fs, os::unix::fs::PermissionsExt};
     let mut rig = quota_rig()?;
     support::clear_accounts(&rig)?;
@@ -743,16 +743,26 @@ cat "$HOME/agy-usage"
     )?;
     let out = rig.command(&["quota", "tick", "--adapter", "agy", "--json"])?;
     assert_eq!(code(&out), 0);
+    // Under --json the typed warning travels in the envelope, never on stderr.
+    let envelope: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
+    let failure = envelope["warnings"]
+        .as_array()
+        .ok_or("warnings")?
+        .iter()
+        .find(|warning| warning["code"] == "ACCOUNT_SWITCH_RECONCILE_FAILED")
+        .ok_or("account switch reconciliation warning")?;
+    let message = failure["message"].as_str().ok_or("warning message")?;
+    assert!(
+        message.contains("failed to reconcile agy account switch"),
+        "{message}"
+    );
+    assert!(
+        message.contains("agy identity is already registered"),
+        "{message}"
+    );
+    assert!(message.contains("provenant accounts list"), "{message}");
     let stderr = String::from_utf8(out.stderr.bytes)?;
-    assert!(
-        stderr.contains("failed to reconcile agy account switch"),
-        "{stderr}"
-    );
-    assert!(
-        stderr.contains("agy identity is already registered"),
-        "{stderr}"
-    );
-    assert!(stderr.contains("provenant accounts list"), "{stderr}");
+    assert!(!stderr.contains("warning:"), "{stderr}");
     let refused: serde_json::Value = serde_json::from_slice(&fs::read(
         rig.state.join("quota").join(&old).join("agy.json"),
     )?)?;
