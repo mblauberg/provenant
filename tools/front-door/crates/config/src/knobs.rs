@@ -464,15 +464,27 @@ pub(crate) fn resolve(
 ) -> Result<ResolvedKnobs, ConfigError> {
     let registry = registry()?;
     let preset = registry.presets.get(profile_name(profile));
-    let mut knobs = BTreeMap::new();
+    let mut by_name: BTreeMap<String, Vec<Sourced<Value>>> = BTreeMap::new();
     for (name, spec) in &registry.knobs {
-        let from_preset = preset.and_then(|p| p.knobs.get(name));
-        let value = match (from_preset, safe_value(name)) {
-            (_, Some(safe)) if malformed_table => sourced(safe, Layer::Default),
-            (Some(value), _) => sourced(value.clone(), Layer::Profile),
-            (None, _) => sourced(spec.default.clone(), Layer::Default),
-        };
-        knobs.insert(name.clone(), value);
+        let mut candidates = Vec::new();
+        let safe = safe_value(name);
+        if malformed_table {
+            // A malformed table narrows every strict knob to its safe value;
+            // other knobs keep the preset or default they would otherwise use.
+            if let Some(safe) = safe {
+                candidates.push(sourced(safe, Layer::Default));
+            } else if let Some(value) = preset.and_then(|preset| preset.knobs.get(name)) {
+                candidates.push(sourced(value.clone(), Layer::Profile));
+            } else {
+                candidates.push(sourced(spec.default.clone(), Layer::Default));
+            }
+        } else {
+            candidates.push(sourced(spec.default.clone(), Layer::Default));
+            if let Some(value) = preset.and_then(|preset| preset.knobs.get(name)) {
+                candidates.push(sourced(value.clone(), Layer::Profile));
+            }
+        }
+        by_name.insert(name.clone(), candidates);
     }
     let mut problems = Vec::new();
     let mut entries = Vec::new();
@@ -493,17 +505,30 @@ pub(crate) fn resolve(
             .and_then(|value| check(spec, &value).map(|()| value));
         match checked {
             Ok(value) => {
-                knobs.insert(name.into(), sourced(value, Layer::Host));
+                by_name
+                    .entry(name.into())
+                    .or_default()
+                    .push(sourced(value, Layer::Host));
             }
             Err(rule) => {
                 if let Some(safe) = safe_value(name) {
-                    knobs.insert(name.into(), sourced(safe, Layer::Default));
+                    let candidates = by_name.entry(name.into()).or_default();
+                    candidates.clear();
+                    candidates.push(sourced(safe, Layer::Default));
                 }
                 problems.push(KnobProblem {
                     name: name.into(),
                     rule,
                 });
             }
+        }
+    }
+    let mut knobs = BTreeMap::new();
+    for (name, candidates) in by_name {
+        let merge = KNOB_PRECEDENCE.merge(candidates);
+        provenant_records::warn_ignored(&merge.ignored, &name);
+        if let Some(winner) = merge.winner {
+            knobs.insert(name, winner);
         }
     }
     Ok((knobs, problems))

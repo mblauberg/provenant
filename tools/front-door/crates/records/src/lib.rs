@@ -68,7 +68,7 @@ pub use port_receipt::{
     PortCommandDisposition, PortCommandReceipt, PortReceiptLifetime,
 };
 pub use ports::{CommandExitCodes, ExitDisposition, PORT_PRECEDENCE, PortCommand, port_layer_rank};
-pub use provenance::{Layer, Merge, Precedence, Source, Sourced};
+pub use provenance::{Layer, Merge, Precedence, Source, Sourced, warn_ignored};
 pub use source::{SourceDigest, SourceDigestError, SourceInput, source_digest};
 pub use trace::Trace;
 pub use usage::{Cost, CostOrigin, Tokens, UsageScope, UsageSemantics, UsageSource};

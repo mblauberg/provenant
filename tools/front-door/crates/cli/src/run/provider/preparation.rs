@@ -5807,40 +5807,67 @@ pub(super) fn resolve_lane_access(
     task: &run::TaskRequest,
     model_policy: &provenant_routing::ModelPolicy,
 ) -> provenant_records::LaneAccessReceipt {
-    use provenant_records::{LaneAccess, LaneAccessReceipt, Layer};
+    use provenant_records::{
+        LANE_ACCESS_PRECEDENCE, LaneAccess, LaneAccessReceipt, Layer, Source, Sourced,
+    };
     const KEY: &str = "lanes.access";
-    let source = task
-        .profile
-        .knob_sources
-        .get(KEY)
-        .copied()
-        .unwrap_or_default();
-    let explicit = matches!(source, Layer::Launch | Layer::Template | Layer::Tier);
-    if !explicit && let Some(access) = model_policy.lane.access {
-        return LaneAccessReceipt {
-            access,
-            source: Layer::Route,
-            key: model_policy
-                .lane
-                .access_key
-                .clone()
-                .unwrap_or_else(|| "defaults.lane.access".into()),
-            extra: Default::default(),
-        };
-    }
-    let receipt_source = source;
-    let access = match task.profile.knobs.get(KEY) {
-        None => LaneAccess::Host,
-        Some(value) => match value.as_str() {
-            Some("host") => LaneAccess::Host,
+    let mut candidates: Vec<Sourced<LaneAccess>> = Vec::new();
+
+    // The compiled floor: an ambient launch runs with host access.
+    candidates.push(Sourced {
+        value: LaneAccess::Host,
+        source: Source {
+            layer: Layer::Default,
+            origin: None,
+        },
+    });
+
+    // The knob at the layer that actually set it (launch, template, tier, ...).
+    if task.profile.knobs.contains_key(KEY) || task.profile.knob_sources.contains_key(KEY) {
+        let layer = task
+            .profile
+            .knob_sources
+            .get(KEY)
+            .copied()
+            .unwrap_or_default();
+        let access = match task.profile.knobs.get(KEY).and_then(|value| value.as_str()) {
             Some("isolated") => LaneAccess::Isolated,
             _ => LaneAccess::Host,
-        },
-    };
+        };
+        candidates.push(Sourced {
+            value: access,
+            source: Source {
+                layer,
+                origin: Some(KEY.into()),
+            },
+        });
+    }
+
+    // The resolved route's policy. Route outranks the template and tier inputs
+    // that selected it, so it must win whenever present.
+    if let Some(access) = model_policy.lane.access {
+        candidates.push(Sourced {
+            value: access,
+            source: Source {
+                layer: Layer::Route,
+                origin: Some(
+                    model_policy
+                        .lane
+                        .access_key
+                        .clone()
+                        .unwrap_or_else(|| "defaults.lane.access".into()),
+                ),
+            },
+        });
+    }
+
+    let merge = LANE_ACCESS_PRECEDENCE.merge(candidates);
+    provenant_records::warn_ignored(&merge.ignored, KEY);
+    let winner = merge.winner.expect("the default candidate always resolves");
     LaneAccessReceipt {
-        access,
-        source: receipt_source,
-        key: KEY.into(),
+        access: winner.value,
+        source: winner.source.layer,
+        key: winner.source.origin.unwrap_or_else(|| KEY.into()),
         extra: Default::default(),
     }
 }
@@ -5868,9 +5895,8 @@ mod lane_access_tests {
     use super::*;
     use provenant_records::{LaneAccess, Layer};
 
-    #[test]
-    fn precedence_and_invalid_values() {
-        let mut task = run::TaskRequest {
+    fn test_task() -> run::TaskRequest {
+        run::TaskRequest {
             context: None,
             extra: Default::default(),
             limit_extensions: Default::default(),
@@ -5896,7 +5922,12 @@ mod lane_access_tests {
             provider_timeout_seconds: 20,
             delivery_id: None,
             access: Default::default(),
-        };
+        }
+    }
+
+    #[test]
+    fn precedence_and_invalid_values() {
+        let mut task = test_task();
         let mut policy = provenant_routing::ModelPolicy::default();
         let cases = [
             (None, None, None, LaneAccess::Host, Layer::Default),
@@ -5921,19 +5952,28 @@ mod lane_access_tests {
                 LaneAccess::Isolated,
                 Layer::Launch,
             ),
+            // Route outranks the template and tier inputs that selected it.
             (
                 Some(Layer::Template),
-                Some("invalid"),
-                None,
-                LaneAccess::Host,
-                Layer::Template,
+                Some("host"),
+                Some(LaneAccess::Isolated),
+                LaneAccess::Isolated,
+                Layer::Route,
             ),
             (
                 Some(Layer::Tier),
-                Some("isolated"),
-                Some(LaneAccess::Host),
+                Some("host"),
+                Some(LaneAccess::Isolated),
                 LaneAccess::Isolated,
-                Layer::Tier,
+                Layer::Route,
+            ),
+            // An invalid knob value falls back to host; the route still wins.
+            (
+                Some(Layer::Template),
+                Some("invalid"),
+                Some(LaneAccess::Isolated),
+                LaneAccess::Isolated,
+                Layer::Route,
             ),
         ];
         for (source, value, route, expected, expected_source) in cases {
@@ -5956,6 +5996,31 @@ mod lane_access_tests {
                 (expected, expected_source)
             );
         }
+    }
+
+    /// Spec: docs/specs/state.md#every-setting-reports-its-layer
+    #[test]
+    fn an_undeclared_knob_layer_is_ignored_and_warned() {
+        let mut task = test_task();
+        task.profile
+            .knob_sources
+            .insert("lanes.access".into(), Layer::Profile);
+        task.profile
+            .knobs
+            .insert("lanes.access".into(), "host".into());
+        let policy = provenant_routing::ModelPolicy::default();
+        let (receipt, warnings) =
+            provenant_records::warning::capture(|| resolve_lane_access(&task, &policy));
+        assert_eq!(
+            (receipt.access, receipt.source),
+            (LaneAccess::Host, Layer::Default)
+        );
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].code.as_ref(), "SETTING_LAYER_IGNORED");
+        assert_eq!(
+            warnings[0].source.as_ref().map(|source| source.layer),
+            Some(Layer::Profile)
+        );
     }
 }
 

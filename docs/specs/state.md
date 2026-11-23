@@ -199,7 +199,8 @@ because the overlapping layer names are the same spelling.
   act on, and a family cannot rank the same setting two ways.
 - Owner: `crates/records/src/provenance.rs`, each family's precedence constant
 
-Each family declares its precedence once, lowest first, beside the type it owns:
+The full set of families, each declaring its precedence once, lowest first,
+beside the type it owns, is:
 
 - Limits use `LIMIT_PRECEDENCE`: default, host, project, tier, template, launch.
   The shared layer spellings match the old `LimitSource` bytes, so digest-sealed
@@ -207,13 +208,30 @@ Each family declares its precedence once, lowest first, beside the type it owns:
 - Ports use `PORT_PRECEDENCE`: default (formerly `builtin`), detected, host,
   host-project, project. Stored receipts and port tables rewrite `builtin` to
   `default` once at install.
-- Admission settings use `SETTING_PRECEDENCE`: default (formerly
+- Pressure thresholds use `PRESSURE_PRECEDENCE`: default (formerly
   `shipped_default`), host (formerly `configuration`).
+- Admission classes use `ADMISSION_PRECEDENCE`: default, host, host-project,
+  project. This is distinct from pressure thresholds; admission class config
+  resolves with its own declaration, not `PRESSURE_PRECEDENCE`.
 - Lane access uses `LANE_ACCESS_PRECEDENCE`: default, host, project, tier,
-  template, route (formerly `route_policy`), launch.
+  template, route (formerly `route_policy`), launch. The resolved route policy
+  is a `route` candidate and outranks the template or tier inputs that selected
+  it.
 - Sandbox mode uses `SANDBOX_PRECEDENCE`: default, host, route, parent. A knob
   records its actual layer; a platform or restriction is a `constraint` beside
   the layer, not a source of the value.
+- Knobs use `KNOB_PRECEDENCE`: default, profile, host. A launch flag is recorded
+  separately in the sealed profile and is not a configuration layer.
+- Config overlays use `OVERLAY_PRECEDENCE`: default, host, project. Host-project
+  state reports as the host layer to owners.
+- Editable schema fields use `SCHEMA_PRECEDENCE`: default, profile, host.
+- Land policies use `LAND_PRECEDENCE`: default, host, project.
+- Graph templates use `TEMPLATE_PRECEDENCE`: default, host, project, launch.
+- Pool weights use `WEIGHT_PRECEDENCE`: default, host, project.
+
+Every production resolver builds its candidates and merges them with its own
+const; the const is the single declaration of order, and a candidate from a
+layer the family does not list is ignored and warned with its source.
 
 The run store's base-13-to-14 migration (`crates/run/src/migration_13_14.sql`)
 is the one rewrite for these renames. On a writable open it rewrites each stored

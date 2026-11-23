@@ -399,16 +399,38 @@ pub fn deserialize_auto<'de, D: serde::Deserializer<'de>>(
     }
 }
 impl LaneBuildSettings {
+    /// Resolve the threshold through its family's single declaration, so the
+    /// value and its source cannot disagree about which layer won.
+    fn resolved_memory_pressure(&self) -> provenant_records::Sourced<MemoryPressureThreshold> {
+        use provenant_records::diagnostic::PRESSURE_PRECEDENCE;
+        use provenant_records::{Layer, Source, Sourced, warn_ignored};
+        let mut candidates = vec![Sourced {
+            value: MemoryPressureThreshold::default(),
+            source: Source {
+                layer: Layer::Default,
+                origin: None,
+            },
+        }];
+        if let Some(value) = self.memory_pressure_threshold {
+            candidates.push(Sourced {
+                value,
+                source: Source {
+                    layer: Layer::Host,
+                    origin: None,
+                },
+            });
+        }
+        let merge = PRESSURE_PRECEDENCE.merge(candidates);
+        warn_ignored(&merge.ignored, "memory pressure threshold");
+        merge.winner.expect("the default threshold always resolves")
+    }
+
     pub fn memory_pressure_threshold(&self) -> MemoryPressureThreshold {
-        self.memory_pressure_threshold.unwrap_or_default()
+        self.resolved_memory_pressure().value
     }
 
     pub fn memory_pressure_source(&self) -> provenant_records::diagnostic::Layer {
-        if self.memory_pressure_threshold.is_some() {
-            provenant_records::diagnostic::Layer::Host
-        } else {
-            provenant_records::diagnostic::Layer::Default
-        }
+        self.resolved_memory_pressure().source.layer
     }
     pub fn read(state: &Path) -> std::io::Result<Self> {
         crate::loader::read_settings(state, "domains.fabric.lanes", |settings: &Self| {

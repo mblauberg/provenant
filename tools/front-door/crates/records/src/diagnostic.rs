@@ -228,10 +228,11 @@ impl ContinuationGuard {
     }
 }
 
-/// The layers an admission threshold accepts, lowest first. A shipped default
-/// is beaten by a value the host configured.
+/// The layers a pressure threshold accepts, lowest first. A shipped default
+/// is beaten by a value the host configured. Admission *classes* use
+/// `ADMISSION_PRECEDENCE` instead.
 /// Spec: docs/specs/state.md#every-setting-reports-its-layer
-pub const SETTING_PRECEDENCE: Precedence = Precedence(&[Layer::Default, Layer::Host]);
+pub const PRESSURE_PRECEDENCE: Precedence = Precedence(&[Layer::Default, Layer::Host]);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -813,7 +814,7 @@ mod tests {
                 },
             }
         }
-        let merge = SETTING_PRECEDENCE.merge([candidate(Layer::Default), candidate(Layer::Host)]);
+        let merge = PRESSURE_PRECEDENCE.merge([candidate(Layer::Default), candidate(Layer::Host)]);
         assert_eq!(
             merge.winner.as_ref().map(|winner| winner.value),
             Some("host")

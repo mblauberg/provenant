@@ -1180,15 +1180,17 @@ macro_rules! declare_ports {
             fn sync_sources_from_provenance(&mut self) {
                 $({
                     let name = stringify!($field);
-                    let mut highest = Layer::Default;
-                    for (path, source) in &self.provenance {
-                        if (path == name || path.starts_with(&format!("{name}.")))
-                            && port_layer_rank(*source) > port_layer_rank(highest)
-                        {
-                            highest = *source;
-                        }
-                    }
-                    self.$field.set_source(highest);
+                    let candidates = self.provenance.iter()
+                        .filter(|(path, _)| *path == name || path.starts_with(&format!("{name}.")))
+                        .map(|(_, source)| Sourced {
+                            value: *source,
+                            source: Source { layer: *source, origin: None },
+                        });
+                    let merge = PORT_PRECEDENCE.merge(candidates);
+                    provenant_records::warn_ignored(&merge.ignored, "port table");
+                    self.$field.set_source(
+                        merge.winner.map(|winner| winner.value).unwrap_or(Layer::Default),
+                    );
                 })+
                 self.build.sync_leaf_sources(&self.provenance);
             }

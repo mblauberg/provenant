@@ -302,36 +302,54 @@ impl GraphLand {
         }
     }
 
-    /// Project entry, then host entry, then the compiled default.
+    /// Project entry, then host entry, then the compiled default, resolved
+    /// through the family's one precedence declaration.
     pub fn choose(
         &self,
         project: Option<&str>,
         tier: provenant_records::workflow::RiskTier,
     ) -> LandChoice {
+        use provenant_records::{Source, Sourced, warn_ignored};
         let host = LandTiers {
             routine: self.routine,
             substantial: self.substantial,
             crucial: self.crucial,
             terminal: self.terminal,
         };
+        let mut candidates: Vec<Sourced<LandPolicy>> = vec![Sourced {
+            value: Self::default_policy(tier),
+            source: Source {
+                layer: Layer::Default,
+                origin: None,
+            },
+        }];
+        if let Some(policy) = host.get(tier) {
+            candidates.push(Sourced {
+                value: policy,
+                source: Source {
+                    layer: Layer::Host,
+                    origin: None,
+                },
+            });
+        }
         if let Some(policy) = project
             .and_then(|id| self.projects.get(id))
             .and_then(|tiers| tiers.get(tier))
         {
-            LandChoice {
-                policy,
-                source: Layer::Project,
-            }
-        } else if let Some(policy) = host.get(tier) {
-            LandChoice {
-                policy,
-                source: Layer::Host,
-            }
-        } else {
-            LandChoice {
-                policy: Self::default_policy(tier),
-                source: Layer::Default,
-            }
+            candidates.push(Sourced {
+                value: policy,
+                source: Source {
+                    layer: Layer::Project,
+                    origin: None,
+                },
+            });
+        }
+        let merge = LAND_PRECEDENCE.merge(candidates);
+        warn_ignored(&merge.ignored, "land policy");
+        let winner = merge.winner.expect("the default policy always resolves");
+        LandChoice {
+            policy: winner.value,
+            source: winner.source.layer,
         }
     }
 }
