@@ -218,25 +218,23 @@ impl BudgetPolicy {
         graces: impl IntoIterator<Item = (Layer, BudgetGrace)>,
     ) -> Self {
         let mut policy = Self::default();
-        if let Some(winner) = LIMIT_PRECEDENCE
-            .merge(
-                actions
-                    .into_iter()
-                    .map(|(layer, value)| sourced(layer, value)),
-            )
-            .winner
-        {
+        let actions = LIMIT_PRECEDENCE.merge(
+            actions
+                .into_iter()
+                .map(|(layer, value)| sourced(layer, value)),
+        );
+        crate::warn_ignored(&actions.ignored, "budget action");
+        if let Some(winner) = actions.winner {
             policy.action = winner.value;
             policy.action_source = winner.source.layer;
         }
-        if let Some(winner) = LIMIT_PRECEDENCE
-            .merge(
-                graces
-                    .into_iter()
-                    .map(|(layer, value)| sourced(layer, value)),
-            )
-            .winner
-        {
+        let graces = LIMIT_PRECEDENCE.merge(
+            graces
+                .into_iter()
+                .map(|(layer, value)| sourced(layer, value)),
+        );
+        crate::warn_ignored(&graces.ignored, "budget grace");
+        if let Some(winner) = graces.winner {
             policy.grace = winner.value;
             policy.grace_source = winner.source.layer;
         }
@@ -268,12 +266,13 @@ impl Limit {
         layers: impl IntoIterator<Item = (Layer, u64)>,
         strength: LimitStrength,
     ) -> Option<Self> {
-        LIMIT_PRECEDENCE
-            .merge(
-                layers
-                    .into_iter()
-                    .map(|(layer, value)| sourced(layer, value)),
-            )
+        let merge = LIMIT_PRECEDENCE.merge(
+            layers
+                .into_iter()
+                .map(|(layer, value)| sourced(layer, value)),
+        );
+        crate::warn_ignored(&merge.ignored, "limit");
+        merge
             .winner
             .map(|winner| Self::new(winner.value, winner.source.layer, strength))
     }
@@ -554,6 +553,35 @@ mod tests {
             [1, 2, 3, 4, 5]
         );
         assert!(merge.ignored.is_empty());
+    }
+
+    /// Spec: docs/specs/state.md#every-setting-reports-its-layer
+    #[test]
+    fn a_profile_candidate_is_ignored_and_warned_by_the_production_resolver() {
+        let (limit, warnings) = crate::warning::capture(|| {
+            Limit::resolve(
+                [(Layer::Profile, 42), (Layer::Host, 7)],
+                LimitStrength::Default,
+            )
+        });
+        let limit = limit.expect("a limit resolves");
+        assert_eq!((limit.value, limit.source), (7, Layer::Host));
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].code.as_ref(), "SETTING_LAYER_IGNORED");
+        assert_eq!(
+            warnings[0].source.as_ref().map(|source| source.layer),
+            Some(Layer::Profile)
+        );
+
+        let (policy, warnings) = crate::warning::capture(|| {
+            BudgetPolicy::resolve(
+                [(Layer::Profile, BudgetAction::Warn)],
+                [(Layer::Profile, BudgetGrace::default())],
+            )
+        });
+        assert_eq!(policy.action_source, Layer::Default);
+        assert_eq!(policy.grace_source, Layer::Default);
+        assert_eq!(warnings.len(), 2);
     }
 
     #[test]

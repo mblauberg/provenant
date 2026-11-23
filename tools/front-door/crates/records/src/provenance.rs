@@ -113,6 +113,27 @@ pub struct Merge<T> {
     pub ignored: Vec<Sourced<T>>,
 }
 
+/// Warn for every candidate whose layer a family does not declare, naming its
+/// source. Pair this with [`Precedence::merge`] so an ignored value is reported
+/// rather than silently dropped.
+/// Spec: docs/specs/state.md#every-setting-reports-its-layer
+pub fn warn_ignored<T>(ignored: &[Sourced<T>], setting: &str) {
+    use crate::warning::{self, SETTING_LAYER_IGNORED, Warning};
+    for candidate in ignored {
+        warning::warn(
+            Warning::new(
+                SETTING_LAYER_IGNORED,
+                format!(
+                    "{setting} value from {} ignored: this family does not declare that layer",
+                    candidate.source.layer.description()
+                ),
+            )
+            .source(candidate.source.clone())
+            .repair(format!("set {setting} from a layer this family declares")),
+        );
+    }
+}
+
 impl Precedence {
     /// The candidate from the highest layer present; ties keep the last given.
     /// A candidate whose layer the family does not list is ignored and
@@ -194,6 +215,22 @@ mod tests {
         );
         assert_eq!(merge.ignored.len(), 1);
         assert_eq!(merge.ignored[0].source.layer, Layer::Account);
+    }
+
+    /// Spec: docs/specs/state.md#every-setting-reports-its-layer
+    #[test]
+    fn ignored_candidates_are_warned_with_their_source() {
+        const FAMILY: Precedence = Precedence(&[Layer::Default, Layer::Host]);
+        let merge = FAMILY.merge([sourced("ignored", Layer::Profile, "profile.toml")]);
+        let ((), warnings) =
+            crate::warning::capture(|| crate::warn_ignored(&merge.ignored, "example"));
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].code.as_ref(), "SETTING_LAYER_IGNORED");
+        assert_eq!(
+            warnings[0].source.as_ref().map(|source| source.layer),
+            Some(Layer::Profile)
+        );
+        assert!(warnings[0].repair.is_some());
     }
 
     #[test]

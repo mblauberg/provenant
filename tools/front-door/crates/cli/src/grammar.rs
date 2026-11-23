@@ -746,8 +746,9 @@ pub struct GraphRunArgs {
     /// Run the lane under the macOS sandbox (sets attempt.sandbox = "on")
     #[arg(long, conflicts_with = "no_sandbox")]
     pub sandbox: bool,
-    /// Run the lane unsandboxed (attempt.sandbox = "off"); overrides route,
-    /// network and parent floors where Provenant decides them
+    /// Run the lane unsandboxed (attempt.sandbox = "off"); overrides the host
+    /// knob default, while a resolved route policy and an active parent floor
+    /// keep their higher precedence
     #[arg(long)]
     pub no_sandbox: bool,
     /// Explain the compiled graph without starting work

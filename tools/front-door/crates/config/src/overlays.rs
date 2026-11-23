@@ -106,6 +106,15 @@ pub fn read_layers(
         }
         layers.push(OverlayLayer { source, text });
     }
+    // The one declaration owns the order: stable sorting keeps host and
+    // host-project (both reported as Host) in the order they were read.
+    layers.sort_by_key(|layer| {
+        OVERLAY_PRECEDENCE
+            .0
+            .iter()
+            .position(|declared| *declared == layer.source)
+            .unwrap_or(usize::MAX)
+    });
     (layers, warnings)
 }
 

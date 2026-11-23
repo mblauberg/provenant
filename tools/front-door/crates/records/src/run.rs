@@ -3303,7 +3303,7 @@ mod tests {
         // A knob's host layer is listed; a route-policy layer unknown to a
         // family would be reported as ignored, not silently ranked.
         assert_eq!(
-            crate::diagnostic::SETTING_PRECEDENCE.0,
+            crate::diagnostic::PRESSURE_PRECEDENCE.0,
             &[Layer::Default, Layer::Host]
         );
     }

@@ -1380,12 +1380,10 @@ impl TemplateLibrary {
     /// Effective layers, retaining flavour overrides for deterministic replay.
     pub fn snapshot(&self) -> BTreeMap<String, Template> {
         self.entries
-            .iter()
-            .filter_map(|(name, layers)| {
-                layers
-                    .values()
-                    .next_back()
-                    .map(|(_, template)| (name.clone(), template.clone()))
+            .keys()
+            .filter_map(|name| {
+                self.resolved_own(name)
+                    .map(|template| (name.clone(), template))
             })
             .collect()
     }
@@ -1443,10 +1441,21 @@ impl TemplateLibrary {
             .and_then(|layers| layers.values().next_back().map(|(layer, _)| *layer))
     }
 
-    fn own(&self, name: &str) -> Option<&Template> {
-        self.entries
-            .get(name)
-            .and_then(|layers| layers.values().next_back().map(|(_, template)| template))
+    /// The effective template for `name`, merged with the family's one
+    /// declaration so the table, not the map's insertion order, decides.
+    fn resolved_own(&self, name: &str) -> Option<Template> {
+        use provenant_records::{Source, Sourced, warn_ignored};
+        let layers = self.entries.get(name)?;
+        let candidates = layers.values().map(|(layer, template)| Sourced {
+            value: template.clone(),
+            source: Source {
+                layer: *layer,
+                origin: None,
+            },
+        });
+        let merge = TEMPLATE_PRECEDENCE.merge(candidates);
+        warn_ignored(&merge.ignored, "graph template");
+        merge.winner.map(|winner| winner.value)
     }
 
     /// Resolve a name, applying each flavour over its base.
@@ -1456,10 +1465,10 @@ impl TemplateLibrary {
                 "invalid template name; use letters, digits, underscores, hyphens and dots".into(),
             );
         }
-        let own = self.own(name);
+        let own = self.resolved_own(name);
         match name.rsplit_once('.') {
             Some((base, _)) => {
-                if self.own(base).is_none() {
+                if self.resolved_own(base).is_none() {
                     return Err(self.unknown_name_message(name, None));
                 }
                 let base = self.resolve(base)?;
@@ -1469,9 +1478,7 @@ impl TemplateLibrary {
                 })?;
                 Ok(Template::flavour(base, own))
             }
-            None => own
-                .cloned()
-                .ok_or_else(|| self.unknown_name_message(name, None)),
+            None => own.ok_or_else(|| self.unknown_name_message(name, None)),
         }
     }
 }

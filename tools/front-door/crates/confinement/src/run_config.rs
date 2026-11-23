@@ -372,6 +372,53 @@ impl Default for RunConfig {
         }
     }
 }
+/// Resolve the layer-based sandbox decision through the family's one
+/// precedence declaration. Constraints (restrictions, platform, inherited OS
+/// sandbox) are applied by the caller beside the winning layer.
+fn sandbox_layer_choice(knob: Option<&str>, listed: bool, parent_sandboxed: bool) -> (bool, Layer) {
+    use provenant_records::{Source, Sourced, warn_ignored};
+    let mut candidates: Vec<Sourced<bool>> = vec![Sourced {
+        value: false,
+        source: Source {
+            layer: Layer::Default,
+            origin: None,
+        },
+    }];
+    match knob {
+        Some("on") | Some("off") => candidates.push(Sourced {
+            value: knob == Some("on"),
+            source: Source {
+                layer: Layer::Host,
+                origin: None,
+            },
+        }),
+        // `auto` and an invalid value leave the compiled default in place.
+        _ => {}
+    }
+    if listed {
+        candidates.push(Sourced {
+            value: true,
+            source: Source {
+                layer: Layer::Route,
+                origin: None,
+            },
+        });
+    }
+    if parent_sandboxed {
+        candidates.push(Sourced {
+            value: true,
+            source: Source {
+                layer: Layer::Parent,
+                origin: None,
+            },
+        });
+    }
+    let merge = provenant_records::run::SANDBOX_PRECEDENCE.merge(candidates);
+    warn_ignored(&merge.ignored, "lanes.sandbox");
+    let winner = merge.winner.expect("the default always resolves");
+    (winner.value, winner.source.layer)
+}
+
 impl RunConfig {
     /// Resolve the host policy once per launch, then report its source and
     /// warnings with `LanePolicy::report_launch`. The renderer consumes the
@@ -405,8 +452,9 @@ impl RunConfig {
     /// Explicit denials always select a profile, even with an off knob or an
     /// unsupported platform: backend resolution reports unavailable mandatory
     /// enforcement as a capability failure.
-    /// The off knob may override an advisory route or warning floor, but not
-    /// an active parent retention floor.
+    /// The layer-based choice goes through `SANDBOX_PRECEDENCE`, so a resolved
+    /// route policy outranks a host knob and an active parent floor outranks
+    /// both. Constraints apply beside the winning layer.
     pub fn sandbox_for(&self, inputs: SandboxInputs<'_>) -> SandboxMode {
         let listed = self
             .sandboxed_routes
@@ -438,8 +486,10 @@ impl RunConfig {
         }
 
         if inputs.os_sandboxed {
+            // A listed route keeps a profile-bound floor even under sandbox=off,
+            // so it can never collapse into a trusted inherited fallback.
             let trusted_inherited =
-                !inputs.parent_sandboxed && (inputs.knob == Some("off") || (!requested && !listed));
+                !inputs.parent_sandboxed && !listed && (inputs.knob == Some("off") || !requested);
             let warning = match inputs.knob {
                 Some("off") => Some("process is already inside an operating-system sandbox; this launch cannot disable it".to_string()),
                 Some(value) if !matches!(value, "auto" | "off" | "on") => {
@@ -462,8 +512,7 @@ impl RunConfig {
         }
 
         if !inputs.platform_supported {
-            let effective =
-                requested || inputs.parent_sandboxed || (listed && inputs.knob != Some("off"));
+            let (effective, _) = sandbox_layer_choice(inputs.knob, listed, inputs.parent_sandboxed);
             return SandboxMode {
                 requested,
                 effective,
@@ -475,83 +524,27 @@ impl RunConfig {
             };
         }
 
-        if inputs.knob == Some("off") {
-            if inputs.parent_sandboxed {
-                return SandboxMode {
-                    requested: false,
-                    effective: true,
-                    source: Layer::Parent,
-                    constraint: None,
-                    backend_requirement: BackendRequirement::Required,
-                    warning: Some(
-                        "active parent sandbox floor requires confinement despite sandbox=off"
-                            .into(),
-                    ),
-                };
+        let (effective, source) =
+            sandbox_layer_choice(inputs.knob, listed, inputs.parent_sandboxed);
+        let warning = match inputs.knob {
+            Some("off") if source == Layer::Parent => {
+                Some("active parent sandbox floor requires confinement despite sandbox=off".into())
             }
-            let mut dropped = Vec::new();
-            if listed {
-                dropped.push(format!("route '{}'", inputs.route));
+            Some("off") if source == Layer::Route => {
+                Some("route policy requires a sandbox despite sandbox=off".into())
             }
-            let warning = if dropped.is_empty() {
-                None
-            } else {
-                Some(format!(
-                    "explicit --no-sandbox drops restriction: {}",
-                    dropped.join(", ")
-                ))
-            };
-            return SandboxMode {
-                requested: false,
-                effective: false,
-                source: Layer::Host,
-                constraint: None,
-                backend_requirement: BackendRequirement::Required,
-                warning,
-            };
-        }
-
-        if inputs.knob == Some("on") {
-            return SandboxMode {
-                requested: true,
-                effective: true,
-                source: Layer::Host,
-                constraint: None,
-                backend_requirement: BackendRequirement::Required,
-                warning: None,
-            };
-        }
-
-        if inputs.parent_sandboxed {
-            SandboxMode {
-                requested: false,
-                effective: true,
-                source: Layer::Parent,
-                constraint: None,
-                backend_requirement: BackendRequirement::Required,
-                warning: None,
+            Some(value) if !matches!(value, "auto" | "off" | "on") => {
+                Some("invalid lanes.sandbox; using default off".into())
             }
-        } else if listed {
-            SandboxMode {
-                requested: false,
-                effective: true,
-                source: Layer::Route,
-                constraint: None,
-                backend_requirement: BackendRequirement::Required,
-                warning: None,
-            }
-        } else {
-            SandboxMode {
-                requested: false,
-                effective: false,
-                source: Layer::Default,
-                constraint: None,
-                backend_requirement: BackendRequirement::Required,
-                warning: inputs
-                    .knob
-                    .filter(|value| !matches!(*value, "auto" | "off" | "on"))
-                    .map(|_| "invalid lanes.sandbox; using default off".into()),
-            }
+            _ => None,
+        };
+        SandboxMode {
+            requested,
+            effective,
+            source,
+            constraint: None,
+            backend_requirement: BackendRequirement::Required,
+            warning,
         }
     }
 
@@ -1089,11 +1082,12 @@ mod tests {
                                 "an active parent floor cannot become a trusted fallback"
                             );
                         }
+                        // Spec: docs/specs/state.md#every-setting-reports-its-layer
+                        // Route outranks the host knob, so a listed route keeps
+                        // its sandbox floor even under sandbox=off.
                         assert_eq!(
                             mode.effective,
-                            knob == Some("on")
-                                || parent_sandboxed
-                                || (knob != Some("off") && listed)
+                            knob == Some("on") || parent_sandboxed || listed
                         );
                     }
                 }

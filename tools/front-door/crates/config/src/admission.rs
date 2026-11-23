@@ -42,6 +42,44 @@ fn parse_size(s: &str) -> Option<u64> {
     parse_cache_size(&clean).ok()
 }
 
+/// Merge one admission-class field across the layers that declare it. The
+/// class's precedence const is the one declaration of order, and an ignored
+/// candidate is reported rather than silently dropped.
+fn resolve_field<T>(
+    layers: &[(Layer, AdmissionClassConfig)],
+    default: Option<T>,
+    pick: impl Fn(&AdmissionClassConfig) -> Option<T>,
+) -> (Option<T>, Option<Layer>) {
+    use provenant_records::{Source, Sourced};
+    let mut candidates: Vec<Sourced<T>> = Vec::new();
+    if let Some(value) = default {
+        candidates.push(Sourced {
+            value,
+            source: Source {
+                layer: Layer::Default,
+                origin: None,
+            },
+        });
+    }
+    for (layer, config) in layers {
+        if let Some(value) = pick(config) {
+            candidates.push(Sourced {
+                value,
+                source: Source {
+                    layer: *layer,
+                    origin: None,
+                },
+            });
+        }
+    }
+    let merge = ADMISSION_PRECEDENCE.merge(candidates);
+    provenant_records::warn_ignored(&merge.ignored, "admission class");
+    match merge.winner {
+        Some(winner) => (Some(winner.value), Some(winner.source.layer)),
+        None => (None, None),
+    }
+}
+
 impl AdmissionClassConfig {
     pub fn memory_per_slot_bytes(&self) -> Option<u64> {
         self.memory_per_slot.as_deref().and_then(parse_size)
@@ -79,122 +117,58 @@ impl ResolvedAdmissionClass {
     /// same binding resolver install and the other config layers use.
     pub fn resolve(class: &str, state: &Path, project: Option<&Path>) -> Self {
         let is_build = class == DEFAULT_CLASS;
-
-        // 1. Shipped default
         let host_build_settings = LaneBuildSettings::read(state).unwrap_or_default();
         let total_ram =
             provenant_os::sys::resources::memory().map_or(0, |memory| memory.total_bytes);
-
-        let (mut slots, mut slots_source) = if is_build {
-            (
-                host_build_settings.automatic_build_limit(total_ram),
-                Layer::Default,
-            )
+        let default_slots = if is_build {
+            host_build_settings.automatic_build_limit(total_ram)
         } else {
-            (1, Layer::Default)
+            1
         };
 
-        let mut memory_bytes = None;
-        let mut memory_source = None;
-        let mut disk_bytes = None;
-        let mut disk_source = None;
-        let mut trim = None;
-        let mut trim_source = None;
-        let mut wait = DEFAULT_WAIT_SECONDS;
-        let mut wait_source = Layer::Default;
-
-        // 2. Host configuration: `<state>/config.toml` [admission.<class>]
-        if let Some(host_cfg) = read_class_from_file(&state.join("config.toml"), class) {
-            if let Some(s) = host_cfg.slots {
-                slots = s;
-                slots_source = Layer::Host;
-            }
-            if let Some(bytes) = host_cfg.memory_per_slot_bytes() {
-                memory_bytes = Some(bytes);
-                memory_source = Some(Layer::Host);
-            }
-            if let Some(bytes) = host_cfg.disk_floor_bytes() {
-                disk_bytes = Some(bytes);
-                disk_source = Some(Layer::Host);
-            }
-            if let Some(action) = host_cfg.trim_action {
-                trim = Some(action);
-                trim_source = Some(Layer::Host);
-            }
-            if let Some(w) = host_cfg.wait_seconds {
-                wait = w;
-                wait_source = Layer::Host;
-            }
+        // Collect one config per declaring layer, then merge each field with
+        // the family's single precedence declaration.
+        let mut layers: Vec<(Layer, AdmissionClassConfig)> = Vec::new();
+        if let Some(config) = read_class_from_file(&state.join("config.toml"), class) {
+            layers.push((Layer::Host, config));
         }
-
-        // 3. Host-project configuration: a consumer repository can be
-        // configured entirely from host state. An unbound project or a missing
-        // file skips this layer silently.
         if let Some(dir) = project.and_then(|project| crate::host_project_dir(state, project)) {
-            let path = dir.join("config.toml");
-            if let Some(keyed_cfg) = read_class_from_file(&path, class) {
-                if let Some(s) = keyed_cfg.slots {
-                    slots = s;
-                    slots_source = Layer::HostProject;
-                }
-                if let Some(bytes) = keyed_cfg.memory_per_slot_bytes() {
-                    memory_bytes = Some(bytes);
-                    memory_source = Some(Layer::HostProject);
-                }
-                if let Some(bytes) = keyed_cfg.disk_floor_bytes() {
-                    disk_bytes = Some(bytes);
-                    disk_source = Some(Layer::HostProject);
-                }
-                if let Some(action) = keyed_cfg.trim_action {
-                    trim = Some(action);
-                    trim_source = Some(Layer::HostProject);
-                }
-                if let Some(w) = keyed_cfg.wait_seconds {
-                    wait = w;
-                    wait_source = Layer::HostProject;
-                }
+            if let Some(config) = read_class_from_file(&dir.join("config.toml"), class) {
+                layers.push((Layer::HostProject, config));
+            }
+        }
+        if let Some(project) = project {
+            let path = project.join(".provenant").join("config.toml");
+            if let Some(config) = read_class_from_file(&path, class) {
+                layers.push((Layer::Project, config));
             }
         }
 
-        // 4. Project configuration: `<project>/.provenant/config.toml` [admission.<class>]
-        if let Some(project) = project {
-            let project_config_path = project.join(".provenant").join("config.toml");
-            if let Some(proj_cfg) = read_class_from_file(&project_config_path, class) {
-                if let Some(s) = proj_cfg.slots {
-                    slots = s;
-                    slots_source = Layer::Project;
-                }
-                if let Some(bytes) = proj_cfg.memory_per_slot_bytes() {
-                    memory_bytes = Some(bytes);
-                    memory_source = Some(Layer::Project);
-                }
-                if let Some(bytes) = proj_cfg.disk_floor_bytes() {
-                    disk_bytes = Some(bytes);
-                    disk_source = Some(Layer::Project);
-                }
-                if let Some(action) = proj_cfg.trim_action {
-                    trim = Some(action);
-                    trim_source = Some(Layer::Project);
-                }
-                if let Some(w) = proj_cfg.wait_seconds {
-                    wait = w;
-                    wait_source = Layer::Project;
-                }
-            }
-        }
+        let (slots, slots_source) =
+            resolve_field(&layers, Some(default_slots), |config| config.slots);
+        let (memory_bytes, memory_source) =
+            resolve_field(&layers, None, |config| config.memory_per_slot_bytes());
+        let (disk_bytes, disk_source) =
+            resolve_field(&layers, None, |config| config.disk_floor_bytes());
+        let (trim_action, trim_source) =
+            resolve_field(&layers, None, |config| config.trim_action.clone());
+        let (wait_seconds, wait_source) =
+            resolve_field(&layers, Some(DEFAULT_WAIT_SECONDS), |config| {
+                config.wait_seconds
+            });
 
         Self {
             name: class.to_string(),
-            slots,
-            slots_source,
+            slots: slots.expect("the default slot count always resolves"),
+            slots_source: slots_source.expect("the default slot count has a layer"),
             memory_per_slot_bytes: memory_bytes,
             memory_per_slot_source: memory_source,
             disk_floor_bytes: disk_bytes,
             disk_floor_source: disk_source,
-            trim_action: trim,
+            trim_action,
             trim_action_source: trim_source,
-            wait_seconds: wait,
-            wait_seconds_source: wait_source,
+            wait_seconds: wait_seconds.expect("the default wait always resolves"),
+            wait_seconds_source: wait_source.expect("the default wait has a layer"),
         }
     }
 

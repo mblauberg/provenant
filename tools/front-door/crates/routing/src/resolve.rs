@@ -184,17 +184,37 @@ pub const WEIGHT_PRECEDENCE: Precedence =
 /// its weights share the layer recorded for that pool. Compiled defaults carry
 /// no pools; a project-scoped origin is reported as such when present.
 fn pool_weight_layer(config: &crate::RoutingConfig, name: &str) -> Layer {
-    if !config.pools.contains_key(name) {
-        return Layer::Default;
+    use provenant_records::{Source, Sourced, warn_ignored};
+    let mut candidates = vec![Sourced {
+        value: (),
+        source: Source {
+            layer: Layer::Default,
+            origin: None,
+        },
+    }];
+    if config.pools.contains_key(name) {
+        let layer = match config
+            .preference_sources
+            .get(&format!("domains.routing.pools.{name}"))
+            .map(String::as_str)
+        {
+            Some("project") => Layer::Project,
+            _ => Layer::Host,
+        };
+        candidates.push(Sourced {
+            value: (),
+            source: Source {
+                layer,
+                origin: None,
+            },
+        });
     }
-    match config
-        .preference_sources
-        .get(&format!("domains.routing.pools.{name}"))
-        .map(String::as_str)
-    {
-        Some("project") => Layer::Project,
-        _ => Layer::Host,
-    }
+    let merge = WEIGHT_PRECEDENCE.merge(candidates);
+    warn_ignored(&merge.ignored, "pool weight");
+    merge
+        .winner
+        .map(|winner| winner.source.layer)
+        .unwrap_or(Layer::Default)
 }
 #[derive(Debug, Serialize)]
 pub struct RoutePoolMemberView {
