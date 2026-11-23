@@ -5624,7 +5624,7 @@ mod integrate_delivery_settlement_tests {
                 remote: delivery_request.remote.clone(),
                 push_url: None,
                 target: format!("refs/heads/{}", delivery_request.branch),
-                previous: provenant_core::GitOid::parse(&base)?,
+                previous: Some(provenant_core::GitOid::parse(&base)?),
                 integrated,
             }),
         };
