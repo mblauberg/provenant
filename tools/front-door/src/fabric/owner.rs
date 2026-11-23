@@ -2107,12 +2107,25 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         let config = provenant_config::ForgeConfig::new(ports, (*policy).clone());
         let git = provenant_config::ForgeGit::new(self.factory.cwd.as_path())
             .map_err(|_| FacadeError::io("forge context Git metadata"))?;
-        let forge_remote = provenant_config::ForgeContext::remote(&config, &git)
-            .map_err(|_| FacadeError::io("forge context resolution"))?
-            .value;
-        let reference = match branch.strip_prefix(&format!("{forge_remote}/")) {
-            Some(branch) => format!("refs/remotes/{forge_remote}/{branch}"),
-            None => format!("refs/heads/{branch}"),
+        // A local integration branch needs no remote: resolving one here would
+        // refuse a read-only base lookup in a checkout that declares none. Only
+        // a remote-qualified branch needs the resolved remote name.
+        // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+        let forge_remote = match provenant_config::ForgeContext::remote(&config, &git) {
+            Ok(remote) => Some(remote.value),
+            Err(provenant_config::ForgeContextError::NoRemote { remotes, .. })
+                if remotes.is_empty() =>
+            {
+                None
+            }
+            Err(_) => return Err(FacadeError::io("forge context resolution")),
+        };
+        let reference = if let Some(remote) = forge_remote.as_deref()
+            && let Some(branch) = branch.strip_prefix(&format!("{remote}/"))
+        {
+            format!("refs/remotes/{remote}/{branch}")
+        } else {
+            format!("refs/heads/{branch}")
         };
         self.factory
             .resolve_base(&self.factory.cwd, &reference, &self.repo_facts, self.cancel)
@@ -2130,18 +2143,21 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         _checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
     ) -> Result<(), Self::Error> {
         let ports = &self.factory.context.port_table;
-        let forge = provenant_run::resolve_forge(
+        // One context for this expansion, resolved only when a delivery target
+        // check first needs it. A read-only expansion delivers nothing, so it
+        // must not be refused in a checkout without a resolvable remote.
+        // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+        let forge = provenant_run::ForgeOnce::new(
             self.factory.context.roots.state.as_path(),
             self.factory.cwd.as_path(),
             ports,
-        )
-        .map_err(run_error)?;
+        );
         for node in &document.nodes {
             if let Some(provenant_records::run::DeliveryMode::Integrate(target)) = &node.delivery {
                 provenant_run::HostDeliveryContext::validate_integration_target(
                     &self.factory.cwd,
                     target,
-                    &forge,
+                    forge.get().map_err(run_error)?,
                 )
                 .map_err(run_error)?;
             }
@@ -3338,16 +3354,25 @@ impl BoundGraphOwner<'_> {
                     ),
                 });
             }
-            let state = self.factory.context.roots.state.as_path();
-            let ports = &self.factory.context.port_table;
-            let forge = provenant_run::resolve_forge(state, self.factory.cwd.as_path(), ports)
-                .map_err(run_error)?;
-            provenant_run::HostDeliveryContext::destination(mode.clone(), &branch, &forge)
-                .map_err(run_error)?
-                .map(|mut request| {
-                    request.fast_forward_only = replay.fast_forward_only;
-                    request
-                })
+            // A writer with no delivery never needs a forge: `destination`
+            // returns `None` for `DeliveryMode::None` before reading any
+            // remote. Resolving one here refuses a valid launch in a checkout
+            // that declares none, leaving the sealed attempt without a
+            // reference. Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+            if matches!(&mode, provenant_records::run::DeliveryMode::None) {
+                None
+            } else {
+                let state = self.factory.context.roots.state.as_path();
+                let ports = &self.factory.context.port_table;
+                let forge = provenant_run::resolve_forge(state, self.factory.cwd.as_path(), ports)
+                    .map_err(run_error)?;
+                provenant_run::HostDeliveryContext::destination(mode.clone(), &branch, &forge)
+                    .map_err(run_error)?
+                    .map(|mut request| {
+                        request.fast_forward_only = replay.fast_forward_only;
+                        request
+                    })
+            }
         } else {
             None
         };

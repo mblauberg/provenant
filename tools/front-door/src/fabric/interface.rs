@@ -4114,6 +4114,23 @@ mod tests {
         Ok(())
     }
 
+    /// Declare the one forge context a delivery preview needs in a local-only
+    /// fixture. The batch resolves it lazily and never guesses a remote or
+    /// default branch, so a graph that checks a delivery target must declare
+    /// both. Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    fn declare_forge(rig: &TestRig, default_branch: &str) -> Result {
+        let directory = rig.project.join(".provenant");
+        std::fs::create_dir_all(&directory)?;
+        std::fs::write(
+            directory.join(provenant_config::PORTS_CONFIG),
+            serde_json::to_vec(&json!({
+                "schema_version": provenant_config::PORTS_SCHEMA_VERSION,
+                "git": {"remote":"origin", "default_branch":default_branch, "protected":[]},
+            }))?,
+        )?;
+        Ok(())
+    }
+
     fn factory(rig: &TestRig) -> Result<Factory> {
         let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
         // Library unit tests inherit the lane environment, where Context::open
@@ -4846,13 +4863,48 @@ mod tests {
                 &json!({"baseRefOid":base,"baseRefName":"main","headRefOid":head,"url":"https://github.com/owner/repo/pull/7"}),
             )?,
         )?;
-        // A command forge port exercises the host lookup without network or credentials.
+        // The PR subject is read through the one CI observation transport, so
+        // the command port must answer its repository and pull paths. A body is
+        // a JSON string inside the typed port response; prepare those bytes in
+        // the fixture rather than escaping them in a shell script.
+        // Spec: docs/specs/cli.md#ci-observations
+        let repository_response = rig.root.join("repository-response.json");
+        std::fs::write(
+            &repository_response,
+            serde_json::to_vec(&json!({
+                "status":200, "headers":{},
+                "body": json!({"full_name":"owner/repo"}).to_string(),
+            }))?,
+        )?;
+        let pull_response = rig.root.join("pull-response.json");
+        std::fs::write(
+            &pull_response,
+            serde_json::to_vec(&json!({
+                "status":200, "headers":{},
+                "body": json!({
+                    "base":{"ref":"main","sha":base},
+                    "head":{"ref":"feature","sha":head},
+                    "html_url":"https://github.com/owner/repo/pull/7",
+                }).to_string(),
+            }))?,
+        )?;
+        let observation_script = concat!(
+            "case \"$PROVENANT_PORT_REQUEST_PATH\" in\n",
+            "  'repos/{owner}/{repo}') /bin/cat \"$1\" ;;\n",
+            "  'repos/owner/repo/pulls/7') /bin/cat \"$2\" ;;\n",
+            "  *) exit 71 ;;\n",
+            "esac\n",
+        );
         std::fs::write(
             rig.state.join("ports.json"),
             serde_json::to_vec(&json!({
                 "schema_version":provenant_config::PORTS_SCHEMA_VERSION,
                 "forge":{"source":"host","backend":{"kind":"command","command":{
                     "argv":["/bin/sh","-c","test \"$2\" = pr && test \"$3\" = view && test \"$4\" = 7 && /bin/cat \"$1\"","fixture",metadata],
+                    "exit_codes":{"success":[0],"unknown":[75],"other":"refused"}
+                }}},
+                "ci_observation":{"source":"host","backend":{"kind":"command","command":{
+                    "argv":["/bin/sh","-c",observation_script,"fixture",repository_response,pull_response],
                     "exit_codes":{"success":[0],"unknown":[75],"other":"refused"}
                 }}}
             }))?,
@@ -7442,6 +7494,7 @@ mod tests {
     #[test]
     fn generated_graph_id_preserves_document_binding_and_settings() -> Result {
         let rig = TestRig::new()?;
+        declare_forge(&rig, "main")?;
         let factory = factory(&rig)?;
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
@@ -7513,6 +7566,7 @@ mod tests {
     #[test]
     fn explicit_batch_node_and_cli_branch_parameters_override_document_binding() -> Result {
         let rig = TestRig::new()?;
+        declare_forge(&rig, "main")?;
         let factory = factory(&rig)?;
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
@@ -7664,6 +7718,7 @@ mod tests {
                 writer_tree.to_str().ok_or("writer worktree")?,
             ],
         )?;
+        declare_forge(&rig, "main")?;
         let factory = factory(&rig)?;
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;

@@ -588,6 +588,22 @@ impl GraphProject {
     fn state(&self) -> PathBuf {
         self.temp.path().join("state")
     }
+    /// Declare the one forge context a delivery graph needs. The batch resolves
+    /// it lazily and never guesses a remote or default branch, so a graph that
+    /// checks a delivery target in a local-only fixture must declare both.
+    /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    fn declare_forge(&self, default_branch: &str) -> Result {
+        let directory = self.project.join(".provenant");
+        std::fs::create_dir_all(&directory)?;
+        std::fs::write(
+            directory.join(provenant_config::PORTS_CONFIG),
+            serde_json::to_vec(&json!({
+                "schema_version": provenant_config::PORTS_SCHEMA_VERSION,
+                "git": {"remote": "origin", "default_branch": default_branch, "protected": []},
+            }))?,
+        )?;
+        Ok(())
+    }
     /// A runnable Codex lane: an isolated login home and a fake `codex` first
     /// on PATH. The route is a real, catalogued model, so admission is not
     /// decided by a placeholder adapter.
@@ -1017,6 +1033,7 @@ fn every_bundled_template_is_listed_and_compiles_with_its_declared_parameters() 
     use provenant_fabric_runtime::graph::template::{Compiler, TemplateLibrary};
 
     let rig = GraphProject::new()?;
+    rig.declare_forge("master")?;
     let (output, value) = rig.run(&["templates"])?;
     assert!(output.status.success(), "{value}");
     let listed = value["data"]["templates"].as_array().ok_or("templates")?;
@@ -1188,6 +1205,7 @@ fn every_bundled_template_is_listed_and_compiles_with_its_declared_parameters() 
 fn batch_launch_provisions_planned_slice_worktrees_and_explains_same_admission() -> Result {
     let mut rig = GraphProject::new()?;
     rig.enable_codex_fixture()?;
+    rig.declare_forge("master")?;
     let document = rig.document(&json!({
         "schema_version": support::GRAPH_DOCUMENT_SCHEMA_VERSION,
         "graph_id": "batch-provision",
@@ -1362,6 +1380,7 @@ fn batch_launch_provisions_planned_slice_worktrees_and_explains_same_admission()
 #[test]
 fn explain_refuses_a_writer_on_the_integration_branch_like_launch() -> Result {
     let rig = GraphProject::new()?;
+    rig.declare_forge("master")?;
     let writer = rig.project.join(".worktrees/integration-writer");
     let output = provenant_os::fixture::git_command()
         .current_dir(&rig.project)
@@ -1418,6 +1437,7 @@ fn explain_refuses_a_writer_on_the_integration_branch_like_launch() -> Result {
 fn explain_previews_a_new_writer_without_creating_its_checkout() -> Result {
     let mut rig = GraphProject::new()?;
     rig.enable_codex_fixture()?;
+    rig.declare_forge("master")?;
     // Push delivery needs a remote; a local bare repository stands in for it.
     let remote = rig.temp.path().join("origin.git");
     for args in [

@@ -1448,7 +1448,21 @@ mod tests {
         let _mode = provenant_redact::scoped(provenant_redact::Mode::Secrets);
         let warnings =
             provenant_fabric_runtime::graph::refusal::input_warnings(&input, &Default::default());
-        let data = json!({"checkpoint":{"graph_id":"example","nodes":[]},"status":"pending","warnings":warnings});
+        let warning = warnings.first().expect("a field-only policy warning");
+        assert_eq!(warning.code.as_ref(), "SECRET_SHAPED_INPUT");
+        assert!(warning.message.contains("brief looks like a credential"));
+        assert!(
+            !warning
+                .message
+                .contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789")
+        );
+        // The facade carries typed warnings to the compact surface as their
+        // messages; the code stays with the typed value in the v2 envelope.
+        let messages: Vec<String> = warnings
+            .into_iter()
+            .map(|warning| warning.message)
+            .collect();
+        let data = json!({"checkpoint":{"graph_id":"example","nodes":[]},"status":"pending","warnings":messages});
         for announced in [false, true] {
             let output = run_human(&data, &json!({"op":"run"}), announced);
             assert!(output.contains("warning: [SECRET_SHAPED_INPUT]"));
