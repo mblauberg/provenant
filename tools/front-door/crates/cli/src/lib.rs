@@ -900,16 +900,27 @@ fn expanded_scoped_help(scope: &str, mut model: clap::Command) -> (String, HelpC
 /// maintenance stays addressable even though the compact listing hides it.
 fn resolved_help_text(path: &[String], model: &mut clap::Command) -> (String, String) {
     let mut scope = String::from("provenant");
-    let mut selected = model;
+    // Resolve the path read-only first: a mutable walk that can stop early
+    // keeps its last borrow alive past the loop.
+    let mut names = Vec::new();
+    let mut current: &clap::Command = model;
     for component in path {
-        let Some(child) = selected.find_subcommand_mut(component) else {
+        let Some(child) = current.find_subcommand(component) else {
             break;
         };
         if child.is_hide_set() && scope != "provenant quota" {
             break;
         }
-        *child = child.clone().hide(false);
         scope = format!("{scope} {}", child.get_name());
+        names.push(child.get_name().to_string());
+        current = child;
+    }
+    let mut selected = model;
+    for name in &names {
+        let Some(child) = selected.find_subcommand_mut(name) else {
+            return (String::new(), scope);
+        };
+        *child = child.clone().hide(false);
         selected = child;
     }
     (selected.render_long_help().to_string(), scope)
