@@ -632,6 +632,120 @@ fn terminal_resumes_after_branch_publication_before_its_phase_checkpoint()
 }
 
 #[test]
+fn terminal_resumes_after_a_merged_publication_and_converges()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    let review = fixture.terminal_via_merged_resume(|| {
+        std::fs::write(
+            fixture.writer.worktree.join("resumed.txt"),
+            "durable branch\n",
+        )?;
+        fixture.lane_git(&["add", "resumed.txt"])?;
+        fixture.commit(&fixture.writer.worktree, "resumable merge publication")
+    })?;
+    assert!(!review);
+    let git = provenant_os::git::git_executable().ok_or("git executable")?;
+    let capture = |args: &[&str]| -> std::result::Result<String, Box<dyn std::error::Error>> {
+        let outcome = provenant_os::fixture::git_command_at(&git)
+            .env_clear()
+            .envs(fixture.environment.iter().map(|(key, value)| (key, value)))
+            .current_dir(&fixture.writer.project)
+            .args(args)
+            .output()?;
+        assert!(
+            outcome.status.success(),
+            "{}",
+            String::from_utf8_lossy(&outcome.stderr)
+        );
+        Ok(String::from_utf8(outcome.stdout)?.trim().to_owned())
+    };
+    let tip = capture(&["rev-parse", "refs/heads/lane"])?;
+    let parents = capture(&["rev-list", "--parents", "-n", "1", &tip])?;
+    assert_eq!(
+        parents.split_whitespace().count(),
+        3,
+        "the resumed branch must end at the merge: {parents}"
+    );
+    // The worktree converged onto the merge: its file is present in the
+    // checked-out tree and the branch tip contains it.
+    assert_eq!(
+        std::fs::read(fixture.writer.worktree.join("resumed.txt"))?,
+        b"durable branch\n"
+    );
+    fixture.lane_git(&["cat-file", "-e", &format!("{tip}:resumed.txt")])?;
+    // The resume cleared this attempt's import-extra pins, which the crash
+    // left behind before the phase checkpoint.
+    let pins = capture(&[
+        "for-each-ref",
+        "--format=%(refname)",
+        "refs/provenant/import-extra/",
+    ])?;
+    assert!(
+        pins.is_empty(),
+        "import-extra pins survived the resumed settlement: {pins}"
+    );
+    Ok(())
+}
+
+#[test]
+fn resumed_foreign_two_parent_tips_keep_files_and_pins()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    for head_first in [true, false] {
+        let fixture = PrepareFixture::new()?;
+        let review = fixture.terminal_via_foreign_merge_resume(head_first, || {
+            std::fs::write(
+                fixture.writer.worktree.join("resumed.txt"),
+                "durable branch\n",
+            )?;
+            fixture.lane_git(&["add", "resumed.txt"])?;
+            fixture.commit(&fixture.writer.worktree, "resumable foreign publication")
+        })?;
+        assert!(!review);
+        let git = provenant_os::git::git_executable().ok_or("git executable")?;
+        let capture = |args: &[&str]| -> std::result::Result<String, Box<dyn std::error::Error>> {
+            let outcome = provenant_os::fixture::git_command_at(&git)
+                .env_clear()
+                .envs(fixture.environment.iter().map(|(key, value)| (key, value)))
+                .current_dir(&fixture.writer.project)
+                .args(args)
+                .output()?;
+            assert!(
+                outcome.status.success(),
+                "{}",
+                String::from_utf8_lossy(&outcome.stderr)
+            );
+            Ok(String::from_utf8(outcome.stdout)?.trim().to_owned())
+        };
+        // The foreign merge is the branch tip, in either parent order, but it
+        // is not this attempt's recorded merge: its tree has no head work.
+        let tip = capture(&["rev-parse", "refs/heads/lane"])?;
+        let parents = capture(&["rev-list", "--parents", "-n", "1", &tip])?;
+        assert_eq!(
+            parents.split_whitespace().count(),
+            3,
+            "the branch must still end at the foreign merge: {parents}"
+        );
+        assert_eq!(
+            std::fs::read(fixture.writer.worktree.join("resumed.txt"))?,
+            b"durable branch\n",
+            "a foreign tip must not advance the worktree (head first: {head_first})"
+        );
+        // The crash's import-extra pin is kept, because only an accepted tip
+        // reaches the writer's clear step.
+        let pins = capture(&[
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/provenant/import-extra/",
+        ])?;
+        assert!(
+            pins.contains("refs/provenant/import-extra/"),
+            "the refusal must keep the crash's import pins (head first: {head_first}): {pins}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn terminal_attributes_only_the_pinned_head_after_branch_advances()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let fixture = PrepareFixture::new()?;

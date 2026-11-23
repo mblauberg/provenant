@@ -16,6 +16,17 @@ use std::{
 };
 type TestResult<T = ()> = std::result::Result<T, Box<dyn Error>>;
 
+/// Most object tests drive publication directly and have no settlement driver
+/// to checkpoint into. The resume tests call `super::publish_branch` themselves
+/// with a recorded tip.
+fn publish_plain(
+    git: &Path,
+    repo: &provenant_confinement::repo::VerifiedRepo,
+    publication: super::BranchPublication<'_>,
+) -> crate::Result<super::Published> {
+    super::publish_branch(git, repo, publication, |_| Ok(()))
+}
+
 #[test]
 fn private_view_binding_refuses_replaced_directories_and_foreign_paths() -> TestResult {
     for component in ["", "git-common", "git-objects"] {
@@ -108,7 +119,7 @@ fn private_view_restarts_import_and_publication_in_shallow_repositories() -> Tes
                 head,
             )?;
             if checkpoint >= 2 {
-                super::publish_branch(
+                publish_plain(
                     &fixture.git,
                     fixture.worktree.repo(),
                     super::BranchPublication {
@@ -190,7 +201,7 @@ fn private_view_recovers_after_import_and_publication_acknowledgement_failures()
             ),
         )?;
         assert!(
-            super::publish_branch(
+            publish_plain(
                 &wrapper,
                 fixture.worktree.repo(),
                 super::BranchPublication {
@@ -212,7 +223,7 @@ fn private_view_recovers_after_import_and_publication_acknowledgement_failures()
             super::resolve_ref(&fixture.git, fixture.worktree.repo(), &stage)?,
             fixture.head
         );
-        super::publish_branch(
+        publish_plain(
             &fixture.git,
             fixture.worktree.repo(),
             super::BranchPublication {
@@ -633,7 +644,7 @@ fn host_prepared_private_repository_reads_shared_base_and_imports_new_commit() -
             Some(&source.objects),
             head,
         )?;
-        super::publish_branch(
+        publish_plain(
             &fixture.git,
             fixture.worktree.repo(),
             super::BranchPublication {
@@ -860,7 +871,7 @@ fn private_commits_survive_a_losing_host_settlement_cas() -> TestResult {
         Some(&first_source.objects),
         first_head,
     )?;
-    super::publish_branch(
+    publish_plain(
         &fixture.git,
         fixture.worktree.repo(),
         super::BranchPublication {
@@ -881,7 +892,7 @@ fn private_commits_survive_a_losing_host_settlement_cas() -> TestResult {
     // The host branch moved after the second writer prepared at the same base,
     // so its settlement CAS loses. The default rebase setting publishes the
     // sibling histories as a host merge: both private commits stay reachable.
-    let published = super::publish_branch(
+    let published = publish_plain(
         &fixture.git,
         fixture.worktree.repo(),
         super::BranchPublication {
@@ -1113,7 +1124,7 @@ fn private_ref_overlay_keeps_host_and_sibling_fetch_usable_until_verified_public
     assert_eq!(shared_tip()?, fixture.base);
     fixture.import()?;
     assert_eq!(shared_tip()?, fixture.base);
-    super::publish_branch(
+    publish_plain(
         &fixture.git,
         fixture.worktree.repo(),
         super::BranchPublication {
@@ -1185,7 +1196,7 @@ fn shared_branch_publication_compares_base_merges_divergence_and_is_idempotent()
     fixture.overlay()?;
     fixture.import()?;
     for _ in 0..2 {
-        super::publish_branch(
+        publish_plain(
             &fixture.git,
             fixture.worktree.repo(),
             super::BranchPublication {
@@ -1240,7 +1251,7 @@ fn shared_branch_publication_compares_base_merges_divergence_and_is_idempotent()
             &fixture.head.to_string(),
         ],
     )?;
-    let published = super::publish_branch(
+    let published = publish_plain(
         &fixture.git,
         fixture.worktree.repo(),
         super::BranchPublication {
@@ -1284,7 +1295,7 @@ fn shared_branch_publication_compares_base_merges_divergence_and_is_idempotent()
         },
         ..LaneHistory::default()
     };
-    let refusal = super::publish_branch(
+    let refusal = publish_plain(
         &fixture.git,
         fixture.worktree.repo(),
         super::BranchPublication {
@@ -1354,7 +1365,7 @@ fn a_divergent_publication_that_conflicts_names_the_files_and_retains_the_branch
     let host = commit_with("host side\n", "host update")?;
     let lane = commit_with("lane side\n", "lane update")?;
     update_ref(&fixture, "refs/heads/lane", host)?;
-    let error = super::publish_branch(
+    let error = publish_plain(
         &fixture.git,
         fixture.worktree.repo(),
         super::BranchPublication {
@@ -1422,7 +1433,7 @@ fn the_unrooted_decision_judges_the_lane_head_before_any_host_merge() -> TestRes
         },
         ..LaneHistory::default()
     };
-    let error = super::publish_branch(
+    let error = publish_plain(
         &fixture.git,
         fixture.worktree.repo(),
         super::BranchPublication {
@@ -1461,7 +1472,7 @@ fn a_lane_tip_that_shares_no_history_with_the_host_branch_is_refused_as_unrelate
     )?;
     let lane = child_of(&fixture, fixture.base, "lane commit")?;
     update_ref(&fixture, "refs/heads/lane", host)?;
-    let error = super::publish_branch(
+    let error = publish_plain(
         &fixture.git,
         fixture.worktree.repo(),
         super::BranchPublication {
@@ -1530,7 +1541,7 @@ fn a_configured_merge_driver_refuses_the_host_merge_before_it_runs() -> TestResu
         )?
     };
     update_ref(&fixture, "refs/heads/lane", host)?;
-    let error = super::publish_branch(
+    let error = publish_plain(
         &fixture.git,
         fixture.worktree.repo(),
         super::BranchPublication {
@@ -1562,7 +1573,7 @@ fn a_configured_merge_driver_refuses_the_host_merge_before_it_runs() -> TestResu
         None,
         &["config", "--unset", "merge.provenant.driver"],
     )?;
-    let conflict = super::publish_branch(
+    let conflict = publish_plain(
         &fixture.git,
         fixture.worktree.repo(),
         super::BranchPublication {
@@ -1592,7 +1603,7 @@ fn a_branch_rewound_behind_its_launch_base_is_refused_not_fast_forwarded() -> Te
     let launch = child_of(&fixture, fixture.base, "launch base")?;
     update_ref(&fixture, "refs/heads/lane", fixture.base)?;
     let head = child_of(&fixture, launch, "lane commit")?;
-    let error = super::publish_branch(
+    let error = publish_plain(
         &fixture.git,
         fixture.worktree.repo(),
         super::BranchPublication {
@@ -1633,14 +1644,181 @@ fn a_head_the_branch_already_contains_never_advances_to_a_tip_someone_else_reach
     assert_eq!(published.tip, ahead);
     assert!(!published.merged);
     assert!(
-        !published.ends_at_head(fixture.head),
+        !published.ends_at_head(fixture.head, None),
         "a contained head must not move this worktree to a tip someone else advanced"
     );
-    assert!(published.ends_at_head(ahead));
+    assert!(published.ends_at_head(ahead, None));
     assert_eq!(
         super::resolve_ref(&fixture.git, fixture.worktree.repo(), "refs/heads/lane")?,
         ahead
     );
+    Ok(())
+}
+
+#[test]
+fn a_resume_after_a_host_merge_converges_on_the_merge_itself() -> TestResult {
+    let mut fixture = Fixture::new("sha1")?;
+    let (_attempt, _scratch) = fixture.overlay()?;
+    fixture.import()?;
+    let mut recorded = None;
+    // Publish the imported head first, then move the host branch onto a
+    // competing commit off the launch base so the next publication merges it.
+    publish_recorded(
+        &fixture,
+        fixture.head,
+        fixture.import_attempt,
+        &mut recorded,
+    )?;
+    let tree = oid(git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["rev-parse", &format!("{}^{{tree}}", fixture.base)],
+    )?)?;
+    let divergent = oid(git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &[
+            "commit-tree",
+            &tree.to_string(),
+            "-p",
+            &fixture.base.to_string(),
+            "-m",
+            "competing host update",
+        ],
+    )?)?;
+    update_ref(&fixture, "refs/heads/lane", divergent)?;
+    let first = publish_recorded(
+        &fixture,
+        fixture.head,
+        fixture.import_attempt,
+        &mut recorded,
+    )?;
+    assert!(
+        first.merged,
+        "the publication must merge the diverged host branch"
+    );
+    let merge = first.tip;
+    assert_eq!(recorded, Some(merge));
+    assert_eq!(
+        super::resolve_ref(&fixture.git, fixture.worktree.repo(), "refs/heads/lane")?,
+        merge
+    );
+
+    // Simulate the crash between the branch CAS and the worktree advance and
+    // phase checkpoint. The resume finds the head already contained, so it
+    // reports the merge as the branch tip without merging again.
+    let resumed = publish_tip(&fixture, fixture.head, fixture.import_attempt)?;
+    assert!(!resumed.merged);
+    assert_eq!(resumed.tip, merge);
+    assert_eq!(resumed.previous, merge);
+    assert!(
+        resumed.ends_at_head(fixture.head, recorded),
+        "a resumed publication must converge the worktree on its own merge"
+    );
+    assert!(super::is_ancestor(
+        &fixture.git,
+        fixture.worktree.repo(),
+        fixture.head,
+        merge
+    ));
+
+    // A tip someone else later advanced past the merge stays out of reach.
+    let ahead = child_of(&fixture, merge, "host advance after merge")?;
+    update_ref(&fixture, "refs/heads/lane", ahead)?;
+    let moved = publish_tip(&fixture, fixture.head, fixture.import_attempt)?;
+    assert!(!moved.merged);
+    assert_eq!(moved.tip, ahead);
+    assert!(
+        !moved.ends_at_head(fixture.head, recorded),
+        "a tip someone else advanced must not move this worktree"
+    );
+    Ok(())
+}
+
+/// A foreign two-parent tip is not this attempt's merge in either parent order:
+/// recording only the OID this attempt planned keeps a manual `git merge` of
+/// the verified head, or a merge the host made from it, out of reach. The test
+/// also checks the pin a crash would leave behind, since the writer clears
+/// import pins only when this gate accepts the tip.
+#[test]
+fn foreign_two_parent_tips_never_advance_or_clear_pins() -> TestResult {
+    for head_first in [true, false] {
+        let mut fixture = Fixture::new("sha1")?;
+        let (_attempt, _scratch) = fixture.overlay()?;
+        fixture.import()?;
+        let mut recorded = None;
+        publish_recorded(
+            &fixture,
+            fixture.head,
+            fixture.import_attempt,
+            &mut recorded,
+        )?;
+        assert_eq!(recorded, Some(fixture.head));
+        // Another writer's commit, unrelated to the lane head, and a manual
+        // two-parent merge with the head in either parent position.
+        let other = child_of(&fixture, fixture.base, "sibling history")?;
+        let tree = oid(git(
+            &fixture.git,
+            &fixture.home,
+            &fixture.project,
+            None,
+            &["rev-parse", &format!("{}^{{tree}}", fixture.head)],
+        )?)?;
+        let parents = if head_first {
+            [fixture.head, other]
+        } else {
+            [other, fixture.head]
+        };
+        let foreign = oid(git(
+            &fixture.git,
+            &fixture.home,
+            &fixture.project,
+            None,
+            &[
+                "commit-tree",
+                &tree.to_string(),
+                "-p",
+                &parents[0].to_string(),
+                "-p",
+                &parents[1].to_string(),
+                "-m",
+                "someone else's merge of the verified head",
+            ],
+        )?)?;
+        update_ref(&fixture, "refs/heads/lane", foreign)?;
+        let pin = format!(
+            "refs/provenant/import-extra/{}/extra",
+            fixture.import_attempt
+        );
+        update_ref(&fixture, &pin, fixture.head)?;
+
+        let resumed = publish_tip(&fixture, fixture.head, fixture.import_attempt)?;
+        assert!(!resumed.merged);
+        assert_eq!(resumed.tip, foreign);
+        assert!(
+            !resumed.ends_at_head(fixture.head, recorded),
+            "a foreign two-parent tip must not advance the worktree (head first: {head_first})"
+        );
+
+        // Mirror the writer's gate: a refused tip leaves the crash's import
+        // pins behind. Only an accepted tip reaches `clear_import_refs`.
+        if resumed.ends_at_head(fixture.head, recorded) {
+            super::clear_import_refs(
+                &fixture.git,
+                fixture.worktree.repo(),
+                fixture.import_attempt,
+            )?;
+        }
+        assert_eq!(
+            super::resolve_ref(&fixture.git, fixture.worktree.repo(), &pin)?,
+            fixture.head,
+            "a refused tip must keep its import pins (head first: {head_first})"
+        );
+    }
     Ok(())
 }
 
@@ -1675,7 +1853,7 @@ fn a_rewound_branch_is_judged_before_an_unrooted_tip() -> TestResult {
         },
         ..LaneHistory::default()
     };
-    let error = super::publish_branch(
+    let error = publish_plain(
         &fixture.git,
         fixture.worktree.repo(),
         super::BranchPublication {
@@ -1693,6 +1871,13 @@ fn a_rewound_branch_is_judged_before_an_unrooted_tip() -> TestResult {
         crate::RunError::PublicationRewound { branch_tip, base }
             if branch_tip == fixture.base && base == launch
     ));
+    // This path never checks the head's ancestry, so the message must not
+    // claim it: the orphan head above gets the same refusal.
+    let message = error.to_string();
+    assert!(
+        !message.contains("while the lane tip descends that base"),
+        "the message must state only what was checked: {message}"
+    );
     assert_eq!(
         super::resolve_ref(&fixture.git, fixture.worktree.repo(), "refs/heads/lane")?,
         fixture.base
@@ -1735,7 +1920,7 @@ fn an_unrooted_tip_warns_or_stays_quiet_and_the_host_merge_still_publishes() -> 
             },
             ..LaneHistory::default()
         };
-        let published = super::publish_branch(
+        let published = publish_plain(
             &fixture.git,
             fixture.worktree.repo(),
             super::BranchPublication {
@@ -1751,7 +1936,8 @@ fn an_unrooted_tip_warns_or_stays_quiet_and_the_host_merge_still_publishes() -> 
         assert!(published.merged, "{value:?}");
         assert_ne!(published.tip, lane, "{value:?}");
         assert_eq!(published.previous, host, "{value:?}");
-        assert!(published.ends_at_head(lane), "{value:?}");
+        assert!(published.ends_at_head(lane, None), "{value:?}");
+        assert_eq!(published.ancestor, super::Ancestor::Unrooted, "{value:?}");
         assert!(
             super::is_ancestor(&fixture.git, fixture.worktree.repo(), lane, published.tip),
             "{value:?}"
@@ -1759,6 +1945,21 @@ fn an_unrooted_tip_warns_or_stays_quiet_and_the_host_merge_still_publishes() -> 
         assert_eq!(
             super::resolve_ref(&fixture.git, fixture.worktree.repo(), "refs/heads/lane")?,
             published.tip
+        );
+        // The record the merge published agrees with the unrooted warning: the
+        // host parent of the merge does not root the judged lane head.
+        let reflog = git(
+            &fixture.git,
+            &fixture.home,
+            &fixture.project,
+            None,
+            &["reflog", "show", "--format=%gs", "refs/heads/lane"],
+        )?;
+        let reflog = String::from_utf8_lossy(&reflog.stdout);
+        assert!(reflog.contains("no known ancestor"), "{value:?}: {reflog}");
+        assert!(
+            !reflog.contains("descends from refs/heads/lane"),
+            "{value:?}: {reflog}"
         );
     }
     Ok(())
@@ -1842,7 +2043,7 @@ fn a_merge_driver_outside_the_repository_config_file_still_refuses_the_host_merg
         let host = child_of(&fixture, fixture.base, "host update")?;
         let lane = child_of(&fixture, fixture.base, "lane update")?;
         update_ref(&fixture, "refs/heads/lane", host)?;
-        let error = super::publish_branch(
+        let error = publish_plain(
             &fixture.git,
             fixture.worktree.repo(),
             super::BranchPublication {
@@ -1888,7 +2089,7 @@ fn a_merge_driver_in_the_worktree_config_refuses_the_host_merge() -> TestResult 
     let host = child_of(&fixture, fixture.base, "host update")?;
     let lane = child_of(&fixture, fixture.base, "lane update")?;
     update_ref(&fixture, "refs/heads/lane", host)?;
-    let error = super::publish_branch(
+    let error = publish_plain(
         &fixture.git,
         fixture.worktree.repo(),
         super::BranchPublication {
@@ -1944,7 +2145,7 @@ fn same_head_import_pins_survive_independent_publication_cleanup() -> TestResult
         fixture.head
     );
 
-    super::publish_branch(
+    publish_plain(
         &fixture.git,
         fixture.worktree.repo(),
         super::BranchPublication {
@@ -1963,7 +2164,7 @@ fn same_head_import_pins_survive_independent_publication_cleanup() -> TestResult
         "publishing the first attempt must retain the sibling's same-head pin"
     );
 
-    super::publish_branch(
+    publish_plain(
         &fixture.git,
         fixture.worktree.repo(),
         super::BranchPublication {
@@ -2808,7 +3009,7 @@ fn stopped_merge_retains_private_state_without_adoption_by_a_new_attempt() -> Te
             custody: None,
         },
     )?;
-    super::publish_branch(
+    publish_plain(
         &fixture.git,
         fixture.worktree.repo(),
         super::BranchPublication {
@@ -2933,7 +3134,7 @@ fn native_index_advance_keeps_private_flags_and_exposes_worktree_edits() -> Test
         };
         assert_eq!(hidden.stdout, expected);
         fixture.import()?;
-        super::publish_branch(
+        publish_plain(
             &fixture.git,
             fixture.worktree.repo(),
             super::BranchPublication {
@@ -2976,7 +3177,7 @@ fn publish_tip(
     head: GitOid,
     attempt: AttemptId,
 ) -> TestResult<super::Published> {
-    Ok(super::publish_branch(
+    Ok(publish_plain(
         &fixture.git,
         fixture.worktree.repo(),
         super::BranchPublication {
@@ -2988,6 +3189,32 @@ fn publish_tip(
             history: LaneHistory::default(),
         },
     )?)
+}
+
+/// Publish with the same durable checkpoint the writer uses, captured here in
+/// a cell so resume tests can replay what the attempt recorded before its CAS.
+fn publish_recorded(
+    fixture: &Fixture,
+    head: GitOid,
+    attempt: AttemptId,
+    recorded: &mut Option<GitOid>,
+) -> crate::Result<super::Published> {
+    super::publish_branch(
+        &fixture.git,
+        fixture.worktree.repo(),
+        super::BranchPublication {
+            branch: "refs/heads/lane",
+            base: fixture.base,
+            launch_ref: None,
+            head,
+            attempt,
+            history: LaneHistory::default(),
+        },
+        |tip| {
+            *recorded = Some(tip);
+            Ok(())
+        },
+    )
 }
 
 /// A sibling lane's commit changing `file`, built through the native index and
@@ -3220,7 +3447,7 @@ fn native_index_advance_preserves_staged_snapshots_on_conflicts_and_disjoint_upd
         let staged_index = fs::read(&index)?;
         let private_index = fs::read(scratch.join("git-common/index"))?;
         fixture.import()?;
-        super::publish_branch(
+        publish_plain(
             &fixture.git,
             fixture.worktree.repo(),
             super::BranchPublication {
@@ -3325,7 +3552,7 @@ fn publication_rechecks_already_published_branch_before_removing_import_ref() ->
     )?;
     fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700))?;
     assert!(
-        super::publish_branch(
+        publish_plain(
             &wrapper,
             fixture.worktree.repo(),
             super::BranchPublication {
@@ -3422,7 +3649,7 @@ fn unrooted_history_warns_by_default_and_each_configured_value_decides() -> Test
         },
         ..LaneHistory::default()
     };
-    let refusal = super::publish_branch(
+    let refusal = publish_plain(
         &fixture.git,
         fixture.worktree.repo(),
         super::BranchPublication {
@@ -3451,7 +3678,7 @@ fn unrooted_history_warns_by_default_and_each_configured_value_decides() -> Test
         // Each value is judged from the same prior tip; otherwise the previous
         // iteration's published tip would count as the known host lane branch.
         update_ref(&fixture, "refs/heads/lane", prior)?;
-        let ancestor = super::publish_branch(
+        let ancestor = publish_plain(
             &fixture.git,
             fixture.worktree.repo(),
             super::BranchPublication {
@@ -3528,7 +3755,7 @@ fn publication_pins_symbolic_recovery_ref_through_collection() -> TestResult {
         None,
         &["symbolic-ref", &recovery, target],
     )?;
-    super::publish_branch(
+    publish_plain(
         &fixture.git,
         fixture.worktree.repo(),
         super::BranchPublication {
@@ -3598,7 +3825,7 @@ fn publication_refuses_conflicting_recovery_ref_atomically() -> TestResult {
     update_ref(&fixture, "refs/heads/lane", prior)?;
     update_ref(&fixture, &recovery, fixture.base)?;
     assert!(
-        super::publish_branch(
+        publish_plain(
             &fixture.git,
             fixture.worktree.repo(),
             super::BranchPublication {
@@ -3736,7 +3963,7 @@ fn unrooted_tip_refuses_only_under_its_refuse_setting() -> TestResult {
         },
         ..LaneHistory::default()
     };
-    let error = super::publish_branch(
+    let error = publish_plain(
         &fixture.git,
         fixture.worktree.repo(),
         super::BranchPublication {
@@ -3868,7 +4095,7 @@ fn publication_accepts_a_rebase_onto_a_pushed_non_default_branch() -> TestResult
     let rebased = child_of(&fixture, feature, "rebased lane")?;
     update_ref(&fixture, "refs/heads/lane", lane_base)?;
     update_ref(&fixture, "refs/remotes/origin/feature", feature)?;
-    let ancestor = super::publish_branch(
+    let ancestor = publish_plain(
         &fixture.git,
         fixture.worktree.repo(),
         super::BranchPublication {
@@ -3922,7 +4149,7 @@ fn publication_accepts_a_rebase_onto_the_launch_ref() -> TestResult {
     let rebased = child_of(&fixture, integration, "rebased lane")?;
     update_ref(&fixture, "refs/heads/lane", lane_base)?;
     update_ref(&fixture, "refs/heads/integration", integration)?;
-    let ancestor = super::publish_branch(
+    let ancestor = publish_plain(
         &fixture.git,
         fixture.worktree.repo(),
         super::BranchPublication {
@@ -3953,7 +4180,7 @@ fn publication_accepts_a_rebase_onto_the_launch_ref() -> TestResult {
         },
         ..LaneHistory::default()
     };
-    let refusal = super::publish_branch(
+    let refusal = publish_plain(
         &fixture.git,
         fixture.worktree.repo(),
         super::BranchPublication {
@@ -3974,7 +4201,7 @@ fn publication_accepts_a_rebase_onto_the_launch_ref() -> TestResult {
         super::resolve_ref(&fixture.git, fixture.worktree.repo(), "refs/heads/lane")?,
         lane_base
     );
-    let ancestor = super::publish_branch(
+    let ancestor = publish_plain(
         &fixture.git,
         fixture.worktree.repo(),
         super::BranchPublication {
@@ -3996,10 +4223,31 @@ fn publication_accepts_a_rebase_onto_the_launch_ref() -> TestResult {
 }
 
 #[test]
+fn an_unrooted_ancestor_has_a_warning_to_record_that_matches_stderr() -> TestResult {
+    let base = GitOid::Sha1([1; 20]);
+    let head = GitOid::Sha1([2; 20]);
+    let warning = super::Ancestor::Unrooted
+        .warning("refs/heads/lane", base, head)
+        .ok_or("an unrooted publication must have a warning to record")?;
+    // The writer writes publication-ancestor.json exactly when warning() is
+    // Some, so the record now names the unrooted head instead of laundering it
+    // into the host branch a merge added as a parent.
+    assert!(warning.contains("no known ancestor"), "{warning}");
+    assert!(warning.contains(&base.to_string()), "{warning}");
+    assert!(warning.contains(&head.to_string()), "{warning}");
+    assert!(warning.contains("refs/heads/lane"), "{warning}");
+    assert_eq!(
+        super::Ancestor::LaunchBase.warning("refs/heads/lane", base, head),
+        None
+    );
+    Ok(())
+}
+
+#[test]
 fn publication_from_the_launch_base_reports_no_ancestor_warning() -> TestResult {
     let fixture = Fixture::new("sha1")?;
     let tip = child_of(&fixture, fixture.base, "lane work")?;
-    let ancestor = super::publish_branch(
+    let ancestor = publish_plain(
         &fixture.git,
         fixture.worktree.repo(),
         super::BranchPublication {
@@ -4069,7 +4317,7 @@ fn publication_accepts_a_rebase_onto_the_current_origin_default() -> TestResult 
             "refs/remotes/origin/main",
         ],
     )?;
-    super::publish_branch(
+    publish_plain(
         &fixture.git,
         fixture.worktree.repo(),
         super::BranchPublication {

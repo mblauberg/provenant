@@ -728,6 +728,19 @@ impl Driver<'_> {
     pub(crate) fn base(&self) -> Option<GitOid> {
         self.journal.base
     }
+    /// The tip this attempt durably planned to publish, read on resume before
+    /// publication replays a branch that already contains the verified head.
+    pub(crate) fn publication_tip(&self) -> Option<GitOid> {
+        self.journal.publication_tip
+    }
+    /// Record the planned tip before the branch ref moves. A retry whose CAS
+    /// lost the branch may build a new merge, so a new OID replaces the old.
+    pub(crate) fn set_publication_tip(&mut self, tip: GitOid) -> Result<()> {
+        self.update(|journal| {
+            journal.publication_tip = Some(tip);
+            Ok(())
+        })
+    }
     pub(crate) fn set_head(&mut self, head: GitOid) -> Result<()> {
         self.update(|journal| {
             if journal.head.is_some_and(|pinned| pinned != head) {
@@ -2917,6 +2930,7 @@ mod tests {
             attempts: 0,
             head: None,
             base: None,
+            publication_tip: None,
             owner: None,
             owner_since_ms: 0,
             retry_after_ms: 0,

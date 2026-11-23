@@ -629,7 +629,12 @@ impl Ancestor {
     pub(crate) fn warning(&self, branch: &str, base: GitOid, head: GitOid) -> Option<String> {
         match self {
             Self::LaunchBase => None,
-            Self::Unrooted => None,
+            // The same claim publication warns about on stderr: the judged
+            // head descended from no known root. The record must not launder it
+            // into an ancestor inferred from a merge's host parent.
+            Self::Unrooted => Some(format!(
+                "lane tip {head} has no known ancestor; it does not descend from its launch base {base}; publishing {branch} anyway"
+            )),
             Self::Known { reference, oid } => Some(format!(
                 "lane tip {head} on {branch} no longer descends from its launch base {base}; \
                  published because it descends from {reference} ({oid})"
@@ -726,12 +731,15 @@ pub(crate) struct Published {
 
 impl Published {
     /// Whether the branch now ends in this writer's own history: at the
-    /// verified head, or at a merge of that head with the host branch. A head
-    /// the branch already contained publishes nothing, so the tip may be a
-    /// commit someone else advanced; moving this worktree's files to it would
-    /// discard what that head describes.
-    pub(crate) fn ends_at_head(&self, head: GitOid) -> bool {
-        self.merged || self.tip == head
+    /// verified head, at a merge of that head with the host branch, or — on a
+    /// resume after that merge — at the exact tip this attempt recorded before
+    /// it moved the branch. A head the branch already contained publishes
+    /// nothing, so the tip may be a commit someone else advanced; moving this
+    /// worktree's files to it would discard what that head describes. Neither a
+    /// commit's parents nor its identity can prove authorship: only the OID the
+    /// attempt itself durably planned can.
+    pub(crate) fn ends_at_head(&self, head: GitOid, recorded_tip: Option<GitOid>) -> bool {
+        self.merged || self.tip == head || recorded_tip == Some(self.tip)
     }
 }
 
@@ -858,10 +866,15 @@ fn host_merge(git: &Path, repo: &VerifiedRepo, current: GitOid, head: GitOid) ->
     }
 }
 
+/// `checkpoint` runs after the target commit exists but before the branch ref
+/// moves. It durably records the planned OID in this attempt's publication
+/// progress, the only witness on resume that a tip is this attempt's own merge
+/// rather than a two-parent commit another writer made from the verified head.
 pub(crate) fn publish_branch(
     git: &Path,
     repo: &VerifiedRepo,
     publication: BranchPublication<'_>,
+    checkpoint: impl FnOnce(GitOid) -> Result<()>,
 ) -> Result<Published> {
     let BranchPublication {
         branch,
@@ -903,9 +916,12 @@ pub(crate) fn publish_branch(
         match history.unrooted_tip.value {
             HistoryEffect::Off => {}
             HistoryEffect::Warn => {
+                let warning = Ancestor::Unrooted
+                    .warning(branch, base, head)
+                    .ok_or_else(invalid)?;
                 let _ = writeln!(
                     std::io::stderr().lock(),
-                    "warning: lane tip {head} has no known ancestor; it does not descend from its launch base {base}; publishing {branch} anyway; {}; set {UNROOTED_TIP} to refuse to stop instead",
+                    "warning: {warning}; {}; set {UNROOTED_TIP} to refuse to stop instead",
                     history.unrooted_tip.setting(UNROOTED_TIP),
                 );
             }
@@ -961,18 +977,20 @@ pub(crate) fn publish_branch(
             history.rebase.setting(REBASE),
         );
     }
-    // The published tip's own ancestry. A merge adds the host branch as a
-    // parent, so the merge's ancestry says nothing about what the head lacked.
-    let ancestor = if merged || target != head {
-        match known_ancestor(git, repo, base, launch_ref, target, branch, Some(current))? {
-            Some(ancestor) => ancestor,
-            // The branch tip the publication replaced is always in the
-            // published tip, so a miss is a broken Git answer, not a history.
-            None => return Err(invalid()),
-        }
-    } else {
-        lane_ancestor.unwrap_or(Ancestor::Unrooted)
-    };
+    // The ancestor the publication established is the one judged on the lane
+    // head before any host merge. A merge adds the host branch as a parent, so
+    // recomputing from its tip would launder an unrooted head into a "descends
+    // from the branch" record that disagrees with the warning already written
+    // about that head.
+    let ancestor = lane_ancestor.unwrap_or(Ancestor::Unrooted);
+    // Record the planned OID before the ref moves. A resumed publication that
+    // finds the branch already containing the head does not publish or merge
+    // again; it accepts only the tip recorded here. When the branch already
+    // contained the head there is nothing of this attempt's own to record, so
+    // a foreign tip cannot become a planned tip on a later resume.
+    if !contains_head {
+        checkpoint(target)?;
+    }
     // receive-pack has checked the graph. Git's CAS protects concurrent host
     // updates, including when a lane rebases or merges its private branch.
     {
