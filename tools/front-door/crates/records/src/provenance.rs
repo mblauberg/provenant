@@ -132,13 +132,14 @@ impl Precedence {
             };
             match winner.as_ref().map(|(best, _)| *best) {
                 Some(best) if best > rank => shadowed.push(candidate),
-                Some(best) if best == rank => {
+                // A tie keeps the last candidate; a higher layer displaces the
+                // current winner. In both cases the displaced candidate is the
+                // one that was the winner, and it keeps its place in shadowed.
+                _ => {
                     if let Some((_, previous)) = winner.replace((rank, candidate)) {
                         shadowed.push(previous);
                     }
                 }
-                Some(_) => shadowed.push(candidate),
-                None => winner = Some((rank, candidate)),
             }
         }
         Merge {

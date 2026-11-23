@@ -562,7 +562,7 @@ fn close_matches(lower: &str, routes: &BTreeSet<String>, models: &[String]) -> V
     let by_id: Vec<(&str, &str)> = models
         .iter()
         .map(|model| {
-            let id = model.split_once('/').map_or(model.as_str(), |(_, id)| id);
+            let id = model.rsplit_once('/').map_or(model.as_str(), |(_, id)| id);
             (id, model.as_str())
         })
         .collect();

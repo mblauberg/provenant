@@ -1424,7 +1424,7 @@ mod tests {
         let data = json!({"status":"pending", "checkpoint":{"graph_id":"work", "nodes":[]},
             "lane_accesses":[{"access":"isolated","source":"route","key":"rules.policy.lane.access"}]});
         let human = run_human(&data, &json!({}), true);
-        assert!(human.contains("access: isolated (rules.policy.lane.access route_policy)\n"));
+        assert!(human.contains("access: isolated (rules.policy.lane.access route)\n"));
     }
 
     // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes

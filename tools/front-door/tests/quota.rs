@@ -228,11 +228,19 @@ fn readiness_write_failure_warns_and_keeps_the_account_commit() -> Result {
     std::fs::write(rig.state.join("readiness"), b"blocked directory")?;
     let output = rig.command(&["quota", "tick", "--json"])?;
     assert_eq!(code(&output), 0);
-    assert!(
-        String::from_utf8_lossy(&output.stderr.bytes)
-            .contains("Warning: could not sync quota readiness:")
-    );
     let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+    // A typed warning reaches the JSON envelope, never bare stderr.
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    assert!(
+        report["warnings"]
+            .as_array()
+            .ok_or("warnings")?
+            .iter()
+            .any(|warning| warning["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("could not sync quota readiness:"))),
+        "{report}"
+    );
     let key = report["data"]["accounts"][0]["account"]["account_key"]
         .as_str()
         .ok_or("key")?;

@@ -1067,10 +1067,21 @@ pools = { junior = [{ model = "codex/gpt-6-luna", weight = 101, effort = "high",
     )?;
     let out = rig.command(&["route", "list", "--pool", "junior", "--json"])?;
     assert_eq!(code(&out), 0);
-    let stderr = String::from_utf8_lossy(&out.stderr.bytes);
+    // A typed warning reaches the JSON envelope, never bare stderr.
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    let envelope: Value = serde_json::from_slice(&out.stdout.bytes)?;
     assert!(
-        stderr.contains("routing") && stderr.contains("unknown configuration key"),
-        "{stderr}"
+        envelope["warnings"]
+            .as_array()
+            .ok_or("warnings")?
+            .iter()
+            .any(|warning| {
+                warning["code"] == "CONFIG_KEY_IGNORED"
+                    && warning["message"].as_str().is_some_and(|message| {
+                        message.contains("routing") && message.contains("unknown configuration key")
+                    })
+            }),
+        "{envelope}"
     );
     Ok(())
 }

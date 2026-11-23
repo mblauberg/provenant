@@ -402,9 +402,21 @@ fn config_show_names_verify_port_layers_and_survives_a_malformed_project_layer()
     )?;
     let shown = rig.command(&["config", "show", "--json"])?;
     assert_eq!(code(&shown), 0, "{shown:?}");
-    let stderr = String::from_utf8_lossy(&shown.stderr.bytes);
-    assert!(stderr.contains("ports.json"), "{stderr}");
-    assert!(stderr.contains("verify"), "{stderr}");
+    // A typed warning reaches the JSON envelope, never bare stderr.
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    let envelope: serde_json::Value = serde_json::from_slice(&shown.stdout.bytes)?;
+    assert!(
+        envelope["warnings"]
+            .as_array()
+            .ok_or("warnings")?
+            .iter()
+            .any(|warning| {
+                warning["message"].as_str().is_some_and(|message| {
+                    message.contains("ports.json") && message.contains("verify")
+                })
+            }),
+        "{envelope}"
+    );
     Ok(())
 }
 
@@ -443,13 +455,23 @@ fn config_show_reads_typed_defaults_warns_on_unknown_keys_and_restricts_authorit
         rig.state.join("config.toml"),
         "schema_version=1\nunknown='private-marker'\n",
     )?;
-    // An unknown key warns by name without echoing its value.
+    // An unknown key warns by name in the envelope without echoing its value.
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
     let unknown = rig.command(&["config", "show", "--json"])?;
     assert_eq!(code(&unknown), 0);
-    let stderr = String::from_utf8_lossy(&unknown.stderr.bytes);
+    let warned: serde_json::Value = serde_json::from_slice(&unknown.stdout.bytes)?;
     assert!(
-        stderr.contains("unknown") && stderr.contains("unknown configuration key"),
-        "{stderr}"
+        warned["warnings"]
+            .as_array()
+            .ok_or("warnings")?
+            .iter()
+            .any(|warning| {
+                warning["code"] == "CONFIG_KEY_IGNORED"
+                    && warning["message"].as_str().is_some_and(|message| {
+                        message.contains("unknown") && message.contains("unknown configuration key")
+                    })
+            }),
+        "{warned}"
     );
     for stream in [&unknown.stdout.bytes, &unknown.stderr.bytes] {
         assert!(!String::from_utf8_lossy(stream).contains("private-marker"));
@@ -467,8 +489,18 @@ fn config_show_reads_typed_defaults_warns_on_unknown_keys_and_restricts_authorit
     );
     let shown: serde_json::Value = serde_json::from_slice(&invalid.stdout.bytes)?;
     assert_eq!(shown["data"]["knobs"]["lanes.publish"]["value"], false);
-    let stderr = String::from_utf8_lossy(&invalid.stderr.bytes);
-    assert!(stderr.contains("lanes.publish"), "{stderr}");
+    // The invalid-knob warning also reaches the envelope, not bare stderr.
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    assert!(
+        shown["warnings"]
+            .as_array()
+            .ok_or("warnings")?
+            .iter()
+            .any(|warning| warning["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("lanes.publish"))),
+        "{shown}"
+    );
     for stream in [&invalid.stdout.bytes, &invalid.stderr.bytes] {
         assert!(!String::from_utf8_lossy(stream).contains("private-marker"));
     }
