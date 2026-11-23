@@ -185,21 +185,21 @@ pub(super) fn read(
                 }
                 _ => None,
             };
-            let usage =
-                serde_json::to_value(attempt.effective_usage()).map_err(|_| Error::Encode)?;
+            let effective = attempt.effective_usage();
+            let tokens = &effective.tokens;
             let mut known = Vec::new();
             let mut missing = Vec::new();
-            for key in [
-                "uncached_input",
-                "cache_read",
-                "cache_write",
-                "output_excluding_reasoning",
-                "reasoning",
+            for (name, count) in [
+                ("input", tokens.input),
+                ("cache_read", tokens.cache_read),
+                ("cache_write", tokens.cache_write),
+                ("output", tokens.output),
+                ("reasoning", tokens.reasoning),
             ] {
-                if usage[key].is_null() {
-                    missing.push(key)
+                if count.is_some() {
+                    known.push(name)
                 } else {
-                    known.push(key)
+                    missing.push(name)
                 }
             }
             let terminal_attention = matches!(attempt.state, AttemptState::Terminal { outcome, .. }
@@ -341,6 +341,19 @@ mod tests {
             },
         )?;
         assert!(upgraded["changed"]["runs"].is_null());
+        // A stated bucket must survive the read projection as known and counted;
+        // an unstated one stays missing.
+        // Spec: docs/specs/telemetry.md#bounded-honest-totals
+        let mut reported = store.record(AttemptId::from_bytes([101; 16]), &call)?;
+        reported.usage.tokens.input = Some(1_234);
+        let db = rusqlite::Connection::open(roots.state.as_path().join("run.sqlite3"))?;
+        db.execute(
+            "UPDATE attempts SET record=?1 WHERE id=?2",
+            rusqlite::params![
+                serde_json::to_vec(&reported)?,
+                reported.attempt_id.to_string()
+            ],
+        )?;
         super::super::write_fixture("changes-after-run-write", "console changes", changes, &base)?;
         let first = read(&roots, None, false, 50, None)?;
         assert_eq!(first["schema_version"], 3);
@@ -363,16 +376,28 @@ mod tests {
         super::super::write_fixture("detail", "console detail", detail, &base)?;
         assert_eq!(first["coverage"]["chairs"], "unavailable");
         assert_eq!(first["lanes"].as_array().unwrap().len(), 50);
+        let reported_id = AttemptId::from_bytes([101; 16]).to_string();
+        let reported_lane = first["lanes"]
+            .as_array()
+            .ok_or("board lanes")?
+            .iter()
+            .find(|lane| lane["lane_id"]["attempt_id"] == json!(reported_id))
+            .ok_or("reported lane")?;
         assert_eq!(
-            first["lanes"][0]["metadata"]["attempt"]["usage"]["uncached_input"],
-            Value::Null
+            reported_lane["metadata"]["attempt"]["usage"]["tokens"]["input"],
+            json!(1_234)
         );
-        assert_eq!(
-            first["lanes"][0]["usage_coverage"]["missing"]
+        assert!(
+            reported_lane["usage_coverage"]["known"]
                 .as_array()
-                .unwrap()
-                .len(),
-            5
+                .ok_or("known buckets")?
+                .contains(&json!("input"))
+        );
+        assert!(
+            reported_lane["usage_coverage"]["missing"]
+                .as_array()
+                .ok_or("missing buckets")?
+                .contains(&json!("reasoning"))
         );
         assert!(!serde_json::to_string(&first)?.contains("private body"));
         assert!(!roots.state.as_path().join("fabric").exists());

@@ -417,7 +417,7 @@ mod fixtures {
                         "lanes": [{"lane_id": lane_id("board-fixture", "65656565656565656565656565656565"),
                             "chair": null, "metadata": {"attempt": board_lane},
                             "wait": {"lane_class": "read_only", "waiting_for": "launch: not yet handed to a guardian"},
-                            "attention": false, "usage_coverage": {"known": [], "missing": ["uncached_input", "cache_read", "cache_write", "output_excluding_reasoning", "reasoning"]},
+                            "attention": false, "usage_coverage": {"known": [], "missing": ["input", "cache_read", "cache_write", "output", "reasoning"]},
                             "observation_coverage": "complete"}],
                         "next_cursor": "2.101.101.sha256:88fdd1c45d28a6ed462639aaadc725d8f7821fd400d0c5b0481ba269745061c7",
                         "truncated": true
@@ -478,7 +478,7 @@ mod fixtures {
                         "usage": {"tokens":{"input": null, "cache_read": null, "cache_write": null,
                             "cache_write_1h": null, "output": null, "reasoning": null},
                             "source": "stream", "context_basis_points": null},
-                        "usage_coverage": {"known": [], "missing": ["uncached_input", "cache_read", "cache_write", "output_excluding_reasoning", "reasoning"]},
+                        "usage_coverage": {"known": [], "missing": ["input", "cache_read", "cache_write", "output", "reasoning"]},
                         "linked_inbox_requests": [],
                         "coverage": {"linked_inbox_requests": "complete", "nested": "bounded_tree_search", "peer": "not_searched"}
                     }),

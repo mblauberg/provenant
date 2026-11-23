@@ -67,10 +67,10 @@
     "usage_coverage": {
       "known": [],
       "missing": [
-        "uncached_input",
+        "input",
         "cache_read",
         "cache_write",
-        "output_excluding_reasoning",
+        "output",
         "reasoning"
       ]
     }

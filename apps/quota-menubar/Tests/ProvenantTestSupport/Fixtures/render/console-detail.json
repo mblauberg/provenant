@@ -87,21 +87,23 @@
       "run": "65656565656565656565656565656565"
     },
     "usage": {
-      "cache_read": 812000,
-      "cache_write": 41000,
-      "cache_write_1h": null,
       "context_basis_points": 3100,
-      "output_excluding_reasoning": 9200,
-      "reasoning": 4100,
       "source": "provider",
-      "uncached_input": 12400
+      "tokens": {
+        "cache_read": 812000,
+        "cache_write": 41000,
+        "cache_write_1h": null,
+        "input": 12400,
+        "output": 9200,
+        "reasoning": 4100
+      }
     },
     "usage_coverage": {
       "known": [
-        "uncached_input",
+        "input",
         "cache_read",
         "cache_write",
-        "output_excluding_reasoning",
+        "output",
         "reasoning"
       ],
       "missing": []

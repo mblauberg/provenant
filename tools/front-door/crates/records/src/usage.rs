@@ -4,8 +4,12 @@ use serde::{Deserialize, Serialize};
 
 /// Token counts as a provider reports them. Every bucket stays absent until a
 /// report states it, never a guessed zero.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tokens {
+    /// Future buckets survive a decode/encode round trip, like every record
+    /// payload. Spec: docs/specs/state.md#strict-bounded-records
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     /// Input tokens as the provider states them; cache buckets say whether
     /// cache reads are included.
     pub input: Option<u64>,
