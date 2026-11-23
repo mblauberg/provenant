@@ -562,21 +562,16 @@ fn resolve_forge(
             format!("cannot read the checkout's Git metadata: {error}"),
         )
     })?;
-    let remote = match provenant_config::ForgeContext::remote(&config, &git) {
-        Ok(remote) => remote.value,
-        Err(provenant_config::ForgeContextError::NoRemote { remotes, .. })
-            if remotes.is_empty() =>
-        {
-            String::new()
-        }
-        Err(error) => {
-            return Err(Refusal::new(
+    let remote = provenant_config::ForgeContext::remote_if_any(&config, &git)
+        .map_err(|error| {
+            Refusal::new(
                 Outcome::Refused,
                 "FORGE_CONTEXT_UNRESOLVED",
                 error.to_string(),
-            ));
-        }
-    };
+            )
+        })?
+        .map(|remote| remote.value)
+        .unwrap_or_default();
     Ok(provenant_run::forge_for(&remote, "", &[]))
 }
 
