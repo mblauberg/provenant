@@ -808,19 +808,18 @@ pub fn default_creation_base(
             }
         })?;
     let warning = default_base_warning(oid);
-    let _ = write_default_base_warning(&mut std::io::stderr().lock(), oid);
+    use provenant_records::warning::{DEFAULT_BASE_FALLBACK, Warning, warn};
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    warn(
+        Warning::new(DEFAULT_BASE_FALLBACK, warning.clone())
+            .subject(oid.to_string())
+            .once_per_change(),
+    );
     Ok((oid, vec![warning]))
 }
 
 fn default_base_warning(oid: GitOid) -> String {
     format!("could not fetch origin's default branch; using local HEAD {oid}")
-}
-
-pub(super) fn write_default_base_warning(
-    output: &mut impl std::io::Write,
-    oid: GitOid,
-) -> std::io::Result<()> {
-    writeln!(output, "warning: {}", default_base_warning(oid))
 }
 
 /// Report whether a failed `worktree add` left no observable artifacts.
@@ -1379,9 +1378,13 @@ pub(super) fn refresh_census_under_custody(
     }
 }
 
-#[allow(clippy::print_stderr)]
 pub(super) fn warn_cache_removal(error: &crate::permissions::PermissionError) {
-    eprintln!("warning: could not remove worktree lane cache: {error}");
+    use provenant_records::warning::{CACHE_REMOVAL_FAILED, Warning, warn};
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    warn(Warning::new(
+        CACHE_REMOVAL_FAILED,
+        format!("could not remove worktree lane cache: {error}"),
+    ));
 }
 
 /// Pins an integration ref given by name. A local branch wins, then a

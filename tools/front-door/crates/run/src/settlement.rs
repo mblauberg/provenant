@@ -3579,12 +3579,16 @@ impl ResumeRequest {
     }
 }
 
-#[expect(
-    clippy::print_stderr,
-    reason = "report the run-level registry failure without suppressing judgeable queued rows"
-)]
 fn report_registry_error(attempt: provenant_core::AttemptId, error: &RunError) {
-    eprintln!("warning: writer fence listing failed for {attempt}: {error}");
+    use provenant_records::warning::{SETTLEMENT_DIAGNOSTIC, Warning, warn};
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    warn(
+        Warning::new(
+            SETTLEMENT_DIAGNOSTIC,
+            format!("writer fence listing failed for {attempt}: {error}"),
+        )
+        .subject(format!("attempt {attempt}")),
+    );
 }
 
 #[derive(Serialize, Deserialize)]

@@ -53,8 +53,12 @@ impl crate::RunStore {
                     8192,
                 );
             }
-            use std::io::Write;
-            let _ = writeln!(std::io::stderr().lock(), "warning: {}", message.trim());
+            use provenant_records::warning::{PR_CONTRIBUTION_WARNING, Warning, warn};
+            // Spec: docs/specs/cli.md#warnings-are-typed-values
+            warn(
+                Warning::new(PR_CONTRIBUTION_WARNING, message.trim().to_owned())
+                    .subject(format!("attempt {attempt}")),
+            );
         }
     }
     pub(crate) fn contribution_attempts(

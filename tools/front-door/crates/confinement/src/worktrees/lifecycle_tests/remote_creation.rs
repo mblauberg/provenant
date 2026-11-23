@@ -227,14 +227,17 @@ fn create_defaults_to_local_head_when_remote_unavailable_or_head_missing()
     let test = TestContext::new(&fixture)?;
     let context = test.context();
     let head = fixture.head()?;
-    let missing = create(
-        &context,
-        WorktreeCreate {
-            branch: "missing-default".into(),
-            base: None,
-        },
-        &cancel(),
-    )?;
+    let (missing, _) = provenant_records::warning::capture(|| {
+        create(
+            &context,
+            WorktreeCreate {
+                branch: "missing-default".into(),
+                base: None,
+            },
+            &cancel(),
+        )
+    });
+    let missing = missing?;
     assert_eq!(missing.head, head);
     assert_eq!(missing.warnings.len(), 1);
     assert!(missing.warnings[0].contains(&head.to_string()));
@@ -249,23 +252,25 @@ fn create_defaults_to_local_head_when_remote_unavailable_or_head_missing()
     let offline_head = offline_fixture.head()?;
     let test = TestContext::new(&offline_fixture)?;
     let context = test.context();
-    let offline = create(
-        &context,
-        WorktreeCreate {
-            branch: "offline-default".into(),
-            base: None,
-        },
-        &cancel(),
-    )?;
+    let (offline, captured) = provenant_records::warning::capture(|| {
+        create(
+            &context,
+            WorktreeCreate {
+                branch: "offline-default".into(),
+                base: None,
+            },
+            &cancel(),
+        )
+    });
+    let offline = offline?;
     assert_eq!(offline.head, offline_head);
     assert_eq!(offline.warnings.len(), 1);
     let receipt = serde_json::to_value(&offline)?;
     assert_eq!(receipt["warnings"][0], offline.warnings[0]);
-    let mut warning = Vec::new();
-    lifecycle::write_default_base_warning(&mut warning, head)?;
-    let warning = String::from_utf8(warning)?;
-    assert!(warning.contains("local HEAD"));
-    assert!(warning.contains(&head.to_string()));
+    assert_eq!(captured.len(), 1);
+    assert_eq!(captured[0].code.as_ref(), "DEFAULT_BASE_FALLBACK");
+    assert!(captured[0].message.contains("local HEAD"));
+    assert!(captured[0].message.contains(&offline_head.to_string()));
     Ok(())
 }
 

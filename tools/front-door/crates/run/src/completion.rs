@@ -11,9 +11,15 @@ use provenant_records::{
 };
 use std::{
     ffi::OsStr,
-    io::Write,
     path::{Component, Path},
 };
+
+/// A handoff was accepted with an advisory parse notice.
+/// Spec: docs/specs/cli.md#warnings-are-typed-values
+fn handoff_advisory(attempt: provenant_core::AttemptId, detail: impl Into<String>) {
+    use provenant_records::warning::{HANDOFF_ADVISORY, Warning, warn};
+    warn(Warning::new(HANDOFF_ADVISORY, detail.into()).subject(format!("attempt {attempt}")));
+}
 
 pub(crate) fn guidance() -> &'static str {
     static GUIDANCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -49,34 +55,20 @@ impl RunStore {
             && parsed.handoff.as_ref().is_ok_and(Option::is_some)
         {
             // Accepted either way: the lane did its work and declared it.
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: attempt {}: {}",
-                record.attempt_id,
-                repeated.warning()
-            );
+            handoff_advisory(record.attempt_id, repeated.warning());
         }
         if let Some(fallback) = provenant_records::handoff::Handoff::json_fence_fallback(
             &decoded.result,
             &decoded.turns,
         ) {
             // Accepted: the answer ended in a handoff-shaped json block.
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: attempt {}: {}",
-                record.attempt_id,
-                fallback.warning()
-            );
+            handoff_advisory(record.attempt_id, fallback.warning());
         }
         if let Ok(Some(handoff)) = &parsed.handoff
             && let Some(warning) = handoff.blocked_on_warning()
         {
             // Accepted: the field is additive, so the handoff stands without it.
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: attempt {}: {warning}",
-                record.attempt_id
-            );
+            handoff_advisory(record.attempt_id, warning);
         }
         if let Some(handoff) = read_snapshot(attempt)? {
             let handoff = with_scope_report(attempt, handoff)?;

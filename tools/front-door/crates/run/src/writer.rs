@@ -1744,7 +1744,15 @@ fn launch_resource_limits(
                     defaults.grant_limit, defaults.profile_limit_bytes
                 )),
             ) {
-                let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+                use provenant_records::warning::{
+                    RUN_SETTINGS_UNAVAILABLE, Warning, warn,
+                };
+                // Spec: docs/specs/cli.md#warnings-are-typed-values
+                warn(
+                    Warning::new(RUN_SETTINGS_UNAVAILABLE, message)
+                        .subject("WRITER_LAUNCH_RESOURCE_LIMITS_NONE")
+                        .once_per_change(),
+                );
             }
             ResolvedLaunchLimits {
                 limits: defaults,
@@ -3854,7 +3862,9 @@ impl WriterLaunch {
                 },
             );
             if let Some(message) = effect.message() {
-                let _ = writeln!(std::io::stderr().lock(), "policy: {message}");
+                use provenant_records::warning::{POLICY_ADVISORY, Warning, warn};
+                // Spec: docs/specs/cli.md#warnings-are-typed-values
+                warn(Warning::new(POLICY_ADVISORY, message).subject("WRITE_SCOPE"));
             }
             if effect.blocks() {
                 return Err(RunError::Validation("WRITE_SCOPE: strict scope policy"));
@@ -3907,7 +3917,9 @@ impl WriterLaunch {
             provenant_records::run::TERMINAL_RECORD_LIMIT,
         )?;
         if let Some(message) = effect.message() {
-            let _ = writeln!(std::io::stderr().lock(), "policy: {message}");
+            use provenant_records::warning::{POLICY_ADVISORY, Warning, warn};
+            // Spec: docs/specs/cli.md#warnings-are-typed-values
+            warn(Warning::new(POLICY_ADVISORY, message).subject("WRITE_SCOPE"));
         }
         if effect.blocks() {
             return Err(RunError::Validation("WRITE_SCOPE: strict scope policy"));
@@ -3941,7 +3953,11 @@ impl WriterLaunch {
             let rendered = format!("policy: {message}");
             #[cfg(test)]
             TOOL_STATE_WARNINGS.with(|warnings| warnings.borrow_mut().push(rendered.clone()));
-            let _ = writeln!(std::io::stderr().lock(), "{rendered}");
+            use provenant_records::warning::{TOOL_STATE_DIAGNOSTIC, Warning, warn};
+            // Spec: docs/specs/cli.md#warnings-are-typed-values
+            warn(
+                Warning::new(TOOL_STATE_DIAGNOSTIC, rendered).subject("LANE_TOOL_STATE_COMMITTED"),
+            );
         }
         // A failure to inspect the diff never blocks settlement. A block here
         // can only come from a user-selected strict setting, so honour it.
@@ -4130,7 +4146,9 @@ impl WriterLaunch {
                 return Err(error);
             }
             if let Some(message) = effect.message() {
-                let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+                use provenant_records::warning::{POLICY_ADVISORY, Warning, warn};
+                // Spec: docs/specs/cli.md#warnings-are-typed-values
+                warn(Warning::new(POLICY_ADVISORY, message).subject("SCOPE_REPORT"));
             }
         }
         self.report_tool_state_paths(work_base, verified_tip, source.as_ref(), enforcement)?;
@@ -4200,7 +4218,12 @@ impl WriterLaunch {
                 // is raised here; both are recorded with the same text so the
                 // record agrees with what the operator was told.
                 if !matches!(ancestor, crate::objects::Ancestor::Unrooted) {
-                    let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+                    use provenant_records::warning::{LANE_HISTORY_WARNING, Warning, warn};
+                    // Spec: docs/specs/cli.md#warnings-are-typed-values
+                    warn(
+                        Warning::new(LANE_HISTORY_WARNING, warning.clone())
+                            .subject(self.branch.as_str().to_owned()),
+                    );
                 }
                 let _ = attempt
                     .atomic_write(
@@ -4379,10 +4402,12 @@ impl WriterLaunch {
                         )
                 })()
                 .map_err(|error| {
-                    let _ = writeln!(
-                        std::io::stderr().lock(),
-                        "warning: stopped work remains unpushed: {error}"
-                    );
+                    use provenant_records::warning::{WRITER_UNPUSHED_WORK, Warning, warn};
+                    // Spec: docs/specs/cli.md#warnings-are-typed-values
+                    warn(Warning::new(
+                        WRITER_UNPUSHED_WORK,
+                        format!("stopped work remains unpushed: {error}"),
+                    ));
                     error
                 })
                 .ok()
@@ -4419,10 +4444,12 @@ impl WriterLaunch {
                 ) {
                     Ok(()) => StopWorkPush::Pushed,
                     Err(error) => {
-                        let _ = writeln!(
-                            std::io::stderr().lock(),
-                            "warning: stopped work remains unpushed: {error}"
-                        );
+                        use provenant_records::warning::{WRITER_UNPUSHED_WORK, Warning, warn};
+                        // Spec: docs/specs/cli.md#warnings-are-typed-values
+                        warn(Warning::new(
+                            WRITER_UNPUSHED_WORK,
+                            format!("stopped work remains unpushed: {error}"),
+                        ));
                         StopWorkPush::Failed
                     }
                 }
@@ -4550,7 +4577,9 @@ impl WriterLaunch {
         fallback: GitOid,
     ) {
         let warn = |message: String| {
-            let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+            use provenant_records::warning::{NATIVE_INDEX_ADVISORY, Warning};
+            // Spec: docs/specs/cli.md#warnings-are-typed-values
+            provenant_records::warning::warn(Warning::new(NATIVE_INDEX_ADVISORY, message));
         };
         match crate::objects::sync_native_index(self.worktree.repo(), fallback) {
             crate::objects::IndexSync::Deferred => {}
@@ -4672,10 +4701,12 @@ impl WriterLaunch {
             crate::artifacts::seal(attempt, PRIMARY_PIN, &bytes, crate::RECORD_LIMIT)
         });
         if let Err(error) = sealed {
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: could not record the primary checkout position: {error}"
-            );
+            use provenant_records::warning::{PRIMARY_POSITION_UNRECORDED, Warning, warn};
+            // Spec: docs/specs/cli.md#warnings-are-typed-values
+            warn(Warning::new(
+                PRIMARY_POSITION_UNRECORDED,
+                format!("could not record the primary checkout position: {error}"),
+            ));
         }
     }
 

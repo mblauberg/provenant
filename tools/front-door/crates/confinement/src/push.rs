@@ -7,7 +7,6 @@ use crate::{
 use provenant_config::{DEFAULT_BRANCH_REWRITE, DefaultBranchRewrite, HistoryEffect, LaneHistory};
 use provenant_core::{CancelToken, GitOid};
 use provenant_os::exec::{Executor, Termination};
-use std::io::Write as _;
 use thiserror::Error;
 
 pub struct PushUpdate {
@@ -140,9 +139,17 @@ impl PushContext<'_> {
                             .setting(DEFAULT_BRANCH_REWRITE);
                         match self.history.default_branch_rewrite.value {
                             DefaultBranchRewrite::Allow => {
-                                let _ = writeln!(
-                                    std::io::stderr().lock(),
-                                    "pre-push: warning: rewriting the default branch {branch}; {setting}"
+                                use provenant_records::warning::{
+                                    DEFAULT_BRANCH_REWRITTEN, Warning, warn,
+                                };
+                                // Spec: docs/specs/cli.md#warnings-are-typed-values
+                                warn(
+                                    Warning::new(
+                                        DEFAULT_BRANCH_REWRITTEN,
+                                        format!("pre-push: rewriting the default branch {branch}; {setting}"),
+                                    )
+                                    .subject(branch.as_str().to_owned())
+                                    .once_per_change(),
                                 );
                             }
                             DefaultBranchRewrite::Refuse => {
@@ -176,9 +183,19 @@ impl PushContext<'_> {
                         .setting(provenant_config::CONFLICT_MARKERS);
                     match self.history.conflict_markers.value {
                         HistoryEffect::Warn => {
-                            let _ = writeln!(
-                                std::io::stderr().lock(),
-                                "pre-push: warning: conflict markers in pushed commits; {setting}"
+                            use provenant_records::warning::{
+                                CONFLICT_MARKERS_PUSHED, Warning, warn,
+                            };
+                            // Spec: docs/specs/cli.md#warnings-are-typed-values
+                            warn(
+                                Warning::new(
+                                    CONFLICT_MARKERS_PUSHED,
+                                    format!(
+                                        "pre-push: conflict markers in pushed commits; {setting}"
+                                    ),
+                                )
+                                .subject(branch.as_str().to_owned())
+                                .once_per_change(),
                             );
                         }
                         HistoryEffect::Refuse => {

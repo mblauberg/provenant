@@ -16,18 +16,27 @@ pub fn acquire(
 }
 /// Advisory diagnostics never change admission or custody policy.
 pub fn warning(message: impl std::fmt::Display) {
-    use std::io::Write as _;
-    let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+    use provenant_records::warning::{CUSTODY_HELD_ADVISORY, Warning, warn};
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    warn(Warning::new(CUSTODY_HELD_ADVISORY, message.to_string()));
 }
 /// A warning is an observation, never a custody lock.
 pub fn warn(changes: &[CustodyChange]) {
+    use provenant_records::warning::{CUSTODY_CHANGED, Warning, warn};
     for change in changes {
         if let Some(holder) = &change.previous_holder {
-            warning(format_args!(
-                "{} was held by {}; custody changed and recorded",
-                change.record.subject,
-                holder_label(holder),
-            ));
+            // Spec: docs/specs/cli.md#warnings-are-typed-values
+            warn(
+                Warning::new(
+                    CUSTODY_CHANGED,
+                    format!(
+                        "{} was held by {}; custody changed and recorded",
+                        change.record.subject,
+                        holder_label(holder),
+                    ),
+                )
+                .subject(change.record.subject.to_string()),
+            );
         }
     }
 }

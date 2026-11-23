@@ -163,10 +163,14 @@ impl SqlCancellation {
                 worker: Some(worker),
             }),
             Err(error) => {
-                use std::io::Write as _;
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: cannot monitor retention SQLite cancellation; using bounded batches: {error}"
+                use provenant_records::warning::{RESOURCE_PROBE_FAILED, Warning, warn};
+                // Spec: docs/specs/cli.md#warnings-are-typed-values
+                warn(
+                    Warning::new(
+                        RESOURCE_PROBE_FAILED,
+                        format!("cannot monitor retention SQLite cancellation; using bounded batches: {error}"),
+                    )
+                    .subject("retention cancellation monitor"),
                 );
                 None
             }

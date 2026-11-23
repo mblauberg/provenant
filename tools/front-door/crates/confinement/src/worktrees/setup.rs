@@ -184,7 +184,12 @@ pub(super) fn run(
         Ok(()) => durability_warning.into_iter().collect(),
         Err(error) => {
             let warning = format!("{error}; worktree remains usable at {}", path.display());
-            let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+            use provenant_records::warning::{WORKTREE_SETUP_INCOMPLETE, Warning, warn};
+            // Spec: docs/specs/cli.md#warnings-are-typed-values
+            warn(
+                Warning::new(WORKTREE_SETUP_INCOMPLETE, warning.clone())
+                    .subject(path.display().to_string()),
+            );
             let mut warnings: Vec<_> = durability_warning.into_iter().collect();
             warnings.push(warning);
             warnings
