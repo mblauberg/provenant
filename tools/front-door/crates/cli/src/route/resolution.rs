@@ -382,67 +382,29 @@ pub(super) fn resolve_account_reference(
     field: &str,
     settings: &provenant_providers::accounts::Settings,
 ) -> Result<String, EdgeError> {
-    // The canonical local login is an account too, even without a registered
-    // credential tree. Require adapter/key to avoid introducing ambiguous aliases.
-    if let Some((adapter, key)) = name.split_once('/')
-        && provenant_records::AdapterSpec::get(adapter)
-            .is_some_and(|s| s.local_login && s.local_account.1 == key)
-    {
-        return Ok(name.to_owned());
-    }
-    let valid = settings
-        .entries
-        .iter()
-        .map(|(id, entry)| {
-            format!(
-                "{} (adapter/key: {}/{}, entry: {})",
-                entry.label, entry.adapter, entry.key, id
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    let matches_for = |settings: &provenant_providers::accounts::Settings| {
-        settings
-            .entries
-            .iter()
-            .filter(|(id, entry)| {
-                name == format!("{}/{}", entry.adapter, entry.key)
-                    || *id == name
-                    || entry.label == name
-                    || entry.key == name
-            })
-            .map(|(id, entry)| (id.clone(), entry.clone()))
-            .collect::<Vec<_>>()
-    };
-    let matches = matches_for(settings);
-    match matches.as_slice() {
-        [(_, entry)] => Ok(format!("{}/{}", entry.adapter, entry.key)),
-        [] => Err(EdgeError::AccountProfile {
-            kind: AccountProfileError::Unknown,
-            message: format!(
-                "{field}: unknown account `{name}`; valid accounts: {}",
-                if valid.is_empty() {
-                    "(none registered)"
+    use provenant_providers::accounts::{ReferenceForms, ambiguous_labels};
+    let forms = ReferenceForms::ROUTING;
+    provenant_providers::accounts::resolve(settings, name, forms)
+        .map(|resolved| resolved.item.qualified())
+        .map_err(|refusal| {
+            let ambiguous = !ambiguous_labels(settings, name, forms).is_empty();
+            let message = if ambiguous {
+                format!(
+                    "{field}: account `{name}` is ambiguous: {}; use adapter/key or a unique label",
+                    refusal.candidates.join(", ")
+                )
+            } else {
+                format!("{field}: {refusal}")
+            };
+            EdgeError::AccountProfile {
+                kind: if ambiguous {
+                    AccountProfileError::Ambiguous
                 } else {
-                    &valid
-                }
-            ),
-        }),
-        _ => Err(EdgeError::AccountProfile {
-            kind: AccountProfileError::Ambiguous,
-            message: format!(
-                "{field}: account `{name}` is ambiguous: {}; use adapter/key or a unique label",
-                matches
-                    .iter()
-                    .map(|(id, entry)| format!(
-                        "{}/{} (label: {}, entry: {})",
-                        entry.adapter, entry.key, entry.label, id
-                    ))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-        }),
-    }
+                    AccountProfileError::Unknown
+                },
+                message,
+            }
+        })
 }
 
 // Resolve configured labels once, so all routing paths use the same account keys.

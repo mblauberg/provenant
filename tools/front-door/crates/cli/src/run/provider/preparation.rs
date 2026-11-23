@@ -56,52 +56,76 @@ fn select_account<'a>(
     selector: &str,
     requested_adapter: Option<&str>,
 ) -> Result<&'a provenant_providers::accounts::Registration, PrepareError> {
-    // Exact keys identify credentials; only use labels when no exact key
-    // exists. This keeps the synthetic `local` identity distinct from any
-    // registered account that happens to use the same label.
-    let candidates = |by_key: bool| {
-        entries.iter().filter(move |entry| {
-            (if by_key {
-                entry.key == selector
-            } else {
-                entry.label == selector
-            }) && requested_adapter.is_none_or(|adapter| entry.adapter == adapter)
-        })
+    use provenant_providers::accounts::{
+        ReferenceForms, Settings as AccountSettings, ambiguous_labels,
     };
-    let by_key = entries.iter().any(|entry| {
-        entry.key == selector && requested_adapter.is_none_or(|adapter| entry.adapter == adapter)
-    });
-    let mut matching = candidates(by_key);
-    let entry = matching.next().ok_or_else(|| PrepareError::Refusal {
-        message: "the selected account is not registered for the requested route; run `provenant accounts list`".into(),
-        cause: provenant_records::run::TerminalCause::UnregisteredAccount,
-        note: None,
+    let settings = AccountSettings {
+        entries: entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| requested_adapter.is_none_or(|adapter| entry.adapter == adapter))
+            .map(|(index, entry)| (index.to_string(), (*entry).clone()))
+            .collect(),
+        ..Default::default()
+    };
+    let forms = ReferenceForms::SELECTION;
+    let resolved =
+        provenant_providers::accounts::resolve(&settings, selector, forms).map_err(|refusal| {
+            if !ambiguous_labels(&settings, selector, forms).is_empty() {
+                PrepareError::Other(format!("{refusal}; use the exact registered key"))
+            } else {
+                PrepareError::Refusal {
+                    message: format!("{refusal}; run `provenant accounts list`"),
+                    cause: provenant_records::run::TerminalCause::UnregisteredAccount,
+                    note: None,
                     fallback_outcome: None,
-    })?;
-    if matching.any(|other| other.key != entry.key || other.adapter != entry.adapter) {
-        return Err(PrepareError::Other(
-            "account alias is ambiguous; use its exact registered key".into(),
-        ));
-    }
-    Ok(entry)
+                }
+            }
+        })?;
+    entries
+        .iter()
+        .find(|entry| entry.adapter == resolved.item.adapter && entry.key == resolved.item.key)
+        .ok_or_else(|| PrepareError::Refusal {
+            message: "the selected account is not registered for the requested route; run `provenant accounts list`".into(),
+            cause: provenant_records::run::TerminalCause::UnregisteredAccount,
+            note: None,
+            fallback_outcome: None,
+        })
 }
 
 fn select_retained_account<'a>(
     entries: &'a [provenant_providers::accounts::Registration],
     identity: RetainedIdentity<'_>,
 ) -> Result<Option<&'a provenant_providers::accounts::Registration>, PrepareError> {
+    use provenant_providers::accounts::{ReferenceForms, Settings as AccountSettings};
     let Some(key) = identity.account_key else {
         return Ok(None);
     };
+    let settings = AccountSettings {
+        entries: entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.adapter == identity.provider)
+            .map(|(index, entry)| (index.to_string(), (*entry).clone()))
+            .collect(),
+        ..Default::default()
+    };
+    let resolved = provenant_providers::accounts::resolve(&settings, key, ReferenceForms::RETAINED)
+        .map_err(|_| PrepareError::Refusal {
+            message: "the prior attempt's account is not registered for its applied provider; cannot continue it".into(),
+            cause: provenant_records::run::TerminalCause::UnregisteredAccount,
+            note: None,
+            fallback_outcome: None,
+        })?;
     entries
         .iter()
-        .find(|entry| entry.adapter == identity.provider && entry.key == key)
+        .find(|entry| entry.adapter == resolved.item.adapter && entry.key == resolved.item.key)
         .map(Some)
         .ok_or_else(|| PrepareError::Refusal {
             message: "the prior attempt's account is not registered for its applied provider; cannot continue it".into(),
             cause: provenant_records::run::TerminalCause::UnregisteredAccount,
             note: None,
-                    fallback_outcome: None,
+            fallback_outcome: None,
         })
 }
 
@@ -7504,12 +7528,12 @@ mod route_launch_boundary_regressions {
         let labelled_collision = agy_entry("local", "agy-other", &home.join(".agy-other"));
         let mut colliding_candidates = vec![labelled_collision];
         colliding_candidates.push(agy_entry(spec.local_account.0, spec.local_account.1, &home));
-        assert_eq!(
-            select_account(&colliding_candidates, spec.local_account.1, Some("agy"))
-                .map_err(|error| error.to_string())?
-                .key,
-            spec.local_account.1
-        );
+        // Spec: docs/specs/routing.md#account-references
+        // A key and a label collision is ambiguous, never silently key-first.
+        assert!(matches!(
+            select_account(&colliding_candidates, spec.local_account.1, Some("agy")),
+            Err(PrepareError::Other(_))
+        ));
         Ok(())
     }
 
