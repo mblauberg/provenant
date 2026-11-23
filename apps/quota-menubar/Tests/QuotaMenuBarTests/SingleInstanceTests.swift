@@ -114,12 +114,16 @@ final class SingleInstanceTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
         try InstanceMarker(pid: 111, nonce: "old").write(to: marker)
         var terminated: [pid_t] = []
+        var livenessChecks = 0
         let won = SingleInstance.takeOver(
             url: marker,
             pid: 222,
             nonce: "new",
             terminate: { terminated.append($0) },
-            isAlive: { _ in false },
+            isAlive: { pid in
+                livenessChecks += 1
+                return pid == 111 && livenessChecks == 1 // live until signalled
+            },
             isMenuBar: { $0 == 111 }, // PID 111 still runs this app's executable
             delay: { _ in }
         )

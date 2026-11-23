@@ -56,7 +56,7 @@ enum SingleInstance {
 
     /// The executable backing `pid`, or nil when it cannot be inspected.
     static func executablePath(for pid: pid_t) -> String? {
-        var buffer = [CChar](repeating: 0, count: Int(PROC_PIDPATHINFO_MAXSIZE))
+        var buffer = [CChar](repeating: 0, count: Int(4 * MAXPATHLEN))
         let length = proc_pidpath(pid, &buffer, UInt32(buffer.count))
         guard length > 0 else { return nil }
         return String(cString: buffer)
