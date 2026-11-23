@@ -250,6 +250,14 @@ impl Fake {
             ..Default::default()
         }
     }
+
+    /// Report `answer` as the decode's final message, with `complete` as the
+    /// decoder's verdict on whether that message was whole.
+    pub(super) fn with_answer(mut self, answer: Option<String>, complete: Option<bool>) -> Self {
+        self.answer = answer;
+        self.complete = complete;
+        self
+    }
 }
 
 impl Providers for Fake {

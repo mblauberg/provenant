@@ -4266,7 +4266,7 @@ mod budget_result_tests {
         let (test_clock, cancel) = (clock(), CancelToken::new());
         let request = call(&test_clock, &cancel);
         let store = RunStore::open(&execution, &request)?;
-        let mut run = input();
+        let run = input();
         store.create(&run, &request)?;
         let id = run.attempt_id;
         store.mark_starting(
@@ -4304,13 +4304,8 @@ mod budget_result_tests {
         observed.scope = RunStore::scope(&store.record(id, &request)?);
         observed.stop_reason = Some(StopReason::TokenBudget);
         seal_exit(&store, &observed)?;
-        let fake = Fake {
-            observed: Some(route()),
-            outcome: Some(Outcome::Succeeded),
-            complete,
-            answer: answer.map(str::to_owned),
-            ..Fake::default()
-        };
+        let fake = Fake::with_observed(Some(route()), Some(Outcome::Succeeded))
+            .with_answer(answer.map(str::to_owned), complete);
         let finished = store.finish(id, &attempt, &observed, &fake, &request)?;
         let result = read_sealed(
             &attempt,
