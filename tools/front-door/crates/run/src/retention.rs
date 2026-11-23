@@ -2741,7 +2741,17 @@ mod tests {
              "guard_resource":{"kind":"disk","free":1,"floor":2,"origin":"configuration"}},
             {"route":"b","kind":"unavailable","detail":"fixture",
              "guard_resource":{"kind":"grant_limit","limit":7,"origin":"shipped_default"}},
-            {"route":"c","kind":"unavailable","detail":"fixture"}
+            // These two guards use their own setting-source enums, which still
+            // spell these origins `configuration` / `shipped_default`. The
+            // Layer-typed rewrite must leave them alone or this terminal row
+            // would stop decoding after migration.
+            {"route":"c","kind":"unavailable","detail":"fixture",
+             "guard_resource":{"kind":"pacing_reserve","percent":25,"setting":"account",
+                               "origin":"configuration","account":"acct",
+                               "window":"window","setting_path":"path"}},
+            {"route":"d","kind":"unavailable","detail":"fixture",
+             "guard_resource":{"kind":"lane_ports","blocks":4,"origin":"shipped_default"}},
+            {"route":"e","kind":"unavailable","detail":"fixture"}
         ]);
         let command = provenant_records::PortCommand {
             argv: vec!["probe".into()],
@@ -2799,17 +2809,43 @@ mod tests {
         let sandbox = observed.sandbox.as_ref().ok_or("observed sandbox")?;
         assert_eq!(sandbox.source, Layer::Host);
         assert_eq!(sandbox.constraint, None);
-        let origins: Vec<_> = record
+        let guards: Vec<_> = record
             .skipped_routes
             .iter()
             .filter_map(|route| route.guard_resource.as_ref())
-            .map(|fact| match fact {
-                provenant_records::diagnostic::ResourceFact::Disk { origin, .. } => *origin,
-                provenant_records::diagnostic::ResourceFact::GrantLimit { origin, .. } => *origin,
-                _ => Layer::Account,
-            })
             .collect();
-        assert_eq!(origins, vec![Layer::Host, Layer::Default]);
+        assert_eq!(guards.len(), 4, "every guard must still decode: {guards:?}");
+        assert!(matches!(
+            guards[0],
+            provenant_records::diagnostic::ResourceFact::Disk {
+                origin: Layer::Host,
+                ..
+            }
+        ));
+        assert!(matches!(
+            guards[1],
+            provenant_records::diagnostic::ResourceFact::GrantLimit {
+                origin: Layer::Default,
+                ..
+            }
+        ));
+        // These origins belong to PacingSettingSource and PortSettingSource,
+        // whose current spellings are still configuration / shipped_default.
+        // Rewriting them would make this terminal row undecodable.
+        assert!(matches!(
+            guards[2],
+            provenant_records::diagnostic::ResourceFact::PacingReserve {
+                origin: provenant_records::diagnostic::PacingSettingSource::Configuration,
+                ..
+            }
+        ));
+        assert!(matches!(
+            guards[3],
+            provenant_records::diagnostic::ResourceFact::LanePorts {
+                origin: provenant_records::diagnostic::PortSettingSource::ShippedDefault,
+                ..
+            }
+        ));
         let binding = record
             .repository_admission_binding
             .as_ref()

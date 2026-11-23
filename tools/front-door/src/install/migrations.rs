@@ -11,7 +11,7 @@
 //! state path and the install proceeds; the id stays unrecorded so the next
 //! install retries the idempotent step.
 use provenant_config::PortEvidenceError;
-use provenant_os::fs::{Directory, PublishMode};
+use provenant_os::fs::{Directory, FsError, PublishMode};
 use provenant_records::migrate::{Migration, MigrationError, MigrationReport};
 use provenant_records::warning::{self, MIGRATION_STEP_FAILED, Warning};
 use provenant_records::{InstallReceipt, Limits};
@@ -78,6 +78,38 @@ fn host_project_clash(source: &Path, target: &Path) -> Warning {
     ))
 }
 
+/// Move one directory entry to `target`, never replacing an existing entry.
+/// A check-then-`rename` sequence loses a file a concurrent writer creates in
+/// the window between them; `rename_noreplace` makes the no-clobber decision
+/// atomic for both files and directories. Returns `false` when the destination
+/// already existed, in which case both entries are kept.
+fn publish_no_clobber(source: &Path, target: &Path) -> Result<bool, MigrationError> {
+    let source_parent = source
+        .parent()
+        .ok_or_else(|| MigrationError::new(format!("{}: no parent directory", source.display())))?;
+    let target_parent = target
+        .parent()
+        .ok_or_else(|| MigrationError::new(format!("{}: no parent directory", target.display())))?;
+    let name = source
+        .file_name()
+        .ok_or_else(|| MigrationError::new(format!("{}: no file name", source.display())))?;
+    let from = Directory::open_anchor(source_parent)
+        .map_err(|error| MigrationError::new(format!("{}: {error}", source_parent.display())))?;
+    let to = Directory::open_anchor(target_parent)
+        .map_err(|error| MigrationError::new(format!("{}: {error}", target_parent.display())))?;
+    match from.rename_noreplace(name, &to, name) {
+        Ok(()) => Ok(true),
+        Err(FsError::Rename { source: error, .. }) if error.kind() == ErrorKind::AlreadyExists => {
+            Ok(false)
+        }
+        Err(error) => Err(MigrationError::new(format!(
+            "{} -> {}: {error}",
+            source.display(),
+            target.display()
+        ))),
+    }
+}
+
 /// Move every non-clashing entry from `from` into the existing `to`. Recurse
 /// when both sides hold a directory of the same name; a true clash leaves the
 /// old entry in place and warns. Returns whether nothing was left unmigrated.
@@ -93,8 +125,14 @@ fn merge_project_dir(
         let target = to.join(entry.file_name());
         match std::fs::symlink_metadata(&target) {
             Err(error) if error.kind() == ErrorKind::NotFound => {
-                std::fs::rename(&source, &target)?;
-                report.changed.push(target.display().to_string());
+                // Publish atomically: a concurrent writer may create `target`
+                // after the check above. A clash keeps both entries and warns.
+                if publish_no_clobber(&source, &target)? {
+                    report.changed.push(target.display().to_string());
+                } else {
+                    report.warnings.push(host_project_clash(&source, &target));
+                    complete = false;
+                }
             }
             Ok(_) => {
                 let both_dirs = entry.file_type()?.is_dir()
@@ -147,8 +185,16 @@ impl Migration for HostProjectDirs {
             let to = projects.join(project_id);
             match std::fs::symlink_metadata(&to) {
                 Err(error) if error.kind() == ErrorKind::NotFound => {
-                    std::fs::rename(&from, &to)?;
-                    report.changed.push(to.display().to_string());
+                    // A writer may create the target after the check above.
+                    // Publish without replacing it; if it appeared, merge as
+                    // we would for any other existing target directory.
+                    if publish_no_clobber(&from, &to)? {
+                        report.changed.push(to.display().to_string());
+                    } else if std::fs::symlink_metadata(&to)?.file_type().is_dir() {
+                        merge_project_dir(&from, &to, &mut report)?;
+                    } else {
+                        report.warnings.push(host_project_clash(&from, &to));
+                    }
                 }
                 Ok(metadata) if metadata.file_type().is_dir() => {
                     // The binding record lives here; merge around it. A clash
@@ -249,23 +295,6 @@ impl Migration for PortSourceSpellings {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(report),
             Err(error) => return Err(error.into()),
         };
-        // A live publisher holds this lock while writing receipts; rewriting
-        // them underneath it would lose its append.
-        let _lock = match provenant_config::try_lock_port_command_receipts(state_root) {
-            Ok(lock) => lock,
-            Err(PortEvidenceError::Busy) => {
-                report.warnings.push(
-                    Warning::new(
-                        MIGRATION_STEP_FAILED,
-                        format!("port receipts under {} are busy; their source spellings were not migrated", root.display()),
-                    )
-                    .subject(root.display().to_string())
-                    .repair("stop the publisher, then rerun `provenant install`; the step is idempotent"),
-                );
-                return Ok(report);
-            }
-            Err(error) => return Err(MigrationError::new(format!("port receipts lock: {error}"))),
-        };
         for owner in owners {
             let owner = owner?;
             if !owner.file_type()?.is_dir() {
@@ -282,9 +311,32 @@ impl Migration for PortSourceSpellings {
                 if !is_receipt {
                     continue;
                 }
+                // A live publisher holds this lock while writing a receipt.
+                // Take it for one file only: holding it for the whole pass
+                // makes every concurrent record_port_command get Busy and
+                // drop its receipt. A busy lock skips just this file; the step
+                // stays pending on its receipt and a later install retries it.
+                let lock = match provenant_config::try_lock_port_command_receipts(state_root) {
+                    Ok(lock) => lock,
+                    Err(PortEvidenceError::Busy) => {
+                        report.warnings.push(
+                            Warning::new(
+                                MIGRATION_STEP_FAILED,
+                                format!("port receipt {} is busy; its source spellings were not migrated", path.display()),
+                            )
+                            .subject(path.display().to_string())
+                            .repair("stop the publisher, then rerun `provenant install`; the step is idempotent"),
+                        );
+                        continue;
+                    }
+                    Err(error) => {
+                        return Err(MigrationError::new(format!("port receipts lock: {error}")));
+                    }
+                };
                 rewrite_json_or_warn(&path, "port-command receipt", &mut report, |value| {
                     rename_source(value, OLD_PORT_RECEIPT_VERSION, NEW_PORT_RECEIPT_VERSION)
                 });
+                drop(lock);
             }
         }
         report.changed.sort();
@@ -583,6 +635,70 @@ mod tests {
 
     /// Spec: docs/specs/state.md#format-changes-migrate-once-at-install
     #[test]
+    fn port_source_spellings_takes_the_lock_per_file() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let owner = root.path().join("port-receipts/admission");
+        std::fs::create_dir_all(&owner).expect("owner dir");
+        for name in ["port-command-a.json", "port-command-b.json"] {
+            std::fs::write(
+                owner.join(name),
+                r#"{"schema_version":2,"source":"builtin","owner":"admission"}"#,
+            )
+            .expect("write receipt");
+        }
+
+        let acquisitions = Rc::new(Cell::new(0usize));
+        let counter = Rc::clone(&acquisitions);
+        provenant_os::fixture::on_owner_lock_acquire(move |name| {
+            if name.to_str() == Some(".port-receipts.lock") {
+                counter.set(counter.get() + 1);
+            }
+        });
+
+        let report = PortSourceSpellings.apply(root.path()).expect("apply");
+        assert_eq!(report.changed.len(), 2, "{report:?}");
+        assert!(report.warnings.is_empty(), "{report:?}");
+        // One acquisition per receipt, not one for the whole pass: a live
+        // publisher then waits at most one file rewrite for the lock.
+        assert_eq!(acquisitions.get(), 2);
+    }
+
+    /// Spec: docs/specs/state.md#format-changes-migrate-once-at-install
+    #[test]
+    fn port_source_spellings_busy_lock_skips_only_that_receipt() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let owner = root.path().join("port-receipts/admission");
+        std::fs::create_dir_all(&owner).expect("owner dir");
+        let receipt = owner.join("port-command-a.json");
+        std::fs::write(
+            &receipt,
+            r#"{"schema_version":2,"source":"builtin","owner":"admission"}"#,
+        )
+        .expect("write receipt");
+        // A live publisher holds the receipt lock through this whole pass.
+        let _publisher =
+            provenant_config::try_lock_port_command_receipts(root.path()).expect("publisher lock");
+
+        let report = PortSourceSpellings.apply(root.path()).expect("apply");
+        assert!(report.changed.is_empty(), "{report:?}");
+        assert_eq!(report.warnings.len(), 1, "{report:?}");
+        let warning = &report.warnings[0];
+        assert_eq!(warning.code.as_ref(), MIGRATION_STEP_FAILED.0);
+        assert!(
+            warning.message.contains(&receipt.display().to_string()),
+            "{:?}",
+            warning.message
+        );
+        let value: Value =
+            serde_json::from_slice(&std::fs::read(&receipt).expect("read")).expect("parse");
+        assert_eq!(value["source"], json!("builtin"), "busy receipt untouched");
+    }
+
+    /// Spec: docs/specs/state.md#format-changes-migrate-once-at-install
+    #[test]
     fn port_config_source_spellings_rewrite_host_and_project_tables() {
         let root = tempfile::tempdir().expect("tempdir");
         let host = root.path().join("ports.json");
@@ -719,6 +835,39 @@ mod tests {
             .expect("apply twice");
         assert!(again.changed.is_empty(), "second run must change nothing");
         assert!(again.warnings.is_empty(), "{again:?}");
+    }
+
+    /// Spec: docs/specs/state.md#format-changes-migrate-once-at-install
+    #[test]
+    fn publish_no_clobber_moves_when_the_target_is_absent() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let source = root.path().join("source.json");
+        let target = root.path().join("target.json");
+        std::fs::write(&source, "payload").expect("write source");
+        assert!(super::publish_no_clobber(&source, &target).expect("publish"));
+        assert!(!source.exists(), "source was moved");
+        assert_eq!(std::fs::read_to_string(&target).expect("moved"), "payload");
+    }
+
+    /// Spec: docs/specs/state.md#format-changes-migrate-once-at-install
+    #[test]
+    fn publish_no_clobber_never_replaces_an_existing_entry() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let source = root.path().join("source.json");
+        let target = root.path().join("target.json");
+        std::fs::write(&source, "from old key").expect("write source");
+        std::fs::write(&target, "from concurrent writer").expect("write target");
+
+        // A check-then-rename would silently replace `target` with `source`.
+        assert!(!super::publish_no_clobber(&source, &target).expect("publish"));
+        assert_eq!(
+            std::fs::read_to_string(&source).expect("source kept"),
+            "from old key"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("target kept"),
+            "from concurrent writer"
+        );
     }
 
     struct Succeeds(&'static str);
