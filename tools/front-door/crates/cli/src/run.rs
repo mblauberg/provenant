@@ -310,27 +310,88 @@ pub struct ReadOnlySourceRef {
     pub head: provenant_core::GitOid,
 }
 
-/// Resolve the default source of a read-only launch from `source`. Only a
-/// checkout behind its fetched upstream yields a pin; a level or ahead checkout
-/// keeps its local tree. Missing Git evidence is advisory, never a refusal.
-pub fn read_only_source_ref(state: &Path, source: &Path) -> Option<ReadOnlySourceRef> {
-    provider::confinement::read_only_source_ref(state, source)
+/// The sourced choice of what a read-only lane reads. `value` is `checkout`,
+/// `default_branch`, an explicit ref, or empty for the compiled default; the
+/// layer and origin are the ones the owner actually set the knob at, so every
+/// warning and receipt names the same place.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReadSourceChoice {
+    pub value: String,
+    pub fetch_first: bool,
+    pub layer: provenant_records::Layer,
+    pub origin: Option<String>,
 }
 
-/// The warning a stale read-only checkout carries when an upstream source is
-/// pinned, naming the ref and commit the lane will read and the local head it
-/// replaces.
-pub fn read_only_source_warning(source: &Path, selected: &ReadOnlySourceRef) -> String {
-    format!(
-        "{} is {} commit{} behind {}; read-only lane will read {} ({}) instead of local {} because the checkout is stale",
-        source.display(),
-        selected.behind,
-        if selected.behind == 1 { "" } else { "s" },
-        selected.reference,
-        selected.reference,
-        selected.commit,
-        selected.head
-    )
+impl Default for ReadSourceChoice {
+    fn default() -> Self {
+        Self {
+            value: String::new(),
+            fetch_first: false,
+            layer: provenant_records::Layer::Default,
+            origin: None,
+        }
+    }
+}
+
+impl ReadSourceChoice {
+    /// The compiled default: only a stale checkout is pinned, as last fetched.
+    pub fn automatic() -> Self {
+        Self::default()
+    }
+
+    /// The knob named whenever this choice is reported.
+    pub const KNOB: &'static str = "lanes.read_source";
+
+    /// Where this choice was set, for warnings and receipts.
+    pub fn description(&self) -> String {
+        match &self.origin {
+            Some(origin) => format!("{} ({origin})", self.layer.as_str()),
+            None => self.layer.as_str().to_owned(),
+        }
+    }
+}
+
+/// Resolve the source of a read-only launch through the one resolver. Only a
+/// checkout behind its fetched upstream yields a pin under the compiled
+/// default; an explicit choice pins its own commit. Missing Git evidence is
+/// advisory, never a refusal.
+pub fn read_only_source_ref(
+    state: &Path,
+    source: &Path,
+    choice: &ReadSourceChoice,
+) -> Option<ReadOnlySourceRef> {
+    provider::confinement::read_only_source_ref(state, source, choice)
+}
+
+/// The warning a read-only launch carries when a source is pinned, naming the
+/// ref and commit the lane will read and where that choice came from.
+pub fn read_only_source_warning(
+    source: &Path,
+    selected: &ReadOnlySourceRef,
+    choice: &ReadSourceChoice,
+) -> String {
+    if choice.value.is_empty() {
+        format!(
+            "{} is {} commit{} behind {}; read-only lane will read {} ({}) instead of local {} because the checkout is stale",
+            source.display(),
+            selected.behind,
+            if selected.behind == 1 { "" } else { "s" },
+            selected.reference,
+            selected.reference,
+            selected.commit,
+            selected.head
+        )
+    } else {
+        format!(
+            "read-only lane will read {} ({}) from {} because {}={} (source: {})",
+            selected.reference,
+            selected.commit,
+            source.display(),
+            ReadSourceChoice::KNOB,
+            choice.value,
+            choice.description()
+        )
+    }
 }
 
 /// The warning for an unpinned read-only launch. The lane still reads the
@@ -347,8 +408,12 @@ pub fn read_only_local_checkout_warning(source: &Path, selected: &ReadOnlySource
     )
 }
 
-pub fn read_only_checkout_warning(state: &Path, source: &Path) -> Option<String> {
-    provider::confinement::read_only_checkout_warning(state, source)
+pub fn read_only_checkout_warning(
+    state: &Path,
+    source: &Path,
+    choice: &ReadSourceChoice,
+) -> Option<String> {
+    provider::confinement::read_only_checkout_warning(state, source, choice)
 }
 
 fn reply(command: &str, outcome: Result<(Value, String), Fail>) -> Reply {

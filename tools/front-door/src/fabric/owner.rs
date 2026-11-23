@@ -3624,6 +3624,7 @@ impl BoundGraphOwner<'_> {
                     .source_root
                     .as_deref()
                     .unwrap_or(self.factory.context.selected_project()),
+                &provenant_cli::run::ReadSourceChoice::automatic(),
             )
         {
             warn(Warning::new(SETTING_LAYER_IGNORED, warning.clone()));

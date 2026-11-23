@@ -637,6 +637,27 @@ fn bind_default_read_only_source(
     }
 }
 
+/// Bind the plan node of `implement --plan` to the commit named by the
+/// launch's `--base`, resolved through the same read-source resolver. The plan
+/// then reads the base it will implement instead of the caller's checkout.
+fn bind_plan_base_source(node: &mut provenant_fabric_runtime::graph::GraphNode, commit: &str) {
+    if node.template.as_deref() == Some("plan") || node.id == "plan" {
+        node.source = Some(provenant_fabric_runtime::graph::SourceBinding::Commit {
+            commit: commit.into(),
+        });
+    }
+    if let Some(composite) = &mut node.composite {
+        for child in &mut composite.nodes {
+            bind_plan_base_source(child, commit);
+        }
+    }
+    if let Some(loop_spec) = &mut node.loop_body {
+        for child in &mut loop_spec.body {
+            bind_plan_base_source(child, commit);
+        }
+    }
+}
+
 fn bind_review_base(node: &mut provenant_fabric_runtime::graph::GraphNode, base: &str) {
     node.review_base = Some(base.into());
     if let Some(composite) = &mut node.composite {
@@ -744,6 +765,62 @@ fn bind_review_warning(node: &mut provenant_fabric_runtime::graph::GraphNode, wa
 
 /// Launch controls that bind a writer; a composite template can take none of them.
 const LAUNCH_CONTROLS: [&str; 5] = ["access", "worktree", "branch", "base", "write_scope"];
+
+/// The `--source` flag is the launch layer of `lanes.read_source`. A host or
+/// project knob supplies the value and the fetch-first flag; the compiled
+/// default keeps the advisory pin of a checkout behind its fetched upstream.
+fn read_source_choice(
+    input: &Value,
+    config: &provenant_config::ResolvedConfig<provenant_cli::domains::Domains>,
+) -> provenant_cli::run::ReadSourceChoice {
+    use provenant_cli::run::ReadSourceChoice;
+    use provenant_records::Layer;
+
+    let mut choice = ReadSourceChoice::automatic();
+    if let Some(knob) = config.knobs.get(ReadSourceChoice::KNOB) {
+        choice.value = if knob.source.layer == Layer::Default {
+            String::new()
+        } else {
+            knob.value.as_str().unwrap_or_default().to_owned()
+        };
+        choice.layer = knob.source.layer;
+        choice.origin = Some(format!("config.toml#{}", ReadSourceChoice::KNOB));
+    }
+    if let Some(flag) = config.knobs.get("lanes.read_source_fetch_first") {
+        choice.fetch_first = flag.value.as_bool().unwrap_or(false);
+    }
+    match input.get("source").and_then(Value::as_str) {
+        Some("local") => {
+            choice.value = "checkout".into();
+            choice.layer = Layer::Launch;
+            choice.origin = Some("--source".into());
+        }
+        Some("upstream") => {
+            choice.value = "default_branch".into();
+            choice.layer = Layer::Launch;
+            choice.origin = Some("--source".into());
+        }
+        _ => {}
+    }
+    choice
+}
+
+/// One shape for the commit a read-only launch reads, in both `run --explain`
+/// (its status) and the launch result. The source names the layer that chose
+/// the ref; `commit` is null when the choice keeps the local checkout.
+fn read_source_report(
+    selected: Option<&provenant_cli::run::ReadOnlySourceRef>,
+    choice: &provenant_cli::run::ReadSourceChoice,
+) -> Value {
+    json!({
+        "value": choice.value,
+        "fetch_first": choice.fetch_first,
+        "source": choice.layer.as_str(),
+        "origin": choice.origin,
+        "commit": selected.map(|selected| selected.commit.to_string()),
+        "reference": selected.map(|selected| selected.reference.clone()),
+    })
+}
 
 /// Apply plain-task execution controls before template lowering and patch admission.
 fn bind_launch_controls(
@@ -1991,6 +2068,20 @@ impl Factory {
             limits: &self.context.config.graph.limits,
             worktree_layout: self.context.port_table.worktree_layout.clone(),
         };
+        // The read source is one sourced setting: `--source` is its launch
+        // layer and the host/project knob supplies the ref and fetch flag. An
+        // unreadable configuration is advisory; the compiled default keeps the
+        // stale-checkout pin.
+        let read_config = provenant_cli::config_reads::read_for(&self.context.roots, "run").ok();
+        let read_source = read_config
+            .as_ref()
+            .map(|config| read_source_choice(input, config))
+            .unwrap_or_default();
+        if read_config.is_none() {
+            warn_operator(
+                "could not read the run configuration; lanes.read_source keeps its compiled default",
+            );
+        }
         // A plain read-only task from a checkout behind its fetched upstream
         // reviews that upstream head, not its stale local tree. Explicit source
         // choices, authored documents, writer launches and review ranges keep
@@ -2000,10 +2091,31 @@ impl Factory {
             && !matches!(
                 input.get("access").and_then(Value::as_str),
                 Some("worktree_write")
+            ) {
+            provenant_cli::run::read_only_source_ref(
+                self.context.roots.state.as_path(),
+                &self.cwd,
+                &read_source,
             )
-            && source_choice.and_then(Value::as_str) != Some("local")
-        {
-            provenant_cli::run::read_only_source_ref(self.context.roots.state.as_path(), &self.cwd)
+        } else {
+            None
+        };
+        // The plan node of `implement --plan` reads the base the launch names,
+        // resolved through the same resolver as any other explicit ref.
+        let plan_base_source = if review_subject.is_none() {
+            input.get("base").and_then(Value::as_str).and_then(|base| {
+                let choice = provenant_cli::run::ReadSourceChoice {
+                    value: base.to_owned(),
+                    fetch_first: read_source.fetch_first,
+                    layer: provenant_records::Layer::Launch,
+                    origin: Some("--base".into()),
+                };
+                provenant_cli::run::read_only_source_ref(
+                    self.context.roots.state.as_path(),
+                    &self.cwd,
+                    &choice,
+                )
+            })
         } else {
             None
         };
@@ -2395,6 +2507,15 @@ impl Factory {
                 provenant_fabric_runtime::graph::minimum_schema_version(&document),
             ));
         }
+        if let Some(selected) = &plan_base_source {
+            let commit = selected.commit.to_string();
+            for node in &mut document.nodes {
+                bind_plan_base_source(node, &commit);
+            }
+            document.schema_version = document.schema_version.max(u64::from(
+                provenant_fabric_runtime::graph::minimum_schema_version(&document),
+            ));
+        }
         let mut bound = encode(&document)?;
         self.confine_nodes(&mut bound)?;
         // Template binding can assemble a credential from individually safe
@@ -2455,7 +2576,8 @@ impl Factory {
             input_warnings.push(warning);
         }
         if let Some(selected) = &default_source {
-            let warning = provenant_cli::run::read_only_source_warning(&self.cwd, selected);
+            let warning =
+                provenant_cli::run::read_only_source_warning(&self.cwd, selected, &read_source);
             warn_operator(&warning);
             input_warnings.push(warning);
         }
@@ -2551,6 +2673,7 @@ impl Factory {
                 "status": if refused { "refused" } else if source_admission.is_empty() { "admitted" } else { "pending_route" },
                 "credential_admission": if source_admission.is_empty() { "not_applicable" } else { "pending_route" },
                 "source_admission": source_admission, "warnings": warnings,
+                "read_source": read_source_report(default_source.as_ref(), &read_source),
                 "implement_plan": {
                     "value": input.pointer("/set/plan").or_else(|| input.pointer("/document/with/plan")).cloned().unwrap_or(json!(self.context.config.implement.plan)),
                     "source": if input.pointer("/set/plan").or_else(|| input.pointer("/document/with/plan")).is_some() { json!("parameter (--plan or --set)") } else {
@@ -2581,6 +2704,7 @@ impl Factory {
             result["review_subject"] = pin;
         }
         result["warnings"] = json!(warnings);
+        result["read_source"] = read_source_report(default_source.as_ref(), &read_source);
         result["named"] = json!({
             "requested": requested, "graph": id, "replayed": replayed, "superseded": taken,
         });
@@ -3126,6 +3250,23 @@ impl Factory {
             )?;
         }
         let mut receipt = json!({"rows":rows,"timed_out":timed_out});
+        // The commit a read-only lane reads is already bound on its node; show
+        // it on status as well, so the launch result and later status agree.
+        let read_commits: Vec<Value> = run
+            .checkpoint
+            .nodes
+            .iter()
+            .filter_map(|node| match (&node.source_binding, &node.source_commit) {
+                (
+                    Some(provenant_fabric_runtime::graph::SourceBinding::Commit { .. }),
+                    Some(commit),
+                ) => Some(json!({"node":node.id,"commit":commit})),
+                _ => None,
+            })
+            .collect();
+        if !read_commits.is_empty() {
+            receipt["read_source"] = json!({"commits":read_commits});
+        }
         if let Some(observation) = observation_report {
             receipt["observation"] = json!(observation);
         }
@@ -6145,6 +6286,196 @@ mod tests {
                 .any(|warning| warning.as_str().is_some_and(|text| text.contains(&default))),
             "a local source must not report an upstream pin: {local_warnings:?}"
         );
+        Ok(())
+    }
+
+    /// Spec: docs/specs/run-launch.md#inputs-and-resources
+    #[test]
+    fn read_source_choices_pin_the_commit_and_name_their_layer() -> Result {
+        let rig = TestRig::new()?;
+        let remote = rig.root.join("remote.git");
+        let remote = remote.to_str().ok_or("remote path")?;
+        git(&rig, &["init", "-q", "--bare", remote])?;
+        git(
+            &rig,
+            &["-C", remote, "symbolic-ref", "HEAD", "refs/heads/master"],
+        )?;
+        git(&rig, &["config", "user.name", "Test"])?;
+        git(&rig, &["config", "user.email", "test@example.invalid"])?;
+        std::fs::write(rig.project.join("file"), "one\n")?;
+        git(&rig, &["add", "file"])?;
+        git(&rig, &["commit", "-q", "-m", "one"])?;
+        let stale = git(&rig, &["rev-parse", "HEAD"])?;
+        git(&rig, &["branch", "-M", "master"])?;
+        std::fs::write(rig.project.join("file"), "two\n")?;
+        git(&rig, &["add", "file"])?;
+        git(&rig, &["commit", "-q", "-m", "two"])?;
+        let default = git(&rig, &["rev-parse", "HEAD"])?;
+        git(&rig, &["remote", "add", "origin", remote])?;
+        git(&rig, &["push", "-q", "origin", "master"])?;
+        git(&rig, &["remote", "set-head", "origin", "master"])?;
+        git(&rig, &["reset", "-q", "--hard", &stale])?;
+
+        let factory = factory(&rig)?;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
+        let submit = |knob: Option<&str>, source: Option<&str>| -> Result<Value> {
+            let mut config = "schema_version=1\n[gc]\nfree_floor='1B'\n".to_owned();
+            if let Some(knob) = knob {
+                config.push_str(&format!("[knobs]\nlanes.read_source='{knob}'\n"));
+            }
+            std::fs::write(rig.state.join("config.toml"), config)?;
+            let mut input =
+                json!({"op":"run","template":"task","brief":"Review the tree","explain":true});
+            if let Some(source) = source {
+                input["source"] = json!(source);
+            }
+            Ok(factory.graph_document(input, budget, &cancel)?)
+        };
+
+        let pinned = submit(Some("default_branch"), None)?;
+        assert_eq!(
+            pinned["document"]["nodes"][0]["source"]["commit"],
+            json!(default),
+            "{pinned}"
+        );
+        assert_eq!(pinned["read_source"]["source"], json!("host"));
+        assert_eq!(pinned["read_source"]["commit"], json!(default));
+        assert!(
+            pinned["warnings"]
+                .as_array()
+                .is_some_and(|rows| rows.iter().any(|row| row
+                    .as_str()
+                    .is_some_and(|text| text.contains("lanes.read_source=default_branch")))),
+            "the warning must name the sourced setting: {}",
+            pinned["warnings"]
+        );
+
+        let checkout = submit(Some("checkout"), None)?;
+        assert!(checkout["document"]["nodes"][0]["source"].is_null());
+        assert!(checkout["read_source"]["commit"].is_null());
+
+        let explicit = submit(Some("refs/remotes/origin/master"), None)?;
+        assert_eq!(
+            explicit["document"]["nodes"][0]["source"]["commit"],
+            json!(default),
+            "{explicit}"
+        );
+        assert_eq!(
+            explicit["read_source"]["value"],
+            json!("refs/remotes/origin/master")
+        );
+
+        let flag = submit(None, Some("upstream"))?;
+        assert_eq!(
+            flag["document"]["nodes"][0]["source"]["commit"],
+            json!(default)
+        );
+        assert_eq!(flag["read_source"]["source"], json!("launch"));
+        let flag = submit(None, Some("local"))?;
+        assert!(flag["document"]["nodes"][0]["source"].is_null());
+        Ok(())
+    }
+
+    /// Spec: docs/specs/run-launch.md#inputs-and-resources
+    #[test]
+    fn read_source_fetch_first_refreshes_the_ref_before_resolving() -> Result {
+        let rig = TestRig::new()?;
+        let remote = rig.root.join("remote.git");
+        let remote = remote.to_str().ok_or("remote path")?;
+        git(&rig, &["init", "-q", "--bare", remote])?;
+        git(
+            &rig,
+            &["-C", remote, "symbolic-ref", "HEAD", "refs/heads/main"],
+        )?;
+        git(&rig, &["config", "user.name", "Test"])?;
+        git(&rig, &["config", "user.email", "test@example.invalid"])?;
+        std::fs::write(rig.project.join("file"), "one\n")?;
+        git(&rig, &["add", "file"])?;
+        git(&rig, &["commit", "-q", "-m", "one"])?;
+        let first = git(&rig, &["rev-parse", "HEAD"])?;
+        git(&rig, &["branch", "-M", "main"])?;
+        git(&rig, &["remote", "add", "origin", remote])?;
+        git(&rig, &["push", "-q", "origin", "main"])?;
+        git(&rig, &["remote", "set-head", "origin", "main"])?;
+        // A separate clone publishes a newer tip the checkout has not fetched.
+        let seed = rig.root.join("seed");
+        git(
+            &rig,
+            &["clone", "-q", remote, seed.to_str().ok_or("seed path")?],
+        )?;
+        let seed = seed.to_str().ok_or("seed path")?;
+        git(&rig, &["-C", seed, "config", "user.name", "Test"])?;
+        git(
+            &rig,
+            &["-C", seed, "config", "user.email", "test@example.invalid"],
+        )?;
+        std::fs::write(rig.root.join("seed").join("file"), "two\n")?;
+        git(&rig, &["-C", seed, "add", "file"])?;
+        git(&rig, &["-C", seed, "commit", "-q", "-m", "two"])?;
+        let second = git(&rig, &["-C", seed, "rev-parse", "HEAD"])?;
+        git(&rig, &["-C", seed, "push", "-q", "origin", "main"])?;
+
+        let factory = factory(&rig)?;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
+        let submit = |fetch_first: bool| -> Result<Value> {
+            let mut config = format!(
+                "schema_version=1\n[gc]\nfree_floor='1B'\n[knobs]\nlanes.read_source='refs/remotes/origin/main'\nlanes.read_source_fetch_first={fetch_first}\n"
+            );
+            config.push_str("\n");
+            std::fs::write(rig.state.join("config.toml"), config)?;
+            Ok(factory.graph_document(
+                json!({"op":"run","template":"task","brief":"Review the tree","explain":true}),
+                budget,
+                &cancel,
+            )?)
+        };
+
+        let last_fetched = submit(false)?;
+        assert_eq!(
+            last_fetched["document"]["nodes"][0]["source"]["commit"],
+            json!(first),
+            "{last_fetched}"
+        );
+        let fetched = submit(true)?;
+        assert_eq!(
+            fetched["document"]["nodes"][0]["source"]["commit"],
+            json!(second),
+            "fetch-first must pin the newly fetched tip: {fetched}"
+        );
+        assert_eq!(fetched["read_source"]["fetch_first"], json!(true));
+        Ok(())
+    }
+
+    /// Spec: docs/specs/run-launch.md#inputs-and-resources
+    #[test]
+    fn plan_node_of_implement_plan_reads_the_launch_base() -> Result {
+        let rig = TestRig::new()?;
+        git(&rig, &["config", "user.name", "Test"])?;
+        git(&rig, &["config", "user.email", "test@example.invalid"])?;
+        std::fs::write(rig.project.join("file"), "one\n")?;
+        git(&rig, &["add", "file"])?;
+        git(&rig, &["commit", "-q", "-m", "one"])?;
+        let base = git(&rig, &["rev-parse", "HEAD"])?;
+        std::fs::write(rig.project.join("file"), "two\n")?;
+        git(&rig, &["add", "file"])?;
+        git(&rig, &["commit", "-q", "-m", "two"])?;
+
+        let factory = factory(&rig)?;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
+        let planned = factory.graph_document(
+            json!({
+                "op":"run","template":"implement","brief":"Fix it","explain":true,
+                "branch":"fix/base","base":base,"set":{"plan":true}
+            }),
+            budget,
+            &cancel,
+        )?;
+        let plan = &planned["document"]["nodes"][0]["composite"]["nodes"][0];
+        assert_eq!(plan["template"], json!("plan"), "{planned}");
+        assert_eq!(plan["source"]["commit"], json!(base), "{planned}");
         Ok(())
     }
 
