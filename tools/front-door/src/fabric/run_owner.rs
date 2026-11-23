@@ -664,7 +664,22 @@ pub(crate) fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
             with_run_detail(error, fail.projection.as_deref())
         }
         Some(detail) => detail,
-        None => with_run_detail(facade_error_for_kind(fail.kind), fail.projection.as_deref()),
+        None => {
+            let error =
+                with_run_detail(facade_error_for_kind(fail.kind), fail.projection.as_deref());
+            match error {
+                // A host-authored launch-input refusal always names its reason;
+                // an unnamed `invalid input` is a defect.
+                FacadeError::InvalidInput { detail: None } if !fail.message.is_empty() => {
+                    FacadeError::invalid(
+                        provenant_fabric_runtime::coordination::facade::InvalidInputDetail::InputReason(
+                            provenant_core::bounded_line(&fail.message, 4096),
+                        ),
+                    )
+                }
+                other => other,
+            }
+        }
     }
 }
 /// Keep a refusal's local diagnostic text when only its kind survives to the
