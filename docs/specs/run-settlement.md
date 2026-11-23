@@ -18,6 +18,19 @@ sibling-divergent host tip is merged and published when no conflict exists, and 
 retains both commits with the conflict and setting named.
 - Why: recovery must resume durable effects without racing another driver or losing work.
 
+Settlement decides whether a Git operation is unfinished before it imports objects or
+publishes the branch, on the first pass and on a resume whose recorded phase is already Publish
+or Record. It observes every directory the lane's writer can write: the bound worktree's private
+Git and the attempt's candidate common directory, using one marker inventory shared with custody
+and the object view. An unfinished operation confined to the lane's own Git warns, names the
+commit its `HEAD` denotes whether symbolic or detached and the directory that retains the
+operation, then publishes the lane's committed tip and leaves that state intact, never resetting
+or cleaning it. Only an operation in the host checkout refuses, before import, with the checkout's
+bytes unchanged; a refusal never converges the checkout over an unfinished operation.
+- Why: a lane's own stopped merge, cherry-pick or rebase is still its committed work to publish
+  and a person's state to resume, while publishing over the host checkout's operation would move
+  the branch underneath it.
+
 The guardian transfers its writer exclusion to recovery, and import and cleanup reuse that guard
 for the same scope. Failed steps before import share a durable budget of three failures. A resumed
 worker honours `retry_after_ms` before its first pass and paces every later pass. Exhausted

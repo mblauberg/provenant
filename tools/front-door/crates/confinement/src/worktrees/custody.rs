@@ -85,36 +85,97 @@ fn check_writer_terminal_with_expected_merge(
     Ok(())
 }
 
+/// One marker that records an unfinished Git operation. The inventory is
+/// shared by custody, the object view and settlement, so a new operation is
+/// listed once rather than in three places that can drift apart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GitOperationMarker {
+    pub marker: &'static str,
+    pub label: &'static str,
+}
+
+pub const GIT_OPERATION_MARKERS: &[GitOperationMarker] = &[
+    GitOperationMarker {
+        marker: "MERGE_HEAD",
+        label: "merge",
+    },
+    GitOperationMarker {
+        marker: "CHERRY_PICK_HEAD",
+        label: "cherry-pick",
+    },
+    GitOperationMarker {
+        marker: "REVERT_HEAD",
+        label: "revert",
+    },
+    GitOperationMarker {
+        marker: "rebase-merge",
+        label: "rebase",
+    },
+    GitOperationMarker {
+        marker: "rebase-apply",
+        label: "rebase",
+    },
+    GitOperationMarker {
+        marker: "sequencer",
+        label: "sequencer",
+    },
+    GitOperationMarker {
+        marker: "BISECT_START",
+        label: "bisect",
+    },
+];
+
+/// The first unfinished Git operation recorded in `directory`, if any.
+/// `expected_merge` accepts one explicit MERGE_HEAD; every other operation
+/// stays unfinished. Only marker presence is read, never operation content.
+pub fn incomplete_git_operation(
+    directory: &Directory,
+    expected_merge: Option<&[u8]>,
+) -> Result<Option<GitOperationMarker>, WorktreeError> {
+    for marker in GIT_OPERATION_MARKERS {
+        if marker.marker == "MERGE_HEAD"
+            && let Some(expected) = expected_merge
+        {
+            let actual = directory.read_stable(OsStr::new(marker.marker), 1024 * 1024)?;
+            if actual != expected {
+                return Ok(Some(*marker));
+            }
+            continue;
+        }
+        match directory.metadata_at(OsStr::new(marker.marker), false) {
+            Ok(_) => return Ok(Some(*marker)),
+            Err(error) if error.is_not_found() => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(None)
+}
+
 /// Inspect the Git state owned by a writer, including an attempt-private view.
 pub fn check_git_operation_terminal(
     private: &Directory,
     expected_merge: Option<&[u8]>,
 ) -> Result<(), WorktreeError> {
-    for marker in [
-        "CHERRY_PICK_HEAD",
-        "REVERT_HEAD",
-        "rebase-merge",
-        "rebase-apply",
-        "MERGE_HEAD",
-        "sequencer",
-        "BISECT_START",
-    ] {
-        if marker == "MERGE_HEAD"
-            && let Some(expected) = expected_merge
-        {
-            let actual = private.read_stable(OsStr::new(marker), 1024 * 1024)?;
-            if actual != expected {
-                return Err(WorktreeError::GitOperationInProgress);
-            }
-            continue;
-        }
-        match private.metadata_at(OsStr::new(marker), false) {
-            Ok(_) => return Err(WorktreeError::GitOperationInProgress),
-            Err(error) if error.is_not_found() => {}
-            Err(error) => return Err(error.into()),
-        }
+    if incomplete_git_operation(private, expected_merge)?.is_some() {
+        return Err(WorktreeError::GitOperationInProgress);
     }
     Ok(())
+}
+
+/// Refuse only when settlement would leave the host checkout mid-operation.
+/// A lane's own operation lives in its private Git and its candidate view;
+/// the primary checkout records its operation in the shared common directory.
+/// A bare common directory has no checkout to leave mid-operation.
+pub fn check_host_checkout_terminal(repo: &VerifiedRepo) -> Result<(), WorktreeError> {
+    if repo.is_bare() {
+        return Ok(());
+    }
+    let directory = if repo.is_primary_checkout() {
+        repo.private_dir()
+    } else {
+        repo.common_dir()
+    };
+    check_git_operation_terminal(directory, None)
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -684,23 +745,7 @@ pub fn in_progress_git_operation(
     cancel: &CancelToken,
 ) -> Result<Option<&'static str>, WorktreeError> {
     let tree = verify_probed_worktree(context, path, cancel)?;
-    let private = tree.repo().private_dir();
-    for (marker, label) in [
-        ("MERGE_HEAD", "merge"),
-        ("rebase-merge", "rebase"),
-        ("rebase-apply", "rebase"),
-        ("CHERRY_PICK_HEAD", "cherry-pick"),
-        ("REVERT_HEAD", "revert"),
-        ("sequencer", "sequencer"),
-        ("BISECT_START", "bisect"),
-    ] {
-        match private.metadata_at(OsStr::new(marker), false) {
-            Ok(_) => return Ok(Some(label)),
-            Err(error) if error.is_not_found() => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
-    Ok(None)
+    Ok(incomplete_git_operation(tree.repo().private_dir(), None)?.map(|marker| marker.label))
 }
 
 /// Verify a registered worktree and probe its own effective Git configuration,

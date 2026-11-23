@@ -522,6 +522,160 @@ fn budget_stop_preserves_a_stopped_merge_without_committing_conflict_markers()
     stopped_merge_stays_private(true)
 }
 
+/// Prepare the lane's candidate Git view as a provider launch does, so a test
+/// can leave an unfinished operation in it.
+fn prepare_candidate_git(
+    fixture: &PrepareFixture,
+) -> std::result::Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    use provenant_confinement::{UtilityBudget, UtilityRuntime};
+    use provenant_core::CancelToken;
+    let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    let attempt_path = fixture.root.join("attempt");
+    let scratch = attempt_path.join("tmp/candidate-0");
+    std::fs::create_dir_all(&scratch)?;
+    let utility = UtilityRuntime::new(&git, fixture.root.join("home"), fixture.root.join("state"))?;
+    let executor = SystemExecutor::new(1)?;
+    let cancel = CancelToken::new();
+    let repo = utility.open_repo(
+        &executor,
+        &fixture.writer.project,
+        UtilityBudget::bounded(Duration::from_secs(5))?,
+        &cancel,
+    )?;
+    let worktree = provenant_confinement::verify_worktree(&repo, &fixture.writer.worktree)?;
+    let base = crate::objects::resolve_ref(&git, worktree.repo(), "refs/heads/lane")?;
+    crate::objects::prepare_bound(
+        &git,
+        worktree.repo(),
+        &Directory::open_anchor(&attempt_path)?,
+        &scratch,
+        "refs/heads/lane",
+        base,
+    )?;
+    Ok(scratch)
+}
+
+/// Run Git against the lane's candidate view, with the provider's binding.
+fn run_in_candidate(
+    fixture: &PrepareFixture,
+    scratch: &Path,
+    args: &[&str],
+) -> std::result::Result<std::process::Output, Box<dyn std::error::Error>> {
+    let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    Ok(provenant_os::fixture::git_command_at(&git)
+        .env_clear()
+        .envs(fixture.environment.iter().map(|(key, value)| (key, value)))
+        .env("GIT_DIR", scratch.join("git-common"))
+        .env("GIT_COMMON_DIR", scratch.join("git-common"))
+        .env("GIT_OBJECT_DIRECTORY", scratch.join("git-objects"))
+        .env("GIT_INDEX_FILE", scratch.join("git-common/index"))
+        .env("GIT_WORK_TREE", &fixture.writer.worktree)
+        .current_dir(&fixture.writer.worktree)
+        .args(args)
+        .output()?)
+}
+
+// Spec: docs/specs/run-settlement.md#settlement
+#[test]
+fn terminal_warns_and_publishes_a_cherry_pick_in_the_candidate_git()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    std::fs::write(fixture.writer.project.join("picked.txt"), "picked\n")?;
+    fixture.git(&["add", "picked.txt"])?;
+    fixture.commit(&fixture.writer.project, "picked")?;
+    let picked = fixture.git_text(&["rev-parse", "HEAD"])?;
+    crate::writer::GIT_OPERATION_WARNINGS.with(|warnings| warnings.borrow_mut().clear());
+    assert!(!fixture.terminal(|| {
+        let scratch = prepare_candidate_git(&fixture)?;
+        let outcome =
+            run_in_candidate(&fixture, &scratch, &["cherry-pick", "--no-commit", &picked])?;
+        assert!(
+            outcome.status.success(),
+            "{}",
+            String::from_utf8_lossy(&outcome.stderr)
+        );
+        Ok(())
+    })?);
+    let candidate = fixture.root.join("attempt/tmp/candidate-0/git-common");
+    assert!(
+        candidate.join("CHERRY_PICK_HEAD").is_file(),
+        "the in-progress cherry-pick must be left in place"
+    );
+    let tip = fixture.git_text(&["rev-parse", "refs/heads/lane"])?;
+    let warnings = crate::writer::GIT_OPERATION_WARNINGS.with(|warnings| warnings.borrow().clone());
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains("cherry-pick")
+                && warning.contains(&tip)
+                && warning.contains("git-common")),
+        "{warnings:?}"
+    );
+    Ok(())
+}
+
+// Spec: docs/specs/run-settlement.md#settlement
+#[test]
+fn terminal_warns_and_publishes_a_rebase_in_the_lane_git()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    crate::writer::GIT_OPERATION_WARNINGS.with(|warnings| warnings.borrow_mut().clear());
+    let marker = fixture
+        .writer
+        .project
+        .join(".git/worktrees/lane/rebase-merge");
+    assert!(!fixture.terminal(|| {
+        std::fs::create_dir_all(&marker)?;
+        Ok(())
+    })?);
+    assert!(
+        marker.is_dir(),
+        "the in-progress rebase must be left in place"
+    );
+    let tip = fixture.git_text(&["rev-parse", "refs/heads/lane"])?;
+    let warnings = crate::writer::GIT_OPERATION_WARNINGS.with(|warnings| warnings.borrow().clone());
+    assert!(
+        warnings.iter().any(|warning| warning.contains("rebase")
+            && warning.contains(&tip)
+            && warning.contains("worktrees/lane")),
+        "{warnings:?}"
+    );
+    Ok(())
+}
+
+// Spec: docs/specs/run-settlement.md#settlement
+#[test]
+fn terminal_refuses_before_import_when_the_host_checkout_is_mid_operation()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    let marker = fixture.writer.project.join(".git/rebase-merge");
+    std::fs::create_dir_all(&marker)?;
+    let checkout = fixture.writer.worktree.join("AGENTS.md");
+    let before = std::fs::read(&checkout).ok();
+    let error = fixture
+        .terminal(|| Ok(()))
+        .expect_err("mid-operation host checkout");
+    assert!(
+        matches!(
+            error.downcast_ref::<RunError>(),
+            Some(RunError::Writer(
+                provenant_confinement::worktrees::WorktreeError::GitOperationInProgress
+            ))
+        ),
+        "{error:?}"
+    );
+    assert!(
+        !fixture.root.join("attempt/writer-terminal.json").exists(),
+        "the refusal must precede import and publication"
+    );
+    assert_eq!(std::fs::read(&checkout).ok(), before);
+    assert!(
+        marker.is_dir(),
+        "the host checkout operation is left intact"
+    );
+    Ok(())
+}
+
 #[test]
 fn terminal_names_a_writer_left_off_the_lane_branch()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
