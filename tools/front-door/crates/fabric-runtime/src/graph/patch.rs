@@ -1516,7 +1516,7 @@ pub(super) fn prepare(
         Preparation::Live { .. } => None,
         Preparation::FinalFragment => catalogue_spec,
     };
-    let catalogue: BTreeMap<String, Template> = catalogue_spec
+    let planner_templates: BTreeMap<String, Template> = catalogue_spec
         .map(|(_, spec)| {
             spec.templates
                 .iter()
@@ -1526,7 +1526,7 @@ pub(super) fn prepare(
         .unwrap_or_default();
     let library = context
         .library
-        .with(Layer::Repository, &catalogue)
+        .with(Layer::Repository, &planner_templates)
         .and_then(|library| library.with(Layer::Inline, &patch.templates))
         .map_err(PatchError::invalid)?;
     let compiler = Compiler {
@@ -1539,7 +1539,7 @@ pub(super) fn prepare(
         let mut node = compiler.compile(raw)?;
         let used = raw.get("use").and_then(Value::as_str);
         let trusted = used.is_some_and(|name| {
-            (catalogue.contains_key(name) || context.library.layer(name).is_some())
+            (planner_templates.contains_key(name) || context.library.layer(name).is_some())
                 && !patch.templates.contains_key(name)
                 && ![
                     "role",
