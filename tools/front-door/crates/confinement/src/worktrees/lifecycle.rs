@@ -1,6 +1,24 @@
 //! Worktree creation, listing, removal and ref pruning.
 use super::*;
+use provenant_records::warning::{BRANCH_BEHIND_BASE, Warning, warn};
 use std::path::Component;
+
+/// An existing branch behind its declared `--base` is reused at its current
+/// tip. `--base` is only the merge target; it never resets the branch. Emit the
+/// one typed warning that names both commits so the operator can merge the base
+/// before landing.
+/// Spec: docs/specs/next-batch.md#the-loop-a-chair-runs
+fn branch_behind_base_warning(branch: &str, head: GitOid, base: GitOid) -> String {
+    let message = format!(
+        "branch {branch} at {head} does not contain base {base}; reusing the branch at {head} with {base} as its merge target"
+    );
+    warn(
+        Warning::new(BRANCH_BEHIND_BASE, message.clone())
+            .subject(branch.to_owned())
+            .repair("merge the base into the branch before landing".to_owned()),
+    );
+    message
+}
 
 /// Credential and Git roots may never be carried into a writer checkout.
 pub fn writer_edit_is_protected(path: &str) -> bool {
@@ -635,26 +653,26 @@ fn create_with_default(
             return Err(WorktreeError::UnknownWriter);
         }
     }
+    // A declared `--base` is the merge target for an existing branch, never a
+    // reset. Pin it once so the behind-base warning and the recorded base agree.
+    // Spec: docs/specs/next-batch.md#the-loop-a-chair-runs
+    let requested_base = request
+        .base
+        .as_deref()
+        .map(|base| pin_revision(context, facts, base, cancel))
+        .transpose()?;
     let checked_out = entries
         .iter()
         .filter(|entry| !entry.prunable)
         .find(|entry| entry.branch.as_ref() == Some(&branch));
     if let Some(entry) = checked_out {
         let head = entry.head.ok_or(WorktreeError::InvalidOutput)?;
-        return Err(if let Some(base) = request.base.as_deref() {
-            let base_oid = pin_revision(context, facts, base, cancel)?;
-            if !is_ancestor(context, base_oid, head, cancel)? {
-                WorktreeError::BranchExistsWithBase {
-                    branch: request.branch.clone(),
-                    head,
-                    base: base_oid,
-                }
-            } else {
-                WorktreeError::CheckedOut
-            }
-        } else {
-            WorktreeError::CheckedOut
-        });
+        if let Some(base) = requested_base
+            && !is_ancestor(context, base, head, cancel)?
+        {
+            branch_behind_base_warning(&request.branch, head, base);
+        }
+        return Err(WorktreeError::CheckedOut);
     }
     if entries
         .iter()
@@ -664,17 +682,16 @@ fn create_with_default(
     }
     let branch_tips = read_branch_tips(context, cancel)?;
     let existing = branch_tips.get(&branch).copied();
+    let mut behind_base = None;
     if let Some(existing_head) = existing
-        && let Some(base) = request.base.as_deref()
+        && let Some(base) = requested_base
+        && !is_ancestor(context, base, existing_head, cancel)?
     {
-        let base_oid = pin_revision(context, facts, base, cancel)?;
-        if !is_ancestor(context, base_oid, existing_head, cancel)? {
-            return Err(WorktreeError::BranchExistsWithBase {
-                branch: request.branch.clone(),
-                head: existing_head,
-                base: base_oid,
-            });
-        }
+        behind_base = Some(branch_behind_base_warning(
+            &request.branch,
+            existing_head,
+            base,
+        ));
     }
     let create_branch = existing.is_none();
     if create_branch && request.base.is_none() && default.is_none() {
@@ -715,8 +732,8 @@ fn create_with_default(
     }
     let base = if let Some(existing) = existing {
         existing
-    } else if let Some(base) = request.base.as_deref() {
-        pin_revision(context, facts, base, cancel)?
+    } else if let Some(base) = requested_base {
+        base
     } else {
         default.as_ref().ok_or(WorktreeError::InvalidRequest)?.0
     };
@@ -775,6 +792,9 @@ fn create_with_default(
     // here; a failed ownership record leaves this branch unobserved, which
     // only ever retains it.
     let mut warnings = naming_warnings;
+    if let Some(message) = behind_base {
+        warnings.push(message);
+    }
     if let Err(error) = creation_record {
         warnings.push(format!(
             "could not record worktree creation: {error}; it is retained as foreign"
@@ -812,7 +832,7 @@ fn create_with_default(
         occupancy: combine_occupancy(&target, Occupancy::Available, writer),
         lane: None,
         attempt: None,
-        base: None,
+        base: requested_base.map(|oid| oid.to_string()),
     })
 }
 

@@ -1048,11 +1048,6 @@ impl RunError {
                         .detail("branch name collides with an existing ref")
                         .next("inspect existing Git refs and choose a different branch name");
                 }
-                if let WorktreeError::BranchExistsWithBase { head, base, .. } = error {
-                    diagnostic = diagnostic
-                        .detail(format!("branch at {head} does not contain base {base}"))
-                        .next("omit --base to reuse the branch");
-                }
                 if let WorktreeError::WriterLeaseHeld { .. } = error {
                     diagnostic = diagnostic
                         .detail(error.to_string())

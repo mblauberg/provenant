@@ -304,7 +304,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "writer_production_plan_denies_outside_writes",
             "writer_reconcile_refuses_unfinished_cherry_pick_and_releases",
             "recreated_worktree_accepts_writer_after_settlement",
-            "existing_branch_with_base_names_the_repair_in_json_and_human_output",
+            "existing_branch_behind_base_warns_and_keeps_its_tip",
             "create_from_remote_base_reports_ok_and_exists",
             "create_list_and_remove_a_managed_worktree",
             "naming_and_post_create_ports_are_advisory_and_evidenced",
@@ -420,8 +420,8 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 "recreated_worktree_accepts_writer_after_settlement" => {
                     recreated_worktree_accepts_writer_after_settlement()
                 }
-                "existing_branch_with_base_names_the_repair_in_json_and_human_output" => {
-                    existing_branch_with_base_names_the_repair_in_json_and_human_output()
+                "existing_branch_behind_base_warns_and_keeps_its_tip" => {
+                    existing_branch_behind_base_warns_and_keeps_its_tip()
                 }
                 "create_from_remote_base_reports_ok_and_exists" => create_from_remote_base_reports_ok_and_exists(),
                 "create_list_and_remove_a_managed_worktree" => {

@@ -55,6 +55,21 @@ each later PR the branch below, each with its own issue link (`gh stack --help`)
 Rebase and force-push with lease only your own unmerged branches, then recheck
 heads and review evidence. Land bottom-first with `provenant land`.
 
+## Repair a pull request
+
+`provenant run implement --pr N` repairs a pull request from its CI failures.
+The host resolves the PR's head branch and base through the forge, locates or
+creates the head branch's worktree, and appends the failing checks — each name
+and a bounded log tail read through the one CI observer — to the lane's brief.
+Re-run it after a push or a check finishes to refresh the evidence; use
+`provenant ci failures N` first to read the same failures without launching a
+lane.
+
+`--base` names the pull request's merge target; it never resets the branch. An
+existing branch behind its base warns `BRANCH_BEHIND_BASE` and proceeds at its
+current tip, so re-running a repair keeps the branch's commits. Merge the base
+into the branch before landing when the warning appears.
+
 ## Merge
 
 Agents merge directly: once a pull request has the lens review its risk

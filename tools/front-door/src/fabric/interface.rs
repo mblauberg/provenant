@@ -934,7 +934,114 @@ fn report_launch_refusals(result: &mut Value, rows: &[Value]) {
     result["launch_refusals"] = json!(refusals);
 }
 
+/// The one PR repair fact resolved from the forge and CI observer before an
+/// implement launch. The branch and base are launch controls; `failures` is a
+/// bounded section appended to the brief.
+struct PrRepairFact {
+    branch: String,
+    base: String,
+    failures: String,
+}
+
 impl Factory {
+    /// Resolve `run implement --pr N` from the one observer: the PR's head
+    /// branch and base become launch controls, and the failing checks (names
+    /// and bounded log tails) are appended to the brief. Review templates keep
+    /// their own subject path. Spec: docs/specs/next-batch.md#the-loop-a-chair-runs
+    fn apply_pr_repair(&self, input: Value) -> Result<Value, FacadeError> {
+        if input.get("pr").is_none_or(|value| value.is_null()) {
+            return Ok(input);
+        }
+        self.apply_pr_repair_with(input, |number| self.observe_pr_repair(number))
+    }
+
+    /// The injectable resolution seam an invariant pins without a live forge.
+    fn apply_pr_repair_with(
+        &self,
+        mut input: Value,
+        resolve: impl FnOnce(u64) -> Result<PrRepairFact, FacadeError>,
+    ) -> Result<Value, FacadeError> {
+        let is_implement = input
+            .get("template")
+            .and_then(Value::as_str)
+            .is_some_and(|name| name == "implement" || name.starts_with("implement."));
+        let number = input
+            .get("pr")
+            .filter(|value| !value.is_null())
+            .and_then(Value::as_u64);
+        if !is_implement || number.is_none_or(|number| number == 0) {
+            return Ok(input);
+        }
+        let number =
+            number.ok_or_else(|| FacadeError::invalid(InvalidInputDetail::Field("pr".into())))?;
+        let fact = resolve(number)?;
+        if input.get("branch").is_none_or(Value::is_null) {
+            input["branch"] = json!(fact.branch);
+        }
+        if input.get("base").is_none_or(Value::is_null) {
+            input["base"] = json!(fact.base);
+        }
+        if !fact.failures.is_empty() {
+            let brief = input.get("brief").and_then(Value::as_str).unwrap_or("");
+            let mut augmented = brief.to_owned();
+            augmented.push_str("\n\n");
+            augmented.push_str(&fact.failures);
+            input["brief"] = json!(augmented);
+        }
+        // The PR has been consumed by the repair; leave no advisory pin for a
+        // review subject to reinterpret.
+        if let Some(object) = input.as_object_mut() {
+            object.remove("pr");
+            object.remove("head");
+        }
+        Ok(input)
+    }
+
+    /// Read the pull and its failing checks through the one CI observer, never
+    /// a caller-owned `gh` process. Spec: docs/specs/next-batch.md#the-loop-a-chair-runs
+    fn observe_pr_repair(&self, number: u64) -> Result<PrRepairFact, FacadeError> {
+        use std::time::Duration;
+        let invalid = |reason: String| FacadeError::invalid(InvalidInputDetail::Field(reason));
+        let request = provenant_config::ports::Request::within(Duration::from_secs(60));
+        let state = self.context.roots.state.as_path();
+        let project = &self.context.project_root;
+        let repository = crate::pr::observer::repository_for_project(state, project, &request)
+            .map_err(|error| invalid(error.to_string()))?;
+        let mut observer =
+            crate::pr::observer::Observer::open(state, project, &repository, &request)
+                .map_err(|error| invalid(error.to_string()))?;
+        let resource = observer
+            .resource(&format!("pulls/{number}"), Duration::ZERO, &request)
+            .map_err(|error| invalid(error.to_string()))?;
+        let field = |pointer: &str| -> Result<&str, FacadeError> {
+            resource
+                .pointer(pointer)
+                .and_then(Value::as_str)
+                .ok_or_else(|| invalid(format!("pull resource has no {pointer}")))
+        };
+        let head_sha = field("/head/sha")?.to_owned();
+        let branch = field("/head/ref")?.to_owned();
+        let base = field("/base/ref")?.to_owned();
+        let checks = observer
+            .checks(&head_sha, Duration::ZERO, &request)
+            .map_err(|error| invalid(error.to_string()))?;
+        let mut failures = format!("CI failures for pull request #{number} at {head_sha}:\n");
+        let mut failed = 0;
+        for check in checks.iter().filter(|check| check.bucket == "fail") {
+            failed += 1;
+            let tail: String = check.excerpt.chars().take(2048).collect();
+            failures.push_str(&format!("- {}: {}\n", check.name, tail));
+        }
+        if failed == 0 {
+            failures.clear();
+        }
+        Ok(PrRepairFact {
+            branch,
+            base,
+            failures,
+        })
+    }
+
     #[allow(
         clippy::print_stderr,
         reason = "warn operator when policy is unavailable and defaults are used"
@@ -1249,7 +1356,7 @@ impl Factory {
         input: &Value,
     ) -> Result<provenant_fabric_runtime::graph::relay::ChildRequest, FacadeError> {
         use provenant_fabric_runtime::graph::relay::{ChildLaunch, ChildRequest};
-        let input = launch_input(input)?;
+        let input = self.apply_pr_repair(launch_input(input)?)?;
         let input = &input;
         let invalid = || FacadeError::invalid(InvalidInputDetail::Field("document".into()));
         let raw = input.get("document").filter(|value| !value.is_null());
@@ -1775,7 +1882,7 @@ impl Factory {
         announce: Option<super::graph_execution::Announce<'_>>,
     ) -> Result<Value, FacadeError> {
         let submitted = input;
-        let mut input = launch_input(input)?;
+        let mut input = self.apply_pr_repair(launch_input(input)?)?;
         let raw_owned = input.get("document").cloned();
         let raw = raw_owned.as_ref();
         let mut input_warnings = self.graph_input_warnings(&input)?;
@@ -3883,6 +3990,59 @@ mod tests {
             host_launch: None,
             workers: &Workers,
         })
+    }
+
+    /// Spec: docs/specs/next-batch.md#the-loop-a-chair-runs -- a fake forge PR
+    /// with a failing check binds the head branch and base and carries the
+    /// failure into the launch brief.
+    #[test]
+    fn implement_pr_repair_binds_branch_base_and_carries_failing_checks() -> Result {
+        let rig = TestRig::new()?;
+        let factory = factory(&rig)?;
+        let input = json!({
+            "op": "run",
+            "template": "implement",
+            "brief": "Repair the pull request",
+            "pr": 7,
+        });
+        let repaired = factory.apply_pr_repair_with(input, |number| {
+            assert_eq!(number, 7);
+            Ok(super::PrRepairFact {
+                branch: "fix/ci".into(),
+                base: "main".into(),
+                failures:
+                    "CI failures for pull request #7:\n- test: assertion failed at src/lib.rs:42"
+                        .into(),
+            })
+        })?;
+        assert_eq!(repaired["branch"].as_str(), Some("fix/ci"));
+        assert_eq!(repaired["base"].as_str(), Some("main"));
+        let brief = repaired["brief"].as_str().ok_or("brief")?;
+        assert!(brief.contains("Repair the pull request"));
+        assert!(brief.contains("test: assertion failed at src/lib.rs:42"));
+        assert!(repaired.get("pr").is_none(), "the PR pin was consumed");
+        // An explicit branch or base wins over the forge answer.
+        let pinned = json!({
+            "op": "run", "template": "implement", "brief": "Repair",
+            "pr": 7, "branch": "chosen", "base": "refs/remotes/origin/main",
+        });
+        let repaired = factory.apply_pr_repair_with(pinned, |_| {
+            Ok(super::PrRepairFact {
+                branch: "fix/ci".into(),
+                base: "main".into(),
+                failures: String::new(),
+            })
+        })?;
+        assert_eq!(repaired["branch"].as_str(), Some("chosen"));
+        assert_eq!(repaired["base"].as_str(), Some("refs/remotes/origin/main"));
+        assert_eq!(repaired["brief"].as_str(), Some("Repair"));
+        // A review template keeps its own subject path; the repair is inert.
+        let review = json!({"op": "run", "template": "review", "pr": 7});
+        let unchanged = factory.apply_pr_repair_with(review.clone(), |_| {
+            panic!("a review template must not resolve a PR repair")
+        })?;
+        assert_eq!(unchanged, review);
+        Ok(())
     }
 
     // Spec: docs/specs/supervisor.md#native-environment-and-sandbox-tool-stores

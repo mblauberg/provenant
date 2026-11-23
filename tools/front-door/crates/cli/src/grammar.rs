@@ -717,7 +717,7 @@ pub struct GraphRunArgs {
     /// Git base for a new writer branch
     #[arg(long, catalog_requires = "branch")]
     pub base: Option<String>,
-    /// Pin a review to this pull request (host resolves its base and head)
+    /// Pin a review to this pull request, or repair a PR with `run implement --pr N` (host resolves its base and head)
     #[arg(long, value_name = "NUMBER", catalog_u64_range = 1..)]
     pub pr: Option<u64>,
     /// Expected head for `--pr`: re-read the forge briefly, then refuse a persistent mismatch
