@@ -91,7 +91,7 @@ fn note_kept_unmerged() {
 fn warn_fetch(error: &Error) {
     provenant_records::warning::warn(
         provenant_records::warning::Warning::new(
-            provenant_records::warning::FORGE_CONTEXT_UNRESOLVED,
+            provenant_records::warning::REMOTE_FETCH_FAILED,
             format!("{error}; using the current integration resolution"),
         )
         .once_per_change(),
@@ -1731,7 +1731,7 @@ fn gc_project(
 fn warn_import_pin_collection(project: &Path, error: &(impl std::fmt::Display + ?Sized)) {
     provenant_records::warning::warn(
         provenant_records::warning::Warning::new(
-            provenant_records::warning::CONFIG_MALFORMED,
+            provenant_records::warning::IMPORT_PIN_COLLECTION_FAILED,
             format!(
                 "import pin collection failed for {}: {error}",
                 project.display()
@@ -3338,7 +3338,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                         .unwrap_or_else(|error| {
                             provenant_records::warning::warn(
                                 provenant_records::warning::Warning::new(
-                                    provenant_records::warning::CONFIG_MALFORMED,
+                                    provenant_records::warning::SETTLED_LANE_COLLECTION_FAILED,
                                     format!(
                                         "settled lane collection failed for {}: {error}",
                                         project.path.display()

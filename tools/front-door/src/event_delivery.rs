@@ -12,7 +12,7 @@ use provenant_records::{
     lane_contract::{
         Coverage, ObservationCursor, ObservationEvent, ObservationKind, ObservationLineage,
     },
-    warning::{CONFIG_MALFORMED, FORGE_CONTEXT_UNRESOLVED, Warning, warn},
+    warning::{Warning, warn},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -427,7 +427,7 @@ pub(crate) fn tick(resolved: &crate::roots::Resolved) -> Result<()> {
                             Err(error) => {
                                 warn(
                                     Warning::new(
-                                        FORGE_CONTEXT_UNRESOLVED,
+                                        provenant_records::warning::FORGE_DISCOVERY_UNAVAILABLE,
                                         format!(
                                             "forge discovery unavailable for {project}: {error}; local journal sources continue; {}",
                                             origin.describe("domains.wait.forge_source")
@@ -467,7 +467,7 @@ pub(crate) fn tick(resolved: &crate::roots::Resolved) -> Result<()> {
                                 )
                             {
                                 warn(Warning::new(
-                                    FORGE_CONTEXT_UNRESOLVED,
+                                    provenant_records::warning::FORWARDER_UNAVAILABLE,
                                     format!(
                                         "forwarder unavailable: {error}; conditional reconciliation continues"
                                     ),
@@ -534,7 +534,7 @@ pub(crate) fn tick(resolved: &crate::roots::Resolved) -> Result<()> {
                             )
                         {
                             warn(Warning::new(
-                                FORGE_CONTEXT_UNRESOLVED,
+                                provenant_records::warning::FORWARDER_UNAVAILABLE,
                                 format!("forwarder unavailable: {error}; using conditional poller"),
                             ));
                             selected = "poll".into();
@@ -684,7 +684,7 @@ fn continue_after_index<T>(
         let quarantined = error.is::<provenant_fabric_runtime::graph::UnreadableCheckpointNotice>();
         warn(
             Warning::new(
-                CONFIG_MALFORMED,
+                provenant_records::warning::GRAPH_OBSERVATION_DEFERRED,
                 format!(
                     "graph observation indexing failed for {project}: {error}{}",
                     if quarantined {
@@ -700,7 +700,7 @@ fn continue_after_index<T>(
     if let Err(error) = notes() {
         warn(
             Warning::new(
-                CONFIG_MALFORMED,
+                provenant_records::warning::NOTE_OBSERVATION_DEFERRED,
                 format!("note observation indexing failed for {project}: {error}; will retry"),
             )
             .subject(project.to_string()),
@@ -895,7 +895,7 @@ fn source(
 
     if let Some(warning) = &selection.warning {
         warn(Warning::new(
-            FORGE_CONTEXT_UNRESOLVED,
+            provenant_records::warning::FORGE_SOURCE_UNRESOLVED,
             format!("{warning}; {origin}"),
         ));
     }
@@ -938,7 +938,7 @@ pub(crate) fn listen(repository: &str, globals: &provenant_cli::Globals) -> u8 {
         Ok(()) => 0,
         Err(error) => {
             warn(Warning::new(
-                FORGE_CONTEXT_UNRESOLVED,
+                provenant_records::warning::FORWARDER_UNAVAILABLE,
                 format!("forge forwarder: {error}; host reconciliation continues"),
             ));
             1

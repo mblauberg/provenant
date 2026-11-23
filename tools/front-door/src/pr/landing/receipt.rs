@@ -93,7 +93,7 @@ pub fn read_latest_approval_carry(
             Err(error) => {
                 provenant_records::warning::warn(
                     provenant_records::warning::Warning::new(
-                        provenant_records::warning::CONFIG_MALFORMED,
+                        provenant_records::warning::APPROVAL_RECEIPT_UNREADABLE,
                         format!(
                             "failed to open approval carry receipt {}: {error}",
                             entry.path().display()
@@ -110,7 +110,7 @@ pub fn read_latest_approval_carry(
                 Err(error) => {
                     provenant_records::warning::warn(
                         provenant_records::warning::Warning::new(
-                            provenant_records::warning::CONFIG_MALFORMED,
+                            provenant_records::warning::APPROVAL_RECEIPT_UNREADABLE,
                             format!(
                                 "corrupt approval carry receipt in {}: {error}",
                                 entry.path().display()

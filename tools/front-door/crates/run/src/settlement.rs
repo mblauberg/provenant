@@ -3580,11 +3580,11 @@ impl ResumeRequest {
 }
 
 fn report_registry_error(attempt: provenant_core::AttemptId, error: &RunError) {
-    use provenant_records::warning::{SETTLEMENT_DIAGNOSTIC, Warning, warn};
+    use provenant_records::warning::{WRITER_FENCE_LIST_FAILED, Warning, warn};
     // Spec: docs/specs/cli.md#warnings-are-typed-values
     warn(
         Warning::new(
-            SETTLEMENT_DIAGNOSTIC,
+            WRITER_FENCE_LIST_FAILED,
             format!("writer fence listing failed for {attempt}: {error}"),
         )
         .subject(format!("attempt {attempt}")),

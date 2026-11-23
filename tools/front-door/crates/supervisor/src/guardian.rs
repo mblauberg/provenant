@@ -1072,8 +1072,13 @@ impl LanePortRefusal {
 fn lane_port_allocation(
     policy: &provenant_records::policy::Policy,
     plan: Option<&provenant_os::lane_ports::Plan>,
-) -> std::result::Result<(Option<provenant_os::lane_ports::Lease>, Option<String>), LanePortRefusal>
-{
+) -> std::result::Result<
+    (
+        Option<provenant_os::lane_ports::Lease>,
+        Option<provenant_records::warning::Warning>,
+    ),
+    LanePortRefusal,
+> {
     let Some(plan) = plan else {
         return Ok((None, None));
     };
@@ -1084,7 +1089,7 @@ fn lane_port_allocation(
             let effect = policy.check("PORT_BLOCKS", Facts::violation("lane port pool exhausted"));
             match effect {
                 Effect::Proceed => return Ok((None, None)),
-                Effect::Warn(warning) => return Ok((None, Some(warning.message))),
+                Effect::Warn(warning) => return Ok((None, Some(warning))),
                 Effect::Refuse(_) | Effect::Stop(_) => {}
             }
             use provenant_records::diagnostic::PortSettingSource;
@@ -1110,7 +1115,7 @@ fn lane_port_allocation(
                 ),
             );
             let warning = match effect {
-                provenant_records::policy::Effect::Warn(warning) => Some(warning.message),
+                provenant_records::policy::Effect::Warn(warning) => Some(warning),
                 _ => None,
             };
             Ok((None, warning))
@@ -1200,14 +1205,17 @@ impl Driver<'_> {
                 Ok(result) => result,
                 Err(reason) => return self.never_spawned(&reason.to_string(), Some(reason.fact())),
             };
-        if let Some(warning) = &port_warning {
-            warn(&mut warnings, &mut omitted_warnings, warning);
+        // A port-allocation warning is a typed value: route it to the command
+        // sink rather than the local label list. Keep the branch decision.
+        let drop_ports = port_warning.is_some();
+        if let Some(warning) = port_warning {
+            provenant_records::warning::warn(warning);
         }
         let adjusted_env;
         let env = if let Some(lease) = &ports {
             adjusted_env = with_lane_ports(env, lease);
             adjusted_env.as_slice()
-        } else if port_warning.is_some() {
+        } else if drop_ports {
             adjusted_env = without_lane_ports(env);
             adjusted_env.as_slice()
         } else {

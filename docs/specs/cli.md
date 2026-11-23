@@ -138,7 +138,11 @@ guard restores the previous sink when it is dropped. Codes follow the same
 stability rules as refusal codes, so a consumer branches on the code and never
 on the prose, and adding a code is additive. A repeated key collapses per
 invocation or per change; a per-change key hashes the code, subject and message
-and is remembered in the state root.
+and is remembered in the state root. Each code names one event; there are no
+catch-all codes, so `CONFIG_MALFORMED` means a configuration file or value was
+malformed and nothing else. The declared catalogue in
+`crates/records/src/warning.rs` is authoritative: every const carries a one-line
+meaning and the upper-snake test lists exactly those consts.
 - Why: a consumer needs to act on a warning without matching text, and a
   command that returns warnings as data must not also print them.
 - Owner: `crates/records/src/warning.rs`, the binary edge that installs the sink

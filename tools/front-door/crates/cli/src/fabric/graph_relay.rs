@@ -15,7 +15,7 @@ use provenant_fabric_runtime::graph::{
     template::{Layer, TemplateLibrary},
 };
 use provenant_fabric_runtime::relay::{FacadeError, ServiceError};
-use provenant_records::warning::{CONFIG_MALFORMED, Warning, warn};
+use provenant_records::warning::{Warning, warn};
 use serde_json::{Value, json};
 
 fn refused(code: &str, message: impl Into<String>) -> ServiceError {
@@ -450,7 +450,7 @@ fn serve_authorised(
             Err(error) => {
                 let error = provenant_records::diagnostic::safe_text(&error.to_string());
                 warn(Warning::new(
-                    CONFIG_MALFORMED,
+                    provenant_records::warning::CONFIG_UNAVAILABLE,
                     format!(
                         "graph admission policy unavailable ({error}); using compiled defaults"
                     ),
@@ -1017,7 +1017,7 @@ fn serve_authorised(
 
 /// Add this request's advisory input warnings to any durable admission
 /// warnings already on the reply, sorted and deduplicated.
-fn merge_warnings(value: &mut Value, extra: &[String]) {
+fn merge_warnings(value: &mut Value, extra: &[provenant_records::warning::Warning]) {
     if extra.is_empty() {
         return;
     }
@@ -1032,7 +1032,7 @@ fn merge_warnings(value: &mut Value, extra: &[String]) {
                 .collect()
         })
         .unwrap_or_default();
-    all.extend(extra.iter().cloned());
+    all.extend(extra.iter().map(|warning| warning.message.clone()));
     all.sort();
     all.dedup();
     value["warnings"] = json!(all);

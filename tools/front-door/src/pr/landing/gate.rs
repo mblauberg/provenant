@@ -601,7 +601,7 @@ fn await_pr_ci_with(
                 Err(LandingError::RateLimited(message)) => {
                     provenant_records::warning::warn(
                         provenant_records::warning::Warning::new(
-                            provenant_records::warning::FORGE_CONTEXT_UNRESOLVED,
+                            provenant_records::warning::GH_RATE_LIMITED,
                             format!("pull request #{} CI read skipped: {message}", pr.number),
                         )
                         .subject(format!("#{}", pr.number))

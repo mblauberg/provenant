@@ -254,10 +254,10 @@ impl RunStore {
             }
             Ok((admitted, warnings))
         })?;
-        use provenant_records::warning::{POLICY_ADVISORY, Warning, warn};
+        use provenant_records::warning::warn;
         for warning in warnings {
             // Spec: docs/specs/cli.md#warnings-are-typed-values
-            warn(Warning::new(POLICY_ADVISORY, warning).subject("ADMISSION_LEASE"));
+            warn(warning.subject("ADMISSION_LEASE"));
         }
         Ok(admitted)
     }
@@ -1106,10 +1106,10 @@ impl RunStore {
             update_attempt(tx, &old, &next)?;
             Ok((Some(next), warnings))
         })?;
-        use provenant_records::warning::{POLICY_ADVISORY, Warning, warn};
+        use provenant_records::warning::warn;
         for warning in warnings {
             // Spec: docs/specs/cli.md#warnings-are-typed-values
-            warn(Warning::new(POLICY_ADVISORY, warning).subject("ADMISSION_LEASE"));
+            warn(warning.subject("ADMISSION_LEASE"));
         }
         Ok(record)
     }

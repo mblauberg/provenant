@@ -1,6 +1,6 @@
 use super::*;
 use provenant_config::{REPOSITORY_CONFIG, RepositoryPolicy};
-use provenant_records::warning::{CONFIG_MALFORMED, Warning};
+use provenant_records::warning::Warning;
 
 /// Classify once on the admitting host, before local/peer routing. Replays
 /// retain the sealed classification even if files or repository policy change.
@@ -21,7 +21,7 @@ pub fn seal_launch_policy(
         attempt.confidential |= sealed.confidential;
         if sealed.repository_config.is_some() && !checkout.join(REPOSITORY_CONFIG).is_file() {
             warn(Warning::new(
-                CONFIG_MALFORMED,
+                provenant_records::warning::LAUNCH_ACCESS_PROFILE,
                 "recorded repository launch policy is missing; retaining sealed classification",
             ));
         }

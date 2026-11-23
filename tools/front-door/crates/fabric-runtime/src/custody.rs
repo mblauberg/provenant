@@ -16,9 +16,9 @@ pub fn acquire(
 }
 /// Advisory diagnostics never change admission or custody policy.
 pub fn warning(message: impl std::fmt::Display) {
-    use provenant_records::warning::{CUSTODY_HELD_ADVISORY, Warning, warn};
+    use provenant_records::warning::{CUSTODY_HELD, Warning, warn};
     // Spec: docs/specs/cli.md#warnings-are-typed-values
-    warn(Warning::new(CUSTODY_HELD_ADVISORY, message.to_string()));
+    warn(Warning::new(CUSTODY_HELD, message.to_string()));
 }
 /// A warning is an observation, never a custody lock.
 pub fn warn(changes: &[CustodyChange]) {

@@ -946,7 +946,7 @@ impl Factory {
                     let error = provenant_records::diagnostic::safe_text(&error.to_string());
                     provenant_records::warning::warn(
                     provenant_records::warning::Warning::new(
-                        provenant_records::warning::CONFIG_MALFORMED,
+                        provenant_records::warning::CONFIG_UNAVAILABLE,
                         format!(
                             "full config unavailable ({error}); using the owner's resolved policy"
                         ),
@@ -1529,7 +1529,7 @@ impl Factory {
                 let reason = provenant_records::diagnostic::safe_text(&reason);
                 provenant_records::warning::warn(
                     provenant_records::warning::Warning::new(
-                        provenant_records::warning::FORGE_CONTEXT_UNRESOLVED,
+                        provenant_records::warning::WORKTREE_INVENTORY_UNAVAILABLE,
                         format!("repository worktree inventory unavailable ({reason}); read roots are limited to the current directory"),
                     )
                     .subject(self.cwd.display().to_string()),
@@ -7646,7 +7646,7 @@ mod tests {
 pub(super) fn warn_operator(warning: impl std::fmt::Display) {
     provenant_records::warning::warn(
         provenant_records::warning::Warning::new(
-            provenant_records::warning::CONFIG_MALFORMED,
+            provenant_records::warning::ADVISORY_FINDING,
             warning.to_string(),
         )
         .once_per_change(),

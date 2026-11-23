@@ -6,7 +6,7 @@ use provenant_confinement::worktrees::WorkerObserver;
 use provenant_core::{CancelToken, Clock, WaitBudget};
 use provenant_records::{
     CommandResult, Outcome,
-    warning::{CONFIG_MALFORMED, Warning, warn},
+    warning::{Warning, warn},
 };
 use provenant_routing::BareModelError;
 use serde_json::{Value, json};
@@ -544,7 +544,7 @@ pub(crate) fn run(
 ) -> u8 {
     if request.over.len() > 5 {
         warn(Warning::new(
-            CONFIG_MALFORMED,
+            provenant_records::warning::ARGUMENT_VALUE_SUSPECT,
             format!(
                 "--over creates {} nodes; check comma-separated items",
                 request.over.len()
@@ -597,7 +597,10 @@ pub(crate) fn run(
                 .and_then(|catalogue| catalogue.provider_segment_warning(&id))
             });
         if let Some(warning) = warning {
-            warn(Warning::new(CONFIG_MALFORMED, warning));
+            warn(Warning::new(
+                provenant_records::warning::ADVISORY_FINDING,
+                warning,
+            ));
         }
     }
     invoke(

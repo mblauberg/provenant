@@ -441,7 +441,7 @@ pub(crate) fn gc_worker(globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
         for warning in schedule_build_hygiene(&resolved) {
             provenant_records::warning::warn(
                 provenant_records::warning::Warning::new(
-                    provenant_records::warning::CONFIG_MALFORMED,
+                    provenant_records::warning::ADVISORY_FINDING,
                     warning,
                 )
                 .once_per_change(),
@@ -536,7 +536,7 @@ fn schedule_build_hygiene(resolved: &crate::roots::Resolved) -> Vec<String> {
     if report.rotated_ledgers > 0 {
         provenant_records::warning::warn(
             provenant_records::warning::Warning::new(
-                provenant_records::warning::CONFIG_MALFORMED,
+                provenant_records::warning::BUILD_LEDGER_ROTATED,
                 format!(
                     "build ledger rotated; {} rotation(s) expired",
                     report.expired_ledgers

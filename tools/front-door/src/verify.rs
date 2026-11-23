@@ -80,7 +80,7 @@ pub fn run(tier: Option<&str>, commit: Option<&str>, affected: bool, globals: &G
     for warning in &full_after.warnings {
         provenant_records::warning::warn(
             provenant_records::warning::Warning::new(
-                provenant_records::warning::CONFIG_MALFORMED,
+                provenant_records::warning::ADVISORY_FINDING,
                 warning.clone(),
             )
             .once_per_change(),
@@ -315,7 +315,7 @@ pub fn run(tier: Option<&str>, commit: Option<&str>, affected: bool, globals: &G
                 declaration.source
             );
             provenant_records::warning::warn(provenant_records::warning::Warning::new(
-                provenant_records::warning::CONFIG_MALFORMED,
+                provenant_records::warning::VERIFY_UNAVAILABLE,
                 format!("[VERIFY_UNAVAILABLE] {reason}; skipping verification"),
             ));
             return render(
@@ -412,7 +412,7 @@ pub fn run(tier: Option<&str>, commit: Option<&str>, affected: bool, globals: &G
                 Err(error) => {
                     provenant_records::warning::warn(
                         provenant_records::warning::Warning::new(
-                            provenant_records::warning::CONFIG_MALFORMED,
+                            provenant_records::warning::AFFECTED_SELECTION_UNAVAILABLE,
                             format!("affected selection unavailable: {error}"),
                         )
                         .once_per_change(),
@@ -425,7 +425,7 @@ pub fn run(tier: Option<&str>, commit: Option<&str>, affected: bool, globals: &G
     let priority = context.port.priority_for("tier");
     for warning in &priority.warnings {
         provenant_records::warning::warn(provenant_records::warning::Warning::new(
-            provenant_records::warning::CONFIG_MALFORMED,
+            provenant_records::warning::ADVISORY_FINDING,
             warning.clone(),
         ));
     }
@@ -730,7 +730,7 @@ impl Drop for DetachedCheckout {
         if !matches!(result, Ok(output) if output.status.success()) {
             provenant_records::warning::warn(
                 provenant_records::warning::Warning::new(
-                    provenant_records::warning::CONFIG_MALFORMED,
+                    provenant_records::warning::TEMP_CHECKOUT_RETAINED,
                     format!(
                         "failed to remove temporary checkout {}",
                         self.path.display()

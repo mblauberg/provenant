@@ -195,7 +195,7 @@ pub(crate) fn advance_graphs_after_settlement(
                 .map_err(|failure| std::io::Error::other(failure.message))?;
                 if waited > 0 {
                     provenant_records::warning::warn(provenant_records::warning::Warning::new(
-                        provenant_records::warning::CONFIG_MALFORMED,
+                        provenant_records::warning::STEER_RESTART_STAGGERED,
                         format!(
                             "steer restart staggered by {} ms (source: {source})",
                             waited / 1_000
@@ -512,7 +512,7 @@ pub(crate) fn settle_owned_worktree(
     if let Err(error) = super::gc_cleanup::spawn(settled, delivery_override) {
         provenant_records::warning::warn(
             provenant_records::warning::Warning::new(
-                provenant_records::warning::CONFIG_MALFORMED,
+                provenant_records::warning::GC_SCHEDULE_FAILED,
                 format!(
                     "completion GC did not start: {error}; the next gc sweep collects the worktree"
                 ),

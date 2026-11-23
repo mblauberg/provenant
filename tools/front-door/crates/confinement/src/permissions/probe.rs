@@ -326,10 +326,9 @@ pub(super) fn denied_probe(outcome: &ExecOutcome) -> bool {
 }
 
 #[cfg(any(target_os = "macos", test, feature = "snapshot"))]
-pub(super) fn report_policy_message(message: String) {
-    use provenant_records::warning::{POLICY_ADVISORY, Warning, warn};
+pub(super) fn report_policy_message(warning: provenant_records::warning::Warning) {
     // Spec: docs/specs/cli.md#warnings-are-typed-values
-    warn(Warning::new(POLICY_ADVISORY, message));
+    provenant_records::warning::warn(warning);
 }
 
 /// Apply one advisory launch threshold. The table controls whether an
@@ -346,7 +345,7 @@ pub(super) fn check_capacity_policy(
     threshold: usize,
     origin: provenant_records::diagnostic::Layer,
     strict_error: PermissionError,
-) -> Result<Option<String>, PermissionError> {
+) -> Result<Option<provenant_records::warning::Warning>, PermissionError> {
     let facts = if actual > threshold {
         Facts::violation(format!(
             "{setting} exceeded: effective value={actual}, threshold={threshold} (setting source: {})",
@@ -360,10 +359,11 @@ pub(super) fn check_capacity_policy(
     };
     match policy.check(code, facts) {
         Effect::Proceed => Ok(None),
-        Effect::Warn(warning) => Ok(Some(warning.message)),
+        Effect::Warn(warning) => Ok(Some(warning)),
         Effect::Refuse(diagnostic) | Effect::Stop(diagnostic) => {
             if let Some(detail) = diagnostic.detail {
-                report_policy_message(detail);
+                use provenant_records::warning::{POLICY_WARNING, Warning};
+                report_policy_message(Warning::new(POLICY_WARNING, detail));
             }
             Err(strict_error)
         }

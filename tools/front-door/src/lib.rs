@@ -1298,7 +1298,7 @@ pub fn dispatch(
                 {
                     provenant_records::warning::warn(
                         provenant_records::warning::Warning::new(
-                            provenant_records::warning::CONFIG_MALFORMED,
+                            provenant_records::warning::ADMISSION_SLOTS_UNAVAILABLE,
                             format!("admission slots unavailable; command may proceed without them: {error}"),
                         )
                         .once_per_change(),

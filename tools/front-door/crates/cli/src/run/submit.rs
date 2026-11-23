@@ -1,5 +1,5 @@
 use super::*;
-use provenant_records::warning::{CONFIG_KEY_IGNORED, CONFIG_MALFORMED, Warning, warn};
+use provenant_records::warning::{CONFIG_KEY_IGNORED, Warning, warn};
 
 #[cfg(any(test, feature = "fixture"))]
 thread_local! {
@@ -390,7 +390,7 @@ pub(super) fn schedule_low_space_gc(state: &Path, home: &Path, worktree: &Path) 
     };
     if let Err(error) = start() {
         warn(Warning::new(
-            CONFIG_MALFORMED,
+            provenant_records::warning::GC_SCHEDULE_FAILED,
             format!("could not schedule low-space GC: {error}"),
         ));
         false
@@ -455,7 +455,7 @@ pub(super) fn check_writer_disk_with_collection(
     match observed {
         Err(DiskCheck::Unobserved(message)) => {
             warn(Warning::new(
-                CONFIG_MALFORMED,
+                provenant_records::warning::DISK_OBSERVATION_UNAVAILABLE,
                 format!(
                     "writer disk observation unavailable; continuing without the disk floor check: {message}"
                 ),

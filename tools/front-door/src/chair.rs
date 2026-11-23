@@ -296,7 +296,7 @@ fn switch(
         SwitchDecision::Stay => {
             provenant_records::warning::warn(
                 provenant_records::warning::Warning::new(
-                    provenant_records::warning::CONFIG_MALFORMED,
+                    provenant_records::warning::CHAIR_SWITCH_QUOTA_STALE,
                     "chair switch: current quota below threshold or unavailable/stale; continuing",
                 )
                 .once_per_change(),
@@ -1018,7 +1018,7 @@ fn session_identity(context: &Context) -> provenant_telemetry::usage::AccountIde
     identity.unwrap_or_else(|_| {
         provenant_records::warning::warn(
             provenant_records::warning::Warning::new(
-                provenant_records::warning::FORGE_CONTEXT_UNRESOLVED,
+                provenant_records::warning::ACCOUNT_IDENTITY_UNVERIFIED,
                 "Claude account identity could not be verified; usage is attributed as unknown",
             )
             .once_per_change(),

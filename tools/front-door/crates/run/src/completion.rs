@@ -17,8 +17,8 @@ use std::{
 /// A handoff was accepted with an advisory parse notice.
 /// Spec: docs/specs/cli.md#warnings-are-typed-values
 fn handoff_advisory(attempt: provenant_core::AttemptId, detail: impl Into<String>) {
-    use provenant_records::warning::{HANDOFF_ADVISORY, Warning, warn};
-    warn(Warning::new(HANDOFF_ADVISORY, detail.into()).subject(format!("attempt {attempt}")));
+    use provenant_records::warning::{HANDOFF_PARSE_NOTICE, Warning, warn};
+    warn(Warning::new(HANDOFF_PARSE_NOTICE, detail.into()).subject(format!("attempt {attempt}")));
 }
 
 pub(crate) fn guidance() -> &'static str {

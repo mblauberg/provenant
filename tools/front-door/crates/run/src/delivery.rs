@@ -23,8 +23,8 @@ use std::{
 /// An advisory that keeps delivery usable rather than refusing it.
 /// Spec: docs/specs/cli.md#warnings-are-typed-values
 fn delivery_advisory(message: impl Into<String>) {
-    use provenant_records::warning::{DELIVERY_REFRESH_ADVISORY, Warning, warn};
-    warn(Warning::new(DELIVERY_REFRESH_ADVISORY, message.into()));
+    use provenant_records::warning::{DELIVERY_REFRESH_FAILED, Warning, warn};
+    warn(Warning::new(DELIVERY_REFRESH_FAILED, message.into()));
 }
 
 /// Launch delivery fields a test compares across stop-publish preparation:
@@ -1228,10 +1228,10 @@ impl HostDeliveryContext {
             .check("DELIVERY_HOST_TRANSPORT_NONE", facts)
             .message()
         {
-            use provenant_records::warning::{DELIVERY_TRANSPORT_ADVISORY, Warning, warn};
+            use provenant_records::warning::{DELIVERY_TRANSPORT_FALLBACK, Warning, warn};
             // Spec: docs/specs/cli.md#warnings-are-typed-values
             warn(
-                Warning::new(DELIVERY_TRANSPORT_ADVISORY, message)
+                Warning::new(DELIVERY_TRANSPORT_FALLBACK, message)
                     .subject("DELIVERY_HOST_TRANSPORT_NONE"),
             );
         }

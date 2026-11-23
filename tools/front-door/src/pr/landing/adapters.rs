@@ -1647,7 +1647,7 @@ fn observe_checks_with(
             Err(LandingError::RateLimited(message)) if elapsed < timeout => {
                 provenant_records::warning::warn(
                     provenant_records::warning::Warning::new(
-                        provenant_records::warning::FORGE_CONTEXT_UNRESOLVED,
+                        provenant_records::warning::GH_RATE_LIMITED,
                         format!(
                             "candidate {} check read skipped: {message}",
                             candidate.commit

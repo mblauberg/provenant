@@ -169,10 +169,10 @@ fn date_stamp(unix_ms: u64) -> String {
 }
 
 fn warn(message: &str) {
-    use provenant_records::warning::{BUILD_LEDGER_DIAGNOSTIC, Warning, warn};
+    use provenant_records::warning::{BUILD_LEDGER_NOTE, Warning, warn};
     // Spec: docs/specs/cli.md#warnings-are-typed-values
     warn(Warning::new(
-        BUILD_LEDGER_DIAGNOSTIC,
+        BUILD_LEDGER_NOTE,
         format!("provenant: {message}"),
     ));
 }

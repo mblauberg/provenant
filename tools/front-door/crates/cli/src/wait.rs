@@ -2,7 +2,7 @@
 use provenant_config::{ConfigError, DomainConfig, DomainSection, FieldMetadata, SectionError};
 use provenant_core::DurationMicros;
 use provenant_fabric_runtime::coordination::{LOCAL_OBSERVATION_INTERVAL_KEY, ObservationSettings};
-use provenant_records::warning::{CONFIG_MALFORMED, Warning, warn};
+use provenant_records::warning::{Warning, warn};
 use serde::{Deserialize, Serialize};
 
 /// The configuration path every wait setting key starts with.
@@ -174,7 +174,7 @@ impl Settings {
             Err(error) => {
                 let reason = read_failure(error);
                 warn(Warning::new(
-                    CONFIG_MALFORMED,
+                    provenant_records::warning::CONFIG_UNAVAILABLE,
                     format!(
                         "wait settings use compiled defaults; configuration unavailable: {reason}"
                     ),
@@ -236,7 +236,7 @@ impl Settings {
         if requested > maximum {
             warn(
                 Warning::new(
-                    CONFIG_MALFORMED,
+                    provenant_records::warning::WAIT_BUDGET_CLAMPED,
                     format!("wait budget clamped to {maximum}s"),
                 )
                 .subject(origin.describe(MAX_TIMEOUT_KEY)),

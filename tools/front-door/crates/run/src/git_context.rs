@@ -839,10 +839,10 @@ fn fetch_tracking_ref(
                 provenant_os::sys::wait_pause(Duration::from_millis(10 * u64::from(attempt)));
             }
             TrackingRefFetch::Collision => {
-                use provenant_records::warning::{BASE_FETCH_ADVISORY, Warning, warn};
+                use provenant_records::warning::{BASE_FETCH_FALLBACK, Warning, warn};
                 // Spec: docs/specs/cli.md#warnings-are-typed-values
                 warn(Warning::new(
-                    BASE_FETCH_ADVISORY,
+                    BASE_FETCH_FALLBACK,
                     format!(
                         "base fetch hit a transient ref-lock collision after {MAX_FETCH_ATTEMPTS} attempts; retrying the launch"
                     ),
@@ -951,10 +951,10 @@ fn base_fetch_lock(executor: &dyn Executor, git: &Path, cwd: &Path) -> Option<Lo
     ) {
         Ok(guard) => Some(guard),
         Err(FsError::LockTimeout { .. }) => {
-            use provenant_records::warning::{BASE_FETCH_ADVISORY, Warning, warn};
+            use provenant_records::warning::{BASE_FETCH_FALLBACK, Warning, warn};
             // Spec: docs/specs/cli.md#warnings-are-typed-values
             warn(Warning::new(
-                BASE_FETCH_ADVISORY,
+                BASE_FETCH_FALLBACK,
                 "base fetch lock is busy; fetching without coalescing",
             ));
             None

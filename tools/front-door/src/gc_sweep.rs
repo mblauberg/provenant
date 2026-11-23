@@ -431,7 +431,7 @@ impl Drop for Lease {
             }
             warn(
                 Warning::new(
-                    CONFIG_MALFORMED,
+                    provenant_records::warning::GC_SWEEP_LEASE_UNRELEASED,
                     "could not lock GC sweep metadata to release its lease",
                 )
                 .once_per_change(),
@@ -448,7 +448,7 @@ impl Drop for Lease {
         if let Err(error) = self.write_progress_locked() {
             warn(
                 Warning::new(
-                    CONFIG_MALFORMED,
+                    provenant_records::warning::GC_SWEEP_CURSOR_UNWRITTEN,
                     format!("could not persist the released GC sweep cursor: {error}"),
                 )
                 .once_per_change(),

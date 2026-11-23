@@ -11,7 +11,7 @@ use provenant_os::{
 };
 use provenant_records::{
     CanonicalV1, FileDigest, Finding, Outcome, PathWire,
-    warning::{CONFIG_MALFORMED, Warning, warn},
+    warning::{Warning, warn},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -544,7 +544,10 @@ pub fn install_page(
             && let Some(detail) = &finding.detail
         {
             if reported.insert(detail.clone()) {
-                warn(Warning::new(CONFIG_MALFORMED, detail.clone()));
+                warn(Warning::new(
+                    provenant_records::warning::ADVISORY_FINDING,
+                    detail.clone(),
+                ));
             }
             continue;
         }
@@ -683,7 +686,10 @@ mod tests {
                 assert_eq!(page.outcome(), Outcome::Ok);
                 assert!(page.findings.is_empty());
                 assert_eq!(warnings.len(), 1);
-                assert_eq!(warnings[0].code.as_ref(), CONFIG_MALFORMED.as_str());
+                assert_eq!(
+                    warnings[0].code.as_ref(),
+                    provenant_records::warning::ADVISORY_FINDING.as_str()
+                );
                 assert_eq!(warnings[0].message, detail);
             }
         }

@@ -1,5 +1,5 @@
 use super::*;
-use provenant_records::warning::{FORGE_CONTEXT_UNRESOLVED, Warning, warn};
+use provenant_records::warning::{Warning, warn};
 
 fn model_route(model: &ModelId) -> provenant_quota::ReadinessRoute {
     provenant_quota::ReadinessRoute::model(model.adapter(), model.model())
@@ -289,7 +289,7 @@ pub(crate) fn filter_unoffered_readiness(
         );
         if is_pinned {
             warn(
-                Warning::new(FORGE_CONTEXT_UNRESOLVED, detail)
+                Warning::new(provenant_records::warning::ACCOUNT_OFFER_MISMATCH, detail)
                     .repair("The launch is attempted anyway because the account is pinned."),
             );
             kept.push(row);

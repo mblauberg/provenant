@@ -11,7 +11,7 @@ use provenant_os::fs;
 use provenant_records::Layer;
 use provenant_records::{
     CanonicalV1, CommandResult, Finding, Outcome, PathWire,
-    warning::{CONFIG_MALFORMED, Warning, warn},
+    warning::{Warning, warn},
 };
 use std::{
     ffi::OsString,
@@ -444,7 +444,10 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
             for message in crate::pool_effort_warnings(&roots).into_iter().chain(
                 provenant_config::port_declaration_warnings(Some(&project), roots.state.as_path()),
             ) {
-                warn(Warning::new(CONFIG_MALFORMED, message));
+                warn(Warning::new(
+                    provenant_records::warning::ADVISORY_FINDING,
+                    message,
+                ));
             }
             Ok(provenant_cli::check::config_page(
                 inspection,
@@ -529,7 +532,7 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
                     )
                 })
             }) {
-                warn(Warning::new(CONFIG_MALFORMED, message));
+                warn(Warning::new(provenant_records::warning::ADVISORY_FINDING, message));
             }
             let apps = crate::apps::dir(&targets.home);
             let login_item = crate::apps::stale_login_item(&apps);
@@ -549,7 +552,10 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
                         login_item.display()
                     )
                 };
-                warn(Warning::new(CONFIG_MALFORMED, message));
+                warn(Warning::new(
+                    provenant_records::warning::ADVISORY_FINDING,
+                    message,
+                ));
             }
             Ok(result)
         }),
@@ -711,7 +717,7 @@ fn private_home<T>(operation: impl FnOnce(&Path) -> Result<T, Error>) -> Result<
         (Ok(value), Err(error)) => {
             provenant_records::warning::warn(
                 provenant_records::warning::Warning::new(
-                    provenant_records::warning::CONFIG_MALFORMED,
+                    provenant_records::warning::PRIVATE_CHECK_DIR_UNCLEAN,
                     format!("cannot clean private check directory: {error}"),
                 )
                 .once_per_change(),

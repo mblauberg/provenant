@@ -3,7 +3,7 @@ use crate::metadata::CatalogueArg;
 use clap::{Args, Parser, Subcommand, ValueEnum, builder::TypedValueParser};
 use provenant_core::{AttemptId, GitOid, OperationId};
 pub use provenant_records::Harness;
-use provenant_records::warning::{CONFIG_MALFORMED, Warning, warn};
+use provenant_records::warning::{Warning, warn};
 use std::{ffi::OsString, path::PathBuf};
 
 #[derive(Debug, Parser)]
@@ -1347,7 +1347,7 @@ pub(crate) fn duration_seconds(value: &str) -> Result<u64, &'static str> {
     if seconds > maximum {
         warn(
             Warning::new(
-                CONFIG_MALFORMED,
+                provenant_records::warning::WAIT_BUDGET_CLAMPED,
                 format!("wait budget clamped to maximum {maximum}s"),
             )
             .repair("Request a smaller wait budget."),

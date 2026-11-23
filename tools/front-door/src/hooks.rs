@@ -11,7 +11,7 @@ use provenant_os::{clock::SystemClock, exec::SystemExecutor, sys::hook_io};
 use provenant_records::{
     Harness, HookAction, HookProtocol,
     inbox::*,
-    warning::{CONFIG_MALFORMED, Warning, warn},
+    warning::{Warning, warn},
 };
 use provenant_workflow::session::{CommandPrefix, HookEvent, HostSessionId};
 use serde::Deserialize;
@@ -1215,7 +1215,7 @@ fn push_history(roots: &provenant_core::Roots) -> provenant_config::LaneHistory 
         Err(error) => {
             warn(
                 Warning::new(
-                    CONFIG_MALFORMED,
+                    provenant_records::warning::CONFIG_UNAVAILABLE,
                     format!(
                         "pre-push: policy settings unavailable ({error}); using compiled defaults"
                     ),
@@ -1296,7 +1296,7 @@ fn pre_push(remote: &str, globals: &Globals, deadline: Instant) -> Result<(), Er
         Ok(project) => project,
         Err(error) => {
             warn(Warning::new(
-                CONFIG_MALFORMED,
+                provenant_records::warning::PROJECT_UNAVAILABLE,
                 format!("pre-push: project unavailable: {error}"),
             ));
             return Ok(());
@@ -1310,7 +1310,7 @@ fn pre_push(remote: &str, globals: &Globals, deadline: Instant) -> Result<(), Er
         Ok(resolved) => resolved,
         Err(error) => {
             warn(Warning::new(
-                CONFIG_MALFORMED,
+                provenant_records::warning::PROJECT_UNAVAILABLE,
                 format!("pre-push: project roots unavailable: {error}"),
             ));
             return Ok(());
@@ -1343,7 +1343,7 @@ fn pre_push(remote: &str, globals: &Globals, deadline: Instant) -> Result<(), Er
                     // only the default-branch gate and a configured refuse stop
                     // the Git operation.
                     warn(Warning::new(
-                        CONFIG_MALFORMED,
+                        provenant_records::warning::POLICY_WARNING,
                         format!("pre-push: {refusal}"),
                     ));
                     Ok(())
@@ -1359,7 +1359,7 @@ fn pre_push(remote: &str, globals: &Globals, deadline: Instant) -> Result<(), Er
             return Err(error);
         }
         warn(Warning::new(
-            CONFIG_MALFORMED,
+            provenant_records::warning::CHECK_UNAVAILABLE,
             format!("pre-push: check unavailable: {error}"),
         ));
         return Ok(());
@@ -1450,7 +1450,7 @@ fn run_local_gate(
         Ok(executor) => executor,
         Err(error) if settings.mode == LocalGateMode::Warn => {
             warn(Warning::new(
-                CONFIG_MALFORMED,
+                provenant_records::warning::CHECK_UNAVAILABLE,
                 format!("pre-push: local gate unavailable: {error}"),
             ));
             return Ok(());
@@ -1504,7 +1504,7 @@ fn run_local_gate_with(
                 return Err(message.into());
             }
             warn(Warning::new(
-                CONFIG_MALFORMED,
+                provenant_records::warning::ADVISORY_FINDING,
                 format!("pre-push: {message}"),
             ));
         }

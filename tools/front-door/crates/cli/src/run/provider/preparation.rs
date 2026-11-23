@@ -1,5 +1,5 @@
 use super::*;
-use provenant_records::warning::{CONFIG_MALFORMED, FORGE_CONTEXT_UNRESOLVED, Warning, warn};
+use provenant_records::warning::{Warning, warn};
 
 /// Resolve a provider or named command through the filtered requester PATH.
 pub(super) fn preparation_executable(
@@ -530,7 +530,7 @@ fn publish_preparation_login_failure(
         crate::quota::persist_preparation_login_failure(state, &account, reason, now)
     {
         warn(Warning::new(
-            CONFIG_MALFORMED,
+            provenant_records::warning::LOGIN_RECORD_UNRETAINED,
             format!("could not publish preparation login failure: {error}"),
         ));
     }
@@ -3022,7 +3022,7 @@ pub(super) fn prepare_candidates_inner(
         }
         Some(Err(error)) => {
             warn(Warning::new(
-                CONFIG_MALFORMED,
+                provenant_records::warning::CONFIG_UNAVAILABLE,
                 format!("{ARGV_LIMIT_KEY} unavailable ({error}); using compiled default"),
             ));
             (
@@ -3142,7 +3142,7 @@ pub(super) fn prepare_candidates_inner(
             Ok(gh) => Some(gh),
             Err(cause) => {
                 warn(Warning::new(
-                    FORGE_CONTEXT_UNRESOLVED,
+                    provenant_records::warning::GH_PUBLISHING_UNAVAILABLE,
                     format!("GitHub publishing unavailable: {cause}"),
                 ));
                 None
@@ -3511,7 +3511,7 @@ pub(super) fn prepare_candidates_inner(
                                 login_observed_at,
                             ) {
                                 warn(Warning::new(
-                                    CONFIG_MALFORMED,
+                                    provenant_records::warning::LOGIN_RECORD_UNRETAINED,
                                     format!("could not publish login recovery: {error}"),
                                 ));
                             }
@@ -3982,7 +3982,7 @@ pub(super) fn prepare_candidates_inner(
                 let diagnostic = run::ErrorKind::StaleReadiness.diagnostic();
                 warn(
                     Warning::new(
-                        FORGE_CONTEXT_UNRESOLVED,
+                        provenant_records::warning::ACCOUNT_READINESS_STALE,
                         format!(
                             "[{}] {}",
                             diagnostic.code,
@@ -5130,7 +5130,7 @@ pub(super) fn prepare_candidates_inner(
         if publishing && !gh_permitted {
             warn(
                 Warning::new(
-                    FORGE_CONTEXT_UNRESOLVED,
+                    provenant_records::warning::GH_CREDENTIALS_WITHHELD,
                     "GitHub publishing credentials withheld by the access policy",
                 )
                 .subject(label.as_str()),
@@ -5202,7 +5202,8 @@ pub(super) fn prepare_candidates_inner(
                 Ok(origin) => super::gh_auth::Delivery::Injected(origin),
                 Err(warning) => {
                     warn(
-                        Warning::new(FORGE_CONTEXT_UNRESOLVED, warning).subject(label.to_string()),
+                        Warning::new(provenant_records::warning::GH_LOGIN_UNAVAILABLE, warning)
+                            .subject(label.to_string()),
                     );
                     super::gh_auth::Delivery::None("login lookup failed".into())
                 }
@@ -5469,12 +5470,18 @@ pub(super) fn prepare_candidates_inner(
             spec.model_observation == provenant_records::ModelObservation::SessionDatabase
         }) {
             let message = opencode_access_message(&lane_access);
-            warn(Warning::new(CONFIG_MALFORMED, message.clone()));
+            warn(Warning::new(
+                provenant_records::warning::LAUNCH_ACCESS_PROFILE,
+                message.clone(),
+            ));
             for warning in spec.warnings.iter().chain(continuation_warning.iter()) {
                 let text = warning
                     .strip_prefix("warning: ")
                     .unwrap_or(warning.as_str());
-                warn(Warning::new(CONFIG_MALFORMED, text.to_string()));
+                warn(Warning::new(
+                    provenant_records::warning::LAUNCH_ACCESS_PROFILE,
+                    text.to_string(),
+                ));
             }
             provider.launch_warnings.push(message);
         }
@@ -5539,7 +5546,8 @@ pub(super) fn prepare_candidates_inner(
                 Ok(origin) => super::gh_auth::Delivery::Injected(origin),
                 Err(warning) => {
                     warn(
-                        Warning::new(FORGE_CONTEXT_UNRESOLVED, warning).subject(label.to_string()),
+                        Warning::new(provenant_records::warning::GH_LOGIN_UNAVAILABLE, warning)
+                            .subject(label.to_string()),
                     );
                     super::gh_auth::Delivery::None("login lookup failed".into())
                 }
