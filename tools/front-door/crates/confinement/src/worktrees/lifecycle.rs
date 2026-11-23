@@ -557,12 +557,14 @@ fn reuse_existing_worktree(
     }
     let verified = verify_probed_worktree(context, &entry.path, cancel)?;
     let dirty = worktree_dirty_at(context, verified.repo(), cancel)?;
-    if dirty != WorktreeCondition::Clean {
+    // Ignored files (build output) are not uncommitted work and do not block reuse.
+    if !matches!(dirty, WorktreeCondition::Clean | WorktreeCondition::Ignored) {
         let condition = match dirty {
-            WorktreeCondition::Ignored => "has ignored files",
             WorktreeCondition::Dirty => "has uncommitted changes",
             WorktreeCondition::GitOperationInProgress => "has a Git operation in progress",
-            WorktreeCondition::Unknown | WorktreeCondition::Clean => "has unknown cleanliness",
+            WorktreeCondition::Unknown | WorktreeCondition::Clean | WorktreeCondition::Ignored => {
+                "has unknown cleanliness"
+            }
         };
         return Err(conflict(format!("the checkout {condition}")));
     }
@@ -577,6 +579,7 @@ fn reuse_existing_worktree(
         "reusing the existing worktree for branch {}; no new checkout was created",
         branch.as_str()
     ));
+    let occupancy = combine_occupancy(&path, Occupancy::Available, writer);
     Ok(WorktreeInfo {
         warnings,
         path,
@@ -585,7 +588,7 @@ fn reuse_existing_worktree(
         dirty,
         owner,
         primary: false,
-        occupancy: combine_occupancy(&path, Occupancy::Available, writer),
+        occupancy,
     })
 }
 
