@@ -15,8 +15,17 @@ fn main() -> ExitCode {
     if first.as_deref() == Some(OsStr::new(INTERNAL_GIT_HOOKS_PATH)) {
         return git_hooks_path_helper(args.collect());
     }
-    let parsed = provenant_cli::parse(first.into_iter().chain(args));
-    ExitCode::from(provenant::dispatch(parsed, &provenant::System))
+    // Clap's value parsers can raise warnings (for example a capitalised name
+    // folded while parsing) before dispatch installs the command sink. Capture
+    // them here and hand them to dispatch, which replays them into the sink so
+    // they reach the envelope under --json instead of leaking to stderr.
+    let (parsed, parse_warnings) =
+        provenant_records::warning::capture(|| provenant_cli::parse(first.into_iter().chain(args)));
+    ExitCode::from(provenant::dispatch(
+        parsed,
+        &provenant::System,
+        parse_warnings,
+    ))
 }
 
 /// Protocol used only by the generated Git wrapper. Exit 1 means the setting

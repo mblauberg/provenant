@@ -27,10 +27,10 @@ fn lane_reader_process() -> Result {
     }
     let arguments: Vec<String> = serde_json::from_str(arguments.to_str().ok_or("arguments")?)?;
     let expected = std::env::var("PROVENANT_TEST_LANE_READ_EXIT")?.parse::<u8>()?;
-    let actual = crate::dispatch(
-        provenant_cli::parse(arguments.into_iter().map(Into::into)),
-        &crate::System,
-    );
+    let (parsed, warnings) = provenant_records::warning::capture(|| {
+        provenant_cli::parse(arguments.into_iter().map(Into::into))
+    });
+    let actual = crate::dispatch(parsed, &crate::System, warnings);
     assert_eq!(actual, expected);
     Ok(())
 }

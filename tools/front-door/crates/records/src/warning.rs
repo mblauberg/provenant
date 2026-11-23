@@ -72,6 +72,8 @@ pub const MIGRATION_STEP_FAILED: WarningCode = WarningCode("MIGRATION_STEP_FAILE
 pub const STATE_ROOT_OVERLAP: WarningCode = WarningCode("STATE_ROOT_OVERLAP");
 /// The one forge context could not be resolved, so a fail-closed path applies.
 pub const FORGE_CONTEXT_UNRESOLVED: WarningCode = WarningCode("FORGE_CONTEXT_UNRESOLVED");
+/// A result exceeded the output cap and was bounded with a marker.
+pub const RESULT_TOO_LARGE: WarningCode = WarningCode("RESULT_TOO_LARGE");
 
 impl Warning {
     /// A warning with no subject, source or repair.
@@ -300,6 +302,8 @@ mod tests {
             super::LIVE_RECORD_FORMAT_CHANGED,
             super::MIGRATION_STEP_FAILED,
             super::STATE_ROOT_OVERLAP,
+            super::RESULT_TOO_LARGE,
+            super::FORGE_CONTEXT_UNRESOLVED,
         ] {
             let name = code.as_str();
             assert!(
