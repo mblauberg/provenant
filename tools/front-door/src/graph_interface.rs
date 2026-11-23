@@ -214,16 +214,21 @@ fn refusal_lines(checkpoint: &Value) -> String {
 
 /// The compact `run` result: the headline, unless it was already announced,
 /// then the one next command. A refusal before admission adds its own line.
-fn run_human(data: &Value, input: &Value, announced: bool) -> String {
+fn run_human(
+    data: &Value,
+    input: &Value,
+    announced: bool,
+) -> (String, provenant_records::command_result::NextStep) {
     let graph = data["checkpoint"]["graph_id"].as_str().unwrap_or_default();
     let rest = match data["status"].as_str() {
         Some("complete" | "cancelled") => format!("output {graph}"),
         Some("paused") => format!("status {graph}"),
         _ => format!("wait {graph}"),
     };
-    let next = provenant_workflow::session::CommandPrefix::default()
-        .runnable(&rest)
-        .unwrap_or_else(|| format!("provenant {rest}"));
+    let next = provenant_records::command_result::NextStep::from_command(
+        &format!("provenant {rest}"),
+        "follow this run",
+    );
     let status = data["status"].as_str().unwrap_or("pending");
     let document = input.get("document");
     // A changed input under a known name starts a suffixed graph. Say so in
@@ -256,10 +261,10 @@ fn run_human(data: &Value, input: &Value, announced: bool) -> String {
         }
     }
     if announced {
-        format!("{lanes}next: {next}\n")
+        (lanes, next)
     } else {
         let headline = run_headline(&data["checkpoint"], status, document, input);
-        format!("{notice}{headline}\n{lanes}next: {next}\n")
+        (format!("{notice}{headline}\n{lanes}"), next)
     }
 }
 
@@ -395,18 +400,23 @@ fn invoke(
     })();
     match result {
         Ok(data) => {
-            let human = if command == "run"
+            let (human, next) = if command == "run"
                 && !globals.full
                 && data["checkpoint"]["graph_id"].is_string()
             {
-                run_human(&data, &input, announced.get())
+                let (human, step) = run_human(&data, &input, announced.get());
+                (human, Some(step))
             } else {
-                serde_json::to_string_pretty(&data).unwrap_or_default() + "\n"
+                (
+                    serde_json::to_string_pretty(&data).unwrap_or_default() + "\n",
+                    None,
+                )
             };
             // A replay reports the graph its input already started; its failure
             // was reported when it happened.
             let replayed = data["named"]["replayed"] == true;
             let mut result = CommandResult::new(command, response_outcome(command, &data), data);
+            result.next = next.into_iter().collect();
             if command == "run"
                 && let Some(refusal) = result.data["source_admission"]
                     .as_array()
@@ -909,7 +919,6 @@ pub(crate) fn templates_summary(
                 format!("nodes: {nodes_str}"),
                 format!("parameters: {params_str}"),
             ],
-            next: None,
             omitted: 0,
         })
     } else {
@@ -932,11 +941,7 @@ pub(crate) fn templates_summary(
         if lines.is_empty() {
             lines.push("no templates".to_string());
         }
-        Some(provenant_cli::Summary {
-            lines,
-            next: None,
-            omitted: 0,
-        })
+        Some(provenant_cli::Summary { lines, omitted: 0 })
     }
 }
 
@@ -1400,19 +1405,22 @@ mod tests {
             let data =
                 json!({"status":status, "checkpoint":{"graph_id":"review-1", "nodes":nodes}});
             for announced in [false, true] {
-                let human = run_human(&data, &json!({"op":"run"}), announced);
+                let (human, step) = run_human(&data, &json!({"op":"run"}), announced);
                 assert!(
                     human.starts_with(if announced { "refused" } else { "review-1" }),
                     "{human}"
                 );
-                assert!(human.ends_with(&format!("next: {command}\n")), "{human}");
-                assert!(
-                    human
-                        .lines()
-                        .filter(|line| line.starts_with("next:"))
-                        .count()
-                        == 1
+                // The suggested command is a typed step; the edge renders the
+                // human line from the same argv it puts on the JSON envelope.
+                assert_eq!(step.argv, command.split_whitespace().collect::<Vec<_>>());
+                assert_eq!(
+                    provenant_cli::next_steps_text(
+                        &[step],
+                        &provenant_workflow::session::CommandPrefix::default()
+                    ),
+                    format!("next: {command}\n")
                 );
+                assert!(!human.lines().any(|line| line.starts_with("next:")));
                 assert!(
                     human
                         .lines()
@@ -1427,7 +1435,7 @@ mod tests {
     fn compact_run_reports_resolved_lane_access() {
         let data = json!({"status":"pending", "checkpoint":{"graph_id":"work", "nodes":[]},
             "lane_accesses":[{"access":"isolated","source":"route","key":"rules.policy.lane.access"}]});
-        let human = run_human(&data, &json!({}), true);
+        let (human, _) = run_human(&data, &json!({}), true);
         assert!(human.contains("access: isolated (rules.policy.lane.access route)\n"));
     }
 
@@ -1464,7 +1472,7 @@ mod tests {
             .collect();
         let data = json!({"checkpoint":{"graph_id":"example","nodes":[]},"status":"pending","warnings":messages});
         for announced in [false, true] {
-            let output = run_human(&data, &json!({"op":"run"}), announced);
+            let (output, _) = run_human(&data, &json!({"op":"run"}), announced);
             assert!(output.contains("warning: [SECRET_SHAPED_INPUT]"));
             assert!(output.contains("brief looks like a credential"));
             assert!(!output.contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"));
@@ -1475,22 +1483,21 @@ mod tests {
     fn a_suffixed_name_is_announced_and_a_replay_is_not_a_failure() {
         let data = json!({"status":"pending", "named":{"requested":"fix", "graph":"fix-2", "superseded":"fix"},
             "checkpoint":{"graph_id":"fix-2", "nodes":[]}});
-        let human = run_human(&data, &json!({}), false);
+        let (human, _) = run_human(&data, &json!({}), false);
         assert!(
             human.starts_with("started fix-2 (fix exists with a different input)\n"),
             "{human}"
         );
-        // An already-announced launch prints the next step only; the notice
-        // was the first line written at launch time and is never duplicated.
-        let announced = run_human(&data, &json!({}), true);
+        // An already-announced launch carries the next step on the envelope;
+        // the notice was the first line written at launch time and is never
+        // duplicated in the result.
+        let (announced, step) = run_human(&data, &json!({}), true);
         assert!(
             !announced.contains("exists with a different input"),
             "{announced}"
         );
-        assert!(
-            announced.starts_with("next: provenant wait fix-2\n"),
-            "{announced}"
-        );
+        assert_eq!(step.argv, ["provenant", "wait", "fix-2"]);
+        assert!(announced.is_empty(), "{announced}");
         let replay = json!({"status":"complete", "outcome":"failed", "named":{"graph":"fix", "replayed":true}});
         assert_eq!(response_outcome("run", &replay), Outcome::Ok);
         let fresh = json!({"status":"complete", "outcome":"failed"});

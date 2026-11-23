@@ -155,17 +155,17 @@ fn settle_states(sources: &[Source], latest: &[Option<Reading>], done: bool) -> 
     }
 }
 
-/// The one next command, paired with the states in the summary's `next` line.
-fn final_line(
+/// The one next command, paired with the settle states as its `why`. The edge
+/// renders this typed step once for human output; JSON carries the same argv.
+fn final_step(
     sources: &[Source],
     latest: &[Option<Reading>],
     done: bool,
     superseding: &[String],
-) -> String {
-    format!(
-        "next: {}; {}\n",
+) -> provenant_records::command_result::NextStep {
+    provenant_records::command_result::NextStep::from_command(
+        &next_command(sources, latest, superseding),
         settle_states(sources, latest, done),
-        next_command(sources, latest, superseding)
     )
 }
 
@@ -1267,7 +1267,6 @@ fn emit_child_wait(
     } else {
         summary_lines.join(", ")
     };
-    human.push_str(&format!("next: {states}; provenant status\n"));
     if let Some(error) = write_error {
         return crate::fail(
             "wait",
@@ -1279,17 +1278,17 @@ fn emit_child_wait(
         );
     }
     let outcome = child_wait_outcome(children, mode, settled_order);
-    let summary = provenant_cli::Summary::new(
-        mode_heading(mode).trim_end().to_owned(),
-        summary_lines,
-        Some(format!("{states}; next: provenant status")),
-    );
+    let summary =
+        provenant_cli::Summary::new(mode_heading(mode).trim_end().to_owned(), summary_lines);
+    let step =
+        provenant_records::command_result::NextStep::from_command("provenant status", states);
     crate::emit_summarised(
         &provenant_records::CommandResult::new(
             "wait",
             outcome,
             terminal_data(mode, rows, false, Some(&observation)),
-        ),
+        )
+        .with_next(vec![step]),
         globals,
         &human,
         true,
@@ -2294,19 +2293,14 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
             }
         }
     }
-    human.push_str(&final_line(&sources, &latest, done, &superseding));
-    // Compact output keeps an owner summary, not a head-only truncation, so
-    // the settle states and the next command stay on its last line.
+    let step = final_step(&sources, &latest, done, &superseding);
+    // Compact output keeps an owner summary. The settle states and the next
+    // command now travel as one typed step on the envelope, not as two strings.
     let mut summary = provenant_cli::Summary::new(
         mode_heading(mode).trim_end().to_owned(),
         rows.iter()
             .map(|row| row["line"].as_str().unwrap_or("").to_owned())
             .collect(),
-        Some(format!(
-            "{}; {}",
-            settle_states(&sources, &latest, done),
-            next_command(&sources, &latest, &superseding)
-        )),
     );
     // Completion reports must retain every failing check and its link in compact output.
     for (source, reading) in sources.iter().zip(&latest) {
@@ -2328,7 +2322,8 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                 !done,
                 (!graph_indices.is_empty()).then_some(observation.as_str()),
             ),
-        ),
+        )
+        .with_next(vec![step]),
         globals,
         &human,
         true,
@@ -2837,7 +2832,7 @@ mod tests {
             Some(reading(Pending)),
         ];
         assert_eq!(
-            final_line(&sources, &mixed, false, &[]),
+            final_human(&sources, &mixed, false, &[]),
             "next: fixed settled ok, broken failed, input needs input, slow still running at timeout; provenant wait slow\n"
         );
         let settled = vec![
@@ -2847,18 +2842,32 @@ mod tests {
             Some(reading(Succeeded)),
         ];
         assert_eq!(
-            final_line(&sources, &settled, true, &[]),
+            final_human(&sources, &settled, true, &[]),
             "next: fixed settled ok, broken failed, input needs input, slow settled ok; provenant status fixed broken input slow\n"
         );
         assert_eq!(
-            final_line(&[], &[], true, &[]),
+            final_human(&[], &[], true, &[]),
             "next: nothing to wait for; provenant status\n"
         );
         // A superseded target keeps its states; the next command names the newer handle.
         assert_eq!(
-            final_line(&sources, &settled, true, &["slow-2".to_owned()]),
+            final_human(&sources, &settled, true, &["slow-2".to_owned()]),
             "next: fixed settled ok, broken failed, input needs input, slow settled ok; provenant wait slow-2\n"
         );
+    }
+
+    /// The human last line is the edge rendering the typed step; this pins the
+    /// two views to the same `why` and `argv`.
+    fn final_human(
+        sources: &[Source],
+        latest: &[Option<Reading>],
+        done: bool,
+        superseding: &[String],
+    ) -> String {
+        provenant_cli::next_steps_text(
+            &[final_step(sources, latest, done, superseding)],
+            &provenant_workflow::session::CommandPrefix::default(),
+        )
     }
 
     fn reading(settle: Settle) -> Reading {

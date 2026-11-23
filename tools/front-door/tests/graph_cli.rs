@@ -2042,7 +2042,7 @@ fn a_changed_brief_leads_the_launch_with_the_new_handle_and_json_field() -> Resu
     );
     assert!(
         text.lines()
-            .any(|line| line.starts_with("next: provenant ") && line.ends_with("once-3")),
+            .any(|line| line.starts_with("next: ") && line.ends_with("provenant output once-3")),
         "{text}"
     );
     Ok(())
@@ -2110,7 +2110,9 @@ fn status_on_a_superseded_name_points_at_the_newer_handle() -> Result {
     let text = String::from_utf8_lossy(&output.stdout);
     let warning = String::from_utf8_lossy(&output.stderr);
     assert!(
-        text.contains("next: provenant status status-once-2\n"),
+        text.lines()
+            .any(|line| line.starts_with("next: ")
+                && line.ends_with("provenant status status-once-2")),
         "{text}"
     );
     assert!(

@@ -71,9 +71,14 @@ pub(crate) fn superseding_handle(
     newest.map(|(_, id)| id)
 }
 
-/// The warning and `next:` lines a superseded name adds to a human view. The
-/// target is still read as asked; only the pointer moves to the newer handle.
-pub(crate) fn superseded_notice(name: &str, newest: &str, verb: &str) -> String {
+/// The warning a superseded name adds to a human view, plus the typed step
+/// pointing at the newer handle. The target is still read as asked; only the
+/// pointer moves.
+pub(crate) fn superseded_notice(
+    name: &str,
+    newest: &str,
+    verb: &str,
+) -> provenant_records::command_result::NextStep {
     provenant_records::warning::warn(
         provenant_records::warning::Warning::new(
             provenant_records::warning::NAME_ALIAS_USED,
@@ -82,7 +87,10 @@ pub(crate) fn superseded_notice(name: &str, newest: &str, verb: &str) -> String 
         .subject(name)
         .repair(format!("provenant {verb} {newest}")),
     );
-    format!("next: provenant {verb} {newest}\n")
+    provenant_records::command_result::NextStep::from_args(
+        &["provenant", verb, newest],
+        "read the newer graph handle",
+    )
 }
 
 impl Factory {
@@ -579,12 +587,6 @@ pub(crate) fn render_graph_status(rows: &[Value]) -> String {
             .collect()
     };
     lines.sort_by_key(|(row, _)| priority(row));
-    let next = graphs
-        .iter()
-        .chain(lines.iter().map(|(row, _)| row))
-        .min_by_key(|row| priority(row))
-        .map(|row| plain(&row["next"]))
-        .unwrap_or_default();
     let mut human = String::new();
     for graph in &graphs {
         human.push_str(&status_line(&plain(&graph["id"]), graph, None));
@@ -626,14 +628,43 @@ pub(crate) fn render_graph_status(rows: &[Value]) -> String {
             ));
         }
     }
-    if !next.is_empty() {
-        human.push_str(&provenant_cli::bounded_text(
-            &format!("next: {next}"),
-            provenant_cli::limits::SUMMARY_ROW_BYTES,
-        ));
-        human.push('\n');
-    }
     human
+}
+
+/// The one suggested command a graph status read offers, as a typed step. The
+/// row projection already owns the command text; this only turns it into the
+/// value the JSON envelope carries and the edge renders once.
+pub(crate) fn graph_status_next(
+    rows: &[Value],
+) -> Option<provenant_records::command_result::NextStep> {
+    let priority = |row: &&Value| match row["state"].as_str() {
+        Some("failed" | "blocked" | "paused" | "unresolved" | "unreadable") => 0,
+        Some("complete" | "succeeded" | "terminal")
+            if row["outcome"]
+                .as_str()
+                .is_some_and(|outcome| outcome != "succeeded") =>
+        {
+            1
+        }
+        Some("pending" | "running" | "starting") => 2,
+        _ => 3,
+    };
+    let graphs: Vec<_> = rows.iter().filter(|row| row["kind"] == "graph").collect();
+    let nodes: Vec<_> = rows.iter().filter(|row| row["kind"] == "node").collect();
+    let lines: Vec<_> = if nodes.is_empty() {
+        rows.iter().filter(|row| row["kind"] == "attempt").collect()
+    } else {
+        nodes.iter().map(|node| *node).collect()
+    };
+    let command = graphs
+        .iter()
+        .chain(lines.iter().copied())
+        .min_by_key(|row| priority(row))
+        .map(|row| plain(&row["next"]))
+        .unwrap_or_default();
+    (!command.is_empty()).then(|| {
+        provenant_records::command_result::NextStep::from_command(&command, "act on this graph")
+    })
 }
 
 fn plain(value: &Value) -> String {
@@ -923,15 +954,9 @@ pub(crate) fn status_summary(rows: &[Value]) -> provenant_cli::Summary {
     }
 
     let omitted = lines.len().saturating_sub(shown_indices.len());
-    let next = lines
-        .iter()
-        .filter_map(|(node, _)| node["next"].as_str())
-        .find(|s| !s.is_empty())
-        .map(str::to_owned);
 
     provenant_cli::Summary {
         lines: std::iter::once(headline).chain(summary_rows).collect(),
-        next,
         omitted,
     }
 }
@@ -1729,7 +1754,8 @@ pub(crate) fn unified_graph_command(
         let cancel = CancelToken::new();
         let mut documents = Vec::new();
         let mut human = String::new();
-        let mut superseded_next: Option<String> = None;
+        let mut next_steps: Vec<provenant_records::command_result::NextStep> = Vec::new();
+        let mut superseded_next: Option<provenant_records::command_result::NextStep> = None;
         for (selector, graph) in selectors {
             let mut input = json!({"op":name,"id":selector});
             match &command {
@@ -1750,6 +1776,7 @@ pub(crate) fn unified_graph_command(
                 let mut data = lane_graph_read(input)?;
                 let rows = data["rows"].as_array().ok_or(FacadeError::StateCorrupt)?;
                 human.push_str(&render_graph_status(rows));
+                next_steps.extend(graph_status_next(rows));
                 data["digests"] = json!(super::graph_status::node_digests(rows));
                 documents.push(data);
                 continue;
@@ -1766,6 +1793,7 @@ pub(crate) fn unified_graph_command(
             }
             let rows = data["rows"].as_array().ok_or(FacadeError::StateCorrupt)?;
             human.push_str(&render_graph_status(rows));
+            next_steps.extend(graph_status_next(rows));
             if globals.full && matches!(command, GraphCommand::Status) {
                 for row in rows.iter().filter(|row| row["kind"] == "attempt") {
                     if let Some(attempt) = row["attempt_id"].as_str().and_then(|id| id.parse().ok())
@@ -1782,8 +1810,7 @@ pub(crate) fn unified_graph_command(
                     name,
                 )
             {
-                human.push_str(&superseded_notice(name, &newest, "status"));
-                superseded_next.get_or_insert(format!("provenant status {newest}"));
+                superseded_next.get_or_insert(superseded_notice(name, &newest, "status"));
             }
             data["digests"] = json!(super::graph_status::node_digests(rows));
             if matches!(command, GraphCommand::Stop { .. })
@@ -1821,18 +1848,16 @@ pub(crate) fn unified_graph_command(
                             .cloned()
                             .unwrap_or_default()
                     };
-                let mut summary = status_summary(&rows);
-                // A superseded name points at the newer handle, not at the
-                // older graph's own next step.
-                if superseded_next.is_some() {
-                    summary.next = superseded_next;
-                }
-                Some(summary)
+                Some(status_summary(&rows))
             } else {
                 None
             };
+            // A superseded name points at the newer handle, not at the older
+            // graph's own next step.
+            let steps = superseded_next.map_or(next_steps, |step| vec![step]);
             crate::emit_summarised(
-                &provenant_records::CommandResult::new(name, provenant_records::Outcome::Ok, data),
+                &provenant_records::CommandResult::new(name, provenant_records::Outcome::Ok, data)
+                    .with_next(steps),
                 globals,
                 &human,
                 false,
@@ -2618,12 +2643,20 @@ pub(crate) fn graph_listing(
                     "{count} {state} graph(s) not shown; use {more} to list them\n"
                 ));
             }
-            if let Some(cursor) = listing.next {
-                human.push_str(&format!(
-                    "next: provenant status --all --limit {} --cursor {cursor}\n",
-                    command.limit
-                ));
-            }
+            let page_next = listing.next.map(|cursor| {
+                provenant_records::command_result::NextStep::from_args(
+                    &[
+                        "provenant",
+                        "status",
+                        "--all",
+                        "--limit",
+                        &command.limit.to_string(),
+                        "--cursor",
+                        &cursor.to_string(),
+                    ],
+                    "read the next page of graphs",
+                )
+            });
             if let Ok(roots) = crate::roots::resolve(
                 globals,
                 crate::roots::Workspace::Home,
@@ -2675,7 +2708,8 @@ pub(crate) fn graph_listing(
                     "status",
                     provenant_records::Outcome::Ok,
                     data,
-                ),
+                )
+                .with_next(page_next.into_iter().collect()),
                 globals,
                 &human,
                 true,
@@ -2843,7 +2877,7 @@ fn listed_state(graph: &ListedGraph) -> &str {
 
 fn listing_summary(
     listing: &Listing,
-    command_limit: u64,
+    _command_limit: u64,
     now_micros: i64,
 ) -> provenant_cli::Summary {
     let tally = ranked_tally(listing.rows.iter().map(listed_state));
@@ -2900,9 +2934,6 @@ fn listing_summary(
     }
 
     let omitted = listing.rows.len().saturating_sub(shown_indices.len());
-    let next = listing
-        .next
-        .map(|cursor| format!("provenant status --all --limit {command_limit} --cursor {cursor}"));
 
     provenant_cli::Summary {
         lines: std::iter::once(headline)
@@ -2910,7 +2941,6 @@ fn listing_summary(
             .chain(admission_lines(listing, now_micros))
             .chain(summary_lines(&listing.stranded_work))
             .collect(),
-        next,
         omitted,
     }
 }
@@ -3313,11 +3343,7 @@ fn result_reply(target: &provenant_cli::Target, rows: &[Value]) -> provenant_cli
             json!({"rows": selected}),
         ),
         human,
-        summary: Some(provenant_cli::Summary::new(
-            "lane results",
-            compact_rows,
-            None,
-        )),
+        summary: Some(provenant_cli::Summary::new("lane results", compact_rows)),
         read_only: true,
     }
 }
@@ -3770,8 +3796,10 @@ fn with_graph_failures(
             summary
                 .lines
                 .splice(0..0, reading.lines().map(str::to_owned));
-            summary.next = None;
         }
+        // A graph-failure reading replaces the owner's suggested command: it
+        // has its own diagnostics and must not point at a stale next step.
+        reply.result.next.clear();
     }
     reply
 }
@@ -5701,19 +5729,16 @@ mod tests {
         }
         let reading = render_graph_status(&many);
         // The owner summary bound (cli.md "Agent output"): the graph line, at
-        // most LISTING_ROWS node lines, the omission count and `next`, each
-        // line within SUMMARY_ROW_BYTES.
+        // most LISTING_ROWS node lines and the omission count, each line within
+        // SUMMARY_ROW_BYTES. The suggested command is a typed step, rendered by
+        // the edge from the same argv the JSON envelope carries.
         use provenant_cli::limits::{LISTING_ROWS, SUMMARY_ROW_BYTES};
         let lines: Vec<_> = reading.lines().collect();
         let omissions = lines
             .iter()
             .filter(|line| line.contains(" nodes not shown;"))
             .count();
-        let next = usize::from(lines.last().is_some_and(|line| line.starts_with("next: ")));
-        assert!(
-            lines.len() <= 1 + LISTING_ROWS + omissions + next,
-            "{reading}"
-        );
+        assert!(lines.len() <= 1 + LISTING_ROWS + omissions, "{reading}");
         assert!(
             reading.lines().all(|line| line.len() <= SUMMARY_ROW_BYTES),
             "{reading}"
@@ -5723,9 +5748,14 @@ mod tests {
         assert!(first_node.starts_with("g/parent"), "{reading}");
         assert!(first_node.contains(" failed "), "{reading}");
         assert!(first_node.contains("AUTH_REQUIRED"), "{reading}");
-        assert!(
-            reading.ends_with("next: provenant retry g/parent\n"),
-            "{reading}"
+        let step = graph_status_next(&rows).expect("a failed graph offers a next step");
+        assert_eq!(step.argv, ["provenant", "retry", "g/parent"]);
+        assert_eq!(
+            provenant_cli::next_steps_text(
+                &[step],
+                &provenant_workflow::session::CommandPrefix::default()
+            ),
+            "next: provenant retry g/parent\n"
         );
         // Per-state omission counts are checked at the CLI boundary; do not
         // pin the human omission sentence here.
@@ -5786,7 +5816,7 @@ mod tests {
                     json!({"outputs":[]}),
                 ),
                 human: String::new(),
-                summary: Some(provenant_cli::Summary::verbatim("attempt output", None)),
+                summary: Some(provenant_cli::Summary::verbatim("attempt output")),
                 read_only: true,
             },
             std::slice::from_ref(node),
@@ -5866,7 +5896,15 @@ mod tests {
         ];
         let reading = render_graph_status(&rows);
         assert!(reading.starts_with("g complete"), "{reading}");
-        assert!(reading.ends_with("next: provenant output g\n"));
+        let step = graph_status_next(&rows).expect("a settled graph offers a next step");
+        assert_eq!(step.argv, ["provenant", "output", "g"]);
+        assert_eq!(
+            provenant_cli::next_steps_text(
+                &[step],
+                &provenant_workflow::session::CommandPrefix::default()
+            ),
+            "next: provenant output g\n"
+        );
     }
 
     #[test]

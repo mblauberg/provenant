@@ -830,17 +830,20 @@ pub(crate) fn run(globals: &Globals, workers: &'static dyn WorkerObserver) -> u8
                         .map(|diagnostic| format!("note: {}: {diagnostic}", task.task))
                 }))
                 .collect();
-            let summary = provenant_cli::Summary::new(
-                human.trim(),
-                rows,
-                failed.then(|| "provenant tick --json".into()),
-            );
+            let summary = provenant_cli::Summary::new(human.trim(), rows);
+            let next = failed.then(|| {
+                provenant_records::command_result::NextStep::from_command(
+                    "provenant tick --json",
+                    "inspect the failed scheduled tasks",
+                )
+            });
             crate::emit_summarised(
                 &CommandResult::new(
                     "tick",
                     if failed { Outcome::Error } else { Outcome::Ok },
                     data,
-                ),
+                )
+                .with_next(next.into_iter().collect()),
                 globals,
                 &human,
                 false,

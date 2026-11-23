@@ -3143,13 +3143,24 @@ fn shared_pool_exhaustions(snapshot: &provenant_quota::QuotaSnapshot) -> Option<
         .collect();
     (!exhausted.is_empty()).then(|| exhausted.join(", "))
 }
-/// Counts by state, then the accounts that need attention, then the command
-/// that shows the rest.
-fn quota_summary(report: &QuotaReport) -> crate::Summary {
+/// Counts by state, then the accounts that need attention, then the typed next
+/// step that shows the rest.
+fn quota_summary(
+    report: &QuotaReport,
+) -> (
+    crate::Summary,
+    Option<provenant_records::command_result::NextStep>,
+) {
     quota_summary_at(report, jiff::tz::TimeZone::system())
 }
 
-fn quota_summary_at(report: &QuotaReport, time_zone: jiff::tz::TimeZone) -> crate::Summary {
+fn quota_summary_at(
+    report: &QuotaReport,
+    time_zone: jiff::tz::TimeZone,
+) -> (
+    crate::Summary,
+    Option<provenant_records::command_result::NextStep>,
+) {
     let state = |row: &provenant_quota::AccountRow| {
         serde_json::to_value(row.status)
             .ok()
@@ -3231,16 +3242,23 @@ fn quota_summary_at(report: &QuotaReport, time_zone: jiff::tz::TimeZone) -> crat
         .accounts
         .iter()
         .any(|row| !matches!(row.status, QuotaStatus::Available | QuotaStatus::CreditOnly))
-        .then(|| "provenant quota tick".to_owned());
-    crate::Summary::new(
-        format!(
-            "quota {}/{} current{}{}",
-            report.coverage.known,
-            report.coverage.total,
-            if tally.is_empty() { "" } else { ": " },
-            tally
+        .then(|| {
+            provenant_records::command_result::NextStep::from_command(
+                "provenant quota tick",
+                "refresh the current quota observations",
+            )
+        });
+    (
+        crate::Summary::new(
+            format!(
+                "quota {}/{} current{}{}",
+                report.coverage.known,
+                report.coverage.total,
+                if tally.is_empty() { "" } else { ": " },
+                tally
+            ),
+            rows,
         ),
-        rows,
         next,
     )
 }
@@ -3267,6 +3285,7 @@ pub fn run(
     };
     let started = std::time::Instant::now();
     let mut summary = None;
+    let mut next_steps: Vec<provenant_records::command_result::NextStep> = Vec::new();
     let result = match &command {
         Quota::History {
             account,
@@ -3333,13 +3352,18 @@ pub fn run(
                 data["model_discovery"] = serde_json::to_value(changes)?;
             }
             if matches!(command, Quota::Show(_)) {
-                summary = Some(quota_summary(&report));
+                let (owner_summary, next) = quota_summary(&report);
+                summary = Some(owner_summary);
+                next_steps.extend(next);
             }
             Ok((data, human))
         }),
     };
     let (mut envelope, human) = match result {
-        Ok((report, human)) => (CommandResult::new(name, Outcome::Ok, Some(report)), human),
+        Ok((report, human)) => (
+            CommandResult::new(name, Outcome::Ok, Some(report)).with_next(next_steps),
+            human,
+        ),
         Err(error) => {
             let status = match &error {
                 EdgeError::Config(provenant_config::ConfigError::Read { .. }) => Outcome::Error,
@@ -4156,7 +4180,7 @@ mod tests {
             display: Default::default(),
             display_icon_warning: Some("warning".into()),
         };
-        let summary = quota_summary(&report);
+        let (summary, next) = quota_summary(&report);
         assert_eq!(summary.lines.len(), 5); // headline, warning, and all three accounts
         assert!(
             summary
@@ -4177,16 +4201,24 @@ mod tests {
                 .any(|line| line.contains("Exhausted [test]: exhausted"))
         );
         assert_eq!(summary.omitted, 0);
-        assert_eq!(summary.next.as_deref(), Some("provenant quota tick"));
+        assert_eq!(
+            next.expect("an exhausted account recommends a typed next step")
+                .argv,
+            ["provenant", "quota", "tick"]
+        );
         for _ in 0..14 {
             report.accounts.push(row(QuotaStatus::Stale));
         }
         report.coverage.total = report.accounts.len().try_into().unwrap();
-        let summary = quota_summary(&report);
+        let (summary, next) = quota_summary(&report);
         assert_eq!(summary.lines.len(), 1 + crate::limits::SUMMARY_ROWS);
         assert_eq!(summary.omitted, 18 - crate::limits::SUMMARY_ROWS);
         assert!(summary.lines[0].contains("quota 3/17"));
-        assert_eq!(summary.next.as_deref(), Some("provenant quota tick"));
+        assert_eq!(
+            next.expect("a stale account recommends a typed next step")
+                .argv,
+            ["provenant", "quota", "tick"]
+        );
     }
 
     #[test]
@@ -4442,7 +4474,7 @@ mod tests {
             "{human}"
         );
         assert!(!human.contains("EXHAUSTED"), "{human}");
-        let summary = quota_summary(&report);
+        let (summary, _) = quota_summary(&report);
         assert!(
             summary
                 .lines
@@ -4459,7 +4491,7 @@ mod tests {
             human.contains("; gemini pool exhausted (shared), claude pool exhausted (shared)"),
             "{human}"
         );
-        let summary = quota_summary(&report);
+        let (summary, _) = quota_summary(&report);
         assert!(summary.lines.iter().any(|line| line == "agy [agy]: exhausted (gemini pool exhausted (shared), claude pool exhausted (shared))"), "{summary:?}");
         Ok(())
     }
@@ -6475,6 +6507,7 @@ mod tests {
         assert!(pool_states(snapshot).unwrap().contains("five_hour >=43%"));
         assert!(
             quota_summary(&report)
+                .0
                 .lines
                 .iter()
                 .any(|line| line.contains("five_hour >=43%"))

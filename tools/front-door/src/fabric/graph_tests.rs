@@ -2161,7 +2161,7 @@ mod result_tests {
             super::graph_human::graph_human_full(&run)
                 .contains("error=blocked by ordinary (Failed)")
         );
-        let summary = super::graph_human::graph_summary(&serde_json::to_value(&run).unwrap());
+        let (summary, _) = super::graph_human::graph_summary(&serde_json::to_value(&run).unwrap());
         assert!(format!("{summary:?}").contains("blocked by ordinary (Failed)"));
     }
 
@@ -2528,7 +2528,7 @@ mod result_tests {
                 "{command}: {human}"
             );
         }
-        let summary = super::graph_human::graph_summary(&serde_json::to_value(&run).unwrap());
+        let (summary, _) = super::graph_human::graph_summary(&serde_json::to_value(&run).unwrap());
         assert!(
             summary
                 .lines
@@ -2554,7 +2554,7 @@ mod result_tests {
         let human = super::graph_display(&run, "status", &globals);
         assert!(human.contains("Pause reason: before[31mafter"));
         assert!(!human.contains('\u{1b}'));
-        let summary = super::graph_human::graph_summary(&serde_json::to_value(&run).unwrap());
+        let (summary, _) = super::graph_human::graph_summary(&serde_json::to_value(&run).unwrap());
         assert!(
             summary
                 .lines
@@ -3150,9 +3150,12 @@ mod result_tests {
         let run = super::graph_snapshot(display);
         let expected = "CI waiting elapsed=65s checks=build, tests head=abc123";
         assert!(super::graph_human(&run).contains(expected));
-        let summary = super::graph_summary(&serde_json::to_value(&run).unwrap());
+        let (summary, next) = super::graph_summary(&serde_json::to_value(&run).unwrap());
         assert_eq!(summary.lines[1], format!("ci running: {expected}"));
-        assert_eq!(summary.next.as_deref(), Some("provenant status delivery"));
+        assert_eq!(
+            next.expect("a running graph offers a next step").argv,
+            ["provenant", "status", "delivery"]
+        );
         assert_eq!(checkpoint.nodes[0].ci.as_ref().unwrap().elapsed_seconds, 10);
 
         let mut nested = run.clone();
