@@ -106,6 +106,7 @@ pub use provenant_records::run::*;
 pub use provenant_supervisor::custody::AdmissionError;
 pub use reader::{
     ArtifactPart, AttemptReader, Attempts, ByteRange, LanePage, LaneQuery, OutputChunk, fact,
+    observed_commands,
 };
 pub use store::{PreparedRun, TerminalPublication};
 use thiserror::Error;

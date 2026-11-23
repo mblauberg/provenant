@@ -109,6 +109,14 @@ pub fn status_evidence(
     json!({"provider_error": provider_error, "handoff": handoff})
 }
 
+/// `status --full` renders the same one projection that `output` and `result`
+/// use: host facts first, then the lane's handoff and verify labelled as
+/// claims. An unobserved exit code stays unknown.
+/// Spec: docs/specs/lane-contracts.md#result-projection
+pub fn status_full_summary(row: &Value, attempt: AttemptId) -> String {
+    output::result_projection(row, attempt).render()
+}
+
 pub fn project_lane(
     lane: &run::AttemptRecord,
     waits: &[run::LaneWait],
@@ -906,5 +914,25 @@ mod tests {
         lane.started_at = None;
         let queued = project_lane(&lane, &[], temp.path(), None, false);
         assert_eq!(queued.last_event_source, Some(LastEventSource::Queued));
+    }
+
+    // Spec: docs/specs/lane-contracts.md#result-projection
+    #[test]
+    fn status_full_summary_renders_facts_before_claims() {
+        let row = json!({
+            "kind": "attempt",
+            "attempt_id": ID,
+            "head": "abc123",
+            "exit_code": null,
+            "handoff": {"Ok": {
+                "schema_version": 2, "status": "done", "note": "finished",
+                "remaining": [], "decisions": [], "verify": ["ran tests"]
+            }}
+        });
+        let text = status_full_summary(&row, ID.parse().unwrap());
+        let facts = text.find("host facts").expect("facts header");
+        let claims = text.find("lane claims").expect("claims header");
+        assert!(facts < claims, "{text}");
+        assert!(text.contains("verify: ran tests"), "{text}");
     }
 }

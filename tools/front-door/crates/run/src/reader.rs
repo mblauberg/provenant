@@ -214,6 +214,26 @@ pub fn fact(r: AttemptRecord) -> Result<AttemptFact> {
         transcript,
     })
 }
+/// The observed command ledger for the result projection. The run reader has
+/// no adapter command capture, so commands stay explicitly unknown rather
+/// than an empty or inferred list.
+/// Spec: docs/specs/lane-contracts.md#result-projection
+pub fn observed_commands() -> provenant_records::lane_contract::Observed<
+    Vec<
+        provenant_records::lane_contract::Observed<
+            provenant_records::lane_contract::CommandReceipt,
+        >,
+    >,
+> {
+    use provenant_records::lane_contract::{Coverage, Observed};
+    Observed {
+        source: "unavailable".into(),
+        completeness: Coverage::Unknown,
+        value: None,
+        extra: Default::default(),
+    }
+}
+
 impl RunStore {
     /// Every project with a terminal attempt in this store, whichever project
     /// opened it. The usage backfill reads each one through its own context.
@@ -1649,6 +1669,17 @@ fn usage_identity(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Spec: docs/specs/lane-contracts.md#result-projection
+    #[test]
+    fn observed_commands_are_unknown_when_no_adapter_exposes_them() {
+        use provenant_records::lane_contract::Coverage;
+
+        let commands = super::observed_commands();
+        assert_eq!(commands.completeness, Coverage::Unknown);
+        assert!(commands.value.is_none());
+        assert_eq!(commands.source, "unavailable");
+    }
 
     #[test]
     fn usage_identity_requires_a_verified_registered_applied_and_observed_key() {

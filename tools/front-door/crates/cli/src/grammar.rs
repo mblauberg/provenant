@@ -808,7 +808,7 @@ pub struct Output {
     /// Byte offset to start from
     #[arg(long, default_value = "0", conflicts_with = "tail")]
     pub offset: u64,
-    /// Read the last N lines instead of an offset (above 500 is clamped to 500)
+    /// Return at most the last N bytes of the selected part
     #[arg(long, catalog_u64_range = 1..)]
     pub tail: Option<u64>,
     /// Maximum bytes to return

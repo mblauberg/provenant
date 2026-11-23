@@ -13,6 +13,88 @@ fn budget_usage(record: &run::AttemptRecord) -> Option<Value> {
     serde_json::to_value(usage).ok()
 }
 
+/// Build the one result projection from a host-owned read. Host facts come
+/// from observed data; the handoff and verify are lane claims, never host
+/// attestations. An unobserved fact stays unknown.
+/// Spec: docs/specs/lane-contracts.md#result-projection
+pub(super) fn result_projection(
+    data: &Value,
+    attempt: AttemptId,
+) -> provenant_records::lane_contract::ResultProjection {
+    use provenant_records::lane_contract::{
+        Coverage, GitFacts, HostFacts, LaneClaims, Observed, ResultProjection,
+    };
+
+    let commands = run::observed_commands();
+    let git_facts = GitFacts {
+        base: data["writer_base"].as_str().map(str::to_owned),
+        head: data["writer_head"]
+            .as_str()
+            .or_else(|| data["head"].as_str())
+            .map(str::to_owned),
+        commits: data["stop_work"]["ahead"]
+            .as_u64()
+            .into_iter()
+            .map(|ahead| format!("{ahead} commit(s)"))
+            .collect(),
+        diffstat: data["changed_files_total"]
+            .as_u64()
+            .map(|total| format!("{total} changed file(s)")),
+        shared_worktree: false,
+        extra: Default::default(),
+    };
+    let git_complete = git_facts.base.is_some() || git_facts.head.is_some();
+    let git = Observed {
+        source: "host-observation".into(),
+        completeness: if git_complete {
+            Coverage::Partial
+        } else {
+            Coverage::Unknown
+        },
+        value: Some(git_facts),
+        extra: Default::default(),
+    };
+    let ci: Observed<Value> = Observed {
+        source: "unavailable".into(),
+        completeness: Coverage::Unknown,
+        value: None,
+        extra: Default::default(),
+    };
+    let scope: Observed<provenant_records::handoff::WriteScopeReport> = Observed {
+        source: "unavailable".into(),
+        completeness: Coverage::Unknown,
+        value: None,
+        extra: Default::default(),
+    };
+    let handoff = data["handoff"]["Ok"].clone().and_then(|value| {
+        serde_json::from_value::<provenant_records::handoff::Handoff>(value).ok()
+    });
+    let verify = handoff
+        .as_ref()
+        .map(|handoff| handoff.verify.clone())
+        .or_else(|| {
+            data["selected"]["verify"]
+                .as_array()
+                .and_then(|values| serde_json::from_value(values.clone()).ok())
+        });
+    ResultProjection::new(
+        provenant_records::RecordHeader::V1,
+        attempt,
+        HostFacts {
+            commands,
+            git,
+            ci,
+            scope,
+            extra: Default::default(),
+        },
+        LaneClaims {
+            handoff,
+            verify,
+            extra: Default::default(),
+        },
+    )
+}
+
 /// Render a host-owned read through the same CLI projection.
 pub fn render_output(command: Output, read: Result<(Value, String), Fail>) -> Reply {
     let receipt_tail = matches!(command.part, Part::Receipt)
@@ -43,10 +125,9 @@ pub fn render_output(command: Output, read: Result<(Value, String), Fail>) -> Re
                     text = format!("{state}\npartial result\n{text}");
                 }
             }
-            if let Some(lines) = receipt_tail {
-                text =
-                    text[tail_start(text.as_bytes(), lines.min(limits::TAIL_LINES))..].to_owned();
-                data["tail"] = json!(lines.min(limits::TAIL_LINES));
+            if let Some(bytes) = receipt_tail {
+                text = text[tail_start_bytes(text.as_bytes(), bytes)..].to_owned();
+                data["tail"] = json!(bytes);
                 data["tail_text"] = json!(text);
             }
             if let Some(path) = &to {
@@ -70,12 +151,12 @@ pub fn render_output(command: Output, read: Result<(Value, String), Fail>) -> Re
     );
     out.read_only = true;
     if out.result.error.is_none() {
-        out.summary = Some(output_summary(
-            &out.result.data,
-            &out.human,
-            headed,
-            Some(&command.target),
-        ));
+        let full = std::env::args_os().any(|arg| arg == "--full");
+        out.summary = Some(if full {
+            output_summary(&out.result.data, &out.human, headed, Some(&command.target))
+        } else {
+            output_summary_default(&out.result.data, &out.human, headed, Some(&command.target))
+        });
         if warn_human
             && out
                 .result
@@ -125,6 +206,28 @@ pub(super) fn output_summary(
     headed: bool,
     target: Option<&crate::Target>,
 ) -> crate::Summary {
+    summary(data, text, headed, true, target)
+}
+
+/// The compact default view: verdict, findings and verify first, with the
+/// host-fact narration and lane prose available through `--full`.
+/// Spec: docs/specs/lane-contracts.md#result-projection
+pub(super) fn output_summary_default(
+    data: &Value,
+    text: &str,
+    headed: bool,
+    target: Option<&crate::Target>,
+) -> crate::Summary {
+    summary(data, text, headed, false, target)
+}
+
+fn summary(
+    data: &Value,
+    text: &str,
+    headed: bool,
+    full: bool,
+    target: Option<&crate::Target>,
+) -> crate::Summary {
     let mut lines = Vec::new();
     if headed && let Some(verdict) = data["selected"]["verdict"].as_str() {
         lines.push(format!(
@@ -140,6 +243,14 @@ pub(super) fn output_summary(
         };
         lines.push(format!("findings: {} ({availability})", findings.len()));
     }
+    if headed {
+        let verify = data["handoff"]["Ok"]["verify"]
+            .as_array()
+            .or_else(|| data["selected"]["verify"].as_array());
+        if let Some(verify) = verify {
+            lines.push(format!("verify: {} lane claim(s)", verify.len()));
+        }
+    }
     if headed
         && data.get("graph").is_some()
         && data.get("node").is_some()
@@ -148,7 +259,10 @@ pub(super) fn output_summary(
     {
         lines.push("declared result excerpt is incomplete".into());
     }
-    if headed && let Some(work) = data.get("stop_work").filter(|value| !value.is_null()) {
+    if full
+        && headed
+        && let Some(work) = data.get("stop_work").filter(|value| !value.is_null())
+    {
         let head = work["head"].as_str().unwrap_or("unknown");
         let ahead = work["ahead"].as_u64();
         let pushed = work["push"] == "pushed";
@@ -191,14 +305,18 @@ pub(super) fn output_summary(
     {
         lines.push(crate::bounded_text(&error.to_string(), 2048));
     }
-    if headed && let Some(fallback) = data.get("planner_fallback") {
+    if full
+        && headed
+        && let Some(fallback) = data.get("planner_fallback")
+    {
         lines.push(format!(
             "planner fallback: {} (reason: {})",
             fallback["stage"].as_str().unwrap_or("static"),
             plain_text(fallback["reason"].as_str().unwrap_or_default(), 160)
         ));
     }
-    if headed
+    if full
+        && headed
         && let Ok(access) = serde_json::from_value::<provenant_records::LaneAccessReceipt>(
             data["applied_route"]["lane_access"].clone(),
         )
@@ -210,7 +328,7 @@ pub(super) fn output_summary(
             access.source.as_str()
         ));
     }
-    if headed {
+    if full && headed {
         let availability = data["applied_route"]["availability_warning"].as_str();
         let launch = data["applied_route"]["launch_warnings"].as_array();
         let mut seen = std::collections::BTreeSet::new();
@@ -229,7 +347,7 @@ pub(super) fn output_summary(
             }
         }
     }
-    if headed && data.get("writer_base").is_some() {
+    if full && headed && data.get("writer_base").is_some() {
         for (label, key) in [
             ("base", "writer_base"),
             ("committed head", "writer_head"),
@@ -243,7 +361,10 @@ pub(super) fn output_summary(
             }
         }
     }
-    if headed && let Some(paths) = data.get("changed_files").and_then(Value::as_array) {
+    if full
+        && headed
+        && let Some(paths) = data.get("changed_files").and_then(Value::as_array)
+    {
         let total = data["changed_files_total"]
             .as_u64()
             .map_or(paths.len(), |total| total as usize);
@@ -464,6 +585,8 @@ fn output_read(
         }
         data.extend(row.clone());
     }
+    data["result_projection"] =
+        serde_json::to_value(result_projection(&data, id)).unwrap_or(Value::Null);
     Ok((data, human))
 }
 
@@ -604,14 +727,14 @@ fn output_read_part(
         ));
     }
     let mut chunk = session.service().output(id, part, range, call)?;
-    let tail = command.tail.map(|lines| lines.min(TAIL_MAX));
-    if let Some(lines) = tail {
+    let tail = command.tail;
+    if let Some(bytes) = tail {
         range.offset = chunk.len.saturating_sub(command.max_bytes);
         // A short transcript's first page already includes the requested tail.
         if !matches!(part, run::ArtifactPart::Transcript) || range.offset != chunk.offset {
             chunk = session.service().output(id, part, range, call)?;
         }
-        let start = tail_start(&chunk.bytes, lines);
+        let start = tail_start_bytes(&chunk.bytes, bytes);
         chunk.offset += start as u64;
         chunk.bytes.drain(..start);
     }
@@ -663,9 +786,9 @@ fn output_read_part(
             text = "payload evicted by retention; the retained capture tail is empty\n".into();
         }
     }
-    if let Some(lines) = tail {
-        data["tail"] = json!(lines);
-        data["tail_clamped"] = json!(command.tail != tail);
+    if let Some(bytes) = tail {
+        data["tail"] = json!(bytes);
+        data["tail_clamped"] = json!(false);
     }
     if matches!(command.part, Part::Result) && command.tail.is_none() && command.offset == 0 {
         let base = run::writer_base(session.context.state_root.as_path(), &record)
@@ -977,16 +1100,14 @@ fn changed_paths(
     Some(all.into_iter().map(str::to_owned).collect())
 }
 
-pub(super) fn tail_start(bytes: &[u8], lines: u64) -> usize {
-    bytes
-        .strip_suffix(b"\n")
-        .unwrap_or(bytes)
-        .iter()
-        .enumerate()
-        .rev()
-        .filter(|(_, b)| **b == b'\n')
-        .nth(usize::try_from(lines.saturating_sub(1)).unwrap_or(usize::MAX))
-        .map_or(0, |(i, _)| i + 1)
+/// Byte offset that leaves at most `max_bytes` of `bytes`, aligned forward to
+/// a UTF-8 boundary so the returned tail is whole text.
+pub(super) fn tail_start_bytes(bytes: &[u8], max_bytes: u64) -> usize {
+    let mut start = bytes.len().saturating_sub(max_bytes as usize);
+    while start < bytes.len() && std::str::from_utf8(&bytes[start..]).is_err() {
+        start += 1;
+    }
+    start
 }
 
 /// A clipped page that ends inside a UTF-8 character stops before it, so the
@@ -1075,7 +1196,8 @@ mod tests {
 
     use super::{
         Status, add_planner_fallback, fallback_reason_for_graph, output_summary,
-        provider_error_from_result, provider_error_from_stderr,
+        output_summary_default, provider_error_from_result, provider_error_from_stderr,
+        tail_start_bytes,
     };
     use serde_json::json;
 
@@ -1466,5 +1588,52 @@ mod tests {
             ),
             None
         );
+    }
+
+    // Spec: docs/specs/lane-contracts.md#result-projection
+    #[test]
+    fn default_view_leads_with_verdict_findings_and_verify() {
+        let data = json!({
+            "state": "succeeded",
+            "selected": {
+                "verdict": "PASS",
+                "findings": [{"id":"F1"}],
+                "findings_available": true
+            },
+            "handoff": {"Ok": {
+                "schema_version": 2, "status": "done", "note": "done",
+                "remaining": [], "decisions": [], "verify": ["ran tests"]
+            }}
+        });
+        let summary = output_summary_default(&data, "narration", true, None);
+        let lines = &summary.lines;
+        let verdict = lines
+            .iter()
+            .position(|line| line.starts_with("review verdict:"));
+        let findings = lines.iter().position(|line| line.starts_with("findings:"));
+        let verify = lines.iter().position(|line| line.starts_with("verify:"));
+        assert!(
+            verdict.is_some() && findings.is_some() && verify.is_some(),
+            "{lines:?}"
+        );
+        assert!(
+            verdict.unwrap() < findings.unwrap() && findings.unwrap() < verify.unwrap(),
+            "{lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.starts_with("base:")),
+            "{lines:?}"
+        );
+    }
+
+    // Spec: docs/specs/cli.md#output-references-and-bounded-tails
+    #[test]
+    fn tail_returns_at_most_the_requested_bytes() {
+        let bytes = b"0123456789abcdef";
+        for n in [0u64, 1, 4, 15, 16, 64] {
+            let start = tail_start_bytes(bytes, n);
+            assert!(bytes.len() - start <= n as usize, "n={n}, start={start}");
+            assert!(std::str::from_utf8(&bytes[start..]).is_ok(), "n={n}");
+        }
     }
 }
