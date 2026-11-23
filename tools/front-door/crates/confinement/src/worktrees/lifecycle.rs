@@ -488,6 +488,11 @@ fn open_or_create_layout_directory(
     create: bool,
     device: u64,
 ) -> Result<Directory, WorktreeError> {
+    // A worktree declared directly under an outside root has no tail to walk;
+    // the root itself is the allocation's parent directory.
+    if relative.as_os_str().is_empty() {
+        return Ok(root.try_clone()?);
+    }
     let mut current: Option<Directory> = None;
     for component in relative.components() {
         let Component::Normal(name) = component else {
@@ -566,33 +571,60 @@ fn create_with_default(
     let target_relative = ports
         .managed_writer_path(&request.branch)
         .map_err(WorktreeError::PortConfiguration)?;
-    let parent_relative = target_relative
-        .parent()
-        .ok_or(WorktreeError::InvalidRequest)?;
-    let path_name = target_relative
-        .file_name()
-        .ok_or(WorktreeError::InvalidRequest)?;
-    let layout_device = context.layout.directory().metadata()?.device;
-    let worktree_parent = open_or_create_layout_directory(
-        context.layout.directory(),
-        parent_relative,
-        true,
-        layout_device,
-    )?;
+    // A declared root may be absolute or parent-relative. Its allocation then
+    // lives outside the checkout anchor, so open that root as its own anchor
+    // and create the template tail beneath it. The default relative root keeps
+    // the device-checked walk from the layout anchor.
+    let outside = target_relative.is_absolute()
+        || target_relative
+            .components()
+            .any(|component| matches!(component, Component::ParentDir));
+    let (allocation, parent_relative, path_name, target) = if outside {
+        let (anchor_path, tail) = ports
+            .worktree_layout
+            .allocation_for(context.layout.root(), &request.branch)
+            .map_err(WorktreeError::PortConfiguration)?;
+        let anchor_path = canonicalize(&anchor_path).map_err(|_| WorktreeError::InvalidRequest)?;
+        let allocation = Directory::open_anchor(&anchor_path)?;
+        let parent_relative = tail
+            .parent()
+            .ok_or(WorktreeError::InvalidRequest)?
+            .to_path_buf();
+        let path_name = tail
+            .file_name()
+            .ok_or(WorktreeError::InvalidRequest)?
+            .to_os_string();
+        let target = allocation.current_path()?.join(&tail);
+        (allocation, parent_relative, path_name, target)
+    } else {
+        let parent_relative = target_relative
+            .parent()
+            .ok_or(WorktreeError::InvalidRequest)?
+            .to_path_buf();
+        let path_name = target_relative
+            .file_name()
+            .ok_or(WorktreeError::InvalidRequest)?
+            .to_os_string();
+        let target = context.layout.root().join(&target_relative);
+        (
+            context.layout.directory().try_clone()?,
+            parent_relative,
+            path_name,
+            target,
+        )
+    };
+    let layout_device = allocation.metadata()?.device;
+    let worktree_parent =
+        open_or_create_layout_directory(&allocation, &parent_relative, true, layout_device)?;
     let parent_identity = worktree_parent.metadata()?;
-    let target = context.layout.root().join(&target_relative);
     let _writer = cache_writer_guard(context.project_state, &target).map_err(custody_refusal)?;
     context.repo.revalidate()?;
-    let named_parent = open_or_create_layout_directory(
-        context.layout.directory(),
-        parent_relative,
-        false,
-        layout_device,
-    )?;
+    let named_parent =
+        open_or_create_layout_directory(&allocation, &parent_relative, false, layout_device)?;
     if !parent_identity.same_identity(&named_parent.metadata()?) {
         return Err(WorktreeError::UnknownWriter);
     }
-    match worktree_parent.metadata_at(path_name, false) {
+    match worktree_parent.metadata_at(&path_name, false) {
         Ok(_) => return Err(WorktreeError::InvalidRequest),
         Err(error) if error.is_not_found() => {}
         Err(_) => return Err(WorktreeError::UnknownWriter),

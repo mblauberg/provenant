@@ -9,6 +9,16 @@ its project port configuration even when invoked from a linked checkout or a
 subdirectory. An explicit relative `--worktree` path remains relative to the
 invoking directory.
 
+The worktree-layout port may declare roots outside the checkout. A root in the
+repository's `.provenant/ports.json` may be absolute or parent-relative (for
+example `../writers`), with a matching `default` template such as
+`../writers/<branch>`; the built-in remains `.worktrees/<branch>`. A declared
+root is treated exactly like the default one for creation, listing, custody and
+GC, and `provenant config ports` reports each root with the layer and origin
+that declared it. Keep roots private to the owner and on one filesystem: the
+worktree parent is created under exclusive custody with the same identity and
+permission checks as the default layout.
+
 ```sh
 provenant worktree create fix/repo-example --base origin/main   # base defaults to the current head
 provenant worktree list                                         # path, lane and base per checkout

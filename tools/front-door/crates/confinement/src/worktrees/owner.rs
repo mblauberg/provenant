@@ -468,11 +468,11 @@ pub fn prune_owned(
 ) -> Result<(RemoveOutcome, provenant_records::custody::RetirementRecord), WorktreeError> {
     let verified = verify_worktree(context.repo, path)?;
     let owner = load_owner(&verified)?.ok_or(WorktreeError::UnknownWriter)?;
-    let relative = path
-        .strip_prefix(context.layout.root())
-        .map_err(|_| WorktreeError::UnknownWriter)?;
+    // The path is canonical. Matching declared roots against it covers both
+    // the default root and any absolute or parent-relative root declared by
+    // the repository or host port table.
     let managed =
-        managed_writer_branch(context.layout.root(), &context.host_state()?, relative)?.is_some();
+        managed_writer_branch(context.layout.root(), &context.host_state()?, path)?.is_some();
     if owner.origin != WorktreeOrigin::Lane || owner.attempt_id != Some(attempt) || !managed {
         return Err(WorktreeError::UnknownWriter);
     }

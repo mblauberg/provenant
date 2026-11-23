@@ -1212,6 +1212,77 @@ fn creation_uses_a_nested_project_worktree_layout() -> Result<(), Box<dyn Error>
     Ok(())
 }
 
+// Spec: docs/specs/next-batch.md#contract
+#[test]
+fn sibling_directory_root_is_used_by_create_list_and_gc_preview() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    declare_forge_default(&fixture)?;
+    fs::create_dir_all(fixture.root.join(".provenant"))?;
+    let parent = fixture.root.parent().ok_or("fixture has a parent")?;
+    let name = format!(
+        "outside-{}",
+        fixture
+            .root
+            .file_name()
+            .ok_or("fixture has a name")?
+            .to_string_lossy()
+    );
+    let outside = parent.join(&name);
+    fs::create_dir(&outside)?;
+
+    let mut ports = provenant_config::PortTable::builtin();
+    ports.worktree_layout.roots = vec![PathBuf::from(format!("../{name}"))];
+    ports.worktree_layout.default = PathBuf::from(format!("../{name}/<branch>"));
+    fs::write(
+        fixture.root.join(provenant_config::PORTS_CONFIG),
+        serde_json::to_vec(&ports)?,
+    )?;
+
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let created = create(
+        &context,
+        WorktreeCreate {
+            branch: "outside-root".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    let expected = canonicalize(&outside)?.join("outside-root");
+    assert_eq!(created.path, expected);
+    assert!(created.path.join(".git").exists());
+
+    // List and the GC inventory both find the worktree under the declared root.
+    let listed = list(&context, &cancel())?;
+    assert!(listed.iter().any(|lane| lane.path == created.path));
+    let lanes = list_for_gc_preview(&context, &cancel())?;
+    assert!(lanes.iter().any(|lane| lane.path == created.path));
+    let report = collect(
+        &context,
+        &lanes,
+        &WorktreeGcPolicy {
+            upstream: None,
+            terminal: &|_| true,
+            no_live_lanes: &|_| true,
+            regenerable: &[],
+            keep: &[],
+            written_before_ns: i128::MAX,
+            dry_run: true,
+            include_foreign: false,
+            retirement_port: None,
+            retirement_feeds: None,
+            mode: CollectionMode::Worktrees,
+            proof: None,
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
+        },
+        &cancel(),
+    )?;
+    assert!(report.candidates.iter().any(|row| row.path == created.path));
+    Ok(())
+}
+
 mod gc_preview;
 mod gc_pruning;
 mod gc_safety;
