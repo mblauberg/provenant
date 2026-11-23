@@ -206,19 +206,38 @@ pub fn branch_candidate(
 /// ledger's records and the untracked-local observation.
 #[derive(Clone, Debug, Default)]
 pub struct LocalRetirementScope {
-    excluded: BTreeSet<String>,
+    /// Default-branch names. No GC path may retire these, whether they are
+    /// local branches, remote ledger records or linked-worktree checkouts.
+    defaults: BTreeSet<String>,
+    /// Branches a worktree has checked out. Ledger candidates for these are
+    /// retained; a linked worktree's own branch lives here too, so worktree
+    /// retirement consults `is_default` instead of `permits`.
+    checked_out: BTreeSet<String>,
 }
 
 impl LocalRetirementScope {
-    /// Ledger records may name a local branch by its short name; compare
-    /// the full `refs/heads/` form so both spellings are filtered alike.
-    pub fn permits(&self, reference: &GitRefName) -> bool {
+    /// Ledger records may name a branch by its short name; compare the full
+    /// `refs/heads/` form so both spellings are filtered alike.
+    fn full_name(reference: &GitRefName) -> String {
         let name = reference.as_str();
         if name.starts_with("refs/") {
-            !self.excluded.contains(name)
+            name.to_owned()
         } else {
-            !self.excluded.contains(&format!("refs/heads/{name}"))
+            format!("refs/heads/{name}")
         }
+    }
+
+    /// Whether this ref may be selected as a ledger retirement candidate.
+    pub fn permits(&self, reference: &GitRefName) -> bool {
+        let name = Self::full_name(reference);
+        !self.defaults.contains(&name) && !self.checked_out.contains(&name)
+    }
+
+    /// Whether this ref names a default branch. A linked worktree checked out
+    /// on the default branch is never retired, even though its branch is also
+    /// in `checked_out`.
+    pub fn is_default(&self, reference: &GitRefName) -> bool {
+        self.defaults.contains(&Self::full_name(reference))
     }
 }
 
@@ -228,13 +247,13 @@ pub fn local_retirement_scope(
     upstream: Option<&LandingTarget>,
     cancel: &CancelToken,
 ) -> Result<LocalRetirementScope, WorktreeError> {
-    let mut excluded = BTreeSet::new();
+    let mut defaults = BTreeSet::new();
     // `main` is always a default-branch name even when no remote advertises it.
-    excluded.insert("refs/heads/main".to_owned());
+    defaults.insert("refs/heads/main".to_owned());
     if let Some(reference) = upstream.and_then(|target| target.reference.as_ref())
         && let Some(local) = local_branch_name(reference.as_str())
     {
-        excluded.insert(local);
+        defaults.insert(local);
     }
     if let Ok(revision) = GitRevision::new("refs/remotes/origin/HEAD")
         && let Some(symbolic) = context
@@ -244,17 +263,21 @@ pub fn local_retirement_scope(
             .flatten()
         && let Some(local) = local_branch_name(&symbolic)
     {
-        excluded.insert(local);
+        defaults.insert(local);
     }
+    let mut checked_out = BTreeSet::new();
     for entry in context.facts.fresh_inventory(context, cancel)? {
         if entry.prunable {
             continue;
         }
         if let Some(branch) = entry.branch {
-            excluded.insert(branch.as_str().to_owned());
+            checked_out.insert(branch.as_str().to_owned());
         }
     }
-    Ok(LocalRetirementScope { excluded })
+    Ok(LocalRetirementScope {
+        defaults,
+        checked_out,
+    })
 }
 
 /// Map a full branch or remote-tracking ref name to its local branch ref.
@@ -1510,6 +1533,9 @@ fn collect_impl(
                         tip,
                     })
             });
+    // One scope covers the default branch from the fetched upstream,
+    // `origin/HEAD` or the `main` fallback on every retirement path below.
+    let retirement_scope = local_retirement_scope(context, integration.as_ref(), cancel)?;
     let patterns = policy.integration_patterns;
     let bases = policy
         .retirement_feeds
@@ -1633,6 +1659,17 @@ fn collect_impl(
                 .any(|pattern| matches_pattern(&lane.path.to_string_lossy(), pattern))
             {
                 row.detail = Some("excluded by gc.projects.keep_paths".into());
+                return Ok(());
+            }
+            // A linked worktree checked out on the default branch is never
+            // retired, even when the primary checkout sits elsewhere.
+            if let Some(branch) = lane
+                .branch
+                .as_deref()
+                .and_then(|name| GitRefName::new(name).ok())
+                && retirement_scope.is_default(&branch)
+            {
+                row.detail = Some("default branch is never retired".into());
                 return Ok(());
             }
             if lane.owner.is_err() {
