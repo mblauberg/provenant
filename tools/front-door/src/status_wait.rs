@@ -442,7 +442,9 @@ fn read(
                 repository,
                 *number,
                 &forge_request(deadline, cancel, pr_read_timeout),
-                crate::pr::observer::POLL,
+                // Spec: docs/specs/cli.md#ci-observations — the PR path reads
+                // through the one observer and its one sourced retry family.
+                crate::pr::observer::retry().poll.value,
             ) {
                 Ok(line) => {
                     let mut line = gate_line(line, watch_head.as_deref());
@@ -2008,8 +2010,11 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                 // Each subscription owns its replay cursor. No target can
                 // consume another target's events from a shared cursor.
                 let setup =
-                    (|| -> Result<crate::event_delivery::Journal, Box<dyn std::error::Error>> {
-                        let journal = crate::event_delivery::Journal::open(
+                    (|| -> Result<crate::pr::observer::journal::PrJournal, Box<dyn std::error::Error>> {
+                        // The observer module owns both transports: this journal
+                        // supplies a current PR observation when one exists, and
+                        // `read` falls back to the forge through the observer.
+                        let journal = crate::pr::observer::journal::PrJournal::open(
                             edge.roots.state.as_path(),
                             edge.cwd,
                         )?;
@@ -2019,7 +2024,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                             ..
                         } = source
                         {
-                            journal.register_pr(repository, *number, None)?;
+                            journal.register(repository, *number, None)?;
                         }
                         Ok(journal)
                     })();
@@ -2072,7 +2077,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                                 repository: Ok(repository),
                                 ..
                             },
-                        ) => match journal.next_pr(
+                        ) => match journal.next(
                             repository,
                             *number,
                             Duration::from_secs(60)

@@ -381,6 +381,14 @@ worktree links are read without following them through the host filesystem.
 
 ## CI observations
 
+One reader owns check state for a pull request or a candidate:
+`src/pr/observer.rs`. It reads the event journal when a current observation is
+available and the forge through the resolved `ForgeContext` otherwise, and it
+owns the bounded wait, cadence and sourced retry family. `pr status`, the landing
+gate's `await_pr_ci`, `ci failures` and review-subject selection call that one
+reader instead of running `gh` themselves. Retry and backoff values are one
+sourced family (`ci.retry.*`), so a pause names the layer and place that set it.
+
 `pr status` reports each pull request's head, check rollup and failed check
 names from one batched GraphQL read when available, and falls back between
 GraphQL and REST when either is unavailable or rate limited. A wait's
