@@ -5,7 +5,6 @@ use provenant_fabric_runtime::notes::{Host, Input};
 use provenant_records::{CommandResult, Outcome};
 use serde_json::Value;
 
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 pub fn run(command: Notes, globals: &Globals) -> u8 {
     let cancel = CancelToken::new();
     let lane = std::env::var(provenant_core::consumer_env::PARENT_ATTEMPT_ID).ok();

@@ -1254,7 +1254,6 @@ fn add_session_warnings(data: &mut Value, warnings: Vec<String>) {
     }
 }
 
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 pub fn run(
     cmd: Workflow,
     globals: &Globals,

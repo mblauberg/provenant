@@ -152,6 +152,7 @@ impl ReleaseSmoke for SystemSmoke {
 }
 
 #[cfg(test)]
+#[allow(dead_code, unused_imports)]
 mod tests {
     use super::*;
     use provenant_records::{CommandResult, Outcome, SourceDigest};

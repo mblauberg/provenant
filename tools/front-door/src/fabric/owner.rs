@@ -324,7 +324,6 @@ impl BoundGraphOwner<'_> {
         self.retain_graph_refusal(&scope, &error, diagnostic)
     }
 
-    #[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
     fn post_graph_refusal(
         &self,
         store: &provenant_run::RunStore,
@@ -1428,7 +1427,6 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         self.factory.context.graph_prompt_limit_source
     }
 
-    #[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
     fn graph_admission_policy(&self) -> provenant_records::policy::Policy {
         let project = self.factory.context.identity.project.to_string();
         match provenant_cli::config_reads::read_for(&self.factory.context.roots, "run admission") {
@@ -1452,7 +1450,6 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         }
     }
 
-    #[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
     fn launch_retry_policy(&self) -> provenant_fabric_runtime::graph::LaunchRetryPolicy {
         use provenant_config::KnobSource;
         let mut policy = provenant_fabric_runtime::graph::LaunchRetryPolicy::default();
@@ -1586,7 +1583,6 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         std::mem::take(&mut self.launch_warnings)
     }
 
-    #[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
     fn resolve_creation_base(
         &mut self,
         branch: &str,
@@ -2729,7 +2725,6 @@ impl BoundGraphOwner<'_> {
     /// replaces it. Its own frame keeps the launch facts off the observation
     /// path (#3542).
     #[allow(clippy::too_many_arguments)] // Launch facts stay outside the kernel's public input shape.
-    #[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
     fn start_attempt(
         &mut self,
         owner: &mut BinaryRunOwner<'_>,

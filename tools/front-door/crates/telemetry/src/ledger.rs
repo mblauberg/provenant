@@ -545,7 +545,7 @@ fn migrate_v3_segments(
         }
         if !sidecar.is_empty() {
             let sidecar_name = format!("{name}.v3-unmapped");
-            if read_segment(&directory, &sidecar_name)?.as_deref() != Some(sidecar.as_slice()) {
+            if read_segment(directory, &sidecar_name)?.as_deref() != Some(sidecar.as_slice()) {
                 directory
                     .atomic_write(
                         OsStr::new(&sidecar_name),

@@ -74,7 +74,6 @@ impl Settings {
 /// Resolve current host and project policy overlaid with the request's sealed
 /// dispatch overrides. Invalid optional policy settings warn and retain compiled
 /// defaults, without changing the boundaries or operation errors.
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 pub fn read(state: &Path, project: &str, dispatch: &BTreeMap<String, Strength>) -> Policy {
     read_reporting(state, project, dispatch, |error| {
         use std::io::Write;

@@ -63,7 +63,6 @@ fn require_current_source(identity: &VersionInfo, current: &SourceDigest) -> io:
     }
 }
 
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args_os().skip(1);
     let mut output = None;

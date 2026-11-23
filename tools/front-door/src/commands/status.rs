@@ -13,7 +13,6 @@ pub static DOMAIN: Domain = Domain {
     }],
 };
 
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn run(inv: &Call) -> Result<Outcome, CommandError> {
     let globals = inv.globals;
     let process = inv.process;

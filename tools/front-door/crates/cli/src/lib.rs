@@ -1308,7 +1308,7 @@ pub(crate) fn install_test_domains() {
         }));
         Box::leak(Box::new([domain]))
     });
-    install_domains(*fixture);
+    install_domains(fixture);
 }
 const WAIT_JSON_CONTRACT: &str = "With --json, wait writes JSONL: zero or more event objects followed by one terminal command-result envelope. Events have an `event` field; the terminal envelope has `command`, `status` and `data`. Settlement events are emitted without --follow; --follow also emits each observed transition.";
 

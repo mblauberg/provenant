@@ -188,7 +188,6 @@ fn fail_with_repair(
 }
 /// `fail_with_repair` with a cause the operator needs to see, such as the
 /// bounded output of a failing `build.prepare` command.
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn fail_with_cause(
     command: &str,
     status: Outcome,
@@ -238,7 +237,6 @@ pub(crate) fn fail_with_cause_with_writers<Wout: Write, Werr: Write>(
 
 /// Emit an already-mapped refusal. Owners with a typed error use this with
 /// [`crate::worktrees::Error::command_error`] so the mapping lives in one place.
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 pub(crate) fn fail_with_command_error(
     command: &str,
     status: Outcome,
@@ -1451,6 +1449,7 @@ pub fn dispatch(
 }
 
 #[cfg(test)]
+#[allow(dead_code, unused_imports)]
 mod unpublished_result_tests {
     use crate::output::{land_explanation, render_unpublished};
 

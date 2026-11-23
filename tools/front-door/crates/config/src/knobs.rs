@@ -796,7 +796,7 @@ mod name_tests {
             matches.first().map(String::as_str),
             Some("chair.switch_accounts")
         );
-        let ConfigError::UnknownKnob { close, .. } = unknown(&registry, "chair.switch_account")
+        let ConfigError::UnknownKnob { close, .. } = unknown(registry, "chair.switch_account")
         else {
             panic!("unknown knob");
         };

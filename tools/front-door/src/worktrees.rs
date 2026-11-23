@@ -462,7 +462,6 @@ fn execute(
 
 /// The hook reads complete newline-delimited records even when its child
 /// deadline stops this command before the inventory is complete.
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn session_list(globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
     use std::io::Write;
     let result = (|| -> Result<(), Error> {
@@ -1722,7 +1721,6 @@ fn gc_project(
 /// An unreadable run store cannot prove which pins are settled, so the
 /// backstop keeps them all. Warn and let the rest of the sweep run: failing the
 /// project here would skip settled-lane collection and the path-based pass.
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn warn_import_pin_collection(project: &Path, error: &(impl std::fmt::Display + ?Sized)) {
     use std::io::Write;
     let _ = writeln!(
@@ -3222,7 +3220,6 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
 
         Ok(())
     }
-    #[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
     fn git_worktrees(&mut self) -> Result<(), Error> {
         if self.stop_at_resume()? {
             return Ok(());
@@ -4939,7 +4936,6 @@ mod gc_preview_tests {
     }
 
     #[test]
-    #[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
     fn gc_default_output_aggregates_routine_rows_and_keeps_exceptions() {
         use provenant_confinement::cache::{CacheGcEntry, CacheGcReason};
         let mut data = GcData::default();

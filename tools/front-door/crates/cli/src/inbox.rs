@@ -164,7 +164,6 @@ where
 /// Persist a steer with Run's owner. Its live adapter decoder requests an
 /// interrupt after validating the session identity. The message identifier is
 /// stable across replays. The fallback notice is printed before that interrupt.
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 pub fn deliver_steer(
     edge: &crate::run::Edge<'_>,
     identity: &provenant_fabric_runtime::identity::Identity,
@@ -1319,7 +1318,6 @@ fn execute(
         },
     )?)
 }
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 pub fn run(
     command: HumanCommand,
     path: &str,

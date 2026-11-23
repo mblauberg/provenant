@@ -601,6 +601,7 @@ fn read_receipt(state_root: &Path) -> Result<Option<InstallReceipt>, String> {
 }
 
 #[cfg(test)]
+#[allow(dead_code, unused_imports)]
 mod tests {
     use super::{PortConfigSourceSpellings, PortSourceSpellings, read_receipt, run_steps};
     use provenant_records::migrate::{Migration, MigrationError, MigrationReport};

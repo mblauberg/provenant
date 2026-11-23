@@ -40,7 +40,6 @@ use serde_json::Value;
 /// The effective writer-dirty setting and the layer that set it, read once at
 /// graph submission. An unreadable host config is advisory: warn and use the
 /// compiled default (`refuse`) rather than refusing to observe the setting.
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn writer_dirty_setting(
     factory: &super::Factory,
 ) -> provenant_run::writer_dirty::ResolvedWriterDirty {
@@ -74,7 +73,6 @@ fn writer_dirty_setting(
 /// Preflight every existing writer worktree at graph submission, before any
 /// plan node can spend tokens. WIP and continued-edit outcomes are recorded
 /// on the node so they reach the graph events.
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn preflight_writer_worktrees(
     factory: &super::Factory,
     facts: &provenant_confinement::worktrees::RepoFacts,

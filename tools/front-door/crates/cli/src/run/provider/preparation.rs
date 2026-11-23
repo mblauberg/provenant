@@ -513,7 +513,6 @@ pub(super) fn provider_preparation_fallback(
     }
 }
 
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn publish_preparation_login_failure(
     state: &Path,
     entry: &provenant_providers::accounts::Registration,
@@ -857,7 +856,6 @@ pub(super) fn prepare_writer_dependencies(
     }))
 }
 
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn prepare_writer_dependencies_with_policy(
     worktree: &Path,
     enabled: bool,
@@ -2964,7 +2962,6 @@ pub(super) fn prepare_candidates(
 type AlterAvailability<'a> = dyn Fn(&mut Vec<provenant_providers::AvailabilityRecord>) + 'a;
 
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 pub(super) fn prepare_candidates_inner(
     registry: &Registry<'_>,
     provider_registry: &[provenant_providers::Registration],
@@ -5793,15 +5790,7 @@ pub(super) fn resolve_lane_access(
             extra: Default::default(),
         };
     }
-    let receipt_source = match source {
-        Layer::Default => Layer::Default,
-        Layer::Host => Layer::Host,
-        Layer::Project => Layer::Project,
-        Layer::Template => Layer::Template,
-        Layer::Tier => Layer::Tier,
-        Layer::Launch => Layer::Launch,
-        other => other,
-    };
+    let receipt_source = source;
     let access = match task.profile.knobs.get(KEY) {
         None => LaneAccess::Host,
         Some(value) => match value.as_str() {

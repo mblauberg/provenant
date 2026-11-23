@@ -413,7 +413,6 @@ impl Drop for FenceWatcher {
 }
 
 impl Drop for Lease {
-    #[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
     fn drop(&mut self) {
         // The unlocked watcher would read the released record as a takeover.
         if let Some(watcher) = self.watcher.take() {
@@ -454,7 +453,6 @@ impl Drop for Lease {
 /// Acquire the host-wide fenced sweep lease. The stable flock inode is only a
 /// short metadata mutex; sweep work never holds it. A stale lease is replaced
 /// atomically and its old owner cannot checkpoint or complete the new epoch.
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 pub(crate) fn acquire(
     state_root: &std::path::Path,
     budget: Duration,
@@ -628,7 +626,6 @@ fn write_legacy_progress(directory: &Directory, progress: &Progress) -> Result<(
     Ok(())
 }
 
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn read_progress(directory: &Directory) -> Result<Option<Progress>, Box<dyn std::error::Error>> {
     let bytes = match directory.read_stable(OsStr::new(PROGRESS_FILE), MIGRATION_PROGRESS_LIMIT) {
         Ok(bytes) => bytes,
@@ -664,7 +661,6 @@ fn progress_has_epoch(directory: &Directory, epoch: u64) -> bool {
         .is_some_and(|progress| progress.epoch == epoch && !progress.released)
 }
 
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn next_epoch(
     directory: &Directory,
     prior_epoch: Option<u64>,

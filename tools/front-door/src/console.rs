@@ -296,7 +296,6 @@ fn console_window_ready(marker: &std::path::Path, previous: Option<&str>) -> boo
 }
 
 /// Opens the console by bundle identifier and waits for a newly presented window.
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn open(globals: &Globals) -> u8 {
     // LaunchServices launches in the login account, independently of a CLI HOME override.
     let marker = provenant_os::sys::account(provenant_os::sys::Account::Current)

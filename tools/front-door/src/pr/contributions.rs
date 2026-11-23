@@ -203,7 +203,6 @@ fn parse_end(bytes: &[u8]) -> Result<(String, Option<WallTime>)> {
 }
 
 /// Workflow success must not depend on optional attribution storage.
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 pub(super) fn warn(number: Option<u64>, error: &dyn std::fmt::Display) {
     use std::io::Write;
     let number = number.map_or_else(|| "N".into(), |number| number.to_string());

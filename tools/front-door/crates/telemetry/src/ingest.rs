@@ -754,7 +754,6 @@ fn row(session: String, message: String, pending: Pending) -> Row {
         cache_write_1h: Some(one_hour),
         output: raw.output_tokens,
         reasoning: raw.reasoning_tokens,
-        ..Tokens::default()
     }));
     let (tokens, _) = accumulator.total();
     Row {

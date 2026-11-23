@@ -18,7 +18,7 @@ use provenant_records::warning::{
 use provenant_records::{Limits, decode_v1};
 use serde::{Deserialize, Serialize};
 use std::ffi::{OsStr, OsString};
-use std::io;
+use std::io::{self, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};

@@ -11,7 +11,6 @@ pub(super) struct ProgressReporter {
     state: std::sync::Arc<std::sync::Mutex<String>>,
 }
 impl ProgressReporter {
-    #[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
     pub(super) fn new(subject: String, interval: Duration) -> Self {
         Self::with_sink(
             subject,
@@ -293,7 +292,6 @@ pub fn assess_evidence(
     clippy::disallowed_methods,
     reason = "gate command execution owns its wall-clock timeout and git boundary"
 )]
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 pub fn execute_commands(
     project: &std::path::Path,
     state: &std::path::Path,
@@ -571,7 +569,6 @@ pub fn await_pr_ci(
     )
 }
 
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn await_pr_ci_with(
     forge: &mut dyn Forge,
     prs: &[EligiblePr],

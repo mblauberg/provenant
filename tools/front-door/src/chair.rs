@@ -236,7 +236,6 @@ fn launch(context: &Context, command: &str, deadline: Option<Instant>) -> Result
     execute_herdr(&["pane".into(), "run".into(), pane.into(), command.into()])?;
     Ok(pane.into())
 }
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn switch(
     context: &Context,
     input: &Input,

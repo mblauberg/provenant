@@ -226,7 +226,6 @@ pub struct LocalRetirementScope {
 impl LocalRetirementScope {
     /// Build the exclusions from an inventory the caller already read. A
     /// preview consults the same snapshot it reports instead of re-reading.
-    #[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
     fn from_inventory(
         context: &WorktreeContext<'_>,
         upstream: Option<&LandingTarget>,

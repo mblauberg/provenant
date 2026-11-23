@@ -44,7 +44,6 @@ struct Report {
     clippy::disallowed_methods,
     reason = "verify selection samples the production wall clock"
 )]
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 pub fn run(tier: Option<&str>, commit: Option<&str>, affected: bool, globals: &Globals) -> u8 {
     let resolved = match roots::resolve(
         globals,
@@ -704,7 +703,6 @@ impl DetachedCheckout {
 }
 impl Drop for DetachedCheckout {
     #[allow(clippy::disallowed_methods, reason = "git worktree lifecycle")]
-    #[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
     fn drop(&mut self) {
         let result = std::process::Command::new("git")
             .arg("-C")
@@ -791,7 +789,6 @@ fn failure_message(disposition: PortCommandDisposition) -> Option<(&'static str,
     Some((code, message.into()))
 }
 
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn render(
     report: Report,
     status: Outcome,

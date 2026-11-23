@@ -390,7 +390,6 @@ pub(super) fn confinement_request(
 /// sealed `lanes.sandbox` knob, the parent flag and the access the plan
 /// grants. The parent flag only narrows, so the host may set it on either the
 /// task or its profile. Invalid optional knobs retain the default off.
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 pub(super) fn sandbox_mode(
     host: &provenant_confinement::run_config::RunConfig,
     route: &str,
@@ -903,7 +902,6 @@ fn credential_declarations(
     unique
 }
 
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn report_credential_warning(message: &str) {
     use std::io::Write;
     let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
@@ -1505,7 +1503,6 @@ fn source_warning_messages(
         .collect()
 }
 
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn report_source_warnings(
     admission: &crate::run::SourceAdmission,
     registry: &Registry<'_>,
@@ -1921,7 +1918,6 @@ pub(in crate::run) fn read_only_checkout_warning(state: &Path, source: &Path) ->
 /// The fetched upstream head a stale read-only checkout should review instead
 /// of its own working tree. This is advisory: missing or unusable Git data
 /// yields no pin, so the launch keeps its existing local-source behaviour.
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 pub(in crate::run) fn read_only_source_ref(
     state: &Path,
     source: &Path,
@@ -2036,7 +2032,6 @@ fn current_branch(
         .map(str::to_owned)
 }
 
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn warn_branch_config(detail: impl std::fmt::Display) {
     use std::io::Write;
     let _ = writeln!(std::io::stderr().lock(), "warning: {detail}");

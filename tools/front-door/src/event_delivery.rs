@@ -20,7 +20,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 pub(crate) fn warn(message: &str) {
     use std::io::Write;
     let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
@@ -827,7 +826,6 @@ fn choose_source(
         Err(reason) => ("poll", Some(reason)),
     }
 }
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn source(
     dir: &Directory,
     repository: &str,

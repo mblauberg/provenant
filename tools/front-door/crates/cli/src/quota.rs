@@ -1004,7 +1004,6 @@ fn older_readiness_version(bytes: &[u8]) -> Option<u64> {
 }
 
 /// One note per process and account for a dropped older readiness file.
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn note_dropped_readiness(adapter: &str, key: &str, version: u64) {
     use std::io::Write;
     static NOTED: std::sync::Mutex<std::collections::BTreeSet<(String, String)>> =
@@ -1098,7 +1097,6 @@ pub fn quota_freshness(
 /// domain the resolved config does, through the state-keyed reader, so the
 /// derived readiness a writer publishes expires under the policy every
 /// reader applies. An unreadable domain warns and keeps the defaults.
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 pub(crate) fn state_freshness(state: &Path) -> provenant_quota::FreshnessPolicy {
     match provenant_config::read_domain::<provenant_quota::Settings>(state, "quota") {
         Ok(settings) => provenant_quota::FreshnessPolicy::from_settings(settings.freshness),
@@ -1116,7 +1114,6 @@ pub(crate) fn state_freshness(state: &Path) -> provenant_quota::FreshnessPolicy 
 /// The pools each model draws on, from the effective catalogue dispatch admits
 /// with, so a report's servable flags agree with dispatch. An unreadable
 /// catalogue warns and leaves models without pool scope.
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn catalogue_pools(roots: &Roots) -> impl Fn(&str, &str) -> Vec<String> {
     let catalogue = match crate::route::effective_catalogue(roots) {
         Ok(catalogue) => Some(catalogue),
@@ -1321,7 +1318,6 @@ fn write_intent(
     )
 }
 
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn write_intent_at(
     dir: &Directory,
     state: &Path,
@@ -2028,7 +2024,6 @@ fn probe_account(
         effects,
     )
 }
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 pub(crate) fn execute(
     command: &Quota,
     roots: &Roots,
@@ -3252,7 +3247,6 @@ fn quota_summary_at(report: &QuotaReport, time_zone: jiff::tz::TimeZone) -> crat
     clippy::disallowed_methods,
     reason = "quota command is a real-time boundary"
 )]
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 pub fn run(
     command: Quota,
     globals: &crate::Globals,

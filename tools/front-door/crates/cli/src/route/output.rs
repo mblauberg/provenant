@@ -308,7 +308,6 @@ pub(super) fn monthly_list_lines(list: &provenant_routing::RouteList) -> Vec<Str
     }));
     lines
 }
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 pub fn run(
     command: Route,
     globals: &Globals,

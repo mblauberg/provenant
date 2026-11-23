@@ -1,7 +1,6 @@
 //! Machine-readable owners for scripts/generate-reference; not an installed binary.
 use std::io::Write as _;
 
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn main() -> std::process::ExitCode {
     provenant::commands::install();
     let policy: Vec<_> = provenant_records::policy::table()

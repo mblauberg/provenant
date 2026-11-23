@@ -539,7 +539,6 @@ fn open_source(globals: &Globals) -> Result<Source, Refusal> {
     })
 }
 
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn execute(
     args: &Handoff,
     globals: &Globals,

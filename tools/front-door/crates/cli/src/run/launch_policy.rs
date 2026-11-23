@@ -90,7 +90,6 @@ pub fn seal_launch_policy(
     Ok(())
 }
 
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn policy_warning(message: &str) {
     use std::io::Write;
     let _ = writeln!(std::io::stderr().lock(), "warning: {message}");

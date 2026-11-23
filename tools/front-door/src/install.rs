@@ -843,7 +843,6 @@ fn inspect_live_attempts(
 /// Best-effort advisory for retained writer custody predating guardian schema
 /// 2. The custody owner classifies legacy evidence; install only reports its
 /// count and a representative path. This warning never blocks preflight.
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn warn_legacy_custody(destination: &provenant_core::Roots) -> Option<String> {
     let worktrees_path = destination.state.as_path().join("worktrees");
     let directory = match Directory::open_anchor(&worktrees_path) {
@@ -905,7 +904,6 @@ fn warn_legacy_custody(destination: &provenant_core::Roots) -> Option<String> {
 /// are enumerated across the whole installed state root, independent of the
 /// current checkout. When they cannot be inspected the failure is itself a
 /// visible warning rather than silence; this never blocks an install.
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn warn_live_record_change(
     destination: &provenant_core::Roots,
     context: &InstallContext<'_>,
@@ -1346,7 +1344,6 @@ fn preflight_install(
 
 /// Installs every batch. `agents` also settles the per-user LaunchAgents,
 /// which only a new release needs; a sync leaves them running as they are.
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn apply_install(
     mut args: cli::Install,
     globals: &cli::Globals,
@@ -1720,7 +1717,6 @@ fn retired_tree_bytes(path: &Path) -> u64 {
 
 /// Remove the directory left by the retired seeding feature, reporting its
 /// path and size. A missing directory is the normal case and stays silent.
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn retire_cargo_target_seeds(state: &Path) -> Option<String> {
     let path = state.join(RETIRED_CARGO_TARGET_SEEDS);
     let metadata = match std::fs::symlink_metadata(&path) {
@@ -2430,7 +2426,6 @@ fn verify_smoke_with(
     )
 }
 
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn report_smoke_cleanup<T>(
     outcome: Result<T, String>,
     cleanup: Result<(), String>,

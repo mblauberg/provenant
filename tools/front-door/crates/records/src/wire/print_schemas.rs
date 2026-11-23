@@ -2,7 +2,6 @@
 //! `scripts/generate-reference`. Not part of the shipped binary set.
 use std::io::Write;
 
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn main() -> std::process::ExitCode {
     let mut files = serde_json::Map::new();
     for (name, schema) in provenant_records::wire::published() {

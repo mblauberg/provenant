@@ -51,7 +51,10 @@ impl CommandSink {
 
     /// Take warnings still held for an envelope that never arrived.
     fn take_held(&self) -> Vec<Warning> {
-        let mut state = self.state.lock().expect("output sink lock");
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.seen.clear();
         std::mem::take(&mut state.warnings)
     }
@@ -63,12 +66,18 @@ impl Sink for CommandSink {
     /// either print to stderr as it arrives or keep it for the envelope.
     fn accept(&self, warning: Warning) {
         let key = warning.key();
-        let mut state = self.state.lock().expect("output sink lock");
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !state.seen.insert(key.clone()) {
             return;
         }
         if warning.dedup == Dedup::PerChange {
-            let root = STATE_ROOT.read().expect("state root lock").clone();
+            let root = STATE_ROOT
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             if let Some(root) = root
                 && dedup::was_seen(&root, &key)
             {
@@ -93,7 +102,10 @@ pub(crate) struct CommandSinkGuard {
 
 impl Drop for CommandSinkGuard {
     fn drop(&mut self) {
-        let sink = COMMAND_SINK.read().expect("output sink lock").clone();
+        let sink = COMMAND_SINK
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         if let Some(sink) = sink {
             for warning in sink.take_held() {
                 sink.display(warning);
@@ -143,7 +155,10 @@ fn remember_for_change(warning: &Warning) {
     if warning.dedup != Dedup::PerChange {
         return;
     }
-    let root = STATE_ROOT.read().expect("state root lock").clone();
+    let root = STATE_ROOT
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
     if let Some(root) = root {
         dedup::remember(&root, &warning.key(), warning.code.as_ref());
     }
@@ -154,7 +169,10 @@ fn remember_for_change(warning: &Warning) {
 /// has the envelope (`remember_warnings`) or once the guard shows the warning on
 /// a path that never emits — never before it has been delivered.
 fn take_warnings() -> Vec<Warning> {
-    let sink = COMMAND_SINK.read().expect("output sink lock").clone();
+    let sink = COMMAND_SINK
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
     sink.map(|sink| sink.take_held()).unwrap_or_default()
 }
 
@@ -170,9 +188,15 @@ fn remember_warnings(warnings: &[Warning]) {
 /// guard shows them on exit (and remembers them then) instead of swallowing
 /// them or remembering an undelivered warning here.
 fn return_warnings(warnings: Vec<Warning>) {
-    let sink = COMMAND_SINK.read().expect("output sink lock").clone();
+    let sink = COMMAND_SINK
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
     if let Some(sink) = sink {
-        let mut state = sink.state.lock().expect("output sink lock");
+        let mut state = sink
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.warnings.extend(warnings);
     }
 }
@@ -630,6 +654,7 @@ mod host_settings {
 }
 
 #[cfg(test)]
+#[allow(dead_code, unused_imports)]
 mod tests {
     use super::*;
     use provenant_records::Outcome;
@@ -640,7 +665,9 @@ mod tests {
     static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn with_root(f: impl FnOnce(&Path)) {
-        let _lock = TEST_LOCK.lock().expect("test lock");
+        let _lock = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().expect("tempdir");
         f(dir.path());
     }
@@ -648,12 +675,16 @@ mod tests {
     #[test]
     // Spec: docs/specs/cli.md#warnings-are-typed-values
     fn json_mode_carries_warnings_in_the_envelope_and_not_on_stderr() {
-        let _lock = TEST_LOCK.lock().expect("test lock");
+        let _lock = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _sink = install_command_sink(true);
         warning::warn(Warning::new(WarningCode("TEST"), "a typed warning"));
         let result = CommandResult::new("fixture", Outcome::Ok, json!({"ok": true}));
-        let mut globals = provenant_cli::Globals::default();
-        globals.json = true;
+        let globals = provenant_cli::Globals {
+            json: true,
+            ..Default::default()
+        };
         let mut out = Vec::new();
         let mut err = Vec::new();
         emit_with_writers(&result, &globals, &mut out, &mut err, "", false, None);
@@ -666,7 +697,9 @@ mod tests {
     #[test]
     // Spec: docs/specs/cli.md#warnings-are-typed-values
     fn an_owner_capture_keeps_warnings_out_of_the_command_sink() {
-        let _lock = TEST_LOCK.lock().expect("test lock");
+        let _lock = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let ((), captured) = capture(|| {
             warning::warn(Warning::new(
                 WarningCode("TEST"),
@@ -723,7 +756,9 @@ mod tests {
     #[test]
     // Spec: docs/specs/cli.md#warnings-are-typed-values
     fn parse_warnings_replayed_before_emit_reach_the_json_envelope() {
-        let _lock = TEST_LOCK.lock().expect("test lock");
+        let _lock = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // A capital target is folded by clap's value parser, which runs before
         // dispatch installs the command sink.
         let (parsed, parse_warnings) =
@@ -741,8 +776,10 @@ mod tests {
         let _sink = install_command_sink(true);
         replay_warnings(parse_warnings);
         let result = CommandResult::new("fixture", Outcome::Ok, json!({"ok": true}));
-        let mut globals = provenant_cli::Globals::default();
-        globals.json = true;
+        let globals = provenant_cli::Globals {
+            json: true,
+            ..Default::default()
+        };
         let mut out = Vec::new();
         let mut err = Vec::new();
         emit_with_writers(&result, &globals, &mut out, &mut err, "", false, None);
@@ -761,7 +798,9 @@ mod tests {
     #[test]
     // Spec: docs/specs/cli.md#one-bounded-envelope
     fn an_oversized_json_result_carries_warnings_on_the_bounded_marker() {
-        let _lock = TEST_LOCK.lock().expect("test lock");
+        let _lock = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _sink = install_command_sink(true);
         let result = CommandResult::new(
             "fixture",
@@ -794,7 +833,9 @@ mod tests {
     #[test]
     // Spec: docs/specs/cli.md#one-bounded-envelope
     fn omitted_bytes_measure_the_envelope_not_the_bare_result() {
-        let _lock = TEST_LOCK.lock().expect("test lock");
+        let _lock = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _sink = install_command_sink(true);
         // Size the bare result just under the cap so a modest held warning is
         // what pushes the envelope over it. The marker and its warning must

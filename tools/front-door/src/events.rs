@@ -21,7 +21,6 @@ pub(crate) fn run(from: i64, follow: bool, consumer: Option<&str>, globals: &Glo
     }
 }
 
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn stream(
     mut cursor: i64,
     follow: bool,

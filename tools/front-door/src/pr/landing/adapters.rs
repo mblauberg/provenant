@@ -824,7 +824,6 @@ impl Forge for GhForge {
     ) -> Result<String, LandingError> {
         GhForge::merge_stack(self, number, head, method)
     }
-    #[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
     fn may_push_directly(&mut self, branch: &str) -> Result<bool, LandingError> {
         let verdict = (|| -> Result<(), String> {
             let encoded = encode_branch(branch);
@@ -1076,7 +1075,6 @@ impl<'a> GitRepo<'a> {
 }
 
 impl Repo for GitRepo<'_> {
-    #[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
     fn publish_command(
         &mut self,
         command: &provenant_records::landing::RepositoryCommand,
@@ -1618,7 +1616,6 @@ struct CheckObservation {
     next_interval: Option<Duration>,
 }
 
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn observe_checks_with(
     candidate: &Candidate,
     definition: &GateDefinition,
@@ -1749,7 +1746,6 @@ impl AlarmSink for ChairAlarms {
     fn set_project_path(&mut self, path: &Path) {
         self.project = path.to_owned();
     }
-    #[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
     fn post(&mut self, alarm: &Alarm) -> Result<(), LandingError> {
         let text = alarm_text(alarm);
         let _ = writeln!(std::io::stderr().lock(), "{text}");

@@ -368,7 +368,7 @@ fn usage_ledger_v4_round_trips_a_v3_fixture_and_is_idempotent() -> Result {
     let sidecar = std::fs::read(directory.join(format!("{segment}.v3-unmapped")))?;
     assert_eq!(
         sidecar,
-        lines[1].iter().copied().chain([b'\n']).collect::<Vec<u8>>()
+        lines[1].iter().copied().chain(*b"\n").collect::<Vec<u8>>()
     );
 
     let again = migrate_to_v4(&state)?;

@@ -69,7 +69,6 @@ pub(crate) fn settlement_reactions(
     })
 }
 
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 pub(crate) fn advance_graphs_after_settlement(
     settled: &provenant_run::HolderContext,
     workers: &'static dyn WorkerObserver,
@@ -424,7 +423,6 @@ pub(crate) fn matching_graph_hint(
     Some(id.to_owned())
 }
 
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 pub(crate) fn settle_owned_worktree(
     settled: &provenant_run::HolderContext,
     roots: &provenant_core::Roots,

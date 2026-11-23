@@ -125,7 +125,6 @@ fn unknown_value(name: &str, text: &str, source: Layer, default: &str) -> String
 /// strict: an unknown value warns with its source and keeps the default, so a
 /// typo neither refuses the file nor silently chooses the permissive reading
 /// under the setting's own name.
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn resolve_setting<T: HistoryValue>(
     name: &str,
     text: Option<&str>,

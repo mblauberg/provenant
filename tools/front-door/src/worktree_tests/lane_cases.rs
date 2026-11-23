@@ -589,7 +589,6 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
 
 /// Fake provider: as a lane's shell would, start Provenant from the lane
 /// environment the host pinned, then publish through the CLI overflow path.
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 pub(crate) fn lane_provider() -> Result {
     if std::env::var(provenant_core::consumer_env::LANE_DEPTH).as_deref() == Ok("2") {
         let mut prompt = String::new();
