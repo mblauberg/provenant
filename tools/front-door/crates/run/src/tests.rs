@@ -1108,10 +1108,16 @@ fn project_delivery_receipt(
         project: temp.path().to_path_buf(),
         worktree: temp.path().join("lane"),
     });
+    // Push delivery needs a named remote; the integrate cases keep the
+    // local destination the integration fixture uses.
+    let remote = match &mode {
+        provenant_records::run::DeliveryMode::Integrate(_) => String::new(),
+        _ => "origin".into(),
+    };
     input.request.task.deliver = Some(WriterDeliveryRequest {
         extra: Default::default(),
         mode,
-        remote: String::new(),
+        remote,
         branch: branch.clone(),
         open_pr: false,
         fast_forward_only: false,
@@ -1235,7 +1241,7 @@ fn failed_delivery_receipt_is_not_projected_as_delivered() -> TestResult {
 fn push_delivery_receipt_with_different_head_is_not_projected() -> TestResult {
     let (projected, delivered) = project_delivery_receipt(
         provenant_records::run::DeliveryMode::Push,
-        |_, integrated| delivered_receipt("batch/next", "", integrated),
+        |_, integrated| delivered_receipt("batch/next", "origin", integrated),
     )?;
     assert!(matches!(
         projected,
