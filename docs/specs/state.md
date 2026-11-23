@@ -169,6 +169,21 @@ approved anchor.
 - Why: errors need visible remedies without expanding authority.
 - Owner: `crates/config/src/`
 
+### Every setting reports its layer
+
+Every setting value travels with the layer it came from and, when it has one,
+the exact origin. One vocabulary names the layers for every family, so a warning
+or receipt never invents a second spelling. A family declares its precedence
+once, lowest first; the merge takes the candidate from the highest listed layer,
+keeps the last given on a tie, and returns every other listed candidate as
+shadowed. A candidate from a layer the family does not list is ignored and
+reported, so the caller can warn with its source. The merge and every
+explanation read that one declaration, and a limit receipt keeps its bytes
+because the overlapping layer names are the same spelling.
+- Why: one vocabulary lets every explanation name a source the next reader can
+  act on, and a family cannot rank the same setting two ways.
+- Owner: `crates/records/src/provenance.rs`, each family's precedence constant
+
 ### One sourced port table
 
 One table declares forge operations, verify, land, CI observation, worktree
@@ -327,6 +342,22 @@ A partial install lists applied and remaining actions, and rerunning `install`
 recovers it, even with no receipt. There are no rollback journals.
 - Why: one idempotent path is easier to trust than a rollback engine.
 - Owner: `crates/config/src/managed.rs`
+
+### Format changes migrate once at install
+
+An install-time migration step owns a change to non-SQLite state: files,
+ledgers, receipts and metadata that no SQLite store owns. SQLite stores migrate
+themselves on writable open and are not wrapped here. Steps run in declaration order after
+the live-attempt advisory and before any release is swapped in, each only when
+the install receipt does not already record its id. An id is recorded only
+after that step succeeds; a failed step warns `MIGRATION_STEP_FAILED` with the
+state path, leaves the receipt unchanged, and the install proceeds. Every step
+is idempotent, so a rerun after a partial failure finishes the job, and a step
+is deleted in the release after the one that ships it. A first install has no
+state to migrate; the receipt it publishes records any later step's id.
+- Why: state a store does not own still changes shape, and one recorded
+  crossing keeps retries safe without a permanent decoder.
+- Owner: `crates/records/src/migrate.rs`, `src/install/migrations.rs`
 
 ## Typed host metadata in format 2
 

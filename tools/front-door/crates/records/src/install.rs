@@ -125,6 +125,10 @@ pub struct InstallReceipt {
     pub harnesses: Vec<Harness>,
     pub harness_targets: Vec<ResolvedHarnessTarget>,
     pub entries: Vec<OwnedEntry>,
+    /// Ids of install-time migration steps that finished, in the order they
+    /// ran. Older receipts omit the field and mean nothing has run.
+    #[serde(default)]
+    pub migrations: Vec<String>,
 }
 
 /// Build identity emitted at the binary edge without ambient source discovery.

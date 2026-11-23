@@ -110,6 +110,22 @@ passing `--project PATH` as the repair.
 
 - Why: consumers can act on a refusal without depending on prose.
 
+### Warnings are typed values
+
+A warning is a typed value: a stable UPPER_SNAKE code from the declared
+catalogue, a one-sentence message, and optional subject, source and repair.
+Library code never writes a warning itself: one function routes each warning to
+the innermost thread-local capture on this thread, then to the command's process
+sink, then to stderr as `warning: <message>` when neither is installed. A sink
+guard restores the previous sink when it is dropped. Codes follow the same
+stability rules as refusal codes, so a consumer branches on the code and never
+on the prose, and adding a code is additive. A repeated key collapses per
+invocation or per change; a per-change key hashes the code, subject and message
+and is remembered in the state root.
+- Why: a consumer needs to act on a warning without matching text, and a
+  command that returns warnings as data must not also print them.
+- Owner: `crates/records/src/warning.rs`, the binary edge that installs the sink
+
 ### Run refusals keep their own code at the facade
 
 A run refusal that reaches the CLI or Fabric facade without a richer typed

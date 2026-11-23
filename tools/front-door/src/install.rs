@@ -20,6 +20,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+mod migrations;
+
 #[derive(Debug)]
 enum EdgeError {
     Root(roots::RootError),
@@ -1446,6 +1448,9 @@ fn apply_install(
     }
     // Configuration has been validated at the staged root; every actual write
     // now targets its published name. Agent bytes already name that destination.
+    // Non-SQLite state migrates once here, after the live-attempt advisory and
+    // before any release is swapped in.
+    let migrated = migrations::run(environment.roots.state.as_path());
     for batch in &mut batches {
         batch.roots = environment.roots.clone();
     }
@@ -1534,6 +1539,9 @@ fn apply_install(
     if let Ok(outcome) = &result
         && !outcome.dry_run
     {
+        // A step that ran before this install had no receipt to record into;
+        // record its id on the receipt the install just published.
+        migrations::record(&state, &migrated);
         // The seeding feature is gone; a state root left by an older release
         // still pays for its seeds until install retires them once.
         let _ = retire_cargo_target_seeds(&state);
@@ -2998,6 +3006,7 @@ mod tests {
             harnesses: Vec::new(),
             harness_targets: Vec::new(),
             entries: Vec::new(),
+            migrations: Vec::new(),
         };
         std::fs::write(
             install.join("receipt.json"),
@@ -3817,6 +3826,7 @@ mod tests {
                 target("orphan")?,
             ],
             entries: vec![],
+            migrations: Vec::new(),
         };
         let orphans = orphaned_targets(&environment, &base, &receipt);
         assert_eq!(orphans.len(), 1);

@@ -32,14 +32,18 @@ mod input;
 mod install;
 mod json;
 mod jsonc;
+pub mod migrate;
 mod path_wire;
 pub mod policy;
 pub mod port_receipt;
 pub mod ports;
+pub mod provenance;
 mod source;
 pub mod telemetry_context;
 mod trace;
+pub mod usage;
 pub mod usage_identity;
+pub mod warning;
 
 pub use artifact_ref::ArtifactRef;
 pub use attempt_fact::{
@@ -57,17 +61,21 @@ pub use json::{
     decode_stored_record_v1, decode_v1, encode,
 };
 pub use jsonc::{JsoncDocument, JsoncToken, JsoncTokenKind, decode_jsonc};
+pub use migrate::{Migration, MigrationError, MigrationReport};
 pub use path_wire::{PathWire, PathWireError, StructuredPathWire};
 pub use port_receipt::{
     DEFAULT_PORT_COMMAND_RECEIPT_AGE_DAYS, PORT_COMMAND_RECEIPT_SCHEMA_VERSION, PortCommandBackend,
     PortCommandDisposition, PortCommandReceipt, PortReceiptLifetime,
 };
 pub use ports::{CommandExitCodes, ExitDisposition, PortCommand, PortSource};
+pub use provenance::{Layer, Merge, Precedence, Source, Sourced};
 pub use source::{SourceDigest, SourceDigestError, SourceInput, source_digest};
 pub use trace::Trace;
+pub use usage::{Cost, CostOrigin, Tokens, UsageScope, UsageSource};
 pub use usage_identity::{
     AccountIdentity, Identity, IdentityEpoch, IdentityEvidenceSource, UnknownIdentityReason,
 };
+pub use warning::{Dedup, Sink, SinkGuard, Warning, WarningCode, capture, install, warn};
 
 pub mod inbox;
 pub mod landing;
