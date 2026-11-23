@@ -724,14 +724,14 @@ fn cli_envelope(command: &str, status: &str, data: Value, error: Value) -> Value
 fn current_cli_failure_envelopes_validate() {
     let lanes = command_schema("lanes").unwrap();
     let cancel = command_schema("cancel").unwrap();
-    let list = serde_json::to_value(list(vec![row()])).unwrap();
+    let listed = serde_json::to_value(list(vec![row()])).unwrap();
     // `lanes --wait` timing out: partial data, no error object.
     validate(
         &lanes,
-        &cli_envelope("lanes", "timeout", list.clone(), Value::Null),
+        &cli_envelope("lanes", "timeout", listed.clone(), Value::Null),
     )
     .unwrap();
-    validate(&lanes, &cli_envelope("lanes", "ok", list, Value::Null)).unwrap();
+    validate(&lanes, &cli_envelope("lanes", "ok", listed, Value::Null)).unwrap();
     // Cancel with an unobservable receipt: failed, no error object.
     let unobservable = json!({"operation_id": "o", "receipts": [
         {"attempt_id": "a", "receipt": {"state": "unobservable", "reason": "no launch summary"}}

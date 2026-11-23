@@ -75,6 +75,20 @@ def lex(source: str) -> list[Token]:
                 result.append(Token("string", source[start:end], start, end, start_line))
                 advance(end)
                 continue
+        if char == "'":
+            # A char literal ('x', '\'', '\u{22}') is one token, so a quote inside
+            # it cannot open a string; a lifetime ('a) stays punctuation.
+            if i + 1 < size and source[i + 1] == "\\":
+                close = source.find("'", i + 3)
+                end = size if close < 0 else close + 1
+            elif i + 2 < size and source[i + 2] == "'":
+                end = i + 3
+            else:
+                end = None
+            if end is not None:
+                result.append(Token("char", source[start:end], start, end, start_line))
+                advance(end)
+                continue
         if char == '"' or (char == "b" and i + 1 < size and source[i + 1] == '"'):
             quote = i + (1 if char == '"' else 2)
             cursor = quote
