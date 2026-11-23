@@ -752,10 +752,19 @@ fn pacing_profile_account_labels_resolve_and_unknown_names_fail() -> Result {
         list["data"]["configured_free"]["opencode"]["deadline"]["reset_of"],
         "claude/opaque-one"
     );
-    for profile in [
-        "[domains.routing.pacing.accounts.missing]\npolicy='pace'\n",
-        "[domains.routing.pacing.accounts.opaque-one]\ndeadline={reset_of='missing'}\n",
-        "[domains.routing.pacing.free.opencode]\ndeadline={reset_of='missing'}\n",
+    for (profile, field) in [
+        (
+            "[domains.routing.pacing.accounts.missing]\npolicy='pace'\n",
+            "pacing.accounts.missing",
+        ),
+        (
+            "[domains.routing.pacing.accounts.opaque-one]\ndeadline={reset_of='missing'}\n",
+            "pacing.accounts.opaque-one.deadline.reset_of",
+        ),
+        (
+            "[domains.routing.pacing.free.opencode]\ndeadline={reset_of='missing'}\n",
+            "pacing.free.opencode.deadline.reset_of",
+        ),
     ] {
         fs::write(&config, format!("{registrations}{profile}"))?;
         let result = call(&rig, &["route", "list"], 2)?;
@@ -766,17 +775,16 @@ fn pacing_profile_account_labels_resolve_and_unknown_names_fail() -> Result {
                 .unwrap()
                 .contains("provenant accounts list")
         );
-        let message = result["error"]["message"].as_str().ok_or("error")?;
-        // A miss names what was supplied and lists close matching labels only:
-        // never a key, directory or the full account catalogue.
+        // A miss names the setting it came from and the reference that was
+        // supplied. Any close matches are labels only, never a key, directory
+        // or the full account catalogue. The field prefix can therefore name a
+        // key the operator wrote in their own config without leaking one.
         // Spec: docs/specs/routing.md#account-references
-        assert!(message.contains("missing"), "{message}");
-        assert!(
-            !message.contains("opaque-one")
-                && !message.contains("opaque-two")
-                && !message.contains("/tmp/")
-                && !message.contains("valid accounts"),
-            "{message}"
+        assert_eq!(
+            result["error"]["message"],
+            format!("{field}: unknown account `missing`"),
+            "{}",
+            result["error"]["message"]
         );
     }
     fs::write(

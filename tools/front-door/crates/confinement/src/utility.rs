@@ -5083,7 +5083,7 @@ File exists\nfatal: could not lock config file .git/config: File exists\n";
                 .map_err(|error| error.to_string())
         }
 
-        let fixture = Fixture::new()?;
+        let mut fixture = Fixture::new()?;
         // The lane's upstream now comes from the resolved forge context, so
         // give the fixture the sole remote that makes that context "origin".
         // Without one the key legitimately becomes empty and the snapshot
@@ -5095,6 +5095,16 @@ File exists\nfatal: could not lock config file .git/config: File exists\n";
             "origin",
             fixture.root.to_str().ok_or("non-UTF8 fixture root")?,
         ])?;
+        // Adding a remote rewrites the common config, which the verified
+        // handle digests on every retry. Re-anchor it before the writer starts,
+        // or the first revalidation reports IdentityChanged instead of
+        // exercising the config.lock retry this test is about.
+        fixture.repo = fixture.runtime.open_repo(
+            &fixture.executor,
+            &fixture.root,
+            fixture.budget()?,
+            &CancelToken::new(),
+        )?;
         let worktrees = fixture.root.join(".worktrees");
         fs::create_dir_all(&worktrees)?;
         let head = fixture.head()?.to_string();

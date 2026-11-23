@@ -110,5 +110,6 @@
     ]
   },
   "default_tier": "0",
-  "test_threads": null
+  "test_threads": null,
+  "static_checks": []
 }

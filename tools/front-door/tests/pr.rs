@@ -566,7 +566,8 @@ fn land_explains_poll_and_budget_sources() -> Result {
         provenant_cli::domains::LandSettings::default().poll_seconds
     );
     // One layer vocabulary names every setting's source; a shipped default is
-    // reported as `default`, not the retired `bundled` spelling.
+    // reported as `default`, not the retired `bundled` spelling. A CLI flag is
+    // the `launch` layer, not a retired `invocation` spelling.
     assert_eq!(
         default["data"]["fields"]["poll_seconds"]["source"]["layer"],
         "default"
@@ -607,7 +608,7 @@ fn land_explains_poll_and_budget_sources() -> Result {
     assert_eq!(cli["data"]["fields"]["poll_seconds"]["value"], 7);
     assert_eq!(
         cli["data"]["fields"]["poll_seconds"]["source"]["layer"],
-        "invocation"
+        "launch"
     );
     assert_eq!(cli["data"]["ci_patience_seconds"], 90);
     assert_eq!(cli["data"]["ci_patience_source"], "--wait");
