@@ -2081,8 +2081,11 @@ fn resolve_managed_writer_path(
     let expected = ports
         .managed_writer_path(branch)
         .map_err(WorktreeError::PortConfiguration)?;
-    let requested = project_root.join(path);
-    let expected = project_root.join(expected);
+    // A declared root may be parent-relative or absolute; compare canonical
+    // paths so `../outside/<branch>` matches the registered checkout path.
+    let canonical = |value: std::path::PathBuf| std::fs::canonicalize(&value).unwrap_or(value);
+    let requested = canonical(project_root.join(path));
+    let expected = canonical(project_root.join(expected));
     if requested == expected {
         Ok(expected)
     } else {

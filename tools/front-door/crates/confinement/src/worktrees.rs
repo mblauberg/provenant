@@ -121,15 +121,23 @@ pub fn managed_writer_relative_path(
         .map_err(WorktreeError::PortConfiguration)
 }
 
-/// Resolve a relative path against the configured layout roots.
+/// Identify the managed writer branch for a path under the configured layout
+/// roots. Relative paths are matched against the declared roots; an absolute
+/// path is matched against those roots resolved against `project`, so a root
+/// declared outside the checkout is treated exactly like the default one.
 pub fn managed_writer_branch(
     project: &Path,
     host_state: &Path,
-    relative: &Path,
+    path: &Path,
 ) -> Result<Option<String>, WorktreeError> {
     let ports = provenant_config::PortTable::read_for(Some(project), host_state)
         .map_err(WorktreeError::PortConfiguration)?;
-    Ok(ports.managed_writer_branch(relative).map(str::to_owned))
+    let branch = if path.is_absolute() {
+        ports.worktree_layout.branch_for_path(project, path)
+    } else {
+        ports.managed_writer_branch(path)
+    };
+    Ok(branch.map(str::to_owned))
 }
 
 /// Context-free allocation roots for a registered Git common directory.

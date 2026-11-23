@@ -702,6 +702,14 @@ fn config_show_ports(
             serde_json::Value::String(remote),
             full,
         ),
+        // Spec: docs/specs/next-batch.md#contract
+        // Each declared root is reported with the layer and origin that set it.
+        "worktree_layout.roots": config_port_leaf(
+            &ports,
+            "worktree_layout.roots",
+            serde_json::to_value(&ports.worktree_layout.roots).unwrap_or_default(),
+            full,
+        ),
     })
 }
 
@@ -811,6 +819,33 @@ mod config_ports_tests {
             candidate["layer"] == "host" && candidate["value"] == "host-remote"
         }));
     }
+
+    // Spec: docs/specs/next-batch.md#contract
+    #[test]
+    fn config_show_ports_reports_declared_worktree_roots_with_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::create_dir_all(project.join(".git")).unwrap();
+        std::fs::create_dir_all(project.join(".provenant")).unwrap();
+        std::fs::write(
+            state.join("ports.json"),
+            r#"{"worktree_layout":{"roots":["../host-writers"],"default":"../host-writers/<branch>"}}"#,
+        )
+        .unwrap();
+
+        let shown = super::config_show_ports(&project, &state, false);
+        let roots = &shown["worktree_layout.roots"];
+        assert_eq!(roots["value"][0], "../host-writers");
+        assert_eq!(roots["layer"], "host");
+        assert!(
+            roots["origin"]
+                .as_str()
+                .unwrap()
+                .ends_with("ports.json#worktree_layout.roots")
+        );
+    }
 }
 
 fn config_setting_value(
@@ -863,6 +898,17 @@ fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::
                 serde_json::json!({
                     "schema_version": table.schema_version,
                     "ports": ports,
+                    // Spec: docs/specs/next-batch.md#contract
+                    // Effective worktree roots carry the layer and origin that
+                    // declared them, including roots outside the checkout.
+                    "worktree_layout": {
+                        "roots": config_port_leaf(
+                            &table,
+                            "worktree_layout.roots",
+                            serde_json::to_value(&table.worktree_layout.roots).unwrap_or_default(),
+                            globals.full,
+                        ),
+                    },
                     "build": {
                         "prepare": config_ports_prepare(&table, globals.full),
                     },

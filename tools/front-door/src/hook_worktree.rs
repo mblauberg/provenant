@@ -152,7 +152,12 @@ fn reusable(
     let expected = match provenant_confinement::worktrees::managed_writer_relative_path(
         &primary, state, branch,
     ) {
-        Ok(relative) => primary.join(relative),
+        // A declared root may be parent-relative or absolute, so the joined
+        // path can carry `..`. The registered path is canonical.
+        Ok(relative) => {
+            let joined = primary.join(relative);
+            std::fs::canonicalize(&joined).unwrap_or(joined)
+        }
         Err(_) => return refuse("the repository worktree layout is unavailable"),
     };
     // `unknown` is common (any process the owner cannot inspect makes every

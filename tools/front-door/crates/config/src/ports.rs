@@ -557,14 +557,54 @@ impl WorktreeLayoutPort {
         Ok(PathBuf::from(rendered))
     }
 
+    /// Resolve a branch's allocation to the directory that anchors its declared
+    /// root and the normal tail beneath that root. Roots may be absolute or
+    /// parent-relative; `base` is the checkout (or common Git directory) those
+    /// declarations are relative to. The anchor is returned as a path expression
+    /// (`base.join(root)`), which callers canonicalise before opening it.
+    pub fn allocation_for(&self, base: &Path, branch: &str) -> io::Result<(PathBuf, PathBuf)> {
+        let rendered = self.path_for_branch(branch)?;
+        let root = self
+            .roots
+            .iter()
+            .filter(|root| rendered.starts_with(root))
+            .max_by_key(|root| root.components().count())
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "invalid worktree template")
+            })?;
+        let tail = rendered
+            .strip_prefix(root)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid worktree template"))?;
+        Ok((base.join(root), tail.to_path_buf()))
+    }
+
+    /// Identify the branch of a worktree at an absolute `path` lying under any
+    /// declared root resolved against `base`. This is the absolute-path
+    /// counterpart of [`Self::branch_component`] and treats an outside root
+    /// exactly like the default one.
+    pub fn branch_for_path<'a>(&self, base: &Path, path: &'a Path) -> Option<&'a str> {
+        if !path.is_absolute() || !matches!(self.backend, PortBackend::Builtin) {
+            return None;
+        }
+        let template_root = self
+            .roots
+            .iter()
+            .filter(|root| self.default.starts_with(root))
+            .max_by_key(|root| root.components().count())?;
+        let template = self.default.strip_prefix(template_root).ok()?.to_str()?;
+        let (prefix, suffix) = template.split_once(BRANCH_TOKEN)?;
+        self.roots.iter().find_map(|root| {
+            let resolved = resolve_declared_path(base, root)?;
+            let tail = path.strip_prefix(&resolved).ok()?.to_str()?;
+            let branch = tail.strip_prefix(prefix)?.strip_suffix(suffix)?;
+            (!branch.is_empty() && !branch.contains('/')).then_some(branch)
+        })
+    }
+
     /// Return the branch slug matched by the declared default template under
     /// any configured root. Secondary roots reuse that same template tail.
     pub fn branch_component<'a>(&self, relative: &'a Path) -> Option<&'a str> {
-        if !relative
-            .components()
-            .all(|component| matches!(component, Component::Normal(_)))
-            || !matches!(self.backend, PortBackend::Builtin)
-        {
+        if !declared_layout_path(relative) || !matches!(self.backend, PortBackend::Builtin) {
             return None;
         }
         let template_root = self
@@ -1126,17 +1166,16 @@ impl PortEntry for WorktreeLayoutPort {
     fn valid(&self) -> bool {
         self.backend.valid()
             && !self.roots.is_empty()
-            && self
-                .roots
-                .iter()
-                .all(|root| relative(root, false) && !root.to_string_lossy().contains(BRANCH_TOKEN))
+            && self.roots.iter().all(|root| {
+                declared_layout_path(root) && !root.to_string_lossy().contains(BRANCH_TOKEN)
+            })
             && self
                 .roots
                 .iter()
                 .collect::<std::collections::BTreeSet<_>>()
                 .len()
                 == self.roots.len()
-            && relative(&self.default, false)
+            && declared_layout_path(&self.default)
             && self.default.to_string_lossy().matches(BRANCH_TOKEN).count() == 1
             && self.roots.iter().any(|root| self.default.starts_with(root))
     }
@@ -1148,6 +1187,59 @@ fn relative(path: &Path, allow_current: bool) -> bool {
             matches!(component, Component::Normal(_))
                 || (allow_current && component == Component::CurDir)
         })
+}
+
+/// A path a layout root or default template may declare. A root may be
+/// absolute or parent-relative so worktrees can live beside or away from the
+/// checkout; an empty component, a `.` component or NUL is never a valid
+/// declaration. This is the one validator for paths that may leave the checkout.
+fn declared_layout_path(path: &Path) -> bool {
+    !path.as_os_str().is_empty()
+        && !path.as_os_str().as_encoded_bytes().contains(&0)
+        && path
+            .components()
+            .enumerate()
+            .all(|(index, component)| match component {
+                Component::Prefix(_) => index == 0,
+                Component::RootDir => index == 0 || index == 1,
+                Component::ParentDir | Component::Normal(_) => true,
+                Component::CurDir => false,
+            })
+}
+
+/// Resolve a declared layout path against its anchor, removing `.` and `..`
+/// lexically. `anchor` is absolute in production; a parent that escapes a
+/// relative anchor is refused. Used to compare an absolute worktree path with
+/// an outside root declared as `../sibling`.
+fn resolve_declared_path(anchor: &Path, declared: &Path) -> Option<PathBuf> {
+    let joined = if declared.is_absolute() {
+        declared.to_path_buf()
+    } else {
+        anchor.join(declared)
+    };
+    let absolute = joined.is_absolute();
+    let mut parts: Vec<OsString> = Vec::new();
+    for component in joined.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir | Component::CurDir => {}
+            Component::Normal(name) => parts.push(name.to_os_string()),
+            Component::ParentDir => match parts.last() {
+                Some(last) if last.as_os_str() != std::ffi::OsStr::new("..") => {
+                    parts.pop();
+                }
+                _ if absolute => return None,
+                _ => parts.push(OsString::from("..")),
+            },
+        }
+    }
+    let mut resolved = PathBuf::new();
+    if absolute {
+        resolved.push("/");
+    }
+    for part in parts {
+        resolved.push(part);
+    }
+    Some(resolved)
 }
 
 macro_rules! declare_ports {
@@ -1892,7 +1984,9 @@ impl PortTable {
         self.worktree_layout
             .roots
             .iter()
-            .map(|relative| root.join(relative))
+            .map(|declared| {
+                resolve_declared_path(root, declared).unwrap_or_else(|| root.join(declared))
+            })
             .collect()
     }
 
@@ -2234,9 +2328,50 @@ mod tests {
         table.worktree_layout.roots = vec![PathBuf::from("trees/<branch>")];
         table.worktree_layout.default = PathBuf::from("trees/<branch>/checkout");
         assert!(table.validate().is_err());
+
+        // Spec: docs/specs/next-batch.md#contract
+        // A parent-relative root places worktrees beside the checkout; an
+        // absolute root places them anywhere. Both are declared roots and are
+        // treated exactly like the default one.
         table = PortTable::builtin();
+        table.worktree_layout.roots = vec![PathBuf::from("../outside")];
         table.worktree_layout.default = PathBuf::from("../outside/<branch>");
-        assert!(table.validate().is_err());
+        assert!(table.validate().is_ok());
+        assert_eq!(
+            table
+                .worktree_layout
+                .path_for_branch("feature/topic")
+                .unwrap(),
+            PathBuf::from("../outside/feature-topic"),
+        );
+        let (anchor, tail) = table
+            .worktree_layout
+            .allocation_for(Path::new("/repo"), "feature/topic")
+            .unwrap();
+        assert_eq!(anchor, PathBuf::from("/repo/../outside"));
+        assert_eq!(tail, PathBuf::from("feature-topic"));
+        assert_eq!(
+            table
+                .worktree_layout
+                .branch_for_path(Path::new("/repo"), Path::new("/outside/feature-topic")),
+            Some("feature-topic"),
+        );
+        table.worktree_layout.roots = vec![PathBuf::from("/srv/worktrees")];
+        table.worktree_layout.default = PathBuf::from("/srv/worktrees/<branch>");
+        assert!(table.validate().is_ok());
+        assert_eq!(
+            table
+                .worktree_layout
+                .path_for_branch("feature/topic")
+                .unwrap(),
+            PathBuf::from("/srv/worktrees/feature-topic"),
+        );
+        assert_eq!(
+            table
+                .worktree_layout
+                .branch_for_path(Path::new("/repo"), Path::new("/outside/feature-topic")),
+            None,
+        );
     }
 
     #[test]
@@ -2276,7 +2411,8 @@ mod tests {
         assert!(naming.4.is_some());
         assert!(PortTable::read_for(Some(directory.path()), directory.path()).is_err());
         let mut invalid = PortTable::builtin();
-        invalid.worktree_layout.default = "../outside/{branch}".into();
+        // The refused shape is the wrong branch token, not the root location.
+        invalid.worktree_layout.default = "outside/{branch}".into();
         assert!(
             invalid
                 .worktree_layout
@@ -3167,6 +3303,54 @@ mod tests {
         assert_eq!(shadowed[1].1, Layer::Host);
         assert_eq!(shadowed[0].1, Layer::Default);
         assert!(table.sourced_leaf("absent.leaf").is_empty());
+    }
+
+    // Spec: docs/specs/next-batch.md#contract
+    #[test]
+    fn outside_worktree_roots_report_their_layer_and_origin() {
+        let temp = tempfile::tempdir().unwrap();
+        let (host, project, keyed) = checkout_with_key(temp.path());
+        std::fs::create_dir_all(&keyed).unwrap();
+        std::fs::write(
+            host.join("ports.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "worktree_layout": {
+                    "roots": ["../host-writers"],
+                    "default": "../host-writers/<branch>",
+                },
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            project.join(PORTS_CONFIG),
+            serde_json::to_vec(&serde_json::json!({
+                "worktree_layout": {
+                    "roots": ["/srv/project-writers"],
+                    "default": "/srv/project-writers/<branch>",
+                },
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let table = PortTable::read_for(Some(&project), &host).unwrap();
+        assert_eq!(
+            table.worktree_layout.roots,
+            vec![PathBuf::from("/srv/project-writers")]
+        );
+        let candidates = table.sourced_leaf("worktree_layout.roots");
+        let winner = candidates.last().unwrap();
+        assert_eq!(winner.source.layer, Layer::Project);
+        assert_eq!(
+            winner.source.origin.as_deref(),
+            Some(".provenant/ports.json#worktree_layout.roots")
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.source.layer == Layer::Host)
+        );
     }
 
     #[test]

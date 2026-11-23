@@ -218,7 +218,7 @@ fn remedy_for(ports: &PortTable) -> String {
         other => other.as_str().to_owned(),
     };
     format!(
-        "place lane worktrees under a root the file does not list by setting worktree_layout.default and worktree_layout.roots in {} (now {}, source: {source}); roots outside the checkout are not configurable",
+        "place lane worktrees under a root the file does not list by setting worktree_layout.default and worktree_layout.roots in {} (now {}, source: {source}); a declared root may be absolute or parent-relative",
         provenant_config::PORTS_CONFIG,
         layout.default.display(),
     )
