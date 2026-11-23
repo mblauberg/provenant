@@ -163,9 +163,10 @@ host branch against the tip it observed. A lane whose history diverged from the 
 by the host and published when the merge is clean and `lanes.history.rebase` is `allow` (the
 default). A real conflict, unrelated histories, a configured merge driver, or `rebase = refuse`
 retains the lane's private Git and names the cause and the setting; a branch rewound behind the
-pinned launch base is refused rather than fast-forwarded over. `lanes.history.unrooted_tip`
-judges the lane head before any merge runs, so a merge cannot supply ancestry the head lacks. The
-base stays pinned until publication.
+pinned launch base is refused rather than fast-forwarded over, and is judged before the unrooted
+tip. `lanes.history.unrooted_tip` judges the lane head before any merge runs, so a merge cannot
+supply ancestry the head lacks; its `warn` and `off` values never override an unrelated-history
+refusal. The base stays pinned until publication.
 
 The worktree's native index follows the branch from a recorded commit and the digest of the
 index Provenant left, advanced under a per-worktree lock (never the admission gate) after

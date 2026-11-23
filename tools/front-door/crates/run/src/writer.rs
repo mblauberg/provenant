@@ -4155,10 +4155,14 @@ impl WriterLaunch {
             }
             // The files, index and branch converge on the published tip: when
             // publication merged a diverged history the branch ends at the
-            // merge commit, not at the verified head.
+            // merge commit, not at the verified head. A head the branch already
+            // contained publishes nothing, so the tip may be a commit someone
+            // else advanced; this worktree must not move to it.
             let at_published_tip = match &source {
                 Some(source) => {
-                    crate::objects::private_tip(source, self.branch.as_str())? == verified_tip
+                    published.ends_at_head(verified_tip)
+                        && crate::objects::private_tip(source, self.branch.as_str())?
+                            == verified_tip
                         && crate::objects::resolve_ref(
                             &git_executable,
                             self.worktree.repo(),

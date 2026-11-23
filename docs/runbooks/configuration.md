@@ -145,7 +145,9 @@ the setting and its source.
   pushed remote-tracking branch or the host lane branch. The head is judged
   before any host merge, so a merge cannot supply the ancestry it lacks. `warn`
   publishes and names the tip and its launch base; `off` is silent; `refuse`
-  stops with `LANE_TIP_UNROOTED`.
+  stops with `LANE_TIP_UNROOTED`. `warn` and `off` decide only this observation:
+  when the host branch has unrelated history, `rebase = allow` still refuses the
+  merge as `PublicationUnrelated`.
 - `lanes.history.conflict_markers` (`warn` default, `off`, `refuse`): added
   lines in a pre-push check that begin with a literal conflict marker. It
   replaces the former `domains.run.push_conflict_markers` boolean.

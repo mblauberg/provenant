@@ -1619,6 +1619,297 @@ fn a_branch_rewound_behind_its_launch_base_is_refused_not_fast_forwarded() -> Te
 }
 
 #[test]
+fn a_head_the_branch_already_contains_never_advances_to_a_tip_someone_else_reached() -> TestResult {
+    let fixture = Fixture::new("sha1")?;
+    // The host advanced the branch past the lane head, so publication finds
+    // the head already contained and changes nothing.
+    let ahead = child_of(&fixture, fixture.head, "host advance")?;
+    update_ref(&fixture, "refs/heads/lane", ahead)?;
+    let published = publish_tip(&fixture, fixture.head, fixture.import_attempt)?;
+    assert_eq!(published.previous, ahead);
+    assert_eq!(published.tip, ahead);
+    assert!(!published.merged);
+    assert!(
+        !published.ends_at_head(fixture.head),
+        "a contained head must not move this worktree to a tip someone else advanced"
+    );
+    assert!(published.ends_at_head(ahead));
+    assert_eq!(
+        super::resolve_ref(&fixture.git, fixture.worktree.repo(), "refs/heads/lane")?,
+        ahead
+    );
+    Ok(())
+}
+
+#[test]
+fn a_rewound_branch_is_judged_before_an_unrooted_tip() -> TestResult {
+    use provenant_config::{HistoryEffect, Setting};
+    use provenant_records::LimitSource;
+    let fixture = Fixture::new("sha1")?;
+    // The branch was rewound to the launch base's parent while the lane tip
+    // descends nothing. The rewound branch decides the publication, so the
+    // unrooted setting never turns it into its own refusal.
+    let launch = child_of(&fixture, fixture.base, "launch base")?;
+    let tree = oid(git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["rev-parse", &format!("{}^{{tree}}", fixture.base)],
+    )?)?;
+    let orphan = oid(git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["commit-tree", &tree.to_string(), "-m", "orphan"],
+    )?)?;
+    update_ref(&fixture, "refs/heads/lane", fixture.base)?;
+    let history = LaneHistory {
+        unrooted_tip: Setting {
+            value: HistoryEffect::Refuse,
+            source: LimitSource::Host,
+        },
+        ..LaneHistory::default()
+    };
+    let error = super::publish_branch(
+        &fixture.git,
+        fixture.worktree.repo(),
+        super::BranchPublication {
+            branch: "refs/heads/lane",
+            base: launch,
+            launch_ref: None,
+            head: orphan,
+            attempt: fixture.import_attempt,
+            history,
+        },
+    )
+    .expect_err("a branch behind its launch base is not fast-forwarded");
+    assert!(matches!(
+        error,
+        crate::RunError::PublicationRewound { branch_tip, base }
+            if branch_tip == fixture.base && base == launch
+    ));
+    assert_eq!(
+        super::resolve_ref(&fixture.git, fixture.worktree.repo(), "refs/heads/lane")?,
+        fixture.base
+    );
+    Ok(())
+}
+
+#[test]
+fn an_unrooted_tip_warns_or_stays_quiet_and_the_host_merge_still_publishes() -> TestResult {
+    use provenant_config::{HistoryEffect, Setting};
+    use provenant_records::LimitSource;
+    for value in [HistoryEffect::Off, HistoryEffect::Warn] {
+        let fixture = Fixture::new("sha1")?;
+        // The host branch and the lane tip share a root the lane never launched
+        // from, so the tip is unrooted and the two histories still merge
+        // cleanly.
+        let root = commit_of(
+            &fixture,
+            tree_with(&fixture, &[("root.txt", "shared root\n")])?,
+            None,
+            "unrelated root",
+        )?;
+        let host = commit_of(
+            &fixture,
+            tree_with(&fixture, &[("host.txt", "host side\n")])?,
+            Some(root),
+            "host update",
+        )?;
+        let lane = commit_of(
+            &fixture,
+            tree_with(&fixture, &[("lane.txt", "lane side\n")])?,
+            Some(root),
+            "lane update",
+        )?;
+        update_ref(&fixture, "refs/heads/lane", host)?;
+        let history = LaneHistory {
+            unrooted_tip: Setting {
+                value,
+                source: LimitSource::Host,
+            },
+            ..LaneHistory::default()
+        };
+        let published = super::publish_branch(
+            &fixture.git,
+            fixture.worktree.repo(),
+            super::BranchPublication {
+                branch: "refs/heads/lane",
+                base: fixture.base,
+                launch_ref: None,
+                head: lane,
+                attempt: fixture.import_attempt,
+                history,
+            },
+        )
+        .map_err(|error| -> Box<dyn Error> { format!("{value:?}: {error}").into() })?;
+        assert!(published.merged, "{value:?}");
+        assert_ne!(published.tip, lane, "{value:?}");
+        assert_eq!(published.previous, host, "{value:?}");
+        assert!(published.ends_at_head(lane), "{value:?}");
+        assert!(
+            super::is_ancestor(&fixture.git, fixture.worktree.repo(), lane, published.tip),
+            "{value:?}"
+        );
+        assert_eq!(
+            super::resolve_ref(&fixture.git, fixture.worktree.repo(), "refs/heads/lane")?,
+            published.tip
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn the_host_branch_roots_a_tip_only_when_the_tip_contains_it() -> TestResult {
+    let fixture = Fixture::new("sha1")?;
+    let root = commit_of(
+        &fixture,
+        tree_with(&fixture, &[("root.txt", "root\n")])?,
+        None,
+        "unrelated root",
+    )?;
+    let host = commit_of(
+        &fixture,
+        tree_with(&fixture, &[("host.txt", "host\n")])?,
+        Some(root),
+        "host update",
+    )?;
+    let head = commit_of(
+        &fixture,
+        tree_with(&fixture, &[("lane.txt", "lane\n")])?,
+        Some(host),
+        "lane commit",
+    )?;
+    // The launch base is unrelated and the repository has no remote default or
+    // remote-tracking branch, so the host branch is the only candidate root and
+    // it counts only when the caller says the tip already contains it.
+    assert_eq!(
+        super::known_ancestor(
+            &fixture.git,
+            fixture.worktree.repo(),
+            fixture.base,
+            None,
+            head,
+            "refs/heads/lane",
+            None,
+        )?,
+        None
+    );
+    assert_eq!(
+        super::known_ancestor(
+            &fixture.git,
+            fixture.worktree.repo(),
+            fixture.base,
+            None,
+            head,
+            "refs/heads/lane",
+            Some(host),
+        )?,
+        Some(super::Ancestor::Known {
+            reference: "refs/heads/lane".to_owned(),
+            oid: host,
+        })
+    );
+    Ok(())
+}
+
+#[test]
+fn a_merge_driver_outside_the_repository_config_file_still_refuses_the_host_merge() -> TestResult {
+    // The driver is reachable only through an included file, so a guard that
+    // reads the repository config alone would run the merge and its driver.
+    for conditional in [false, true] {
+        let fixture = Fixture::new("sha1")?;
+        let included = fixture.root.join("merge-driver.cfg");
+        fs::write(&included, "[merge \"provenant\"]\n\tdriver = /bin/false\n")?;
+        let included = included.to_str().ok_or("driver path is not UTF-8")?;
+        let key = if conditional {
+            format!("includeIf.gitdir:{}/.path", fixture.project.display())
+        } else {
+            "include.path".to_owned()
+        };
+        git(
+            &fixture.git,
+            &fixture.home,
+            &fixture.project,
+            None,
+            &["config", "--local", key.as_str(), included],
+        )?;
+        let host = child_of(&fixture, fixture.base, "host update")?;
+        let lane = child_of(&fixture, fixture.base, "lane update")?;
+        update_ref(&fixture, "refs/heads/lane", host)?;
+        let error = super::publish_branch(
+            &fixture.git,
+            fixture.worktree.repo(),
+            super::BranchPublication {
+                branch: "refs/heads/lane",
+                base: fixture.base,
+                launch_ref: None,
+                head: lane,
+                attempt: fixture.import_attempt,
+                history: LaneHistory::default(),
+            },
+        )
+        .expect_err("a driver in an included file is still configured");
+        assert!(
+            matches!(
+                error,
+                crate::RunError::PublicationMergeDriver { ref setting }
+                    if setting.contains("lanes.history.rebase = allow")
+            ),
+            "conditional {conditional}: {error}"
+        );
+        assert_eq!(
+            super::resolve_ref(&fixture.git, fixture.worktree.repo(), "refs/heads/lane")?,
+            host
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_merge_driver_in_the_worktree_config_refuses_the_host_merge() -> TestResult {
+    let fixture = Fixture::new("sha1")?;
+    git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["config", "--local", "extensions.worktreeConfig", "true"],
+    )?;
+    fs::write(
+        fixture.project.join(".git/config.worktree"),
+        "[merge \"provenant\"]\n\tdriver = /bin/false\n",
+    )?;
+    let host = child_of(&fixture, fixture.base, "host update")?;
+    let lane = child_of(&fixture, fixture.base, "lane update")?;
+    update_ref(&fixture, "refs/heads/lane", host)?;
+    let error = super::publish_branch(
+        &fixture.git,
+        fixture.worktree.repo(),
+        super::BranchPublication {
+            branch: "refs/heads/lane",
+            base: fixture.base,
+            launch_ref: None,
+            head: lane,
+            attempt: fixture.import_attempt,
+            history: LaneHistory::default(),
+        },
+    )
+    .expect_err("a driver in the worktree config is still configured");
+    assert!(matches!(
+        error,
+        crate::RunError::PublicationMergeDriver { .. }
+    ));
+    assert_eq!(
+        super::resolve_ref(&fixture.git, fixture.worktree.repo(), "refs/heads/lane")?,
+        host
+    );
+    Ok(())
+}
+
+#[test]
 fn same_head_import_pins_survive_independent_publication_cleanup() -> TestResult {
     let fixture = Fixture::new("sha1")?;
     let first = AttemptId::from_bytes([31; 16]);

@@ -720,6 +720,19 @@ pub(crate) struct Published {
     pub ancestor: Ancestor,
     pub previous: GitOid,
     pub tip: GitOid,
+    /// Whether publication merged a diverged host history into the lane tip.
+    pub merged: bool,
+}
+
+impl Published {
+    /// Whether the branch now ends in this writer's own history: at the
+    /// verified head, or at a merge of that head with the host branch. A head
+    /// the branch already contained publishes nothing, so the tip may be a
+    /// commit someone else advanced; moving this worktree's files to it would
+    /// discard what that head describes.
+    pub(crate) fn ends_at_head(&self, head: GitOid) -> bool {
+        self.merged || self.tip == head
+    }
 }
 
 /// What a worktree-free host merge of a diverged lane tip produced.
@@ -754,28 +767,21 @@ fn shares_history(git: &Path, repo: &VerifiedRepo, left: GitOid, right: GitOid) 
 /// Whether the host repository configures any `merge.*.driver`. A driver runs
 /// repository code selected by lane-controlled attributes, and delivery refuses
 /// the same configuration before it merges (its "check configured merge
-/// drivers" guard). Only the repository's own config file is read: the process
-/// runs with system and global configuration disabled.
+/// drivers" guard). Both read the shared effective scope, so an included or
+/// worktree config cannot widen the merge past its guard.
 fn configured_merge_driver(git: &Path, repo: &VerifiedRepo) -> Result<bool> {
-    let output = provenant_os::git_config::read(
-        provenant_os::git_config::ConfigContext {
-            operation: "check configured merge drivers",
-            file: repo.common_git_dir().join("config"),
-            key: None,
-        },
-        provenant_os::git_config::Read::GetRegexpLocal("^merge\\..*\\.driver$"),
-        |command| {
+    let output =
+        provenant_os::git_config::merge_drivers(repo.common_git_dir().join("config"), |command| {
             raw_outcome(
                 git,
                 repo.common_git_dir(),
                 repo.root_path(),
                 command.as_ref(),
             )
-        },
-    )
-    .map_err(|error| RunError::ConfigCommandFailed {
-        reason: provenant_core::bounded_line(&error.to_string(), 512),
-    })?;
+        })
+        .map_err(|error| RunError::ConfigCommandFailed {
+            reason: provenant_core::bounded_line(&error.to_string(), 512),
+        })?;
     match output.termination {
         // One `key value` line per configured driver.
         Termination::Exit(0) => Ok(!output.stdout.bytes.is_empty()),
@@ -869,6 +875,15 @@ pub(crate) fn publish_branch(
     // A head the branch already contains publishes nothing, so it asks no
     // history question and cannot be refused for one.
     let contains_head = is_ancestor(git, repo, head, current);
+    // A branch rewound behind its launch base is judged before any history
+    // question: a fast-forward would reinstate the history the host removed,
+    // and a warning about the tip would only precede that refusal.
+    if !contains_head && current != base && is_ancestor(git, repo, current, base) {
+        return Err(RunError::PublicationRewound {
+            branch_tip: current,
+            base,
+        });
+    }
     let advances_current = !contains_head && is_ancestor(git, repo, current, head);
     // The unrooted setting judges the lane head, before any host merge exists:
     // a merge's parents must never supply ancestry the head does not have. The
@@ -907,15 +922,7 @@ pub(crate) fn publish_branch(
         // nothing.
         (current, false)
     } else if current == base || advances_current {
-        // Fast-forward from the launch base or from later lane commits, but not
-        // from a branch rewound behind its base: publishing would reinstate the
-        // history the host removed.
-        if current != base && is_ancestor(git, repo, current, base) {
-            return Err(RunError::PublicationRewound {
-                branch_tip: current,
-                base,
-            });
-        }
+        // Fast-forward from the launch base or from later lane commits.
         (head, false)
     } else {
         match history.rebase.value {
@@ -1014,6 +1021,7 @@ pub(crate) fn publish_branch(
         ancestor,
         previous: current,
         tip: target,
+        merged,
     })
 }
 
