@@ -119,11 +119,13 @@ write grants. `provenant fabric identity` prints the project ID.
 ## Lanes do not build
 
 Lanes format and coordinate only: they never provision, seed or admit a
-compiler job. There is no `lanes.cargo_target`, `lanes.cargo_seed_budget`,
-`lanes.cargo_build_jobs`, `lanes.cargo_incremental`, `lanes.cargo_debug` or
-`domains.fabric.lanes.cargo_seed` setting; a leftover key warns as unknown.
-The chair runs one warm integrated check per epic through the build port, and
-CI runs clippy and the tests.
+compiler job. The chair runs one warm integrated check per epic through the
+build port, capped by `[admission.build].slots`, and CI runs clippy and the
+tests; `lanes.verification` puts that instruction in the writer preamble.
+Cargo output is bounded by `lanes.cargo_cache_max` and collected after
+`gc.cargo_target_idle`, and `domains.fabric.lanes.cargo_source_writes` decides
+whether lanes may write the shared source caches. The former per-lane Cargo
+settings are retired: a leftover key warns as unknown.
 
 ## Git pre-push hook and local gate
 
