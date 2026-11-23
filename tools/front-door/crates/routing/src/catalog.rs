@@ -2930,4 +2930,33 @@ mod tests {
         }
         Ok(())
     }
+
+    #[test]
+    fn bundled_opencode_flash_models_are_catalogued_and_free()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let catalogue = Catalogue::bundled()?;
+        for id in [
+            "opencode/opencode-go/hy4-flash-free",
+            "opencode/opencode/hy4-flash-free",
+            "opencode/opencode-go/deepseek-v4.1-flash",
+            "opencode/opencode/deepseek-v4.1-flash-free",
+        ] {
+            let model = ModelId::parse(id)?;
+            let entry = catalogue
+                .model(&model)
+                .ok_or_else(|| format!("{id} is missing from the bundled catalogue"))?;
+            assert!(!entry.evidence_ref.is_empty(), "{id} has no evidence");
+            if id.ends_with("-free") {
+                assert!(catalogue.is_free_model(&model), "{id} must be free");
+            }
+        }
+        for short in ["opencode/hy4-flash-free", "opencode/deepseek-v4.1-flash"] {
+            let id = ModelId::parse(short)?;
+            assert!(
+                !catalogue.namespaced_candidates(&id).is_empty(),
+                "{short} has no catalogued provider segment"
+            );
+        }
+        Ok(())
+    }
 }

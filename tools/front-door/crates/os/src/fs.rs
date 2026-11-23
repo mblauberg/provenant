@@ -1553,6 +1553,42 @@ impl FileHandle {
             .set_permissions(std::fs::Permissions::from_mode(mode | 0o200))
             .map_err(error("fchmod file", &self.path))
     }
+    /// Remove group and other access from an owned regular file through its
+    /// open descriptor, returning the previous mode. A link, foreign owner or
+    /// changed identity refuses: the change never widens access to another
+    /// entry, and the caller can warn with the mode it observed.
+    pub fn make_owner_private(&self) -> Result<Option<u32>> {
+        let before = self.metadata()?;
+        if before.kind != FileKind::Regular {
+            return Err(FsError::NotRegular {
+                name: self.path.as_os_str().into(),
+            });
+        }
+        if before.links != 1 || before.uid != effective_uid() {
+            return Err(FsError::NotPrivate {
+                name: self.path.as_os_str().into(),
+            });
+        }
+        if before.mode & 0o077 == 0 {
+            return Ok(None);
+        }
+        use std::os::unix::fs::PermissionsExt;
+        self.file
+            .set_permissions(std::fs::Permissions::from_mode(before.mode & !0o077))
+            .map_err(error("fchmod file", &self.path))?;
+        let after = self.metadata()?;
+        if !before.same_identity(&after)
+            || after.kind != FileKind::Regular
+            || after.links != 1
+            || after.uid != effective_uid()
+            || after.mode & 0o077 != 0
+        {
+            return Err(FsError::RaceRefused {
+                name: self.path.as_os_str().into(),
+            });
+        }
+        Ok(Some(before.mode))
+    }
     /// Give the owner execute permission through the open descriptor.
     pub fn make_owner_executable(&self) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;

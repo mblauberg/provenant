@@ -1363,12 +1363,20 @@ fn streamed_result_is_verified_and_raw_across_chunks() -> TestResult {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        crate::artifacts::PRIVATE_MODE_REPAIRS.with(|warnings| warnings.borrow_mut().clear());
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))?;
-        let expected = std::path::PathBuf::from(format!("attempts/{id}/result.md"));
-        assert!(
-            matches!(store.stream_result(id, &call, None), Err(RunError::UnsafePath { path, check: PathCheck::Mode }) if path == expected)
+        assert_eq!(
+            store.stream_result(id, &call, None)?.digest,
+            CanonicalV1::file_digest(text.as_bytes()).to_string()
         );
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        let warnings =
+            crate::artifacts::PRIVATE_MODE_REPAIRS.with(|warnings| warnings.borrow().clone());
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains("0644"),
+            "warning must name the old mode: {warnings:?}"
+        );
+        assert_eq!(std::fs::metadata(&path)?.permissions().mode() & 0o077, 0);
     }
     std::fs::write(&path, vec![b'x'; text.len() + 1])?;
     assert_eq!(
@@ -1393,6 +1401,112 @@ fn streamed_result_is_verified_and_raw_across_chunks() -> TestResult {
             ]))),
         }
     );
+    Ok(())
+}
+
+// Spec: docs/specs/run-settlement.md#outcome-before-release
+#[test]
+fn a_broadly_readable_lane_result_settles_and_is_tightened() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = input();
+    let id = input.attempt_id;
+    store.create(&input, &call)?;
+    seal_exit_fixture(&store, &input)?;
+    let text = "lane-written result";
+    let mut done = publication();
+    done.result = text;
+    let path = context
+        .state_root
+        .as_path()
+        .join(format!("attempts/{id}/result.md"));
+    std::fs::write(&path, text.as_bytes())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))?;
+    }
+    crate::artifacts::PRIVATE_MODE_REPAIRS.with(|warnings| warnings.borrow_mut().clear());
+    let settled = store.publish_terminal(id, 1, &done, &exit(), &call)?;
+    assert!(matches!(settled.state, AttemptState::Terminal { .. }));
+    let warnings =
+        crate::artifacts::PRIVATE_MODE_REPAIRS.with(|warnings| warnings.borrow().clone());
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(
+        warnings[0].contains(&format!("attempts/{id}/result.md")),
+        "warning must name the repaired path: {warnings:?}"
+    );
+    assert!(
+        warnings[0].contains("0644"),
+        "warning must name the old mode: {warnings:?}"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&path)?.permissions().mode() & 0o077,
+            0,
+            "group and other access must be removed"
+        );
+    }
+    assert!(!store.stream_result(id, &call, None)?.source_truncated);
+    Ok(())
+}
+
+// Spec: docs/specs/run-settlement.md#outcome-before-release
+#[test]
+fn a_result_symlink_out_of_the_attempt_directory_still_refuses_settlement() -> TestResult {
+    use std::os::unix::fs::symlink;
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = input();
+    let id = input.attempt_id;
+    store.create(&input, &call)?;
+    seal_exit_fixture(&store, &input)?;
+    let outside = temp.path().join("outside-result.md");
+    std::fs::write(&outside, b"outside")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o644))?;
+    }
+    let result_path = context
+        .state_root
+        .as_path()
+        .join(format!("attempts/{id}/result.md"));
+    if let Err(error) = std::fs::remove_file(&result_path) {
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound, "{error}");
+    }
+    symlink(&outside, &result_path)?;
+    crate::artifacts::PRIVATE_MODE_REPAIRS.with(|warnings| warnings.borrow_mut().clear());
+    assert!(
+        store
+            .publish_terminal(id, 1, &publication(), &exit(), &call)
+            .is_err(),
+        "a symlink must not settle"
+    );
+    assert!(
+        crate::artifacts::PRIVATE_MODE_REPAIRS.with(|warnings| warnings.borrow().is_empty()),
+        "a symlink target must never be tightened"
+    );
+    assert_eq!(std::fs::read(&outside)?, b"outside");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&outside)?.permissions().mode() & 0o077,
+            0o044,
+            "the outside target must keep its mode"
+        );
+    }
     Ok(())
 }
 

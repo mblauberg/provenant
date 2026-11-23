@@ -22,8 +22,18 @@ for the same scope. Failed steps before import share a durable budget of three f
 worker honours `retry_after_ms` before its first pass and paces every later pass. Exhausted
 retries keep their cause and stop automatic recovery: status reports settlement blocked and calls
 for explicit reconciliation. A retry deadline overdue by three minutes is flagged stalled in the
-status reason.
+status reason, and a stalled custody-path refusal names the remedy (replace a symlink or restore a
+path inside the attempt directory).
 - Why: a retained writer must not contend with itself or retry an unchanged failure forever.
+
+A result a lane leaves group- or other-readable in Provenant's private attempt directory is a
+recoverable condition, not a settlement refusal. Settlement tightens that regular, single-link,
+owned file through its open descriptor, warns with the path and the old mode, and continues. A
+symlink, a foreign owner or a path outside the attempt directory still refuses: a stalled reason
+for either names the remedy.
+- Why: custody protects the private store and the lane's finished work, so an over-broad mode
+  should be repaired rather than strand a completed writer.
+- Owner: `crates/run/src/artifacts.rs`, `crates/os/src/fs.rs`
 
 Only the detached worker's acquisition of an exited attempt's writer lock waits, within the
 store's lock budget (the SQLite busy timeout), and it wakes as soon as the

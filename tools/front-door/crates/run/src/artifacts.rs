@@ -1,6 +1,6 @@
 use crate::*;
 use provenant_core::RelativePath;
-use provenant_os::fs::{Directory, FileKind, Metadata, PayloadTree, PublishMode};
+use provenant_os::fs::{Directory, FileHandle, FileKind, Metadata, PayloadTree, PublishMode};
 use provenant_records::{CanonicalV1, PathWire};
 use std::{ffi::OsStr, io::Read, path::Component};
 
@@ -198,11 +198,9 @@ impl RunStore {
             });
         }
         let dir = self.attempt_dir(id, false)?;
-        let mut file = dir.open_read(OsStr::new("result.md"))?;
-        let before = file.metadata()?;
-        if let Some(check) = PathCheck::file(before) {
-            return Err(RunError::unsafe_entry(&dir, OsStr::new("result.md"), check));
-        }
+        let name = OsStr::new("result.md");
+        let mut file = dir.open_read(name)?;
+        let before = private_metadata(&dir, name, &file, file.metadata()?, true)?;
         if before.size != artifact.bytes {
             return Err(RunError::artifact_mismatch(
                 ArtifactCheck::RecordedLength,
@@ -335,6 +333,49 @@ pub(crate) fn artifact_path(attempt: provenant_core::AttemptId, name: &str) -> R
 }
 /// Opens of a sealed name that concurrent replacements may retire in a row.
 const REPLACED_OPENS: usize = 4;
+/// Rendered private-mode repair warnings, for tests that cannot read the
+/// process-wide stderr stream without racing other tests.
+#[cfg(test)]
+pub(crate) static PRIVATE_MODE_REPAIRS: std::cell::RefCell<Vec<String>> =
+    const { std::cell::RefCell::new(Vec::new()) };
+
+/// Judge a sealed regular file through its open descriptor. A too-broad mode
+/// on a file a lane left in Provenant's private attempt directory is repaired
+/// in place with a warning naming the path and the old mode; a link, foreign
+/// owner, symlink or other kind stays refused. `repair` is false for a handle
+/// already retired by a rename, which the caller retries instead.
+fn private_metadata(
+    dir: &Directory,
+    name: &OsStr,
+    file: &FileHandle,
+    meta: Metadata,
+    repair: bool,
+) -> Result<Metadata> {
+    if let Some(check) = PathCheck::file(meta) {
+        if check != PathCheck::Mode || !repair {
+            return Err(RunError::unsafe_entry(dir, name, check));
+        }
+        let old_mode = file.make_owner_private()?;
+        let after = file.metadata()?;
+        if let Some(check) = PathCheck::file(after) {
+            return Err(RunError::unsafe_entry(dir, name, check));
+        }
+        if let Some(old_mode) = old_mode {
+            let rendered = format!(
+                "warning: tightened run-store path {} from mode {:04o} to a private mode",
+                dir.anchored_path().join(name).display(),
+                old_mode & 0o7777
+            );
+            #[cfg(test)]
+            PRIVATE_MODE_REPAIRS.with(|warnings| warnings.borrow_mut().push(rendered.clone()));
+            use std::io::Write as _;
+            let _ = writeln!(std::io::stderr().lock(), "{rendered}");
+        }
+        return Ok(after);
+    }
+    Ok(meta)
+}
+
 /// Counts durable reads on the calling thread so tests can prove which record
 /// path a consumer takes without relying on timing.
 #[cfg(test)]
@@ -400,9 +441,7 @@ fn read_sealed_with(
             links: meta.links.max(1),
             ..meta
         };
-        if let Some(check) = PathCheck::file(judged) {
-            return Err(RunError::unsafe_entry(dir, OsStr::new(name), check));
-        }
+        private_metadata(dir, OsStr::new(name), &file, judged, !unlinked)?;
         if unlinked {
             retired += 1;
             if retired >= REPLACED_OPENS {
@@ -569,11 +608,12 @@ mod tests {
     }
 
     #[test]
-    fn read_sealed_reports_typed_refusal_for_unsafe_entries() -> TestResult {
+    fn read_sealed_repairs_a_broad_mode_but_refuses_other_unsafe_entries() -> TestResult {
         let temp = tempfile::tempdir()?;
         let dir = Directory::open_anchor(temp.path())?;
         checkpoint(&dir, b"x")?;
-        let meta = dir.metadata_at(OsStr::new("process.json"), false)?;
+        let name = OsStr::new("process.json");
+        let meta = dir.metadata_at(name, false)?;
         assert_eq!(PathCheck::file(meta), None);
         assert_eq!(
             PathCheck::file(Metadata { links: 2, ..meta }),
@@ -593,18 +633,54 @@ mod tests {
             }),
             Some(PathCheck::Symlink)
         );
+        PRIVATE_MODE_REPAIRS.with(|warnings| warnings.borrow_mut().clear());
         std::fs::set_permissions(
             temp.path().join("process.json"),
             std::fs::Permissions::from_mode(0o644),
         )?;
-        let error = read_sealed(&dir, "process.json", 1024).expect_err("group-readable");
-        assert!(matches!(
-            error,
-            RunError::UnsafePath {
-                path,
-                check: PathCheck::Mode,
-            } if path == dir.anchored_path().join("process.json")
-        ));
+        assert_eq!(
+            read_sealed(&dir, "process.json", 1024)?.as_deref(),
+            Some(b"x".as_slice())
+        );
+        let warnings = PRIVATE_MODE_REPAIRS.with(|warnings| warnings.borrow().clone());
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains(
+                &dir.anchored_path()
+                    .join("process.json")
+                    .display()
+                    .to_string()
+            ),
+            "warning must name the repaired path: {warnings:?}"
+        );
+        assert!(
+            warnings[0].contains("0644"),
+            "warning must name the old mode: {warnings:?}"
+        );
+        let after = dir.metadata_at(name, false)?;
+        assert_eq!(after.mode & 0o077, 0);
+        assert_eq!(PathCheck::file(after), None);
+        Ok(())
+    }
+
+    #[test]
+    fn read_sealed_refuses_a_symlink_instead_of_tightening_its_target() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let dir = Directory::open_anchor(temp.path())?;
+        let outside = temp.path().join("outside.txt");
+        std::fs::write(&outside, b"sentinel")?;
+        std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o644))?;
+        std::os::unix::fs::symlink(&outside, temp.path().join("result.md"))?;
+        let error = read_sealed(&dir, "result.md", 1024).expect_err("symlinked result");
+        assert!(
+            matches!(error, RunError::Filesystem(_) | RunError::UnsafePath { .. }),
+            "a link must never be read or repaired: {error:?}"
+        );
+        assert_eq!(
+            std::fs::metadata(&outside)?.permissions().mode() & 0o077,
+            0o044,
+            "the outside target must keep its mode"
+        );
         Ok(())
     }
 
