@@ -2474,11 +2474,14 @@ mod tests {
         store: &RunStore,
         source: AttemptId,
         id: AttemptId,
+        offset: i64,
         record: &serde_json::Value,
     ) -> TestResult {
+        // Each inserted row needs its own attempt key: (project, graph, node,
+        // attempt) is unique.
         store.db.execute(
-            "INSERT INTO attempts (id,project,graph,node,attempt,digest,actor,operation,number,operation_record,revision,terminal,record) SELECT ?1,project,graph,node,attempt+1000,digest,actor,operation,number+1,operation_record,revision,1,?2 FROM attempts WHERE id=?3",
-            rusqlite::params![id.to_string(), serde_json::to_vec(record)?, source.to_string()],
+            "INSERT INTO attempts (id,project,graph,node,attempt,digest,actor,operation,number,operation_record,revision,terminal,record) SELECT ?1,project,graph,node,attempt+?4,digest,actor,operation,number+?4,operation_record,revision,1,?2 FROM attempts WHERE id=?3",
+            rusqlite::params![id.to_string(), serde_json::to_vec(record)?, source.to_string(), offset],
         )?;
         Ok(())
     }
@@ -2616,11 +2619,17 @@ mod tests {
         let string_grants = AttemptId::from_bytes([10; 16]);
         let mut string_record = shaped.clone();
         string_record["write_grants"] = serde_json::json!("abc");
-        insert_base_twelve_record(&store, input.attempt_id, string_grants, &string_record)?;
+        insert_base_twelve_record(
+            &store,
+            input.attempt_id,
+            string_grants,
+            1001,
+            &string_record,
+        )?;
         let array_grants = AttemptId::from_bytes([11; 16]);
         let mut array_record = shaped;
         array_record["write_grants"] = serde_json::json!(["abc"]);
-        insert_base_twelve_record(&store, input.attempt_id, array_grants, &array_record)?;
+        insert_base_twelve_record(&store, input.attempt_id, array_grants, 1002, &array_record)?;
         store.db.execute_batch("PRAGMA user_version=12;")?;
         drop(store);
 
