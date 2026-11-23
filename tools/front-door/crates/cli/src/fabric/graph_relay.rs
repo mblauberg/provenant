@@ -1957,7 +1957,10 @@ fn launch_resolvers_with(
     for slot in panel.slots {
         let (key, mut route, warnings) = tier_route(&slot.lens, &slot.tier, None, true, catalogue)?;
         for warning in warnings {
-            eprintln!("warning: {warning}");
+            let _ = std::io::Write::write_all(
+                &mut std::io::stderr().lock(),
+                format!("warning: {warning}\n").as_bytes(),
+            );
         }
         if let Some(family) = slot
             .satisfied_family

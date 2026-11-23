@@ -248,8 +248,11 @@ mod tests {
         let model = document.nodes[0]
             .route
             .as_ref()
-            .and_then(|route| route.model.as_deref());
-        assert_eq!(model, Some("opencode/opencode/uncatalogued-fixture-model"));
+            .and_then(|route| route.model.clone());
+        assert_eq!(
+            model.as_deref(),
+            Some("opencode/opencode/uncatalogued-fixture-model")
+        );
         // A second pass changes neither the id nor its warning.
         let again = canonicalise_route_models(&mut document, Some(&catalogue()));
         assert_eq!(again.len(), warnings.len());
@@ -259,7 +262,7 @@ mod tests {
                 .route
                 .as_ref()
                 .and_then(|route| route.model.as_deref()),
-            model
+            model.as_deref()
         );
     }
 }

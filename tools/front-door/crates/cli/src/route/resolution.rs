@@ -1186,7 +1186,10 @@ pub fn resolve_review_family(
     let (_, lowered, warnings) =
         crate::fabric::graph_relay::tier_route("review", tier, None, true, catalogue.as_ref())?;
     for warning in warnings {
-        eprintln!("warning: {warning}");
+        let _ = std::io::Write::write_all(
+            &mut std::io::stderr().lock(),
+            format!("warning: {warning}\n").as_bytes(),
+        );
     }
     let routes: Vec<_> = lowered
         .as_array()
