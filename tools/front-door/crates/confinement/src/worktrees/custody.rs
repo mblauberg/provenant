@@ -198,7 +198,7 @@ fn operation_ref(directory: &Directory, marker: GitOperationMarker) -> Option<St
 /// An unfinished operation found in the host checkout and whether it blocks
 /// settlement. The marker is reported so an unrelated operation can be named
 /// in a warning; only `blocks` decides whether settlement refuses.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostCheckoutOperation {
     pub marker: GitOperationMarker,
     /// The ref the operation acts on, when it names one.

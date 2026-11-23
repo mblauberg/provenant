@@ -698,7 +698,7 @@ fn terminal_warns_and_proceeds_for_an_unrelated_host_checkout_rebase()
     assert!(marker.is_dir(), "the host operation is left intact");
     assert!(
         captured.iter().any(|warning| {
-            warning.code.as_str() == "GIT_OPERATION_RETAINED"
+            warning.code.as_ref() == "GIT_OPERATION_RETAINED"
                 && warning.message.contains("refs/heads/side")
         }),
         "{captured:?}"

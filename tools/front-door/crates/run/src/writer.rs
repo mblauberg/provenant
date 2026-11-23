@@ -5229,7 +5229,7 @@ mod git_operation_warning_tests {
             assert_eq!(warnings, vec![message]);
         });
         assert_eq!(captured.len(), 1, "{captured:?}");
-        assert_eq!(captured[0].code.as_str(), "GIT_OPERATION_RETAINED");
+        assert_eq!(captured[0].code.as_ref(), "GIT_OPERATION_RETAINED");
         let emitted = GIT_OPERATION_WARNINGS.with(|warnings| warnings.borrow().clone());
         assert_eq!(emitted.len(), 1, "{emitted:?}");
     }
