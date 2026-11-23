@@ -1,5 +1,8 @@
 # Documentation index
 
+**Start here:** [Quickstart](quickstart.md) — one runnable sequence from install
+to a first read-only lane and a first writer.
+
 - [Architecture](ARCHITECTURE.md): system map and boundaries.
 - [Specifications](specs/README.md): behavioural contracts.
 - [Runbooks](runbooks/README.md): procedures and troubleshooting.
