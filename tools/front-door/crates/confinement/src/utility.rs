@@ -2945,16 +2945,33 @@ pub fn set_lane_upstream_key(
     if branch.short_name().is_empty() {
         return Err(UtilityError::InvalidOperationValue);
     }
+    // The lane's upstream remote comes from the one resolved forge context,
+    // never a compiled-in `origin`. An absent remote is an absence, not a
+    // guessed identity.
+    // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    let project = repo.root_path();
+    let ports = provenant_config::PortTable::read_project_only(project)
+        .map_err(|_| UtilityError::InvalidOperationValue)?;
+    let policy = provenant_config::operation_policy(project, project, &ports);
+    let config = provenant_config::ForgeConfig::new(&ports, (*policy).clone());
+    let git = provenant_config::ForgeGit::new(project)
+        .map_err(|_| UtilityError::InvalidOperationValue)?;
+    let remote = match provenant_config::ForgeContext::remote(&config, &git) {
+        Ok(remote) => remote.value,
+        Err(provenant_config::ForgeContextError::NoRemote { remotes, .. })
+            if remotes.is_empty() =>
+        {
+            String::new()
+        }
+        Err(_) => return Err(UtilityError::InvalidOperationValue),
+    };
     let (field, value) = if merge {
         (
             provenant_os::git_config::BranchField::Merge,
             branch.as_str().to_owned(),
         )
     } else {
-        (
-            provenant_os::git_config::BranchField::Remote,
-            "origin".to_owned(),
-        )
+        (provenant_os::git_config::BranchField::Remote, remote)
     };
     let mutation = GitMutation::SetBranchConfig {
         branch: branch.clone(),

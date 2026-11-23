@@ -334,6 +334,35 @@ pub fn forge_context(
     provenant_config::resolve_for(project, &ports).map_err(|error| error.to_string())
 }
 
+/// The one remote for a worktree command. No checkout is assumed to call its
+/// remote `origin`: an absent remote is an absence, not a guessed identity, and
+/// an ambiguous remote stays a refusal that names what was seen.
+/// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+pub fn forge_remote(context: &WorktreeContext<'_>) -> Result<Option<String>, WorktreeError> {
+    let project = context
+        .layout
+        .project()
+        .ok_or(WorktreeError::ProjectLayoutUnresolved)?;
+    let state = context.host_state()?;
+    let ports = provenant_config::PortTable::read_for(Some(project), &state)
+        .map_err(WorktreeError::PortConfiguration)?;
+    let policy = provenant_config::operation_policy(&state, project, &ports);
+    let config = provenant_config::ForgeConfig::new(&ports, (*policy).clone());
+    let git = provenant_config::ForgeGit::new(project)
+        .map_err(|error| WorktreeError::PortConfiguration(std::io::Error::other(error)))?;
+    match provenant_config::ForgeContext::remote(&config, &git) {
+        Ok(remote) => Ok(Some(remote.value)),
+        Err(provenant_config::ForgeContextError::NoRemote { remotes, .. })
+            if remotes.is_empty() =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(WorktreeError::PortConfiguration(std::io::Error::other(
+            error,
+        ))),
+    }
+}
+
 /// Read the exclusions a retirement candidate set must respect.
 pub fn local_retirement_scope(
     context: &WorktreeContext<'_>,

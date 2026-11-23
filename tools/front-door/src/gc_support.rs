@@ -304,7 +304,7 @@ fn refresh_branch(
 }
 
 /// Fetch the remote's actual default branch, independently of local main or a
-/// stale origin/HEAD. Only this branch's remote-tracking ref is updated.
+/// stale remote HEAD symref. Only this branch's remote-tracking ref is updated.
 pub(crate) fn fetch_default(
     context: &WorktreeContext<'_>,
     cancel: &CancelToken,
@@ -1031,6 +1031,61 @@ mod tests {
         assert_eq!(
             result.1,
             GitOid::parse(std::str::from_utf8(&actual)?.trim())?
+        );
+        Ok(())
+    }
+
+    /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    #[test]
+    fn a_gc_dry_run_uses_the_upstream_remote_and_protects_its_default()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().join("home");
+        let state = temp.path().join("state");
+        let repo = temp.path().join("repo");
+        let remote = temp.path().join("upstream.git");
+        std::fs::create_dir_all(&home)?;
+        std::fs::create_dir_all(&state)?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::create_dir_all(&repo)?;
+        provenant_os::fixture::run_git(
+            temp.path(),
+            &["init", "--bare", remote.to_str().ok_or("remote")?],
+        )?;
+        for args in [
+            vec!["init", "-q", "-b", "trunk"],
+            vec!["commit", "--allow-empty", "-qm", "base"],
+            vec![
+                "remote",
+                "add",
+                "upstream",
+                remote.to_str().ok_or("remote")?,
+            ],
+            vec!["push", "upstream", "HEAD:refs/heads/trunk"],
+        ] {
+            provenant_os::fixture::run_git(&repo, &args)?;
+        }
+        provenant_os::fixture::run_git(&remote, &["symbolic-ref", "HEAD", "refs/heads/trunk"])?;
+        let mut inputs = provenant_core::RootInputs::new(home.clone(), repo.clone());
+        inputs.state_dir = Some(state);
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let fetched = provenant_confinement::worktrees::with_context(
+            &roots,
+            &home,
+            &repo,
+            &clock,
+            &cancel,
+            |context| Ok(fetch_default(context, &cancel)),
+        )??
+        .ok_or("missing upstream")?;
+        assert_eq!(fetched.0, "refs/remotes/upstream/trunk");
+        let expected = provenant_os::fixture::run_git(&remote, &["rev-parse", "trunk"])?;
+        assert_eq!(
+            fetched.1,
+            GitOid::parse(std::str::from_utf8(&expected)?.trim())?
         );
         Ok(())
     }

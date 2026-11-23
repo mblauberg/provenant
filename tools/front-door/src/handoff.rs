@@ -1,8 +1,9 @@
 //! `workflow session handoff`: start a fresh Claude session on a peer from a
 //! hand-off prompt. The source checks its worktrees, saves the checkpoint and
 //! sends one `session_handoff` peer action. The target checks the account
-//! against its own registrations, recreates each branch's worktree from
-//! origin, stores the prompt and opens Terminal through a launcher seam.
+//! against its own registrations, recreates each branch's worktree from the
+//! resolved forge remote, stores the prompt and opens Terminal through a
+//! launcher seam.
 //! Fabric-runtime owns those rules; this edge composes Git, the worktree
 //! owner, registered accounts, the run snapshot and the peer call.
 use provenant_cli::{
@@ -143,6 +144,7 @@ fn inspect(
     src: &Source,
     workers: &dyn WorkerObserver,
     facts: &worktrees::RepoFacts,
+    forge: &provenant_config::ForgeContext,
 ) -> Result<Vec<Tree>, Refusal> {
     crate::worktrees::with_context_using_facts(
         &src.roots,
@@ -151,7 +153,7 @@ fn inspect(
         GIT_TIMEOUT,
         workers,
         facts,
-        |context, cancel| inspect_context(context, facts, cancel),
+        |context, cancel| inspect_context(context, facts, cancel, forge),
     )
     .map_err(|error| {
         if matches!(
@@ -171,6 +173,7 @@ fn inspect_context(
     context: &worktrees::WorktreeContext<'_>,
     facts: &worktrees::RepoFacts,
     cancel: &CancelToken,
+    forge: &provenant_config::ForgeContext,
 ) -> Result<Vec<Tree>, crate::worktrees::Error> {
     let context = &worktrees::WorktreeContext { facts, ..*context };
     let observations = worktrees::list(context, cancel)?;
@@ -183,10 +186,12 @@ fn inspect_context(
         // only and correctly refuses the primary checkout.
         let primary = info.primary;
         let branch = info.branch.as_deref().map(short_branch);
-        let (upstream, pushed) = match branch.as_deref() {
+        let (upstream, pushed) = match branch.as_deref().filter(|_| !forge.remote.value.is_empty())
+        {
             Some(branch) => {
                 let remote = provenant_confinement::repo::GitRefName::remote_tracking(format!(
-                    "origin/{branch}"
+                    "{}/{branch}",
+                    forge.remote.value
                 ))
                 .map_err(|_| worktrees::WorktreeError::InvalidRequest)?;
                 match facts.resolve_commit(context, remote, cancel) {
@@ -333,6 +338,7 @@ fn wip(
     workers: &dyn WorkerObserver,
     facts: &worktrees::RepoFacts,
     tree: &Tree,
+    forge: &provenant_config::ForgeContext,
 ) -> Result<(), Refusal> {
     with_wip_custody(
         &src.roots,
@@ -355,12 +361,12 @@ fn wip(
                     ));
                 }
             }
-            wip_git(tree)
+            wip_git(tree, &forge.remote.value)
         },
     )
 }
 
-fn wip_git(tree: &Tree) -> Result<(), Refusal> {
+fn wip_git(tree: &Tree, remote: &str) -> Result<(), Refusal> {
     let branch = tree.branch.as_deref().ok_or_else(|| {
         Refusal::refused("WIP_REFUSED", "a detached worktree has no branch to push")
     })?;
@@ -384,7 +390,7 @@ fn wip_git(tree: &Tree) -> Result<(), Refusal> {
     }
     // A full refspec cannot be confused with a tag of the same name.
     let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
-    step(&["push", "--set-upstream", "origin", &refspec])
+    step(&["push", "--set-upstream", remote, &refspec])
 }
 /// Untracked files Git does not ignore. `--wip` commits tracked changes only,
 /// so these would stay behind.
@@ -539,6 +545,41 @@ fn open_source(globals: &Globals) -> Result<Source, Refusal> {
     })
 }
 
+/// The one forge context for this command. Each owner calls this exactly once
+/// and passes the result down; no helper rediscovers the remote or default.
+/// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+fn resolve_forge(
+    state: &Path,
+    project: &Path,
+    ports: &provenant_config::PortTable,
+) -> Result<provenant_config::ForgeContext, Refusal> {
+    let policy = provenant_config::operation_policy(state, project, ports);
+    let config = provenant_config::ForgeConfig::new(ports, (*policy).clone());
+    let git = provenant_config::ForgeGit::new(project).map_err(|error| {
+        Refusal::new(
+            Outcome::Error,
+            "GIT",
+            format!("cannot read the checkout's Git metadata: {error}"),
+        )
+    })?;
+    let remote = match provenant_config::ForgeContext::remote(&config, &git) {
+        Ok(remote) => remote.value,
+        Err(provenant_config::ForgeContextError::NoRemote { remotes, .. })
+            if remotes.is_empty() =>
+        {
+            String::new()
+        }
+        Err(error) => {
+            return Err(Refusal::new(
+                Outcome::Refused,
+                "FORGE_CONTEXT_UNRESOLVED",
+                error.to_string(),
+            ));
+        }
+    };
+    Ok(provenant_run::forge_for(&remote, "", &[]))
+}
+
 // The writer advisory is part of the handoff hook's stderr protocol.
 #[allow(clippy::disallowed_methods)]
 fn execute(
@@ -617,6 +658,7 @@ fn execute(
         .map(|(_, lanes)| lanes)
         .map_err(|fail| fail.message);
     let project = context.identity.project;
+    let forge = resolve_forge(src.roots.state.as_path(), project, &context.port_table)?;
     let actor = context.identity.inbox.actor;
     let store = session.as_ref().filter(|_| !args.no_checkpoint).map(|id| {
         checkpoint_store(&src.roots, project, id.clone()).with_chair(context.identity.host, actor)
@@ -688,7 +730,7 @@ fn execute(
 
     // 2. Worktrees must be clean and pushed, unless the caller says otherwise.
     let facts = worktrees::RepoFacts::default();
-    let mut trees = inspect(&src, workers, &facts)?;
+    let mut trees = inspect(&src, workers, &facts, &forge)?;
     let mut input = request(&trees)?;
     for advisory in trees
         .iter()
@@ -739,7 +781,7 @@ fn execute(
             if !args.dry_run {
                 let mut pushed: Vec<String> = Vec::new();
                 for tree in &problems {
-                    if let Err(mut refusal) = wip(&src, workers, &facts, tree) {
+                    if let Err(mut refusal) = wip(&src, workers, &facts, tree, &forge) {
                         if !pushed.is_empty() {
                             let _ = write!(
                                 refusal.message,
@@ -751,7 +793,7 @@ fn execute(
                     }
                     pushed.push(tree.branch.clone().unwrap_or_default());
                 }
-                trees = inspect(&src, workers, &facts)?;
+                trees = inspect(&src, workers, &facts, &forge)?;
                 let left: Vec<String> = trees
                     .iter()
                     .filter(|t| !t.problems().is_empty())
@@ -1107,9 +1149,13 @@ fn fetch_recreation_base<T, E>(
 }
 
 /// Recreate each branch's worktree with this host's own worktree owner, from
-/// `origin/<branch>`. A worktree already on the branch is kept. Failures are
+/// `<remote>/<branch>`. A worktree already on the branch is kept. Failures are
 /// reported per branch; the hand-off still lands.
-fn recreate(target: &Target<'_>, branches: &[String]) -> Vec<HandoffWorktree> {
+fn recreate(
+    target: &Target<'_>,
+    branches: &[String],
+    forge: &provenant_config::ForgeContext,
+) -> Vec<HandoffWorktree> {
     let remaining = || {
         let left =
             Duration::from_micros(target.budget.remaining(target.clock.mono_now()).as_micros());
@@ -1143,7 +1189,7 @@ fn recreate(target: &Target<'_>, branches: &[String]) -> Vec<HandoffWorktree> {
                     |context, cancel| {
                         Ok(crate::fabric::remote_base(
                             context,
-                            &format!("origin/{branch}"),
+                            &format!("{}/{branch}", forge.remote.value),
                             time / 2,
                             fetch,
                             cancel,
@@ -1155,7 +1201,9 @@ fn recreate(target: &Target<'_>, branches: &[String]) -> Vec<HandoffWorktree> {
             });
             let base = match base {
                 Ok(base) => base,
-                Err(error) => return failed(format!("origin/{branch}: {error}")),
+                Err(error) => {
+                    return failed(format!("{}/{branch}: {error}", forge.remote.value));
+                }
             };
             let made = crate::worktrees::with_context_using_facts(
                 &target.context.roots,
@@ -1198,7 +1246,7 @@ fn recreate(target: &Target<'_>, branches: &[String]) -> Vec<HandoffWorktree> {
                     path: Some(info.path.to_string_lossy().into_owned()),
                     head: Some(info.head.to_string()),
                     created,
-                    error: worktree_warning(&info, &base),
+                    error: worktree_warning(&info, &base, &forge.remote.value),
                 },
                 Err(error) => failed(error.to_string()),
             }
@@ -1206,15 +1254,16 @@ fn recreate(target: &Target<'_>, branches: &[String]) -> Vec<HandoffWorktree> {
         .collect()
 }
 
-/// Why a reused worktree is not a clean copy of `origin/<branch>`.
+/// Why a reused worktree is not a clean copy of `<remote>/<branch>`.
 fn worktree_warning(
     info: &worktrees::WorktreeInfo,
     base: &provenant_core::GitOid,
+    remote: &str,
 ) -> Option<String> {
     let mut found = Vec::new();
     if info.head != *base {
         found.push(format!(
-            "local branch differs from origin (local {}, origin {base})",
+            "local branch differs from {remote} (local {}, {remote} {base})",
             info.head
         ));
     }
@@ -1295,7 +1344,22 @@ pub(crate) fn receive(
             Err(receipt) => return *receipt,
         };
     // Worktrees are recreated only once this operation owns its directory.
-    let worktrees = recreate(target, &input.branches);
+    let forge = match resolve_forge(
+        context.roots.state.as_path(),
+        target.cwd,
+        &context.port_table,
+    ) {
+        Ok(forge) => forge,
+        Err(error) => {
+            return HandoffReceipt::Refused {
+                extra: Default::default(),
+                code: "FORGE_CONTEXT_UNRESOLVED".into(),
+                message: error.message,
+                accounts: Vec::new(),
+            };
+        }
+    };
+    let worktrees = recreate(target, &input.branches, &forge);
     let source_label = context
         .config
         .peers
@@ -1342,6 +1406,10 @@ pub(crate) fn receive(
 #[allow(dead_code, unused_imports)]
 mod tests {
     use super::*;
+
+    fn test_forge(remote: &str) -> provenant_config::ForgeContext {
+        provenant_run::forge_for(remote, "trunk", &[])
+    }
 
     #[test]
     fn git_refuses_stdout_past_its_bound() {
@@ -1539,7 +1607,7 @@ mod tests {
             &project,
             GIT_TIMEOUT,
             &Free,
-            |context, cancel| inspect_context(context, &facts, cancel),
+            |context, cancel| inspect_context(context, &facts, cancel, &test_forge("origin")),
         )?;
         let primary_path = std::fs::canonicalize(&project)?;
         let listed_paths: Vec<_> = inspected
@@ -1573,7 +1641,7 @@ mod tests {
             &project,
             GIT_TIMEOUT,
             &Bystander,
-            |context, cancel| inspect_context(context, &facts, cancel),
+            |context, cancel| inspect_context(context, &facts, cancel, &test_forge("origin")),
         )?;
         let observed = observed
             .iter()
@@ -1592,7 +1660,7 @@ mod tests {
             &project,
             GIT_TIMEOUT,
             &Free,
-            |context, cancel| inspect_context(context, &limited, cancel),
+            |context, cancel| inspect_context(context, &limited, cancel, &test_forge("origin")),
         );
         assert!(matches!(
             overflow,
@@ -1638,7 +1706,7 @@ mod tests {
             &project,
             GIT_TIMEOUT,
             &Free,
-            |context, cancel| inspect_context(context, &facts, cancel),
+            |context, cancel| inspect_context(context, &facts, cancel, &test_forge("origin")),
         )?;
         let row = refreshed
             .iter()
@@ -1734,10 +1802,10 @@ mod tests {
             owner: Err("worktree registration was not observed".into()),
             primary: false,
         };
-        assert_eq!(worktree_warning(&info, &base), None);
+        assert_eq!(worktree_warning(&info, &base, "origin"), None);
         info.head = provenant_core::GitOid::parse(&"b".repeat(40)).unwrap();
         info.dirty = WorktreeCondition::Dirty;
-        let warning = worktree_warning(&info, &base).unwrap();
+        let warning = worktree_warning(&info, &base, "origin").unwrap();
         assert!(
             warning.contains("local branch differs from origin"),
             "{warning}"
@@ -1878,5 +1946,61 @@ mod tests {
             Some("explicit-session".into())
         );
         assert!(session_id(Some("Not Valid")).is_err());
+    }
+}
+
+#[cfg(test)]
+mod upstream_handoff_tests {
+    use super::*;
+
+    fn test_forge(remote: &str) -> provenant_config::ForgeContext {
+        provenant_run::forge_for(remote, "trunk", &[])
+    }
+
+    /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    #[test]
+    fn wip_push_and_recreation_follow_the_upstream_context()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let project = temp.path().join("project");
+        let bare = temp.path().join("upstream.git");
+        std::fs::create_dir_all(&project)?;
+        provenant_os::fixture::run_git(
+            temp.path(),
+            &["init", "--bare", bare.to_str().ok_or("remote")?],
+        )?;
+        for args in [
+            vec!["init", "-q", "-b", "trunk"],
+            vec!["commit", "--allow-empty", "-qm", "base"],
+            vec!["remote", "add", "upstream", bare.to_str().ok_or("remote")?],
+            vec!["push", "upstream", "HEAD:refs/heads/trunk"],
+            vec!["checkout", "-qb", "lane"],
+            vec!["commit", "--allow-empty", "-qm", "lane"],
+        ] {
+            provenant_os::fixture::run_git(&project, &args)?;
+        }
+        provenant_os::fixture::run_git(&bare, &["symbolic-ref", "HEAD", "refs/heads/trunk"])?;
+        let head = provenant_os::fixture::run_git(&project, &["rev-parse", "HEAD"])?;
+        let tree = Tree {
+            path: project.clone(),
+            branch: Some("lane".into()),
+            head: head.trim().to_owned(),
+            primary: false,
+            dirty: false,
+            unknown: false,
+            live_writer: false,
+            writer_unknown: false,
+            writer_evidence: None,
+            writer_advisory: None,
+            upstream: None,
+            pushed: false,
+        };
+        let forge = test_forge("upstream");
+        assert!(forge.is_protected("trunk"));
+        wip_git(&tree, &forge.remote.value)?;
+        let pushed = provenant_os::fixture::run_git(&bare, &["rev-parse", "refs/heads/lane"])?;
+        assert_eq!(pushed.trim(), head.trim());
+        assert!(!forge.is_protected("lane"));
+        Ok(())
     }
 }

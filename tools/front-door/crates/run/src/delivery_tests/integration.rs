@@ -502,11 +502,19 @@ fn delivery_refuses_corrupt_reachable_content_before_log_or_integration()
         })
     ));
     fixture.git(&["branch", "integration"])?;
-    let request =
-        HostDeliveryContext::destination(DeliveryMode::Integrate("integration".into()), "lane")?
-            .ok_or("destination")?;
+    let request = HostDeliveryContext::destination(
+        DeliveryMode::Integrate("integration".into()),
+        "lane",
+        &crate::forge_for("origin", "main", &[]),
+    )?
+    .ok_or("destination")?;
     assert!(matches!(
-        host.integrate(&fixture.writer, &request, head),
+        host.integrate(
+            &fixture.writer,
+            &request,
+            head,
+            &crate::forge_for("origin", "main", &[])
+        ),
         Err(RunError::Delivery {
             stage: WriterDeliveryStage::Integrate,
             ..
@@ -523,6 +531,7 @@ fn integration_refreshes_forged_tracking_ref_and_fails_closed()
     fixture.request = HostDeliveryContext::destination(
         DeliveryMode::Integrate("origin/integration".into()),
         "lane",
+        &crate::forge_for("origin", "main", &[]),
     )?
     .ok_or("destination")?;
     let host = fixture.prepare()?;
@@ -533,7 +542,12 @@ fn integration_refreshes_forged_tracking_ref_and_fails_closed()
         "refs/remotes/origin/integration",
         &head.to_string(),
     ])?;
-    host.integrate(&fixture.writer, &fixture.request, head)?;
+    host.integrate(
+        &fixture.writer,
+        &fixture.request,
+        head,
+        &crate::forge_for("origin", "main", &[]),
+    )?;
     let remote = host.command(
         &fixture.writer.worktree,
         "git",
@@ -573,8 +587,13 @@ fn integration_refreshes_forged_tracking_ref_and_fails_closed()
         .join(".git/refs/remotes/origin/integration.lock");
     std::fs::write(lock, "stale lock")?;
     assert!(
-        host.integrate(&fixture.writer, &fixture.request, next)
-            .is_err()
+        host.integrate(
+            &fixture.writer,
+            &fixture.request,
+            next,
+            &crate::forge_for("origin", "main", &[])
+        )
+        .is_err()
     );
     assert_eq!(
         remote,
@@ -807,7 +826,7 @@ fn origin_refresh_updates_tracking_refs_and_reports_fetch_failure()
             ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
         ])
     };
-    host().refresh_origin_with(&writer, &git_dir)?;
+    host().refresh_origin_with(&writer, &git_dir, "origin")?;
     assert_eq!(
         run(&git_dir, &["rev-parse", "refs/remotes/origin/main"])?,
         expected
@@ -824,7 +843,7 @@ fn origin_refresh_updates_tracking_refs_and_reports_fetch_failure()
         ),
     )?;
     run(&remote, &["symbolic-ref", "HEAD", "refs/heads/other"])?;
-    host().refresh_origin_with(&writer, &git_dir)?;
+    host().refresh_origin_with(&writer, &git_dir, "origin")?;
     assert_eq!(
         run(&git_dir, &["rev-parse", "refs/remotes/origin/main"])?,
         expected
@@ -838,7 +857,7 @@ fn origin_refresh_updates_tracking_refs_and_reports_fetch_failure()
         newer
     );
     run(&remote, &["symbolic-ref", "HEAD", "refs/heads/main"])?;
-    let Err(error) = host().refresh_origin_with(&writer, &git_dir) else {
+    let Err(error) = host().refresh_origin_with(&writer, &git_dir, "origin") else {
         return Err("colliding default must fail".into());
     };
     assert!(matches!(error, RunError::OriginDefaultCollision));
@@ -855,7 +874,11 @@ fn origin_refresh_updates_tracking_refs_and_reports_fetch_failure()
             root.join("missing.git").to_str().ok_or("missing path")?,
         ],
     )?;
-    assert!(host().refresh_origin_with(&writer, &git_dir).is_err());
+    assert!(
+        host()
+            .refresh_origin_with(&writer, &git_dir, "origin")
+            .is_err()
+    );
     assert_eq!(
         run(&git_dir, &["rev-parse", "refs/remotes/origin/main"])?,
         expected
@@ -1256,18 +1279,31 @@ fn delivery_receipts_record_the_destination_tips_from_the_bound_endpoint()
     assert_eq!(updated.integrated, second);
     // Local integration leases the target's tip and reads the result back.
     fixture.git(&["branch", "integration", &first.to_string()])?;
-    fixture.request =
-        HostDeliveryContext::destination(DeliveryMode::Integrate("integration".into()), "lane")?
-            .ok_or("destination")?;
+    fixture.request = HostDeliveryContext::destination(
+        DeliveryMode::Integrate("integration".into()),
+        "lane",
+        &crate::forge_for("origin", "main", &[]),
+    )?
+    .ok_or("destination")?;
     let host = fixture.prepare()?;
-    let integrated = host.integrate(&fixture.writer, &fixture.request, second)?;
+    let integrated = host.integrate(
+        &fixture.writer,
+        &fixture.request,
+        second,
+        &crate::forge_for("origin", "main", &[]),
+    )?;
     assert_eq!(integrated.remote, "");
     assert_eq!(integrated.push_url, None);
     assert_eq!(integrated.target, "refs/heads/integration");
     assert_eq!(integrated.previous, Some(first));
     assert_eq!(integrated.integrated, second);
     // Integrating again finds the head already landed and changes nothing.
-    let replay = host.integrate(&fixture.writer, &fixture.request, second)?;
+    let replay = host.integrate(
+        &fixture.writer,
+        &fixture.request,
+        second,
+        &crate::forge_for("origin", "main", &[]),
+    )?;
     assert_eq!(replay.previous, Some(second));
     assert_eq!(replay.integrated, second);
     Ok(())

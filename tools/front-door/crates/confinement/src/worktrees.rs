@@ -36,7 +36,7 @@ pub use gc::{
     CandidateReport, CollectionMode, ForgeObservation, LocalRetirementScope, OutputEntry,
     RetirementFeeds, WorktreeGcPolicy, WorktreeGcReport, acknowledge_foreign_preview,
     branch_candidate, collect, collect_from, collect_selected, first_foreign_pass, forge_context,
-    local_retirement_scope, resume_pending_retirements,
+    forge_remote, local_retirement_scope, resume_pending_retirements,
 };
 pub use inventory::*;
 pub use landed::{

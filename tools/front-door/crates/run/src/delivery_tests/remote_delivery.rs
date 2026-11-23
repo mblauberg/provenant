@@ -5,8 +5,12 @@ use super::*;
 fn stopped_head_push_uses_launch_binding_and_keeps_dirty_paths()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let fixture = PrepareFixture::new()?;
-    let request = HostDeliveryContext::destination(DeliveryMode::Push, "lane")?
-        .ok_or("stop-publish destination")?;
+    let request = HostDeliveryContext::destination(
+        DeliveryMode::Push,
+        "lane",
+        &crate::forge_for("origin", "main", &[]),
+    )?
+    .ok_or("stop-publish destination")?;
     let host = HostDeliveryContext::new(fixture.environment.clone())
         .with_host_state(&fixture.root.join("state"))
         .prepare_stop_publish(&fixture.writer, &request)?;
@@ -84,8 +88,12 @@ fn stop_publish_preparation_leaves_the_launch_pr_delivery_untouched()
     assert!(gh_before.is_some(), "an open_pr launch prepares gh");
     assert!(binding_before.is_some() && stop_before.is_none());
 
-    let request = HostDeliveryContext::destination(DeliveryMode::Push, "lane")?
-        .ok_or("stop-publish destination")?;
+    let request = HostDeliveryContext::destination(
+        DeliveryMode::Push,
+        "lane",
+        &crate::forge_for("origin", "main", &[]),
+    )?
+    .ok_or("stop-publish destination")?;
     let stopped = launch
         .clone()
         .prepare_stop_publish(&fixture.writer, &request)?;
@@ -112,9 +120,12 @@ fn integration_refuses_default_fallbacks_remote_head_and_primary_branch()
         "origin/main",
         "origin/primary-live",
     ] {
-        fixture.request =
-            HostDeliveryContext::destination(DeliveryMode::Integrate(target.into()), "lane")?
-                .ok_or("destination")?;
+        fixture.request = HostDeliveryContext::destination(
+            DeliveryMode::Integrate(target.into()),
+            "lane",
+            &crate::forge_for("origin", "main", &[]),
+        )?
+        .ok_or("destination")?;
         assert!(
             matches!(fixture.prepare(), Err(RunError::ProtectedDeliveryBranch)),
             "{target}"
@@ -126,18 +137,24 @@ fn integration_refuses_default_fallbacks_remote_head_and_primary_branch()
         "refs/remotes/origin/trunk",
     ])?;
     for target in ["trunk", "origin/trunk"] {
-        fixture.request =
-            HostDeliveryContext::destination(DeliveryMode::Integrate(target.into()), "lane")?
-                .ok_or("destination")?;
+        fixture.request = HostDeliveryContext::destination(
+            DeliveryMode::Integrate(target.into()),
+            "lane",
+            &crate::forge_for("origin", "main", &[]),
+        )?
+        .ok_or("destination")?;
         assert!(
             matches!(fixture.prepare(), Err(RunError::ProtectedDeliveryBranch)),
             "{target}"
         );
     }
     fixture.git(&["branch", "integration"])?;
-    fixture.request =
-        HostDeliveryContext::destination(DeliveryMode::Integrate("integration".into()), "lane")?
-            .ok_or("destination")?;
+    fixture.request = HostDeliveryContext::destination(
+        DeliveryMode::Integrate("integration".into()),
+        "lane",
+        &crate::forge_for("origin", "main", &[]),
+    )?
+    .ok_or("destination")?;
     let host = fixture.prepare()?;
     fixture.commit(&fixture.writer.worktree, "lane change")?;
     fixture.git(&[
@@ -147,7 +164,12 @@ fn integration_refuses_default_fallbacks_remote_head_and_primary_branch()
     ])?;
     let head = host.head(&fixture.writer)?;
     assert!(matches!(
-        host.integrate(&fixture.writer, &fixture.request, head),
+        host.integrate(
+            &fixture.writer,
+            &fixture.request,
+            head,
+            &crate::forge_for("origin", "main", &[])
+        ),
         Err(RunError::Delivery {
             stage: WriterDeliveryStage::Integrate,
             ..
@@ -158,9 +180,12 @@ fn integration_refuses_default_fallbacks_remote_head_and_primary_branch()
         "refs/heads/alias",
         "refs/heads/primary-live",
     ])?;
-    fixture.request =
-        HostDeliveryContext::destination(DeliveryMode::Integrate("alias".into()), "lane")?
-            .ok_or("destination")?;
+    fixture.request = HostDeliveryContext::destination(
+        DeliveryMode::Integrate("alias".into()),
+        "lane",
+        &crate::forge_for("origin", "main", &[]),
+    )?
+    .ok_or("destination")?;
     assert!(matches!(
         fixture.prepare(),
         Err(RunError::DeliveryPrepare {
@@ -176,9 +201,12 @@ fn integration_rechecks_primary_checkout_after_preparation()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let mut fixture = PrepareFixture::new()?;
     fixture.git(&["branch", "integration"])?;
-    fixture.request =
-        HostDeliveryContext::destination(DeliveryMode::Integrate("integration".into()), "lane")?
-            .ok_or("destination")?;
+    fixture.request = HostDeliveryContext::destination(
+        DeliveryMode::Integrate("integration".into()),
+        "lane",
+        &crate::forge_for("origin", "main", &[]),
+    )?
+    .ok_or("destination")?;
 
     // Preparation caches the initial primary checkout listing in these facts.
     let facts = provenant_confinement::worktrees::RepoFacts::default();
@@ -191,7 +219,12 @@ fn integration_rechecks_primary_checkout_after_preparation()
 
     let head = host.head(&fixture.writer)?;
     assert!(matches!(
-        host.integrate(&fixture.writer, &fixture.request, head),
+        host.integrate(
+            &fixture.writer,
+            &fixture.request,
+            head,
+            &crate::forge_for("origin", "main", &[])
+        ),
         Err(RunError::Delivery {
             stage: WriterDeliveryStage::Integrate,
             ..
@@ -221,15 +254,22 @@ fn integration_refuses_the_default_branch_of_a_non_origin_remote()
     fixture.git(&["branch", "release"])?;
     fixture.git(&["config", "branch.release.remote", "upstream"])?;
     fixture.git(&["config", "branch.release.merge", "refs/heads/release"])?;
-    fixture.request =
-        HostDeliveryContext::destination(DeliveryMode::Integrate("release".into()), "lane")?
-            .ok_or("destination")?;
+    fixture.request = HostDeliveryContext::destination(
+        DeliveryMode::Integrate("release".into()),
+        "lane",
+        &crate::forge_for("origin", "main", &[]),
+    )?
+    .ok_or("destination")?;
     assert!(matches!(
         fixture.prepare(),
         Err(RunError::ProtectedDeliveryBranch)
     ));
     assert!(matches!(
-        HostDeliveryContext::validate_integration_target(&fixture.writer.project, "release"),
+        HostDeliveryContext::validate_integration_target(
+            &fixture.writer.project,
+            "release",
+            &crate::forge_for("origin", "main", &[])
+        ),
         Err(RunError::ProtectedDeliveryBranch)
     ));
     Ok(())
@@ -380,6 +420,7 @@ fn delivery_records_dirty_failure_and_checked_out_integration_after_start()
         fixture.request = HostDeliveryContext::destination(
             DeliveryMode::Integrate("integration".into()),
             "lane",
+            &crate::forge_for("origin", "main", &[]),
         )?
         .ok_or("destination")?;
         let host = fixture.prepare()?;
@@ -423,9 +464,12 @@ fn two_lanes_contend_for_integration_without_losing_either_head()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let mut fixture = PrepareFixture::new()?;
     fixture.git(&["branch", "integration"])?;
-    fixture.request =
-        HostDeliveryContext::destination(DeliveryMode::Integrate("integration".into()), "lane")?
-            .ok_or("destination")?;
+    fixture.request = HostDeliveryContext::destination(
+        DeliveryMode::Integrate("integration".into()),
+        "lane",
+        &crate::forge_for("origin", "main", &[]),
+    )?
+    .ok_or("destination")?;
     let first = fixture.prepare()?;
     let second_writer = WriterRequest {
         extra: fixture.writer.extra.clone(),
@@ -450,11 +494,21 @@ fn two_lanes_contend_for_integration_without_losing_either_head()
     let (one, two) = std::thread::scope(|scope| {
         let one = scope.spawn(|| {
             barrier.wait();
-            first.integrate(&fixture.writer, &fixture.request, first_head)
+            first.integrate(
+                &fixture.writer,
+                &fixture.request,
+                first_head,
+                &crate::forge_for("origin", "main", &[]),
+            )
         });
         let two = scope.spawn(|| {
             barrier.wait();
-            second.integrate(&second_writer, &fixture.request, second_head)
+            second.integrate(
+                &second_writer,
+                &fixture.request,
+                second_head,
+                &crate::forge_for("origin", "main", &[]),
+            )
         });
         (
             one.join().expect("first lane thread"),
@@ -474,7 +528,12 @@ fn two_lanes_contend_for_integration_without_losing_either_head()
             ),
             "{error}"
         );
-        first.integrate(&fixture.writer, &fixture.request, first_head)?;
+        first.integrate(
+            &fixture.writer,
+            &fixture.request,
+            first_head,
+            &crate::forge_for("origin", "main", &[]),
+        )?;
     }
     if let Err(error) = two {
         assert!(
@@ -487,7 +546,12 @@ fn two_lanes_contend_for_integration_without_losing_either_head()
             ),
             "{error}"
         );
-        second.integrate(&second_writer, &fixture.request, second_head)?;
+        second.integrate(
+            &second_writer,
+            &fixture.request,
+            second_head,
+            &crate::forge_for("origin", "main", &[]),
+        )?;
     }
     for head in [first_head, second_head] {
         first.command(
@@ -543,6 +607,7 @@ fn graph_pr_body_uses_its_recorded_base_despite_primary_checkout_changes()
         "integration",
         base,
         "Graph fixture\nRun fixture\nAttempt fixture",
+        &crate::forge_for("origin", "main", &[]),
     )?;
     assert_eq!(url, "https://github.com/fixture/repo/pull/1");
     let body = std::fs::read_to_string(fixture.root.join("graph-body"))?;
@@ -597,6 +662,7 @@ fn graph_pr_refreshes_forged_target_and_refuses_failed_fetch()
         "origin/integration",
         base,
         "Graph fixture",
+        &crate::forge_for("origin", "main", &[]),
     )?;
     assert!(std::fs::read_to_string(fixture.root.join("graph-body"))?.contains("Graph work"));
 
@@ -619,6 +685,7 @@ fn graph_pr_refreshes_forged_target_and_refuses_failed_fetch()
                 "origin/integration",
                 base,
                 "Graph fixture",
+                &crate::forge_for("origin", "main", &[]),
             )
             .is_err()
     );
@@ -677,12 +744,18 @@ fn remote_integration_refreshes_the_leased_destination()
     fixture.request = HostDeliveryContext::destination(
         DeliveryMode::Integrate("origin/integration".into()),
         "lane",
+        &crate::forge_for("origin", "main", &[]),
     )?
     .ok_or("destination")?;
     let host = fixture.prepare()?;
     fixture.commit(&fixture.writer.worktree, "remote lane")?;
     let head = host.head(&fixture.writer)?;
-    host.integrate(&fixture.writer, &fixture.request, head)?;
+    host.integrate(
+        &fixture.writer,
+        &fixture.request,
+        head,
+        &crate::forge_for("origin", "main", &[]),
+    )?;
     assert_eq!(
         host.command(
             &fixture.writer.worktree,
@@ -692,7 +765,12 @@ fn remote_integration_refreshes_the_leased_destination()
         )?,
         head.to_string()
     );
-    host.integrate(&fixture.writer, &fixture.request, head)?;
+    host.integrate(
+        &fixture.writer,
+        &fixture.request,
+        head,
+        &crate::forge_for("origin", "main", &[]),
+    )?;
     Ok(())
 }
 
@@ -711,6 +789,7 @@ fn remote_integration_refuses_a_symbolic_destination()
     fixture.request = HostDeliveryContext::destination(
         DeliveryMode::Integrate("origin/integration".into()),
         "lane",
+        &crate::forge_for("origin", "main", &[]),
     )?
     .ok_or("destination")?;
     let host = fixture.prepare()?;
@@ -718,7 +797,12 @@ fn remote_integration_refuses_a_symbolic_destination()
     fixture.commit(&fixture.writer.worktree, "lane change")?;
     let head = host.head(&fixture.writer)?;
     assert!(matches!(
-        host.integrate(&fixture.writer, &fixture.request, head),
+        host.integrate(
+            &fixture.writer,
+            &fixture.request,
+            head,
+            &crate::forge_for("origin", "main", &[])
+        ),
         Err(RunError::Delivery {
             stage: WriterDeliveryStage::Integrate,
             ..
@@ -742,13 +826,21 @@ fn local_integration_fast_forwards_merges_and_replays()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let mut fixture = PrepareFixture::new()?;
     fixture.git(&["branch", "integration"])?;
-    fixture.request =
-        HostDeliveryContext::destination(DeliveryMode::Integrate("integration".into()), "lane")?
-            .ok_or("destination")?;
+    fixture.request = HostDeliveryContext::destination(
+        DeliveryMode::Integrate("integration".into()),
+        "lane",
+        &crate::forge_for("origin", "main", &[]),
+    )?
+    .ok_or("destination")?;
     let host = fixture.prepare()?;
     fixture.commit(&fixture.writer.worktree, "lane one")?;
     let head = host.head(&fixture.writer)?;
-    host.integrate(&fixture.writer, &fixture.request, head)?;
+    host.integrate(
+        &fixture.writer,
+        &fixture.request,
+        head,
+        &crate::forge_for("origin", "main", &[]),
+    )?;
     assert_eq!(
         host.command(
             &fixture.writer.project,
@@ -758,13 +850,23 @@ fn local_integration_fast_forwards_merges_and_replays()
         )?,
         head.to_string()
     );
-    host.integrate(&fixture.writer, &fixture.request, head)?;
+    host.integrate(
+        &fixture.writer,
+        &fixture.request,
+        head,
+        &crate::forge_for("origin", "main", &[]),
+    )?;
     // Divergent commits with a common tree still require a two-parent merge.
     fixture.commit(&fixture.writer.project, "integration side")?;
     fixture.git(&["branch", "-f", "integration", "HEAD"])?;
     fixture.commit(&fixture.writer.worktree, "lane two")?;
     let head = host.head(&fixture.writer)?;
-    host.integrate(&fixture.writer, &fixture.request, head)?;
+    host.integrate(
+        &fixture.writer,
+        &fixture.request,
+        head,
+        &crate::forge_for("origin", "main", &[]),
+    )?;
     let parents = host.command(
         &fixture.writer.project,
         "git",
@@ -781,9 +883,12 @@ fn fast_forward_only_integration_advances_but_never_merges()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let mut fixture = PrepareFixture::new()?;
     fixture.git(&["branch", "integration"])?;
-    fixture.request =
-        HostDeliveryContext::destination(DeliveryMode::Integrate("integration".into()), "lane")?
-            .ok_or("destination")?;
+    fixture.request = HostDeliveryContext::destination(
+        DeliveryMode::Integrate("integration".into()),
+        "lane",
+        &crate::forge_for("origin", "main", &[]),
+    )?
+    .ok_or("destination")?;
     fixture.request.fast_forward_only = true;
     let host = fixture.prepare()?;
     let rev = |fixture: &PrepareFixture, name: &str| {
@@ -797,10 +902,20 @@ fn fast_forward_only_integration_advances_but_never_merges()
     // A descendant of the target fast-forwards it.
     fixture.commit(&fixture.writer.worktree, "round one")?;
     let first = host.head(&fixture.writer)?;
-    host.integrate(&fixture.writer, &fixture.request, first)?;
+    host.integrate(
+        &fixture.writer,
+        &fixture.request,
+        first,
+        &crate::forge_for("origin", "main", &[]),
+    )?;
     assert_eq!(rev(&fixture, "integration")?, first.to_string());
     // A head the target already contains integrates nothing and is not an error.
-    host.integrate(&fixture.writer, &fixture.request, first)?;
+    host.integrate(
+        &fixture.writer,
+        &fixture.request,
+        first,
+        &crate::forge_for("origin", "main", &[]),
+    )?;
     // The target moved elsewhere: the round is refused instead of merged.
     fixture.commit(&fixture.writer.project, "someone else")?;
     fixture.git(&["branch", "-f", "integration", "HEAD"])?;
@@ -808,7 +923,12 @@ fn fast_forward_only_integration_advances_but_never_merges()
     fixture.commit(&fixture.writer.worktree, "round two")?;
     let second = host.head(&fixture.writer)?;
     let refused = host
-        .integrate(&fixture.writer, &fixture.request, second)
+        .integrate(
+            &fixture.writer,
+            &fixture.request,
+            second,
+            &crate::forge_for("origin", "main", &[]),
+        )
         .unwrap_err();
     assert!(matches!(refused, RunError::IntegrationHeadMoved));
     assert!(refused.to_string().contains("integration_head_moved"));
@@ -825,9 +945,12 @@ fn local_integration_conflict_dirty_and_checked_out_refuse_without_partial_state
     fixture.git(&["add", "conflict"])?;
     fixture.commit(&fixture.writer.project, "integration conflict")?;
     fixture.git(&["branch", "integration"])?;
-    fixture.request =
-        HostDeliveryContext::destination(DeliveryMode::Integrate("integration".into()), "lane")?
-            .ok_or("destination")?;
+    fixture.request = HostDeliveryContext::destination(
+        DeliveryMode::Integrate("integration".into()),
+        "lane",
+        &crate::forge_for("origin", "main", &[]),
+    )?
+    .ok_or("destination")?;
     let host = fixture.prepare()?;
     let original = host.command(
         &fixture.writer.project,
@@ -840,7 +963,7 @@ fn local_integration_conflict_dirty_and_checked_out_refuse_without_partial_state
     fixture.commit(&fixture.writer.worktree, "lane conflict")?;
     let head = host.head(&fixture.writer)?;
     assert!(matches!(
-        host.integrate(&fixture.writer, &fixture.request, head),
+        host.integrate(&fixture.writer, &fixture.request, head, &crate::forge_for("origin", "main", &[])),
         Err(RunError::IntegrationConflict { child_head, conflicting_files })
             if child_head == head && conflicting_files == ["conflict"]
     ));
@@ -857,16 +980,25 @@ fn local_integration_conflict_dirty_and_checked_out_refuse_without_partial_state
     assert!(!fixture.writer.project.join(".git/MERGE_HEAD").exists());
     std::fs::write(fixture.writer.worktree.join("dirty"), "keep")?;
     assert!(
-        host.integrate(&fixture.writer, &fixture.request, head)
-            .is_err()
+        host.integrate(
+            &fixture.writer,
+            &fixture.request,
+            head,
+            &crate::forge_for("origin", "main", &[])
+        )
+        .is_err()
     );
     std::fs::remove_file(fixture.writer.worktree.join("dirty"))?;
     let primary = std::fs::read_to_string(fixture.writer.project.join(".git/HEAD"))?
         .trim()
         .trim_start_matches("ref: refs/heads/")
         .to_owned();
-    let request = HostDeliveryContext::destination(DeliveryMode::Integrate(primary), "lane")?
-        .ok_or("destination")?;
+    let request = HostDeliveryContext::destination(
+        DeliveryMode::Integrate(primary),
+        "lane",
+        &crate::forge_for("origin", "main", &[]),
+    )?
+    .ok_or("destination")?;
     assert!(matches!(
         HostDeliveryContext::new(fixture.environment.clone()).prepare(&fixture.writer, &request),
         Err(RunError::ProtectedDeliveryBranch)
@@ -876,20 +1008,36 @@ fn local_integration_conflict_dirty_and_checked_out_refuse_without_partial_state
 
 #[test]
 fn concise_delivery_preserves_alias_contract_and_refuses_injection() -> Result<()> {
-    assert!(HostDeliveryContext::destination(DeliveryMode::None, "")?.is_none());
-    let push = HostDeliveryContext::destination(DeliveryMode::Push, "lane")?
-        .ok_or(RunError::Validation("push"))?;
+    assert!(
+        HostDeliveryContext::destination(
+            DeliveryMode::None,
+            "",
+            &crate::forge_for("origin", "main", &[])
+        )?
+        .is_none()
+    );
+    let push = HostDeliveryContext::destination(
+        DeliveryMode::Push,
+        "lane",
+        &crate::forge_for("origin", "main", &[]),
+    )?
+    .ok_or(RunError::Validation("push"))?;
     assert_eq!(
         (&*push.remote, &*push.branch, push.open_pr),
         ("origin", "lane", false)
     );
     assert!(
-        HostDeliveryContext::destination(DeliveryMode::Pr, "lane")?
-            .is_some_and(|request| request.open_pr)
+        HostDeliveryContext::destination(
+            DeliveryMode::Pr,
+            "lane",
+            &crate::forge_for("origin", "main", &[])
+        )?
+        .is_some_and(|request| request.open_pr)
     );
     let remote = HostDeliveryContext::destination(
         DeliveryMode::Integrate("origin/integration".into()),
         "lane",
+        &crate::forge_for("origin", "main", &[]),
     )?
     .ok_or(RunError::Validation("integration"))?;
     assert_eq!(

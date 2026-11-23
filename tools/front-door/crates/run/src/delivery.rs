@@ -27,6 +27,63 @@ fn delivery_advisory(message: impl Into<String>) {
     warn(Warning::new(DELIVERY_REFRESH_ADVISORY, message.into()));
 }
 
+/// Build a forge context from explicit values for callers that own those
+/// values already (fixtures, pinned dispatch), rather than rediscovering them.
+/// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+pub fn forge_for(
+    remote: &str,
+    default_branch: &str,
+    protected: &[&str],
+) -> provenant_config::ForgeContext {
+    use provenant_records::provenance::{Layer, Source, Sourced};
+    let source = Source {
+        layer: Layer::Detected,
+        origin: Some("explicit fixture values".to_owned()),
+    };
+    let mut names = vec![default_branch.to_owned()];
+    names.extend(protected.iter().map(|name| (*name).to_owned()));
+    names.sort();
+    names.dedup();
+    provenant_config::ForgeContext {
+        remote: Sourced {
+            value: remote.to_owned(),
+            source: source.clone(),
+        },
+        default_branch: Sourced {
+            value: default_branch.to_owned(),
+            source: source.clone(),
+        },
+        protected: Sourced {
+            value: names,
+            source: source.clone(),
+        },
+        policy: Sourced {
+            value: Default::default(),
+            source,
+        },
+    }
+}
+
+/// Resolve the one forge context for a delivery-related command. Owners call
+/// this once and pass the result down.
+/// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+pub fn resolve_forge(
+    state: &Path,
+    project: &Path,
+    ports: &provenant_config::PortTable,
+) -> Result<provenant_config::ForgeContext, RunError> {
+    let invalid = |error: String| RunError::Input {
+        kind: crate::ErrorKind::Invalid,
+        message: error,
+    };
+    let policy = provenant_config::operation_policy(state, project, ports);
+    let config = provenant_config::ForgeConfig::new(ports, (*policy).clone());
+    let git =
+        provenant_config::ForgeGit::new(project).map_err(|error| invalid(error.to_string()))?;
+    provenant_config::ForgeContext::resolve(&config, &git)
+        .map_err(|error| invalid(error.to_string()))
+}
+
 /// Launch delivery fields a test compares across stop-publish preparation:
 /// git, gh, the launch binding digest, the stop binding digest and the
 /// environment.
@@ -828,14 +885,26 @@ impl HostDeliveryContext {
         self
     }
     /// Integration authority never includes the default or primary checkout ref.
-    pub fn validate_integration_target(project: &Path, target: &str) -> Result<()> {
-        let branch = target.strip_prefix("origin/").unwrap_or(target);
-        Self::check_delivery_branch(project, branch)
+    pub fn validate_integration_target(
+        project: &Path,
+        target: &str,
+        forge: &provenant_config::ForgeContext,
+    ) -> Result<()> {
+        let branch = target
+            .strip_prefix(&format!("{}/", forge.remote.value))
+            .unwrap_or(target);
+        Self::check_delivery_branch(project, branch, forge)
     }
     /// The same protected-target rule without reading host state, for
     /// `run --explain` and other read-only admission previews.
-    pub fn validate_integration_target_read_only(project: &Path, target: &str) -> Result<()> {
-        let branch = target.strip_prefix("origin/").unwrap_or(target);
+    pub fn validate_integration_target_read_only(
+        project: &Path,
+        target: &str,
+        forge: &provenant_config::ForgeContext,
+    ) -> Result<()> {
+        let branch = target
+            .strip_prefix(&format!("{}/", forge.remote.value))
+            .unwrap_or(target);
         let writer = WriterRequest {
             extra: Default::default(),
             custody_project: None,
@@ -848,14 +917,23 @@ impl HostDeliveryContext {
             git: host.executable("git", &writer)?,
             gh: None,
         });
-        host.refuse_protected_target(&writer, branch, Stage::Prepare)
+        host.refuse_protected_target(&writer, branch, Stage::Prepare, forge)
     }
     /// A publication ref is distinct from a PR's base, which may be protected.
-    pub fn check_delivery_branch(project: &Path, target: &str) -> Result<()> {
-        Self::capture().check_delivery_branch_with_facts(project, target)
+    pub fn check_delivery_branch(
+        project: &Path,
+        target: &str,
+        forge: &provenant_config::ForgeContext,
+    ) -> Result<()> {
+        Self::capture().check_delivery_branch_with_facts(project, target, forge)
     }
 
-    pub fn check_delivery_branch_with_facts(&self, project: &Path, target: &str) -> Result<()> {
+    pub fn check_delivery_branch_with_facts(
+        &self,
+        project: &Path,
+        target: &str,
+        forge: &provenant_config::ForgeContext,
+    ) -> Result<()> {
         let writer = WriterRequest {
             extra: Default::default(),
             custody_project: None,
@@ -868,7 +946,7 @@ impl HostDeliveryContext {
             git: host.executable("git", &writer)?,
             gh: None,
         });
-        host.refuse_protected_target(&writer, target, Stage::Prepare)
+        host.refuse_protected_target(&writer, target, Stage::Prepare, forge)
     }
 
     fn refuse_protected_target(
@@ -876,6 +954,7 @@ impl HostDeliveryContext {
         writer: &WriterRequest,
         target: &str,
         stage: Stage,
+        forge: &provenant_config::ForgeContext,
     ) -> Result<()> {
         if !self
             .command(
@@ -891,26 +970,24 @@ impl HostDeliveryContext {
                 "symbolic branch targets are refused",
             ));
         }
-        let remotes = self.command(&writer.worktree, "git", &["remote"], stage)?;
-        let mut has_default = false;
-        let mut protected_default = false;
-        for remote in remotes.lines() {
-            let default = self.command(
-                &writer.worktree,
-                "git",
-                &[
-                    "symbolic-ref",
-                    "--quiet",
-                    &format!("refs/remotes/{remote}/HEAD"),
-                ],
-                stage,
-            )?;
-            if let Some(branch) = default.strip_prefix(&format!("refs/remotes/{remote}/")) {
-                has_default = true;
-                protected_default |= branch == target;
-            }
-        }
-        protected_default |= !has_default && matches!(target, "main" | "master");
+        // Read the default branch from the one resolved remote's HEAD. A
+        // compiled-in `main`/`master` fallback could retire a differently
+        // named default, so an unknown default protects nothing here; the
+        // owner's ForgeContext.is_protected still governs GC retirement.
+        // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+        let default = self.command(
+            &writer.worktree,
+            "git",
+            &[
+                "symbolic-ref",
+                "--quiet",
+                &format!("refs/remotes/{}/HEAD", forge.remote.value),
+            ],
+            stage,
+        )?;
+        let protected_default = default
+            .strip_prefix(&format!("refs/remotes/{}/", forge.remote.value))
+            .is_some_and(|branch| branch == target);
         let trees = self.command(
             &writer.worktree,
             "git",
@@ -961,17 +1038,19 @@ impl HostDeliveryContext {
         branch: &str,
         base: GitOid,
         body: &str,
+        forge: &provenant_config::ForgeContext,
     ) -> Result<String> {
-        let target = branch.strip_prefix("origin/").unwrap_or(branch);
-        self.check_delivery_branch_with_facts(project, target)?;
-        let local = !branch.starts_with("origin/");
-        let source = if let Some(branch) = branch.strip_prefix("origin/") {
-            format!("refs/remotes/origin/{branch}")
+        let qualified = format!("{}/", forge.remote.value);
+        let target = branch.strip_prefix(&qualified).unwrap_or(branch);
+        self.check_delivery_branch_with_facts(project, target, forge)?;
+        let local = !branch.starts_with(&qualified);
+        let source = if let Some(branch) = branch.strip_prefix(&qualified) {
+            format!("refs/remotes/{}/{branch}", forge.remote.value)
         } else {
             format!("refs/heads/{branch}")
         };
-        let branch = branch.strip_prefix("origin/").unwrap_or(branch);
-        let request = Self::destination(crate::DeliveryMode::Pr, branch)?
+        let branch = branch.strip_prefix(&qualified).unwrap_or(branch);
+        let request = Self::destination(crate::DeliveryMode::Pr, branch, forge)?
             .ok_or(RunError::Validation("graph PR destination"))?;
         let writer = WriterRequest {
             extra: Default::default(),
@@ -991,7 +1070,7 @@ impl HostDeliveryContext {
                 Stage::Head,
             )?
         } else {
-            host.refresh_target_and_resolve(&writer, branch, Stage::Head)?
+            host.refresh_target_and_resolve(&writer, branch, Stage::Head, &forge.remote.value)?
         };
         let head = GitOid::parse(&head)
             .map_err(|error| RunError::delivery(Stage::Head, DeliveryCause::parse(error)))?;
@@ -1005,7 +1084,7 @@ impl HostDeliveryContext {
             None
         };
         let branch = publication.as_deref().unwrap_or(branch);
-        host.refuse_protected_target(&writer, branch, Stage::Push)?;
+        host.refuse_protected_target(&writer, branch, Stage::Push, forge)?;
         let reference = format!("refs/heads/{branch}");
         if local {
             host.refuse_remote_symbolic_target(project, &bound.push_url, branch, Stage::Push)?;
@@ -1150,17 +1229,19 @@ impl HostDeliveryContext {
         Ok(branch)
     }
     /// Resolve the concise mode into the existing explicit destination contract.
-    /// Integration names are local unless qualified as `origin/<branch>`.
+    /// Integration names are local unless qualified as `<remote>/<branch>`.
     pub fn destination(
         mode: crate::DeliveryMode,
         branch: &str,
+        forge: &provenant_config::ForgeContext,
     ) -> Result<Option<WriterDeliveryRequest>> {
+        let qualified = format!("{}/", forge.remote.value);
         let (remote, destination, open_pr) = match &mode {
             crate::DeliveryMode::None => return Ok(None),
-            crate::DeliveryMode::Push => ("origin".to_owned(), branch.to_owned(), false),
-            crate::DeliveryMode::Pr => ("origin".to_owned(), branch.to_owned(), true),
-            crate::DeliveryMode::Integrate(target) => match target.strip_prefix("origin/") {
-                Some(branch) => ("origin".to_owned(), branch.to_owned(), false),
+            crate::DeliveryMode::Push => (forge.remote.value.clone(), branch.to_owned(), false),
+            crate::DeliveryMode::Pr => (forge.remote.value.clone(), branch.to_owned(), true),
+            crate::DeliveryMode::Integrate(target) => match target.strip_prefix(&qualified) {
+                Some(branch) => (forge.remote.value.clone(), branch.to_owned(), false),
                 None => (String::new(), target.clone(), false),
             },
         };
@@ -1441,8 +1522,8 @@ impl HostDeliveryContext {
         }
         Ok(self)
     }
-    /// Refresh origin under writer custody with delivery's host credential and
-    /// executable checks, while constraining the refspec and transport helpers.
+    /// Refresh the forge remote under writer custody with delivery's host
+    /// credential and executable checks, constraining the refspec and helpers.
     pub(crate) fn refresh_origin(
         writer: &WriterRequest,
         git_dir: &Path,
@@ -1451,6 +1532,7 @@ impl HostDeliveryContext {
         facts: &provenant_confinement::worktrees::RepoFacts,
         access: (Option<&provenant_records::LaneAccessReceipt>, Option<bool>),
         policy: &provenant_records::policy::Policy,
+        remote: &str,
     ) -> Result<()> {
         let mut host = Self::capture()
             .with_lane_access(access.0.cloned(), access.1)
@@ -1458,9 +1540,14 @@ impl HostDeliveryContext {
             .with_repo_facts(facts)
             .with_host_state(host_state);
         host.cancellation = Some(cancel.clone());
-        host.refresh_origin_with(writer, git_dir)
+        host.refresh_origin_with(writer, git_dir, remote)
     }
-    pub(super) fn refresh_origin_with(self, writer: &WriterRequest, git_dir: &Path) -> Result<()> {
+    pub(super) fn refresh_origin_with(
+        self,
+        writer: &WriterRequest,
+        git_dir: &Path,
+        remote: &str,
+    ) -> Result<()> {
         let requested = OriginRefreshRequest::capture()?;
         let mut host = self;
         host.host_environment(writer)?;
@@ -1485,7 +1572,7 @@ impl HostDeliveryContext {
             &["--git-dir", git_dir, "--work-tree", worktree, "remote"],
             Stage::Prepare,
         )?;
-        if !remotes.lines().any(|line| line == "origin") {
+        if !remotes.lines().any(|line| line == remote) {
             return Ok(());
         }
         // A refresh completed since this request began also satisfies it,
@@ -1504,7 +1591,7 @@ impl HostDeliveryContext {
                 host.refresh_remote(
                     writer,
                     &["--git-dir", git_dir, "--work-tree", worktree],
-                    "origin",
+                    remote,
                 )
             },
         )
@@ -1646,11 +1733,12 @@ impl HostDeliveryContext {
         writer: &WriterRequest,
         branch: &str,
         stage: Stage,
+        remote: &str,
     ) -> Result<String> {
         let branch_ref = GitRefName::branch(branch)
             .map_err(|error| RunError::delivery(stage, DeliveryCause::parse(error)))?;
         let common = self.common_git_dir(&writer.project, stage)?;
-        crate::writer::verify_writer_git_paths(&common, &branch_ref)?;
+        crate::writer::verify_writer_git_paths(&common, &branch_ref, remote)?;
         self.validate_transport_helpers(writer)?;
         let source = format!("refs/heads/{branch}");
         // Read and fetch the same sealed destination used for the later push.
@@ -1666,7 +1754,7 @@ impl HostDeliveryContext {
                 "git",
                 &[
                     "-c",
-                    "remote.origin.uploadpack=git-upload-pack",
+                    &format!("remote.{remote}.uploadpack=git-upload-pack"),
                     "ls-remote",
                     "--exit-code",
                     "--",
@@ -1686,7 +1774,7 @@ impl HostDeliveryContext {
                 "advertised ref does not match the requested ref",
             ));
         }
-        let tracking = format!("refs/remotes/origin/{branch}");
+        let tracking = format!("refs/remotes/{remote}/{branch}");
         self.refuse_symref_destination(&writer.worktree, &tracking, stage)?;
         let refspec = format!("+{source}:{tracking}");
         self.command(
@@ -1694,7 +1782,7 @@ impl HostDeliveryContext {
             "git",
             &[
                 "-c",
-                "remote.origin.uploadpack=git-upload-pack",
+                &format!("remote.{remote}.uploadpack=git-upload-pack"),
                 "-c",
                 "core.logAllRefUpdates=false",
                 "fetch",
@@ -2605,15 +2693,16 @@ impl HostDeliveryContext {
         writer: &WriterRequest,
         request: &WriterDeliveryRequest,
         head: GitOid,
+        forge: &provenant_config::ForgeContext,
     ) -> Result<WriterIntegration> {
         let stage = Stage::Integrate;
-        self.refuse_protected_target(writer, &request.branch, stage)
+        self.refuse_protected_target(writer, &request.branch, stage, forge)
             .map_err(|error| delivery_stage_error(error, stage))?;
         let bound = self
             .bound
             .as_ref()
             .ok_or_else(|| delivery_refusal(stage, "delivery launch binding was not sealed"))?;
-        self.refuse_protected_target(writer, &request.branch, stage)
+        self.refuse_protected_target(writer, &request.branch, stage, forge)
             .map_err(|error| delivery_stage_error(error, stage))?;
         self.verify_objects(writer, head, stage)?;
         self.clean(writer)?;
@@ -2627,7 +2716,7 @@ impl HostDeliveryContext {
         let remote = !request.remote.is_empty();
         let target = if remote {
             let tracking = format!("refs/remotes/{}/{}", request.remote, request.branch);
-            if request.remote != "origin" {
+            if request.remote != forge.remote.value {
                 self.refuse_symref_destination(&writer.worktree, &tracking, Stage::Fetch)?;
                 self.command(
                     &writer.worktree,
@@ -2647,8 +2736,8 @@ impl HostDeliveryContext {
         } else {
             destination.clone()
         };
-        let expected = if remote && request.remote == "origin" {
-            self.refresh_target_and_resolve(writer, &request.branch, stage)?
+        let expected = if remote && request.remote == forge.remote.value {
+            self.refresh_target_and_resolve(writer, &request.branch, stage, &forge.remote.value)?
         } else {
             self.command(
                 &writer.worktree,
@@ -2791,7 +2880,7 @@ impl HostDeliveryContext {
             GitOid::parse(&commit)
                 .map_err(|error| RunError::delivery(stage, DeliveryCause::parse(error)))?
         };
-        self.refuse_protected_target(writer, &request.branch, stage)
+        self.refuse_protected_target(writer, &request.branch, stage, forge)
             .map_err(|error| delivery_stage_error(error, stage))?;
         if remote {
             self.refuse_remote_symbolic_target(
@@ -2816,8 +2905,13 @@ impl HostDeliveryContext {
                 ],
                 stage,
             )?;
-            let verified = if request.remote == "origin" {
-                self.refresh_target_and_resolve(writer, &request.branch, Stage::Verify)?
+            let verified = if request.remote == forge.remote.value {
+                self.refresh_target_and_resolve(
+                    writer,
+                    &request.branch,
+                    Stage::Verify,
+                    &forge.remote.value,
+                )?
             } else {
                 self.refuse_symref_destination(&writer.worktree, &target, Stage::Verify)?;
                 self.command(
@@ -3007,7 +3101,12 @@ impl HostDeliveryContext {
                 "writer head moved during delivery",
             ));
         }
-        self.refuse_protected_target(writer, &request.branch, Stage::Push)
+        // The destination was built from the owner's forge context and carries
+        // its remote; reuse that value rather than resolving a second context
+        // that could disagree with the one already sealed at launch.
+        // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+        let forge = forge_for(&request.remote, "", &[]);
+        self.refuse_protected_target(writer, &request.branch, Stage::Push, &forge)
             .map_err(|error| match error {
                 RunError::DeliveryLimit { .. } | RunError::DeliveryFact { .. } => error,
                 other => RunError::delivery(Stage::Prepare, DeliveryCause::parse(other)),
@@ -3018,7 +3117,7 @@ impl HostDeliveryContext {
         if matches!(request.mode, crate::DeliveryMode::Integrate(_)) {
             return Ok(Published {
                 pull_request: None,
-                integration: Some(self.integrate(writer, request, head)?),
+                integration: Some(self.integrate(writer, request, head, &forge)?),
             });
         }
         let bound = self.bound.as_ref().ok_or_else(|| {
@@ -4703,5 +4802,32 @@ mod stored_format_tests {
         )?;
         assert_eq!(shape.get("future_record_field"), Some(&future));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod forge_context_tests {
+    use super::*;
+
+    /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    #[test]
+    fn delivery_destination_and_protection_follow_the_upstream_context() {
+        let forge = forge_for("upstream", "trunk", &[]);
+        let push = HostDeliveryContext::destination(crate::DeliveryMode::Push, "lane", &forge)
+            .expect("destination")
+            .expect("push request");
+        assert_eq!(push.remote, "upstream");
+        assert_eq!(push.branch, "lane");
+        assert!(forge.is_protected("trunk"));
+        assert!(!forge.is_protected("lane"));
+        let integrate = HostDeliveryContext::destination(
+            crate::DeliveryMode::Integrate("upstream/trunk".into()),
+            "lane",
+            &forge,
+        )
+        .expect("destination")
+        .expect("integrate request");
+        assert_eq!(integrate.remote, "upstream");
+        assert_eq!(integrate.branch, "trunk");
     }
 }

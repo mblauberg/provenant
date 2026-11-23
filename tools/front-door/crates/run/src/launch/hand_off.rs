@@ -392,9 +392,19 @@ impl RunStore {
                     .strip_prefix("refs/heads/")
                     .ok_or(RunError::Validation("writer needs a local branch"))?;
                 let mut holder: HolderContext = decode(&holder_context)?;
-                let request =
-                    crate::HostDeliveryContext::destination(crate::DeliveryMode::Push, branch)?
-                        .ok_or(RunError::Validation("stop publication destination missing"))?;
+                let state = self.context.state_root.as_path();
+                let ports = provenant_config::PortTable::read_for(
+                    Some(writer_request.project.as_path()),
+                    state,
+                )
+                .map_err(|error| RunError::Validation(error.to_string()))?;
+                let forge = crate::resolve_forge(state, &writer_request.project, &ports)?;
+                let request = crate::HostDeliveryContext::destination(
+                    crate::DeliveryMode::Push,
+                    branch,
+                    &forge,
+                )?
+                .ok_or(RunError::Validation("stop publication destination missing"))?;
                 let host = holder.host_delivery.take().unwrap_or_else(|| {
                     crate::HostDeliveryContext::capture()
                         .with_repo_facts(self.repo_facts())

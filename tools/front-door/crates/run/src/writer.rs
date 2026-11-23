@@ -653,22 +653,22 @@ impl WriterLaunch {
         status_paths(&output)
     }
 
-    fn ahead_of_remote(&self, git: &Path, head: GitOid) -> Result<Option<u64>> {
+    fn ahead_of_remote(&self, git: &Path, head: GitOid, remote: &str) -> Result<Option<u64>> {
         let branch = self
             .branch
             .as_str()
             .strip_prefix("refs/heads/")
             .ok_or(RunError::Validation("writer needs a local branch"))?;
-        let upstream = format!("refs/remotes/origin/{branch}");
+        let upstream = format!("refs/remotes/{remote}/{branch}");
         let revision = match crate::objects::resolve_ref(git, self.worktree.repo(), &upstream) {
             Ok(base) => vec![format!("{base}..{head}").into()],
             // A new lane branch has no remote counterpart. Count commits not
-            // reachable from any recorded origin ref rather than losing the
+            // reachable from any recorded remote ref rather than losing the
             // evidence for the most common stopped-writer case.
             Err(_) => vec![
                 head.to_string().into(),
                 "--not".into(),
-                "--remotes=origin".into(),
+                format!("--remotes={remote}").into(),
             ],
         };
         let mut args = vec!["rev-list".into(), "--count".into()];
@@ -1953,6 +1953,26 @@ fn prepare_writer_git(
     let executor =
         SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
     let project = writer.executor_root.clone();
+    // The one remote for this writer preparation, resolved by the owner and
+    // passed to every Git path check and refresh below. No checkout is assumed
+    // to call it `origin`; a checkout with no remote simply has none to fetch.
+    // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    let ports = provenant_config::PortTable::read_for(Some(project.as_path()), state)
+        .map_err(|error| RunError::Validation(error.to_string()))?;
+    let policy = provenant_config::operation_policy(state, &project, &ports);
+    let config = provenant_config::ForgeConfig::new(&ports, (*policy).clone());
+    let git = provenant_config::ForgeGit::new(&project)
+        .map_err(|error| RunError::Validation(error.to_string()))?;
+    let remote = match provenant_config::ForgeContext::remote(&config, &git) {
+        Ok(remote) => remote.value,
+        Err(provenant_config::ForgeContextError::NoRemote { remotes, .. })
+            if remotes.is_empty() =>
+        {
+            String::new()
+        }
+        Err(error) => return Err(RunError::Validation(error.to_string())),
+    };
+    let remote = remote.as_str();
     let path = writer.worktree.path().to_path_buf();
     // Git replaces config atomically. Open a verified snapshot and reopen after
     // fetch so a sibling's completed config update is observed coherently.
@@ -1983,7 +2003,11 @@ fn prepare_writer_git(
         ));
     }
     writer.worktree = refreshed;
-    verify_writer_git_paths(writer.worktree.repo().common_git_dir(), &writer.branch)?;
+    verify_writer_git_paths(
+        writer.worktree.repo().common_git_dir(),
+        &writer.branch,
+        remote,
+    )?;
     if let Some((authority, credentials)) = authority {
         prepare_writer_directories(
             &writer.worktree,
@@ -2011,6 +2035,7 @@ fn prepare_writer_git(
         &writer.facts,
         access,
         policy,
+        remote,
     )?;
     // Fetch may race with sibling config writes. Reopen after it and let Git's
     // config.lock serialize the independent upstream updates.
@@ -2172,18 +2197,19 @@ fn prepare_writer_git(
 
 // These exact paths are writable by the lane. Check them before host Git can
 // follow a planted link, including during fetch and reflog updates.
-pub(super) fn verify_writer_git_paths(common: &Path, branch: &GitRefName) -> Result<()> {
+pub(super) fn verify_writer_git_paths(
+    common: &Path,
+    branch: &GitRefName,
+    remote: &str,
+) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
     let suffix = branch
         .as_str()
         .strip_prefix("refs/heads/")
         .ok_or(RunError::Validation("writer branch is not a local branch"))?;
-    for prefix in [
-        "refs/heads",
-        "logs/refs/heads",
-        "refs/remotes/origin",
-        "logs/refs/remotes/origin",
-    ] {
+    let tracking = format!("refs/remotes/{remote}");
+    let tracking_log = format!("logs/refs/remotes/{remote}");
+    for prefix in ["refs/heads", "logs/refs/heads", &tracking, &tracking_log] {
         for name in [suffix.to_owned(), format!("{suffix}.lock")] {
             let relative = Path::new(prefix).join(name);
             let path = common.join(&relative);
@@ -4362,7 +4388,7 @@ impl WriterLaunch {
                 .ok()
                 .and_then(|paths| u64::try_from(paths.len()).ok());
             let ahead = self
-                .ahead_of_remote(&git_executable, verified_tip)
+                .ahead_of_remote(&git_executable, verified_tip, "origin")
                 .ok()
                 .flatten();
             let recovered = if policy.publish.is_none() && policy.publish_granted {
@@ -4372,9 +4398,12 @@ impl WriterLaunch {
                         .as_str()
                         .strip_prefix("refs/heads/")
                         .ok_or(RunError::Validation("writer needs a local branch"))?;
-                    let request =
-                        crate::HostDeliveryContext::destination(crate::DeliveryMode::Push, branch)?
-                            .ok_or(RunError::Validation("stop publication destination missing"))?;
+                    let request = crate::HostDeliveryContext::destination(
+                        crate::DeliveryMode::Push,
+                        branch,
+                        &crate::forge_for("origin", "main", &[]),
+                    )?
+                    .ok_or(RunError::Validation("stop publication destination missing"))?;
                     crate::HostDeliveryContext::capture()
                         .with_lane_access(
                             policy.route.and_then(|route| route.lane_access.clone()),
