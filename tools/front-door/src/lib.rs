@@ -72,10 +72,7 @@ use std::{
     io::{self, Write},
 };
 
-pub(crate) use output::{
-    emit, emit_summarised, emit_unpublished, emit_with_writers, land_explanation,
-    render_unpublished,
-};
+pub(crate) use output::{emit, emit_summarised, emit_unpublished, emit_with_writers};
 
 /// Process-wide seams the entry point selects once. The trait lives in the CLI
 /// crate because a registry `Call` carries it; the binary re-exports it
@@ -1455,6 +1452,8 @@ pub fn dispatch(
 
 #[cfg(test)]
 mod unpublished_result_tests {
+    use crate::output::{land_explanation, render_unpublished};
+
     #[test]
     fn landing_explanation_projects_sourced_facts_and_preserves_warnings() {
         let data = serde_json::json!({
@@ -1466,7 +1465,7 @@ mod unpublished_result_tests {
             "ci_patience_source": "--wait",
             "warnings": ["inspect the selected gate"]
         });
-        let summary = super::land_explanation(&data, &provenant_cli::Globals::default()).unwrap();
+        let summary = land_explanation(&data, &provenant_cli::Globals::default()).unwrap();
         let text = summary.lines.join("\n");
         for field in data["fields"].as_object().unwrap().values() {
             assert!(text.contains(field["source"]["layer"].as_str().unwrap()));
@@ -1500,7 +1499,7 @@ mod unpublished_result_tests {
             ..Default::default()
         };
         let (mut out, mut err) = (Vec::new(), Vec::new());
-        let rendered = super::render_unpublished(
+        let rendered = render_unpublished(
             &result, &globals, &text, false, None, limit, &mut out, &mut err,
         );
         let omitted = rendered.expect("an oversized human result is bounded, not refused");
@@ -1516,7 +1515,7 @@ mod unpublished_result_tests {
             ..Default::default()
         };
         let (mut out, mut err) = (Vec::new(), Vec::new());
-        let rendered = super::render_unpublished(
+        let rendered = render_unpublished(
             &result, &globals, &text, false, None, limit, &mut out, &mut err,
         );
         assert!(
@@ -1538,7 +1537,7 @@ mod unpublished_result_tests {
             ..Default::default()
         };
         let mut out = Vec::new();
-        super::render_unpublished(
+        render_unpublished(
             &result,
             &globals,
             "",

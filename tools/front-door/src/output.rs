@@ -8,8 +8,8 @@
 
 use crate::overflow;
 use provenant_cli::{OverflowPolicy, RenderError, RenderMode, Summary};
+use provenant_records::CommandResult;
 use provenant_records::warning::{self, Dedup, RESULT_TOO_LARGE, Sink, Warning};
-use provenant_records::{CommandResult, Outcome};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::HashSet;
@@ -632,6 +632,7 @@ mod host_settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use provenant_records::Outcome;
     use provenant_records::warning::{NAME_CASE_FOLDED, WarningCode, capture};
     use provenant_sqlite::{ensure_schema, open_connection};
     use std::ffi::OsString;
