@@ -182,6 +182,14 @@
       "kind": "builtin"
     }
   },
+  "git": {
+    "source": "default",
+    "backend": {
+      "kind": "builtin"
+    },
+    "remote": "",
+    "protected": []
+  },
   "build": {
     "source": "default",
     "prepare": [],

@@ -45,25 +45,58 @@ struct Plan {
     remote: String,
 }
 
+#[derive(Deserialize)]
+struct Repository {
+    #[serde(rename = "defaultBranchRef")]
+    branch: Named,
+}
+#[derive(Deserialize)]
+struct Named {
+    name: String,
+}
+
+/// The forge API half of context resolution. Local Git metadata is preferred;
+/// this probe is consulted only when the checkout has no remote `HEAD` symref.
+struct RepositoryForge<'a> {
+    state: &'a Path,
+    project: &'a Path,
+}
+impl provenant_config::ForgeProbe for RepositoryForge<'_> {
+    fn default_branch(&self, _remote: &str) -> Option<String> {
+        let bytes = super::forge_execute(
+            self.state,
+            self.project,
+            &["gh", "repo", "view", "--json", "defaultBranchRef"],
+            &provenant_config::ports::Request::within(Duration::from_secs(60)),
+            false,
+            None,
+        )
+        .ok()?;
+        let bytes = successful(bytes).ok()?;
+        serde_json::from_slice::<Repository>(&bytes)
+            .ok()
+            .map(|repository| repository.branch.name)
+    }
+}
+
+/// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+#[allow(clippy::print_stderr)]
 fn default_branch(state: &Path, project: &Path) -> Result<String> {
-    #[derive(Deserialize)]
-    struct Repository {
-        #[serde(rename = "defaultBranchRef")]
-        branch: Named,
+    let ports = provenant_config::PortTable::read_for(Some(project), state)?;
+    let policy = provenant_config::operation_policy(state, project, &ports);
+    let probe = RepositoryForge { state, project };
+    let mut config = provenant_config::ForgeConfig::new(&ports, (*policy).clone());
+    config.forge = &probe;
+    if let Ok(git) = provenant_config::ForgeGit::new(project)
+        && let Ok(context) = provenant_config::ForgeContext::resolve(project, &config, &git)
+    {
+        return Ok(context.default_branch.value);
     }
-    #[derive(Deserialize)]
-    struct Named {
-        name: String,
-    }
-    let bytes = successful(super::forge_execute(
-        state,
-        project,
-        &["gh", "repo", "view", "--json", "defaultBranchRef"],
-        &provenant_config::ports::Request::within(Duration::from_secs(60)),
-        false,
-        None,
-    )?)?;
-    Ok(serde_json::from_slice::<Repository>(&bytes)?.branch.name)
+    // Without local Git metadata only the forge API can name the default
+    // branch; warn and proceed rather than guessing a name.
+    eprintln!("warning: local Git metadata unavailable; asking the forge for the default branch");
+    provenant_config::ForgeProbe::default_branch(&probe, "")
+        .ok_or_else(|| "cannot resolve the repository's default branch".into())
 }
 
 /// Resolve the remote-tracking base through the command's bounded facts session.
@@ -244,13 +277,14 @@ pub(super) fn run(command: PrOpen, globals: &Globals) -> u8 {
     let created = (|| -> Result<Vec<u8>> {
         let ports =
             provenant_config::PortTable::read_for(Some(&project), resolved.roots.state.as_path())?;
+        let policy =
+            provenant_config::operation_policy(resolved.roots.state.as_path(), &project, &ports);
         let mut forge = provenant_config::ForgePort::new(
             ports.forge,
             "forge",
             &project,
             resolved.roots.state.as_path(),
-            // TODO(#3371 seam): caller owner supplies the operation-scoped policy.
-            std::sync::Arc::new(provenant_records::policy::Policy::default()),
+            policy,
         )?;
         provenant_confinement::publication::install_forge(
             &mut forge,

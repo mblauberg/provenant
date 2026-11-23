@@ -849,7 +849,8 @@ fn settlement_policy(
             );
             policy
         }
-        // TODO(#3371 seam): run owner supplies task policy for legacy decode callers.
+        // No host roots and no sealed task: only the compiled policy table
+        // applies, so the compiled default is the owner's resolved layer here.
         _ => provenant_records::policy::Policy::default(),
     }
 }
@@ -977,7 +978,8 @@ impl Registry<'_> {
             .map(|spec| spec.model_observation)
             .unwrap_or(provenant_records::ModelObservation::Stream);
         let model = stream_model(route);
-        // TODO(#3371 seam): run owner supplies task policy for legacy decode callers.
+        // A caller without a sealed task policy receives the compiled table;
+        // there is no host or project layer to overlay in that case.
         let fallback = provenant_records::policy::Policy::default();
         let policy = policy.unwrap_or(&fallback);
         let mut state = match expected_session {

@@ -213,15 +213,9 @@ fn read(
     let ports = PortTable::read_for(Some(project), state).map_err(|error| {
         Batch::Unavailable(format!("forge port configuration unavailable: {error}"))
     })?;
-    let mut forge = ForgePort::new(
-        ports.forge,
-        "forge",
-        project,
-        state,
-        // TODO(#3371 seam): caller owner supplies the operation-scoped policy.
-        std::sync::Arc::new(provenant_records::policy::Policy::default()),
-    )
-    .map_err(|error| Batch::Unavailable(format!("cannot start forge adapter: {error}")))?;
+    let policy = provenant_config::operation_policy(state, project, &ports);
+    let mut forge = ForgePort::new(ports.forge, "forge", project, state, policy)
+        .map_err(|error| Batch::Unavailable(format!("cannot start forge adapter: {error}")))?;
     forge.bind(&request);
     let query = rollup_query(owner, name, numbers);
     let response = <ForgePort as Forge>::request(

@@ -679,8 +679,7 @@ impl HostDeliveryContext {
             "forge",
             project,
             &state,
-            // TODO(#3371 seam): caller owner supplies the operation-scoped policy.
-            std::sync::Arc::new(provenant_records::policy::Policy::default()),
+            std::sync::Arc::new(self.policy.clone()),
         )
         .map_err(|error| prepare_error(DeliveryPrepareStep::ForgePort, error.to_string()))?;
         provenant_confinement::publication::install_forge(

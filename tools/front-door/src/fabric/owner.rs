@@ -1441,9 +1441,13 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 let error = provenant_records::diagnostic::safe_text(&error.to_string());
                 let _ = writeln!(
                     std::io::stderr().lock(),
-                    "warning: graph admission policy unavailable ({error}); using compiled defaults"
+                    "warning: full config unavailable ({error}); using the owner's resolved policy"
                 );
-                provenant_records::policy::Policy::default()
+                provenant_config::policy::read(
+                    self.factory.context.roots.state.as_path(),
+                    &project,
+                    &Default::default(),
+                )
             }
         }
     }

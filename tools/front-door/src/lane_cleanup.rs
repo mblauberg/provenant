@@ -897,8 +897,9 @@ fn remote_outcomes(
         return vec![out(ArtefactState::Retained).with_reason("invalid_ref")];
     };
     // `target` names the fetched default branch and covers the normal apply
-    // path. The scope adds the origin/HEAD and `main` fallback, so the default
-    // branch is still protected in dry-run and when `remote_default` failed.
+    // path. The scope adds the default branch from the one resolved forge
+    // context, so it is still protected in dry-run and when `remote_default`
+    // failed. Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
     if scope.is_some_and(|scope| !scope.permits(&reference)) {
         return vec![out(ArtefactState::Retained).with_reason(EXCLUDED_REASON)];
     }
@@ -2094,7 +2095,7 @@ mod tests {
             &fixture.project,
             &[
                 "update-ref",
-                "refs/remotes/origin/trunk",
+                "refs/remotes/bound/trunk",
                 &fixture.landed.to_string(),
             ],
         )?;
@@ -2102,8 +2103,8 @@ mod tests {
             &fixture.project,
             &[
                 "symbolic-ref",
-                "refs/remotes/origin/HEAD",
-                "refs/remotes/origin/trunk",
+                "refs/remotes/bound/HEAD",
+                "refs/remotes/bound/trunk",
             ],
         )?;
         run_git(
@@ -2185,13 +2186,13 @@ mod tests {
         use provenant_os::fixture::run_git;
 
         let fixture = CleanupFixture::new()?;
-        // `origin/HEAD` names `trunk` as the default; no target is resolved in
+        // The bound remote's HEAD names `trunk` as the default; no target is resolved in
         // dry-run, so the scope is the only protection for the remote record.
         run_git(
             &fixture.project,
             &[
                 "update-ref",
-                "refs/remotes/origin/trunk",
+                "refs/remotes/bound/trunk",
                 &fixture.landed.to_string(),
             ],
         )?;
@@ -2199,8 +2200,8 @@ mod tests {
             &fixture.project,
             &[
                 "symbolic-ref",
-                "refs/remotes/origin/HEAD",
-                "refs/remotes/origin/trunk",
+                "refs/remotes/bound/HEAD",
+                "refs/remotes/bound/trunk",
             ],
         )?;
         fixture.with_context(|context, cancel| {
@@ -2243,7 +2244,7 @@ mod tests {
             &fixture.project,
             &[
                 "update-ref",
-                "refs/remotes/origin/trunk",
+                "refs/remotes/bound/trunk",
                 &fixture.landed.to_string(),
             ],
         )?;
@@ -2251,8 +2252,8 @@ mod tests {
             &fixture.project,
             &[
                 "symbolic-ref",
-                "refs/remotes/origin/HEAD",
-                "refs/remotes/origin/trunk",
+                "refs/remotes/bound/HEAD",
+                "refs/remotes/bound/trunk",
             ],
         )?;
         fixture.with_context(|context, cancel| {

@@ -51,14 +51,19 @@ pub use providers::{
     OutOfScopePin, ProviderSettings, ProviderUpdate, defaults as provider_defaults,
 };
 pub mod detect;
+pub mod forge;
+pub use forge::{
+    Config as ForgeConfig, ForgeContext, ForgeContextError, ForgeProbe, Git as ForgeGit,
+    NoForgeProbe, operation_policy,
+};
 pub mod ports;
 mod project_binding;
 pub use ports::{
     Adapter, BuildClean, BuildOffload, BuildOverflow, BuildPort, BuildPriority, BuildSoakPort,
     BuildStrategyName, CommandExitCodes, DEFAULT_PORT_COMMAND_RECEIPT_AGE_DAYS, ExitDisposition,
-    Forge, ForgeOperation, ForgePort, ForgeResponse, HeadersObservation, Integration, LandBackend,
-    LandPort, PORTS_CONFIG, PORTS_SCHEMA_VERSION, PackagePath, Port, PortBackend, PortBackendKind,
-    PortCommand, PortCommandBackend, PortCommandDisposition, PortCommandExecution,
+    Forge, ForgeOperation, ForgePort, ForgeResponse, GitPort, HeadersObservation, Integration,
+    LandBackend, LandPort, PORTS_CONFIG, PORTS_SCHEMA_VERSION, PackagePath, Port, PortBackend,
+    PortBackendKind, PortCommand, PortCommandBackend, PortCommandDisposition, PortCommandExecution,
     PortCommandPublication, PortCommandReceipt, PortCommandReceiptCollectionLock,
     PortCommandReceiptEntry, PortCommandReceiptInventory, PortCommandReceiptProof, PortError,
     PortEvidenceError, PortExecution, PortReceiptIssue, PortReceiptLifetime, PortTable,

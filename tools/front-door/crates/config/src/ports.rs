@@ -265,6 +265,22 @@ pub struct Port {
     pub backend: PortBackend,
 }
 
+/// The one declaration of the Git context every forge operation shares.
+///
+/// An empty `remote` or `protected` means "detect": [`crate::forge::ForgeContext`]
+/// resolves the value from the repository when no layer declared it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitPort {
+    pub source: Layer,
+    pub backend: PortBackend,
+    /// The remote name. Empty means detect it from the branch upstream or the
+    /// sole remote.
+    pub remote: String,
+    /// Branch names that must never be rewritten or retired. Empty means the
+    /// default branch plus the forge-reported protected branches.
+    pub protected: Vec<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct VerifyPort {
     pub source: Layer,
@@ -1020,6 +1036,28 @@ impl PortEntry for Port {
         self.backend.valid()
     }
 }
+impl PortEntry for GitPort {
+    fn source(&self) -> Layer {
+        self.source
+    }
+    fn set_source(&mut self, source: Layer) {
+        self.source = source;
+    }
+    fn backend_kind(&self) -> PortBackendKind {
+        self.backend.kind()
+    }
+    fn valid(&self) -> bool {
+        self.backend.valid()
+            && (self.remote.is_empty()
+                || (relative(Path::new(&self.remote), false)
+                    && !self.remote.contains(BRANCH_TOKEN)))
+            && self
+                .protected
+                .iter()
+                .all(|branch| !branch.is_empty() && !branch.contains(BRANCH_TOKEN))
+    }
+}
+
 impl PortEntry for VerifyPort {
     fn source(&self) -> Layer {
         self.source
@@ -1158,6 +1196,7 @@ macro_rules! declare_ports {
 
 declare_ports! {
     forge: Port,
+    git: GitPort,
     verify: VerifyPort,
     land: LandPort,
     ci_observation: Port,
