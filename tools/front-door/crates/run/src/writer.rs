@@ -1131,6 +1131,32 @@ fn budget_commit_message(paths: &[String]) -> String {
     message
 }
 
+/// The delivery destination a host operation must not move. An unreadable or
+/// undecodable sealed request is a refusal, not a reason to drop the destination
+/// and let a host operation on it warn instead of refusing.
+fn sealed_delivery_destination(attempt: &Directory) -> Result<Option<String>> {
+    let Some(raw) = crate::artifacts::read_sealed(attempt, "request.json", crate::RECORD_LIMIT)?
+    else {
+        return Ok(None);
+    };
+    let request: crate::CanonicalRequest = crate::db::decode(&raw)?;
+    Ok(request.task.deliver.map(|deliver| {
+        let branch = deliver.branch;
+        if branch.starts_with("refs/") {
+            branch
+        } else {
+            format!("refs/heads/{branch}")
+        }
+    }))
+}
+
+/// The path named by a retained-operation warning. A Git directory whose path
+/// can no longer be resolved must never fail settlement while building a
+/// warning; the warning names an unknown path instead.
+fn warning_path<E>(path: std::result::Result<PathBuf, E>) -> PathBuf {
+    path.unwrap_or_else(|_| PathBuf::from("an unknown path"))
+}
+
 /// Name an unfinished operation in one lane Git directory without touching it.
 /// The warning names the commit HEAD denotes, symbolic or detached, and the
 /// directory that retains the operation, so a person can resume it there.
@@ -3982,25 +4008,13 @@ impl WriterLaunch {
         // private Git or candidate common directory, is named and left intact
         // while the committed tip is published.
         let repo = self.worktree.repo();
-        let delivery_destination =
-            crate::artifacts::read_sealed(attempt, "request.json", crate::RECORD_LIMIT)
-                .ok()
-                .flatten()
-                .and_then(|raw| crate::db::decode::<crate::CanonicalRequest>(&raw).ok())
-                .and_then(|request| request.task.deliver.map(|deliver| deliver.branch))
-                .map(|branch| {
-                    if branch.starts_with("refs/") {
-                        branch
-                    } else {
-                        format!("refs/heads/{branch}")
-                    }
-                });
+        let delivery_destination = sealed_delivery_destination(attempt)?;
         let mut moved_refs = vec![self.branch.as_str()];
         if let Some(destination) = delivery_destination.as_deref() {
             moved_refs.push(destination);
         }
         let mut warning_messages = Vec::new();
-        match worktrees::check_host_checkout_terminal(repo, &moved_refs)? {
+        match worktrees::check_host_checkout_terminal(repo, self.branch.as_str(), &moved_refs)? {
             Some(operation) if operation.blocks => {
                 return Err(worktrees::WorktreeError::GitOperationInProgress.into());
             }
@@ -4008,7 +4022,7 @@ impl WriterLaunch {
                 let path = if repo.is_primary_checkout() {
                     repo.private_git_dir().to_path_buf()
                 } else {
-                    repo.common_dir().current_path()?
+                    warning_path(repo.common_dir().current_path())
                 };
                 warning_messages.push(format!(
                     "host checkout retains an unfinished {} on {}; settlement publishes the lane and leaves the state intact in {}",
@@ -4028,12 +4042,15 @@ impl WriterLaunch {
             lane_operation = true;
             warning_messages.push(warning);
         }
+        let candidate_path = source
+            .as_ref()
+            .map(|source| warning_path(source.refs.current_path()))
+            .unwrap_or_else(|| PathBuf::from("an unknown path"));
         if let Some(source) = &source
-            && let Some(warning) = lane_git_operation_warning(
-                &source.refs,
-                &source.refs.current_path()?,
-                |reference| crate::objects::private_tip(source, reference),
-            )
+            && let Some(warning) =
+                lane_git_operation_warning(&source.refs, &candidate_path, |reference| {
+                    crate::objects::private_tip(source, reference)
+                })
         {
             lane_operation = true;
             warning_messages.push(warning);
@@ -5216,6 +5233,59 @@ mod git_operation_warning_tests {
         })
         .expect("a warning is still produced");
         assert!(warning.contains("commit unknown"), "{warning}");
+    }
+
+    #[test]
+    fn undecodable_request_refuses_instead_of_dropping_the_destination() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let attempt = Directory::open_anchor(temp.path()).expect("directory");
+        crate::artifacts::seal(&attempt, "request.json", b"not json", crate::RECORD_LIMIT)
+            .expect("seal undecodable request");
+        assert!(
+            sealed_delivery_destination(&attempt).is_err(),
+            "an undecodable sealed request must refuse, not drop the destination into a warning"
+        );
+    }
+
+    #[test]
+    fn sealed_destination_is_namespaced_or_absent() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let attempt = Directory::open_anchor(temp.path()).expect("directory");
+        assert!(
+            sealed_delivery_destination(&attempt)
+                .expect("a missing request has no destination")
+                .is_none()
+        );
+        let mut request = crate::tests::input().request;
+        request.task.deliver = Some(provenant_records::run::WriterDeliveryRequest {
+            extra: Default::default(),
+            mode: Default::default(),
+            remote: "origin".into(),
+            branch: "published/lane".into(),
+            open_pr: false,
+            fast_forward_only: false,
+        });
+        crate::artifacts::seal(
+            &attempt,
+            "request.json",
+            &crate::db::bytes(&request).expect("encode request"),
+            crate::RECORD_LIMIT,
+        )
+        .expect("seal request");
+        assert_eq!(
+            sealed_delivery_destination(&attempt).expect("destination"),
+            Some("refs/heads/published/lane".to_owned())
+        );
+    }
+
+    #[test]
+    fn an_unresolvable_warning_path_degrades_to_unknown() {
+        assert_eq!(
+            warning_path(Err::<PathBuf, _>("path gone")),
+            PathBuf::from("an unknown path")
+        );
+        let known = PathBuf::from("/git/common");
+        assert_eq!(warning_path(Ok::<_, &str>(known.clone())), known);
     }
 
     #[test]
