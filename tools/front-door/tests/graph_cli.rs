@@ -1204,6 +1204,11 @@ fn every_bundled_template_is_listed_and_compiles_with_its_declared_parameters() 
 #[test]
 fn batch_item_exact_model_matches_run_model_route() -> Result {
     let rig = GraphProject::new()?;
+    // The bundled batch expands a repair loop that checks its
+    // `integrate:<integration_branch>` delivery target. That check needs the
+    // one forge context; a local-only fixture must declare it rather than let
+    // resolution guess a remote. Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    rig.declare_forge("master")?;
     let model = "opencode/opencode/hy4-flash-free";
     let worktree = rig.project.to_str().ok_or("worktree path")?;
     let integration_branch = "batch/exact-model-route";

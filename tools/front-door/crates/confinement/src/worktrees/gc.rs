@@ -398,10 +398,14 @@ pub fn forge_context(
 /// an ambiguous remote stays a refusal that names what was seen.
 /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
 pub fn forge_remote(context: &WorktreeContext<'_>) -> Result<Option<String>, WorktreeError> {
-    let project = context
-        .layout
-        .project()
-        .ok_or(WorktreeError::ProjectLayoutUnresolved)?;
+    // A bound bare repository has no primary checkout by design. Its layout is
+    // host-only, so there is no checkout whose remote could supply a default
+    // creation base; absence is not a failed layout. Local HEAD remains the
+    // default base for such a project.
+    // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    let Some(project) = context.layout.project() else {
+        return Ok(None);
+    };
     let state = context.host_state()?;
     let ports = provenant_config::PortTable::read_for(Some(project), &state)
         .map_err(WorktreeError::PortConfiguration)?;

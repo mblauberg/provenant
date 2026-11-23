@@ -1606,11 +1606,19 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         // both creation paths; neither rediscovers the remote.
         // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
         let state = self.factory.context.roots.state.as_path();
-        let project = self.factory.cwd.as_path();
+        // Forge metadata lives at the checkout root. The invoking cwd may be a
+        // plain subdirectory of that checkout, which has no `.git` of its own;
+        // hand the resolved toplevel to every Git-metadata reader. Keep the
+        // Git worktree contexts below on the cwd, which resolve subdirectories.
+        // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+        let project = self
+            .factory
+            .graph_checkout()
+            .map_err(|_| FacadeError::io("forge context Git metadata"))?;
         let ports = &self.factory.context.port_table;
-        let policy = provenant_config::operation_policy(state, project, ports);
+        let policy = provenant_config::operation_policy(state, &project, ports);
         let config = provenant_config::ForgeConfig::new(ports, (*policy).clone());
-        let git = provenant_config::ForgeGit::new(project)
+        let git = provenant_config::ForgeGit::new(&project)
             .map_err(|_| FacadeError::io("forge context Git metadata"))?;
         let forge_remote = match provenant_config::ForgeContext::remote(&config, &git) {
             Ok(remote) => Some(remote.value),
