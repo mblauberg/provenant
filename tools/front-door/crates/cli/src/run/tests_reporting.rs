@@ -122,7 +122,7 @@ fn cli_safe_local_facts_are_bounded_and_escape_controls() {
 #[test]
 fn cli_recorded_remedies_preserve_typed_causes() {
     use provenant_fabric_runtime::coordination::facade::{DispatchRefusalFact, FacadeError};
-    use provenant_records::diagnostic::{ResourceFact, SettingSource};
+    use provenant_records::diagnostic::{Layer, ResourceFact};
     let cases = [
         (
             FacadeError::DispatchRefused {
@@ -137,7 +137,7 @@ fn cli_recorded_remedies_preserve_typed_causes() {
                 fact: Some(DispatchRefusalFact::Resource(ResourceFact::Disk {
                     free: 1,
                     floor: 2,
-                    origin: SettingSource::Configuration,
+                    origin: Layer::Host,
                 })),
                 disk: None,
                 reason: "TOKEN_SENTINEL".into(),

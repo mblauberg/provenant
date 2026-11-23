@@ -345,7 +345,7 @@ pub struct AttemptSpec {
     pub confidential: bool,
     /// Sources retained when run controls are merged onto template defaults.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub budget_sources: std::collections::BTreeMap<String, provenant_records::LimitSource>,
+    pub budget_sources: std::collections::BTreeMap<String, provenant_records::Layer>,
     /// Fresh-token target; zero disables it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_budget: Option<u64>,

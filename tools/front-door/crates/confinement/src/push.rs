@@ -236,7 +236,7 @@ mod tests {
     #[test]
     fn conflict_markers_follow_the_lane_history_setting() -> Result<(), Box<dyn Error>> {
         use provenant_config::{CONFLICT_MARKERS, HistoryEffect, Setting};
-        use provenant_records::LimitSource;
+        use provenant_records::Layer;
         let fixture = Fixture::new()?;
         fixture.run(&["branch", "-m", "main"])?;
         let base = fixture.head()?;
@@ -264,7 +264,7 @@ mod tests {
             let history = LaneHistory {
                 conflict_markers: Setting {
                     value,
-                    source: LimitSource::Host,
+                    source: Layer::Host,
                 },
                 ..LaneHistory::default()
             };
@@ -297,7 +297,7 @@ mod tests {
     #[test]
     fn default_branch_rewrite_is_an_owner_gate() -> Result<(), Box<dyn Error>> {
         use provenant_config::{DEFAULT_BRANCH_REWRITE, DefaultBranchRewrite, Setting};
-        use provenant_records::LimitSource;
+        use provenant_records::Layer;
         let fixture = Fixture::new()?;
         fixture.run(&["branch", "-m", "main"])?;
         let first = fixture.head()?;
@@ -319,7 +319,7 @@ mod tests {
             let history = LaneHistory {
                 default_branch_rewrite: Setting {
                     value,
-                    source: LimitSource::Host,
+                    source: Layer::Host,
                 },
                 ..LaneHistory::default()
             };

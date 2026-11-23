@@ -1944,7 +1944,7 @@ fn launch_retry_knobs_are_listed_with_defaults_bounds_and_sources() {
 /// configuration (its `[knobs]` table or its selected preset) or a launch.
 #[test]
 fn every_registered_knob_reports_the_layer_that_set_it() {
-    use provenant_records::LimitSource;
+    use provenant_records::Layer;
     let registry = knobs::registry().unwrap();
     let text = |value: &serde_json::Value| match value {
         serde_json::Value::String(text) => text.clone(),
@@ -1961,7 +1961,7 @@ fn every_registered_knob_reports_the_layer_that_set_it() {
     let defaults = configured(&[]).dispatch_profile(&[]).unwrap();
     assert!(!registry.knobs.is_empty());
     for (name, spec) in &registry.knobs {
-        assert_eq!(knob_source(&defaults, name), LimitSource::Default, "{name}");
+        assert_eq!(knob_source(&defaults, name), Layer::Default, "{name}");
         let value = text(&spec.default);
         let host = configured(&[KnobEdit::Set {
             name,
@@ -1969,12 +1969,12 @@ fn every_registered_knob_reports_the_layer_that_set_it() {
         }]);
         assert_eq!(
             knob_source(&host.dispatch_profile(&[]).unwrap(), name),
-            LimitSource::Host,
+            Layer::Host,
             "{name}"
         );
         if !spec.host_only {
             let launched = host.dispatch_profile(&[format!("{name}={value}")]).unwrap();
-            assert_eq!(knob_source(&launched, name), LimitSource::Launch, "{name}");
+            assert_eq!(knob_source(&launched, name), Layer::Launch, "{name}");
         }
     }
     for (preset, values) in &registry.presets {
@@ -1982,11 +1982,7 @@ fn every_registered_knob_reports_the_layer_that_set_it() {
             .dispatch_profile(&[])
             .unwrap();
         for name in values.knobs.keys() {
-            assert_eq!(
-                knob_source(&profile, name),
-                LimitSource::Host,
-                "{preset}: {name}"
-            );
+            assert_eq!(knob_source(&profile, name), Layer::Host, "{preset}: {name}");
         }
     }
 }

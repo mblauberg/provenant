@@ -4,10 +4,11 @@ use provenant_cli::{
     Check, Globals,
     check::{CheckError, CheckPage, GitContext},
 };
-use provenant_config::{PortCommandDisposition, PortSource, PortTable, Release, Targets};
+use provenant_config::{PortCommandDisposition, PortTable, Release, Targets};
 use provenant_core::CancelToken;
 use provenant_os::exec::SystemExecutor;
 use provenant_os::fs;
+use provenant_records::Layer;
 use provenant_records::{CanonicalV1, CommandResult, Finding, Outcome, PathWire};
 use std::{
     ffi::OsString,
@@ -591,7 +592,7 @@ fn command_release_page(
     project: &Path,
     state: &Path,
     command: provenant_config::PortCommand,
-    source: PortSource,
+    source: Layer,
     range: Option<(provenant_core::GitOid, provenant_core::GitOid)>,
     selector: impl serde::Serialize,
     page: &provenant_cli::Page,

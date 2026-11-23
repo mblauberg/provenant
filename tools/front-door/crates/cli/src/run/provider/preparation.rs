@@ -207,9 +207,9 @@ fn resolve_pacing_source(
         origins.get(&key),
         Some(provenant_config::Origin::User { .. })
     ) {
-        PacingSettingSource::Configuration
+        PacingLayer::Host
     } else {
-        PacingSettingSource::ShippedDefault
+        PacingLayer::Default
     };
     fact
 }
@@ -1521,7 +1521,7 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
     let prompt = PrepareError::Prompt(LaunchPromptError::Provider(
         provenant_providers::ProviderError::PromptTooLarge {
             limit: 32,
-            origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
+            origin: provenant_records::diagnostic::Layer::Default,
         },
     ))
     .into_refusal();
@@ -1653,7 +1653,7 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
     let mut resources = std::collections::BTreeMap::new();
     let fact = provenant_records::diagnostic::ResourceFact::ArgvPromptLimit {
         limit: 3,
-        origin: provenant_records::diagnostic::SettingSource::Configuration,
+        origin: provenant_records::diagnostic::Layer::Host,
     };
     resources.insert(0, fact.clone());
     assert_eq!(uniform_candidate_resource(1, &resources), Some(fact));
@@ -1747,7 +1747,7 @@ impl From<&str> for PrepareError {
 #[test]
 fn mixed_candidate_guard_facts_survive_fallback_without_source_text()
 -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_records::diagnostic::{BoundaryClass, ResourceFact, SettingSource};
+    use provenant_records::diagnostic::{BoundaryClass, Layer, ResourceFact};
     let mut reasons = vec![
         skip("a", SkipKind::Refused, "TOKEN_SENTINEL"),
         skip("b", SkipKind::Refused, "TOKEN_SENTINEL"),
@@ -1757,7 +1757,7 @@ fn mixed_candidate_guard_facts_survive_fallback_without_source_text()
         1,
         ResourceFact::ArgvPromptLimit {
             limit: 3,
-            origin: SettingSource::Configuration,
+            origin: Layer::Host,
         },
     )]
     .into_iter()
@@ -3011,9 +3011,9 @@ pub(super) fn prepare_candidates_inner(
         Some(Ok(config)) => {
             let origin = config.origins.get(ARGV_LIMIT_KEY);
             let label = if matches!(origin, Some(provenant_config::Origin::User { .. })) {
-                provenant_records::diagnostic::SettingSource::Configuration
+                provenant_records::diagnostic::Layer::Host
             } else {
-                provenant_records::diagnostic::SettingSource::ShippedDefault
+                provenant_records::diagnostic::Layer::Default
             };
             (
                 config.domains.run.argv_prompt_limit_bytes,
@@ -3029,13 +3029,13 @@ pub(super) fn prepare_candidates_inner(
             );
             (
                 default_limit,
-                provenant_records::diagnostic::SettingSource::ShippedDefault,
+                provenant_records::diagnostic::Layer::Default,
                 origin_receipt(None),
             )
         }
         None => (
             default_limit,
-            provenant_records::diagnostic::SettingSource::ShippedDefault,
+            provenant_records::diagnostic::Layer::Default,
             origin_receipt(None),
         ),
     };
@@ -5773,7 +5773,7 @@ pub(super) fn resolve_lane_access(
     task: &run::TaskRequest,
     model_policy: &provenant_routing::ModelPolicy,
 ) -> provenant_records::LaneAccessReceipt {
-    use provenant_records::{LaneAccess, LaneAccessReceipt, LaneAccessSource, LimitSource};
+    use provenant_records::{LaneAccess, LaneAccessReceipt, Layer};
     const KEY: &str = "lanes.access";
     let source = task
         .profile
@@ -5781,14 +5781,11 @@ pub(super) fn resolve_lane_access(
         .get(KEY)
         .copied()
         .unwrap_or_default();
-    let explicit = matches!(
-        source,
-        LimitSource::Launch | LimitSource::Template | LimitSource::Tier
-    );
+    let explicit = matches!(source, Layer::Launch | Layer::Template | Layer::Tier);
     if !explicit && let Some(access) = model_policy.lane.access {
         return LaneAccessReceipt {
             access,
-            source: LaneAccessSource::RoutePolicy,
+            source: Layer::Route,
             key: model_policy
                 .lane
                 .access_key
@@ -5798,12 +5795,13 @@ pub(super) fn resolve_lane_access(
         };
     }
     let receipt_source = match source {
-        LimitSource::Default => LaneAccessSource::Default,
-        LimitSource::Host => LaneAccessSource::Host,
-        LimitSource::Project => LaneAccessSource::Project,
-        LimitSource::Template => LaneAccessSource::Template,
-        LimitSource::Tier => LaneAccessSource::Tier,
-        LimitSource::Launch => LaneAccessSource::Launch,
+        Layer::Default => Layer::Default,
+        Layer::Host => Layer::Host,
+        Layer::Project => Layer::Project,
+        Layer::Template => Layer::Template,
+        Layer::Tier => Layer::Tier,
+        Layer::Launch => Layer::Launch,
+        other => other,
     };
     let access = match task.profile.knobs.get(KEY) {
         None => LaneAccess::Host,
@@ -5825,7 +5823,7 @@ pub(super) fn lane_access_warning(
     task: &run::TaskRequest,
     receipt: &provenant_records::LaneAccessReceipt,
 ) -> Option<String> {
-    (receipt.source != provenant_records::LaneAccessSource::RoutePolicy
+    (receipt.source != provenant_records::Layer::Route
         && task
             .profile
             .knobs
@@ -5842,7 +5840,7 @@ pub(super) fn lane_access_warning(
 #[cfg(test)]
 mod lane_access_tests {
     use super::*;
-    use provenant_records::{LaneAccess, LaneAccessSource, LimitSource};
+    use provenant_records::{LaneAccess, Layer};
 
     #[test]
     fn precedence_and_invalid_values() {
@@ -5875,47 +5873,41 @@ mod lane_access_tests {
         };
         let mut policy = provenant_routing::ModelPolicy::default();
         let cases = [
+            (None, None, None, LaneAccess::Host, Layer::Default),
             (
-                None,
-                None,
-                None,
-                LaneAccess::Host,
-                LaneAccessSource::Default,
-            ),
-            (
-                Some(LimitSource::Host),
+                Some(Layer::Host),
                 Some("isolated"),
                 None,
                 LaneAccess::Isolated,
-                LaneAccessSource::Host,
+                Layer::Host,
             ),
             (
-                Some(LimitSource::Host),
+                Some(Layer::Host),
                 Some("isolated"),
                 Some(LaneAccess::Host),
                 LaneAccess::Host,
-                LaneAccessSource::RoutePolicy,
+                Layer::Route,
             ),
             (
-                Some(LimitSource::Launch),
+                Some(Layer::Launch),
                 Some("isolated"),
                 Some(LaneAccess::Host),
                 LaneAccess::Isolated,
-                LaneAccessSource::Launch,
+                Layer::Launch,
             ),
             (
-                Some(LimitSource::Template),
+                Some(Layer::Template),
                 Some("invalid"),
                 None,
                 LaneAccess::Host,
-                LaneAccessSource::Template,
+                Layer::Template,
             ),
             (
-                Some(LimitSource::Tier),
+                Some(Layer::Tier),
                 Some("isolated"),
                 Some(LaneAccess::Host),
                 LaneAccess::Isolated,
-                LaneAccessSource::Tier,
+                Layer::Tier,
             ),
         ];
         for (source, value, route, expected, expected_source) in cases {
@@ -6239,17 +6231,17 @@ fn user_skills_exposure(
 #[cfg(test)]
 #[test]
 fn opencode_access_message_reports_value_and_source() {
-    use provenant_records::{LaneAccess, LaneAccessReceipt, LaneAccessSource};
+    use provenant_records::{LaneAccess, LaneAccessReceipt, Layer};
     let default = opencode_access_message(&LaneAccessReceipt {
         access: LaneAccess::Host,
-        source: LaneAccessSource::Default,
+        source: Layer::Default,
         key: "lanes.access".into(),
         extra: Default::default(),
     });
     assert!(default.contains("profile=host") && default.contains("source: default"));
     let configured = opencode_access_message(&LaneAccessReceipt {
         access: LaneAccess::Isolated,
-        source: LaneAccessSource::Host,
+        source: Layer::Host,
         key: "lanes.access".into(),
         extra: Default::default(),
     });
@@ -6721,7 +6713,7 @@ mod refusal_cause_tests {
 #[test]
 fn oversized_argv_prompt_spills_to_private_attempt_state() -> Result<(), Box<dyn std::error::Error>>
 {
-    use provenant_records::diagnostic::SettingSource;
+    use provenant_records::diagnostic::Layer;
     let temp = tempfile::tempdir()?;
     let root = std::fs::canonicalize(temp.path())?;
     let paths = run::LaunchPaths {
@@ -6737,15 +6729,7 @@ fn oversized_argv_prompt_spills_to_private_attempt_state() -> Result<(), Box<dyn
     };
     let policy = provenant_records::policy::Policy::default();
     let text = "PROMPT_SECRET_SENTINEL";
-    let prompt = launch_prompt(
-        text,
-        &paths,
-        &root,
-        "cursor",
-        1,
-        SettingSource::Configuration,
-        &policy,
-    )?;
+    let prompt = launch_prompt(text, &paths, &root, "cursor", 1, Layer::Host, &policy)?;
     let file = prompt
         .file()
         .ok_or("oversized argv prompt was not spilled")?;
@@ -7441,7 +7425,7 @@ mod route_launch_boundary_regressions {
             &[],
             Some(&provenant_records::LaneAccessReceipt {
                 access: provenant_records::LaneAccess::Isolated,
-                source: provenant_records::LaneAccessSource::Default,
+                source: provenant_records::Layer::Default,
                 key: "lanes.access".into(),
                 extra: Default::default(),
             }),
@@ -7474,7 +7458,7 @@ mod route_launch_boundary_regressions {
                 &[&registered.directory.join("workspace")],
                 Some(&provenant_records::LaneAccessReceipt {
                     access: provenant_records::LaneAccess::Isolated,
-                    source: provenant_records::LaneAccessSource::Default,
+                    source: provenant_records::Layer::Default,
                     key: "lanes.access".into(),
                     extra: Default::default()
                 }),

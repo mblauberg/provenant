@@ -229,9 +229,7 @@ fn add_child(
 // Spec: docs/specs/fabric.md#publication-boundary
 #[test]
 fn graph_output_claim_requires_the_retained_launch_and_origin() -> TestResult {
-    use provenant_fabric_runtime::hosts::{
-        OutputAudience, PeerAction, PeerRequest, ProjectLocator,
-    };
+    use provenant_fabric_runtime::hosts::{OutputAudience, PeerAction, PeerRequest, ProjectLocator, };
     use provenant_fabric_runtime::identity::{Address, CrossHostProjectKey};
     if host_test(
         "fabric::peer_tests::peer_graph_tests::graph_output_claim_requires_the_retained_launch_and_origin",
@@ -1144,7 +1142,7 @@ fn peer_pacing_refusal_is_definite_and_preserves_its_fact_on_receipt_replay() ->
     let fact = ResourceFact::PacingReserve {
         percent: 23,
         setting: PacingReserveSetting::AdapterFiveHour,
-        origin: PacingSettingSource::Configuration,
+        origin: PacingLayer::Host,
         hold: Box::new(provenant_records::diagnostic::PacingHold {
             account: "codex/opaque-account".into(),
             window: "five_hour".into(),

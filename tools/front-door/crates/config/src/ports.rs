@@ -1,9 +1,9 @@
 //! One sourced, versioned declaration for repository integration ports.
 use provenant_records::FileDigest;
 pub use provenant_records::{
-    CommandExitCodes, DEFAULT_PORT_COMMAND_RECEIPT_AGE_DAYS, ExitDisposition, PortCommand,
-    PortCommandBackend, PortCommandDisposition, PortCommandReceipt, PortReceiptLifetime,
-    PortSource,
+    CommandExitCodes, DEFAULT_PORT_COMMAND_RECEIPT_AGE_DAYS, ExitDisposition, Layer,
+    PORT_PRECEDENCE, PortCommand, PortCommandBackend, PortCommandDisposition, PortCommandReceipt,
+    PortReceiptLifetime, port_layer_rank,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -17,7 +17,7 @@ use std::{
 };
 
 pub const PORTS_CONFIG: &str = ".provenant/ports.json";
-pub const PORTS_SCHEMA_VERSION: u16 = 2;
+pub const PORTS_SCHEMA_VERSION: u16 = 3;
 
 mod evidence;
 mod forge;
@@ -261,13 +261,13 @@ impl PortBackend {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Port {
-    pub source: PortSource,
+    pub source: Layer,
     pub backend: PortBackend,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct VerifyPort {
-    pub source: PortSource,
+    pub source: Layer,
     pub backend: PortBackend,
     pub base: String,
     pub workspace: PathBuf,
@@ -490,13 +490,13 @@ pub enum LandBackend {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LandPort {
-    pub source: PortSource,
+    pub source: Layer,
     pub backend: LandBackend,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorktreeLayoutPort {
-    pub source: PortSource,
+    pub source: Layer,
     pub backend: PortBackend,
     pub roots: Vec<PathBuf>,
     pub default: PathBuf,
@@ -623,7 +623,7 @@ fn default_build_soak() -> BuildSoakPort {
 /// compile, so this port has no lane strategy, wrapper or seed leaves.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BuildPort {
-    pub source: PortSource,
+    pub source: Layer,
     #[serde(default)]
     pub prepare: Vec<Vec<String>>,
     #[serde(default = "default_build_strategy")]
@@ -654,7 +654,7 @@ pub struct BuildPort {
     /// This is frozen into lane build contexts and is overwritten when a
     /// configuration layer is loaded, so declarations cannot claim a source.
     #[serde(default)]
-    pub leaf_sources: BTreeMap<String, PortSource>,
+    pub leaf_sources: BTreeMap<String, Layer>,
 }
 
 /// Soak thresholds used by the build report.
@@ -717,7 +717,7 @@ impl Default for BuildSoakPort {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedBuildValue<T> {
     pub value: T,
-    pub source: PortSource,
+    pub source: Layer,
     pub warnings: Vec<String>,
 }
 
@@ -756,7 +756,7 @@ pub enum BuildPriority {
 impl BuildPort {
     /// Return the exact source for a dotted build leaf. The field-level source
     /// remains useful for callers that have only an older bare BuildPort.
-    pub fn source_for_leaf(&self, leaf: &str) -> PortSource {
+    pub fn source_for_leaf(&self, leaf: &str) -> Layer {
         let full_path = if leaf.starts_with("build.") {
             leaf.to_owned()
         } else {
@@ -772,7 +772,7 @@ impl BuildPort {
         let configured_source = self.source_for_leaf(leaf);
         ResolvedBuildValue {
             value: default,
-            source: PortSource::Builtin,
+            source: Layer::Default,
             warnings: vec![format!(
                 "invalid build.{leaf} value {raw:?} from {}; using builtin value (default): {reason}",
                 port_source_layer(configured_source)
@@ -869,7 +869,7 @@ impl BuildPort {
         let Some(raw) = self.priority.get(class) else {
             return ResolvedBuildValue {
                 value: default,
-                source: PortSource::Builtin,
+                source: Layer::Default,
                 warnings: Vec::new(),
             };
         };
@@ -931,7 +931,7 @@ impl BuildPort {
         self.duration("soak.test_wait_p95", &self.soak.test_wait_p95, "300s")
     }
 
-    fn sync_leaf_sources(&mut self, provenance: &BTreeMap<String, PortSource>) {
+    fn sync_leaf_sources(&mut self, provenance: &BTreeMap<String, Layer>) {
         let leaves = [
             "strategy",
             "prepare",
@@ -964,10 +964,7 @@ impl BuildPort {
             .into_iter()
             .map(|leaf| {
                 let path = format!("build.{leaf}");
-                let source = provenance
-                    .get(&path)
-                    .copied()
-                    .unwrap_or(PortSource::Builtin);
+                let source = provenance.get(&path).copied().unwrap_or(Layer::Default);
                 (path, source)
             })
             .collect();
@@ -975,10 +972,10 @@ impl BuildPort {
 }
 
 impl PortEntry for BuildPort {
-    fn source(&self) -> PortSource {
+    fn source(&self) -> Layer {
         self.source
     }
-    fn set_source(&mut self, source: PortSource) {
+    fn set_source(&mut self, source: Layer) {
         self.source = source;
     }
     fn backend_kind(&self) -> PortBackendKind {
@@ -991,8 +988,8 @@ impl PortEntry for BuildPort {
 }
 
 trait PortEntry {
-    fn source(&self) -> PortSource;
-    fn set_source(&mut self, source: PortSource);
+    fn source(&self) -> Layer;
+    fn set_source(&mut self, source: Layer);
     fn backend_kind(&self) -> PortBackendKind;
     fn valid(&self) -> bool;
     fn backend_unavailable_reason(&self) -> Option<&'static str> {
@@ -1010,10 +1007,10 @@ fn port_unavailable_reason(port: &impl PortEntry) -> Option<&'static str> {
 }
 
 impl PortEntry for Port {
-    fn source(&self) -> PortSource {
+    fn source(&self) -> Layer {
         self.source
     }
-    fn set_source(&mut self, source: PortSource) {
+    fn set_source(&mut self, source: Layer) {
         self.source = source;
     }
     fn backend_kind(&self) -> PortBackendKind {
@@ -1024,10 +1021,10 @@ impl PortEntry for Port {
     }
 }
 impl PortEntry for VerifyPort {
-    fn source(&self) -> PortSource {
+    fn source(&self) -> Layer {
         self.source
     }
-    fn set_source(&mut self, source: PortSource) {
+    fn set_source(&mut self, source: Layer) {
         self.source = source;
     }
     fn backend_kind(&self) -> PortBackendKind {
@@ -1047,10 +1044,10 @@ impl PortEntry for VerifyPort {
     }
 }
 impl PortEntry for LandPort {
-    fn source(&self) -> PortSource {
+    fn source(&self) -> Layer {
         self.source
     }
-    fn set_source(&mut self, source: PortSource) {
+    fn set_source(&mut self, source: Layer) {
         self.source = source;
     }
     fn backend_kind(&self) -> PortBackendKind {
@@ -1077,10 +1074,10 @@ impl PortEntry for WorktreeLayoutPort {
             PortBackend::None => Some("the effective declaration disables this port"),
         }
     }
-    fn source(&self) -> PortSource {
+    fn source(&self) -> Layer {
         self.source
     }
-    fn set_source(&mut self, source: PortSource) {
+    fn set_source(&mut self, source: Layer) {
         self.source = source;
     }
     fn backend_kind(&self) -> PortBackendKind {
@@ -1122,13 +1119,13 @@ macro_rules! declare_ports {
             /// Highest layer that set each leaf. Derived from the same walk
             /// that labels ports, excluded from every serialised layer.
             #[serde(skip)]
-            provenance: BTreeMap<String, PortSource>,
+            provenance: BTreeMap<String, Layer>,
         }
 
         impl PortTable {
             pub const PORT_NAMES: &'static [&'static str] = &[$(stringify!($field)),+];
 
-            fn set_sources(&mut self, source: PortSource) {
+            fn set_sources(&mut self, source: Layer) {
                 $(self.$field.set_source(source);)+
             }
 
@@ -1137,10 +1134,10 @@ macro_rules! declare_ports {
             fn sync_sources_from_provenance(&mut self) {
                 $({
                     let name = stringify!($field);
-                    let mut highest = PortSource::Builtin;
+                    let mut highest = Layer::Default;
                     for (path, source) in &self.provenance {
                         if (path == name || path.starts_with(&format!("{name}.")))
-                            && *source > highest
+                            && port_layer_rank(*source) > port_layer_rank(highest)
                         {
                             highest = *source;
                         }
@@ -1150,7 +1147,7 @@ macro_rules! declare_ports {
                 self.build.sync_leaf_sources(&self.provenance);
             }
 
-            pub fn entries(&self) -> impl Iterator<Item = (&'static str, PortSource, PortBackendKind, bool, Option<&'static str>)> + '_ {
+            pub fn entries(&self) -> impl Iterator<Item = (&'static str, Layer, PortBackendKind, bool, Option<&'static str>)> + '_ {
                 [$(
                     (stringify!($field), self.$field.source(), self.$field.backend_kind(), self.$field.valid(), port_unavailable_reason(&self.$field)),
                 )+].into_iter()
@@ -1238,9 +1235,9 @@ fn first_type_mismatch(
 /// `source` label and `schema_version` are not configuration leaves.
 fn record_leaf_sources(
     value: &serde_json::Value,
-    source: PortSource,
+    source: Layer,
     prefix: &str,
-    provenance: &mut BTreeMap<String, PortSource>,
+    provenance: &mut BTreeMap<String, Layer>,
 ) {
     match value {
         serde_json::Value::Object(map) => {
@@ -1272,9 +1269,9 @@ fn record_leaf_sources(
 
 fn apply_layer(
     table: &mut serde_json::Value,
-    provenance: &mut BTreeMap<String, PortSource>,
+    provenance: &mut BTreeMap<String, Layer>,
     path: &Path,
-    source: PortSource,
+    source: Layer,
     on_unknown: &mut impl FnMut(&[u8], &provenant_records::InputWarning),
     on_malformed: &mut impl FnMut(&Path, &io::Error),
 ) -> io::Result<()> {
@@ -1282,7 +1279,7 @@ fn apply_layer(
         Ok(file) => file,
         Err(error)
             if error.kind() == io::ErrorKind::NotFound
-                || (source == PortSource::HostProject
+                || (source == Layer::HostProject
                     && error.kind() == io::ErrorKind::NotADirectory) =>
         {
             return Ok(());
@@ -1399,14 +1396,8 @@ fn apply_layer(
 }
 
 /// Name the layer a port declaration came from.
-pub fn port_source_layer(source: PortSource) -> &'static str {
-    match source {
-        PortSource::Builtin => "builtin",
-        PortSource::Detected => "detected",
-        PortSource::Host => "host",
-        PortSource::HostProject => "host_project",
-        PortSource::Project => "project",
-    }
+pub fn port_source_layer(source: Layer) -> &'static str {
+    source.as_str()
 }
 
 /// Every dotted leaf of a port table, derived from the compiled declaration so
@@ -1567,13 +1558,13 @@ impl PortTable {
     pub fn builtin() -> Self {
         let mut table: Self = serde_json::from_str(include_str!("../assets/ports.json"))
             .expect("compiled port table asset must match its schema");
-        table.set_sources(PortSource::Builtin);
+        table.set_sources(Layer::Default);
         table.sync_sources_from_provenance();
         table
     }
 
     /// The highest layer that set each leaf, keyed by dotted path.
-    pub fn provenance(&self) -> &BTreeMap<String, PortSource> {
+    pub fn provenance(&self) -> &BTreeMap<String, Layer> {
         &self.provenance
     }
 
@@ -1581,11 +1572,7 @@ impl PortTable {
     /// layer source. Invalid durations warn and fall back to the builtin 24h.
     pub fn verify_affected_full_after_duration(&self) -> ResolvedBuildValue<Duration> {
         let leaf = "verify.affected.full_after";
-        let source = self
-            .provenance
-            .get(leaf)
-            .copied()
-            .unwrap_or(PortSource::Builtin);
+        let source = self.provenance.get(leaf).copied().unwrap_or(Layer::Default);
         match crate::gc::parse_gc_idle_duration(&self.verify.affected.full_after) {
             Ok(seconds) => ResolvedBuildValue {
                 value: Duration::from_secs(seconds),
@@ -1594,7 +1581,7 @@ impl PortTable {
             },
             Err(reason) => ResolvedBuildValue {
                 value: Duration::from_secs(24 * 60 * 60),
-                source: PortSource::Builtin,
+                source: Layer::Default,
                 warnings: vec![format!(
                     "invalid {leaf} value {:?} from {}; using builtin value (default): {reason}",
                     self.verify.affected.full_after,
@@ -1702,13 +1689,13 @@ impl PortTable {
     ) -> io::Result<Self> {
         let mut document = serde_json::to_value(Self::builtin()).map_err(io::Error::other)?;
         let mut provenance = BTreeMap::new();
-        record_leaf_sources(&document, PortSource::Builtin, "", &mut provenance);
+        record_leaf_sources(&document, Layer::Default, "", &mut provenance);
         if let Some(project) = project {
             let detected = crate::detect::detect(project);
             if !detected.stacks.is_empty() {
                 document["verify"]["default_tier"] =
                     detected.default_tier.unwrap_or_default().into();
-                provenance.insert("verify.default_tier".into(), PortSource::Detected);
+                provenance.insert("verify.default_tier".into(), Layer::Detected);
                 document["verify"]["tiers"] = serde_json::json!({});
                 provenance.retain(|key, _| !key.starts_with("verify.tiers."));
                 for (name, commands) in detected.tiers {
@@ -1725,7 +1712,7 @@ impl PortTable {
                     });
                     record_leaf_sources(
                         &document["verify"]["tiers"][&name],
-                        PortSource::Detected,
+                        Layer::Detected,
                         &format!("verify.tiers.{name}"),
                         &mut provenance,
                     );
@@ -1737,7 +1724,7 @@ impl PortTable {
                 &mut document,
                 &mut provenance,
                 &host_state.join("ports.json"),
-                PortSource::Host,
+                Layer::Host,
                 &mut on_unknown,
                 &mut on_malformed,
             )?;
@@ -1752,7 +1739,7 @@ impl PortTable {
                     &mut document,
                     &mut provenance,
                     &dir.join("ports.json"),
-                    PortSource::HostProject,
+                    Layer::HostProject,
                     &mut on_unknown,
                     &mut on_malformed,
                 )?;
@@ -1767,7 +1754,7 @@ impl PortTable {
                 &mut candidate,
                 &mut candidate_provenance,
                 &path,
-                PortSource::Project,
+                Layer::Project,
                 &mut |bytes, warning| warnings.push((bytes.to_vec(), warning.clone())),
                 &mut on_malformed,
             );
@@ -1916,15 +1903,15 @@ mod tests {
         );
 
         let source_cases = [
-            PortSource::Builtin,
-            PortSource::Detected,
-            PortSource::Host,
-            PortSource::HostProject,
-            PortSource::Project,
+            Layer::Default,
+            Layer::Detected,
+            Layer::Host,
+            Layer::HostProject,
+            Layer::Project,
         ];
         for source in source_cases {
             let value = serde_json::to_value(source).unwrap();
-            assert_eq!(serde_json::from_value::<PortSource>(value).unwrap(), source);
+            assert_eq!(serde_json::from_value::<Layer>(value).unwrap(), source);
         }
     }
 
@@ -2000,11 +1987,11 @@ mod tests {
     fn inspection_reports_invalid_ports_without_executing_them() {
         let directory = tempfile::tempdir().unwrap();
         std::fs::create_dir(directory.path().join(".provenant")).unwrap();
-        std::fs::write(directory.path().join(PORTS_CONFIG), r#"{"schema_version":2,"naming":{"backend":{"kind":"command","command":{"argv":[],"exit_codes":{"success":[0],"unknown":[],"other":"refused"}}}}}"#).unwrap();
+        std::fs::write(directory.path().join(PORTS_CONFIG), r#"{"schema_version":3,"naming":{"backend":{"kind":"command","command":{"argv":[],"exit_codes":{"success":[0],"unknown":[],"other":"refused"}}}}}"#).unwrap();
         let table =
             PortTable::read_for_inspection(Some(directory.path()), directory.path()).unwrap();
         let naming = table.entries().find(|entry| entry.0 == "naming").unwrap();
-        assert_eq!(naming.1, PortSource::Project);
+        assert_eq!(naming.1, Layer::Project);
         assert!(!naming.3);
         assert!(naming.4.is_some());
         assert!(PortTable::read_for(Some(directory.path()), directory.path()).is_err());
@@ -2066,8 +2053,8 @@ mod tests {
         })
         .unwrap();
         assert_eq!(table.verify.backend, PortBackend::None);
-        assert_eq!(table.verify.source, PortSource::Host);
-        assert_eq!(table.naming.source, PortSource::Project);
+        assert_eq!(table.verify.source, Layer::Host);
+        assert_eq!(table.naming.source, Layer::Project);
         let encoded = serde_json::to_value(&table).unwrap();
         assert!(encoded.get("future_port").is_none());
         assert!(encoded["verify"].get("future_nested").is_none());
@@ -2159,17 +2146,17 @@ mod tests {
 
         let table = PortTable::read_for(Some(&project), &host).unwrap();
         assert_eq!(table.verify.base, "upstream/master");
-        assert_eq!(table.verify.source, PortSource::Project);
+        assert_eq!(table.verify.source, Layer::Project);
         assert_eq!(table.verify.test_threads, Some(4));
         assert!(!table.verify.tiers["2"].warn_for_host_load);
         assert_eq!(table.verify.remote, "origin");
         assert_eq!(table.verify.default_tier, "0");
-        assert_eq!(table.land.source, PortSource::Builtin);
+        assert_eq!(table.land.source, Layer::Default);
 
         // The same field-level merge applies to a host overlay over builtins.
         std::fs::remove_file(project.join(PORTS_CONFIG)).unwrap();
         let table = PortTable::read_for(None, &host).unwrap();
-        assert_eq!(table.verify.source, PortSource::Host);
+        assert_eq!(table.verify.source, Layer::Host);
         assert_eq!(table.verify.test_threads, Some(4));
         assert_eq!(table.verify.base, "");
     }
@@ -2211,7 +2198,7 @@ mod tests {
             );
             assert_eq!(
                 table.provenance()["verify.tiers.0.commands"],
-                PortSource::Builtin
+                Layer::Default
             );
             assert_eq!(table.verify.tiers["1"].commands[0].argv, ["valid"]);
             assert_eq!(warnings.len(), 1);
@@ -2269,7 +2256,7 @@ mod tests {
         assert_eq!(table.verify.tiers["0"].commands, [from_string]);
         assert_eq!(
             table.provenance()["verify.tiers.0.commands"],
-            PortSource::Project
+            Layer::Project
         );
         let value = serde_json::to_value(&table).unwrap();
         assert!(value["verify"]["tiers"]["0"]["commands"][0].is_object());
@@ -2392,7 +2379,7 @@ mod tests {
                 );
                 assert_eq!(
                     table.provenance()["verify.tiers.1.commands"],
-                    PortSource::Builtin
+                    Layer::Default
                 );
                 assert_eq!(warnings.len(), 1);
                 assert_eq!(warnings[0].0, path);
@@ -2450,10 +2437,7 @@ mod tests {
         let table = PortTable::read_for(Some(root.path()), state.path()).unwrap();
         assert!(table.verify.tiers.is_empty());
         assert!(table.verify.default_tier.is_empty());
-        assert_eq!(
-            table.provenance()["verify.default_tier"],
-            PortSource::Detected
-        );
+        assert_eq!(table.provenance()["verify.default_tier"], Layer::Detected);
     }
 
     #[test]
@@ -2478,11 +2462,11 @@ mod tests {
         assert!(!table.verify.tiers.contains_key("3"));
         assert_eq!(
             table.provenance()["verify.tiers.0.commands"],
-            PortSource::Detected
+            Layer::Detected
         );
         assert_eq!(
             table.provenance()["verify.tiers.1.commands"],
-            PortSource::Project
+            Layer::Project
         );
     }
 
@@ -2560,7 +2544,7 @@ mod tests {
         let builtin = serde_json::to_value(PortTable::builtin()).unwrap();
 
         for &name in PortTable::PORT_NAMES {
-            for serialised_source in [None, Some(PortSource::Builtin)] {
+            for serialised_source in [None, Some(Layer::Default)] {
                 let mut entry = builtin[name].clone();
                 if name != "build" {
                     // build has no backend field; its layer override is prepare.
@@ -2577,12 +2561,12 @@ mod tests {
                 std::fs::write(host.join("ports.json"), &bytes).unwrap();
 
                 for (project_overlay, expected_source) in [
-                    (None, PortSource::Host),
+                    (None, Layer::Host),
                     (
                         Some(serde_json::json!({"schema_version": PORTS_SCHEMA_VERSION})),
-                        PortSource::Host,
+                        Layer::Host,
                     ),
-                    (Some(overlay.clone()), PortSource::Project),
+                    (Some(overlay.clone()), Layer::Project),
                 ] {
                     if let Some(document) = &project_overlay {
                         std::fs::write(
@@ -2599,7 +2583,7 @@ mod tests {
                             if port == name {
                                 expected_source
                             } else {
-                                PortSource::Builtin
+                                Layer::Default
                             },
                             "{port}: overlay for {name} must not relabel omitted ports"
                         );
@@ -2626,7 +2610,7 @@ mod tests {
     fn build_defaults_are_slots_and_generic() {
         let table = PortTable::builtin();
         let build = &table.build;
-        assert_eq!(build.source, PortSource::Builtin);
+        assert_eq!(build.source, Layer::Default);
         assert!(build.prepare.is_empty());
         assert_eq!(build.strategy, "slots");
         assert_eq!(build.offload, "auto");
@@ -2648,7 +2632,7 @@ mod tests {
         assert_eq!(build.queue_aging_duration().value, Duration::from_secs(120));
         let (_, source, backend, valid, reason) =
             table.entries().find(|entry| entry.0 == "build").unwrap();
-        assert_eq!(source, PortSource::Builtin);
+        assert_eq!(source, Layer::Default);
         assert_eq!(backend, PortBackendKind::Builtin);
         assert!(valid);
         assert!(reason.is_none());
@@ -2677,7 +2661,7 @@ mod tests {
         // No project layer: the host value and its source survive.
         let table = PortTable::read_for(None, &host).unwrap();
         assert_eq!(table.build.prepare, host_prepare);
-        assert_eq!(table.build.source, PortSource::Host);
+        assert_eq!(table.build.source, Layer::Host);
 
         // A project layer that sets build.prepare wins and reports its source.
         std::fs::write(
@@ -2691,10 +2675,10 @@ mod tests {
         .unwrap();
         let table = PortTable::read_for(Some(project.as_path()), &host).unwrap();
         assert_eq!(table.build.prepare, project_prepare);
-        assert_eq!(table.build.source, PortSource::Project);
+        assert_eq!(table.build.source, Layer::Project);
 
-        assert_eq!(table.build.source_for_leaf("strategy"), PortSource::Builtin);
-        assert_eq!(table.build.source_for_leaf("offload"), PortSource::Builtin);
+        assert_eq!(table.build.source_for_leaf("strategy"), Layer::Default);
+        assert_eq!(table.build.source_for_leaf("offload"), Layer::Default);
         // Arrays replace rather than concatenate across layers.
         assert_eq!(table.build.prepare.len(), 1);
 
@@ -2709,13 +2693,13 @@ mod tests {
         .unwrap();
         let table = PortTable::read_for(Some(project.as_path()), &host).unwrap();
         assert_eq!(table.build.prepare, host_prepare);
-        assert_eq!(table.build.source, PortSource::Host);
+        assert_eq!(table.build.source, Layer::Host);
 
         // With no layer setting build at all, it stays builtin and empty.
         let empty_host = temp.path().join("empty-host");
         std::fs::create_dir_all(&empty_host).unwrap();
         let table = PortTable::read_for(None, &empty_host).unwrap();
-        assert_eq!(table.build.source, PortSource::Builtin);
+        assert_eq!(table.build.source, Layer::Default);
         assert!(table.build.prepare.is_empty());
     }
 
@@ -2792,22 +2776,19 @@ mod tests {
         assert_eq!(table.build.strategy, "slots");
 
         let provenance = table.provenance();
-        assert_eq!(provenance.get("verify.base"), Some(&PortSource::Project));
-        assert_eq!(provenance.get("verify.remote"), Some(&PortSource::Host));
-        assert_eq!(
-            provenance.get("build.strategy"),
-            Some(&PortSource::HostProject)
-        );
-        assert_eq!(provenance.get("build.prepare"), Some(&PortSource::Builtin));
+        assert_eq!(provenance.get("verify.base"), Some(&Layer::Project));
+        assert_eq!(provenance.get("verify.remote"), Some(&Layer::Host));
+        assert_eq!(provenance.get("build.strategy"), Some(&Layer::HostProject));
+        assert_eq!(provenance.get("build.prepare"), Some(&Layer::Default));
         assert_eq!(
             provenance.get("verify.tiers.0.commands"),
-            Some(&PortSource::Builtin)
+            Some(&Layer::Default)
         );
 
         // Port labels agree with the leaves they own.
-        assert_eq!(table.verify.source, PortSource::Project);
-        assert_eq!(table.build.source, PortSource::HostProject);
-        assert_eq!(table.land.source, PortSource::Builtin);
+        assert_eq!(table.verify.source, Layer::Project);
+        assert_eq!(table.build.source, Layer::HostProject);
+        assert_eq!(table.land.source, Layer::Default);
     }
 
     #[test]
@@ -2843,15 +2824,12 @@ mod tests {
 
         let table = PortTable::read_for(Some(&project), &host).unwrap();
         let provenance = table.provenance();
-        assert_eq!(
-            provenance.get("build.prepare"),
-            Some(&PortSource::HostProject)
-        );
-        assert_eq!(provenance.get("build.offload"), Some(&PortSource::Host));
-        assert_eq!(provenance.get("build.clean"), Some(&PortSource::Project));
-        assert_eq!(provenance.get("build.strategy"), Some(&PortSource::Builtin));
-        assert_eq!(provenance.get("verify.base"), Some(&PortSource::Host));
-        assert_eq!(table.build.source, PortSource::Project);
+        assert_eq!(provenance.get("build.prepare"), Some(&Layer::HostProject));
+        assert_eq!(provenance.get("build.offload"), Some(&Layer::Host));
+        assert_eq!(provenance.get("build.clean"), Some(&Layer::Project));
+        assert_eq!(provenance.get("build.strategy"), Some(&Layer::Default));
+        assert_eq!(provenance.get("verify.base"), Some(&Layer::Host));
+        assert_eq!(table.build.source, Layer::Project);
 
         // The table's full provenance remains derived state; only the frozen
         // build context carries the per-build-leaf map needed by lane jobs.
@@ -2876,20 +2854,20 @@ mod tests {
         build.queue_aging = "tomorrow".into();
         build
             .leaf_sources
-            .insert("build.strategy".into(), PortSource::Project);
+            .insert("build.strategy".into(), Layer::Project);
         build
             .leaf_sources
-            .insert("build.overflow".into(), PortSource::Host);
+            .insert("build.overflow".into(), Layer::Host);
         build
             .leaf_sources
-            .insert("build.clean".into(), PortSource::Project);
+            .insert("build.clean".into(), Layer::Project);
         build
             .leaf_sources
-            .insert("build.queue_aging".into(), PortSource::Host);
+            .insert("build.queue_aging".into(), Layer::Host);
 
         let strategy = build.strategy_name();
         assert_eq!(strategy.value, BuildStrategyName::Slots);
-        assert_eq!(strategy.source, PortSource::Builtin);
+        assert_eq!(strategy.source, Layer::Default);
         assert!(strategy.warnings[0].contains("build.strategy"));
         assert!(strategy.warnings[0].contains("project"));
 
@@ -2923,29 +2901,29 @@ mod tests {
         // No key (a directory with no checkout marker) skips the layer.
         let table = PortTable::read_for(Some(&project), &host).unwrap();
         assert_eq!(table.build.strategy, "slots");
-        assert_eq!(table.build.source, PortSource::Host);
+        assert_eq!(table.build.source, Layer::Host);
         assert!(
             table
                 .provenance()
                 .values()
-                .all(|source| *source != PortSource::HostProject)
+                .all(|source| *source != Layer::HostProject)
         );
 
         // A key with no layer directory also skips it silently.
         std::fs::create_dir_all(project.join(".git")).unwrap();
         let table = PortTable::read_for(Some(&project), &host).unwrap();
         assert_eq!(table.build.strategy, "slots");
-        assert_eq!(table.build.source, PortSource::Host);
+        assert_eq!(table.build.source, Layer::Host);
         assert!(
             table
                 .provenance()
                 .values()
-                .all(|source| *source != PortSource::HostProject)
+                .all(|source| *source != Layer::HostProject)
         );
         std::fs::write(host.join("projects"), "not a directory").unwrap();
         let table = PortTable::read_for(Some(&project), &host).unwrap();
         assert_eq!(table.build.strategy, "slots");
-        assert_eq!(table.build.source, PortSource::Host);
+        assert_eq!(table.build.source, Layer::Host);
     }
 
     #[test]
@@ -3062,7 +3040,7 @@ mod tests {
                 .unwrap()
                 .build
                 .source,
-            PortSource::HostProject
+            Layer::HostProject
         );
     }
 }

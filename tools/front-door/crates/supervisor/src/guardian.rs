@@ -1052,7 +1052,7 @@ impl provenant_os::capture::DecodedEventSink for Events {
     }
 }
 #[derive(Debug, thiserror::Error)]
-#[error("no free lane port block; domains.fabric.lanes.lane_port_blocks={blocks} ({}); raise or disable this setting", match origin { provenant_records::diagnostic::PortSettingSource::Configuration => "host configuration", provenant_records::diagnostic::PortSettingSource::ShippedDefault => "compiled default", provenant_records::diagnostic::PortSettingSource::RecordedPlan => "recorded plan" })]
+#[error("no free lane port block; domains.fabric.lanes.lane_port_blocks={blocks} ({}); raise or disable this setting", match origin { provenant_records::diagnostic::PortLayer::Host => "host configuration", provenant_records::diagnostic::PortLayer::Default => "compiled default", provenant_records::diagnostic::PortSettingSource::RecordedPlan => "recorded plan" })]
 struct LanePortRefusal {
     blocks: u32,
     origin: provenant_records::diagnostic::PortSettingSource,
@@ -1086,12 +1086,8 @@ fn lane_port_allocation(
             }
             use provenant_records::diagnostic::PortSettingSource;
             let origin = match plan.blocks_origin {
-                Some(provenant_os::lane_ports::BlocksOrigin::CompiledDefault) => {
-                    PortSettingSource::ShippedDefault
-                }
-                Some(provenant_os::lane_ports::BlocksOrigin::HostConfig) => {
-                    PortSettingSource::Configuration
-                }
+                Some(provenant_os::lane_ports::BlocksOrigin::CompiledDefault) => PortLayer::Default,
+                Some(provenant_os::lane_ports::BlocksOrigin::HostConfig) => PortLayer::Host,
                 None => PortSettingSource::RecordedPlan,
             };
             Err(LanePortRefusal {
@@ -2514,7 +2510,7 @@ impl Driver<'_> {
                 inherited_profile: self
                     .profile_file
                     .as_ref()
-                    .map(|profile| profile as &dyn provenant_os::sys::profile::LimitSource),
+                    .map(|profile| profile as &dyn provenant_os::sys::profile::Layer),
                 inherited_ports: ports,
                 process_group: false,
                 capture_stdout: plan.stdout.piped(),

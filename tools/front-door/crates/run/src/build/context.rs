@@ -2,7 +2,8 @@
 
 use super::BaseRef;
 use crate::build::GitBinding;
-use provenant_config::{BuildPort, PortSource};
+use provenant_config::BuildPort;
+use provenant_records::Layer;
 use std::{ffi::OsString, path::PathBuf};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -14,7 +15,7 @@ pub struct BuildContext {
     pub sandboxed: bool,
     pub git: Option<GitBinding>,
     pub port: BuildPort,
-    pub strategy_source: PortSource,
+    pub strategy_source: Layer,
     pub host_home: PathBuf,
     pub rustup_home: Option<PathBuf>,
     pub cargo_home: PathBuf,

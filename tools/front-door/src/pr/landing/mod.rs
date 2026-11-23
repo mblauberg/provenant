@@ -19,7 +19,7 @@ pub(crate) mod test_support;
 pub enum LandingError {
     #[error("landing port is disabled (source: {port_source:?})")]
     PortUnavailable {
-        port_source: provenant_config::PortSource,
+        port_source: provenant_records::Layer,
     },
     #[error("landing {id} unavailable: {reason}")]
     Unavailable {

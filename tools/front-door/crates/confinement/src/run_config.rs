@@ -6,7 +6,7 @@ use crate::permissions::{
 };
 use crate::review_exempt::{MAX_PATTERNS, ReviewExempt, valid_pattern};
 use provenant_config::{DomainConfig, DomainSection, FieldMetadata, SectionError};
-use provenant_records::{BudgetAction, BudgetGrace, Limit, LimitSource, LimitStrength};
+use provenant_records::{BudgetAction, BudgetGrace, Layer, Limit, LimitStrength};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
@@ -581,47 +581,46 @@ impl RunConfig {
     /// setting, then the host setting, then the default.
     pub fn writer_token_budget_for(&self, project: &str) -> Limit {
         let layers = [
-            Some((LimitSource::Default, DEFAULT_WRITER_TOKEN_BUDGET)),
-            self.writer_token_budget
-                .map(|tokens| (LimitSource::Host, tokens)),
+            Some((Layer::Default, DEFAULT_WRITER_TOKEN_BUDGET)),
+            self.writer_token_budget.map(|tokens| (Layer::Host, tokens)),
             self.projects
                 .get(project)
                 .and_then(|settings| settings.writer_token_budget)
-                .map(|tokens| (LimitSource::Project, tokens)),
+                .map(|tokens| (Layer::Project, tokens)),
         ];
         Limit::resolve(layers.into_iter().flatten(), LimitStrength::Default)
-            .unwrap_or_else(|| Limit::new(0, LimitSource::Default, LimitStrength::Default))
+            .unwrap_or_else(|| Limit::new(0, Layer::Default, LimitStrength::Default))
     }
 
     /// The action and its source for `project`, with project taking precedence
     /// over host and the compiled `wrap_up` default.
-    pub fn writer_budget_action_for(&self, project: &str) -> (BudgetAction, LimitSource) {
+    pub fn writer_budget_action_for(&self, project: &str) -> (BudgetAction, Layer) {
         if let Some(action) = self
             .projects
             .get(project)
             .and_then(|settings| settings.writer_budget_action)
         {
-            (action, LimitSource::Project)
+            (action, Layer::Project)
         } else if let Some(action) = self.writer_budget_action {
-            (action, LimitSource::Host)
+            (action, Layer::Host)
         } else {
-            (BudgetAction::default(), LimitSource::Default)
+            (BudgetAction::default(), Layer::Default)
         }
     }
 
     /// The action grace and its source for `project`, with project taking
     /// precedence over host and the compiled 0.10 default.
-    pub fn writer_budget_grace_for(&self, project: &str) -> (BudgetGrace, LimitSource) {
+    pub fn writer_budget_grace_for(&self, project: &str) -> (BudgetGrace, Layer) {
         if let Some(grace) = self
             .projects
             .get(project)
             .and_then(|settings| settings.writer_budget_grace)
         {
-            (grace, LimitSource::Project)
+            (grace, Layer::Project)
         } else if let Some(grace) = self.writer_budget_grace {
-            (grace, LimitSource::Host)
+            (grace, Layer::Host)
         } else {
-            (BudgetGrace::default(), LimitSource::Default)
+            (BudgetGrace::default(), Layer::Default)
         }
     }
 
@@ -1372,7 +1371,7 @@ mod tests {
         let unset = RunConfig::default().writer_token_budget_for("p");
         assert_eq!(
             (unset.value, unset.source),
-            (DEFAULT_WRITER_TOKEN_BUDGET, LimitSource::Default)
+            (DEFAULT_WRITER_TOKEN_BUDGET, Layer::Default)
         );
         let host: RunConfig = toml_edit::de::from_str(&format!(
             "writer_token_budget = {DEFAULT_WRITER_TOKEN_BUDGET}\n"
@@ -1381,7 +1380,7 @@ mod tests {
         let budget = host.writer_token_budget_for("p");
         assert_eq!(
             (budget.value, budget.source),
-            (DEFAULT_WRITER_TOKEN_BUDGET, LimitSource::Host)
+            (DEFAULT_WRITER_TOKEN_BUDGET, Layer::Host)
         );
         let off: RunConfig = toml_edit::de::from_str("writer_token_budget = 0\n").unwrap();
         assert_eq!(off.writer_token_budget_for("p").value, 0);

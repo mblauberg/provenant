@@ -1926,17 +1926,15 @@ fn host_native_preparation_uses_the_provider_contract() -> Result {
     task.profile
         .knobs
         .insert("lanes.access".into(), serde_json::json!("isolated"));
-    task.profile.knob_sources.insert(
-        "lanes.access".into(),
-        provenant_records::LimitSource::Launch,
-    );
+    task.profile
+        .knob_sources
+        .insert("lanes.access".into(), provenant_records::Layer::Launch);
     task.profile
         .knobs
         .insert("lanes.sandbox".into(), serde_json::json!("on"));
-    task.profile.knob_sources.insert(
-        "lanes.sandbox".into(),
-        provenant_records::LimitSource::Launch,
-    );
+    task.profile
+        .knob_sources
+        .insert("lanes.sandbox".into(), provenant_records::Layer::Launch);
     let mut absent = task.clone();
     absent.route = provenant_run::RequestedRoute::Adapter {
         required_family: None,

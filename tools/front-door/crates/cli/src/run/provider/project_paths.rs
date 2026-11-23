@@ -410,7 +410,7 @@ mod tests {
                     credential_roots: &credential_roots,
                     lane_access: &provenant_records::LaneAccessReceipt {
                         access: provenant_records::LaneAccess::Isolated,
-                        source: provenant_records::LaneAccessSource::Default,
+                        source: provenant_records::Layer::Default,
                         key: "lanes.access".into(),
                         extra: Default::default(),
                     },
@@ -504,7 +504,7 @@ mod tests {
                 assert_eq!(credential_warning["credential_source"], declared_source);
                 let receipt = provenant_records::LaneAccessReceipt {
                     access: provenant_records::LaneAccess::Host,
-                    source: provenant_records::LaneAccessSource::Default,
+                    source: provenant_records::Layer::Default,
                     key: "lanes.access".into(),
                     extra: Default::default(),
                 };
@@ -612,7 +612,7 @@ mod tests {
                 credential_roots: &provenant_core::CredentialRoots::for_home(&home),
                 lane_access: &provenant_records::LaneAccessReceipt {
                     access: provenant_records::LaneAccess::Isolated,
-                    source: provenant_records::LaneAccessSource::Default,
+                    source: provenant_records::Layer::Default,
                     key: "lanes.access".into(),
                     extra: Default::default(),
                 },
@@ -709,7 +709,7 @@ mod tests {
                     credential_roots: &provenant_core::CredentialRoots::for_home(&home),
                     lane_access: &provenant_records::LaneAccessReceipt {
                         access: provenant_records::LaneAccess::Isolated,
-                        source: provenant_records::LaneAccessSource::Default,
+                        source: provenant_records::Layer::Default,
                         key: "lanes.access".into(),
                         extra: Default::default(),
                     },
@@ -796,7 +796,7 @@ mod tests {
                 credential_roots: &provenant_core::CredentialRoots::for_home(&home),
                 lane_access: &provenant_records::LaneAccessReceipt {
                     access: provenant_records::LaneAccess::Isolated,
-                    source: provenant_records::LaneAccessSource::Default,
+                    source: provenant_records::Layer::Default,
                     key: "lanes.access".into(),
                     extra: Default::default(),
                 },
@@ -922,7 +922,7 @@ mod tests {
                     credential_roots: &provenant_core::CredentialRoots::for_home(&home),
                     lane_access: &provenant_records::LaneAccessReceipt {
                         access: provenant_records::LaneAccess::Isolated,
-                        source: provenant_records::LaneAccessSource::Default,
+                        source: provenant_records::Layer::Default,
                         key: "lanes.access".into(),
                         extra: Default::default(),
                     },
@@ -1078,7 +1078,7 @@ mod tests {
                 credential_roots: &provenant_core::CredentialRoots::for_home(&home),
                 lane_access: &provenant_records::LaneAccessReceipt {
                     access: provenant_records::LaneAccess::Isolated,
-                    source: provenant_records::LaneAccessSource::Default,
+                    source: provenant_records::Layer::Default,
                     key: "lanes.access".into(),
                     extra: Default::default(),
                 },

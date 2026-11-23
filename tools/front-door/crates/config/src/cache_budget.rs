@@ -9,7 +9,7 @@ pub const DEFAULT: &str = "10%";
 pub struct CargoCacheBudget {
     pub bytes: u64,
     pub setting: String,
-    pub source: provenant_records::LimitSource,
+    pub source: provenant_records::Layer,
 }
 
 /// Resolve the effective lane budget using the volume that contains the cache.
@@ -102,7 +102,7 @@ mod tests {
         .unwrap();
         assert_eq!(default.bytes, volume / 10);
         assert_eq!(default.setting, DEFAULT);
-        assert_eq!(default.source, provenant_records::LimitSource::Default);
+        assert_eq!(default.source, provenant_records::Layer::Default);
 
         let host = provenant_records::run::HarnessProfile {
             knobs: std::collections::BTreeMap::from([(
@@ -111,14 +111,14 @@ mod tests {
             )]),
             knob_sources: std::collections::BTreeMap::from([(
                 KNOB.into(),
-                provenant_records::LimitSource::Host,
+                provenant_records::Layer::Host,
             )]),
             ..Default::default()
         };
         let budget = resolve(&host, directory.path()).unwrap();
         assert_eq!(budget.bytes, 1_073_741_824);
         assert_eq!(budget.setting, "1073741824");
-        assert_eq!(budget.source, provenant_records::LimitSource::Host);
+        assert_eq!(budget.source, provenant_records::Layer::Host);
 
         let numeric = provenant_records::run::HarnessProfile {
             knobs: std::collections::BTreeMap::from([(
@@ -127,7 +127,7 @@ mod tests {
             )]),
             knob_sources: std::collections::BTreeMap::from([(
                 KNOB.into(),
-                provenant_records::LimitSource::Host,
+                provenant_records::Layer::Host,
             )]),
             ..Default::default()
         };

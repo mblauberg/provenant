@@ -61,7 +61,7 @@ pub use ports::{
     PortCommand, PortCommandBackend, PortCommandDisposition, PortCommandExecution,
     PortCommandPublication, PortCommandReceipt, PortCommandReceiptCollectionLock,
     PortCommandReceiptEntry, PortCommandReceiptInventory, PortCommandReceiptProof, PortError,
-    PortEvidenceError, PortExecution, PortReceiptIssue, PortReceiptLifetime, PortSource, PortTable,
+    PortEvidenceError, PortExecution, PortReceiptIssue, PortReceiptLifetime, PortTable,
     ResolvedBuildValue, TierCommand, VerifyAffectedPort, VerifyPort, VerifySelection, VerifyTier,
     WorktreeLayoutPort, dispatch_port_backend, execute_port_command,
     execute_port_command_with_input, infer_verify_base, land_backend, port_command_environment,

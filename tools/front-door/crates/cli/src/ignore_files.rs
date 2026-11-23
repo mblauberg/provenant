@@ -17,8 +17,9 @@
 //! `**` spans components. As in Git, once a directory is ignored nothing below
 //! it can be re-included. Backslash escapes and trailing-space escapes are not
 //! interpreted.
-use provenant_config::{PortSource, PortTable};
+use provenant_config::PortTable;
 use provenant_records::AdapterSpec;
+use provenant_records::Layer;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
@@ -209,11 +210,12 @@ fn layout_remedy(checkout: &Path, host_state: &Path) -> String {
 fn remedy_for(ports: &PortTable) -> String {
     let layout = &ports.worktree_layout;
     let source = match layout.source {
-        PortSource::Builtin => "compiled default".to_owned(),
-        PortSource::Detected => "detected from the checkout".to_owned(),
-        PortSource::Host => "host ports.json in the state directory".to_owned(),
-        PortSource::HostProject => "host-project ports.json in the state directory".to_owned(),
-        PortSource::Project => provenant_config::PORTS_CONFIG.to_owned(),
+        Layer::Default => "compiled default".to_owned(),
+        Layer::Detected => "detected from the checkout".to_owned(),
+        Layer::Host => "host ports.json in the state directory".to_owned(),
+        Layer::HostProject => "host-project ports.json in the state directory".to_owned(),
+        Layer::Project => provenant_config::PORTS_CONFIG.to_owned(),
+        other => other.as_str().to_owned(),
     };
     format!(
         "place lane worktrees under a root the file does not list by setting worktree_layout.default and worktree_layout.roots in {} (now {}, source: {source}); roots outside the checkout are not configurable",

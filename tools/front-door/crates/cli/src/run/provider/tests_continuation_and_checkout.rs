@@ -736,9 +736,7 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable()
 -> Result<(), Box<dyn std::error::Error>> {
     // Spec: docs/specs/fabric.md#session-ready-steering
     use provenant_core::{AttemptId, Digest};
-    use provenant_records::{
-        FileDigest, RouteAlternatives, RouteConfidentiality, RouteEligibility, RouteReadiness,
-    };
+    use provenant_records::{FileDigest, RouteAlternatives, RouteConfidentiality, RouteEligibility, RouteReadiness, };
     for adapter in ["cursor", "opencode", "claude", "codex"] {
         let route = ResolvedRoute {
             selection_context: Default::default(),
@@ -1051,7 +1049,7 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable()
                 Some(
                     provenant_records::diagnostic::ResourceFact::ContinuationCopy {
                         limit: 1,
-                        origin: provenant_records::diagnostic::SettingSource::Configuration,
+                        origin: provenant_records::diagnostic::Layer::Host,
                         setting: provenant_records::diagnostic::ContinuationCopyLimit::Entries,
                         ..
                     }
@@ -1167,9 +1165,7 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable()
 fn opencode_host_continuation_uses_the_recorded_host_store_by_session_id()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_core::{AttemptId, Digest, ProjectId};
-    use provenant_records::{
-        FileDigest, RouteAlternatives, RouteConfidentiality, RouteEligibility, RouteReadiness,
-    };
+    use provenant_records::{FileDigest, RouteAlternatives, RouteConfidentiality, RouteEligibility, RouteReadiness, };
 
     let temp = tempfile::tempdir()?;
     let base = temp.path().canonicalize()?;

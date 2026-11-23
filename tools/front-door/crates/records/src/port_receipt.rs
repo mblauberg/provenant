@@ -1,10 +1,9 @@
 //! Versioned evidence for repository command ports.
-use crate::FileDigest;
-pub use crate::ports::PortSource;
+use crate::{FileDigest, Layer};
 use provenant_core::{ActorId, AttemptId, ProjectId};
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
-pub const PORT_COMMAND_RECEIPT_SCHEMA_VERSION: u16 = 2;
+pub const PORT_COMMAND_RECEIPT_SCHEMA_VERSION: u16 = 3;
 pub const DEFAULT_PORT_COMMAND_RECEIPT_AGE_DAYS: u32 = 30;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,7 +48,7 @@ pub struct PortCommandReceipt {
     schema_version: u16,
     pub owner: String,
     pub backend: PortCommandBackend,
-    pub source: PortSource,
+    pub source: Layer,
     pub phase: String,
     pub request_key_digest: FileDigest,
     pub command_digest: FileDigest,
@@ -68,7 +67,7 @@ impl PortCommandReceipt {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         owner: String,
-        source: PortSource,
+        source: Layer,
         phase: String,
         request_key_digest: FileDigest,
         command_digest: FileDigest,
@@ -129,7 +128,7 @@ mod tests {
     fn sample() -> PortCommandReceipt {
         PortCommandReceipt::new(
             "admission".into(),
-            PortSource::Project,
+            Layer::Project,
             "release".into(),
             crate::CanonicalV1::file_digest(b"attempt:1"),
             crate::CanonicalV1::file_digest(b"command"),
@@ -169,7 +168,7 @@ mod tests {
     #[test]
     fn receipt_decoder_rejects_unknown_schema_version() {
         let mut value = serde_json::to_value(sample()).expect("receipt serialises");
-        value["schema_version"] = serde_json::json!(3);
+        value["schema_version"] = serde_json::json!(PORT_COMMAND_RECEIPT_SCHEMA_VERSION + 1);
         let error = crate::decode::<PortCommandReceipt, _>(
             Cursor::new(serde_json::to_vec(&value).expect("fixture serialises")),
             crate::Limits {

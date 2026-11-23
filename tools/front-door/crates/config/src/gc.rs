@@ -403,11 +403,11 @@ impl LaneBuildSettings {
         self.memory_pressure_threshold.unwrap_or_default()
     }
 
-    pub fn memory_pressure_source(&self) -> provenant_records::diagnostic::SettingSource {
+    pub fn memory_pressure_source(&self) -> provenant_records::diagnostic::Layer {
         if self.memory_pressure_threshold.is_some() {
-            provenant_records::diagnostic::SettingSource::Configuration
+            provenant_records::diagnostic::Layer::Host
         } else {
-            provenant_records::diagnostic::SettingSource::ShippedDefault
+            provenant_records::diagnostic::Layer::Default
         }
     }
     pub fn read(state: &Path) -> std::io::Result<Self> {
@@ -603,9 +603,9 @@ impl Default for GcSettings {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct DiskLimits {
     pub free_floor: u64,
-    pub free_floor_source: provenant_records::diagnostic::SettingSource,
+    pub free_floor_source: provenant_records::diagnostic::Layer,
     pub critical_free: u64,
-    pub critical_free_source: provenant_records::diagnostic::SettingSource,
+    pub critical_free_source: provenant_records::diagnostic::Layer,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DiskLevel {
@@ -713,13 +713,13 @@ impl GcSettings {
     }
 
     pub fn disk_limits(&self, state: &Path) -> std::io::Result<DiskLimits> {
-        use provenant_records::diagnostic::SettingSource::{Configuration, ShippedDefault};
+        use provenant_records::diagnostic::Layer;
         Ok(DiskLimits {
             free_floor: self.free_floor_bytes(state)?,
             free_floor_source: if self.free_floor.is_some() {
-                Configuration
+                Layer::Host
             } else {
-                ShippedDefault
+                Layer::Default
             },
             critical_free: self
                 .critical_free
@@ -729,9 +729,9 @@ impl GcSettings {
                 .map_err(std::io::Error::other)?
                 .unwrap_or(2 * 1024_u64.pow(3)),
             critical_free_source: if self.critical_free.is_some() {
-                Configuration
+                Layer::Host
             } else {
-                ShippedDefault
+                Layer::Default
             },
         })
     }
@@ -1181,17 +1181,14 @@ mod build_tests {
     #[test]
     fn memory_pressure_accepts_host_policy() {
         use provenant_os::sys::resources::MemoryPressure;
-        use provenant_records::diagnostic::SettingSource;
+        use provenant_records::diagnostic::Layer;
         assert_eq!(
             LaneBuildSettings::default().memory_pressure_source(),
-            SettingSource::ShippedDefault
+            Layer::Default
         );
         let defaults: LaneBuildSettings =
             toml_edit::de::from_str("memory_pressure_threshold = 'critical'").unwrap();
-        assert_eq!(
-            defaults.memory_pressure_source(),
-            SettingSource::Configuration
-        );
+        assert_eq!(defaults.memory_pressure_source(), Layer::Host);
         assert!(
             !defaults
                 .memory_pressure_threshold()
@@ -1371,17 +1368,17 @@ mod disk_limit_tests {
             let decoded: DiskLimits = serde_json::from_slice(&encoded)?;
             assert_eq!(
                 decoded.free_floor_source,
-                provenant_records::diagnostic::SettingSource::Configuration
+                provenant_records::diagnostic::Layer::Host
             );
             assert_eq!(
                 decoded.critical_free_source,
-                provenant_records::diagnostic::SettingSource::Configuration
+                provenant_records::diagnostic::Layer::Host
             );
         }
         let defaults = GcSettings::default().disk_limits(temp.path())?;
         assert_eq!(
             defaults.critical_free_source,
-            provenant_records::diagnostic::SettingSource::ShippedDefault
+            provenant_records::diagnostic::Layer::Default
         );
         Ok(())
     }

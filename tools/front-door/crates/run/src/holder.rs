@@ -4698,12 +4698,12 @@ mod disk_admission_tests {
             custody_error(RunError::Admission(AdmissionError::Disk {
                 free: 99,
                 floor: 100,
-                origin: provenant_records::diagnostic::SettingSource::Configuration,
+                origin: provenant_records::diagnostic::Layer::Host,
             })),
             CustodyError::Admission(AdmissionError::Disk {
                 free: 99,
                 floor: 100,
-                origin: provenant_records::diagnostic::SettingSource::Configuration,
+                origin: provenant_records::diagnostic::Layer::Host,
             })
         ));
     }
@@ -7012,7 +7012,7 @@ mod writer_recovery_tests {
             provenant_records::LaneLimits {
                 token_budget: Some(provenant_records::Limit::new(
                     1_000_000,
-                    provenant_records::LimitSource::Default,
+                    provenant_records::Layer::Default,
                     provenant_records::LimitStrength::Default,
                 )),
                 budget_policy: Some(provenant_records::BudgetPolicy::default()),

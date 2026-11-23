@@ -79,7 +79,7 @@ take snapshots in and return decisions out; `src/` performs the effects.
 - **Host to host.** The fixed SSH peer protocol in `fabric-runtime::hosts`;
   one home host per project.
 - **Configuration layers.** Lowest to highest: compiled default, detected,
-  host, host-project, project, then template, risk tier and launch request.
+  host, host-project, project, then risk tier, template and launch request.
   Every effective value reports the layer that set it (`config show --full`);
   one layer vocabulary across settings is #3777.
 - **Apps.** The Swift apps run the CLI and decode its JSON; they watch the

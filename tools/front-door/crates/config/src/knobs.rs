@@ -157,7 +157,7 @@ impl<D> crate::ResolvedConfig<D> {
             .iter()
             .filter_map(|(name, knob)| {
                 let source = layer(knob.source, launch_overrides.contains(name.as_str()));
-                (source != provenant_records::LimitSource::Default).then(|| (name.clone(), source))
+                (source != provenant_records::Layer::Default).then(|| (name.clone(), source))
             })
             .collect();
         Ok(provenant_records::run::HarnessProfile {
@@ -191,12 +191,12 @@ impl<D> crate::ResolvedConfig<D> {
 /// The layer a lane reports for a knob: a launch override, host
 /// configuration (its `[knobs]` table or the profile preset it selected), or
 /// the registry default.
-fn layer(source: KnobSource, launched: bool) -> provenant_records::LimitSource {
-    use provenant_records::LimitSource::{Default, Host, Launch};
+fn layer(source: KnobSource, launched: bool) -> provenant_records::Layer {
+    use provenant_records::Layer;
     match source {
-        KnobSource::Override if launched => Launch,
-        KnobSource::Override | KnobSource::Profile => Host,
-        KnobSource::Default => Default,
+        KnobSource::Override if launched => Layer::Launch,
+        KnobSource::Override | KnobSource::Profile => Layer::Host,
+        KnobSource::Default => Layer::Default,
     }
 }
 
@@ -206,12 +206,12 @@ fn layer(source: KnobSource, launched: bool) -> provenant_records::LimitSource {
 pub fn knob_source(
     profile: &provenant_records::run::HarnessProfile,
     name: &str,
-) -> provenant_records::LimitSource {
+) -> provenant_records::Layer {
     profile
         .knob_sources
         .get(name)
         .copied()
-        .unwrap_or(provenant_records::LimitSource::Default)
+        .unwrap_or(provenant_records::Layer::Default)
 }
 
 /// Parsed once; the embedded text is immutable.

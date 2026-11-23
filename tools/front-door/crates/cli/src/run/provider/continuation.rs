@@ -501,12 +501,12 @@ pub(super) fn prior_uses_native_session_state(
 
 #[test]
 fn native_session_selection_follows_recorded_access_and_legacy_sandbox() {
-    use provenant_records::{LaneAccess, LaneAccessReceipt, LaneAccessSource};
+    use provenant_records::{LaneAccess, LaneAccessReceipt, Layer};
     let mut route = run::RouteRecord::default();
     assert!(!prior_uses_native_session_state(&route, "codex", None));
     route.lane_access = Some(LaneAccessReceipt {
         access: LaneAccess::Host,
-        source: LaneAccessSource::Default,
+        source: Layer::Default,
         key: "lanes.access".into(),
         extra: Default::default(),
     });
@@ -631,18 +631,18 @@ pub(super) const RETAINED_STATE: StateLimits = StateLimits {
 struct StateCopyPolicy {
     enforcement: Option<provenant_records::policy::Policy>,
     limits: StateLimits,
-    origins: [provenant_records::diagnostic::SettingSource; 3],
+    origins: [provenant_records::diagnostic::Layer; 3],
 }
 impl StateCopyPolicy {
     fn shipped(limits: StateLimits) -> Self {
         Self {
             enforcement: None,
             limits,
-            origins: [provenant_records::diagnostic::SettingSource::ShippedDefault; 3],
+            origins: [provenant_records::diagnostic::Layer::Default; 3],
         }
     }
     fn read(state_root: &Path, enforcement: &provenant_records::policy::Policy) -> Self {
-        use provenant_records::diagnostic::SettingSource;
+        use provenant_records::diagnostic::Layer;
         match provenant_confinement::run_config::RunConfig::read_with_keys(state_root) {
             Ok((config, keys)) => {
                 let origins = [
@@ -652,9 +652,9 @@ impl StateCopyPolicy {
                 ]
                 .map(|key| {
                     if keys.contains(key) {
-                        SettingSource::Configuration
+                        Layer::Host
                     } else {
-                        SettingSource::ShippedDefault
+                        Layer::Default
                     }
                 });
                 Self {
@@ -1137,7 +1137,7 @@ fn retained_state_links_follow_access_model() -> Result<(), Box<dyn std::error::
     std::fs::hard_link(&external, source.join("link"))?;
     let access = provenant_records::LaneAccessReceipt {
         access: provenant_records::LaneAccess::Host,
-        source: provenant_records::LaneAccessSource::Default,
+        source: provenant_records::Layer::Default,
         key: "lanes.access".into(),
         extra: Default::default(),
     };

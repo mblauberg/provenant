@@ -580,9 +580,9 @@ impl run::Providers for Registry<'_> {
                     config.origins.get("domains.run.write_grant_limit_bytes"),
                     Some(provenant_config::Origin::User { .. })
                 ) {
-                    provenant_records::diagnostic::SettingSource::Configuration
+                    provenant_records::diagnostic::Layer::Host
                 } else {
-                    provenant_records::diagnostic::SettingSource::ShippedDefault
+                    provenant_records::diagnostic::Layer::Default
                 };
                 run::WriteGrantLimit {
                     bytes: config.domains.run.write_grant_limit_bytes,

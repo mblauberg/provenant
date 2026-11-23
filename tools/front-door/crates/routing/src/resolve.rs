@@ -2643,11 +2643,11 @@ fn candidate(
                 PacingReserveSetting::Free
             };
             let origin = if window.profile {
-                PacingSettingSource::Configuration
+                PacingLayer::Host
             } else if context.config.pacing_reserve.contains_key(model.adapter()) {
                 PacingSettingSource::Unresolved
             } else {
-                PacingSettingSource::ShippedDefault
+                PacingLayer::Default
             };
             let window_name = window.name();
             let account = format!(

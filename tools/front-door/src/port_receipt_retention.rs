@@ -4,7 +4,7 @@ use provenant_config::{
     PortReceiptLifetime,
 };
 use provenant_core::{ActorId, AttemptId, CancelToken, Clock, ProjectId, Roots, SweepControl};
-use provenant_records::{FileDigest, PortSource};
+use provenant_records::{FileDigest, Layer};
 use provenant_run::{ExecutionContext, Request, RunStore};
 use serde::Serialize;
 use std::{
@@ -47,7 +47,7 @@ struct AttemptScope {
 
 #[derive(Clone)]
 struct AdmissionProof {
-    source: PortSource,
+    source: Layer,
     command_digest: FileDigest,
     request_key: String,
     success_codes: Vec<i32>,

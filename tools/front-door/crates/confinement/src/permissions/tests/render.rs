@@ -480,7 +480,7 @@ fn capacity_policy_controls_warning_off_and_typed_refusal() {
         assert_eq!(rule.rule.boundary, Boundary::None);
         assert_eq!(rule.rule.strength, Strength::Warn);
     }
-    let origin = provenant_records::diagnostic::SettingSource::Configuration;
+    let origin = provenant_records::diagnostic::Layer::Host;
     assert!(
         check_capacity_policy(
             &default,
@@ -768,8 +768,8 @@ fn worktree_access_read_only_profile_limits_checkout_writes()
         limits: ProfileLimits {
             grant_limit: 1,
             profile_limit_bytes: 1,
-            grant_origin: provenant_records::diagnostic::SettingSource::Configuration,
-            profile_origin: provenant_records::diagnostic::SettingSource::Configuration,
+            grant_origin: provenant_records::diagnostic::Layer::Host,
+            profile_origin: provenant_records::diagnostic::Layer::Host,
         },
         policy: Policy::default(),
     }
@@ -1551,7 +1551,7 @@ fn credential_keychain_and_process_denials_follow_lane_access() -> Result<(), Pe
     assert!(rule_index(&isolated, RuleAction::Deny, "signal", None).is_some());
     mandatory.set_lane_access(provenant_records::LaneAccessReceipt {
         access: provenant_records::LaneAccess::Host,
-        source: provenant_records::LaneAccessSource::Default,
+        source: provenant_records::Layer::Default,
         key: "lanes.access".into(),
         extra: Default::default(),
     });

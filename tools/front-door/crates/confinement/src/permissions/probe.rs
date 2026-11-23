@@ -35,8 +35,8 @@ pub(super) const CLEANUP_TIMEOUT: Duration = Duration::from_millis(250);
 pub struct ProfileLimits {
     pub grant_limit: usize,
     pub profile_limit_bytes: usize,
-    pub grant_origin: provenant_records::diagnostic::SettingSource,
-    pub profile_origin: provenant_records::diagnostic::SettingSource,
+    pub grant_origin: provenant_records::diagnostic::Layer,
+    pub profile_origin: provenant_records::diagnostic::Layer,
 }
 impl Default for ProfileLimits {
     fn default() -> Self {
@@ -44,8 +44,8 @@ impl Default for ProfileLimits {
         Self {
             grant_limit: config.grant_limit,
             profile_limit_bytes: config.profile_limit_bytes,
-            grant_origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
-            profile_origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
+            grant_origin: provenant_records::diagnostic::Layer::Default,
+            profile_origin: provenant_records::diagnostic::Layer::Default,
         }
     }
 }
@@ -343,7 +343,7 @@ pub(super) fn check_capacity_policy(
     setting: &str,
     actual: usize,
     threshold: usize,
-    origin: provenant_records::diagnostic::SettingSource,
+    origin: provenant_records::diagnostic::Layer,
     strict_error: PermissionError,
 ) -> Result<Option<String>, PermissionError> {
     let facts = if actual > threshold {

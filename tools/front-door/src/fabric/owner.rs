@@ -3037,7 +3037,7 @@ impl BoundGraphOwner<'_> {
                             spec.budget_sources
                                 .get(field)
                                 .copied()
-                                .unwrap_or(provenant_records::LimitSource::Template),
+                                .unwrap_or(provenant_records::Layer::Template),
                         );
                     }
                 }
@@ -5316,7 +5316,7 @@ mod recovery_rebuild_tests {
                                     .insert("lanes.sandbox_floor".into(), "strict".into());
                                 profile.knob_sources.insert(
                                     "lanes.sandbox_floor".into(),
-                                    provenant_records::LimitSource::Host,
+                                    provenant_records::Layer::Host,
                                 );
                                 if spec.confidential {
                                     profile.confidential = true;

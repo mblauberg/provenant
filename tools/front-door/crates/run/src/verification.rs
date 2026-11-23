@@ -2,7 +2,7 @@
 //! format only; the paragraph names what the chair's integrated check and CI
 //! will run. Advisory: the preamble names its source. A brief line overrides
 //! the knob.
-use provenant_records::{LimitSource, run::HarnessProfile};
+use provenant_records::{Layer, run::HarnessProfile};
 
 /// The registry knob.
 pub const KNOB: &str = "lanes.verification";
@@ -121,9 +121,9 @@ fn brief_scope(brief: &str) -> Option<VerificationScope> {
     })
 }
 
-fn display_source(source: LimitSource) -> &'static str {
+fn display_source(source: Layer) -> &'static str {
     match source {
-        LimitSource::Launch => "brief",
+        Layer::Launch => "brief",
         other => other.as_str(),
     }
 }
@@ -142,7 +142,7 @@ mod tests {
     fn a_brief_scope_overrides_and_names_its_source() {
         let mut profile = HarnessProfile::default();
         profile.knobs.insert(KNOB.into(), "check".into());
-        profile.knob_sources.insert(KNOB.into(), LimitSource::Host);
+        profile.knob_sources.insert(KNOB.into(), Layer::Host);
         let resolved = VerificationResolution::resolve(
             &profile,
             "Do the work.\nVerification scope: targeted\n",
@@ -183,7 +183,7 @@ mod tests {
         ] {
             let mut profile = HarnessProfile::default();
             profile.knobs.insert(KNOB.into(), source.into());
-            profile.knob_sources.insert(KNOB.into(), LimitSource::Host);
+            profile.knob_sources.insert(KNOB.into(), Layer::Host);
             let text = VerificationResolution::resolve(&profile, "implement it").paragraph();
             assert!(text.contains("format only"), "{scope:?}: {text}");
             assert!(text.contains("source: host"), "{scope:?}: {text}");
@@ -198,9 +198,7 @@ mod tests {
     fn a_conflict_stop_names_the_guidance_and_the_brief() {
         let mut profile = HarnessProfile::default();
         profile.knobs.insert(KNOB.into(), "check".into());
-        profile
-            .knob_sources
-            .insert(KNOB.into(), LimitSource::Launch);
+        profile.knob_sources.insert(KNOB.into(), Layer::Launch);
         let resolved = VerificationResolution::resolve(&profile, "Verification scope: full\n");
         let cause = resolved.conflict.expect("conflict");
         assert!(cause.contains("lane guidance is check"));

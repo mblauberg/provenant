@@ -32,7 +32,7 @@ fn provider_preparation_fallback_preserves_authority_and_identity_failures() {
         ProviderError::CredentialReadFailed("fixture".into()),
         ProviderError::PromptTooLarge {
             limit: 1,
-            origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
+            origin: provenant_records::diagnostic::Layer::Default,
         },
         ProviderError::Overflow,
         ProviderError::Malformed,
@@ -113,9 +113,7 @@ fn codex_auth_reprobe_uses_selected_home_and_trusts_status()
 #[test]
 fn cursor_auth_reprobe_accepts_only_selected_host_login() -> Result<(), Box<dyn std::error::Error>>
 {
-    use provenant_os::exec::{
-        CapturedStream, ExecError, ExecOptions, ExecOutcome, Executor, Termination,
-    };
+    use provenant_os::exec::{CapturedStream, ExecError, ExecOptions, ExecOutcome, Executor, Termination, };
     struct Fake;
     impl Executor for Fake {
         fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
@@ -473,9 +471,7 @@ fn publishing_canonicalises_symlinked_gh_and_ignores_missing_tools()
 #[test]
 fn version_probe_reports_outcomes_without_disclosing_output()
 -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_os::exec::{
-        CapturedStream, ExecError, ExecOptions, ExecOutcome, Executor, Termination,
-    };
+    use provenant_os::exec::{CapturedStream, ExecError, ExecOptions, ExecOutcome, Executor, Termination, };
 
     struct VersionExecutor(ExecOutcome);
     impl Executor for VersionExecutor {
@@ -714,9 +710,7 @@ fn version_probe_reports_outcomes_without_disclosing_output()
 #[test]
 fn unregistered_agy_observes_on_its_local_login_without_an_identity_probe()
 -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_os::exec::{
-        CapturedStream, ExecError, ExecOptions, ExecOutcome, Executor, Termination,
-    };
+    use provenant_os::exec::{CapturedStream, ExecError, ExecOptions, ExecOutcome, Executor, Termination, };
 
     #[derive(Default)]
     struct Agy(std::sync::Mutex<Vec<Vec<String>>>);
@@ -822,9 +816,7 @@ fn unregistered_agy_observes_on_its_local_login_without_an_identity_probe()
 #[test]
 fn agy_account_whose_isolated_keychain_vanished_is_refused()
 -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_os::exec::{
-        CapturedStream, ExecError, ExecOptions, ExecOutcome, Executor, Termination,
-    };
+    use provenant_os::exec::{CapturedStream, ExecError, ExecOptions, ExecOutcome, Executor, Termination, };
 
     /// Signs in as one Google account per `HOME`, as a keychain-backed agy does.
     struct Agy {
@@ -1067,7 +1059,7 @@ fn launch_prompt_preserves_admitted_text_when_host_additions_exceed_one_mib()
                 &attempt,
                 adapter,
                 65_536,
-                provenant_records::diagnostic::SettingSource::Configuration,
+                provenant_records::diagnostic::Layer::Host,
                 &provenant_records::policy::Policy::default(),
             )?;
             assert_eq!(prompt.text(), text);
@@ -1080,7 +1072,7 @@ fn launch_prompt_preserves_admitted_text_when_host_additions_exceed_one_mib()
             &attempt,
             adapter,
             65_536,
-            provenant_records::diagnostic::SettingSource::Configuration,
+            provenant_records::diagnostic::Layer::Host,
             &provenant_records::policy::Policy::default(),
         )?;
         if AdapterSpec::get(adapter).is_some_and(|spec| spec.argv_prompt) {
@@ -1113,7 +1105,7 @@ fn launch_prompt_keeps_oversized_stdin_prompts_in_memory() -> Result<(), Box<dyn
                     &attempt,
                     adapter,
                     65_536,
-                    provenant_records::diagnostic::SettingSource::Configuration,
+                    provenant_records::diagnostic::Layer::Host,
                     &provenant_records::policy::Policy::default(),
                 )?;
                 assert_eq!(prompt.text(), text);
@@ -1149,7 +1141,7 @@ fn launch_prompt_spills_only_top_level_argv_and_refuses_conflicting_file()
             &attempt,
             adapter,
             65_536,
-            provenant_records::diagnostic::SettingSource::Configuration,
+            provenant_records::diagnostic::Layer::Host,
             &strict_policy,
         )
         .err()
@@ -1173,7 +1165,7 @@ fn launch_prompt_spills_only_top_level_argv_and_refuses_conflicting_file()
                 &attempt,
                 adapter,
                 65_536,
-                provenant_records::diagnostic::SettingSource::Configuration,
+                provenant_records::diagnostic::Layer::Host,
                 &strict_policy,
             )?;
             assert_eq!(prompt.file(), Some(attempt.join("prompt.md").as_path()));
@@ -1195,7 +1187,7 @@ fn launch_prompt_spills_only_top_level_argv_and_refuses_conflicting_file()
                 &attempt,
                 adapter,
                 65_536,
-                provenant_records::diagnostic::SettingSource::Configuration,
+                provenant_records::diagnostic::Layer::Host,
                 &strict_policy,
             )
             .is_err()
@@ -1222,7 +1214,7 @@ fn nested_argv_prompt_respects_configured_byte_limit() -> Result<(), Box<dyn std
         &attempt,
         "cursor",
         65_536,
-        provenant_records::diagnostic::SettingSource::Configuration,
+        provenant_records::diagnostic::Layer::Host,
         &warn_policy,
     )?;
     assert_eq!(warned.text(), text);
@@ -1248,7 +1240,7 @@ fn nested_argv_prompt_respects_configured_byte_limit() -> Result<(), Box<dyn std
         &attempt,
         "cursor",
         65_536,
-        provenant_records::diagnostic::SettingSource::Configuration,
+        provenant_records::diagnostic::Layer::Host,
         &off_policy,
     )?;
     assert_eq!(off.text(), text);
@@ -1277,7 +1269,7 @@ fn nested_argv_prompt_respects_configured_byte_limit() -> Result<(), Box<dyn std
         &attempt,
         "cursor",
         65_536,
-        provenant_records::diagnostic::SettingSource::Configuration,
+        provenant_records::diagnostic::Layer::Host,
         &strict_policy,
     )
     .err()
@@ -1297,7 +1289,7 @@ fn nested_argv_prompt_respects_configured_byte_limit() -> Result<(), Box<dyn std
         &attempt,
         "cursor",
         131_072,
-        provenant_records::diagnostic::SettingSource::Configuration,
+        provenant_records::diagnostic::Layer::Host,
         &warn_policy,
     )?;
     assert_eq!(prompt.text(), text);
@@ -1319,7 +1311,7 @@ fn launch_prompt_refuses_symlinked_attempt_ancestors() -> Result<(), Box<dyn std
             &state,
             "cursor",
             65_536,
-            provenant_records::diagnostic::SettingSource::Configuration,
+            provenant_records::diagnostic::Layer::Host,
             &provenant_records::policy::Policy::default(),
         )
         .is_err()

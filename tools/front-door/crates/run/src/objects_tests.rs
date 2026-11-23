@@ -1291,7 +1291,7 @@ fn shared_branch_publication_compares_base_merges_divergence_and_is_idempotent()
     let refuse = LaneHistory {
         rebase: provenant_config::Setting {
             value: provenant_config::Rebase::Refuse,
-            source: provenant_records::LimitSource::Project,
+            source: provenant_records::Layer::Project,
         },
         ..LaneHistory::default()
     };
@@ -1402,7 +1402,7 @@ fn a_divergent_publication_that_conflicts_names_the_files_and_retains_the_branch
 // Spec: docs/specs/run-settlement.md#settlement
 fn the_unrooted_decision_judges_the_lane_head_before_any_host_merge() -> TestResult {
     use provenant_config::{HistoryEffect, Setting};
-    use provenant_records::LimitSource;
+    use provenant_records::Layer;
     let fixture = Fixture::new("sha1")?;
     // The host branch was rewritten onto a root the lane never saw, so a merge
     // of it would descend the branch while the lane head descends neither it
@@ -1429,7 +1429,7 @@ fn the_unrooted_decision_judges_the_lane_head_before_any_host_merge() -> TestRes
     let history = LaneHistory {
         unrooted_tip: Setting {
             value: HistoryEffect::Refuse,
-            source: LimitSource::Host,
+            source: Layer::Host,
         },
         ..LaneHistory::default()
     };
@@ -1825,7 +1825,7 @@ fn foreign_two_parent_tips_never_advance_or_clear_pins() -> TestResult {
 #[test]
 fn a_rewound_branch_is_judged_before_an_unrooted_tip() -> TestResult {
     use provenant_config::{HistoryEffect, Setting};
-    use provenant_records::LimitSource;
+    use provenant_records::Layer;
     let fixture = Fixture::new("sha1")?;
     // The branch was rewound to the launch base's parent while the lane tip
     // descends nothing. The rewound branch decides the publication, so the
@@ -1849,7 +1849,7 @@ fn a_rewound_branch_is_judged_before_an_unrooted_tip() -> TestResult {
     let history = LaneHistory {
         unrooted_tip: Setting {
             value: HistoryEffect::Refuse,
-            source: LimitSource::Host,
+            source: Layer::Host,
         },
         ..LaneHistory::default()
     };
@@ -1888,7 +1888,7 @@ fn a_rewound_branch_is_judged_before_an_unrooted_tip() -> TestResult {
 #[test]
 fn an_unrooted_tip_warns_or_stays_quiet_and_the_host_merge_still_publishes() -> TestResult {
     use provenant_config::{HistoryEffect, Setting};
-    use provenant_records::LimitSource;
+    use provenant_records::Layer;
     for value in [HistoryEffect::Off, HistoryEffect::Warn] {
         let fixture = Fixture::new("sha1")?;
         // The host branch and the lane tip share a root the lane never launched
@@ -1916,7 +1916,7 @@ fn an_unrooted_tip_warns_or_stays_quiet_and_the_host_merge_still_publishes() -> 
         let history = LaneHistory {
             unrooted_tip: Setting {
                 value,
-                source: LimitSource::Host,
+                source: Layer::Host,
             },
             ..LaneHistory::default()
         };
@@ -3585,7 +3585,7 @@ fn publication_rechecks_already_published_branch_before_removing_import_ref() ->
 // Spec: docs/specs/run-settlement.md#settlement
 fn unrooted_history_warns_by_default_and_each_configured_value_decides() -> TestResult {
     use provenant_config::{HistoryEffect, Setting};
-    use provenant_records::LimitSource;
+    use provenant_records::Layer;
     let fixture = Fixture::new("sha1")?;
     let tree = oid(git(
         &fixture.git,
@@ -3645,7 +3645,7 @@ fn unrooted_history_warns_by_default_and_each_configured_value_decides() -> Test
     let history = |value| LaneHistory {
         unrooted_tip: Setting {
             value,
-            source: LimitSource::Project,
+            source: Layer::Project,
         },
         ..LaneHistory::default()
     };
@@ -3940,7 +3940,7 @@ fn update_ref(fixture: &Fixture, reference: &str, value: GitOid) -> TestResult {
 #[test]
 fn unrooted_tip_refuses_only_under_its_refuse_setting() -> TestResult {
     use provenant_config::{HistoryEffect, Setting};
-    use provenant_records::LimitSource;
+    use provenant_records::Layer;
     let fixture = Fixture::new("sha1")?;
     let tree = oid(git(
         &fixture.git,
@@ -3959,7 +3959,7 @@ fn unrooted_tip_refuses_only_under_its_refuse_setting() -> TestResult {
     let history = LaneHistory {
         unrooted_tip: Setting {
             value: HistoryEffect::Refuse,
-            source: LimitSource::Host,
+            source: Layer::Host,
         },
         ..LaneHistory::default()
     };
@@ -4176,7 +4176,7 @@ fn publication_accepts_a_rebase_onto_the_launch_ref() -> TestResult {
     let refuse = LaneHistory {
         unrooted_tip: provenant_config::Setting {
             value: provenant_config::HistoryEffect::Refuse,
-            source: provenant_records::LimitSource::Project,
+            source: provenant_records::Layer::Project,
         },
         ..LaneHistory::default()
     };

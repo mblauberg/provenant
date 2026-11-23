@@ -1,5 +1,6 @@
 //! Strict run-store records. Facts are constructed only after store validation.
-use crate::{CanonicalError, CanonicalV1, FileDigest, LimitSource, PathWire};
+pub use crate::Layer;
+use crate::{CanonicalError, CanonicalV1, FileDigest, PathWire, Precedence};
 use provenant_core::{
     ActorId, AttemptId, DeliveryId, Digest, GitOid, OperationId, ProjectId, WallTime,
 };
@@ -81,7 +82,7 @@ pub struct HarnessProfile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admitted_by: Option<String>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub knob_sources: std::collections::BTreeMap<String, LimitSource>,
+    pub knob_sources: std::collections::BTreeMap<String, Layer>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget_wrap_up: Option<BudgetWrapUp>,
     /// Dispatch-level policy overrides after typed validation.
@@ -116,7 +117,7 @@ impl HarnessProfile {
 pub struct WorkContext {
     /// Sources of writer budget fields, retained by graph compilation.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub budget_sources: std::collections::BTreeMap<String, crate::LimitSource>,
+    pub budget_sources: std::collections::BTreeMap<String, crate::Layer>,
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -394,36 +395,23 @@ impl LaneAccess {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LaneAccessSource {
-    Default,
-    Host,
-    Project,
-    Template,
-    Tier,
-    Launch,
-    RoutePolicy,
-}
-
-impl LaneAccessSource {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Default => "default",
-            Self::Host => "host",
-            Self::Project => "project",
-            Self::Template => "template",
-            Self::Tier => "tier",
-            Self::Launch => "launch",
-            Self::RoutePolicy => "route_policy",
-        }
-    }
-}
+/// The layers lane access accepts, lowest first. The resolved route's policy
+/// outranks the launch inputs that selected it.
+/// Spec: docs/specs/state.md#every-setting-reports-its-layer
+pub const LANE_ACCESS_PRECEDENCE: Precedence = Precedence(&[
+    Layer::Default,
+    Layer::Host,
+    Layer::Project,
+    Layer::Tier,
+    Layer::Template,
+    Layer::Route,
+    Layer::Launch,
+]);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaneAccessReceipt {
     pub access: LaneAccess,
-    pub source: LaneAccessSource,
+    pub source: Layer,
     pub key: String,
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
@@ -818,16 +806,21 @@ pub enum AccountSource {
     Automatic,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// The layers a sandbox mode accepts, lowest first. A knob's actual layer
+/// replaces the old `knob` spelling (Spec: docs/specs/state.md#every-setting-reports-its-layer).
+pub const SANDBOX_PRECEDENCE: Precedence =
+    Precedence(&[Layer::Default, Layer::Host, Layer::Route, Layer::Parent]);
+
+/// Why a sandbox cap was imposed. A cap explains *what* limits the lane, not
+/// *where a value came from*, so it stays beside the layer instead of being
+/// folded into it (Spec: docs/specs/state.md#every-setting-reports-its-layer).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SandboxSourceReceipt {
-    Parent,
-    Route,
+pub enum SandboxConstraint {
+    /// Explicit network or path denials require kernel enforcement.
     Restriction,
+    /// The host platform does not implement sandbox confinement.
     Platform,
-    Knob,
-    #[default]
-    Default,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -837,7 +830,10 @@ pub struct SandboxModeReceipt {
     pub requested: bool,
     #[serde(default)]
     pub effective: bool,
-    pub source: SandboxSourceReceipt,
+    pub source: Layer,
+    /// A cap from a restriction or the platform, kept apart from provenance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub constraint: Option<SandboxConstraint>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
     #[serde(flatten)]
@@ -860,7 +856,7 @@ pub struct SandboxAdmissionReceipt {
     pub boundary: crate::diagnostic::BoundaryClass,
     pub strength: SandboxFloorStrength,
     pub knob: String,
-    pub source: crate::LimitSource,
+    pub source: crate::Layer,
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
 }
@@ -1104,7 +1100,7 @@ pub struct CiScopeReceipt {
     #[serde(default)]
     pub value: String,
     #[serde(default)]
-    pub source: crate::LimitSource,
+    pub source: crate::Layer,
     #[serde(default)]
     pub key: String,
     #[serde(flatten)]
@@ -1231,7 +1227,7 @@ pub struct GhInvocationReceipt {
     #[serde(default)]
     pub count: u64,
     pub budget: Option<u64>,
-    pub source: Option<crate::LimitSource>,
+    pub source: Option<crate::Layer>,
     #[serde(default)]
     pub over_budget: bool,
     #[serde(flatten)]
@@ -2796,11 +2792,7 @@ impl AttemptRecord {
 fn sandbox_floors_children(sandbox: Option<&SandboxModeReceipt>) -> bool {
     sandbox.is_some_and(|sandbox| {
         sandbox.effective
-            && (sandbox.requested
-                || matches!(
-                    sandbox.source,
-                    SandboxSourceReceipt::Parent | SandboxSourceReceipt::Route
-                ))
+            && (sandbox.requested || matches!(sandbox.source, Layer::Parent | Layer::Route))
     })
 }
 /// Sealed launch classification, shared by local, peer and recovered attempts.
@@ -2952,7 +2944,7 @@ impl RepositoryAdmissionPhase {
 pub struct RepositoryAdmissionBinding {
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
-    pub source: crate::PortSource,
+    pub source: crate::Layer,
     pub command: crate::PortCommand,
     pub command_digest: FileDigest,
     pub lease_epoch: u64,
@@ -2965,7 +2957,7 @@ impl<'de> Deserialize<'de> for RepositoryAdmissionBinding {
         struct Wire {
             #[serde(flatten)]
             extra: crate::ExtraFields,
-            source: crate::PortSource,
+            source: crate::Layer,
             command: crate::PortCommand,
             command_digest: FileDigest,
             lease_epoch: u64,
@@ -2990,7 +2982,7 @@ impl<'de> Deserialize<'de> for RepositoryAdmissionBinding {
 }
 
 impl RepositoryAdmissionBinding {
-    pub fn new(source: crate::PortSource, command: &crate::PortCommand) -> Self {
+    pub fn new(source: crate::Layer, command: &crate::PortCommand) -> Self {
         Self {
             extra: Default::default(),
             source,
@@ -3194,12 +3186,13 @@ mod tests {
                 "digest":CanonicalV1::file_digest(b"fixture"),"bytes":7,"complete":true,"redacted":false}
         }))?;
         assert!(!record.floors_children());
-        let mut floors = |source: SandboxSourceReceipt, requested: bool, effective: bool| {
+        let mut floors = |source: Layer, requested: bool, effective: bool| {
             record.applied_route = Some(RouteRecord {
                 sandbox: Some(SandboxModeReceipt {
                     requested,
                     effective,
                     source,
+                    constraint: None,
                     warning: None,
                     extra: Default::default(),
                 }),
@@ -3208,12 +3201,10 @@ mod tests {
             record.floors_children()
         };
         for (source, parent_derived) in [
-            (SandboxSourceReceipt::Route, true),
-            (SandboxSourceReceipt::Parent, true),
-            (SandboxSourceReceipt::Knob, false),
-            (SandboxSourceReceipt::Platform, false),
-            (SandboxSourceReceipt::Restriction, false),
-            (SandboxSourceReceipt::Default, false),
+            (Layer::Route, true),
+            (Layer::Parent, true),
+            (Layer::Host, false), // a knob's actual layer
+            (Layer::Default, false),
         ] {
             for requested in [false, true] {
                 for effective in [false, true] {
@@ -3222,8 +3213,59 @@ mod tests {
                 }
             }
         }
-        assert!(!floors(SandboxSourceReceipt::Default, false, false));
+        // A platform or restriction cap is not a source and never floors children.
+        for constraint in [SandboxConstraint::Platform, SandboxConstraint::Restriction] {
+            record.applied_route = Some(RouteRecord {
+                sandbox: Some(SandboxModeReceipt {
+                    requested: false,
+                    effective: true,
+                    source: Layer::Host,
+                    constraint: Some(constraint),
+                    warning: None,
+                    extra: Default::default(),
+                }),
+                ..Default::default()
+            });
+            assert!(!record.floors_children());
+        }
+        assert!(!floors(Layer::Default, false, false));
         Ok(())
+    }
+
+    /// Spec: docs/specs/state.md#every-setting-reports-its-layer
+    #[test]
+    fn lane_access_and_sandbox_precedence_preserve_the_documented_order() {
+        use crate::{Source, Sourced};
+        fn candidate(layer: Layer) -> Sourced<&'static str> {
+            Sourced {
+                value: layer.as_str(),
+                source: Source {
+                    layer,
+                    origin: None,
+                },
+            }
+        }
+        let access =
+            LANE_ACCESS_PRECEDENCE.merge(LANE_ACCESS_PRECEDENCE.0.iter().copied().map(candidate));
+        assert_eq!(
+            access.winner.as_ref().map(|winner| winner.value),
+            Some("launch")
+        );
+        assert_eq!(access.shadowed.len(), LANE_ACCESS_PRECEDENCE.0.len() - 1);
+        assert!(access.ignored.is_empty());
+
+        let sandbox = SANDBOX_PRECEDENCE.merge(SANDBOX_PRECEDENCE.0.iter().copied().map(candidate));
+        assert_eq!(
+            sandbox.winner.as_ref().map(|winner| winner.value),
+            Some("parent")
+        );
+        assert_eq!(sandbox.shadowed.len(), SANDBOX_PRECEDENCE.0.len() - 1);
+        // A knob's host layer is listed; a route-policy layer unknown to a
+        // family would be reported as ignored, not silently ranked.
+        assert_eq!(
+            crate::diagnostic::SETTING_PRECEDENCE.0,
+            &[Layer::Default, Layer::Host]
+        );
     }
 
     #[test]
@@ -3553,7 +3595,7 @@ mod tests {
             confidential: true,
             parent_sandboxed: true,
             admitted_by: Some("parent".into()),
-            knob_sources: [("lanes.ci_scope".into(), LimitSource::Launch)].into(),
+            knob_sources: [("lanes.ci_scope".into(), Layer::Launch)].into(),
             budget_wrap_up: Some(BudgetWrapUp { remaining: 17 }),
             policy_overrides: [("WRITE_SCOPE".into(), crate::policy::Strength::Warn)].into(),
             policy_project: Some(ProjectId::from_bytes([7; 16])),
@@ -3755,7 +3797,7 @@ mod tests {
                 other: crate::ExitDisposition::Refused,
             },
         };
-        let binding = RepositoryAdmissionBinding::new(crate::PortSource::Project, &command);
+        let binding = RepositoryAdmissionBinding::new(crate::Layer::Project, &command);
         let wire = serde_json::to_value(&binding).unwrap();
         let bytes = serde_json::to_vec(&wire).unwrap();
         let decoded: RepositoryAdmissionBinding =
@@ -3809,7 +3851,7 @@ mod tests {
             "argv":["admission-check"],
             "exit_codes":{"success":[0],"unknown":[],"other":"refused"}
         }))?;
-        let binding = RepositoryAdmissionBinding::new(crate::PortSource::Project, &command);
+        let binding = RepositoryAdmissionBinding::new(crate::Layer::Project, &command);
         let field_values = [
             (
                 "stop_work",

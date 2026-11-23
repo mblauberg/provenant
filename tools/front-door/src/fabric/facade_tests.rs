@@ -682,12 +682,12 @@ fn dirty_writer_refusal_keeps_safe_cause_and_action_on_the_wire() {
 
 #[test]
 fn memory_pressure_refusal_keeps_source_and_resource_action() {
-    use provenant_records::diagnostic::{PressureLevel, PressureThreshold, SettingSource};
+    use provenant_records::diagnostic::{PressureLevel, PressureThreshold, Layer};
     let error = run_error(provenant_run::RunError::Admission(
         provenant_run::AdmissionError::MemoryPressure {
             level: PressureLevel::Critical,
             threshold: PressureThreshold::Warning,
-            origin: SettingSource::Configuration,
+            origin: Layer::Host,
         },
     ));
     let projection = error.diagnostic();
@@ -699,7 +699,7 @@ fn memory_pressure_refusal_keeps_source_and_resource_action() {
         provenant_run::AdmissionError::MemoryPressure {
             level: PressureLevel::Critical,
             threshold: PressureThreshold::Warning,
-            origin: SettingSource::Configuration,
+            origin: Layer::Host,
         },
     ));
     let error = dispatch_refused(fail);
@@ -713,13 +713,13 @@ fn memory_pressure_refusal_keeps_source_and_resource_action() {
 
 #[test]
 fn lane_cap_refusal_retains_the_setting_through_both_adapters() {
-    use provenant_records::diagnostic::{LaneLimit, SettingSource};
+    use provenant_records::diagnostic::{LaneLimit, Layer};
     let failure = || {
         provenant_run::RunError::Admission(provenant_run::AdmissionError::LaneCap {
             active: 3,
             limit: 3,
             kind: LaneLimit::ProjectWriters,
-            origin: SettingSource::Configuration,
+            origin: Layer::Host,
         })
     };
     for error in [run_error(failure()), dispatch_refused(failure().into())] {
@@ -752,13 +752,11 @@ fn lane_cap_refusal_retains_the_setting_through_both_adapters() {
 
 #[test]
 fn pacing_dispatch_refusal_keeps_the_route_and_monthly_window_note() {
-    use provenant_records::diagnostic::{
-        Diagnostic, DiagnosticFact, PacingReserveSetting, PacingSettingSource, ResourceFact,
-    };
+    use provenant_records::diagnostic::{Diagnostic, DiagnosticFact, PacingReserveSetting, PacingSettingSource, ResourceFact, };
     let fact = ResourceFact::PacingReserve {
         percent: 10,
         setting: PacingReserveSetting::Account,
-        origin: PacingSettingSource::Configuration,
+        origin: PacingLayer::Host,
         hold: Box::new(provenant_records::diagnostic::PacingHold {
             account: "codex/opaque-account".into(),
             window: "five_hour".into(),
@@ -1052,9 +1050,7 @@ pub(crate) mod peer_tests {
             .join(record.attempt_id.to_string());
         let directory = provenant_os::fs::Directory::open_anchor(&attempt)?;
         use provenant_records::custody::Scope;
-        use provenant_supervisor::custody::{
-            ExitObservation, PublicationState, SettlementEvidence,
-        };
+        use provenant_supervisor::custody::{ExitObservation, PublicationState, SettlementEvidence, };
         let exit = ExitObservation {
             publication: PublicationState::Durable,
             scope: Scope {
@@ -1250,9 +1246,7 @@ pub(crate) mod peer_tests {
             lane_commit: bool,
             delivery: Option<provenant_run::WriterDeliveryRequest>,
         ) -> Result<Self, Box<dyn std::error::Error>> {
-            use provenant_confinement::worktrees::{
-                self, WorktreeCreate, WorktreeOrigin, WorktreeOwner,
-            };
+            use provenant_confinement::worktrees::{self, WorktreeCreate, WorktreeOrigin, WorktreeOwner, };
             let rig = crate::worktree_tests::support::TestRig::new()?;
             let git = provenant_os::git::git_executable().ok_or("git")?;
             for args in [
@@ -1942,9 +1936,7 @@ fn managed_writer_path_mismatch_names_the_layout_and_repair() {
 #[test]
 fn failed_worktree_add_retains_safe_operation_and_lock_facts_through_relay()
 -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_confinement::worktrees::{
-        self, GitMutationOperation, Occupancy, WorkerObserver, WorktreeCreate,
-    };
+    use provenant_confinement::worktrees::{self, GitMutationOperation, Occupancy, WorkerObserver, WorktreeCreate, };
     use std::collections::BTreeMap;
     struct Free;
     impl WorkerObserver for Free {

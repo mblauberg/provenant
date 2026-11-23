@@ -173,7 +173,7 @@ pub(super) fn naming_and_post_create_ports_are_advisory_and_evidenced() -> Resul
     let marker = marker_path.to_str().ok_or("marker path")?.to_owned();
     let mut ports = provenant_config::PortTable::builtin();
     ports.naming = provenant_config::Port {
-        source: provenant_records::PortSource::Project,
+        source: provenant_records::Layer::Project,
         backend: provenant_config::PortBackend::Command {
             command: provenant_records::PortCommand {
                 argv: vec![
@@ -191,7 +191,7 @@ pub(super) fn naming_and_post_create_ports_are_advisory_and_evidenced() -> Resul
         },
     };
     ports.post_create = provenant_config::Port {
-        source: provenant_records::PortSource::Project,
+        source: provenant_records::Layer::Project,
         backend: provenant_config::PortBackend::Command {
             command: provenant_records::PortCommand {
                 argv: vec![
@@ -249,7 +249,7 @@ pub(super) fn naming_and_post_create_ports_are_advisory_and_evidenced() -> Resul
             .find(|entry| entry.receipt.owner == owner && entry.receipt.phase == phase)
             .ok_or("missing setup command receipt")?
             .receipt;
-        assert_eq!(receipt.source, provenant_records::PortSource::Project);
+        assert_eq!(receipt.source, provenant_records::Layer::Project);
         assert_eq!(
             receipt.backend,
             provenant_records::PortCommandBackend::RepositoryCommand

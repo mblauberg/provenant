@@ -292,7 +292,7 @@ mod tests {
             sandboxed: false,
             git: None,
             port: provenant_config::PortTable::builtin().build,
-            strategy_source: provenant_config::PortSource::Builtin,
+            strategy_source: provenant_records::Layer::Default,
             host_home: "/home".into(),
             rustup_home: Some("/rustup".into()),
             cargo_home: "/cargo".into(),

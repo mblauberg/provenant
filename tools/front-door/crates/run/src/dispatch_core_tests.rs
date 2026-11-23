@@ -957,10 +957,7 @@ fn the_writer_cap_refuses_at_its_limit_and_names_it() -> TestResult {
                         provenant_records::diagnostic::LaneLimit::ProjectWriters
                     }
                 );
-                assert_eq!(
-                    origin,
-                    provenant_records::diagnostic::SettingSource::Configuration
-                );
+                assert_eq!(origin, provenant_records::diagnostic::Layer::Host);
                 // The message names the configuration key to raise.
                 let key = if scope == "project" {
                     "max_project_writer_lanes"

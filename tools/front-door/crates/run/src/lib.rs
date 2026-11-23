@@ -1425,13 +1425,13 @@ mod diagnostic_projection_tests {
     #[test]
     fn confinement_resource_diagnostic_keeps_code_and_excludes_source_text() {
         use provenant_confinement::permissions::PermissionError;
-        use provenant_records::diagnostic::{DiagnosticFact, ResourceFact, SettingSource};
+        use provenant_records::diagnostic::{DiagnosticFact, Layer, ResourceFact};
         let error = RunError::Confinement(PermissionError::ConfigOrigin {
             source: Box::new(PermissionError::GrantLimitExceeded {
                 family: "TOKEN_SENTINEL",
                 limit: 17,
             }),
-            origin: SettingSource::Configuration,
+            origin: Layer::Host,
         });
         let diagnostic = error.diagnostic(Destination::Remote);
         assert_eq!(diagnostic.code, ErrorKind::Confinement.code());

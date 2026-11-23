@@ -164,7 +164,7 @@ fn pacing_reserve_warns_without_excluding_accounts() -> Result<(), Box<dyn std::
                     fact,
                     provenant_records::diagnostic::ResourceFact::PacingReserve {
                         setting,
-                        origin: provenant_records::diagnostic::PacingSettingSource::ShippedDefault,
+                        origin: provenant_records::diagnostic::PacingLayer::Default,
                         ..
                     } if Some(setting) == expected_setting
                 ));
@@ -201,7 +201,7 @@ fn pacing_reserve_warns_without_excluding_accounts() -> Result<(), Box<dyn std::
         (
             serde_json::json!({"pacing": {"accounts": {"codex/opaque-account": {"policy": "pace", "reserve": {"five_hour": 25}}}}}),
             provenant_records::diagnostic::PacingReserveSetting::Account,
-            provenant_records::diagnostic::PacingSettingSource::Configuration,
+            provenant_records::diagnostic::PacingLayer::Host,
             25,
         ),
     ] {

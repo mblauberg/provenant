@@ -1,8 +1,6 @@
 #[test]
 fn identity_probes_preserve_auth_failures_only_from_intact_captures() {
-    use provenant_os::exec::{
-        CapturedStream, ExecError, ExecOptions, ExecOutcome, Executor, Termination,
-    };
+    use provenant_os::exec::{CapturedStream, ExecError, ExecOptions, ExecOutcome, Executor, Termination, };
     struct SignedOut<'a>(&'a [u8], bool, bool, bool, bool);
     impl Executor for SignedOut<'_> {
         fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
@@ -146,7 +144,7 @@ fn optional_discovered_grants_are_filtered_without_touching_required_grants()
         &mut omitted,
     )?;
     assert_eq!(grants, vec![required.clone()]);
-    let receipt = provenant_records::LaneAccessReceipt { access: provenant_records::LaneAccess::Host, source: provenant_records::LaneAccessSource::Default, key: "lanes.access".into(), extra: Default::default() };
+    let receipt = provenant_records::LaneAccessReceipt { access: provenant_records::LaneAccess::Host, source: provenant_records::Layer::Default, key: "lanes.access".into(), extra: Default::default() };
     let mut host_grants = vec![required.clone(), crate::launch::subtree(&optional)];
     let mut host_omitted = Vec::new();
     crate::launch::filter_optional_grants(&mut host_grants, 1, &roots, Some(&receipt), crate::tests::fixture_policy(), crate::launch::OmissionSource::Toolchain, &mut host_omitted)?;
@@ -868,9 +866,7 @@ fn claude_user_skills_use_private_placement_for_registered_readers()
 #[cfg_attr(not(target_os = "macos"), ignore = "requires macOS sandbox")]
 #[allow(clippy::disallowed_methods)]
 fn staged_skills_native_probes() -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_confinement::permissions::{
-        AccessMode, WorktreeWriteAuthority, snapshot::render,
-    };
+    use provenant_confinement::permissions::{AccessMode, WorktreeWriteAuthority, snapshot::render, };
     use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
     let temp = tempfile::tempdir()?;
     let root = temp.path().canonicalize()?;

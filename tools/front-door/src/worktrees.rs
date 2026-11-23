@@ -2902,15 +2902,15 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
     // Stale open graphs are advisory: gc always warns and only stops them when
     // the caller explicitly asked to apply changes.
     use provenant_fabric_runtime::graph::{CancellationTarget, FileJournal};
-    use provenant_records::diagnostic::SettingSource;
+    use provenant_records::diagnostic::Layer;
     let stale_age_seconds = config.gc.stale_graph_age_seconds().unwrap_or(86_400);
     let stale_source = if matches!(
         config.origins.get("gc.stale_graph_age"),
         Some(provenant_config::Origin::User { .. })
     ) {
-        SettingSource::Configuration
+        Layer::Host
     } else {
-        SettingSource::ShippedDefault
+        Layer::Default
     };
     let now_micros = i64::try_from(now_ns / 1_000).unwrap_or(i64::MAX);
     let clock = SystemClock::new();

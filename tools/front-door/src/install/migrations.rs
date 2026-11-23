@@ -10,15 +10,163 @@
 //! warns with the state path and the install proceeds; the id stays unrecorded
 //! so the next install retries the idempotent step.
 use provenant_os::fs::{Directory, PublishMode};
-use provenant_records::migrate::Migration;
+use provenant_records::migrate::{Migration, MigrationError, MigrationReport};
 use provenant_records::warning::{self, MIGRATION_STEP_FAILED, Warning};
 use provenant_records::{InstallReceipt, Limits};
+use serde_json::{Value, json};
 use std::ffi::OsStr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Ordered steps for this release. Steps are deleted in the release after the
 /// one that ships them.
-const STEPS: &[&dyn Migration] = &[];
+const STEPS: &[&dyn Migration] = &[&PortSourceSpellings, &PortConfigSourceSpellings];
+
+/// `builtin` was the old spelling of the compiled-default layer. The shared
+/// vocabulary spells it `default`; rewrite it in every file-backed record and
+/// bump the record's schema version so an old writer cannot be read as new.
+const OLD_SOURCE: &str = "builtin";
+const NEW_SOURCE: &str = "default";
+const OLD_PORT_RECEIPT_VERSION: u64 = 2;
+const NEW_PORT_RECEIPT_VERSION: u64 = 3;
+const OLD_PORTS_VERSION: u64 = 2;
+const NEW_PORTS_VERSION: u64 = 3;
+
+/// Rewrite one JSON file in place, returning whether its bytes changed.
+fn rewrite_json(
+    path: &Path,
+    mut edit: impl FnMut(&mut Value) -> bool,
+) -> Result<bool, MigrationError> {
+    let bytes = std::fs::read(path)?;
+    let mut value: Value = serde_json::from_slice(&bytes).map_err(|error| {
+        MigrationError::new(format!("{}: invalid JSON: {error}", path.display()))
+    })?;
+    if !edit(&mut value) {
+        return Ok(false);
+    }
+    let encoded = serde_json::to_vec(&value)
+        .map_err(|error| MigrationError::new(format!("{}: encode: {error}", path.display())))?;
+    let directory = path
+        .parent()
+        .ok_or_else(|| MigrationError::new(format!("{}: no parent directory", path.display())))?;
+    let directory = Directory::open_anchor(directory)
+        .map_err(|error| MigrationError::new(format!("{}: {error}", directory.display())))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| MigrationError::new(format!("{}: no file name", path.display())))?;
+    directory
+        .atomic_write(name, ".migration.", &encoded, PublishMode::Replace)
+        .map_err(|error| MigrationError::new(format!("{}: {error}", path.display())))?;
+    Ok(true)
+}
+
+/// If `value` carries the old `builtin` source spelling, set the new spelling
+/// and move `schema_version` from `old_version` to `new_version`.
+fn rename_source(value: &mut Value, old_version: u64, new_version: u64) -> bool {
+    let mut changed = false;
+    if value.get("source").and_then(Value::as_str) == Some(OLD_SOURCE) {
+        value["source"] = json!(NEW_SOURCE);
+        changed = true;
+    }
+    if value.get("schema_version").and_then(Value::as_u64) == Some(old_version) {
+        value["schema_version"] = json!(new_version);
+        changed = true;
+    }
+    changed
+}
+
+/// Rewrite stored port-command receipts: `port-receipts/<owner>/port-command-*.json`.
+struct PortSourceSpellings;
+
+impl Migration for PortSourceSpellings {
+    fn id(&self) -> &'static str {
+        "port-source-spellings"
+    }
+
+    fn apply(&self, state_root: &Path) -> Result<MigrationReport, MigrationError> {
+        let mut report = MigrationReport::new(self.id());
+        let root = state_root.join("port-receipts");
+        let owners = match std::fs::read_dir(&root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(report),
+            Err(error) => return Err(error.into()),
+        };
+        for owner in owners {
+            let owner = owner?;
+            if !owner.file_type()?.is_dir() {
+                continue;
+            }
+            for entry in std::fs::read_dir(owner.path())? {
+                let path = entry?.path();
+                let is_receipt = path
+                    .file_name()
+                    .and_then(OsStr::to_str)
+                    .is_some_and(|name| {
+                        name.starts_with("port-command-") && name.ends_with(".json")
+                    });
+                if !is_receipt {
+                    continue;
+                }
+                let changed = rewrite_json(&path, |value| {
+                    rename_source(value, OLD_PORT_RECEIPT_VERSION, NEW_PORT_RECEIPT_VERSION)
+                })?;
+                if changed {
+                    report.changed.push(path.display().to_string());
+                }
+            }
+        }
+        report.changed.sort();
+        Ok(report)
+    }
+}
+
+/// Rewrite the host and host-project port tables: `ports.json` and
+/// `projects/<key>/ports.json`. Each declaration carries a `source`.
+struct PortConfigSourceSpellings;
+
+impl Migration for PortConfigSourceSpellings {
+    fn id(&self) -> &'static str {
+        "port-config-source-spellings"
+    }
+
+    fn apply(&self, state_root: &Path) -> Result<MigrationReport, MigrationError> {
+        let mut report = MigrationReport::new(self.id());
+        let mut tables: Vec<PathBuf> = vec![state_root.join("ports.json")];
+        if let Ok(projects) = std::fs::read_dir(state_root.join("projects")) {
+            for project in projects {
+                let path = project?.path().join("ports.json");
+                if path.exists() {
+                    tables.push(path);
+                }
+            }
+        }
+        for path in tables {
+            if !path.exists() {
+                continue;
+            }
+            let changed = rewrite_json(&path, |value| {
+                let mut changed = rename_source(value, OLD_PORTS_VERSION, NEW_PORTS_VERSION);
+                if let Some(declarations) = value.as_object_mut() {
+                    for (name, declaration) in declarations {
+                        if name == "schema_version" {
+                            continue;
+                        }
+                        if let Some(object) = declaration.as_object_mut()
+                            && rename_source(object, OLD_PORTS_VERSION, NEW_PORTS_VERSION)
+                        {
+                            changed = true;
+                        }
+                    }
+                }
+                changed
+            })?;
+            if changed {
+                report.changed.push(path.display().to_string());
+            }
+        }
+        report.changed.sort();
+        Ok(report)
+    }
+}
 
 /// Run every pending step against the state root and return every recorded id.
 pub(super) fn run(state_root: &Path) -> Vec<String> {
@@ -150,12 +298,75 @@ fn read_receipt(state_root: &Path) -> Result<Option<InstallReceipt>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{read_receipt, run_steps};
+    use super::{PortConfigSourceSpellings, PortSourceSpellings, read_receipt, run_steps};
     use provenant_records::migrate::{Migration, MigrationError, MigrationReport};
     use provenant_records::warning::{MIGRATION_STEP_FAILED, capture};
     use provenant_records::{AbsolutePath, FileDigest, InstallReceipt, SourceDigest};
+    use serde_json::{Value, json};
     use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Spec: docs/specs/state.md#format-changes-migrate-once-at-install
+    #[test]
+    fn port_source_spellings_round_trip_and_are_idempotent() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let owner = root.path().join("port-receipts/admission");
+        std::fs::create_dir_all(&owner).expect("owner dir");
+        let receipt = owner.join("port-command-release-abc.json");
+        std::fs::write(
+            &receipt,
+            r#"{"schema_version":2,"source":"builtin","owner":"admission"}"#,
+        )
+        .expect("write receipt");
+        let report = PortSourceSpellings.apply(root.path()).expect("apply once");
+        assert_eq!(report.id, "port-source-spellings");
+        assert_eq!(report.changed, [receipt.display().to_string()]);
+        let bytes = std::fs::read(&receipt).expect("read receipt");
+        let value: Value = serde_json::from_slice(&bytes).expect("parse receipt");
+        assert_eq!(value["source"], json!("default"));
+        assert_eq!(value["schema_version"], json!(3));
+        let again = PortSourceSpellings.apply(root.path()).expect("apply twice");
+        assert!(again.changed.is_empty(), "second run must change nothing");
+    }
+
+    /// Spec: docs/specs/state.md#format-changes-migrate-once-at-install
+    #[test]
+    fn port_config_source_spellings_rewrite_host_and_project_tables() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let host = root.path().join("ports.json");
+        std::fs::write(
+            &host,
+            r#"{"schema_version":2,"verify":{"source":"builtin"},"build":{"source":"host"}}"#,
+        )
+        .expect("write host table");
+        let project_dir = root.path().join("projects/key");
+        std::fs::create_dir_all(&project_dir).expect("project dir");
+        let project = project_dir.join("ports.json");
+        std::fs::write(
+            &project,
+            r#"{"schema_version":2,"land":{"source":"builtin"}}"#,
+        )
+        .expect("write project table");
+        let report = PortConfigSourceSpellings
+            .apply(root.path())
+            .expect("apply once");
+        assert_eq!(report.changed.len(), 2, "{report:?}");
+        for path in [&host, &project] {
+            let value: Value =
+                serde_json::from_slice(&std::fs::read(path).expect("read")).expect("parse");
+            assert_eq!(value["schema_version"], json!(3));
+            assert!(
+                serde_json::to_string(&value)
+                    .expect("serialise")
+                    .contains("\"default\""),
+                "{path:?}: {value}"
+            );
+        }
+        let again = PortConfigSourceSpellings
+            .apply(root.path())
+            .expect("apply twice");
+        assert!(again.changed.is_empty(), "second run must change nothing");
+    }
 
     struct Succeeds(&'static str);
 

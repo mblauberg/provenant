@@ -5,7 +5,7 @@ use provenant_core::{AttemptId, ProjectId};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ExtraFields, LimitSource, PathWire, RecordHeader, WorkKey,
+    ExtraFields, Layer, PathWire, RecordHeader, WorkKey,
     handoff::{Handoff, WriteScopeReport},
 };
 
@@ -64,13 +64,13 @@ pub enum BranchChoice {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Sourced<T> {
     pub value: T,
-    pub source: LimitSource,
+    pub source: Layer,
 }
 impl<T: Default> Default for Sourced<T> {
     fn default() -> Self {
         Self {
             value: T::default(),
-            source: LimitSource::Default,
+            source: Layer::Default,
         }
     }
 }

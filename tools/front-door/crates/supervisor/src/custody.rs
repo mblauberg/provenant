@@ -175,13 +175,13 @@ pub enum AdmissionError {
     Disk {
         free: u64,
         floor: u64,
-        origin: provenant_records::diagnostic::SettingSource,
+        origin: provenant_records::diagnostic::Layer,
     },
     #[error("memory pressure is {level:?}; domains.fabric.lanes.memory_pressure_threshold is {threshold_label} (source: {source_label}); wait for host memory pressure to fall", threshold_label = .threshold.name(), source_label = .origin.description())]
     MemoryPressure {
         level: provenant_records::diagnostic::PressureLevel,
         threshold: provenant_records::diagnostic::PressureThreshold,
-        origin: provenant_records::diagnostic::SettingSource,
+        origin: provenant_records::diagnostic::Layer,
     },
     #[error(
         "user process count {used} of {limit}; wait for processes to exit or raise the per-user process limit"
@@ -195,7 +195,7 @@ pub enum AdmissionError {
         active: u64,
         limit: u64,
         kind: provenant_records::diagnostic::LaneLimit,
-        origin: provenant_records::diagnostic::SettingSource,
+        origin: provenant_records::diagnostic::Layer,
     },
 }
 impl AdmissionError {

@@ -96,7 +96,7 @@ impl CommitSourcePreparation {
                 knobs: [("lanes.access".into(), serde_json::json!("isolated"))].into(),
                 knob_sources: [(
                     "lanes.access".into(),
-                    provenant_records::LimitSource::Launch,
+                    provenant_records::Layer::Launch,
                 )]
                 .into(),
                 ..Default::default()

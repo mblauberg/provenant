@@ -2395,7 +2395,7 @@ impl Factory {
                             spec.budget_sources
                                 .get(field)
                                 .copied()
-                                .unwrap_or(provenant_records::LimitSource::Template),
+                                .unwrap_or(provenant_records::Layer::Template),
                         );
                     }
                 }

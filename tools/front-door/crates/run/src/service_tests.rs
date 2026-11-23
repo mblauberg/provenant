@@ -878,7 +878,7 @@ fn each_refusal_has_its_own_stable_code() {
             RunError::Admission(AdmissionError::Disk {
                 free: 1,
                 floor: 2,
-                origin: provenant_records::diagnostic::SettingSource::Configuration,
+                origin: provenant_records::diagnostic::Layer::Host,
             }),
             "DISK_FLOOR",
         ),
@@ -886,7 +886,7 @@ fn each_refusal_has_its_own_stable_code() {
             RunError::Admission(AdmissionError::MemoryPressure {
                 level: provenant_records::diagnostic::PressureLevel::Critical,
                 threshold: provenant_records::diagnostic::PressureThreshold::Critical,
-                origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
+                origin: provenant_records::diagnostic::Layer::Default,
             }),
             "MEMORY_PRESSURE",
         ),
@@ -895,7 +895,7 @@ fn each_refusal_has_its_own_stable_code() {
                 active: 3,
                 limit: 3,
                 kind: provenant_records::diagnostic::LaneLimit::HostWriters,
-                origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
+                origin: provenant_records::diagnostic::Layer::Default,
             }),
             "LANE_CAP",
         ),
