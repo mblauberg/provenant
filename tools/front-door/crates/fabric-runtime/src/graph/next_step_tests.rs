@@ -271,6 +271,7 @@ fn retry_of_a_declared_stop_preserves_a_valid_checkpoint() {
             &document.nodes[0].id,
             None,
             &patch::PatchContext {
+                catalogue: None,
                 library: &template::TemplateLibrary::bundled(),
                 resolvers: &Default::default(),
 

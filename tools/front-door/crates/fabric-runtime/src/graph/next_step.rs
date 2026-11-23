@@ -684,6 +684,7 @@ pub(super) fn settle_stop(
         restart,
         detail.as_deref(),
         &PatchContext {
+            catalogue: None,
             library: &TemplateLibrary::bundled(),
             resolvers: &Default::default(),
 

@@ -25,6 +25,7 @@ fn retry_id(
         id,
         brief,
         &patch::PatchContext {
+            catalogue: None,
             library: &template::TemplateLibrary::bundled(),
             resolvers: &Default::default(),
             journal,
@@ -1419,6 +1420,7 @@ fn retry_node_and_dependants_resets_consumers_and_preserves_unrelated_work() {
     let resolvers = Default::default();
     let limits = plans::generous();
     let context = patch::PatchContext {
+        catalogue: None,
         library: &library,
         resolvers: &resolvers,
 
@@ -1619,6 +1621,7 @@ fn public_agent_retry_replaces_dynamic_children_instead_of_relaunching_stale_wor
                 "work",
                 None,
                 &patch::PatchContext {
+                    catalogue: None,
                     library: &template::TemplateLibrary::bundled(),
                     resolvers: &Default::default(),
 
@@ -1639,6 +1642,7 @@ fn public_agent_retry_replaces_dynamic_children_instead_of_relaunching_stale_wor
             "work",
             None,
             &patch::PatchContext {
+                catalogue: None,
                 library: &template::TemplateLibrary::bundled(),
                 resolvers: &Default::default(),
 
@@ -1732,6 +1736,7 @@ fn public_retry_of_dynamic_member_recomputes_enclosing_join_without_retiring_the
         "work--planner--slice",
         None,
         &patch::PatchContext {
+            catalogue: None,
             library: &template::TemplateLibrary::bundled(),
             resolvers: &Default::default(),
 
@@ -1776,6 +1781,7 @@ fn public_retry_preserves_live_spawn_only_children() {
     let resolvers = Default::default();
     let limits = plans::generous();
     let context = patch::PatchContext {
+        catalogue: None,
         library: &library,
         resolvers: &resolvers,
 
@@ -1796,7 +1802,6 @@ fn public_retry_preserves_live_spawn_only_children() {
             ..Default::default()
         },
         &context,
-        None,
     )
     .unwrap();
     let mut owner = FakeOwner {

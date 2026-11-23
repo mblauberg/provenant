@@ -25,6 +25,7 @@ pub fn validate_submission_snapshot(
     let library = TemplateLibrary::bundled();
     let resolvers = BTreeMap::new();
     let context = PatchContext {
+        catalogue: None,
         library: &library,
         resolvers: &resolvers,
         journal: None,
@@ -328,6 +329,10 @@ pub struct PatchContext<'a> {
     pub limits: &'a crate::config::GraphLimits,
     /// The project's declared worktree layout used for generated child paths.
     pub worktree_layout: provenant_config::WorktreeLayoutPort,
+    /// The host's effective routing catalogue. Every host path that admits a
+    /// patch supplies it, so `prepare` can decide one model spelling for the
+    /// nodes it adds. In-process callers without a host pass `None`.
+    pub catalogue: Option<&'a provenant_routing::Catalogue>,
 }
 
 /// Detect a credential shape for advisory warnings only.
@@ -375,9 +380,8 @@ pub fn admit_patch(
     parent: Option<&str>,
     patch: &Patch,
     context: &PatchContext<'_>,
-    catalogue: Option<&provenant_routing::Catalogue>,
 ) -> Result<Admitted, PatchError> {
-    admit_patch_for_retry(graph, parent, patch, context, catalogue, None)
+    admit_patch_for_retry(graph, parent, patch, context, None)
 }
 
 fn admit_patch_for_retry(
@@ -385,7 +389,6 @@ fn admit_patch_for_retry(
     parent: Option<&str>,
     patch: &Patch,
     context: &PatchContext<'_>,
-    catalogue: Option<&provenant_routing::Catalogue>,
     retry: Option<&str>,
 ) -> Result<Admitted, PatchError> {
     // Initial nodes live in the immutable source, rather than being copied
@@ -525,7 +528,6 @@ fn admit_patch_for_retry(
         parent,
         patch,
         context,
-        catalogue,
         Preparation::Live { retry },
     )? {
         Prepared::Replayed(revision) => Ok(Admitted {
@@ -908,7 +910,6 @@ fn retry_node_scope(
         None,
         &patch,
         context,
-        None,
         Some(id),
     )?;
     if let Some((_, Some(restart))) = reason
@@ -1094,6 +1095,7 @@ pub fn submission(
     let library = TemplateLibrary::bundled();
     let resolvers = BTreeMap::new();
     let context = PatchContext {
+        catalogue: None,
         library: &library,
         resolvers: &resolvers,
 
@@ -1429,7 +1431,6 @@ pub(super) enum Preparation<'a> {
     FinalFragment,
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn prepare(
     source: &GraphDocument,
     expanded: &GraphDocument,
@@ -1437,7 +1438,6 @@ pub(super) fn prepare(
     parent: Option<&PlannedNode>,
     patch: &Patch,
     context: &PatchContext<'_>,
-    catalogue: Option<&provenant_routing::Catalogue>,
     mode: Preparation<'_>,
 ) -> Result<Prepared, PatchError> {
     let retry = match mode {
@@ -1740,8 +1740,8 @@ pub(super) fn prepare(
     // Admission only reads the stored ids.
     // Spec: docs/specs/fabric.md#one-model-spelling-per-route
     let mut model_warnings = Vec::new();
-    super::canonicalise_route_nodes(&mut nodes, catalogue, &mut model_warnings);
-    super::canonicalise_route_nodes(&mut replaced, catalogue, &mut model_warnings);
+    super::canonicalise_route_nodes(&mut nodes, context.catalogue, &mut model_warnings);
+    super::canonicalise_route_nodes(&mut replaced, context.catalogue, &mut model_warnings);
     warnings.extend(
         model_warnings
             .into_iter()
@@ -2007,13 +2007,13 @@ mod advisory_write_scope_tests {
             None,
             &patch,
             &PatchContext {
+                catalogue: None,
                 library: &library,
                 resolvers: &resolvers,
                 journal: None,
                 limits: &limits,
                 worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
             },
-            None,
         )
         .expect("overlapping advisory claims remain admissible");
 
@@ -2100,13 +2100,13 @@ mod advisory_write_scope_tests {
             None,
             &submission,
             &PatchContext {
+                catalogue: None,
                 library: &library,
                 resolvers: &resolvers,
                 journal: None,
                 limits: &limits,
                 worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
             },
-            None,
         )
         .expect("initial static admission succeeds");
 

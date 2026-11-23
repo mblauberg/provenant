@@ -57,6 +57,7 @@ fn compiled_batch(raw: Value) -> GraphDocument {
     ]);
     let limits = super::plans::generous();
     let context = super::patch::PatchContext {
+        catalogue: None,
         library: &library,
         resolvers: &resolvers,
         journal: None,

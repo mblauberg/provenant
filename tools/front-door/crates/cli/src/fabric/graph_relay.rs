@@ -682,7 +682,11 @@ fn serve_authorised(
                 &review_subjects,
             )
             .map_err(|error| refused("invalid_review", error))?;
+            // The host decides one spelling of every model a child route adds,
+            // so relay children reach launch with the same full ids as edits.
+            let catalogue = crate::route::effective_catalogue(&context.roots).ok();
             let patch_context = PatchContext {
+                catalogue: catalogue.as_ref(),
                 journal: None,
                 library: &library,
                 resolvers: &resolvers,
@@ -914,6 +918,7 @@ fn serve_authorised(
                 Some(&parent),
                 &patch,
                 &PatchContext {
+                    catalogue: catalogue.as_ref(),
                     journal: None,
                     library: &library,
                     resolvers: &resolvers,
@@ -921,7 +926,6 @@ fn serve_authorised(
                     limits: &context.config.graph.limits,
                     worktree_layout: context.port_table.worktree_layout.clone(),
                 },
-                catalogue.as_ref(),
             )
             .map_err(patch_refused)?;
             if let Some(expansion) = checkpoint.expansions.last() {
@@ -4484,6 +4488,7 @@ mod panel_tests {
                 Some("caller"),
                 &patch,
                 &PatchContext {
+                    catalogue: None,
                     library: &library,
                     resolvers: &resolvers,
                     limits: &limits,
@@ -4491,7 +4496,6 @@ mod panel_tests {
                     journal: None,
                     worktree_layout: worktree_layout.clone(),
                 },
-                None,
             )?;
             assert!(!admitted.added.is_empty());
             let expanded = &checkpoint.expansions.last().ok_or("relay expansion")?.nodes;
@@ -4692,6 +4696,7 @@ mod panel_tests {
             None,
             &patch,
             &PatchContext {
+                catalogue: None,
                 library: &library,
                 resolvers: &crucial,
                 limits: &limits,
@@ -4700,7 +4705,6 @@ mod panel_tests {
 
                 worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
             },
-            None,
         )
         .expect("relay resolvers expand the complete review composite");
     }

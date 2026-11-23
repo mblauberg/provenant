@@ -348,6 +348,12 @@ pub trait AttemptOwner {
     /// Graph planning is pure and never probes the filesystem or selects a layout.
     fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort;
 
+    /// The host's effective routing catalogue, used to decide one spelling of
+    /// every model a patch admits. Hosts without routing policy keep `None`.
+    fn catalogue(&self) -> Option<provenant_routing::Catalogue> {
+        None
+    }
+
     /// Read the admitted successor of a terminal attempt, without replacing
     /// the predecessor's identity or submitting another operation.
     fn continuation(
@@ -1584,6 +1590,7 @@ fn advance_gate<R: AttemptOwner, J: GraphJournal>(
                     }
                     let library = template::TemplateLibrary::bundled();
                     let context = patch::PatchContext {
+                        catalogue: None,
                         library: &library,
                         resolvers: &resolvers,
                         journal: None,
@@ -1601,7 +1608,6 @@ fn advance_gate<R: AttemptOwner, J: GraphJournal>(
                         Some(&parent),
                         &change,
                         &context,
-                        None,
                     )
                     .map_err(|error| error.message)?;
                     let preview = plans::expand(
@@ -2952,6 +2958,7 @@ fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
     limits: &crate::config::GraphLimits,
     worktree_layout: provenant_config::WorktreeLayoutPort,
     admission_policy: provenant_records::policy::Policy,
+    catalogue: Option<&provenant_routing::Catalogue>,
     effective_budget: crate::config::GraphBudget,
     resume_in: bool,
     checkpoint_in: GraphCheckpoint,
@@ -3059,6 +3066,7 @@ fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
                     limits,
                     &worktree_layout,
                     &admission_policy,
+                    catalogue,
                 );
                 if let Some((next_expanded, next_plan, next_positions)) = settled {
                     validate_expanded_rows(&checkpoint, &next_plan)?;
@@ -3564,6 +3572,7 @@ fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
                         limits,
                         &worktree_layout,
                         &admission_policy,
+                        catalogue,
                     )
                 } else {
                     None
@@ -3634,6 +3643,7 @@ fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
                     limits,
                     &worktree_layout,
                     &admission_policy,
+                    catalogue,
                 )
             {
                 validate_expanded_rows(&checkpoint, &next_plan)?;
@@ -3717,6 +3727,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
     admitted_candidate: Option<AdmittedCandidate>,
 ) -> Result<GraphRun, GraphError<R::Error, J::Error>> {
     let worktree_layout = owner.worktree_layout();
+    // The host owns the effective catalogue; patch admission reads it from the
+    // graph context rather than resolving a bundled fallback of its own.
+    let catalogue = owner.catalogue();
     // Resolve once for this graph operation, before replay and expansion.
     let admission_policy = owner.graph_admission_policy();
     let unbounded = crate::config::GraphLimits {
@@ -3834,13 +3847,13 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     None,
                     submission,
                     &patch::PatchContext {
+                        catalogue: catalogue.as_ref(),
                         library: &library,
                         resolvers: &resolvers,
                         journal: None,
                         limits,
                         worktree_layout: worktree_layout.clone(),
                     },
-                    None,
                 )
                 .map_err(|error| GraphError::Invalid(error.to_string()))?;
             }
@@ -4043,6 +4056,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         limits,
         worktree_layout,
         admission_policy,
+        catalogue.as_ref(),
         effective_budget,
         resume,
         checkpoint,

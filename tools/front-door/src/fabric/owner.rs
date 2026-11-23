@@ -1441,6 +1441,10 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         self.factory.context.graph_prompt_limit_source
     }
 
+    fn catalogue(&self) -> Option<provenant_routing::Catalogue> {
+        provenant_cli::route::effective_catalogue(&self.factory.context.roots).ok()
+    }
+
     fn graph_admission_policy(&self) -> provenant_records::policy::Policy {
         let project = self.factory.context.identity.project.to_string();
         match provenant_cli::config_reads::read_for(&self.factory.context.roots, "run admission") {

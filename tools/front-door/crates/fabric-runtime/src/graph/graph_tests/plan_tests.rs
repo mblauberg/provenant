@@ -2942,6 +2942,7 @@ fn admit_with(
     )]);
     let limits = plans::generous();
     let context = PatchContext {
+        catalogue: None,
         library: &library,
         resolvers: &resolvers,
         journal: None,
@@ -2957,7 +2958,6 @@ fn admit_with(
         parent,
         &host_patch(patch),
         &context,
-        None,
     )
 }
 
@@ -3231,6 +3231,7 @@ fn admit_patch_journals_before_commit_and_tags_its_nodes_with_the_parent() {
         Ok(())
     };
     let context = PatchContext {
+        catalogue: None,
         library: &library,
         resolvers: &resolvers,
 
@@ -3250,7 +3251,6 @@ fn admit_patch_journals_before_commit_and_tags_its_nodes_with_the_parent() {
         Some("a"),
         &patch,
         &context,
-        None,
     )
     .unwrap();
     // The sink saw the record before commit, unmarked, with the parent named.
@@ -3263,6 +3263,7 @@ fn admit_patch_journals_before_commit_and_tags_its_nodes_with_the_parent() {
 
     let failing = |_: &PatchRecord| Err("disk full".to_owned());
     let context = PatchContext {
+        catalogue: None,
         library: &library,
         resolvers: &resolvers,
 
@@ -3282,7 +3283,6 @@ fn admit_patch_journals_before_commit_and_tags_its_nodes_with_the_parent() {
         None,
         &patch,
         &context,
-        None,
     )
     .unwrap_err();
     assert_eq!(error.code, "journal");
@@ -3535,6 +3535,7 @@ fn submit_compiles_a_patch_into_a_new_graph() {
     let resolvers = Default::default();
     let limits = plans::generous();
     let context = PatchContext {
+        catalogue: None,
         library: &library,
         resolvers: &resolvers,
 
@@ -4079,6 +4080,7 @@ fn ordinary_agent_final_patch_follows_earlier_live_children_once() {
         &plans::generous(),
         &provenant_config::PortTable::builtin().worktree_layout,
         &Default::default(),
+        None,
     )
     .expect("final patch must follow the live patch");
     assert_eq!(checkpoint.expansions.len(), 2);
@@ -4094,7 +4096,8 @@ fn ordinary_agent_final_patch_follows_earlier_live_children_once() {
             Some(&capture(&output)),
             &plans::generous(),
             &provenant_config::PortTable::builtin().worktree_layout,
-        &Default::default(),
+            &Default::default(),
+            None,
         )
         .is_none()
     );
@@ -4141,6 +4144,7 @@ fn planner_admits_bundled_batch_and_deliver_through_the_patch_path() {
     ]);
     let limits = plans::generous();
     let context = PatchContext {
+        catalogue: None,
         library: &library,
         resolvers: &resolvers,
 
@@ -4172,7 +4176,6 @@ fn planner_admits_bundled_batch_and_deliver_through_the_patch_path() {
             Some("plan"),
             &patch,
             &context,
-            None,
         )
         .unwrap_or_else(|error| panic!("{name}: {error}"));
         assert!(admitted.added.contains(&"plan--delivery".to_owned()));

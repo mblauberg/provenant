@@ -3137,6 +3137,7 @@ fn pending_repair_cache_and_panel_never_certify_a_redone_fix() {
             "repair--r1--fix",
             None,
             &patch::PatchContext {
+                catalogue: None,
                 library: &library,
                 resolvers: &resolvers,
 

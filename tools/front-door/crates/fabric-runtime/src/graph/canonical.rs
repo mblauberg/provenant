@@ -159,14 +159,15 @@ mod tests {
             })],
             ..Default::default()
         };
+        let catalogue = catalogue();
         let context = super::super::patch::PatchContext {
+            catalogue: Some(&catalogue),
             library: &library,
             resolvers: &resolvers,
             journal: None,
             limits: &limits,
             worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
         };
-        let catalogue = catalogue();
         super::super::patch::admit_patch(
             &mut super::super::patch::LiveGraph {
                 document: &document,
@@ -175,7 +176,6 @@ mod tests {
             None,
             &patch,
             &context,
-            Some(&catalogue),
         )
         .expect("patch admits");
         let added = checkpoint

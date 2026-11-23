@@ -1862,6 +1862,7 @@ impl Factory {
             .zip(resolved_head.as_deref());
         let resolver = self.launch_resolvers_for_tier(raw, route.as_ref(), review_range)?;
         let context = PatchContext {
+            catalogue: None,
             library: &library,
             resolvers: &resolver,
 
@@ -2731,6 +2732,7 @@ impl Factory {
             None,
             &patch,
             &PatchContext {
+                catalogue: catalogue.as_ref(),
                 library: &library,
                 resolvers: &resolver,
 
@@ -2738,7 +2740,6 @@ impl Factory {
                 limits: &self.context.config.graph.limits,
                 worktree_layout: self.context.port_table.worktree_layout.clone(),
             },
-            catalogue.as_ref(),
         )
         .map_err(graph_patch_error)?;
         for expansion in &mut checkpoint.expansions {
@@ -2933,6 +2934,7 @@ impl Factory {
                     &node,
                     input.get("brief").and_then(Value::as_str),
                     &PatchContext {
+                        catalogue: None,
                         library: &library,
                         resolvers: &resolver,
 
