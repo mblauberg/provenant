@@ -946,8 +946,14 @@ impl Factory {
             ),
             Err(error) => {
                 let error = provenant_records::diagnostic::safe_text(&error.to_string());
-                eprintln!(
-                    "warning: full config unavailable ({error}); using the owner's resolved policy"
+                provenant_records::warning::warn(
+                    provenant_records::warning::Warning::new(
+                        provenant_records::warning::CONFIG_MALFORMED,
+                        format!(
+                            "full config unavailable ({error}); using the owner's resolved policy"
+                        ),
+                    )
+                    .subject(self.context.identity.project.to_string()),
                 );
                 provenant_config::policy::read(
                     self.context.roots.state.as_path(),
@@ -1522,11 +1528,13 @@ impl Factory {
             crate::graph_support::ProjectWorktrees::Registered(paths) => paths,
             crate::graph_support::ProjectWorktrees::NotRepository => vec![self.cwd.clone()],
             crate::graph_support::ProjectWorktrees::Unavailable(reason) => {
-                use std::io::Write;
                 let reason = provenant_records::diagnostic::safe_text(&reason);
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: repository worktree inventory unavailable ({reason}); read roots are limited to the current directory"
+                provenant_records::warning::warn(
+                    provenant_records::warning::Warning::new(
+                        provenant_records::warning::FORGE_CONTEXT_UNRESOLVED,
+                        format!("repository worktree inventory unavailable ({reason}); read roots are limited to the current directory"),
+                    )
+                    .subject(self.cwd.display().to_string()),
                 );
                 vec![self.cwd.clone()]
             }
@@ -7636,8 +7644,13 @@ mod tests {
     }
 }
 
-/// Prints a launch warning for the operator; a warning never blocks a launch.
+/// Reports a launch warning for the operator; a warning never blocks a launch.
 pub(super) fn warn_operator(warning: impl std::fmt::Display) {
-    use std::io::Write;
-    let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+    provenant_records::warning::warn(
+        provenant_records::warning::Warning::new(
+            provenant_records::warning::CONFIG_MALFORMED,
+            warning.to_string(),
+        )
+        .once_per_change(),
+    );
 }

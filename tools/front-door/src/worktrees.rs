@@ -88,9 +88,14 @@ fn note_kept_unmerged() {
     );
 }
 
-#[allow(clippy::print_stderr)]
 fn warn_fetch(error: &Error) {
-    eprintln!("warning: {error}; using the current integration resolution");
+    provenant_records::warning::warn(
+        provenant_records::warning::Warning::new(
+            provenant_records::warning::FORGE_CONTEXT_UNRESOLVED,
+            format!("{error}; using the current integration resolution"),
+        )
+        .once_per_change(),
+    );
 }
 
 pub(crate) fn local_worktree_message(error: &WorktreeError) -> String {
@@ -462,6 +467,8 @@ fn execute(
 
 /// The hook reads complete newline-delimited records even when its child
 /// deadline stops this command before the inventory is complete.
+// The hook reads newline-delimited records from stdout as its wire protocol.
+#[allow(clippy::disallowed_methods)]
 fn session_list(globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
     use std::io::Write;
     let result = (|| -> Result<(), Error> {
@@ -1722,11 +1729,16 @@ fn gc_project(
 /// backstop keeps them all. Warn and let the rest of the sweep run: failing the
 /// project here would skip settled-lane collection and the path-based pass.
 fn warn_import_pin_collection(project: &Path, error: &(impl std::fmt::Display + ?Sized)) {
-    use std::io::Write;
-    let _ = writeln!(
-        std::io::stderr().lock(),
-        "warning: import pin collection failed for {}: {error}",
-        project.display()
+    provenant_records::warning::warn(
+        provenant_records::warning::Warning::new(
+            provenant_records::warning::CONFIG_MALFORMED,
+            format!(
+                "import pin collection failed for {}: {error}",
+                project.display()
+            ),
+        )
+        .subject(project.display().to_string())
+        .once_per_change(),
     );
 }
 
@@ -3324,11 +3336,15 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                             &mut should_stop,
                         )
                         .unwrap_or_else(|error| {
-                            use std::io::Write;
-                            let _ = writeln!(
-                                std::io::stderr().lock(),
-                                "warning: settled lane collection failed for {}: {error}",
-                                project.path.display()
+                            provenant_records::warning::warn(
+                                provenant_records::warning::Warning::new(
+                                    provenant_records::warning::CONFIG_MALFORMED,
+                                    format!(
+                                        "settled lane collection failed for {}: {error}",
+                                        project.path.display()
+                                    ),
+                                )
+                                .subject(project.path.display().to_string()),
                             );
                             crate::fabric::gc_cleanup::UnsettledCollection::default()
                         })
@@ -4936,6 +4952,8 @@ mod gc_preview_tests {
     }
 
     #[test]
+    // This fixture measures its own stderr byte count as the reported contract.
+    #[allow(clippy::disallowed_methods)]
     fn gc_default_output_aggregates_routine_rows_and_keeps_exceptions() {
         use provenant_confinement::cache::{CacheGcEntry, CacheGcReason};
         let mut data = GcData::default();

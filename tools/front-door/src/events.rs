@@ -21,6 +21,10 @@ pub(crate) fn run(from: i64, follow: bool, consumer: Option<&str>, globals: &Glo
     }
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "streams event records to stdout as the command's output"
+)]
 fn stream(
     mut cursor: i64,
     follow: bool,

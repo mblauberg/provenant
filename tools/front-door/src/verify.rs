@@ -78,7 +78,13 @@ pub fn run(tier: Option<&str>, commit: Option<&str>, affected: bool, globals: &G
     };
     let full_after = ports.verify_affected_full_after_duration();
     for warning in &full_after.warnings {
-        let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+        provenant_records::warning::warn(
+            provenant_records::warning::Warning::new(
+                provenant_records::warning::CONFIG_MALFORMED,
+                warning.clone(),
+            )
+            .once_per_change(),
+        );
     }
     let declaration = ports.verify.clone();
     let tier = tier.unwrap_or(&declaration.default_tier).to_owned();
@@ -308,10 +314,10 @@ pub fn run(tier: Option<&str>, commit: Option<&str>, affected: bool, globals: &G
                 "the effective verify port is disabled (source: {:?})",
                 declaration.source
             );
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: [VERIFY_UNAVAILABLE] {reason}; skipping verification"
-            );
+            provenant_records::warning::warn(provenant_records::warning::Warning::new(
+                provenant_records::warning::CONFIG_MALFORMED,
+                format!("[VERIFY_UNAVAILABLE] {reason}; skipping verification"),
+            ));
             return render(
                 Report {
                     tier: tier.clone(),
@@ -403,14 +409,25 @@ pub fn run(tier: Option<&str>, commit: Option<&str>, affected: bool, globals: &G
                 .unwrap_or("HEAD");
             match provenant_select::select_with_object_dir(&site.root.join(workspace), &base, head, &policy, &state, &project_key, SystemTime::now(), if site.slot.is_none() { selection_objects.as_deref() } else { None }) {
                 Ok(selection) => extra.push((OsString::from(VERIFY_SELECTION), OsString::from(serde_json::json!({"packages": selection.packages, "full": selection.full, "reason": selection.reason.to_string()}).to_string()))),
-                Err(error) => { let _ = writeln!(std::io::stderr().lock(), "warning: affected selection unavailable: {error}"); },
+                Err(error) => {
+                    provenant_records::warning::warn(
+                        provenant_records::warning::Warning::new(
+                            provenant_records::warning::CONFIG_MALFORMED,
+                            format!("affected selection unavailable: {error}"),
+                        )
+                        .once_per_change(),
+                    );
+                },
             }
         }
         Ok(extra)
     });
     let priority = context.port.priority_for("tier");
     for warning in &priority.warnings {
-        let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+        provenant_records::warning::warn(provenant_records::warning::Warning::new(
+            provenant_records::warning::CONFIG_MALFORMED,
+            warning.clone(),
+        ));
     }
     let priority = match priority.value {
         provenant_config::BuildPriority::Interactive => Priority::Interactive,
@@ -711,10 +728,15 @@ impl Drop for DetachedCheckout {
             .arg(&self.path)
             .output();
         if !matches!(result, Ok(output) if output.status.success()) {
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: failed to remove temporary checkout {}",
-                self.path.display()
+            provenant_records::warning::warn(
+                provenant_records::warning::Warning::new(
+                    provenant_records::warning::CONFIG_MALFORMED,
+                    format!(
+                        "failed to remove temporary checkout {}",
+                        self.path.display()
+                    ),
+                )
+                .subject(self.path.display().to_string()),
             );
         }
     }
@@ -789,6 +811,8 @@ fn failure_message(disposition: PortCommandDisposition) -> Option<(&'static str,
     Some((code, message.into()))
 }
 
+// In human mode the command's captured streams are forwarded verbatim to the terminal.
+#[allow(clippy::disallowed_methods)]
 fn render(
     report: Report,
     status: Outcome,

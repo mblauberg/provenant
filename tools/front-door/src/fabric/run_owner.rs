@@ -1748,10 +1748,12 @@ impl BinaryRunOwner<'_> {
             )
             .is_err()
         {
-            use std::io::Write;
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "refusal notice could not be delivered; inspect the chair binding and notice configuration, then run `provenant reconcile`"
+            provenant_records::warning::warn(
+                provenant_records::warning::Warning::new(
+                    provenant_records::warning::CONFIG_MALFORMED,
+                    "refusal notice could not be delivered; inspect the chair binding and notice configuration",
+                )
+                .repair("run `provenant reconcile`"),
             );
         }
         let (admitted, started) = submission?;

@@ -65,9 +65,14 @@ pub(crate) fn superseding_handle(
 /// The warning and `next:` lines a superseded name adds to a human view. The
 /// target is still read as asked; only the pointer moves to the newer handle.
 pub(crate) fn superseded_notice(name: &str, newest: &str, verb: &str) -> String {
-    crate::event_delivery::warn(&format!(
-        "graph `{name}` was superseded by `{newest}` (different input); reading the older graph"
-    ));
+    provenant_records::warning::warn(
+        provenant_records::warning::Warning::new(
+            provenant_records::warning::NAME_ALIAS_USED,
+            format!("graph `{name}` was superseded by `{newest}` (different input); reading the older graph"),
+        )
+        .subject(name)
+        .repair(format!("provenant {verb} {newest}")),
+    );
     format!("next: provenant {verb} {newest}\n")
 }
 

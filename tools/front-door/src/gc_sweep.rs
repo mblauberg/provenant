@@ -4,12 +4,13 @@ use provenant_os::{
     clock::SystemClock,
     fs::{Directory, LockGuard, LockMode, PublishMode},
 };
+use provenant_records::warning::{CONFIG_MALFORMED, SETTING_LAYER_IGNORED, Warning, warn};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     ffi::{OsStr, OsString},
-    io::{self, Write},
+    io,
     time::{Duration, Instant},
 };
 
@@ -428,9 +429,12 @@ impl Drop for Lease {
             if let Some(cancel) = &self.fenced_cancel {
                 cancel.cancel();
             }
-            let _ = writeln!(
-                io::stderr().lock(),
-                "warning: could not lock GC sweep metadata to release its lease"
+            warn(
+                Warning::new(
+                    CONFIG_MALFORMED,
+                    "could not lock GC sweep metadata to release its lease",
+                )
+                .once_per_change(),
             );
             return;
         };
@@ -442,9 +446,12 @@ impl Drop for Lease {
         }
         self.progress.released = true;
         if let Err(error) = self.write_progress_locked() {
-            let _ = writeln!(
-                io::stderr().lock(),
-                "warning: could not persist the released GC sweep cursor: {error}"
+            warn(
+                Warning::new(
+                    CONFIG_MALFORMED,
+                    format!("could not persist the released GC sweep cursor: {error}"),
+                )
+                .once_per_change(),
             );
         }
     }
@@ -522,9 +529,12 @@ pub(crate) fn acquire(
         progress.scope_cursors_v2 = true;
     }
     if budget.is_zero() {
-        let _ = writeln!(
-            io::stderr().lock(),
-            "warning: gc.sweep_budget=0 checkpoints immediately without collecting"
+        warn(
+            Warning::new(
+                SETTING_LAYER_IGNORED,
+                "gc.sweep_budget=0 checkpoints immediately without collecting",
+            )
+            .once_per_change(),
         );
     }
     let cursor = if let Some(progress) = &old {
@@ -645,9 +655,13 @@ fn read_progress(directory: &Directory) -> Result<Option<Progress>, Box<dyn std:
             Ok(Some(progress))
         }
         Err(error) => {
-            let _ = writeln!(
-                io::stderr().lock(),
-                "warning: corrupt {PROGRESS_FILE}: {error}; resetting cursor"
+            warn(
+                Warning::new(
+                    CONFIG_MALFORMED,
+                    format!("corrupt {PROGRESS_FILE}: {error}; resetting cursor"),
+                )
+                .subject(PROGRESS_FILE)
+                .once_per_change(),
             );
             Ok(None)
         }
@@ -672,9 +686,13 @@ fn next_epoch(
         {
             Some(epoch) => epoch,
             None => {
-                let _ = writeln!(
-                    io::stderr().lock(),
-                    "warning: corrupt {EPOCH_FILE}; resetting epoch counter"
+                warn(
+                    Warning::new(
+                        CONFIG_MALFORMED,
+                        format!("corrupt {EPOCH_FILE}; resetting epoch counter"),
+                    )
+                    .subject(EPOCH_FILE)
+                    .once_per_change(),
                 );
                 0
             }

@@ -188,6 +188,8 @@ fn fail_with_repair(
 }
 /// `fail_with_repair` with a cause the operator needs to see, such as the
 /// bounded output of a failing `build.prepare` command.
+// Refusal emission writes the mapped command result to the two output streams.
+#[allow(clippy::disallowed_methods)]
 fn fail_with_cause(
     command: &str,
     status: Outcome,
@@ -237,6 +239,8 @@ pub(crate) fn fail_with_cause_with_writers<Wout: Write, Werr: Write>(
 
 /// Emit an already-mapped refusal. Owners with a typed error use this with
 /// [`crate::worktrees::Error::command_error`] so the mapping lives in one place.
+// Refusal emission writes the mapped command result to the two output streams.
+#[allow(clippy::disallowed_methods)]
 pub(crate) fn fail_with_command_error(
     command: &str,
     status: Outcome,
@@ -1292,9 +1296,12 @@ pub fn dispatch(
                 if let Err(error) =
                     provenant_os::admission::AdmissionSlots::provision(state, class, config.slots)
                 {
-                    let _ = writeln!(
-                        io::stderr().lock(),
-                        "provenant: admission slots unavailable; command may proceed without them: {error}"
+                    provenant_records::warning::warn(
+                        provenant_records::warning::Warning::new(
+                            provenant_records::warning::CONFIG_MALFORMED,
+                            format!("admission slots unavailable; command may proceed without them: {error}"),
+                        )
+                        .once_per_change(),
                     );
                 }
                 env.push((

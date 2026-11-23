@@ -885,12 +885,20 @@ pub(crate) fn wait_line_observed(
     let mut line = poll_line(&mut observer, number, None, request, max_age)?.0;
     match observer.active_workflows(&line.head, max_age, request) {
         Ok(Some(active)) => line.active_workflows = Some(active),
-        Ok(None) => crate::event_delivery::warn_once(
-            "Actions runs unavailable for this head (no runs found); using observed checks only",
+        Ok(None) => provenant_records::warning::warn(
+            provenant_records::warning::Warning::new(
+                provenant_records::warning::FORGE_CONTEXT_UNRESOLVED,
+                "Actions runs unavailable for this head (no runs found); using observed checks only",
+            )
+            .subject(line.head.clone()),
         ),
-        Err(error) => crate::event_delivery::warn_once(&format!(
-            "Actions runs unavailable for this head ({error}); using observed checks only"
-        )),
+        Err(error) => provenant_records::warning::warn(
+            provenant_records::warning::Warning::new(
+                provenant_records::warning::FORGE_CONTEXT_UNRESOLVED,
+                format!("Actions runs unavailable for this head ({error}); using observed checks only"),
+            )
+            .subject(line.head.clone()),
+        ),
     }
     Ok(line)
 }

@@ -4,7 +4,10 @@ use provenant_cli::brief::{BriefSource, read_brief, select_brief_source};
 use provenant_cli::{Edit, Globals, GraphRunArgs, Templates};
 use provenant_confinement::worktrees::WorkerObserver;
 use provenant_core::{CancelToken, Clock, WaitBudget};
-use provenant_records::{CommandResult, Outcome};
+use provenant_records::{
+    CommandResult, Outcome,
+    warning::{CONFIG_MALFORMED, Warning, warn},
+};
 use provenant_routing::BareModelError;
 use serde_json::{Value, json};
 use std::io::Write;
@@ -260,6 +263,8 @@ fn run_human(data: &Value, input: &Value, announced: bool) -> String {
     }
 }
 
+// The graph command's one-line announcement is written to stdout as its protocol.
+#[allow(clippy::disallowed_methods)]
 fn invoke(
     command: &str,
     input: Result<Value, Box<provenant_records::diagnostic::Diagnostic>>,
@@ -538,11 +543,13 @@ pub(crate) fn run(
     workers: &'static dyn WorkerObserver,
 ) -> u8 {
     if request.over.len() > 5 {
-        let _ = writeln!(
-            std::io::stderr().lock(),
-            "warning: --over creates {} nodes; check comma-separated items",
-            request.over.len()
-        );
+        warn(Warning::new(
+            CONFIG_MALFORMED,
+            format!(
+                "--over creates {} nodes; check comma-separated items",
+                request.over.len()
+            ),
+        ));
     }
     let bare_model = request
         .model
@@ -590,7 +597,7 @@ pub(crate) fn run(
                 .and_then(|catalogue| catalogue.provider_segment_warning(&id))
             });
         if let Some(warning) = warning {
-            let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+            warn(Warning::new(CONFIG_MALFORMED, warning));
         }
     }
     invoke(

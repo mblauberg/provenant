@@ -1755,10 +1755,17 @@ pub(super) fn gc_reports_settled_lane_store_error_and_continues() -> Result {
     let output = command(rig, &["gc", "--apply", "--json"])?;
     // Provider retention reads the same unreadable store and reports it as an
     // incomplete retention, so the exit status is not asserted here.
-    let stderr = String::from_utf8_lossy(&output.stderr.bytes);
+    let value: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    let warnings = value["warnings"].as_array().ok_or("envelope warnings")?;
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
     assert!(
-        stderr.contains("warning: settled lane collection failed for"),
-        "stderr must contain settled lane collection warning: {stderr}"
+        warnings.iter().any(|warning| {
+            warning["code"] == "CONFIG_MALFORMED"
+                && warning["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("settled lane collection failed"))
+        }),
+        "envelope must carry the settled lane collection warning: {warnings:?}"
     );
     Ok(())
 }

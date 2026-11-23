@@ -11,6 +11,10 @@ pub(super) struct ProgressReporter {
     state: std::sync::Arc<std::sync::Mutex<String>>,
 }
 impl ProgressReporter {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "progress output writes to stderr at the gate boundary"
+    )]
     pub(super) fn new(subject: String, interval: Duration) -> Self {
         Self::with_sink(
             subject,
@@ -290,7 +294,7 @@ pub fn assess_evidence(
 /// Execute a configured command plan in an isolated candidate checkout.
 #[allow(
     clippy::disallowed_methods,
-    reason = "gate command execution owns its wall-clock timeout and git boundary"
+    reason = "gate command execution owns its wall-clock timeout, git boundary and stderr output"
 )]
 pub fn execute_commands(
     project: &std::path::Path,
@@ -569,6 +573,10 @@ pub fn await_pr_ci(
     )
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "CI probe output writes to stderr at the gate boundary"
+)]
 fn await_pr_ci_with(
     forge: &mut dyn Forge,
     prs: &[EligiblePr],
@@ -591,11 +599,13 @@ fn await_pr_ci_with(
                 Ok(false) => break,
                 Ok(true) => {}
                 Err(LandingError::RateLimited(message)) => {
-                    use std::io::Write;
-                    let _ = writeln!(
-                        std::io::stderr().lock(),
-                        "warning: pull request #{} CI read skipped: {message}",
-                        pr.number
+                    provenant_records::warning::warn(
+                        provenant_records::warning::Warning::new(
+                            provenant_records::warning::FORGE_CONTEXT_UNRESOLVED,
+                            format!("pull request #{} CI read skipped: {message}", pr.number),
+                        )
+                        .subject(format!("#{}", pr.number))
+                        .once_per_change(),
                     );
                 }
                 Err(error) => return Err(error),

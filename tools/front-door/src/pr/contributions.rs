@@ -204,11 +204,14 @@ fn parse_end(bytes: &[u8]) -> Result<(String, Option<WallTime>)> {
 
 /// Workflow success must not depend on optional attribution storage.
 pub(super) fn warn(number: Option<u64>, error: &dyn std::fmt::Display) {
-    use std::io::Write;
-    let number = number.map_or_else(|| "N".into(), |number| number.to_string());
-    let _ = writeln!(
-        std::io::stderr().lock(),
-        "warning: PR contribution binding failed: {error}; retry `provenant pr contributions {number} --bind`"
+    let label = number.map_or_else(|| "N".into(), |number| number.to_string());
+    provenant_records::warning::warn(
+        provenant_records::warning::Warning::new(
+            provenant_records::warning::CONFIG_MALFORMED,
+            format!("PR contribution binding failed: {error}"),
+        )
+        .subject(label.clone())
+        .repair(format!("retry `provenant pr contributions {label} --bind`")),
     );
 }
 

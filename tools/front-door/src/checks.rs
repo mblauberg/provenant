@@ -709,9 +709,12 @@ fn private_home<T>(operation: impl FnOnce(&Path) -> Result<T, Error>) -> Result<
     match (result, cleanup) {
         (Err(error), _) => Err(error),
         (Ok(value), Err(error)) => {
-            let _ = writeln!(
-                io::stderr().lock(),
-                "provenant: warning: cannot clean private check directory: {error}"
+            provenant_records::warning::warn(
+                provenant_records::warning::Warning::new(
+                    provenant_records::warning::CONFIG_MALFORMED,
+                    format!("cannot clean private check directory: {error}"),
+                )
+                .once_per_change(),
             );
             Ok(value)
         }

@@ -231,10 +231,17 @@ fn check_install_smokes_a_staged_binary_with_private_home_and_keeps_scan_status(
     fs::remove_file(home.join("keep"))?;
     fs::remove_dir(&home)?;
     fs::remove_file(&marker)?;
-    let stderr = String::from_utf8_lossy(&output.stderr.bytes);
+    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
     assert!(
-        stderr.contains("warning") && stderr.contains("private check directory"),
-        "{stderr}"
+        envelope["warnings"].as_array().is_some_and(|warnings| {
+            warnings.iter().any(|warning| {
+                warning["code"] == "CONFIG_MALFORMED"
+                    && warning["message"]
+                        .as_str()
+                        .is_some_and(|message| message.contains("private check directory"))
+            })
+        }),
+        "envelope must carry the private check directory warning: {envelope}"
     );
     Ok(())
 }

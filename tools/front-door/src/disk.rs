@@ -8,6 +8,8 @@ use provenant_records::{CommandError, CommandResult, Outcome};
 use provenant_run::{ExecutionContext, Request, RunStore};
 use std::{io, path::Path, time::Duration};
 
+// The command's own result streams are the render seam for this reader.
+#[allow(clippy::disallowed_methods)]
 pub fn run(globals: &Globals) -> u8 {
     let mut result = match collect(globals) {
         Ok(report) => CommandResult::new("disk report", Outcome::Ok, Some(report)),

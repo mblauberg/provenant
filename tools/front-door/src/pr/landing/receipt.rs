@@ -91,9 +91,15 @@ pub fn read_latest_approval_carry(
         let file = match std::fs::File::open(entry.path()) {
             Ok(file) => file,
             Err(error) => {
-                eprintln!(
-                    "warning: failed to open approval carry receipt {}: {error}",
-                    entry.path().display()
+                provenant_records::warning::warn(
+                    provenant_records::warning::Warning::new(
+                        provenant_records::warning::CONFIG_MALFORMED,
+                        format!(
+                            "failed to open approval carry receipt {}: {error}",
+                            entry.path().display()
+                        ),
+                    )
+                    .subject(entry.path().display().to_string()),
                 );
                 continue;
             }
@@ -102,9 +108,15 @@ pub fn read_latest_approval_carry(
             match provenant_records::decode(file, provenant_records::Limits::default()) {
                 Ok(receipt) => receipt,
                 Err(error) => {
-                    eprintln!(
-                        "warning: corrupt approval carry receipt in {}: {error}",
-                        entry.path().display()
+                    provenant_records::warning::warn(
+                        provenant_records::warning::Warning::new(
+                            provenant_records::warning::CONFIG_MALFORMED,
+                            format!(
+                                "corrupt approval carry receipt in {}: {error}",
+                                entry.path().display()
+                            ),
+                        )
+                        .subject(entry.path().display().to_string()),
                     );
                     continue;
                 }

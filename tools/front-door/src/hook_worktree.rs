@@ -44,6 +44,8 @@ fn state_root(globals: &Globals, cwd: &Path) -> Result<PathBuf, Error> {
     Ok(resolved.roots.state.as_path().to_path_buf())
 }
 
+// A hook's refusal is reported on stderr for the caller that keys on its exit code.
+#[allow(clippy::disallowed_methods)]
 fn fail(hook: &str, error: &dyn std::fmt::Display) -> u8 {
     let _ = writeln!(
         io::stderr().lock(),
@@ -53,6 +55,8 @@ fn fail(hook: &str, error: &dyn std::fmt::Display) -> u8 {
     2
 }
 
+// A hook's skip notice is reported on stderr for the caller that keys on its exit code.
+#[allow(clippy::disallowed_methods)]
 fn abstain(hook: &str, reason: &dyn std::fmt::Display) -> u8 {
     let _ = writeln!(
         io::stderr().lock(),
@@ -68,10 +72,16 @@ fn abstain(hook: &str, reason: &dyn std::fmt::Display) -> u8 {
 /// a tree the hook only hoped to adopt is never claimed as adopted. Dirty trees
 /// and trees with a live writer stay refused by `fail`.
 fn warn_adopt(hook: &str, reason: &dyn std::fmt::Display) {
-    let _ = writeln!(
-        io::stderr().lock(),
-        "{hook}: warning: adopting clean worktree: {}",
-        reason.to_string().chars().take(512).collect::<String>()
+    provenant_records::warning::warn(
+        provenant_records::warning::Warning::new(
+            provenant_records::warning::WORKTREE_ADOPTED_DIRTY,
+            format!(
+                "adopting clean worktree: {}",
+                reason.to_string().chars().take(512).collect::<String>()
+            ),
+        )
+        .subject(hook)
+        .once_per_change(),
     );
 }
 
@@ -260,6 +270,8 @@ fn forget(state: &Path, canonical: &Path) {
 
 // Hook I/O is bounded by real monotonic deadlines.
 #[allow(clippy::disallowed_methods)]
+// The hook's ownership-mark failure notice is part of its stderr protocol.
+#[allow(clippy::disallowed_methods)]
 pub fn create(globals: &Globals) -> u8 {
     let input = match hook_io::read_stdin(INPUT_CAP, Instant::now() + INPUT_TIME) {
         Ok(bytes) => match serde_json::from_slice::<CreateInput>(&bytes) {
@@ -273,10 +285,15 @@ pub fn create(globals: &Globals) -> u8 {
     }
     let branch = branch_for(&input.name);
     if branch != format!("claude/{}", input.name) {
-        let _ = writeln!(
-            io::stderr().lock(),
-            "worktree-create: warning: worktree name {:?} is not a plain slug; using branch {branch} (source: hook input name)",
-            input.name.chars().take(64).collect::<String>()
+        provenant_records::warning::warn(
+            provenant_records::warning::Warning::new(
+                provenant_records::warning::NAME_CASE_FOLDED,
+                format!(
+                    "worktree-create: worktree name {:?} is not a plain slug; using branch {branch}",
+                    input.name.chars().take(64).collect::<String>()
+                ),
+            )
+            .subject(branch.clone()),
         );
     }
     let result = (|| -> Result<PathBuf, Error> {
