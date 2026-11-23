@@ -1074,10 +1074,7 @@ fn lock_worktree_impl(
         });
         match effect {
             Effect::Proceed => {}
-            Effect::Warn(message) => {
-                use std::io::Write;
-                let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
-            }
+            Effect::Warn(warning) => provenant_records::warning::warn(warning),
             Effect::Refuse(_) | Effect::Stop(_) => {
                 return Err(live_refusal(context.workers, &canonical));
             }

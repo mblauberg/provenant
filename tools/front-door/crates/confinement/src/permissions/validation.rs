@@ -783,7 +783,9 @@ pub(super) fn filtered_native_controls_with_policy(
             Facts::violation(format!("omitted {invalid} malformed native control labels")),
         ) {
             Effect::Proceed => {}
-            Effect::Warn(message) => crate::permissions::probe::report_policy_message(message),
+            Effect::Warn(warning) => {
+                crate::permissions::probe::report_policy_message(warning.message)
+            }
             Effect::Refuse(_) | Effect::Stop(_) => {
                 panic!("native-control filtering is a warning-only decision")
             }

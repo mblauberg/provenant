@@ -1084,7 +1084,7 @@ fn lane_port_allocation(
             let effect = policy.check("PORT_BLOCKS", Facts::violation("lane port pool exhausted"));
             match effect {
                 Effect::Proceed => return Ok((None, None)),
-                Effect::Warn(message) => return Ok((None, Some(message))),
+                Effect::Warn(warning) => return Ok((None, Some(warning.message))),
                 Effect::Refuse(_) | Effect::Stop(_) => {}
             }
             use provenant_records::diagnostic::PortSettingSource;
@@ -1110,7 +1110,7 @@ fn lane_port_allocation(
                 ),
             );
             let warning = match effect {
-                provenant_records::policy::Effect::Warn(message) => Some(message),
+                provenant_records::policy::Effect::Warn(warning) => Some(warning.message),
                 _ => None,
             };
             Ok((None, warning))
