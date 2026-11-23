@@ -500,8 +500,15 @@ impl HostDeliveryContext {
         }
         // Preparation runs on a copy: only its sealed binding and the tools it
         // validated are kept, in stop-only fields. The launch binding, host
-        // tools and environment stay as the launch prepared them.
-        let prepared = self.clone().prepare(writer, request)?;
+        // tools and environment stay as the launch prepared them. The launch's
+        // own prepare has just refreshed the remote, so a second all-branch
+        // fetch here would run outside the origin-refresh lock and could lose
+        // a tracking-ref transaction against an unrelated forced ref update,
+        // dropping stop publication. Bind from that same refreshed state.
+        let prepared = self.clone().prepare_with_fetch(writer, request, false)?;
+        if prepared.bound.is_none() {
+            return Err(RunError::Validation("stop publish binding missing"));
+        }
         self.attach_stop_publish(prepared);
         Ok(self)
     }
@@ -1520,7 +1527,20 @@ impl HostDeliveryContext {
         });
         self.validate_transport_helpers(writer)?;
         if fetch && !matches!(request.mode, crate::DeliveryMode::Integrate(_)) {
-            self.refresh_remote(writer, &[], &request.remote)?;
+            // This all-branch fetch is the same shared refresh `refresh_origin`
+            // performs. Taking the fetch lock coalesces a refresh another
+            // launch just completed, and the concurrent-transaction tolerance
+            // keeps an unrelated forced ref update from failing the launch.
+            let common = self.common_git_dir(&writer.project, stage)?;
+            let common = Directory::open_anchor(&common)?;
+            let requested = OriginRefreshRequest::capture()?;
+            let cancel = provenant_core::CancelToken::new();
+            coalesced_origin_refresh(
+                &common,
+                &requested,
+                self.cancellation.as_ref().unwrap_or(&cancel),
+                || self.refresh_remote(writer, &[], &request.remote),
+            )?;
         }
         Ok(self)
     }
