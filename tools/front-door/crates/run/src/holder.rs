@@ -2226,11 +2226,13 @@ impl RunStore {
             let request = self.request(record.attempt_id, call)?;
             let task = request.task;
             if let (Some(writer), Some(delivery)) = (&task.writer, &task.deliver) {
-                // The delivery's own artifact is authoritative for completion.
-                // An integrate receipt names the head it published to the
-                // destination, which can differ from the sealed writer head
-                // (the graph base before integration), so head equality must not
-                // reject it. A pickup receipt still needs its sealed head.
+                // Only an integrate receipt may name a head other than the
+                // sealed writer head: integration publishes the lane to its
+                // destination and the receipt can carry the integrated tip.
+                // A delivered push or pr receipt for H1 must not settle a
+                // sealed H2 that was never delivered. An explicit pickup
+                // receipt still requires the sealed head below.
+                let integrate = matches!(delivery.mode, crate::DeliveryMode::Integrate(_));
                 let integrated = read_sealed(attempt, "delivery.json", RECORD_LIMIT)?
                     .map(|raw| crate::db::decode::<WriterDeliveryReceipt>(&raw))
                     .transpose()?
@@ -2238,6 +2240,7 @@ impl RunStore {
                         receipt.branch == delivery.branch
                             && receipt.remote == delivery.remote
                             && matches!(receipt.state, WriterDeliveryState::Delivered { .. })
+                            && (integrate || receipt.head == record.head)
                     });
                 if integrated
                     || self
