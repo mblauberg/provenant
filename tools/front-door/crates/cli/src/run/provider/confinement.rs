@@ -1926,7 +1926,14 @@ pub(in crate::run) fn read_only_source_ref(
     .and_then(|text| provenant_core::GitOid::parse(text.trim()).ok())?;
     let (commit, reference) = configured_upstream(&executor, &repo, &utility, budget, &cancel)
         .or_else(|| {
-            let fallback = default_upstream(&executor, &repo, &utility, budget, &cancel)?;
+            // The remote comes from the one declared/inferred context, never a
+            // compiled `origin`: a fork checkout must not pin its review base to
+            // the fork's default when `upstream` is the real forge. An
+            // unresolvable or ambiguous remote keeps the local-source behaviour.
+            // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+            let remote = resolved_forge_remote(state, ancestor)?;
+            let fallback =
+                default_upstream(&executor, &repo, &utility, budget, &cancel, &remote)?;
             // The branch's own tracking configuration could not be resolved, so
             // the remote's default branch is only an advisory stand-in.
             warn(Warning::new(
@@ -2107,15 +2114,35 @@ fn configured_upstream(
     resolve_upstream_ref(executor, repo, utility, budget, cancel, name.as_str())
 }
 
+/// The one remote for an advisory read-only source pin, from the full port
+/// table (host and project declarations together). A fork's `origin` is never
+/// assumed: when no remote is declared or inferred, the caller keeps its local
+/// source behaviour instead of pinning to a guessed remote.
+///
+/// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+fn resolved_forge_remote(state: &Path, project: &Path) -> Option<String> {
+    let ports = provenant_config::PortTable::read_for(Some(project), state).ok()?;
+    let policy = provenant_config::operation_policy(state, project, &ports);
+    let config = provenant_config::ForgeConfig::new(&ports, (*policy).clone());
+    let git = provenant_config::ForgeGit::new(project).ok()?;
+    provenant_config::ForgeContext::remote(&config, &git)
+        .ok()
+        .map(|remote| remote.value)
+}
+
 /// The remote's default branch as last fetched, with the exact ref that named
 /// it. Advisory fallback only: this never fetches. The remote is asked only
-/// when no `origin/HEAD` is recorded, and only within the utility budget.
+/// when no tracking ref is recorded for the resolved remote, and only within
+/// the utility budget.
+///
+/// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
 fn default_upstream(
     executor: &dyn provenant_os::exec::Executor,
     repo: &provenant_confinement::ReadOnlyRepo,
     utility: &provenant_confinement::UtilityRuntime,
     budget: provenant_confinement::UtilityBudget,
     cancel: &provenant_core::CancelToken,
+    remote: &str,
 ) -> Option<(provenant_core::GitOid, String)> {
     use provenant_confinement::utility::advertised_default_branch;
 
@@ -2125,18 +2152,18 @@ fn default_upstream(
         utility,
         budget,
         cancel,
-        "refs/remotes/origin/HEAD",
+        &format!("refs/remotes/{remote}/HEAD"),
     )
     .or_else(|| {
         let branch =
-            advertised_default_branch(executor, repo, utility, "origin", budget, cancel).ok()??;
+            advertised_default_branch(executor, repo, utility, remote, budget, cancel).ok()??;
         resolve_upstream_ref(
             executor,
             repo,
             utility,
             budget,
             cancel,
-            &format!("refs/remotes/origin/{}", branch.short_name()),
+            &format!("refs/remotes/{remote}/{}", branch.short_name()),
         )
     })
 }

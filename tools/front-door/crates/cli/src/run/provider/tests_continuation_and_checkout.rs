@@ -1615,3 +1615,67 @@ fn retained_state_copy_refuses_trees_past_its_entry_and_depth_budget()
     assert!(error.contains("domains.run.continuation_copy_entries is 4"));
     Ok(())
 }
+
+#[test]
+// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+fn read_only_source_ref_resolves_the_remote_instead_of_assuming_origin()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let state = temp.path().join("state");
+    let checkout = temp.path().join("checkout");
+    let remote = temp.path().join("forge.git");
+    std::fs::create_dir_all(&state)?;
+    std::fs::create_dir_all(&checkout)?;
+    let remote_path = remote.to_str().ok_or("remote path")?;
+    provenant_os::fixture::run_git(temp.path(), &["init", "--bare", "-q", remote_path])?;
+    provenant_os::fixture::run_git(&remote, &["symbolic-ref", "HEAD", "refs/heads/main"])?;
+    provenant_os::fixture::run_git(&checkout, &["init", "-q", "-b", "main"])?;
+    for args in [
+        vec!["config", "user.name", "Test"],
+        vec!["config", "user.email", "test@example.invalid"],
+    ] {
+        provenant_os::fixture::run_git(&checkout, &args)?;
+    }
+    std::fs::write(checkout.join("file"), "one\n")?;
+    provenant_os::fixture::run_git(&checkout, &["add", "file"])?;
+    provenant_os::fixture::run_git(&checkout, &["commit", "-qm", "one"])?;
+    std::fs::write(checkout.join("file"), "two\n")?;
+    provenant_os::fixture::run_git(&checkout, &["add", "file"])?;
+    provenant_os::fixture::run_git(&checkout, &["commit", "-qm", "two"])?;
+    let default = String::from_utf8(provenant_os::fixture::run_git(
+        &checkout,
+        &["rev-parse", "HEAD"],
+    )?)?
+    .trim()
+    .to_owned();
+    // A checkout with only a non-`origin` remote and no branch upstream: the
+    // advisory pin must follow the resolved remote's HEAD, not a compiled
+    // `origin` that does not exist here.
+    provenant_os::fixture::run_git(&checkout, &["remote", "add", "forge", remote_path])?;
+    provenant_os::fixture::run_git(&checkout, &["push", "-q", "forge", "main"])?;
+    provenant_os::fixture::run_git(&checkout, &["fetch", "-q", "forge"])?;
+    provenant_os::fixture::run_git(
+        &checkout,
+        &[
+            "symbolic-ref",
+            "refs/remotes/forge/HEAD",
+            "refs/remotes/forge/main",
+        ],
+    )?;
+    provenant_os::fixture::run_git(&checkout, &["reset", "-q", "--hard", "HEAD~1"])?;
+
+    let selected = confinement::read_only_source_ref(&state, &checkout)
+        .ok_or("behind checkout did not resolve a source")?;
+    assert!(
+        selected.reference.contains("refs/remotes/forge/"),
+        "{}",
+        selected.reference
+    );
+    assert!(
+        !selected.reference.contains("origin"),
+        "{}",
+        selected.reference
+    );
+    assert_eq!(selected.commit, provenant_core::GitOid::parse(&default)?);
+    Ok(())
+}

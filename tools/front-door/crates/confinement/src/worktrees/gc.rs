@@ -9,6 +9,7 @@ use provenant_records::custody::{
 };
 use provenant_records::warning::{self, FORGE_CONTEXT_UNRESOLVED, Warning};
 use std::collections::{BTreeSet, HashSet};
+use std::fmt;
 
 /// One budget covers every output candidate in a preview. Applied collection
 /// continues to use the full proof before mutation.
@@ -204,6 +205,57 @@ pub fn branch_candidate(
     }
 }
 
+/// The typed cause of a fail-closed forge-context resolution. A refusal keeps
+/// the remotes or branches it saw so the warning can name a concrete repair;
+/// unreadable metadata is kept as its own cause rather than collapsed into a
+/// refusal.
+///
+/// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+#[derive(Debug)]
+pub enum ForgeContextFailure {
+    /// Context resolution refused: lists the remotes or branches seen.
+    Refusal(provenant_config::ForgeContextError),
+    /// The layout, host state or port table needed to resolve was unreadable.
+    Unavailable(String),
+}
+
+impl fmt::Display for ForgeContextFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Refusal(error) => write!(f, "{error}"),
+            Self::Unavailable(message) => f.write_str(message),
+        }
+    }
+}
+
+impl ForgeContextFailure {
+    /// One command or edit that clears this cause. A missing default branch can
+    /// be repaired either by declaring `git.default_branch` or by naming the
+    /// resolved remote's HEAD; a missing remote must be declared with
+    /// `git.remote` before either applies.
+    ///
+    /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    pub fn repair(&self) -> String {
+        let declaration = "in .provenant/ports.json (or the host ports)";
+        match self {
+            Self::Refusal(provenant_config::ForgeContextError::NoDefaultBranch {
+                remote, ..
+            }) => format!(
+                "run `git remote set-head {remote} --auto` for the reported remote, \
+                 or declare `git.default_branch` {declaration}; then rerun `provenant gc`"
+            ),
+            Self::Refusal(provenant_config::ForgeContextError::NoRemote { .. }) => {
+                format!("declare `git.remote` {declaration}, then rerun `provenant gc`")
+            }
+            Self::Refusal(provenant_config::ForgeContextError::Io { .. })
+            | Self::Unavailable(_) => format!(
+                "make the checkout's Git metadata and port table readable {declaration}, \
+                 then rerun `provenant gc`"
+            ),
+        }
+    }
+}
+
 /// The local branches one GC pass must never select for retirement: every
 /// protected branch (the default branch among them) from the one resolved forge
 /// context, the branch named by the fetched upstream, and every branch a
@@ -253,11 +305,13 @@ impl LocalRetirementScope {
         let forge = match forge_context(context) {
             Ok(forge) => forge,
             Err(cause) => {
+                let repair = cause.repair();
                 warning::warn(
                     Warning::new(
                         FORGE_CONTEXT_UNRESOLVED,
                         format!("forge context unavailable ({cause}); no branch will be retired"),
                     )
+                    .repair(repair)
                     .once_per_change(),
                 );
                 return Ok(Self {
@@ -326,15 +380,16 @@ impl LocalRetirementScope {
 /// guessing a remote or a default branch.
 pub fn forge_context(
     context: &WorktreeContext<'_>,
-) -> Result<provenant_config::ForgeContext, String> {
-    let project = context
-        .layout
-        .project()
-        .ok_or_else(|| "the checkout has no project root".to_owned())?;
-    let state = context.host_state().map_err(|error| error.to_string())?;
+) -> Result<provenant_config::ForgeContext, ForgeContextFailure> {
+    let project = context.layout.project().ok_or_else(|| {
+        ForgeContextFailure::Unavailable("the checkout has no project root".into())
+    })?;
+    let state = context
+        .host_state()
+        .map_err(|error| ForgeContextFailure::Unavailable(error.to_string()))?;
     let ports = provenant_config::PortTable::read_for(Some(project), &state)
-        .map_err(|error| error.to_string())?;
-    provenant_config::resolve_for(project, &ports).map_err(|error| error.to_string())
+        .map_err(|error| ForgeContextFailure::Unavailable(error.to_string()))?;
+    provenant_config::resolve_for(project, &ports).map_err(ForgeContextFailure::Refusal)
 }
 
 /// The one remote for a worktree command. No checkout is assumed to call its

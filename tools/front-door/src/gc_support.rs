@@ -233,7 +233,10 @@ fn forge_remote(context: &WorktreeContext<'_>) -> Result<Option<String>, Error> 
         {
             Ok(None)
         }
-        Err(_) => Err(invalid()),
+        // Keep the typed refusal: its remotes and close matches reach the
+        // warning and its repair, instead of the circular collection message.
+        // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+        Err(error) => Err(Error::ForgeContextUnresolved(error)),
     }
 }
 
@@ -1167,7 +1170,14 @@ mod tests {
             &cancel,
             |context| Ok(fetch_default(context, &cancel)),
         )?;
-        assert!(fetched.is_err(), "{fetched:?}");
+        let error = fetched.expect_err("an ambiguous remote stays a refusal");
+        // The typed cause reaches the caller: both remotes are named and the
+        // repair points at the declaration, not a circular collection hint.
+        // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+        let message = error.local_message();
+        assert!(message.contains("alpha"), "{message}");
+        assert!(message.contains("beta"), "{message}");
+        assert!(error.repair().contains("git.remote"), "{}", error.repair());
         Ok(())
     }
 
