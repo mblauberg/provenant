@@ -631,7 +631,7 @@ fn land_explains_poll_and_budget_sources() -> Result {
     assert_eq!(project["data"]["fields"]["poll_seconds"]["value"], 21);
     assert_eq!(
         project["data"]["fields"]["poll_seconds"]["source"]["layer"],
-        "project"
+        "host_project"
     );
     let tier = show(&["land", "--explain", "--tier", "crucial", "--json"])?;
     assert_eq!(tier["data"]["fields"]["poll_seconds"]["value"], 12);
