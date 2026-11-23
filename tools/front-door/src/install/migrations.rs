@@ -6,15 +6,18 @@
 //!
 //! Every step not already recorded in the install receipt runs once, in
 //! declaration order, after the live-attempt advisory and before any release
-//! is published. Its id is recorded only after it succeeds. A failed step
-//! warns with the state path and the install proceeds; the id stays unrecorded
-//! so the next install retries the idempotent step.
+//! is published. Its id is recorded only after it succeeds. A failed step, or
+//! one that still has warnings for entries it could not migrate, warns with the
+//! state path and the install proceeds; the id stays unrecorded so the next
+//! install retries the idempotent step.
+use provenant_config::PortEvidenceError;
 use provenant_os::fs::{Directory, PublishMode};
 use provenant_records::migrate::{Migration, MigrationError, MigrationReport};
 use provenant_records::warning::{self, MIGRATION_STEP_FAILED, Warning};
 use provenant_records::{InstallReceipt, Limits};
 use serde_json::{Value, json};
 use std::ffi::OsStr;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 /// Ordered steps for this release. Steps are deleted in the release after the
@@ -50,10 +53,67 @@ fn is_old_project_key(name: &str) -> bool {
 
 /// Host-project settings were once filed under `projects/<project_key>`, the
 /// 64-hex SHA-256 of the canonical common Git dir. Project bindings key the same
-/// directory by ProjectId: the first 16 bytes of that digest. Move the old
-/// directory to its binding name. The target's absence is the merge condition;
-/// when both exist neither is touched and the conflict names both paths.
+/// directory by ProjectId: the first 16 bytes of that digest. A bound project
+/// already owns the target directory (it holds its binding record), so merge
+/// the old tree into it entry by entry instead of refusing to touch either.
 struct HostProjectDirs;
+
+/// A clash keeps both entries and names both paths plus the manual repair.
+fn host_project_clash(source: &Path, target: &Path) -> Warning {
+    Warning::new(
+        MIGRATION_STEP_FAILED,
+        format!(
+            "host-project entry clash: {} and {} both exist; the conflicting entry was left in place",
+            source.display(),
+            target.display()
+        ),
+    )
+    .subject(source.display().to_string())
+    .repair(format!(
+        "compare {} with {}, copy the values you need into {}, then remove {} and rerun `provenant install`",
+        source.display(),
+        target.display(),
+        target.display(),
+        source.display()
+    ))
+}
+
+/// Move every non-clashing entry from `from` into the existing `to`. Recurse
+/// when both sides hold a directory of the same name; a true clash leaves the
+/// old entry in place and warns. Returns whether nothing was left unmigrated.
+fn merge_project_dir(
+    from: &Path,
+    to: &Path,
+    report: &mut MigrationReport,
+) -> Result<bool, MigrationError> {
+    let mut complete = true;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let source = entry.path();
+        let target = to.join(entry.file_name());
+        match std::fs::symlink_metadata(&target) {
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                std::fs::rename(&source, &target)?;
+                report.changed.push(target.display().to_string());
+            }
+            Ok(_) => {
+                let both_dirs = entry.file_type()?.is_dir()
+                    && std::fs::symlink_metadata(&target)?.file_type().is_dir();
+                if both_dirs {
+                    complete &= merge_project_dir(&source, &target, report)?;
+                } else {
+                    report.warnings.push(host_project_clash(&source, &target));
+                    complete = false;
+                }
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    if complete && std::fs::read_dir(from)?.next().is_none() {
+        std::fs::remove_dir(from)?;
+    }
+    Ok(complete)
+}
 
 impl Migration for HostProjectDirs {
     fn id(&self) -> &'static str {
@@ -85,27 +145,19 @@ impl Migration for HostProjectDirs {
             }
             let from = entry.path();
             let to = projects.join(project_id);
-            if std::fs::symlink_metadata(&to).is_ok() {
-                report.warnings.push(
-                    Warning::new(
-                        MIGRATION_STEP_FAILED,
-                        format!(
-                            "host-project directory conflict: {} and {} both exist; neither was changed",
-                            from.display(),
-                            to.display()
-                        ),
-                    )
-                    .subject(from.display().to_string())
-                    .repair(format!(
-                        "move the settings from {} into {} by hand, then rerun `provenant install`",
-                        from.display(),
-                        to.display()
-                    )),
-                );
-                continue;
+            match std::fs::symlink_metadata(&to) {
+                Err(error) if error.kind() == ErrorKind::NotFound => {
+                    std::fs::rename(&from, &to)?;
+                    report.changed.push(to.display().to_string());
+                }
+                Ok(metadata) if metadata.file_type().is_dir() => {
+                    // The binding record lives here; merge around it. A clash
+                    // leaves the old entry behind, which keeps the step pending.
+                    merge_project_dir(&from, &to, &mut report)?;
+                }
+                Ok(_) => report.warnings.push(host_project_clash(&from, &to)),
+                Err(error) => return Err(error.into()),
             }
-            std::fs::rename(&from, &to)?;
-            report.changed.push(to.display().to_string());
         }
         report.changed.sort();
         Ok(report)
@@ -140,6 +192,32 @@ fn rewrite_json(
     Ok(true)
 }
 
+/// Rewrite one file, reporting a failure against its own path and carrying on.
+/// A warning means the step did not finish, so its id stays off the receipt and
+/// the next install retries it.
+fn rewrite_json_or_warn(
+    path: &Path,
+    what: &str,
+    report: &mut MigrationReport,
+    edit: impl FnMut(&mut Value) -> bool,
+) {
+    match rewrite_json(path, edit) {
+        Ok(true) => report.changed.push(path.display().to_string()),
+        Ok(false) => {}
+        Err(error) => report.warnings.push(
+            Warning::new(
+                MIGRATION_STEP_FAILED,
+                format!("{what} could not be migrated: {error}"),
+            )
+            .subject(path.display().to_string())
+            .repair(format!(
+                "repair {}, then rerun `provenant install`; the step is idempotent",
+                path.display()
+            )),
+        ),
+    }
+}
+
 /// If `value` carries the old `builtin` source spelling, set the new spelling
 /// and move `schema_version` from `old_version` to `new_version`.
 fn rename_source(value: &mut Value, old_version: u64, new_version: u64) -> bool {
@@ -171,6 +249,23 @@ impl Migration for PortSourceSpellings {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(report),
             Err(error) => return Err(error.into()),
         };
+        // A live publisher holds this lock while writing receipts; rewriting
+        // them underneath it would lose its append.
+        let _lock = match provenant_config::try_lock_port_command_receipts(state_root) {
+            Ok(lock) => lock,
+            Err(PortEvidenceError::Busy) => {
+                report.warnings.push(
+                    Warning::new(
+                        MIGRATION_STEP_FAILED,
+                        format!("port receipts under {} are busy; their source spellings were not migrated", root.display()),
+                    )
+                    .subject(root.display().to_string())
+                    .repair("stop the publisher, then rerun `provenant install`; the step is idempotent"),
+                );
+                return Ok(report);
+            }
+            Err(error) => return Err(MigrationError::new(format!("port receipts lock: {error}"))),
+        };
         for owner in owners {
             let owner = owner?;
             if !owner.file_type()?.is_dir() {
@@ -187,12 +282,9 @@ impl Migration for PortSourceSpellings {
                 if !is_receipt {
                     continue;
                 }
-                let changed = rewrite_json(&path, |value| {
+                rewrite_json_or_warn(&path, "port-command receipt", &mut report, |value| {
                     rename_source(value, OLD_PORT_RECEIPT_VERSION, NEW_PORT_RECEIPT_VERSION)
-                })?;
-                if changed {
-                    report.changed.push(path.display().to_string());
-                }
+                });
             }
         }
         report.changed.sort();
@@ -224,7 +316,7 @@ impl Migration for PortConfigSourceSpellings {
             if !path.exists() {
                 continue;
             }
-            let changed = rewrite_json(&path, |value| {
+            rewrite_json_or_warn(&path, "port table", &mut report, |value| {
                 let mut changed = rename_source(value, OLD_PORTS_VERSION, NEW_PORTS_VERSION);
                 if let Some(declarations) = value.as_object_mut() {
                     for (name, declaration) in declarations {
@@ -238,11 +330,21 @@ impl Migration for PortConfigSourceSpellings {
                         }
                     }
                 }
+                // `leaf_sources` values are Layer spellings, not `source`
+                // fields, so the shared rename above cannot see them.
+                if let Some(leaves) = value
+                    .pointer_mut("/build/leaf_sources")
+                    .and_then(Value::as_object_mut)
+                {
+                    for source in leaves.values_mut() {
+                        if source.as_str() == Some(OLD_SOURCE) {
+                            *source = json!(NEW_SOURCE);
+                            changed = true;
+                        }
+                    }
+                }
                 changed
-            })?;
-            if changed {
-                report.changed.push(path.display().to_string());
-            }
+            });
         }
         report.changed.sort();
         Ok(report)
@@ -358,8 +460,14 @@ fn run_steps(state_root: &Path, steps: &[&dyn Migration]) -> Vec<String> {
         }
         match step.apply(state_root) {
             Ok(report) => {
+                // A step that still has warnings left something unmigrated:
+                // keep its id off the receipt so the next install retries it.
+                let pending = !report.warnings.is_empty();
                 for message in report.warnings {
                     warning::warn(message);
+                }
+                if pending {
+                    continue;
                 }
                 applied.push(step.id().to_owned());
                 if let Err(error) = persist(state_root, &applied) {
@@ -444,7 +552,7 @@ fn read_receipt(state_root: &Path) -> Result<Option<InstallReceipt>, String> {
 mod tests {
     use super::{PortConfigSourceSpellings, PortSourceSpellings, read_receipt, run_steps};
     use provenant_records::migrate::{Migration, MigrationError, MigrationReport};
-    use provenant_records::warning::{MIGRATION_STEP_FAILED, capture};
+    use provenant_records::warning::{MIGRATION_STEP_FAILED, Warning, capture};
     use provenant_records::{AbsolutePath, FileDigest, InstallReceipt, SourceDigest};
     use serde_json::{Value, json};
     use std::path::Path;
@@ -555,9 +663,17 @@ mod tests {
         let report = super::HostProjectDirs.apply(root.path()).expect("apply");
         assert!(report.changed.is_empty(), "{report:?}");
         assert_eq!(report.warnings.len(), 1, "{report:?}");
-        let message = &report.warnings[0].message;
-        assert!(message.contains(&old.display().to_string()), "{message}");
-        assert!(message.contains(&target.display().to_string()), "{message}");
+        let warning = &report.warnings[0];
+        assert!(
+            warning.message.contains(&old.display().to_string())
+                && warning.message.contains(&target.display().to_string()),
+            "{:?}",
+            warning.message
+        );
+        let repair = warning.repair.as_deref().expect("repair");
+        assert!(repair.contains(&old.display().to_string()), "{repair}");
+        assert!(repair.contains(&target.display().to_string()), "{repair}");
+        assert!(repair.contains("remove"), "{repair}");
         assert_eq!(
             std::fs::read_to_string(old.join("config.toml")).expect("old kept"),
             "slots = 3\n"
@@ -566,6 +682,43 @@ mod tests {
             std::fs::read_to_string(target.join("config.toml")).expect("target kept"),
             "slots = 7\n"
         );
+    }
+
+    /// Spec: docs/specs/state.md#format-changes-migrate-once-at-install
+    #[test]
+    fn host_project_dirs_merges_around_the_binding_record() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let old_key = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        let old = root.path().join("projects").join(old_key);
+        let target = root.path().join("projects").join(&old_key[..32]);
+        std::fs::create_dir_all(&old).expect("old project dir");
+        std::fs::create_dir_all(&target).expect("binding project dir");
+        std::fs::write(old.join("config.toml"), "[admission.build]\nslots = 3\n")
+            .expect("write old config");
+        std::fs::write(target.join("ports.json"), r#"{"schema_version":3}"#)
+            .expect("write binding record");
+
+        let report = super::HostProjectDirs.apply(root.path()).expect("apply");
+        assert_eq!(
+            report.changed,
+            [target.join("config.toml").display().to_string()]
+        );
+        assert!(report.warnings.is_empty(), "{report:?}");
+        assert!(!old.exists(), "the merged old directory was removed");
+        assert_eq!(
+            std::fs::read_to_string(target.join("config.toml")).expect("moved config"),
+            "[admission.build]\nslots = 3\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.join("ports.json")).expect("binding record kept"),
+            r#"{"schema_version":3}"#
+        );
+
+        let again = super::HostProjectDirs
+            .apply(root.path())
+            .expect("apply twice");
+        assert!(again.changed.is_empty(), "second run must change nothing");
+        assert!(again.warnings.is_empty(), "{again:?}");
     }
 
     struct Succeeds(&'static str);
@@ -596,6 +749,30 @@ mod tests {
                 return Err(MigrationError::new("fixture failure"));
             }
             Ok(MigrationReport::new(self.id))
+        }
+    }
+
+    struct WarnsThenSucceeds {
+        id: &'static str,
+        warnings: AtomicUsize,
+    }
+
+    impl Migration for WarnsThenSucceeds {
+        fn id(&self) -> &'static str {
+            self.id
+        }
+
+        fn apply(&self, _state_root: &Path) -> Result<MigrationReport, MigrationError> {
+            let mut report = MigrationReport::new(self.id);
+            if self.warnings.load(Ordering::SeqCst) > 0 {
+                self.warnings.fetch_sub(1, Ordering::SeqCst);
+                report.warnings.push(
+                    Warning::new(MIGRATION_STEP_FAILED, "fixture left something behind")
+                        .subject("fixture")
+                        .repair("retry"),
+                );
+            }
+            Ok(report)
         }
     }
 
@@ -695,5 +872,88 @@ mod tests {
         let (applied, warnings) = capture(|| run_steps(absent.path(), &steps));
         assert_eq!(applied, ["done"]);
         assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    /// Spec: docs/specs/state.md#format-changes-migrate-once-at-install
+    #[test]
+    fn a_step_with_unmigrated_entries_is_retried() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = root.path();
+        write_receipt(path, Vec::new());
+        let step = WarnsThenSucceeds {
+            id: "pending",
+            warnings: AtomicUsize::new(1),
+        };
+        let steps: [&dyn Migration; 1] = [&step];
+
+        let (applied, warnings) = capture(|| run_steps(path, &steps));
+        assert!(applied.is_empty(), "{applied:?}");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        let receipt = read_receipt(path).expect("read").expect("receipt");
+        assert!(receipt.migrations.is_empty(), "{receipt:?}");
+
+        let (applied, warnings) = capture(|| run_steps(path, &steps));
+        assert_eq!(applied, ["pending"]);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let receipt = read_receipt(path).expect("read").expect("receipt");
+        assert_eq!(receipt.migrations, ["pending"]);
+    }
+
+    /// Spec: docs/specs/state.md#format-changes-migrate-once-at-install
+    #[test]
+    fn one_unparseable_receipt_warns_without_aborting_the_other_files() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let owner = root.path().join("port-receipts/admission");
+        std::fs::create_dir_all(&owner).expect("owner dir");
+        let broken = owner.join("port-command-broken.json");
+        let good = owner.join("port-command-good.json");
+        std::fs::write(&broken, "{not json").expect("write broken receipt");
+        std::fs::write(
+            &good,
+            r#"{"schema_version":2,"source":"builtin","owner":"admission"}"#,
+        )
+        .expect("write good receipt");
+
+        let report = PortSourceSpellings.apply(root.path()).expect("apply");
+        assert_eq!(report.changed, [good.display().to_string()]);
+        assert_eq!(report.warnings.len(), 1, "{report:?}");
+        let warning = &report.warnings[0];
+        assert!(
+            warning.message.contains(&broken.display().to_string()),
+            "{:?}",
+            warning.message
+        );
+        let value: Value =
+            serde_json::from_slice(&std::fs::read(&good).expect("read")).expect("parse");
+        assert_eq!(value["source"], json!("default"));
+        assert_eq!(value["schema_version"], json!(3));
+    }
+
+    /// Spec: docs/specs/state.md#format-changes-migrate-once-at-install
+    #[test]
+    fn port_table_leaf_sources_migrate_the_retired_spelling() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let host = root.path().join("ports.json");
+        std::fs::write(
+            &host,
+            r#"{"schema_version":2,"build":{"source":"builtin","leaf_sources":{"build.strategy":"builtin","build.offload":"host"}}}"#,
+        )
+        .expect("write host table");
+
+        let report = PortConfigSourceSpellings.apply(root.path()).expect("apply");
+        assert_eq!(report.changed, [host.display().to_string()]);
+        assert!(report.warnings.is_empty(), "{report:?}");
+        let value: Value =
+            serde_json::from_slice(&std::fs::read(&host).expect("read")).expect("parse");
+        assert_eq!(value["schema_version"], json!(3));
+        assert_eq!(value["build"]["source"], json!("default"));
+        assert_eq!(
+            value["build"]["leaf_sources"]["build.strategy"],
+            json!("default")
+        );
+        assert_eq!(
+            value["build"]["leaf_sources"]["build.offload"],
+            json!("host")
+        );
     }
 }

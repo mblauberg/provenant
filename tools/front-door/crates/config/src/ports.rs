@@ -1,5 +1,6 @@
 //! One sourced, versioned declaration for repository integration ports.
 use provenant_records::FileDigest;
+use provenant_records::warning::{CONFIG_MALFORMED, Warning, warn};
 pub use provenant_records::{
     CommandExitCodes, DEFAULT_PORT_COMMAND_RECEIPT_AGE_DAYS, ExitDisposition, Layer,
     PORT_PRECEDENCE, PortCommand, PortCommandBackend, PortCommandDisposition, PortCommandReceipt,
@@ -1219,6 +1220,74 @@ fn layer_error(path: &Path, key: &str, message: impl std::fmt::Display) -> io::E
     )
 }
 
+/// A retired layer spelling is a refusal, not a value to decode or silently
+/// upgrade: install rewrites persisted spellings once, and a repository file
+/// was never in that migration's scope. Name the new spelling in the refusal.
+fn reject_retired_sources(path: &Path, value: &serde_json::Value) -> io::Result<()> {
+    fn retired(path: &Path, key: &str) -> io::Error {
+        layer_error(
+            path,
+            key,
+            format!(
+                "retired source spelling \"builtin\"; use \"{}\" instead",
+                Layer::Default.as_str()
+            ),
+        )
+    }
+    fn walk(value: &serde_json::Value, prefix: &str, path: &Path) -> io::Result<()> {
+        match value {
+            serde_json::Value::Object(map) => {
+                for (name, child) in map {
+                    let key = if prefix.is_empty() {
+                        name.clone()
+                    } else {
+                        format!("{prefix}.{name}")
+                    };
+                    if name == "source" && child.as_str() == Some("builtin") {
+                        return Err(retired(path, &key));
+                    }
+                    if key == "build.leaf_sources"
+                        && let Some(leaves) = child.as_object()
+                    {
+                        for (leaf, source) in leaves {
+                            if source.as_str() == Some("builtin") {
+                                return Err(retired(path, &format!("{key}.{leaf}")));
+                            }
+                        }
+                    }
+                    walk(child, &key, path)?;
+                }
+                Ok(())
+            }
+            serde_json::Value::Array(items) => {
+                for child in items {
+                    walk(child, prefix, path)?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+    walk(value, "", path)
+}
+
+/// A refused port file is reported through the same typed sink as any other
+/// configuration warning, so `--json` never carries a raw stderr line.
+fn warn_malformed_port_file(path: &Path, error: &io::Error) {
+    let file = path.display().to_string();
+    warn(
+        Warning::new(
+            CONFIG_MALFORMED,
+            format!("{file}: malformed port declaration ignored: {error}"),
+        )
+        .subject(file)
+        .repair(format!(
+            "correct the declaration in {path:?}, then rerun the command"
+        ))
+        .once_per_change(),
+    );
+}
+
 /// Deep-merge an overlay's object fields over the lower layer. Objects merge
 /// recursively, every other JSON shape replaces the lower value, and unknown
 /// keys are retained so the decoder can warn about them.
@@ -1306,7 +1375,6 @@ fn record_leaf_sources(
     }
 }
 
-#[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
 fn apply_layer(
     table: &mut serde_json::Value,
     provenance: &mut BTreeMap<String, Layer>,
@@ -1335,6 +1403,7 @@ fn apply_layer(
     }
     let mut overlay: serde_json::Value =
         serde_json::from_slice(&bytes).map_err(|error| layer_error(path, "json", error))?;
+    reject_retired_sources(path, &overlay)?;
     if let Some(tiers) = overlay
         .pointer_mut("/verify/tiers")
         .and_then(serde_json::Value::as_object_mut)
@@ -1386,12 +1455,20 @@ fn apply_layer(
             );
         }
         Some(version) if version != u64::from(PORTS_SCHEMA_VERSION) => {
-            use std::io::Write;
-            let _ = writeln!(
-                io::stderr().lock(),
-                "warning: {}: schema_version: expected {}, found {version}; using the current schema",
-                path.display(),
-                PORTS_SCHEMA_VERSION
+            let file = path.display().to_string();
+            warn(
+                Warning::new(
+                    CONFIG_MALFORMED,
+                    format!(
+                        "{file}: schema_version: expected {}, found {version}; using the current schema",
+                        PORTS_SCHEMA_VERSION
+                    ),
+                )
+                .subject(file.clone())
+                .repair(format!(
+                    "set \"schema_version\": {PORTS_SCHEMA_VERSION} in {file}"
+                ))
+                .once_per_change(),
             );
             object.insert(
                 "schema_version".into(),
@@ -1674,27 +1751,14 @@ impl PortTable {
 
     /// Resolve only the project declaration over compiled defaults when no
     /// validated host state root is available to supply host-level ports.
-    #[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
     pub fn read_project_only(project: &Path) -> io::Result<Self> {
         let table = Self::read_layers(
             Some(project),
             None,
-            |_, warning| {
-                let message = format!(
-                    "{}: {}: unknown configuration key; ignored",
-                    warning.source, warning.key
-                );
-                use std::io::Write;
-                let _ = writeln!(io::stderr().lock(), "warning: {message}");
+            |bytes, warning| {
+                let _ = crate::loader::warn_unknown_input_once(project, bytes, warning);
             },
-            |path, error| {
-                use std::io::Write;
-                let _ = writeln!(
-                    io::stderr().lock(),
-                    "warning: {}: malformed port declaration ignored: {error}",
-                    path.display()
-                );
-            },
+            warn_malformed_port_file,
         )?;
         table.validate()?;
         Ok(table)
@@ -1707,20 +1771,17 @@ impl PortTable {
         })
     }
 
-    #[allow(clippy::disallowed_methods)] // next-batch wave 2 removes
     fn read_for_inspection_with(
         project: Option<&Path>,
         host_state: &Path,
         mut on_unknown: impl FnMut(&[u8], &provenant_records::InputWarning),
     ) -> io::Result<Self> {
-        Self::read_layers(project, Some(host_state), &mut on_unknown, |path, error| {
-            use std::io::Write;
-            let _ = writeln!(
-                io::stderr().lock(),
-                "warning: {}: malformed port declaration ignored: {error}",
-                path.display()
-            );
-        })
+        Self::read_layers(
+            project,
+            Some(host_state),
+            &mut on_unknown,
+            warn_malformed_port_file,
+        )
     }
 
     fn read_layers(
@@ -1830,6 +1891,7 @@ impl Default for PortTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use provenant_records::warning::capture;
 
     #[test]
     fn declared_port_rows_and_backend_shapes_round_trip() {
@@ -3084,5 +3146,70 @@ mod tests {
                 .source,
             Layer::HostProject
         );
+    }
+
+    /// Spec: docs/specs/cli.md#warnings-are-typed-values
+    #[test]
+    fn an_older_schema_warning_uses_the_sink_and_names_the_file_and_change() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir(project.path().join(".provenant")).unwrap();
+        let file = project.path().join(PORTS_CONFIG);
+        std::fs::write(&file, r#"{"schema_version":2}"#).unwrap();
+
+        let (_, warnings) = capture(|| {
+            PortTable::read_for_inspection(Some(project.path()), project.path()).unwrap()
+        });
+        let warning = warnings
+            .iter()
+            .find(|warning| warning.code.as_ref() == CONFIG_MALFORMED.as_str())
+            .expect("typed schema warning");
+        let path = file.display().to_string();
+        assert!(warning.message.contains(&path), "{:?}", warning.message);
+        assert!(warning.message.contains("found 2"), "{:?}", warning.message);
+        let repair = warning.repair.as_deref().expect("repair");
+        assert!(repair.contains(&path), "{repair}");
+        assert!(
+            repair.contains(&format!("schema_version\": {PORTS_SCHEMA_VERSION}")),
+            "{repair}"
+        );
+    }
+
+    /// Spec: docs/specs/state.md#format-changes-migrate-once-at-install
+    #[test]
+    fn a_retired_source_spelling_is_refused_with_the_new_spelling() {
+        for (json, key) in [
+            (
+                r#"{"schema_version":3,"verify":{"source":"builtin"}}"#,
+                "verify.source",
+            ),
+            (
+                r#"{"schema_version":3,"build":{"leaf_sources":{"build.strategy":"builtin"}}}"#,
+                "build.leaf_sources.build.strategy",
+            ),
+        ] {
+            let project = tempfile::tempdir().unwrap();
+            std::fs::create_dir(project.path().join(".provenant")).unwrap();
+            let file = project.path().join(PORTS_CONFIG);
+            std::fs::write(&file, json).unwrap();
+
+            let (_, warnings) = capture(|| {
+                PortTable::read_for_inspection(Some(project.path()), project.path()).unwrap()
+            });
+            let warning = warnings
+                .iter()
+                .find(|warning| warning.message.contains("builtin"))
+                .expect("the retired spelling was refused with a typed warning");
+            let path = file.display().to_string();
+            assert!(warning.message.contains(&path), "{:?}", warning.message);
+            assert!(warning.message.contains(key), "{:?}", warning.message);
+            assert!(
+                warning
+                    .message
+                    .contains(&format!("\"{}\"", Layer::Default.as_str())),
+                "{:?}",
+                warning.message
+            );
+            assert_eq!(warning.code.as_ref(), CONFIG_MALFORMED.as_str());
+        }
     }
 }
