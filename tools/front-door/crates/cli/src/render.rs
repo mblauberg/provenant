@@ -403,7 +403,7 @@ fn fallback_text(command: &str, text: &str) -> String {
     out
 }
 fn compact_text(command: &str, text: &str, summary: Option<&Summary>) -> String {
-    let out = match summary.filter(|summary| !summary.lines.is_empty()) {
+    match summary.filter(|summary| !summary.lines.is_empty()) {
         Some(summary) => {
             let mut body = summary.lines.join("\n");
             body.push('\n');
@@ -416,8 +416,7 @@ fn compact_text(command: &str, text: &str, summary: Option<&Summary>) -> String 
             body
         }
         None => fallback_text(command, text),
-    };
-    out
+    }
 }
 #[derive(Debug, Error)]
 pub enum RenderError {
