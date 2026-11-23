@@ -1724,6 +1724,14 @@ pub(crate) fn unified_graph_command(
             }
             let rows = data["rows"].as_array().ok_or(FacadeError::StateCorrupt)?;
             human.push_str(&render_graph_status(rows));
+            if globals.full && matches!(command, GraphCommand::Status) {
+                for row in rows.iter().filter(|row| row["kind"] == "attempt") {
+                    if let Some(attempt) = row["attempt_id"].as_str().and_then(|id| id.parse().ok())
+                    {
+                        human.push_str(&provenant_cli::run::status_full_summary(row, attempt));
+                    }
+                }
+            }
             if matches!(command, GraphCommand::Status)
                 && let Some(name) = graph
                 && let Some(newest) = superseding_handle(

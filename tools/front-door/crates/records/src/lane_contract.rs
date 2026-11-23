@@ -166,6 +166,27 @@ pub struct CommandReceipt {
     pub extra: ExtraFields,
 }
 
+impl CommandReceipt {
+    /// An absent exit code is unknown; it is never inferred from the outcome.
+    pub fn exit_code_text(&self) -> String {
+        self.exit_code
+            .map(|code| code.to_string())
+            .unwrap_or_else(|| "unknown".to_owned())
+    }
+}
+
+impl<T> Observed<T> {
+    /// The source and completeness of an observation, for human rendering.
+    pub fn observed_label(&self) -> String {
+        let completeness = match &self.completeness {
+            Coverage::Complete => "complete",
+            Coverage::Partial => "partial",
+            Coverage::Unknown => "unknown",
+        };
+        format!("source {}; {completeness}", self.source)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GitFacts {
     pub base: Option<String>,
@@ -212,6 +233,23 @@ pub struct ResultProjection {
 pub const RESULT_PROJECTION_MAX_BYTES: u64 = crate::run::RESULT_LIMIT;
 
 impl ResultProjection {
+    /// The single producer: host facts are always placed before lane claims so
+    /// a reader cannot mistake a lane assertion for something the host saw.
+    pub fn new(
+        header: RecordHeader,
+        attempt: AttemptId,
+        host_facts: HostFacts,
+        lane_claims: LaneClaims,
+    ) -> Self {
+        Self {
+            header,
+            attempt,
+            host_facts,
+            lane_claims,
+            extra: ExtraFields::default(),
+        }
+    }
+
     /// Decode untrusted projection bytes with the standard bounded record codec.
     pub fn decode(reader: impl std::io::Read) -> Result<Self, crate::DecodeError> {
         crate::decode(
@@ -222,6 +260,104 @@ impl ResultProjection {
             },
         )
     }
+
+    /// Render the projection for a person. What the harness observed comes
+    /// first; the lane's handoff and verify follow, labelled as claims. An
+    /// unobserved fact stays unknown rather than being inferred.
+    pub fn render(&self) -> String {
+        let mut out = String::from("host facts (observed):\n");
+        let commands = &self.host_facts.commands;
+        out.push_str(&format!("- commands: {}\n", commands.observed_label()));
+        match &commands.value {
+            Some(receipts) => {
+                for receipt in receipts {
+                    let command = receipt.command.as_deref().unwrap_or("unknown");
+                    out.push_str(&format!(
+                        "  - {command}: exit {}, {}\n",
+                        receipt.exit_code_text(),
+                        receipt.observed_label()
+                    ));
+                }
+            }
+            None => out.push_str("  - none observed; none inferred\n"),
+        }
+        let git = &self.host_facts.git;
+        match &git.value {
+            Some(facts) => out.push_str(&format!(
+                "- git: base {}, head {}, {} commit(s), diffstat {}, {}; {}\n",
+                facts.base.as_deref().unwrap_or("unknown"),
+                facts.head.as_deref().unwrap_or("unknown"),
+                facts.commits.len(),
+                facts.diffstat.as_deref().unwrap_or("unknown"),
+                if facts.shared_worktree {
+                    "shared worktree"
+                } else {
+                    "own worktree"
+                },
+                git.observed_label()
+            )),
+            None => out.push_str(&format!("- git: unknown; {}\n", git.observed_label())),
+        }
+        let ci = &self.host_facts.ci;
+        out.push_str(&format!(
+            "- ci: {}; {}\n",
+            json_summary(&ci.value),
+            ci.observed_label()
+        ));
+        let scope = &self.host_facts.scope;
+        let outside = scope
+            .value
+            .as_ref()
+            .map(|report| report.clone().compact().out_of_scope_count)
+            .map(|count| count.to_string())
+            .unwrap_or_else(|| "unknown".to_owned());
+        out.push_str(&format!(
+            "- files outside scope: {outside}; {}\n",
+            scope.observed_label()
+        ));
+
+        out.push_str("lane claims (unverified):\n");
+        match &self.lane_claims.handoff {
+            Some(handoff) => out.push_str(&format!(
+                "- handoff: {} ({})\n",
+                bounded(&handoff.note),
+                handoff.status.as_str()
+            )),
+            None => out.push_str("- handoff: none\n"),
+        }
+        match &self.lane_claims.verify {
+            Some(verify) => {
+                for line in verify {
+                    out.push_str(&format!("  - verify: {}\n", bounded(line)));
+                }
+            }
+            None => out.push_str("- verify: unknown\n"),
+        }
+        out
+    }
+}
+
+/// A single-line, bounded rendering of a JSON observation, without secrets.
+fn json_summary(value: &Option<serde_json::Value>) -> String {
+    match value {
+        None => "unknown".to_owned(),
+        Some(serde_json::Value::Null) => "unknown".to_owned(),
+        Some(serde_json::Value::String(text)) => bounded(text),
+        Some(value) => bounded(&value.to_string()),
+    }
+}
+
+/// Keep one rendered field on one bounded line.
+fn bounded(text: &str) -> String {
+    let single = text.replace(['\n', '\r'], " ");
+    if single.len() <= 256 {
+        return single;
+    }
+    let mut end = 256;
+    while end > 0 && !single.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &single[..end])
 }
 
 #[cfg(test)]
@@ -400,5 +536,78 @@ mod tests {
         assert!(
             ResultProjection::decode(serde_json::to_vec(&oversized).unwrap().as_slice()).is_err()
         );
+    }
+
+    // Spec: docs/specs/lane-contracts.md#result-projection
+    #[test]
+    fn result_projection_renders_host_facts_before_lane_claims() {
+        let projection = ResultProjection::new(
+            RecordHeader::V1,
+            attempt(),
+            HostFacts {
+                commands: unknown(),
+                git: unknown(),
+                ci: unknown(),
+                scope: unknown(),
+                extra: Default::default(),
+            },
+            LaneClaims {
+                handoff: None,
+                verify: Some(vec!["ran targeted tests".into()]),
+                extra: Default::default(),
+            },
+        );
+        let rendered = projection.render();
+        let facts = rendered.find("host facts").expect("facts header");
+        let claims = rendered.find("lane claims").expect("claims header");
+        assert!(facts < claims, "{rendered}");
+        let wire = serde_json::to_string(&projection).unwrap();
+        assert!(
+            wire.find("host_facts").unwrap() < wire.find("lane_claims").unwrap(),
+            "{wire}"
+        );
+    }
+
+    // Spec: docs/specs/lane-contracts.md#result-projection
+    #[test]
+    fn result_projection_unknown_exit_code_is_unknown() {
+        let receipt = CommandReceipt {
+            command: Some("cargo test".into()),
+            exit_code: None,
+            extra: Default::default(),
+        };
+        assert_eq!(receipt.exit_code_text(), "unknown");
+        let commands = Observed {
+            source: "adapter-capture".into(),
+            completeness: Coverage::Partial,
+            value: Some(vec![Observed {
+                source: "adapter-capture".into(),
+                completeness: Coverage::Complete,
+                value: Some(receipt),
+                extra: Default::default(),
+            }]),
+            extra: Default::default(),
+        };
+        let projection = ResultProjection::new(
+            RecordHeader::V1,
+            attempt(),
+            HostFacts {
+                commands,
+                git: unknown(),
+                ci: unknown(),
+                scope: unknown(),
+                extra: Default::default(),
+            },
+            LaneClaims {
+                handoff: None,
+                verify: None,
+                extra: Default::default(),
+            },
+        );
+        let rendered = projection.render();
+        assert!(rendered.contains("exit unknown"), "{rendered}");
+        assert!(!rendered.contains("exit 0"), "{rendered}");
+        assert!(rendered.contains("source adapter-capture"), "{rendered}");
+        assert!(rendered.contains("partial"), "{rendered}");
     }
 }

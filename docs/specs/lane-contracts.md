@@ -102,10 +102,13 @@ page is capped.
 
 ## Result projection
 
-`ResultProjection` presents bounded `HostFacts` first and `LaneClaims` second. Observed commands
-carry source and completeness, with unknown exit codes left unknown, and Git, CI and scope
-evidence state the same; shared-worktree Git facts describe the worktree, not child authorship.
-The lane's handoff and verify are claims, never host attestations. The host builds the projection
-and bounds its encoded input to the run result limit, reporting truncation and missing evidence as
-partial or unknown.
+`ResultProjection` is now produced by one host-owned builder (`ResultProjection::new`) and
+consumed by `output`, `result` and `status --full`. It presents bounded `HostFacts` first and
+`LaneClaims` second. Observed commands carry source and completeness, with unknown exit codes left
+unknown, and Git, CI and scope evidence state the same; shared-worktree Git facts describe the
+worktree, not child authorship. The lane's handoff and verify are claims, never host attestations,
+and are labelled as claims when rendered. The default view leads with the verdict, findings and
+verify; `--full` adds the host facts and the lane's prose, and `--tail N` returns at most N bytes.
+The host builds the projection and bounds its encoded input to the run result limit, reporting
+truncation and missing evidence as partial or unknown.
 - Why: a reader must be able to tell what the host observed from what the lane asserted.
