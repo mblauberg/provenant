@@ -44,11 +44,6 @@ renders them as Markdown under the untracked `<repository>/docs/reference/`.
 - [Rust workspace rules](rust-workspace.md): layering, dependencies,
   errors, unsafe and tests
 
-## Transient design records
-
-- [Next batch](next-batch.md) and its [quick wins](next-batch-quick-wins.md):
-  the design and build plan for the shared-seams batch; deleted when it lands
-
 ## Cross-cutting decisions
 
 Each row names the area that owns the contract; amend that owner when changing

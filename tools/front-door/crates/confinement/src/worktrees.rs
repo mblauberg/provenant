@@ -948,7 +948,7 @@ impl Serialize for WorktreeInfo {
 /// refusal carrying ranked close matches. Matching is exact and covers every
 /// query kind: full or short branch, lane name, attempt id and PR number.
 ///
-/// Spec: docs/specs/next-batch.md#seam-5-the-worktree-and-landing-loop-a-chair-actually-uses
+/// Spec: docs/specs/cli.md#every-name-refusal-lists-close-matches
 pub fn locate<'a>(query: &str, rows: &'a [WorktreeInfo]) -> Result<&'a WorktreeInfo, NameRefusal> {
     let folded = query.to_lowercase();
     if let Some(row) = rows.iter().find(|row| locate_matches(row, query, &folded)) {
@@ -1327,7 +1327,7 @@ mod tests {
         .with_owner_identity()
     }
 
-    // Spec: docs/specs/next-batch.md#seam-5-the-worktree-and-landing-loop-a-chair-actually-uses
+    // Spec: docs/specs/cli.md#every-name-refusal-lists-close-matches
     #[test]
     fn locate_resolves_every_query_kind_and_refuses_with_close_matches() {
         let attempt = [7; 16];
@@ -1361,7 +1361,7 @@ mod tests {
         assert!(!refusal.candidates.is_empty());
     }
 
-    // Spec: docs/specs/next-batch.md#seam-5-the-worktree-and-landing-loop-a-chair-actually-uses
+    // Spec: docs/specs/run-git.md#worktrees-and-refs
     #[test]
     fn worktree_info_serialises_owner_lane_attempt_and_base() {
         let row = located_fixture("feature/topic", None, Some([3; 16]));

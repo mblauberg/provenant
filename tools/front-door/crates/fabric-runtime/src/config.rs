@@ -289,7 +289,7 @@ pub const LAND_PRECEDENCE: Precedence = Precedence(&[Layer::Default, Layer::Host
 /// the owner's host config are the only layers that may set it. A grant from
 /// any other layer lands in [`provenant_records::Merge::ignored`] so the caller
 /// can warn with its source rather than silently honouring it.
-/// Spec: docs/specs/next-batch.md#seam-5-the-worktree-and-landing-loop-a-chair-actually-uses
+/// Spec: docs/specs/cli.md#landing-adds-no-merge-authority
 pub const ADMIN_PUBLICATION_PRECEDENCE: Precedence = Precedence(&[Layer::Default, Layer::Host]);
 
 /// The effective policy for one tier and the layer it came from.
