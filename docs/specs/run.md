@@ -33,13 +33,12 @@ data.
 
 ## Lanes do not build
 
-Lanes format and coordinate only. There is no per-lane Cargo target allocation,
-no host target seed, no `seed-build`/`seed-target` command and no target-seed
-generation GC. The chair runs one warm host-owned integrated check per epic and
-CI runs clippy and the tests. `.worktrees/.cargo/config.toml` is the single
-mechanism that disables lane cargo; a leftover `lanes.cargo_target`,
-`lanes.cargo_seed_budget` or `domains.fabric.lanes.cargo_seed` key warns as
-unknown.
+Lanes format and coordinate only. The chair runs one warm host-owned integrated
+check per epic through the build port, capped by `[admission.build].slots`, and
+CI runs clippy and the tests. `lanes.verification` sets the format-only writer
+preamble. Lane Cargo output is bounded by `lanes.cargo_cache_max` and collected
+after `gc.cargo_target_idle`; `domains.fabric.lanes.cargo_source_writes`
+controls writes to the shared source caches.
 
 ## Publication order
 

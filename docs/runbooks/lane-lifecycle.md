@@ -66,12 +66,12 @@ refs intact. Failed and cancelled lanes keep their worktrees.
 ## Lanes do not build
 
 Lanes run formatting and coordination only. They never provision, seed or
-admit a compiler job: host Cargo target seeds, `provenant worktree seed-build`
-and `seed-target`, and the `cargo_seed` retention keys are gone. The chair runs
-one warm integrated check per epic; CI runs clippy and the tests. Native npm,
-pnpm and Corepack launches keep host cache selectors when a provider changes
-HOME or XDG state; explicit settings win. Corepack keeps its downloads shared
-through `COREPACK_HOME`.
+admit a compiler job; the chair runs one warm integrated check per epic and CI
+runs clippy and the tests. `lanes.verification` sets the format-only writer
+preamble, and lane Cargo output is bounded by `lanes.cargo_cache_max` and
+collected after `gc.cargo_target_idle`. Native npm, pnpm and Corepack launches
+keep host cache selectors when a provider changes HOME or XDG state; explicit
+settings win. Corepack keeps its downloads shared through `COREPACK_HOME`.
 
 ## Recovery
 
