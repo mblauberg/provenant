@@ -386,7 +386,7 @@ fn execute_inner(
         .domains
         .accounts;
     if let Accounts::Show { name } = command {
-        let id = resolve_typed(&settings, name).map_err(|(cause, message)| {
+        let id = resolve_entry(&settings, name).map_err(|(cause, message)| {
             *kind = cause;
             message
         })?;

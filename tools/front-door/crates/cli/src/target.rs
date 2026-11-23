@@ -249,10 +249,10 @@ pub enum ResolveError<E> {
 impl<E> ResolveError<E> {
     /// A `NOT_FOUND` whose candidates are the close matches of `query` in
     /// `universe`, ranked by the one shared ranker.
-    pub fn not_found(
+    pub fn not_found<'a>(
         target: impl Into<String>,
         query: &str,
-        universe: impl IntoIterator<Item = &str>,
+        universe: impl IntoIterator<Item = &'a str>,
     ) -> Self {
         let candidates = provenant_core::close_matches(query, universe)
             .into_iter()
@@ -484,7 +484,7 @@ fn resolve_inner<E>(
         .ok_or_else(|| {
             ResolveError::not_found(
                 format!("{}/{node}", target.name),
-                node,
+                &node,
                 checkpoint
                     .nodes
                     .iter()
@@ -757,11 +757,11 @@ mod tests {
         for number in 1..=3u32 {
             let target = Target::parse(&format!("fix/review#{number}")).unwrap();
             let steer = resolve(&target, Want::Attempt { settled: false }, &[], |_| {
-                Ok::<_, ()>(Some(graph.clone()))
+                Ok::<_, std::convert::Infallible>(Some(graph.clone()))
             })
             .unwrap();
             let output = resolve(&target, Want::Attempt { settled: true }, &[], |_| {
-                Ok::<_, ()>(Some(graph.clone()))
+                Ok::<_, std::convert::Infallible>(Some(graph.clone()))
             })
             .unwrap();
             assert_eq!(steer, output);
@@ -778,16 +778,19 @@ mod tests {
         let graph = checkpoint("fix", &[("review", &["terminal", "running"])]);
         let node = Target::parse("fix/review").unwrap();
         let newest = resolve(&node, Want::Attempt { settled: false }, &[], |_| {
-            Ok::<_, ()>(Some(graph.clone()))
+            Ok::<_, std::convert::Infallible>(Some(graph.clone()))
         })
         .unwrap();
         assert_eq!(newest.number, NonZeroU32::new(2));
         let settled = resolve(&node, Want::Attempt { settled: true }, &[], |_| {
-            Ok::<_, ()>(Some(graph.clone()))
+            Ok::<_, std::convert::Infallible>(Some(graph.clone()))
         })
         .unwrap();
         assert_eq!(settled.number, NonZeroU32::new(1));
-        let work = resolve(&node, Want::Work, &[], |_| Ok::<_, ()>(Some(graph.clone()))).unwrap();
+        let work = resolve(&node, Want::Work, &[], |_| {
+            Ok::<_, std::convert::Infallible>(Some(graph.clone()))
+        })
+        .unwrap();
         assert_eq!(work.number, None);
     }
 
@@ -796,13 +799,13 @@ mod tests {
         let one = checkpoint("fix", &[("task", &["terminal"])]);
         let bare = Target::parse("fix").unwrap();
         let resolved = resolve(&bare, Want::Attempt { settled: true }, &[], |_| {
-            Ok::<_, ()>(Some(one))
+            Ok::<_, std::convert::Infallible>(Some(one))
         })
         .unwrap();
         assert_eq!(resolved.node.as_deref(), Some("task"));
         let two = checkpoint("fix", &[("plan", &["terminal"]), ("build", &[])]);
         match resolve(&bare, Want::Attempt { settled: true }, &[], |_| {
-            Ok::<_, ()>(Some(two.clone()))
+            Ok::<_, std::convert::Infallible>(Some(two.clone()))
         }) {
             Err(ResolveError::Ambiguous { candidates, .. }) => {
                 assert_eq!(candidates, ["fix/plan", "fix/build"]);
@@ -810,9 +813,14 @@ mod tests {
             other => panic!("expected ambiguity, got {other:?}"),
         }
         assert_eq!(
-            resolve(&bare, Want::Work, &[], |_| Ok::<_, ()>(Some(two)))
-                .unwrap()
-                .node,
+            resolve(
+                &bare,
+                Want::Work,
+                &[],
+                |_| Ok::<_, std::convert::Infallible>(Some(two))
+            )
+            .unwrap()
+            .node,
             None
         );
     }
@@ -824,7 +832,7 @@ mod tests {
         for spelling in ["panel", "panel/task"] {
             let target = Target::parse(spelling).unwrap();
             let resolved = resolve(&target, Want::Output, &[], |_| {
-                Ok::<_, ()>(Some(graph.clone()))
+                Ok::<_, std::convert::Infallible>(Some(graph.clone()))
             })
             .unwrap();
             assert_eq!(resolved.node.as_deref(), Some("task"), "{spelling}");
@@ -845,7 +853,9 @@ mod tests {
         );
         graph.nodes[0].children = vec!["task--review".into()];
         let target = Target::parse("panel").unwrap();
-        match resolve(&target, Want::Output, &[], |_| Ok::<_, ()>(Some(graph))) {
+        match resolve(&target, Want::Output, &[], |_| {
+            Ok::<_, std::convert::Infallible>(Some(graph))
+        }) {
             Err(ResolveError::Ambiguous { candidates, .. }) => {
                 assert_eq!(candidates, ["panel/task", "panel/adjacent"]);
             }
@@ -880,7 +890,7 @@ mod tests {
             ],
         );
         let resolved = resolve_with_document(&target, Want::Output, &[], |_| {
-            Ok::<_, ()>(Some((doc, graph)))
+            Ok::<_, std::convert::Infallible>(Some((doc, graph)))
         })
         .unwrap();
         assert_eq!(resolved.node.as_deref(), Some("panel"));
@@ -911,7 +921,7 @@ mod tests {
             ],
         );
         match resolve_with_document(&target, Want::Output, &[], |_| {
-            Ok::<_, ()>(Some((doc, graph)))
+            Ok::<_, std::convert::Infallible>(Some((doc, graph)))
         }) {
             Err(ResolveError::Ambiguous { candidates, .. }) => {
                 assert_eq!(
@@ -927,7 +937,10 @@ mod tests {
     fn output_keeps_the_newest_settled_attempt_for_a_leaf_root() {
         let graph = checkpoint("single", &[("review", &["terminal", "running"])]);
         let target = Target::parse("single").unwrap();
-        let resolved = resolve(&target, Want::Output, &[], |_| Ok::<_, ()>(Some(graph))).unwrap();
+        let resolved = resolve(&target, Want::Output, &[], |_| {
+            Ok::<_, std::convert::Infallible>(Some(graph))
+        })
+        .unwrap();
         assert_eq!(resolved.node.as_deref(), Some("review"));
         assert_eq!(resolved.number, NonZeroU32::new(1));
         assert_eq!(resolved.attempt_ref.as_deref(), Some("host/review-1"));
@@ -938,7 +951,8 @@ mod tests {
     fn missing_graphs_nodes_and_attempts_list_close_matches() {
         let graph = checkpoint("fix", &[("review", &["terminal"])]);
         let graphs = ["fix".to_owned()];
-        let read = |name: &str| Ok::<_, ()>((name == "fix").then(|| graph.clone()));
+        let read =
+            |name: &str| Ok::<_, std::convert::Infallible>((name == "fix").then(|| graph.clone()));
 
         // A one-edit typo of the graph name ranks the real graph first.
         let target = Target::parse("fx").unwrap();
@@ -953,7 +967,7 @@ mod tests {
         // A one-edit typo of the node name ranks the real node first.
         let target = Target::parse("fix/reveiw").unwrap();
         let error = resolve(&target, Want::Work, &graphs, |_| {
-            Ok::<_, ()>(Some(graph.clone()))
+            Ok::<_, std::convert::Infallible>(Some(graph.clone()))
         })
         .expect_err("unknown node");
         assert_eq!(error.candidates(), ["review".to_owned()].as_slice());
@@ -962,7 +976,7 @@ mod tests {
         // An unknown attempt lists the attempts the node actually recorded.
         let target = Target::parse("fix/review#2").unwrap();
         let error = resolve(&target, Want::Work, &graphs, |_| {
-            Ok::<_, ()>(Some(graph.clone()))
+            Ok::<_, std::convert::Infallible>(Some(graph.clone()))
         })
         .expect_err("unknown attempt");
         assert_eq!(error.candidates(), ["1".to_owned()].as_slice());

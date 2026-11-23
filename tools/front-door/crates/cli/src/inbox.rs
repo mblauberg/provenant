@@ -1436,6 +1436,7 @@ mod tests {
             let resolved = resolve(
                 &Target::parse(spelling).unwrap(),
                 Want::Attempt { settled: false },
+                &["g".to_owned()],
                 |_| Ok::<_, ()>(Some(checkpoint.clone())),
             )
             .unwrap();

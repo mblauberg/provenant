@@ -69,7 +69,7 @@ pub(super) fn prepare_command(
     AdapterSpec::get(provider)
         .ok_or_else(|| {
             format!(
-                "unknown adapter{}{}",
+                "unknown adapter `{provider}`{}",
                 provenant_routing::close_matches_hint(&provenant_routing::adapter_candidates(
                     provider
                 ))
@@ -196,7 +196,7 @@ pub(super) fn prepare_command(
         AdapterSpec::get(provider)
             .ok_or_else(|| {
                 format!(
-                    "unknown adapter{}{}",
+                    "unknown adapter `{provider}`{}",
                     provenant_routing::close_matches_hint(&provenant_routing::adapter_candidates(
                         provider
                     ))

@@ -132,10 +132,10 @@ impl RoutingError {
 
     /// Refuse an unknown exclusion, ranking the close selectors from the
     /// providers and models the caller knows.
-    pub fn unknown_exclusion(
+    pub fn unknown_exclusion<'a>(
         selector: &str,
         detail: impl Into<String>,
-        universe: impl IntoIterator<Item = &str>,
+        universe: impl IntoIterator<Item = &'a str>,
     ) -> Self {
         let candidates = provenant_core::close_matches(selector, universe)
             .into_iter()
