@@ -306,6 +306,25 @@ impl PrepareFixture {
         command.extend_from_slice(args);
         self.git(&command)
     }
+    /// Run Git in the primary checkout and return its trimmed stdout.
+    pub(crate) fn git_text(
+        &self,
+        args: &[&str],
+    ) -> std::result::Result<String, Box<dyn std::error::Error>> {
+        let git = provenant_os::git::git_executable().ok_or("git executable")?;
+        let output = provenant_os::fixture::git_command_at(&git)
+            .env_clear()
+            .envs(self.environment.iter().map(|(key, value)| (key, value)))
+            .current_dir(&self.writer.project)
+            .args(args)
+            .output()?;
+        if !output.status.success() {
+            return Err(
+                format!("git {args:?}: {}", String::from_utf8_lossy(&output.stderr)).into(),
+            );
+        }
+        Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+    }
     pub(crate) fn commit(
         &self,
         path: &Path,

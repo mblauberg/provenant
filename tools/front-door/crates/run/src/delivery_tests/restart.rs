@@ -561,8 +561,9 @@ fn reconcile_settles_exhausted_writer_import_after_durable_exit()
     Ok(())
 }
 
+// Spec: docs/specs/run-settlement.md#settlement
 #[test]
-fn terminal_refuses_an_unfinished_host_sequencer()
+fn terminal_names_and_retains_an_unfinished_cherry_pick_in_the_lane_git()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let fixture = PrepareFixture::new()?;
     std::fs::write(
@@ -571,28 +572,34 @@ fn terminal_refuses_an_unfinished_host_sequencer()
     )?;
     fixture.lane_git(&["add", "AGENTS.md"])?;
     fixture.commit(&fixture.writer.worktree, "instruction baseline")?;
+    crate::writer::GIT_OPERATION_WARNINGS.with(|warnings| warnings.borrow_mut().clear());
+    let marker = fixture
+        .writer
+        .project
+        .join(".git/worktrees/lane/CHERRY_PICK_HEAD");
     let result = fixture.terminal(|| {
         std::fs::write(
             fixture.writer.worktree.join("AGENTS.md"),
             b"changed instructions\n",
         )?;
-        std::fs::write(
-            fixture
-                .writer
-                .project
-                .join(".git/worktrees/lane/CHERRY_PICK_HEAD"),
-            b"fixture sequencer state",
-        )?;
+        std::fs::write(&marker, b"fixture sequencer state")?;
         Ok(())
     });
+    assert_eq!(result.as_ref().ok(), Some(&false), "{result:?}");
     assert!(
-        matches!(&result, Err(error) if matches!(error.downcast_ref::<RunError>(), Some(RunError::Writer(provenant_confinement::worktrees::WorktreeError::GitOperationInProgress)))),
-        "{result:?}"
+        marker.is_file(),
+        "settlement must leave the unfinished operation in place"
     );
-    let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(
-        fixture.root.join("attempt/quarantine/manifest.json"),
-    )?)?;
-    assert_eq!(manifest["disposition"], "writer_settled");
+    let tip = fixture.git_text(&["rev-parse", "refs/heads/lane"])?;
+    let warnings = crate::writer::GIT_OPERATION_WARNINGS.with(|warnings| warnings.borrow().clone());
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains(&tip.to_string())
+                && warning.contains("cherry-pick")
+                && warning.contains("worktrees/lane")),
+        "{warnings:?}"
+    );
     Ok(())
 }
 

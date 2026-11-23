@@ -57,6 +57,9 @@ thread_local! {
     /// the process-wide stderr stream without racing other tests.
     pub(crate) static TOOL_STATE_WARNINGS: std::cell::RefCell<Vec<String>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    /// The rendered lane Git-operation settlement warning, for the same reason.
+    pub(crate) static GIT_OPERATION_WARNINGS: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 fn error<E: std::fmt::Display>(
@@ -694,18 +697,8 @@ impl WriterLaunch {
         let source = crate::objects::bound_source(attempt)?
             .ok_or(RunError::Validation("clean point needs private Git state"))?;
         let index_dir = &source.refs;
-        for name in [
-            "MERGE_HEAD",
-            "CHERRY_PICK_HEAD",
-            "REVERT_HEAD",
-            "rebase-merge",
-            "rebase-apply",
-        ] {
-            match index_dir.metadata_at(OsStr::new(name), false) {
-                Ok(_) => return Ok(false),
-                Err(error) if error.is_not_found() => {}
-                Err(error) => return Err(error.into()),
-            }
+        if worktrees::incomplete_git_operation(index_dir, None)?.is_some() {
+            return Ok(false);
         }
         index_dir.read_stable(OsStr::new("index"), 64 * 1024 * 1024)?;
         let index = index_dir.current_path()?.join("index");
@@ -856,18 +849,8 @@ impl WriterLaunch {
         let tip = crate::objects::private_tip(&source, self.branch.as_str())?;
         // Never stage away conflict stages or finish an in-progress Git
         // operation on the lane's behalf. Its state stays private for recovery.
-        for (name, operation) in [
-            ("MERGE_HEAD", "merge"),
-            ("CHERRY_PICK_HEAD", "cherry-pick"),
-            ("REVERT_HEAD", "revert"),
-            ("rebase-merge", "rebase"),
-            ("rebase-apply", "rebase"),
-        ] {
-            match source.refs.metadata_at(OsStr::new(name), false) {
-                Ok(_) => return Ok(BudgetCommit::note(in_progress_note(operation))),
-                Err(error) if error.is_not_found() => {}
-                Err(error) => return Err(error.into()),
-            }
+        if let Some(operation) = worktrees::incomplete_git_operation(&source.refs, None)? {
+            return Ok(BudgetCommit::note(in_progress_note(operation.label)));
         }
         let objects = crate::objects::prepare_budget_objects(&source.objects, repo)?;
         // Reuse stable, no-follow reading before passing the index path to Git.
@@ -1148,6 +1131,51 @@ fn budget_commit_message(paths: &[String]) -> String {
     message
 }
 
+/// Name an unfinished operation in one lane Git directory without touching it.
+/// The warning names the commit HEAD denotes, symbolic or detached, and the
+/// directory that retains the operation, so a person can resume it there.
+fn lane_git_operation_warning(
+    directory: &Directory,
+    path: &Path,
+    resolve: impl FnOnce(&str) -> Result<GitOid>,
+) -> Result<Option<String>> {
+    let Some(operation) = worktrees::incomplete_git_operation(directory, None)? else {
+        return Ok(None);
+    };
+    let raw = directory.read_stable(OsStr::new("HEAD"), 1024)?;
+    let head = std::str::from_utf8(&raw)
+        .map_err(|_| RunError::Validation("lane Git HEAD is not UTF-8"))?
+        .trim();
+    let commit = match head.strip_prefix("ref: ") {
+        Some(reference) => resolve(reference)?,
+        None => GitOid::parse(head)
+            .map_err(|_| RunError::Validation("lane Git HEAD is not a commit"))?,
+    };
+    Ok(Some(format!(
+        "writer left an unfinished {} at commit {commit}; the in-progress state is retained in {} and is not reset or cleaned; the lane's committed tip is published",
+        operation.label,
+        path.display()
+    )))
+}
+
+fn emit_git_operation_warning(message: String) {
+    #[cfg(test)]
+    GIT_OPERATION_WARNINGS.with(|warnings| warnings.borrow_mut().push(message.clone()));
+    let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+}
+
+/// Whether a terminal check stopped only because an operation is unfinished.
+/// Any other failure keeps its cause instead of reading as unfinished work.
+fn git_operation_pending(
+    result: std::result::Result<(), worktrees::WorktreeError>,
+) -> Result<bool> {
+    match result {
+        Ok(()) => Ok(false),
+        Err(worktrees::WorktreeError::GitOperationInProgress) => Ok(true),
+        Err(error) => Err(error.into()),
+    }
+}
+
 /// The settlement note for a budget stop that left an in-progress operation
 /// uncommitted.
 fn in_progress_note(operation: &str) -> &'static str {
@@ -1155,7 +1183,10 @@ fn in_progress_note(operation: &str) -> &'static str {
         "merge" => "budget commit skipped: in-progress merge preserved in attempt-private Git",
         "cherry-pick" => "budget commit skipped: in-progress cherry-pick left uncommitted",
         "revert" => "budget commit skipped: in-progress revert left uncommitted",
-        _ => "budget commit skipped: in-progress rebase left uncommitted",
+        "rebase" => "budget commit skipped: in-progress rebase left uncommitted",
+        "sequencer" => "budget commit skipped: in-progress sequencer left uncommitted",
+        "bisect" => "budget commit skipped: in-progress bisect left uncommitted",
+        _ => "budget commit skipped: in-progress Git operation left uncommitted",
     }
 }
 
@@ -3930,13 +3961,38 @@ impl WriterLaunch {
         // hash-checked. Do this before ancestry checks.
         let source = crate::objects::bound_source(attempt)?;
         let git_executable = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
-        let head = self
-            .worktree
-            .repo()
-            .private_dir()
-            .read_stable(OsStr::new("HEAD"), 1024)?;
-        if std::str::from_utf8(&head).map(str::trim).ok()
-            != Some(format!("ref: {}", self.branch.as_str()).as_str())
+        // Decide before import and publication, and again on a resume whose
+        // phase is already Publish or Record. Only an operation in the host
+        // checkout refuses; the lane's own operation, in its private Git or
+        // its candidate common directory, is named and left intact while its
+        // committed tip is published.
+        let repo = self.worktree.repo();
+        worktrees::check_host_checkout_terminal(repo)?;
+        let mut native_operation = false;
+        let mut lane_operation = false;
+        if let Some(warning) =
+            lane_git_operation_warning(repo.private_dir(), repo.private_git_dir(), |reference| {
+                crate::objects::resolve_ref(&git_executable, repo, reference)
+            })?
+        {
+            native_operation = true;
+            lane_operation = true;
+            emit_git_operation_warning(warning);
+        }
+        if let Some(source) = &source
+            && let Some(warning) = lane_git_operation_warning(
+                &source.refs,
+                &source.refs.current_path()?,
+                |reference| crate::objects::private_tip(source, reference),
+            )?
+        {
+            lane_operation = true;
+            emit_git_operation_warning(warning);
+        }
+        let head = repo.private_dir().read_stable(OsStr::new("HEAD"), 1024)?;
+        if !native_operation
+            && std::str::from_utf8(&head).map(str::trim).ok()
+                != Some(format!("ref: {}", self.branch.as_str()).as_str())
         {
             return Err(RunError::WriterHeadNotLaneBranch);
         }
@@ -4099,10 +4155,12 @@ impl WriterLaunch {
                 }
                 None => false,
             };
-            if at_published_tip {
+            // An unfinished lane operation owns the checkout's files and index
+            // until a person resumes it; convergence would overwrite that.
+            if at_published_tip && !lane_operation {
                 self.advance_files(attempt, published.tip)?;
             }
-            if source.is_some() {
+            if source.is_some() && !lane_operation {
                 // Every settlement and resume runs this: it advances from the
                 // recorded commit to the branch tip, whichever lane moved it,
                 // and does nothing when the index already follows the tip.
@@ -4181,10 +4239,8 @@ impl WriterLaunch {
             return Err(RunError::WriterHeadNotLaneBranch);
         }
 
-        // The host checkout must not be left mid-operation: settlement
-        // advances its files and index. A lane's own unfinished operation
-        // stays in its private Git, which never reaches the host.
-        worktrees::check_writer_terminal(self.worktree.repo())?;
+        // The Git-operation decision already ran before import and publication;
+        // reaching here leaves the host checkout's state unchanged.
         // The remote ref and dirty census can change after the first pass.
         // Once sealed, this attempt's summary is immutable even if its effect
         // receipt transaction failed. Reuse it after revalidating the pinned head.
@@ -4332,10 +4388,23 @@ impl WriterLaunch {
             let repo = self.worktree.repo();
             let branch = self.branch.as_str();
             let tip = crate::objects::private_tip(&source, branch)?;
-            let held = crate::objects::resolve_ref(&git, repo, branch)?;
             let location = format!(
                 "the lane's work is commit {tip} on branch {branch}, retained in its private Git"
             );
+            // Restoring files must not converge over an unfinished operation:
+            // the checkout may hold its resolution while the marker sits in
+            // either the native or the candidate Git.
+            if git_operation_pending(worktrees::check_writer_terminal(repo))?
+                || git_operation_pending(worktrees::check_git_operation_terminal(
+                    &source.refs,
+                    None,
+                ))?
+            {
+                return Ok(format!(
+                    "worktree left intact; an unfinished Git operation is retained in the lane's Git; {location}"
+                ));
+            }
+            let held = crate::objects::resolve_ref(&git, repo, branch)?;
             let bases = launch_bases(attempt, self.base)?;
             if tip == bases.work || held != bases.host {
                 return Ok(String::new());
