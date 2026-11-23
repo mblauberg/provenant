@@ -68,7 +68,9 @@ fn next_text(steps: &[NextStep], globals: &provenant_cli::Globals) -> String {
 /// The command's sink, installed once before any path can raise a warning.
 static COMMAND_SINK: RwLock<Option<Arc<CommandSink>>> = RwLock::new(None);
 /// Set as soon as the state root is known, before root and config warnings fire.
-static STATE_ROOT: RwLock<Option<PathBuf>> = RwLock::new(None);
+/// The retention window is resolved with the root so config loading never runs
+/// while the sink holds its mutex. Spec: docs/specs/cli.md#warnings-are-typed-values
+static STATE_ROOT: RwLock<Option<(PathBuf, u64)>> = RwLock::new(None);
 
 struct SinkState {
     json: bool,
@@ -83,18 +85,26 @@ struct CommandSink {
 }
 
 impl CommandSink {
-    /// Show an accepted warning, then record its per-change key. Recording only
-    /// after the reader has it keeps a warning swallowed on an exit path that
-    /// never emits from being marked seen before it was displayed.
-    fn display(&self, warning: Warning) {
-        {
-            let mut err = io::stderr().lock();
-            let _ = writeln!(err, "warning: {}", warning.message);
-            if let Some(repair) = warning.repair.as_deref() {
-                let _ = writeln!(err, "  repair: {repair}");
-            }
+    /// Show an accepted warning through the supplied writer, then record its
+    /// per-change key only when the message actually reached the reader. A
+    /// failed write leaves the key unseen so the same warning can be retried
+    /// on the next invocation instead of being silently swallowed.
+    /// Spec: docs/specs/cli.md#warnings-are-typed-values
+    fn display_with(&self, warning: Warning, err: &mut dyn Write) {
+        let delivered = writeln!(err, "warning: {}", warning.message).is_ok();
+        if let Some(repair) = warning.repair.as_deref() {
+            let _ = writeln!(err, "  repair: {repair}");
         }
-        remember_for_change(&warning);
+        if delivered {
+            remember_for_change(&warning);
+        }
+    }
+
+    /// The production seam: typed warnings are the only thing this module
+    /// writes to stderr, and only after the sink no longer holds its lock.
+    fn display(&self, warning: Warning) {
+        let mut err = io::stderr().lock();
+        self.display_with(warning, &mut err);
     }
 
     /// Take warnings still held for an envelope that never arrived.
@@ -114,6 +124,15 @@ impl Sink for CommandSink {
     /// either print to stderr as it arrives or keep it for the envelope.
     fn accept(&self, warning: Warning) {
         let key = warning.key();
+        // Read the root and its resolved retention window before taking the
+        // mutex. Nothing called under this lock may load config or raise a
+        // warning, or a malformed `[warnings]` setting would re-enter `accept`
+        // on this thread and deadlock the non-reentrant mutex.
+        // Spec: docs/specs/cli.md#warnings-are-typed-values
+        let state_root = STATE_ROOT
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         let mut state = self
             .state
             .lock()
@@ -121,16 +140,11 @@ impl Sink for CommandSink {
         if !state.seen.insert(key.clone()) {
             return;
         }
-        if warning.dedup == Dedup::PerChange {
-            let root = STATE_ROOT
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
-            if let Some(root) = root
-                && dedup::was_seen(&root, &key)
-            {
-                return;
-            }
+        if warning.dedup == Dedup::PerChange
+            && let Some((root, retention_days)) = state_root.as_ref()
+            && dedup::was_seen(root, &key, *retention_days)
+        {
+            return;
         }
         if state.json {
             state.warnings.push(warning);
@@ -189,11 +203,15 @@ pub(crate) fn replay_warnings(warnings: Vec<Warning>) {
     }
 }
 
-/// Name the state root used by per-change dedup. Called as soon as roots are
-/// resolved, before config and root warnings are raised.
+/// Name the state root used by per-change dedup and resolve its retention
+/// window once, before the sink can see the root. Config loading raises typed
+/// warnings; doing it here — with no sink lock held — keeps that warning out of
+/// the sink's reentrant path. Called as soon as roots are resolved, before root
+/// warnings are raised. Spec: docs/specs/cli.md#warnings-are-typed-values
 pub(crate) fn set_state_root(root: &Path) {
+    let retention_days = host_settings::dedup_retention_days(root);
     if let Ok(mut slot) = STATE_ROOT.write() {
-        *slot = Some(root.to_owned());
+        *slot = Some((root.to_owned(), retention_days));
     }
 }
 
@@ -203,12 +221,12 @@ fn remember_for_change(warning: &Warning) {
     if warning.dedup != Dedup::PerChange {
         return;
     }
-    let root = STATE_ROOT
+    let state_root = STATE_ROOT
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
-    if let Some(root) = root {
-        dedup::remember(&root, &warning.key(), warning.code.as_ref());
+    if let Some((root, retention_days)) = state_root {
+        dedup::remember(&root, &warning.key(), warning.code.as_ref(), retention_days);
     }
 }
 
@@ -647,7 +665,7 @@ mod dedup {
     /// Whether `key` has already been shown. A read-only check: it does not
     /// mark the key, so a warning can be held for the envelope before it is
     /// remembered at display time.
-    pub(super) fn was_seen(state_root: &Path, key: &str) -> bool {
+    pub(super) fn was_seen(state_root: &Path, key: &str, retention_days: u64) -> bool {
         let Some(db) = open(state_root, false) else {
             return false;
         };
@@ -656,8 +674,7 @@ mod dedup {
         }
         use provenant_core::Clock as _;
         let now = provenant_os::clock::SystemClock.unix_seconds().max(0);
-        let retention = super::host_settings::dedup_retention_days(state_root);
-        let window = i64::try_from(retention.saturating_mul(86_400)).unwrap_or(i64::MAX);
+        let window = i64::try_from(retention_days.saturating_mul(86_400)).unwrap_or(i64::MAX);
         let cutoff = now.saturating_sub(window);
         // An expired key is new again: its row will be pruned on the next write.
         db.query_row(
@@ -671,7 +688,7 @@ mod dedup {
     /// Record `key` and report whether it is new. A fresh row starts at one;
     /// only an existing row advances its count and last-seen time. Stale rows
     /// are pruned on every write.
-    pub(super) fn remember(state_root: &Path, key: &str, code: &str) -> bool {
+    pub(super) fn remember(state_root: &Path, key: &str, code: &str, retention_days: u64) -> bool {
         let Some(mut db) = open(state_root, true) else {
             return true;
         };
@@ -681,8 +698,7 @@ mod dedup {
         use provenant_core::Clock as _;
         // SQLite stores signed integers; seconds before the epoch clamp to zero.
         let now = provenant_os::clock::SystemClock.unix_seconds().max(0);
-        let retention = super::host_settings::dedup_retention_days(state_root);
-        let window = i64::try_from(retention.saturating_mul(86_400)).unwrap_or(i64::MAX);
+        let window = i64::try_from(retention_days.saturating_mul(86_400)).unwrap_or(i64::MAX);
         let cutoff = now.saturating_sub(window);
         let tx = match db.transaction() {
             Ok(tx) => tx,
@@ -826,9 +842,9 @@ mod tests {
     fn a_per_change_key_is_remembered_but_a_changed_key_is_shown() {
         with_root(|root| {
             set_state_root(root);
-            assert!(dedup::remember(root, "sha256:a", "A"));
-            assert!(!dedup::remember(root, "sha256:a", "A"));
-            assert!(dedup::remember(root, "sha256:b", "A"));
+            assert!(dedup::remember(root, "sha256:a", "A", 30));
+            assert!(!dedup::remember(root, "sha256:a", "A", 30));
+            assert!(dedup::remember(root, "sha256:b", "A", 30));
             assert!(root.join("warnings.sqlite3").exists());
         });
     }
@@ -850,7 +866,7 @@ mod tests {
                     rusqlite::params![stale],
                 )
                 .is_ok());
-            assert!(dedup::remember(root, "sha256:fresh", "A"));
+            assert!(dedup::remember(root, "sha256:fresh", "A", 30));
             let remaining: Vec<String> = db
                 .prepare("SELECT key FROM seen ORDER BY key")
                 .expect("prepare")
@@ -1000,7 +1016,7 @@ mod tests {
             let _sink = install_command_sink(true);
             warning::warn(warning);
             assert!(
-                !dedup::was_seen(root, &key),
+                !dedup::was_seen(root, &key, 30),
                 "a warning held for the envelope is not remembered before it is shown"
             );
             let result = CommandResult::new("fixture", Outcome::Ok, json!({"ok": true}));
@@ -1015,7 +1031,7 @@ mod tests {
                 0
             );
             assert!(
-                dedup::was_seen(root, &key),
+                dedup::was_seen(root, &key, 30),
                 "delivering the warning in the envelope remembers its key"
             );
             assert!(err.is_empty(), "{}", String::from_utf8_lossy(&err));
@@ -1045,7 +1061,7 @@ mod tests {
                 3
             );
             assert!(
-                !dedup::was_seen(root, &key),
+                !dedup::was_seen(root, &key, 30),
                 "a warning no envelope delivered is not remembered on an IO failure"
             );
             // The guard shows the returned warning on exit and remembers it then.
@@ -1077,10 +1093,10 @@ mod tests {
             {
                 let _sink = install_command_sink(true);
                 warning::warn(warning);
-                assert!(!dedup::was_seen(root, &key));
+                assert!(!dedup::was_seen(root, &key, 30));
             }
             assert!(
-                dedup::was_seen(root, &key),
+                dedup::was_seen(root, &key, 30),
                 "the guard drains held warnings on exit so they are shown once"
             );
         });
@@ -1090,7 +1106,7 @@ mod tests {
     // Spec: docs/specs/cli.md#warnings-are-typed-values
     fn a_fresh_per_change_key_starts_at_one() {
         with_root(|root| {
-            assert!(dedup::remember(root, "sha256:fresh", "A"));
+            assert!(dedup::remember(root, "sha256:fresh", "A", 30));
             let db = open_connection(&root.join("warnings.sqlite3"), true).expect("db");
             let count: i64 = db
                 .query_row(
@@ -1101,7 +1117,7 @@ mod tests {
                 .expect("count");
             assert_eq!(count, 1, "a new row is shown once and counted once");
             drop(db);
-            assert!(!dedup::remember(root, "sha256:fresh", "A"));
+            assert!(!dedup::remember(root, "sha256:fresh", "A", 30));
             let db = open_connection(&root.join("warnings.sqlite3"), true).expect("db");
             let count: i64 = db
                 .query_row(
@@ -1111,6 +1127,84 @@ mod tests {
                 )
                 .expect("count");
             assert_eq!(count, 2, "only a repeat advances the count");
+        });
+    }
+
+    #[test]
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    fn a_malformed_warnings_setting_does_not_reenter_the_sink_under_its_lock() {
+        with_root(|root| {
+            std::fs::write(
+                root.join("config.toml"),
+                "schema_version = 1\n[warnings]\ndedup_retention_days = 0\n",
+            )
+            .expect("config");
+            set_state_root(root);
+            let _sink = install_command_sink(true);
+            // Resolving the malformed setting raises a per-change config warning.
+            // If the sink re-entered while holding its mutex on this path the
+            // command would hang; it must instead reach the same envelope.
+            warning::warn(
+                Warning::new(NAME_CASE_FOLDED, "folded `Sink` to `sink`")
+                    .subject("sink")
+                    .once_per_change(),
+            );
+            let result = CommandResult::new("fixture", Outcome::Ok, json!({"ok": true}));
+            let globals = provenant_cli::Globals {
+                json: true,
+                ..Default::default()
+            };
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            emit_with_writers(&result, &globals, &mut out, &mut err, "", false, None);
+            let envelope: Value = serde_json::from_slice(&out).expect("envelope");
+            assert!(
+                envelope["warnings"]
+                    .as_array()
+                    .expect("warnings")
+                    .iter()
+                    .any(|warning| warning["code"] == NAME_CASE_FOLDED.as_str()),
+                "{envelope}"
+            );
+            assert!(err.is_empty(), "{}", String::from_utf8_lossy(&err));
+        });
+    }
+
+    #[test]
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    fn a_failed_stderr_write_does_not_remember_a_per_change_warning() {
+        with_root(|root| {
+            set_state_root(root);
+            let first = Warning::new(NAME_CASE_FOLDED, "folded `Sink` to `sink`")
+                .subject("sink-write")
+                .once_per_change();
+            let key = first.key();
+            let _sink = install_command_sink(false);
+            let sink = COMMAND_SINK
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+                .expect("sink");
+            let mut broken = BrokenWriter;
+            sink.display_with(first, &mut broken);
+            assert!(
+                !dedup::was_seen(root, &key, 30),
+                "an undelivered warning must not be remembered as shown"
+            );
+
+            let second = Warning::new(NAME_CASE_FOLDED, "folded `Sink` to `sink`")
+                .subject("sink-write")
+                .once_per_change();
+            let mut delivered = Vec::new();
+            sink.display_with(second, &mut delivered);
+            assert_eq!(
+                String::from_utf8_lossy(&delivered),
+                "warning: folded `Sink` to `sink`\n"
+            );
+            assert!(
+                dedup::was_seen(root, &key, 30),
+                "a warning the reader received is remembered"
+            );
         });
     }
 }
