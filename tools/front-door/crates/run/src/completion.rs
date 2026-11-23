@@ -5,14 +5,16 @@ use crate::{
 };
 use provenant_os::fs::Directory;
 use provenant_records::{
-    AttemptFile,
+    AttemptFile, Layer, Source,
     handoff::{HANDOFF_BYTES, Handoff, HandoffError, HandoffResult},
     run::{PathScope, WriteSource},
+    warning::{CONFIG_MALFORMED, CONFIG_UNAVAILABLE, Warning, warn},
 };
 use std::{
     ffi::OsStr,
-    path::{Component, Path},
+    path::{Component, Path, PathBuf},
 };
+use toml_edit::{Item, TableLike};
 
 /// A handoff was accepted with an advisory parse notice.
 /// Spec: docs/specs/cli.md#warnings-are-typed-values
@@ -286,6 +288,237 @@ impl LaneLocation {
     }
 }
 
+/// The roles a layered brief-preamble file may scope itself to.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BriefRole {
+    #[default]
+    Writer,
+    Review,
+    ReadOnly,
+}
+
+impl BriefRole {
+    /// The one spelling of each role in a `<!-- provenant-roles: -->` header.
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim() {
+            "writer" => Some(Self::Writer),
+            "review" => Some(Self::Review),
+            "read-only" => Some(Self::ReadOnly),
+            _ => None,
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Writer => "writer",
+            Self::Review => "review",
+            Self::ReadOnly => "read-only",
+        }
+    }
+}
+
+/// One layer of the standing brief preamble, with the exact file it came from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BriefLayer {
+    pub source: Source,
+    /// Roles this layer is scoped to. Empty means every role.
+    pub roles: Vec<BriefRole>,
+    pub text: String,
+}
+
+/// One project-declared no-build check for a writer to run before pushing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BriefStaticCheck {
+    pub argv: Vec<String>,
+    pub cwd: PathBuf,
+    pub timeout_seconds: u64,
+}
+
+/// The layered standing rules and the project's static checks, carried into
+/// every lane's prompt through [`PreambleExtras`].
+#[derive(Clone, Debug, Default)]
+pub struct BriefPreamble {
+    /// Layers in Host, Project, Launch order. Every present layer is kept: the
+    /// family concatenates rather than choosing a winner.
+    pub layers: Vec<BriefLayer>,
+    pub static_checks: Vec<BriefStaticCheck>,
+    pub static_checks_source: Option<Source>,
+}
+
+/// The registry knob that names a preamble file in each config layer.
+pub const BRIEF_PREAMBLE_KNOB: &str = "lanes.brief_preamble";
+const ROLE_HEADER_OPEN: &str = "<!-- provenant-roles:";
+const ROLE_HEADER_CLOSE: &str = "-->";
+
+/// Read `lanes.brief_preamble` from one config document, accepting both the
+/// quoted dotted key and the nested `[knobs.lanes]` form.
+fn brief_preamble_knob(text: &str) -> Option<String> {
+    let document = text.parse::<toml_edit::DocumentMut>().ok()?;
+    let knobs = document.get("knobs")?.as_table_like()?;
+    if let Some(path) = knobs
+        .get(BRIEF_PREAMBLE_KNOB)
+        .and_then(Item::as_value)
+        .and_then(|value| value.as_str())
+    {
+        return Some(path.to_owned());
+    }
+    knobs
+        .get("lanes")
+        .and_then(Item::as_table_like)?
+        .get("brief_preamble")
+        .and_then(Item::as_value)
+        .and_then(|value| value.as_str())
+        .map(str::to_owned)
+}
+
+/// The roles declared in a first-line header. An unrecognised role warns and
+/// is ignored; a file with no header applies to every role.
+fn brief_roles(text: &str, origin: &str) -> Vec<BriefRole> {
+    let Some(first) = text.lines().next() else {
+        return Vec::new();
+    };
+    let first = first.trim();
+    let Some(rest) = first.strip_prefix(ROLE_HEADER_OPEN) else {
+        return Vec::new();
+    };
+    let Some(list) = rest.strip_suffix(ROLE_HEADER_CLOSE) else {
+        return Vec::new();
+    };
+    let mut roles = Vec::new();
+    for token in list
+        .split(',')
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+    {
+        match BriefRole::parse(token) {
+            Some(role) if !roles.contains(&role) => roles.push(role),
+            Some(_) => {}
+            None => warn(
+                Warning::new(
+                    CONFIG_MALFORMED,
+                    format!("unknown brief preamble role {token:?}; expected writer, review or read-only"),
+                )
+                .subject(origin.to_owned()),
+            ),
+        }
+    }
+    roles
+}
+
+fn without_role_header(text: &str) -> &str {
+    let Some(first) = text.lines().next() else {
+        return text;
+    };
+    if first.trim().starts_with(ROLE_HEADER_OPEN) && first.trim().ends_with(ROLE_HEADER_CLOSE) {
+        text[first.len()..].trim_start_matches(|c| c == '\r' || c == '\n')
+    } else {
+        text
+    }
+}
+
+impl BriefPreamble {
+    /// Read the three layers in Host, Project, Launch order. The host layer's
+    /// path comes from `<state>/config.toml`, the project layer's from
+    /// `<project>/.provenant/config.toml`, and the launch layer's from
+    /// `--preamble-file`. A missing or unreadable file warns through the typed
+    /// sink and is skipped; the other layers still reach the preamble.
+    pub fn read(host_config: Option<&Path>, project: Option<&Path>, launch: Option<&Path>) -> Self {
+        let mut layers = Vec::new();
+        let mut add = |layer: Layer, path: &Path| {
+            let origin = path.display().to_string();
+            match std::fs::read_to_string(path) {
+                Ok(text) => layers.push(BriefLayer {
+                    source: Source {
+                        layer,
+                        origin: Some(origin.clone()),
+                    },
+                    roles: brief_roles(&text, &origin),
+                    text: without_role_header(&text).to_owned(),
+                }),
+                Err(error) => warn(
+                    Warning::new(
+                        CONFIG_UNAVAILABLE,
+                        format!("brief preamble file {origin} could not be read: {error}; this layer is skipped and the launch proceeds"),
+                    )
+                    .subject(origin.clone())
+                    .source(Source {
+                        layer,
+                        origin: Some(origin),
+                    }),
+                ),
+            }
+        };
+        if let Some(config) = host_config
+            && let Ok(text) = std::fs::read_to_string(config)
+            && let Some(name) = brief_preamble_knob(&text)
+        {
+            add(Layer::Host, Path::new(name.as_str()));
+        }
+        if let Some(project) = project
+            && let Ok(text) =
+                std::fs::read_to_string(project.join(".provenant").join("config.toml"))
+            && let Some(name) = brief_preamble_knob(&text)
+        {
+            add(Layer::Project, &project.join(name));
+        }
+        if let Some(path) = launch {
+            add(Layer::Launch, path);
+        }
+        Self {
+            layers,
+            ..Default::default()
+        }
+    }
+
+    /// The applicable layers, each labelled with its source, in layer order.
+    fn render(&self, role: BriefRole) -> String {
+        let mut text = String::new();
+        for layer in &self.layers {
+            if !layer.roles.is_empty() && !layer.roles.contains(&role) {
+                continue;
+            }
+            text.push_str(&format!(
+                "Brief preamble from {} ({}):\n{}\n",
+                layer.source.layer.description(),
+                layer.source.origin.as_deref().unwrap_or("unknown source"),
+                layer.text.trim_end()
+            ));
+        }
+        text
+    }
+
+    /// The project's no-build checks, added only to a writer's preamble.
+    fn static_checks_paragraph(&self) -> String {
+        if self.static_checks.is_empty() {
+            return String::new();
+        }
+        let source = self.static_checks_source.as_ref().map(|source| {
+            format!(
+                "{}; {}",
+                source.layer.description(),
+                source.origin.as_deref().unwrap_or(".provenant/ports.json")
+            )
+        });
+        let source = source.unwrap_or_else(|| "project; .provenant/ports.json".to_owned());
+        let checks = self
+            .static_checks
+            .iter()
+            .map(|check| {
+                format!(
+                    "`{}` in {} (cap {}s)",
+                    check.argv.join(" "),
+                    check.cwd.display(),
+                    check.timeout_seconds
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        format!(
+            "Static checks: before pushing, run the project's no-build checks (source: {source}): {checks}. Report any failure in the handoff; a failure does not refuse the push and CI still gates the merge.\n"
+        )
+    }
+}
+
 /// Optional preamble overrides. Default uses the targeted verification paragraph.
 #[derive(Clone, Debug, Default)]
 pub struct PreambleExtras {
@@ -293,6 +526,10 @@ pub struct PreambleExtras {
     pub location: Option<LaneLocation>,
     pub verification: Option<crate::VerificationResolution>,
     pub build_cap: Option<BuildCap>,
+    /// The layered standing brief preamble and the project's static checks.
+    pub brief: Option<BriefPreamble>,
+    /// Which role this lane plays, for the preamble's role filters.
+    pub role: BriefRole,
 }
 
 /// Format an applied route without repeating a provider already on the model.
@@ -394,6 +631,18 @@ pub fn lane_preamble_with(
     handoff: Option<&Path>,
     extras: &PreambleExtras,
 ) -> String {
+    let is_writer = ci_scope.is_some();
+    let brief = extras
+        .brief
+        .as_ref()
+        .map(|brief| {
+            let mut text = brief.render(extras.role);
+            if is_writer && extras.role == BriefRole::Writer {
+                text.push_str(&brief.static_checks_paragraph());
+            }
+            text
+        })
+        .unwrap_or_default();
     let writer = ci_scope
         .map(|scope| {
             let budget = limits
@@ -425,7 +674,7 @@ pub fn lane_preamble_with(
         })
         .unwrap_or_default();
     format!(
-        "{model_guidance}\n{}{writer}{}{}{READING_GUIDANCE}Shared notes: `provenant notes add [--tag T] [--scope GRAPH/NODE] -- TEXT`; `provenant notes read` reads new observations; use `--replay` to replay. Notes are unverified claims by default.\n",
+        "{model_guidance}\n{brief}{}{writer}{}{}{READING_GUIDANCE}Shared notes: `provenant notes add [--tag T] [--scope GRAPH/NODE] -- TEXT`; `provenant notes read` reads new observations; use `--replay` to replay. Notes are unverified claims by default.\n",
         limits.preamble(),
         extras
             .route
@@ -589,6 +838,153 @@ mod tests {
         );
         assert!(preamble.contains("build` admission class cap of 7"));
         assert!(preamble.contains("source: host; `[admission.build].slots`"));
+    }
+
+    /// Spec: docs/specs/run-launch.md#layered-brief-preamble
+    #[test]
+    fn layered_brief_preamble_concatenates_with_source_labels_and_role_filters() {
+        fn layer(layer: Layer, origin: &str, roles: Vec<BriefRole>, text: &str) -> BriefLayer {
+            BriefLayer {
+                source: Source {
+                    layer,
+                    origin: Some(origin.to_owned()),
+                },
+                roles,
+                text: text.to_owned(),
+            }
+        }
+        let preamble = BriefPreamble {
+            layers: vec![
+                layer(Layer::Host, "host.md", vec![], "Standing host rule."),
+                layer(
+                    Layer::Project,
+                    ".provenant/project.md",
+                    vec![BriefRole::Writer],
+                    "Writer-only project rule.",
+                ),
+                layer(
+                    Layer::Launch,
+                    "--preamble-file",
+                    vec![],
+                    "One-off launch rule.",
+                ),
+            ],
+            static_checks: vec![BriefStaticCheck {
+                argv: vec!["scripts/check-extra-fields".into()],
+                cwd: PathBuf::from("."),
+                timeout_seconds: 30,
+            }],
+            static_checks_source: Some(Source {
+                layer: Layer::Project,
+                origin: Some(".provenant/ports.json#verify.static_checks".into()),
+            }),
+        };
+        let extras = PreambleExtras {
+            brief: Some(preamble.clone()),
+            role: BriefRole::Writer,
+            ..Default::default()
+        };
+        let writer = lane_preamble_with(
+            "Policy",
+            &Default::default(),
+            Some(crate::ResolvedCiScope::resolve(&Default::default())),
+            None,
+            &extras,
+        );
+        let host = writer.find("Brief preamble from host configuration (host.md)");
+        let project = writer.find("Brief preamble from project (.provenant/project.md)");
+        let launch = writer.find("Brief preamble from launch (--preamble-file)");
+        assert!(
+            host.is_some() && project.is_some() && launch.is_some(),
+            "{writer}"
+        );
+        assert!(host < project && project < launch, "{writer}");
+        assert!(writer.contains("Standing host rule."), "{writer}");
+        assert!(writer.contains("Writer-only project rule."), "{writer}");
+        assert!(writer.contains("One-off launch rule."), "{writer}");
+        assert!(
+            writer.contains("source: project; .provenant/ports.json#verify.static_checks"),
+            "{writer}"
+        );
+        assert!(writer.contains("scripts/check-extra-fields"), "{writer}");
+        assert!(writer.contains("cap 30s"), "{writer}");
+        // A review lane sees only the layers whose roles match it, and no
+        // static-check paragraph even when the project declared checks.
+        let review_extras = PreambleExtras {
+            brief: Some(preamble.clone()),
+            role: BriefRole::Review,
+            ..Default::default()
+        };
+        let review = lane_preamble_with(
+            "Policy",
+            &Default::default(),
+            Some(crate::ResolvedCiScope::resolve(&Default::default())),
+            None,
+            &review_extras,
+        );
+        assert!(review.contains("Standing host rule."), "{review}");
+        assert!(!review.contains("Writer-only project rule."), "{review}");
+        assert!(review.contains("One-off launch rule."), "{review}");
+        assert!(!review.contains("Static checks:"), "{review}");
+        let reader_extras = PreambleExtras {
+            brief: Some(preamble),
+            role: BriefRole::ReadOnly,
+            ..Default::default()
+        };
+        let reader = lane_preamble_with("Policy", &Default::default(), None, None, &reader_extras);
+        assert!(!reader.contains("Writer-only project rule."), "{reader}");
+        assert!(!reader.contains("Static checks:"), "{reader}");
+    }
+
+    /// Spec: docs/specs/run-launch.md#layered-brief-preamble
+    #[test]
+    fn a_missing_brief_preamble_file_warns_and_the_other_layers_still_launch() {
+        let temp = tempfile::tempdir().unwrap();
+        let host_file = temp.path().join("host.md");
+        std::fs::write(&host_file, "Host rule.\n").unwrap();
+        let host_config = temp.path().join("config.toml");
+        std::fs::write(
+            &host_config,
+            format!(
+                "schema_version=1\n[knobs]\nlanes.brief_preamble = {:?}\n",
+                host_file.display().to_string()
+            ),
+        )
+        .unwrap();
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(project.join(".provenant")).unwrap();
+        let missing = project.join(".provenant").join("absent.md");
+        std::fs::write(
+            project.join(".provenant").join("config.toml"),
+            "schema_version=1\n[knobs.lanes]\nbrief_preamble = \"absent.md\"\n",
+        )
+        .unwrap();
+        let launch = temp.path().join("launch.md");
+        std::fs::write(&launch, "Launch rule.\n").unwrap();
+
+        let (brief, warnings) = provenant_records::warning::capture(|| {
+            BriefPreamble::read(Some(&host_config), Some(&project), Some(&launch))
+        });
+        assert_eq!(brief.layers.len(), 2, "{brief:?}");
+        assert_eq!(brief.layers[0].source.layer, Layer::Host);
+        assert_eq!(brief.layers[1].source.layer, Layer::Launch);
+        assert!(
+            warnings.iter().any(|warning| {
+                warning.code.as_ref() == CONFIG_UNAVAILABLE.as_str()
+                    && warning.message.contains(missing.to_str().unwrap())
+            }),
+            "{warnings:?}"
+        );
+
+        // The preamble still contains the readable layers; the launch proceeds.
+        let extras = PreambleExtras {
+            brief: Some(brief),
+            ..Default::default()
+        };
+        let text = lane_preamble_with("Policy", &Default::default(), None, None, &extras);
+        assert!(text.contains("Host rule."), "{text}");
+        assert!(text.contains("Launch rule."), "{text}");
+        assert!(!text.contains("absent.md"), "{text}");
     }
 
     fn snapshot(status: &str) -> Vec<u8> {

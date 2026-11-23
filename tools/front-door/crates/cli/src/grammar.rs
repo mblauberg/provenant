@@ -683,6 +683,9 @@ pub struct GraphRunArgs {
     /// Read the brief from a file, or from standard input given `-`
     #[arg(long, conflicts_with_all = ["file", "brief", "brief_text"])]
     pub brief_file: Option<PathBuf>,
+    /// Standing lane rules to append to every lane's preamble as its launch layer
+    #[arg(long = "preamble-file", value_name = "PATH")]
+    pub preamble_file: Option<PathBuf>,
     /// Place attempts on this peer name or host ID
     #[arg(long)]
     pub host: Option<String>,

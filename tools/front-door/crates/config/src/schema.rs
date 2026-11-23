@@ -393,6 +393,7 @@ pub fn schema<T: Serialize>(
             path: name.clone(),
             kind: match spec.kind {
                 Kind::Bool => "bool",
+                Kind::String => "string",
                 Kind::StringList => "string_list",
                 Kind::CensusIgnoreList => "census_ignore_list",
                 Kind::Enum => "enum",

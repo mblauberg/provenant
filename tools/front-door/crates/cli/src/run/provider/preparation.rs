@@ -4644,6 +4644,58 @@ pub(super) fn prepare_candidates_inner(
             provider.source = Some(format!("domains.fabric.host_native.{name}"));
             provider.host_native = Some(name.to_owned());
         }
+        let project_root = writer
+            .as_ref()
+            .and_then(|writer| writer.project_root())
+            .or(registry.cwd);
+        let launch_preamble =
+            (provenant_config::knob_source(&task.profile, run::BRIEF_PREAMBLE_KNOB)
+                == provenant_records::Layer::Launch)
+                .then(|| {
+                    task.profile
+                        .knobs
+                        .get(run::BRIEF_PREAMBLE_KNOB)
+                        .and_then(|value| value.as_str())
+                        .map(PathBuf::from)
+                })
+                .flatten();
+        let mut brief = run::BriefPreamble::read(
+            Some(&state_root.join("config.toml")),
+            project_root,
+            launch_preamble.as_deref(),
+        );
+        if let Ok(ports) = provenant_config::PortTable::read_for(project_root, state_root) {
+            brief.static_checks = ports
+                .verify
+                .static_checks
+                .iter()
+                .map(|check| run::BriefStaticCheck {
+                    argv: check.argv.clone(),
+                    cwd: check.cwd.clone(),
+                    timeout_seconds: check.timeout_seconds,
+                })
+                .collect();
+            if !ports.verify.static_checks.is_empty() {
+                brief.static_checks_source = Some(provenant_records::Source {
+                    layer: ports
+                        .provenance()
+                        .get("verify.static_checks")
+                        .copied()
+                        .unwrap_or(ports.verify.source),
+                    origin: Some(format!(
+                        "{}#verify.static_checks",
+                        provenant_config::PORTS_CONFIG
+                    )),
+                });
+            }
+        }
+        let role = if writer.is_some() {
+            run::BriefRole::Writer
+        } else if matches!(&task.route, run::RequestedRoute::Review { .. }) {
+            run::BriefRole::Review
+        } else {
+            run::BriefRole::ReadOnly
+        };
         let extras = run::PreambleExtras {
             route: Some(provider.clone()),
             location: writer.as_ref().map(|writer| run::LaneLocation {
@@ -4657,6 +4709,8 @@ pub(super) fn prepare_candidates_inner(
                 prompt_text,
             )),
             build_cap: Some(run::BuildCap::from(&build_class)),
+            brief: Some(brief),
+            role,
         };
         let text = format!(
             "{}\n{text}",

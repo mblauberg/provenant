@@ -682,6 +682,9 @@ fn run_input(
             .map(|model| model_selector(model, catalogue))
             .transpose()?;
         let mut input = json!({"op":"run","explain":request.explain,"detached":request.detached});
+        if let Some(path) = request.preamble_file {
+            input["preamble_file"] = json!(path);
+        }
         for (field, value) in [
             ("host", request.host),
             ("model", model),
@@ -1037,6 +1040,7 @@ mod tests {
             brief: None,
             brief_text: None,
             brief_file: None,
+            preamble_file: None,
             template: None,
             route: None,
             mode: None,

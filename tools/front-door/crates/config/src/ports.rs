@@ -301,6 +301,37 @@ pub struct VerifyPort {
     pub runners: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     pub affected: VerifyAffectedPort,
+    /// Cheap repository checks a writer runs before pushing. They need no
+    /// build, so a lane may run them even though it otherwise only formats.
+    #[serde(default)]
+    pub static_checks: Vec<VerifyStaticCheck>,
+}
+
+/// One no-build check declared under `verify.static_checks` of a port layer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerifyStaticCheck {
+    pub argv: Vec<String>,
+    #[serde(default = "default_static_check_cwd")]
+    pub cwd: std::path::PathBuf,
+    #[serde(default = "default_static_check_timeout")]
+    pub timeout_seconds: u64,
+}
+
+fn default_static_check_cwd() -> std::path::PathBuf {
+    std::path::PathBuf::from(".")
+}
+
+fn default_static_check_timeout() -> u64 {
+    60
+}
+
+impl VerifyStaticCheck {
+    /// A declaration is usable when it has a command and a positive time cap.
+    pub fn is_valid(&self) -> bool {
+        self.argv.first().is_some_and(|program| !program.is_empty())
+            && self.timeout_seconds > 0
+            && crate::ports::relative(&self.cwd, true)
+    }
 }
 
 /// Configuration for skipping verification tiers whose inputs are unaffected.
@@ -1081,6 +1112,7 @@ impl PortEntry for VerifyPort {
             && self.test_threads.is_none_or(|threads| threads > 0)
             && (self.tiers.is_empty() || self.tiers.contains_key(&self.default_tier))
             && self.tiers.iter().all(|(name, tier)| !name.is_empty() && !tier.commands.is_empty())
+            && self.static_checks.iter().all(VerifyStaticCheck::is_valid)
     }
 }
 impl PortEntry for LandPort {

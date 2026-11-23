@@ -27,6 +27,7 @@ struct ProviderUpdates {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Kind {
     Bool,
+    String,
     StringList,
     CensusIgnoreList,
     Enum,
@@ -300,6 +301,10 @@ fn check(spec: &Spec, value: &Value) -> Result<(), &'static str> {
             }
         }
         Value::Bool(_) if spec.kind == Kind::Bool => Ok(()),
+        Value::String(text) if spec.kind == Kind::String => (!text.contains('\0')
+            && text.len() <= 4096)
+            .then_some(())
+            .ok_or("type"),
         Value::Array(items) if spec.kind == Kind::StringList => {
             if items.len() <= 128
                 && items.iter().all(|v| {
