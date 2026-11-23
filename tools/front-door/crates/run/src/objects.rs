@@ -726,12 +726,53 @@ pub(crate) struct Published {
 
 impl Published {
     /// Whether the branch now ends in this writer's own history: at the
-    /// verified head, or at a merge of that head with the host branch. A head
-    /// the branch already contained publishes nothing, so the tip may be a
-    /// commit someone else advanced; moving this worktree's files to it would
-    /// discard what that head describes.
-    pub(crate) fn ends_at_head(&self, head: GitOid) -> bool {
-        self.merged || self.tip == head
+    /// verified head, at a merge of that head with the host branch, or — on a
+    /// resume after that merge — at the merge commit itself. A head the branch
+    /// already contained publishes nothing, so the tip may be a commit someone
+    /// else advanced; moving this worktree's files to it would discard what
+    /// that head describes.
+    pub(crate) fn ends_at_head(
+        &self,
+        git: &Path,
+        repo: &VerifiedRepo,
+        head: GitOid,
+    ) -> Result<bool> {
+        if self.merged || self.tip == head {
+            return Ok(true);
+        }
+        // A resume after a host merge finds the branch already containing the
+        // verified head, so publication did not merge again and `merged` is
+        // false. The merge itself is the only witness left that the tip is the
+        // lane's own: `host_merge` wrote the head as one of its two parents. A
+        // fast-forward, or a tip someone else advanced past the merge, is not
+        // a two-parent commit with the head as a parent and stays out of reach.
+        lane_merge_of(git, repo, self.tip, head)
+    }
+}
+
+/// Whether `tip` is the merge this lane published: a two-parent commit with the
+/// verified head as one parent. The caller separately checks that `tip` is the
+/// branch's current tip, so this identifies a merge the lane produced rather
+/// than a commit another writer moved the branch to.
+fn lane_merge_of(git: &Path, repo: &VerifiedRepo, tip: GitOid, head: GitOid) -> Result<bool> {
+    let output = raw_outcome(
+        git,
+        repo.common_git_dir(),
+        repo.root_path(),
+        &args(&["rev-list", "--parents", "--max-count=1", &tip.to_string()]),
+    )?;
+    match output.termination {
+        Termination::Exit(0) => {
+            let text = String::from_utf8_lossy(&output.stdout.bytes);
+            let mut fields = text.split_whitespace();
+            let listed_tip = fields.next().unwrap_or_default();
+            let parents: Vec<&str> = fields.collect();
+            let head = head.to_string();
+            Ok(listed_tip == tip.to_string()
+                && parents.len() == 2
+                && parents.contains(&head.as_str()))
+        }
+        _ => Err(operation_io(repo.common_git_dir(), Some(output))),
     }
 }
 
@@ -961,18 +1002,12 @@ pub(crate) fn publish_branch(
             history.rebase.setting(REBASE),
         );
     }
-    // The published tip's own ancestry. A merge adds the host branch as a
-    // parent, so the merge's ancestry says nothing about what the head lacked.
-    let ancestor = if merged || target != head {
-        match known_ancestor(git, repo, base, launch_ref, target, branch, Some(current))? {
-            Some(ancestor) => ancestor,
-            // The branch tip the publication replaced is always in the
-            // published tip, so a miss is a broken Git answer, not a history.
-            None => return Err(invalid()),
-        }
-    } else {
-        lane_ancestor.unwrap_or(Ancestor::Unrooted)
-    };
+    // The ancestor the publication established is the one judged on the lane
+    // head before any host merge. A merge adds the host branch as a parent, so
+    // recomputing from its tip would launder an unrooted head into a "descends
+    // from the branch" record that disagrees with the warning already written
+    // about that head.
+    let ancestor = lane_ancestor.unwrap_or(Ancestor::Unrooted);
     // receive-pack has checked the graph. Git's CAS protects concurrent host
     // updates, including when a lane rebases or merges its private branch.
     {

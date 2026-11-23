@@ -1633,13 +1633,85 @@ fn a_head_the_branch_already_contains_never_advances_to_a_tip_someone_else_reach
     assert_eq!(published.tip, ahead);
     assert!(!published.merged);
     assert!(
-        !published.ends_at_head(fixture.head),
+        !published.ends_at_head(&fixture.git, fixture.worktree.repo(), fixture.head)?,
         "a contained head must not move this worktree to a tip someone else advanced"
     );
-    assert!(published.ends_at_head(ahead));
+    assert!(published.ends_at_head(&fixture.git, fixture.worktree.repo(), ahead)?);
     assert_eq!(
         super::resolve_ref(&fixture.git, fixture.worktree.repo(), "refs/heads/lane")?,
         ahead
+    );
+    Ok(())
+}
+
+#[test]
+fn a_resume_after_a_host_merge_converges_on_the_merge_itself() -> TestResult {
+    let mut fixture = Fixture::new("sha1")?;
+    let (_attempt, _scratch) = fixture.overlay()?;
+    fixture.import()?;
+    // Publish the imported head first, then move the host branch onto a
+    // competing commit off the launch base so the next publication merges it.
+    publish_tip(&fixture, fixture.head, fixture.import_attempt)?;
+    let tree = oid(git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["rev-parse", &format!("{}^{{tree}}", fixture.base)],
+    )?)?;
+    let divergent = oid(git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &[
+            "commit-tree",
+            &tree.to_string(),
+            "-p",
+            &fixture.base.to_string(),
+            "-m",
+            "competing host update",
+        ],
+    )?)?;
+    update_ref(&fixture, "refs/heads/lane", divergent)?;
+    let first = publish_tip(&fixture, fixture.head, fixture.import_attempt)?;
+    assert!(
+        first.merged,
+        "the publication must merge the diverged host branch"
+    );
+    let merge = first.tip;
+    assert_eq!(
+        super::resolve_ref(&fixture.git, fixture.worktree.repo(), "refs/heads/lane")?,
+        merge
+    );
+
+    // Simulate the crash between the branch CAS and the worktree advance and
+    // phase checkpoint. The resume finds the head already contained, so it
+    // reports the merge as the branch tip without merging again.
+    let resumed = publish_tip(&fixture, fixture.head, fixture.import_attempt)?;
+    assert!(!resumed.merged);
+    assert_eq!(resumed.tip, merge);
+    assert_eq!(resumed.previous, merge);
+    assert!(
+        resumed.ends_at_head(&fixture.git, fixture.worktree.repo(), fixture.head)?,
+        "a resumed publication must converge the worktree on its own merge"
+    );
+    assert!(super::is_ancestor(
+        &fixture.git,
+        fixture.worktree.repo(),
+        fixture.head,
+        merge
+    ));
+
+    // A tip someone else later advanced past the merge stays out of reach.
+    let ahead = child_of(&fixture, merge, "host advance after merge")?;
+    update_ref(&fixture, "refs/heads/lane", ahead)?;
+    let moved = publish_tip(&fixture, fixture.head, fixture.import_attempt)?;
+    assert!(!moved.merged);
+    assert_eq!(moved.tip, ahead);
+    assert!(
+        !moved.ends_at_head(&fixture.git, fixture.worktree.repo(), fixture.head)?,
+        "a tip someone else advanced must not move this worktree"
     );
     Ok(())
 }
@@ -1693,6 +1765,13 @@ fn a_rewound_branch_is_judged_before_an_unrooted_tip() -> TestResult {
         crate::RunError::PublicationRewound { branch_tip, base }
             if branch_tip == fixture.base && base == launch
     ));
+    // This path never checks the head's ancestry, so the message must not
+    // claim it: the orphan head above gets the same refusal.
+    let message = error.to_string();
+    assert!(
+        !message.contains("while the lane tip descends that base"),
+        "the message must state only what was checked: {message}"
+    );
     assert_eq!(
         super::resolve_ref(&fixture.git, fixture.worktree.repo(), "refs/heads/lane")?,
         fixture.base
@@ -1751,7 +1830,11 @@ fn an_unrooted_tip_warns_or_stays_quiet_and_the_host_merge_still_publishes() -> 
         assert!(published.merged, "{value:?}");
         assert_ne!(published.tip, lane, "{value:?}");
         assert_eq!(published.previous, host, "{value:?}");
-        assert!(published.ends_at_head(lane), "{value:?}");
+        assert!(
+            published.ends_at_head(&fixture.git, fixture.worktree.repo(), lane)?,
+            "{value:?}"
+        );
+        assert_eq!(published.ancestor, super::Ancestor::Unrooted, "{value:?}");
         assert!(
             super::is_ancestor(&fixture.git, fixture.worktree.repo(), lane, published.tip),
             "{value:?}"
@@ -1759,6 +1842,21 @@ fn an_unrooted_tip_warns_or_stays_quiet_and_the_host_merge_still_publishes() -> 
         assert_eq!(
             super::resolve_ref(&fixture.git, fixture.worktree.repo(), "refs/heads/lane")?,
             published.tip
+        );
+        // The record the merge published agrees with the unrooted warning: the
+        // host parent of the merge does not root the judged lane head.
+        let reflog = git(
+            &fixture.git,
+            &fixture.home,
+            &fixture.project,
+            None,
+            &["reflog", "show", "--format=%gs", "refs/heads/lane"],
+        )?;
+        let reflog = String::from_utf8_lossy(&reflog.stdout);
+        assert!(reflog.contains("no known ancestor"), "{value:?}: {reflog}");
+        assert!(
+            !reflog.contains("descends from refs/heads/lane"),
+            "{value:?}: {reflog}"
         );
     }
     Ok(())

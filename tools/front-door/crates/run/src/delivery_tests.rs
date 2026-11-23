@@ -11,6 +11,9 @@ struct TerminalFixtureOptions {
     resume_after_publish: bool,
     advance_after_publish: bool,
     budget_stop: bool,
+    // Publish a host merge, then crash before the worktree advance so the
+    // resumed settlement must recognise its own merge.
+    merge_after_publish: bool,
 }
 
 pub(super) struct PrepareFixture {
@@ -328,6 +331,24 @@ impl PrepareFixture {
     ) -> std::result::Result<bool, Box<dyn std::error::Error>> {
         self.terminal_via_inner(remote, base_ref, false, false, false, write)
     }
+    fn terminal_via_merged_resume(
+        &self,
+        write: impl FnOnce() -> std::result::Result<(), Box<dyn std::error::Error>>,
+    ) -> std::result::Result<bool, Box<dyn std::error::Error>> {
+        self.terminal_via_with(
+            "origin",
+            None,
+            TerminalFixtureOptions {
+                resume_after_publish: true,
+                merge_after_publish: true,
+                ..TerminalFixtureOptions::default()
+            },
+            || {
+                write()?;
+                Ok(())
+            },
+        )
+    }
     fn terminal_via_inner(
         &self,
         remote: &str,
@@ -344,6 +365,7 @@ impl PrepareFixture {
                 resume_after_publish,
                 advance_after_publish,
                 budget_stop,
+                merge_after_publish: false,
             },
             || {
                 write()?;
@@ -362,6 +384,7 @@ impl PrepareFixture {
             resume_after_publish,
             advance_after_publish,
             budget_stop,
+            merge_after_publish,
         } = options;
         use provenant_confinement::{GitRead, UtilityBudget, UtilityRuntime};
         use provenant_core::{CancelToken, Clock, WaitBudget};
@@ -492,6 +515,39 @@ impl PrepareFixture {
                 tip,
             )?;
             settlement.advance(crate::settlement::Phase::Publish)?;
+            if merge_after_publish {
+                // Move the shared lane branch onto a competing commit off the
+                // launch base so this publication merges it into the lane head.
+                let capture =
+                    |args: &[&str]| -> std::result::Result<String, Box<dyn std::error::Error>> {
+                        let outcome = provenant_os::fixture::git_command_at(&git_executable)
+                            .env_clear()
+                            .envs(self.environment.iter().map(|(key, value)| (key, value)))
+                            .current_dir(&self.writer.project)
+                            .args(args)
+                            .output()?;
+                        assert!(
+                            outcome.status.success(),
+                            "{}",
+                            String::from_utf8_lossy(&outcome.stderr)
+                        );
+                        Ok(String::from_utf8(outcome.stdout)?.trim().to_owned())
+                    };
+                let tree = capture(&["rev-parse", &format!("{base}^{{tree}}")])?;
+                let divergent = capture(&[
+                    "commit-tree",
+                    &tree,
+                    "-p",
+                    &base.to_string(),
+                    "-m",
+                    "host diverged",
+                ])?;
+                self.git(&["update-ref", launch.branch.as_str(), &divergent])?;
+                // A crash before the phase checkpoint leaves the attempt's
+                // extra pins behind, just as a real interrupted settlement would.
+                let extra_pin = format!("refs/provenant/import-extra/{}/extra", scope.attempt);
+                self.git(&["update-ref", &extra_pin, &tip.to_string()])?;
+            }
             crate::objects::publish_branch(
                 &git_executable,
                 launch.worktree.repo(),

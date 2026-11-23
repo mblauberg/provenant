@@ -4078,7 +4078,7 @@ impl WriterLaunch {
             // else advanced; this worktree must not move to it.
             let at_published_tip = match &source {
                 Some(source) => {
-                    published.ends_at_head(verified_tip)
+                    published.ends_at_head(&git_executable, self.worktree.repo(), verified_tip)?
                         && crate::objects::private_tip(source, self.branch.as_str())?
                             == verified_tip
                         && crate::objects::resolve_ref(

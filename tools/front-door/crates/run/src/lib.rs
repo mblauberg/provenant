@@ -698,9 +698,9 @@ pub enum RunError {
     )]
     PublicationMergeDriver { setting: String },
     /// The host branch was rewound behind the pinned launch base while the lane
-    /// tip still descends that base.
+    /// head was not already contained in it.
     #[error(
-        "the host branch was rewound to {branch_tip}, behind its pinned launch base {base}, while the lane tip descends that base; publishing would reinstate the history the host removed, so its commits are retained in the attempt's private Git for host recovery; move the branch forward to {base} to publish the lane"
+        "the host branch was rewound to {branch_tip}, behind its pinned launch base {base}; publishing would reinstate the history the host removed, so its commits are retained in the attempt's private Git for host recovery; move the branch forward to {base} to publish the lane"
     )]
     PublicationRewound {
         branch_tip: provenant_core::GitOid,
