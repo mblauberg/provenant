@@ -24,6 +24,17 @@ pub fn render_output(command: Output, read: Result<(Value, String), Fail>) -> Re
     let mut out = reply(
         "output",
         read.and_then(|(mut data, mut text)| {
+            // A live attempt has only partial evidence. Keep the read
+            // successful, name the state in the envelope and say in the header
+            // that the bytes arrived before settlement.
+            if headed
+                && let Some(state) = data["state"].as_str()
+                && matches!(state, "queued" | "starting" | "running" | "settling")
+            {
+                let state = state.to_owned();
+                data["status"] = json!(state);
+                text = format!("{state}\npartial result\n{text}");
+            }
             if let Some(lines) = receipt_tail {
                 text =
                     text[tail_start(text.as_bytes(), lines.min(limits::TAIL_LINES))..].to_owned();
@@ -1062,7 +1073,7 @@ mod tests {
     }
 
     use super::{
-        add_planner_fallback, fallback_reason_for_graph, output_summary,
+        Status, add_planner_fallback, fallback_reason_for_graph, output_summary,
         provider_error_from_result, provider_error_from_stderr,
     };
     use serde_json::json;
@@ -1100,6 +1111,53 @@ mod tests {
                 Some("provenant wait repair/writer#2")
             );
         }
+    }
+
+    // Spec: docs/specs/cli.md#output-references-and-bounded-tails
+    #[test]
+    fn a_running_result_envelope_is_ok_partial_and_headed_running() {
+        let command = crate::Output {
+            target: "repair/writer#2".parse().unwrap(),
+            part: crate::Part::Result,
+            to: None,
+            path: false,
+            offset: 0,
+            tail: None,
+            max_bytes: 65536,
+        };
+        let data = json!({
+            "attempt_id": "22222222222222222222222222222222",
+            "state": "running",
+            "reason": null,
+            "part": "result",
+            "offset": 0, "next_offset": 0, "length": 0,
+            "eof": true, "clipped": false, "complete": false,
+            "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            "bytes": {"encoding": "utf8", "data": ""},
+        });
+        let reply = super::render_output(command.clone(), Ok((data, "half a result".into())));
+        assert_eq!(reply.result.status, Status::Ok);
+        assert_eq!(reply.result.data["status"], "running");
+        assert_eq!(reply.result.data["state"], "running");
+        assert!(reply.human.starts_with("running\npartial result\n"));
+        assert!(reply.human.contains("half a result"));
+        let summary = reply
+            .summary
+            .expect("a headed result has a summary")
+            .lines
+            .join("\n");
+        assert!(summary.contains("partial result"), "{summary}");
+
+        let settled = json!({
+            "attempt_id": "22222222222222222222222222222222",
+            "state": "succeeded",
+            "part": "result",
+            "eof": true, "complete": true,
+            "bytes": {"encoding": "utf8", "data": "all of it"},
+        });
+        let reply = super::render_output(command, Ok((settled, "all of it".into())));
+        assert!(reply.result.data.get("status").is_none());
+        assert!(!reply.human.contains("partial result"));
     }
 
     #[test]
