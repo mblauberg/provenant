@@ -380,7 +380,7 @@ fn matching_identities<'a>(
         .collect()
 }
 
-impl Catalogue for AccountCatalogue<'_> {
+impl Catalogue for AccountCatalogue {
     type Item = AccountIdentity;
     const KIND: NameKind = NameKind("account");
 
@@ -448,7 +448,7 @@ impl Catalogue for AccountCatalogue<'_> {
     }
 }
 
-struct AccountCatalogue<'a> {
+struct AccountCatalogue {
     identities: Vec<AccountIdentity>,
     forms: ReferenceForms,
 }
