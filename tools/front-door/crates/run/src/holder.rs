@@ -2737,36 +2737,27 @@ impl RunStore {
                 provenant_records::run::SettlementTerminalOutcome::Succeeded
             );
         if completed_budget_handoff {
-            // Completion is a candidate before writer validation, so dirty work
-            // and import failures can still veto it before final classification.
+            // The one budget success gate: derivation already required a valid
+            // done handoff. Completion is a candidate before writer validation,
+            // so dirty work and import failures can still veto it before final
+            // classification.
             decoded.outcome = Outcome::Succeeded;
         }
-        if (clean_budget || completed_budget_handoff)
-            && (!decoded.complete || decoded.result.trim().is_empty())
-        {
-            // Use the lane's recorded outcome, including a done progress
-            // handoff. With no completed report, ordinary review is required;
-            // a clean boundary must not invent success or impose a timeout.
-            let done = handoff.as_ref().is_some_and(|handoff| {
-                handoff.status == provenant_records::handoff::HandoffStatus::Done
-            });
-            decoded.outcome = if done {
-                Outcome::Succeeded
-            } else {
-                Outcome::ReviewRequired
-            };
+        if (clean_budget || completed_budget_handoff) && decoded.result.trim().is_empty() {
+            // With no provider answer, keep the lane's handoff as the review
+            // record rather than a success. The fenced report is the whole
+            // result the host retained, so seal the substitution complete.
+            // A non-empty but truncated answer never enters here: its decoded
+            // completeness stands, and the later gate rejects it as success.
             decoded.terminal_cause = None;
-            if decoded.result.trim().is_empty()
-                && let Some(handoff) = &handoff
-            {
+            if let Some(handoff) = &handoff {
                 decoded.result = handoff.fenced();
             }
             if decoded.result.trim().is_empty() {
                 decoded.result = "Token target reached at a clean pushed point; inspect the retained work before accepting completion.".into();
             }
-            // The host has sealed a complete review report even when the
-            // interrupted provider did not finish its own report.
             decoded.complete = true;
+            decoded.outcome = Outcome::ReviewRequired;
             decoded.reason = Some("token target reached at a clean pushed point; retained the lane's handoff without a budget snapshot".into());
         }
         // Valid natural completion wins over a late stop request.
@@ -4258,6 +4249,118 @@ mod budget_result_tests {
             provenant_records::handoff::HandoffStatus::StoppedEarly
         );
         assert_eq!(handoff.remaining, ["unknown: inspect branch"]);
+    }
+
+    /// Settle a budget-stopped lane whose host sealed a done handoff. `answer`
+    /// is the provider's final message; `complete` is the decoder's own verdict
+    /// on whether that message was whole.
+    fn settle_budget_stop(
+        answer: Option<&str>,
+        complete: Option<bool>,
+    ) -> std::result::Result<(AttemptRecord, String), Box<dyn std::error::Error>> {
+        use crate::dispatch_tests::{Fake, seal_exit};
+        use crate::tests::{call, clock, context, exit, input, route};
+
+        let temp = tempfile::tempdir()?;
+        let execution = context(temp.path())?;
+        let (test_clock, cancel) = clock();
+        let request = call(&test_clock, &cancel);
+        let store = RunStore::open(&execution, &request)?;
+        let mut run = input();
+        store.create(&run, &request)?;
+        let id = run.attempt_id;
+        store.mark_starting(
+            &store.record(id, &request)?,
+            &route(),
+            &[],
+            &Default::default(),
+            None,
+            &request,
+        )?;
+        store
+            .claim(id, &test_clock, &request)?
+            .ok_or("not admitted")?;
+        let attempt = store.attempt_dir(id, false)?;
+        let done = serde_json::json!({
+            "schema_version": 2,
+            "status": "done",
+            "note": "finished",
+            "remaining": [],
+            "decisions": [],
+            "verify": [],
+        });
+        let handoff = provenant_records::handoff::Handoff::from_json(&serde_json::to_vec(&done)?)?;
+        let stored: provenant_records::handoff::HandoffResult = Ok(Some(handoff));
+        crate::artifacts::seal(
+            &attempt,
+            provenant_records::AttemptFile::Handoff.name(),
+            &serde_json::to_vec(&stored)?,
+            provenant_records::handoff::HANDOFF_BYTES as u64 * 4,
+        )?;
+        if let Some(answer) = answer {
+            crate::artifacts::seal(&attempt, "stdout.log", answer.as_bytes(), CAPTURE_LIMIT)?;
+        }
+        let mut observed = exit();
+        observed.scope = RunStore::scope(&store.record(id, &request)?);
+        observed.stop_reason = Some(StopReason::TokenBudget);
+        seal_exit(&store, &observed)?;
+        let fake = Fake {
+            observed: Some(route()),
+            outcome: Some(Outcome::Succeeded),
+            complete,
+            answer: answer.map(str::to_owned),
+            ..Fake::default()
+        };
+        let finished = store.finish(id, &attempt, &observed, &fake, &request)?;
+        let result = read_sealed(
+            &attempt,
+            provenant_records::AttemptFile::Result.name(),
+            RESULT_LIMIT,
+        )?
+        .ok_or("result")?;
+        Ok((finished, String::from_utf8(result)?))
+    }
+
+    // Spec: docs/specs/run-settlement.md#outcome-before-release
+    #[test]
+    fn a_truncated_budget_result_under_a_done_handoff_stays_incomplete()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let (finished, result) =
+            settle_budget_stop(Some("partial answer before the budget stop"), Some(false))?;
+        let AttemptState::Terminal { outcome, .. } = &finished.state else {
+            return Err("budget stop must settle".into());
+        };
+        assert_ne!(
+            *outcome,
+            Outcome::Succeeded,
+            "a truncated result must not be promoted to success"
+        );
+        let stored = finished.result.as_ref().ok_or("result artifact")?;
+        assert!(!stored.complete, "the decoder's completeness must be kept");
+        assert!(!result.is_empty(), "the partial answer is retained");
+        Ok(())
+    }
+
+    // Spec: docs/specs/run-settlement.md#outcome-before-release
+    #[test]
+    fn an_empty_budget_result_keeps_the_done_handoff_as_a_review_record()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let (finished, result) = settle_budget_stop(None, Some(false))?;
+        let AttemptState::Terminal { outcome, .. } = &finished.state else {
+            return Err("budget stop must settle".into());
+        };
+        assert_eq!(
+            *outcome,
+            Outcome::ReviewRequired,
+            "an empty answer needs review, not success"
+        );
+        let handoff = provenant_records::handoff::Handoff::from_result(&result)?
+            .ok_or("the fenced handoff substitution")?;
+        assert_eq!(
+            handoff.status,
+            provenant_records::handoff::HandoffStatus::Done
+        );
+        Ok(())
     }
 }
 
