@@ -1225,10 +1225,7 @@ fn recreate(
                     };
                     match worktrees::create(context, request, cancel) {
                         // The local branch exists without a worktree: check it out.
-                        Err(
-                            worktrees::WorktreeError::InvalidRequest
-                            | worktrees::WorktreeError::BranchExistsWithBase { .. },
-                        ) => {
+                        Err(worktrees::WorktreeError::InvalidRequest) => {
                             let request = WorktreeCreate {
                                 branch: branch.clone(),
                                 base: None,

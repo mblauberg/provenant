@@ -471,33 +471,38 @@ pub(super) fn create_list_and_remove_a_managed_worktree() -> Result {
     rig.assert_v1_root_untouched()
 }
 
-pub(super) fn existing_branch_with_base_names_the_repair_in_json_and_human_output() -> Result {
+pub(super) fn existing_branch_behind_base_warns_and_keeps_its_tip() -> Result {
+    // Spec: docs/specs/next-batch.md#the-loop-a-chair-runs -- an existing branch
+    // behind its base warns BRANCH_BEHIND_BASE and proceeds; --base records the
+    // merge target and never resets the branch.
     let rig = repository()?;
     git(&rig, &["branch", "existing"])?;
+    let tip = git(&rig, &["rev-parse", "existing"])?;
     git(&rig, &["commit", "--allow-empty", "-qm", "advance"])?;
-    let json_output = command(
+    let json_output = ok(
         &rig,
         &["worktree", "create", "existing", "--base", "HEAD", "--json"],
     )?;
-    assert_ne!(code(&json_output), 0);
-    let value = json(&json_output)?;
-    let message = value["error"]["message"].as_str().ok_or("error message")?;
+    let warnings = json_output["data"]["warnings"]
+        .as_array()
+        .ok_or("worktree warnings are not an array")?;
     assert!(
-        message.contains("branch existing at")
-            && message.contains("does not contain base")
-            && message.contains("omit --base"),
-        "{value}"
+        warnings.iter().any(|warning| {
+            warning.as_str().is_some_and(|text| {
+                text.contains("branch existing at")
+                    && text.contains("does not contain base")
+                    && text.contains("merge target")
+            })
+        }),
+        "{json_output}"
     );
-
-    let human_output = command(&rig, &["worktree", "create", "existing", "--base", "HEAD"])?;
-    assert_ne!(code(&human_output), 0);
-    let message = String::from_utf8_lossy(&human_output.stderr.bytes);
-    assert!(
-        message.contains("branch existing at")
-            && message.contains("does not contain base")
-            && message.contains("omit --base"),
-        "{message}"
+    assert_eq!(
+        git(&rig, &["rev-parse", "existing"])?,
+        tip,
+        "--base must not move the branch"
     );
+    let head = git(&rig, &["rev-parse", "HEAD"])?;
+    assert_eq!(json_output["data"]["base"].as_str(), Some(head.as_str()));
     Ok(())
 }
 

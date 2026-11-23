@@ -226,12 +226,6 @@ pub enum WorktreeError {
         "branch {branch} exists on origin but not locally; fetch it and create the local branch at origin/{branch} before starting the writer"
     )]
     RemoteOnlyBranch { branch: String },
-    #[error("branch {branch} at {head} does not contain base {base}; omit --base to reuse it")]
-    BranchExistsWithBase {
-        branch: String,
-        head: GitOid,
-        base: GitOid,
-    },
     #[error("worktree or branch was not found")]
     NotFound,
     #[error("base {base} did not resolve to a commit")]
