@@ -56,6 +56,7 @@ pub enum Command {
     /// Print the resolved release root
     Root,
     /// Read a fresh resident-memory sample of an owned lane process tree
+    #[command(visible_alias = "ps")]
     ProcessTree {
         /// PID inside this lane's sampled tree (defaults to the supervised command)
         #[arg(long, catalog_u32_range = 1..=i32::MAX as i64)]
@@ -402,6 +403,7 @@ pub enum Pr {
         no_lane: bool,
     },
     /// List retained local attempt contributions and missing peer coverage
+    #[command(visible_alias = "contrib")]
     Contributions {
         #[arg(catalog_u64_range = 1..)]
         number: u64,
@@ -929,7 +931,7 @@ pub enum Telemetry {
     /// Report API-equivalent cost from the usage ledger, for one attempt or grouped
     Cost(crate::telemetry_args::TelemetryCost),
     /// Compare experiment arms using offline pipeline outcomes
-    #[command(subcommand)]
+    #[command(subcommand, visible_alias = "exp")]
     Experiments(Experiments),
 }
 #[derive(Clone, Debug, Subcommand)]

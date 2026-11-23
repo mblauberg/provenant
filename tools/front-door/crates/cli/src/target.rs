@@ -228,11 +228,15 @@ impl Resolved {
     }
 }
 
-/// Resolution faults. Each names the target as the caller spelled it.
+/// Resolution faults. Each names the target as the caller spelled it and carries
+/// the close matches of a name that was not found.
 #[derive(Debug, thiserror::Error)]
 pub enum ResolveError<E> {
-    #[error("NOT_FOUND: {0}")]
-    NotFound(String),
+    #[error("NOT_FOUND: {target}{}", close(.candidates))]
+    NotFound {
+        target: String,
+        candidates: Vec<String>,
+    },
     #[error("AMBIGUOUS_TARGET: {target} has several nodes; use one of {}", .candidates.join(", "))]
     Ambiguous {
         target: String,
@@ -240,6 +244,49 @@ pub enum ResolveError<E> {
     },
     #[error(transparent)]
     Read(E),
+}
+
+impl<E> ResolveError<E> {
+    /// A `NOT_FOUND` whose candidates are the close matches of `query` in
+    /// `universe`, ranked by the one shared ranker.
+    pub fn not_found(
+        target: impl Into<String>,
+        query: &str,
+        universe: impl IntoIterator<Item = &str>,
+    ) -> Self {
+        let candidates = provenant_core::close_matches(query, universe)
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        Self::NotFound {
+            target: target.into(),
+            candidates,
+        }
+    }
+
+    /// The close matches carried by a `NOT_FOUND`, empty for other faults.
+    pub fn candidates(&self) -> &[String] {
+        match self {
+            Self::NotFound { candidates, .. } => candidates,
+            _ => &[],
+        }
+    }
+
+    /// The target as spelled by the caller, for faults that name one.
+    pub fn target(&self) -> Option<&str> {
+        match self {
+            Self::NotFound { target, .. } | Self::Ambiguous { target, .. } => Some(target),
+            Self::Read(_) => None,
+        }
+    }
+}
+
+fn close(matches: &[String]) -> String {
+    if matches.is_empty() {
+        String::new()
+    } else {
+        format!("; close matches: {}", matches.join(", "))
+    }
 }
 
 /// Most candidates an ambiguity lists.
@@ -322,12 +369,15 @@ fn output_roots(
 
 /// Resolve `target` by reading only its own graph's checkpoint: `read` is
 /// called once, with the target's name, so no other graph is ever opened.
+/// `graph_names` is the caller-supplied catalogue of graph names used only to
+/// rank close matches when that one read finds nothing.
 pub fn resolve<E>(
     target: &Target,
     want: Want,
+    graph_names: &[String],
     read: impl FnOnce(&str) -> Result<Option<provenant_fabric_runtime::graph::GraphCheckpoint>, E>,
 ) -> Result<Resolved, ResolveError<E>> {
-    resolve_inner(target, want, |name| {
+    resolve_inner(target, want, graph_names, |name| {
         read(name).map(|checkpoint| checkpoint.map(|checkpoint| (None, checkpoint)))
     })
 }
@@ -339,6 +389,7 @@ pub fn resolve<E>(
 pub fn resolve_with_document<E>(
     target: &Target,
     want: Want,
+    graph_names: &[String],
     read: impl FnOnce(
         &str,
     ) -> Result<
@@ -349,7 +400,7 @@ pub fn resolve_with_document<E>(
         E,
     >,
 ) -> Result<Resolved, ResolveError<E>> {
-    resolve_inner(target, want, |name| {
+    resolve_inner(target, want, graph_names, |name| {
         read(name).map(|record| record.map(|(document, checkpoint)| (Some(document), checkpoint)))
     })
 }
@@ -357,6 +408,7 @@ pub fn resolve_with_document<E>(
 fn resolve_inner<E>(
     target: &Target,
     want: Want,
+    graph_names: &[String],
     read: impl FnOnce(
         &str,
     ) -> Result<
@@ -368,9 +420,16 @@ fn resolve_inner<E>(
     >,
 ) -> Result<Resolved, ResolveError<E>> {
     use provenant_fabric_runtime::graph::AttemptState;
-    let (document, checkpoint) = read(&target.name)
-        .map_err(ResolveError::Read)?
-        .ok_or_else(|| ResolveError::NotFound(target.name.clone()))?;
+    let (document, checkpoint) =
+        read(&target.name)
+            .map_err(ResolveError::Read)?
+            .ok_or_else(|| {
+                ResolveError::not_found(
+                    target.name.clone(),
+                    &target.name,
+                    graph_names.iter().map(String::as_str),
+                )
+            })?;
     let node = match (&target.node, want) {
         (Some(node), _) => Some(node.clone()),
         (None, Want::Work) => None,
@@ -391,7 +450,12 @@ fn resolve_inner<E>(
             let roots = output_roots(&checkpoint, document.as_ref());
             match roots.as_slice() {
                 [only] => Some(only.clone()),
-                [] => return Err(ResolveError::NotFound(target.name.clone())),
+                [] => {
+                    return Err(ResolveError::NotFound {
+                        target: target.name.clone(),
+                        candidates: Vec::new(),
+                    });
+                }
                 nodes => {
                     return Err(ResolveError::Ambiguous {
                         target: target.to_string(),
@@ -417,18 +481,34 @@ fn resolve_inner<E>(
         .nodes
         .iter()
         .find(|candidate| candidate.id == node)
-        .ok_or_else(|| ResolveError::NotFound(format!("{}/{node}", target.name)))?;
+        .ok_or_else(|| {
+            ResolveError::not_found(
+                format!("{}/{node}", target.name),
+                node,
+                checkpoint
+                    .nodes
+                    .iter()
+                    .map(|candidate| candidate.id.as_str()),
+            )
+        })?;
     let numbered: Vec<_> = progress
         .recorded_attempts()
         .filter_map(|attempt| Some((attempt, NonZeroU32::new(attempt.key.attempt)?)))
         .collect();
+    let attempt_numbers: Vec<String> = numbered.iter().map(|(_, n)| n.to_string()).collect();
     let selected = match (target.attempt, want) {
         (Some(number), _) => Some(
             numbered
                 .iter()
                 .find(|(_, n)| *n == number)
                 .copied()
-                .ok_or_else(|| ResolveError::NotFound(target.to_string()))?,
+                .ok_or_else(|| {
+                    ResolveError::not_found(
+                        target.to_string(),
+                        &number.to_string(),
+                        attempt_numbers.iter().map(String::as_str),
+                    )
+                })?,
         ),
         (None, Want::Work) => None,
         (None, Want::Attempt { settled }) => {
@@ -453,10 +533,10 @@ fn resolve_inner<E>(
     };
     let composite_output = want == Want::Output && composite_output(progress);
     if target.attempt.is_none() && want != Want::Work && !composite_output && selected.is_none() {
-        return Err(ResolveError::NotFound(format!(
-            "{}/{node} has no attempt",
-            target.name
-        )));
+        return Err(ResolveError::NotFound {
+            target: format!("{}/{node} has no attempt", target.name),
+            candidates: Vec::new(),
+        });
     }
     Ok(Resolved {
         graph: target.name.clone(),
@@ -660,7 +740,7 @@ mod tests {
             ("fix", Want::Attempt { settled: false }),
         ] {
             let target = Target::parse(spelling).unwrap();
-            let resolved = resolve(&target, want, read).unwrap();
+            let resolved = resolve(&target, want, &[], read).unwrap();
             assert_eq!(resolved.graph, "fix", "{spelling}");
         }
     }
@@ -676,11 +756,11 @@ mod tests {
         );
         for number in 1..=3u32 {
             let target = Target::parse(&format!("fix/review#{number}")).unwrap();
-            let steer = resolve(&target, Want::Attempt { settled: false }, |_| {
+            let steer = resolve(&target, Want::Attempt { settled: false }, &[], |_| {
                 Ok::<_, ()>(Some(graph.clone()))
             })
             .unwrap();
-            let output = resolve(&target, Want::Attempt { settled: true }, |_| {
+            let output = resolve(&target, Want::Attempt { settled: true }, &[], |_| {
                 Ok::<_, ()>(Some(graph.clone()))
             })
             .unwrap();
@@ -697,17 +777,17 @@ mod tests {
     fn a_node_reads_its_newest_attempt_and_output_its_newest_settled_one() {
         let graph = checkpoint("fix", &[("review", &["terminal", "running"])]);
         let node = Target::parse("fix/review").unwrap();
-        let newest = resolve(&node, Want::Attempt { settled: false }, |_| {
+        let newest = resolve(&node, Want::Attempt { settled: false }, &[], |_| {
             Ok::<_, ()>(Some(graph.clone()))
         })
         .unwrap();
         assert_eq!(newest.number, NonZeroU32::new(2));
-        let settled = resolve(&node, Want::Attempt { settled: true }, |_| {
+        let settled = resolve(&node, Want::Attempt { settled: true }, &[], |_| {
             Ok::<_, ()>(Some(graph.clone()))
         })
         .unwrap();
         assert_eq!(settled.number, NonZeroU32::new(1));
-        let work = resolve(&node, Want::Work, |_| Ok::<_, ()>(Some(graph.clone()))).unwrap();
+        let work = resolve(&node, Want::Work, &[], |_| Ok::<_, ()>(Some(graph.clone()))).unwrap();
         assert_eq!(work.number, None);
     }
 
@@ -715,13 +795,13 @@ mod tests {
     fn a_bare_name_is_one_attempt_only_in_a_one_node_graph() {
         let one = checkpoint("fix", &[("task", &["terminal"])]);
         let bare = Target::parse("fix").unwrap();
-        let resolved = resolve(&bare, Want::Attempt { settled: true }, |_| {
+        let resolved = resolve(&bare, Want::Attempt { settled: true }, &[], |_| {
             Ok::<_, ()>(Some(one))
         })
         .unwrap();
         assert_eq!(resolved.node.as_deref(), Some("task"));
         let two = checkpoint("fix", &[("plan", &["terminal"]), ("build", &[])]);
-        match resolve(&bare, Want::Attempt { settled: true }, |_| {
+        match resolve(&bare, Want::Attempt { settled: true }, &[], |_| {
             Ok::<_, ()>(Some(two.clone()))
         }) {
             Err(ResolveError::Ambiguous { candidates, .. }) => {
@@ -730,7 +810,7 @@ mod tests {
             other => panic!("expected ambiguity, got {other:?}"),
         }
         assert_eq!(
-            resolve(&bare, Want::Work, |_| Ok::<_, ()>(Some(two)))
+            resolve(&bare, Want::Work, &[], |_| Ok::<_, ()>(Some(two)))
                 .unwrap()
                 .node,
             None
@@ -743,8 +823,10 @@ mod tests {
         graph.nodes[0].children = vec!["task--review".into()];
         for spelling in ["panel", "panel/task"] {
             let target = Target::parse(spelling).unwrap();
-            let resolved =
-                resolve(&target, Want::Output, |_| Ok::<_, ()>(Some(graph.clone()))).unwrap();
+            let resolved = resolve(&target, Want::Output, &[], |_| {
+                Ok::<_, ()>(Some(graph.clone()))
+            })
+            .unwrap();
             assert_eq!(resolved.node.as_deref(), Some("task"), "{spelling}");
             assert_eq!(resolved.number, None, "{spelling}");
             assert_eq!(resolved.attempt_ref, None, "{spelling}");
@@ -763,7 +845,7 @@ mod tests {
         );
         graph.nodes[0].children = vec!["task--review".into()];
         let target = Target::parse("panel").unwrap();
-        match resolve(&target, Want::Output, |_| Ok::<_, ()>(Some(graph))) {
+        match resolve(&target, Want::Output, &[], |_| Ok::<_, ()>(Some(graph))) {
             Err(ResolveError::Ambiguous { candidates, .. }) => {
                 assert_eq!(candidates, ["panel/task", "panel/adjacent"]);
             }
@@ -797,9 +879,10 @@ mod tests {
                 }),
             ],
         );
-        let resolved =
-            resolve_with_document(&target, Want::Output, |_| Ok::<_, ()>(Some((doc, graph))))
-                .unwrap();
+        let resolved = resolve_with_document(&target, Want::Output, &[], |_| {
+            Ok::<_, ()>(Some((doc, graph)))
+        })
+        .unwrap();
         assert_eq!(resolved.node.as_deref(), Some("panel"));
     }
 
@@ -827,7 +910,9 @@ mod tests {
                 serde_json::json!({"id":"verify", "access":"read_only", "prompt":"verify"}),
             ],
         );
-        match resolve_with_document(&target, Want::Output, |_| Ok::<_, ()>(Some((doc, graph)))) {
+        match resolve_with_document(&target, Want::Output, &[], |_| {
+            Ok::<_, ()>(Some((doc, graph)))
+        }) {
             Err(ResolveError::Ambiguous { candidates, .. }) => {
                 assert_eq!(
                     candidates,
@@ -842,24 +927,45 @@ mod tests {
     fn output_keeps_the_newest_settled_attempt_for_a_leaf_root() {
         let graph = checkpoint("single", &[("review", &["terminal", "running"])]);
         let target = Target::parse("single").unwrap();
-        let resolved = resolve(&target, Want::Output, |_| Ok::<_, ()>(Some(graph))).unwrap();
+        let resolved = resolve(&target, Want::Output, &[], |_| Ok::<_, ()>(Some(graph))).unwrap();
         assert_eq!(resolved.node.as_deref(), Some("review"));
         assert_eq!(resolved.number, NonZeroU32::new(1));
         assert_eq!(resolved.attempt_ref.as_deref(), Some("host/review-1"));
     }
 
     #[test]
-    fn missing_graphs_nodes_and_attempts_are_not_found() {
+    // Spec: docs/specs/cli.md#every-name-refusal-lists-close-matches
+    fn missing_graphs_nodes_and_attempts_list_close_matches() {
         let graph = checkpoint("fix", &[("review", &["terminal"])]);
-        for spelling in ["gone", "fix/absent", "fix/review#2"] {
-            let target = Target::parse(spelling).unwrap();
-            let result = resolve(&target, Want::Work, |name| {
-                Ok::<_, ()>((name == "fix").then(|| graph.clone()))
-            });
-            assert!(
-                matches!(result, Err(ResolveError::NotFound(_))),
-                "{spelling}"
-            );
-        }
+        let graphs = ["fix".to_owned()];
+        let read = |name: &str| Ok::<_, ()>((name == "fix").then(|| graph.clone()));
+
+        // A one-edit typo of the graph name ranks the real graph first.
+        let target = Target::parse("fx").unwrap();
+        let error = resolve(&target, Want::Work, &graphs, read).expect_err("unknown graph");
+        assert_eq!(error.candidates(), ["fix".to_owned()].as_slice());
+        assert!(
+            error
+                .to_string()
+                .contains("NOT_FOUND: fx; close matches: fix")
+        );
+
+        // A one-edit typo of the node name ranks the real node first.
+        let target = Target::parse("fix/reveiw").unwrap();
+        let error = resolve(&target, Want::Work, &graphs, |_| {
+            Ok::<_, ()>(Some(graph.clone()))
+        })
+        .expect_err("unknown node");
+        assert_eq!(error.candidates(), ["review".to_owned()].as_slice());
+        assert!(error.to_string().contains("close matches: review"));
+
+        // An unknown attempt lists the attempts the node actually recorded.
+        let target = Target::parse("fix/review#2").unwrap();
+        let error = resolve(&target, Want::Work, &graphs, |_| {
+            Ok::<_, ()>(Some(graph.clone()))
+        })
+        .expect_err("unknown attempt");
+        assert_eq!(error.candidates(), ["1".to_owned()].as_slice());
+        assert!(error.to_string().contains("close matches: 1"));
     }
 }

@@ -146,7 +146,7 @@ fn parse_with_models(
             }
             return match error.kind() {
                 clap::error::ErrorKind::DisplayHelp => match help_scope(&model, &argv) {
-                    Some(scope) => {
+                    HelpScope::Resolved(scope) => {
                         let (text, catalog) = if scope == "provenant" {
                             (core_help(&model), catalog(&model))
                         } else if is_core_scope(&model, &scope) {
@@ -168,10 +168,26 @@ fn parse_with_models(
                             globals,
                         }
                     }
-                    None => ParseOutcome::Invalid {
-                        error: CliError::invalid("unknown help command"),
-                        globals,
-                    },
+                    HelpScope::Unknown {
+                        word,
+                        scope,
+                        candidates,
+                    } => {
+                        let close = provenant_core::close_matches(
+                            &word,
+                            candidates.iter().map(String::as_str),
+                        );
+                        let mut message = format!("unknown help command `{word}` under `{scope}`");
+                        if close.is_empty() {
+                            message.push_str(&format!("; commands: {}", candidates.join(", ")));
+                        } else {
+                            message.push_str(&format!("; close matches: {}", close.join(", ")));
+                        }
+                        ParseOutcome::Invalid {
+                            error: CliError::invalid(message),
+                            globals,
+                        }
+                    }
                 },
                 clap::error::ErrorKind::DisplayVersion => ParseOutcome::Version { globals },
                 _ => ParseOutcome::Invalid {
@@ -857,7 +873,18 @@ fn validate(inv: &Invocation) -> Result<(), CliError> {
 /// `provenant fabric mail`. Flags are skipped, along with the values of the
 /// global `--state-dir` and `--project`. Explicit quota subcommands remain
 /// addressable even though they are omitted from the compact listing.
-fn help_scope(model: &clap::Command, argv: &[OsString]) -> Option<String> {
+/// The scope an explicit `--help` names, or the hidden component that stopped
+/// the walk with the visible siblings worth suggesting.
+enum HelpScope {
+    Resolved(String),
+    Unknown {
+        word: String,
+        scope: String,
+        candidates: Vec<String>,
+    },
+}
+
+fn help_scope(model: &clap::Command, argv: &[OsString]) -> HelpScope {
     let mut scope = String::from("provenant");
     let mut current = model;
     let mut words = argv
@@ -872,13 +899,22 @@ fn help_scope(model: &clap::Command, argv: &[OsString]) -> Option<String> {
                 || (child.is_hide_set()
                     && !matches!(scope.as_str(), "provenant" | "provenant quota"))
             {
-                return None;
+                let candidates = current
+                    .get_subcommands()
+                    .filter(|child| !child.is_hide_set())
+                    .map(|child| child.get_name().to_owned())
+                    .collect();
+                return HelpScope::Unknown {
+                    word: arg.to_string_lossy().into_owned(),
+                    scope,
+                    candidates,
+                };
             }
             scope = format!("{scope} {}", child.get_name());
             current = child;
         }
     }
-    Some(scope)
+    HelpScope::Resolved(scope)
 }
 fn is_core_scope(model: &clap::Command, scope: &str) -> bool {
     let mut selected = model;
@@ -931,10 +967,15 @@ fn resolved_help_text(
                 .filter(|child| !child.is_hide_set())
                 .map(clap::Command::get_name)
                 .collect();
-            return Err(CliError::invalid(format!(
+            let close = provenant_core::close_matches(component, children.iter().copied());
+            let mut message = format!(
                 "unknown help command `{component}` under `{scope}`; commands: {}",
                 children.join(", ")
-            )));
+            );
+            if !close.is_empty() {
+                message.push_str(&format!("; close matches: {}", close.join(", ")));
+            }
+            return Err(CliError::invalid(message));
         };
         scope = format!("{scope} {}", child.get_name());
         names.push(child.get_name().to_string());
@@ -1771,6 +1812,36 @@ mod tests {
             }
         }
     }
+    #[test]
+    // Spec: docs/specs/cli.md#every-name-refusal-lists-close-matches
+    fn an_unknown_help_command_lists_close_matches() {
+        let ParseOutcome::Invalid { error, .. } = parsed(&["help", "config", "no-such-command"])
+        else {
+            panic!("unknown help path")
+        };
+        let text = error.to_string();
+        assert!(
+            text.contains("unknown help command `no-such-command`"),
+            "{text}"
+        );
+        assert!(text.contains("commands:"), "{text}");
+
+        // A one-edit typo of a real command ranks that command first.
+        let ParseOutcome::Invalid { error, .. } = parsed(&["help", "confg", "path"]) else {
+            panic!("typo help path")
+        };
+        let text = error.to_string();
+        assert!(text.contains("close matches: config"), "{text}");
+
+        // A hidden command is no longer a bare, unhelpful refusal.
+        let ParseOutcome::Invalid { error, .. } = parsed(&["fabric", "peer", "--help"]) else {
+            panic!("hidden help path")
+        };
+        let text = error.to_string();
+        assert!(text.contains("unknown help command `peer`"), "{text}");
+        assert!(text.contains(";"), "{text}");
+    }
+
     #[test]
     // Spec: docs/specs/cli.md#parsing
     fn help_tree_resolves_nested_paths_and_lists_globals_once() {

@@ -105,6 +105,7 @@ pub enum Mail {
         session: Option<String>,
     },
     /// Mark messages read up to a sequence number
+    #[command(visible_alias = "mark")]
     MarkRead {
         /// Last sequence number to mark read
         #[arg(catalog_i64_range = 0..)]

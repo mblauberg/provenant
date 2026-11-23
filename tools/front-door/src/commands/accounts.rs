@@ -13,6 +13,11 @@ pub static DOMAIN: Domain = Domain {
             run,
         },
         Verb {
+            path: &["accounts", "show"],
+            stability: Stability::Evolving,
+            run,
+        },
+        Verb {
             path: &["accounts", "register"],
             stability: Stability::Evolving,
             run,
@@ -53,6 +58,8 @@ fn run(inv: &Call) -> Result<Outcome, CommandError> {
                 |edge| match provenant_cli::accounts::execute(&command, edge.roots, edge.home) {
                     Ok(data) => {
                         let listing = matches!(command, provenant_cli::accounts::Accounts::List);
+                        let read_only = listing
+                            || matches!(command, provenant_cli::accounts::Accounts::Show { .. });
                         let mut reply = provenant_cli::run::Reply {
                             human: data
                                 .entries
@@ -60,7 +67,7 @@ fn run(inv: &Call) -> Result<Outcome, CommandError> {
                                 .map(|e| format!("{} {} {}\n", e.adapter, e.label, e.key))
                                 .collect(),
                             summary: listing.then(|| crate::accounts_summary(&data)),
-                            read_only: listing,
+                            read_only,
                             result: CommandResult::new(
                                 inv.leaf,
                                 Outcome::Ok,

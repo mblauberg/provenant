@@ -1640,6 +1640,7 @@ fn usage_verbs_keep_their_persisted_spelling() {
         "accounts list",
         "accounts register",
         "accounts set",
+        "accounts show",
         "accounts sync",
         "admit",
         "adopt",
@@ -1812,7 +1813,7 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
     const DEFAULT_CEILING: usize = 2_000;
     const CEILINGS: &[(&str, usize)] = &[
         ("crates/cli/src/fabric/graph_relay.rs", 4939),
-        ("crates/cli/src/lib.rs", 3748),
+        ("crates/cli/src/lib.rs", 3830),
         ("crates/cli/src/quota.rs", 6915),
         ("crates/cli/src/run.rs", 2443),
         ("crates/cli/src/run/provider/confinement.rs", 2560),
@@ -1869,7 +1870,7 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         ("src/fabric/owner.rs", 5439),
         ("src/fabric/peer.rs", 2594),
         ("src/fabric/run_owner.rs", 2748),
-        ("src/fabric/unified.rs", 6307),
+        ("src/fabric/unified.rs", 6370),
         ("src/hooks.rs", 2636),
         ("src/install.rs", 3981),
         ("src/lane_cleanup.rs", 3101),

@@ -459,12 +459,17 @@ impl DoctorError {
             message: error.to_string(),
         }
     }
-    fn unknown(name: &str) -> Self {
+    fn unknown(name: &str, candidates: &[String]) -> Self {
+        let close = if candidates.is_empty() {
+            String::new()
+        } else {
+            format!("; close matches: {}", candidates.join(", "))
+        };
         Self {
             outcome: Outcome::Invalid,
             code: "UNKNOWN_HOST",
             message: format!(
-                "peer {name} is not configured; run `provenant hosts` to list configured peers"
+                "peer {name} is not configured; run `provenant hosts` to list configured peers{close}"
             ),
         }
     }
@@ -677,7 +682,7 @@ fn inspect(
         .map_err(DoctorError::local)?;
     let host = context
         .peer_host(name)
-        .ok_or_else(|| DoctorError::unknown(name))?;
+        .ok_or_else(|| DoctorError::unknown(name, &context.host_candidates(name)))?;
     let clock = SystemClock::new();
     let budget = WaitBudget::cli(clock.mono_now(), context.config.limits.peer_seconds)
         .map_err(DoctorError::local)?;

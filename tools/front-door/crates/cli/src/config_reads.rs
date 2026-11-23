@@ -23,6 +23,7 @@ reads! {
     "ask" => ["fabric", "accounts"], "inbox" => ["fabric", "accounts"],
     "answer" => ["fabric", "accounts"], "accounts" => ["accounts"],
     "adopt" => ["fabric"], "release" => ["fabric"],
+    "accounts show" => ["accounts"],
     "accounts register" => ["accounts", "quota", "fabric"],
     "accounts set" => ["accounts", "quota"],
     "accounts sync" => ["accounts", "fabric"],

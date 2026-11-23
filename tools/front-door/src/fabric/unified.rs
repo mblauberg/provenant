@@ -16,6 +16,15 @@ pub(crate) struct GraphTarget {
     pub attempt: Option<String>,
 }
 
+/// The graph names a miss can suggest: every checkpoint, event and reserved
+/// handle in this project.
+pub(crate) fn graph_names(
+    root: &provenant_core::StateRoot,
+    project: provenant_core::ProjectId,
+) -> Vec<String> {
+    FileJournal::reserved_graph_ids(root, project).unwrap_or_default()
+}
+
 /// Resolve `target` by reading only its own graph's checkpoint.
 pub(crate) fn resolve(
     root: &provenant_core::StateRoot,
@@ -23,7 +32,7 @@ pub(crate) fn resolve(
     target: &provenant_cli::Target,
     want: Want,
 ) -> Result<Resolved, ResolveError<JournalError>> {
-    provenant_cli::target::resolve(target, want, |name| {
+    provenant_cli::target::resolve(target, want, &graph_names(root, project), |name| {
         FileJournal::read_status_checkpoint(root, project, name)
     })
 }
@@ -94,7 +103,7 @@ impl Factory {
                 node: resolved.node,
                 attempt: resolved.attempt_ref,
             })),
-            Err(ResolveError::NotFound(_)) => Ok(None),
+            Err(ResolveError::NotFound { .. }) => Ok(None),
             Err(ResolveError::Ambiguous { .. }) => Err(FacadeError::Conflict),
             // A whole unreadable graph stays addressable so status can name
             // its retirement command and stop can retire it.
@@ -1387,14 +1396,26 @@ impl std::fmt::Display for TargetFault {
 
 impl std::error::Error for TargetFault {}
 
+fn close(matches: &[String]) -> String {
+    if matches.is_empty() {
+        String::new()
+    } else {
+        format!("; close matches: {}", matches.join(", "))
+    }
+}
+
 pub(crate) fn target_fault(error: ResolveError<JournalError>) -> TargetFault {
     let (outcome, code) = match &error {
-        ResolveError::NotFound(_) => (provenant_records::Outcome::Invalid, "NOT_FOUND"),
+        ResolveError::NotFound { .. } => (provenant_records::Outcome::Invalid, "NOT_FOUND"),
         ResolveError::Ambiguous { .. } => (provenant_records::Outcome::Invalid, "AMBIGUOUS_TARGET"),
         ResolveError::Read(_) => (provenant_records::Outcome::Error, "GRAPH_READ"),
     };
     let message = match &error {
-        ResolveError::NotFound(target) => target.clone(),
+        ResolveError::NotFound { target, candidates } => {
+            let mut message = target.clone();
+            message.push_str(&close(candidates));
+            message
+        }
         ResolveError::Ambiguous { target, candidates } => format!(
             "{target} has several nodes; use one of {}",
             candidates.join(", ")
@@ -1494,18 +1515,27 @@ fn resolve_output_with_checkpoint(
     target: &provenant_cli::Target,
 ) -> Result<(Resolved, provenant_fabric_runtime::graph::GraphCheckpoint), TargetFault> {
     let mut read = None;
-    let resolved = provenant_cli::target::resolve_with_document(target, Want::Output, |name| {
-        let snapshot = FileJournal::read_status_snapshot(
-            &factory.context.roots.state,
-            factory.context.identity.project,
-            name,
-        )?;
-        read = snapshot.as_ref().map(|(_, checkpoint)| checkpoint.clone());
-        Ok(snapshot.map(|(execution, checkpoint)| (execution.document, checkpoint)))
-    })
-    .map_err(target_fault)?;
-    let checkpoint =
-        read.ok_or_else(|| target_fault(ResolveError::NotFound(target.to_string())))?;
+    let names = graph_names(
+        &factory.context.roots.state,
+        factory.context.identity.project,
+    );
+    let resolved =
+        provenant_cli::target::resolve_with_document(target, Want::Output, &names, |name| {
+            let snapshot = FileJournal::read_status_snapshot(
+                &factory.context.roots.state,
+                factory.context.identity.project,
+                name,
+            )?;
+            read = snapshot.as_ref().map(|(_, checkpoint)| checkpoint.clone());
+            Ok(snapshot.map(|(execution, checkpoint)| (execution.document, checkpoint)))
+        })
+        .map_err(target_fault)?;
+    let checkpoint = read.ok_or_else(|| {
+        target_fault(ResolveError::NotFound {
+            target: target.to_string(),
+            candidates: Vec::new(),
+        })
+    })?;
     Ok((resolved, checkpoint))
 }
 
@@ -1516,14 +1546,19 @@ fn resolve_checkpoint(
     want: Want,
 ) -> Result<(Resolved, provenant_fabric_runtime::graph::GraphCheckpoint), TargetFault> {
     let mut read = None;
-    let resolved = provenant_cli::target::resolve(target, want, |name| {
+    let names = graph_names(root, project);
+    let resolved = provenant_cli::target::resolve(target, want, &names, |name| {
         let checkpoint = FileJournal::read_status_checkpoint(root, project, name)?;
         read.clone_from(&checkpoint);
         Ok(checkpoint)
     })
     .map_err(target_fault)?;
-    let checkpoint =
-        read.ok_or_else(|| target_fault(ResolveError::NotFound(target.to_string())))?;
+    let checkpoint = read.ok_or_else(|| {
+        target_fault(ResolveError::NotFound {
+            target: target.to_string(),
+            candidates: Vec::new(),
+        })
+    })?;
     Ok((resolved, checkpoint))
 }
 
@@ -1620,7 +1655,10 @@ pub(crate) fn unified_graph_command(
                 }
                 .map_err(|error| match targets.first() {
                     Some(target) if missing_graph_context(error.as_ref()) => {
-                        Box::new(target_fault(ResolveError::NotFound(target.to_string())))
+                        Box::new(target_fault(ResolveError::NotFound {
+                            target: target.to_string(),
+                            candidates: Vec::new(),
+                        }))
                     }
                     _ => error,
                 })?,
@@ -3670,9 +3708,10 @@ pub(crate) fn check_targets(
                     Err(error) => {
                         let error = super::interface::relay_error(error);
                         if is_target_not_found(&error) {
-                            return Err(Box::new(target_fault(ResolveError::NotFound(
-                                target.to_string(),
-                            ))));
+                            return Err(Box::new(target_fault(ResolveError::NotFound {
+                                target: target.to_string(),
+                                candidates: Vec::new(),
+                            })));
                         }
                         return Err(Box::new(error));
                     }
@@ -3692,9 +3731,10 @@ pub(crate) fn check_targets(
     for target in targets {
         wait_remaining(deadline, cancel)?;
         let Some(context) = &context else {
-            return Err(Box::new(target_fault(ResolveError::NotFound(
-                target.to_string(),
-            ))));
+            return Err(Box::new(target_fault(ResolveError::NotFound {
+                target: target.to_string(),
+                candidates: Vec::new(),
+            })));
         };
         resolve(
             &context.roots.state,
@@ -3854,10 +3894,12 @@ fn local_status_rows(
 ) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
     let context = match session {
         Some(context) => context,
-        None => session.insert(
-            read_context(edge)?
-                .ok_or_else(|| target_fault(ResolveError::NotFound(target.to_string())))?,
-        ),
+        None => session.insert(read_context(edge)?.ok_or_else(|| {
+            target_fault(ResolveError::NotFound {
+                target: target.to_string(),
+                candidates: Vec::new(),
+            })
+        })?),
     };
     let (resolved, checkpoint) = resolve_checkpoint(
         &context.roots.state,
@@ -5320,11 +5362,13 @@ mod tests {
         assert_eq!(rows[1]["id"], "g/parent");
         for row in rows.iter().filter(|row| row["kind"] == "attempt") {
             let target = provenant_cli::Target::parse(row["id"].as_str().unwrap()).unwrap();
-            let resolved =
-                provenant_cli::target::resolve(&target, Want::Attempt { settled: false }, |_| {
-                    Ok::<_, std::convert::Infallible>(Some(run.checkpoint.clone()))
-                })
-                .unwrap();
+            let resolved = provenant_cli::target::resolve(
+                &target,
+                Want::Attempt { settled: false },
+                &[],
+                |_| Ok::<_, std::convert::Infallible>(Some(run.checkpoint.clone())),
+            )
+            .unwrap();
             assert_eq!(resolved.attempt_ref.as_deref(), row["attempt_id"].as_str());
             assert_eq!(
                 resolved.number.map(|number| number.get()),
@@ -5950,11 +5994,11 @@ mod tests {
         // is not found.
         assert!(matches!(
             resolve(&roots.state, project, &target("h/parent#1")?, Want::Work),
-            Err(ResolveError::NotFound(_))
+            Err(ResolveError::NotFound { .. })
         ));
         assert!(matches!(
             resolve(&roots.state, project, &target("missing")?, Want::Work),
-            Err(ResolveError::NotFound(_))
+            Err(ResolveError::NotFound { .. })
         ));
         Ok(())
     }
