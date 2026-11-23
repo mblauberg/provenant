@@ -300,6 +300,17 @@ the same policy. The publication lock fences landing identity, generation and
 snapshot revision before dispatch, so a superseded generation cannot publish,
 including during recovery.
 
+Admin publication does not move authority to land: it only lets land exercise
+the owner's own admin authority, and only when the owner grants it in the
+**host** layer with `domains.pr.land.admin_publication =
+"when_review_unavailable"`. A grant from any other layer warns
+`SETTING_LAYER_IGNORED` with its source and is ignored. After land's gate
+passed — green CI on the exact candidate plus independent review evidence — a
+405 whose cause is a review requirement the owner cannot satisfy is retried
+through the admin API `gh pr merge --admin` uses. Red CI, a missing review
+receipt and every other 405 cause are never bypassed; the receipt records the
+grant and its source.
+
 Repository, host, project, target-rule, risk-tier and invocation settings
 resolve into one saved plan with sources (`land --explain --json`). An
 unavailable execution returns its landing record ID and typed alternatives and

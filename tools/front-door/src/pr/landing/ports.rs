@@ -131,6 +131,17 @@ pub trait Forge {
         head: &str,
         method: MergeMethod,
     ) -> Result<String, LandingError>;
+    /// Retry a review-requirement refusal with the owner's admin authority —
+    /// the same API `gh pr merge --admin` uses. Only called after land's gate
+    /// passed and the host layer granted `admin_publication`.
+    fn merge_admin(
+        &mut self,
+        _number: u64,
+        _head: &str,
+        _method: MergeMethod,
+    ) -> Result<String, LandingError> {
+        Err(LandingError::Unimplemented("forge admin merge"))
+    }
     fn may_push_directly(&mut self, branch: &str) -> Result<bool, LandingError>;
     fn labels(&mut self, number: u64) -> Result<Vec<String>, LandingError>;
     /// Whether this adapter can open revert-forward pull requests.

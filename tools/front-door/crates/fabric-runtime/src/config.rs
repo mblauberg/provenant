@@ -285,6 +285,13 @@ pub struct GraphLand {
 /// Spec: docs/specs/state.md#every-setting-reports-its-layer
 pub const LAND_PRECEDENCE: Precedence = Precedence(&[Layer::Default, Layer::Host, Layer::Project]);
 
+/// Admin publication is a host-only authority grant: the bundled `never` and
+/// the owner's host config are the only layers that may set it. A grant from
+/// any other layer lands in [`provenant_records::Merge::ignored`] so the caller
+/// can warn with its source rather than silently honouring it.
+/// Spec: docs/specs/next-batch.md#seam-5-the-worktree-and-landing-loop-a-chair-actually-uses
+pub const ADMIN_PUBLICATION_PRECEDENCE: Precedence = Precedence(&[Layer::Default, Layer::Host]);
+
 /// The effective policy for one tier and the layer it came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LandChoice {

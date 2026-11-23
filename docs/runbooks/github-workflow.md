@@ -66,10 +66,20 @@ merging a substantial change, confirm its receipt is current
 (`provenant workflow receipt show ID`).
 
 Repository admins may bypass `Protect main` for pull-request merges only;
-direct pushes still need CI. Use `gh pr merge N --merge --admin` only when
-`ci-status` was green on an earlier head of the same pull request and
-`git diff --stat GREEN NEW` shows non-code files only (docs, skills, release
-notes). Never use it for a code delta, a red check or an unreviewed change.
+direct pushes still need CI. The `gh pr merge N --merge --admin` escape hatch
+is for an earlier green head of the same pull request whose later delta is
+docs, skills or release notes only (`git diff --stat GREEN NEW`); never for a
+code delta, a red check or an unreviewed change. `provenant land` does not
+invoke that escape hatch by default. If a ruleset demands a review the
+authenticated owner cannot give, set
+`domains.pr.land.admin_publication = "when_review_unavailable"` in the owner's
+**host** config: after land's own gate passed (green CI on the exact
+candidate and independent review evidence), a review-requirement 405 is
+retried with the same admin API `--admin` uses. Any other layer setting is
+warned (`SETTING_LAYER_IGNORED`) and ignored; red CI, a missing review receipt
+and every other 405 cause are never bypassed. The receipt records the grant
+and its source. This changes how the owner's authority is exercised, not who
+holds it.
 
 `ci-status` is the single required check: the aggregate job at the end of
 [`ci.yml`](../../.github/workflows/ci.yml). `Protect main` does not require

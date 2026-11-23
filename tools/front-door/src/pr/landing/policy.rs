@@ -1,7 +1,8 @@
 //! Resolves landing policy without adding configuration-loader layers.
 use std::collections::BTreeMap;
 
-use provenant_cli::domains::{LandOverride, LandSettings};
+use super::model::PublicationGrant;
+use provenant_cli::domains::{AdminPublication, LandOverride, LandSettings};
 use provenant_config::Origin;
 use provenant_records::Layer;
 use serde::{Deserialize, Serialize};
@@ -77,6 +78,68 @@ pub struct Sourced<T> {
     pub extra: provenant_records::ExtraFields,
 }
 
+/// Resolve the admin-publication grant. Only the owner's host config may grant
+/// it: other layers are reported with [`provenant_records::warning::SETTING_LAYER_IGNORED`]
+/// and fall back to `never`. The shared `Precedence` merge reports the ignored
+/// candidate with its source so the warning never invents a second vocabulary.
+/// Spec: docs/specs/next-batch.md#seam-5-the-worktree-and-landing-loop-a-chair-actually-uses
+fn admin_candidate(
+    field: &Sourced<Value>,
+) -> Result<provenant_records::Sourced<AdminPublication>, serde_json::Error> {
+    use provenant_records::{Source as SharedSource, Sourced as SharedSourced};
+    let value: AdminPublication = serde_json::from_value(field.value.clone())?;
+    let origin = field.source.path.as_ref().map(|path| {
+        path.as_str()
+            .map(str::to_owned)
+            .unwrap_or_else(|| path.to_string())
+    });
+    Ok(SharedSourced {
+        value,
+        source: SharedSource {
+            layer: field.source.layer,
+            origin,
+        },
+    })
+}
+
+fn resolve_admin_publication(
+    fields: &BTreeMap<String, Sourced<Value>>,
+    base: Option<provenant_records::Sourced<AdminPublication>>,
+) -> Result<PublicationGrant, serde_json::Error> {
+    use provenant_records::warning;
+    let final_candidate = fields
+        .get("admin_publication")
+        .map(admin_candidate)
+        .transpose()?;
+    let candidates = base.into_iter().chain(final_candidate).collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return Ok(PublicationGrant::default());
+    }
+    let merged = provenant_fabric_runtime::config::ADMIN_PUBLICATION_PRECEDENCE.merge(candidates);
+    for ignored in merged.ignored {
+        warning::warn(
+            warning::Warning::new(
+                warning::SETTING_LAYER_IGNORED,
+                format!(
+                    "domains.pr.land.admin_publication from {} is ignored; only the host layer may grant admin publication",
+                    ignored.source.layer.description()
+                ),
+            )
+            .subject("domains.pr.land.admin_publication")
+            .source(ignored.source)
+            .repair("set admin_publication in the owner's host config [domains.pr.land]")
+            .once_per_change(),
+        );
+    }
+    Ok(merged
+        .winner
+        .map(|winner| PublicationGrant {
+            mode: winner.value,
+            source: winner.source,
+        })
+        .unwrap_or_default())
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LandPolicy {
     /// Publication declaration sealed in the plan and pending intent.
@@ -85,6 +148,13 @@ pub struct LandPolicy {
     pub landing: Option<provenant_records::landing::LandingContext>,
     pub fields: BTreeMap<String, Sourced<Value>>,
     pub budget_rate_micros_per_minute: BTreeMap<String, Sourced<u64>>,
+    /// Admin publication is a host-only grant; its source travels with the policy.
+    #[serde(default)]
+    pub publication: PublicationGrant,
+    /// The landing target and where it came from (#3191). Set by the caller
+    /// once the target is resolved from members or the repository default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_source: Option<provenant_records::provenance::Sourced<String>>,
     #[serde(flatten, default)]
     pub extra: provenant_records::ExtraFields,
 }
@@ -225,6 +295,13 @@ impl LandPolicy {
                 },
             );
         }
+        // Keep the host/bundled candidate before any lower-precedence layer
+        // overwrites the field: a tier or project value must not suppress a
+        // grant the owner made in the host config.
+        let base_admin = fields
+            .get("admin_publication")
+            .map(admin_candidate)
+            .transpose()?;
         fn apply(
             fields: &mut BTreeMap<String, Sourced<Value>>,
             override_: &LandOverride,
@@ -396,11 +473,14 @@ impl LandPolicy {
                 )?;
             }
         }
+        let publication = resolve_admin_publication(&fields, base_admin)?;
         Ok(Self {
             publication_port: provenant_config::PortTable::builtin().land,
             landing: None,
             fields,
             budget_rate_micros_per_minute,
+            publication,
+            target_source: None,
             extra: Default::default(),
         })
     }
@@ -850,6 +930,60 @@ mod tests {
         assert_eq!(resolved.strategy, Strategy::Direct);
         assert_eq!(resolved.batch_size, 1);
         assert_eq!(resolved.gate.timeout_seconds, 50);
+        Ok(())
+    }
+
+    // Spec: docs/specs/next-batch.md#seam-5-the-worktree-and-landing-loop-a-chair-actually-uses
+    #[test]
+    fn admin_publication_is_honoured_only_from_the_host_layer()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_records::warning;
+
+        let mut settings = LandSettings::default();
+        settings.admin_publication = AdminPublication::WhenReviewUnavailable;
+        let path = PathWire::from_relative(&RelativePath::parse("config.toml")?)?;
+        let origins = BTreeMap::from([(
+            "domains.pr.land.admin_publication".into(),
+            Origin::User { path },
+        )]);
+        let (host, warnings) = warning::capture(|| {
+            LandPolicy::resolve(&settings, &origins, None, None, &LandOverride::default())
+        });
+        let host = host?;
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(
+            host.publication.mode,
+            AdminPublication::WhenReviewUnavailable
+        );
+        assert_eq!(host.publication.source.layer, Layer::Host);
+        assert!(host.publication.allows_review_unavailable());
+
+        let mut project = LandSettings::default();
+        project.projects.insert(
+            "p".into(),
+            LandOverride {
+                admin_publication: Some(AdminPublication::WhenReviewUnavailable),
+                ..Default::default()
+            },
+        );
+        let (ignored, warnings) = warning::capture(|| {
+            LandPolicy::resolve(
+                &project,
+                &BTreeMap::new(),
+                Some("p"),
+                None,
+                &LandOverride::default(),
+            )
+        });
+        let ignored = ignored?;
+        assert_eq!(ignored.publication.mode, AdminPublication::Never);
+        assert!(!ignored.publication.allows_review_unavailable());
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(warnings[0].code.as_str(), "SETTING_LAYER_IGNORED");
+        assert_eq!(
+            warnings[0].source.as_ref().map(|source| source.layer),
+            Some(Layer::HostProject)
+        );
         Ok(())
     }
 }

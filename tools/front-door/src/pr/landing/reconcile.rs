@@ -574,6 +574,8 @@ pub(crate) fn recover_pending_with(
                                     step.pr.number,
                                     &step.pr.head,
                                     settings.method,
+                                    &attempt.policy.publication,
+                                    !step.pr.approval_evidence.is_empty(),
                                 )
                             } else {
                                 Err(LandingError::PublicationUnknown)

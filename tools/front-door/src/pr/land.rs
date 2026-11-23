@@ -1053,7 +1053,7 @@ pub(crate) fn graph_land(
         policy: provenant_records::landing::PolicyChoice::default(),
         ..Default::default()
     };
-    let submission = super::landing::prepare(&globals, None, None, None, None)
+    let submission = super::landing::prepare(&globals, None, None, None, None, &[number])
         .and_then(|prepared| super::landing::submit(&prepared, land, false, &globals, workers));
     let submission = match submission {
         Ok(submission) => submission,

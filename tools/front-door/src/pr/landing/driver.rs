@@ -611,6 +611,7 @@ fn run_inner(
                         request.target,
                         &candidate,
                         request.settings.method,
+                        &request.policy.publication,
                         &mut progress,
                         &mut |number| {
                             attempt.dispatched.get_or_insert_default().push(number);
@@ -1515,6 +1516,50 @@ pub(super) mod tests {
         );
         Ok(())
     }
+    // Spec: docs/specs/next-batch.md#seam-5-the-worktree-and-landing-loop-a-chair-actually-uses
+    #[test]
+    fn a_red_gate_never_uses_a_host_admin_grant() -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_cli::domains::AdminPublication;
+        let (mut forge, mut repo, mut gate, settings, definition) = fixture(1);
+        let mut policy = LandPolicy::resolve(
+            &settings,
+            &BTreeMap::new(),
+            None,
+            None,
+            &LandOverride::default(),
+        )?;
+        policy.publication = PublicationGrant {
+            mode: AdminPublication::WhenReviewUnavailable,
+            source: provenant_records::provenance::Source {
+                layer: provenant_records::Layer::Host,
+                origin: Some("host.toml".into()),
+            },
+        };
+        gate.check_result = Some(GateResult::Failed);
+        let state = tempfile::tempdir()?;
+        let report = run(
+            &mut forge,
+            &mut repo,
+            &mut gate,
+            &mut FakeAlarms::default(),
+            Request {
+                pins: &Default::default(),
+                approvals: Approvals::forge(),
+                numbers: &[1],
+                target: "main",
+                settings: &settings,
+                policy: &policy,
+                gate: &definition,
+                shadow: false,
+                state: state.path(),
+            },
+        )?;
+        assert_eq!(report.outcomes[&1], Outcome::Red);
+        assert!(forge.merges.is_empty());
+        assert!(forge.admin_merges.is_empty());
+        Ok(())
+    }
+
     #[test]
     fn driver_rejects_unmet_gate_evidence_without_publishing()
     -> Result<(), Box<dyn std::error::Error>> {
