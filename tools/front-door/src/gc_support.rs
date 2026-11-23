@@ -366,6 +366,22 @@ pub(crate) fn fetch_default(
     if fetched.termination != Termination::Exit(0) {
         return Err(Error::GcObservation("cannot fetch upstream default branch"));
     }
+    // Record the advertised default as the remote's HEAD, as
+    // `git remote set-head --auto` would. The explicit refspec above skips
+    // Git's own remote-HEAD update, and the forge context reads the default
+    // branch from this symref: without it the context stays unresolved and no
+    // merged lane is ever retired.
+    // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    let remote_head = format!("refs/remotes/{remote}/HEAD");
+    let recorded = run(
+        &["symbolic-ref", &remote_head, &reference],
+        Duration::from_secs(10),
+    )?;
+    if recorded.termination != Termination::Exit(0) {
+        return Err(Error::GcObservation(
+            "cannot record upstream default branch",
+        ));
+    }
     let name =
         provenant_confinement::repo::GitRefName::remote_tracking(format!("{remote}/{branch}"))
             .map_err(|_| Error::GcObservation("invalid fetched upstream ref"))?;
