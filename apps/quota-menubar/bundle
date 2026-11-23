@@ -1,6 +1,6 @@
 #!/bin/sh
-# Builds "Provenant Console.app": the console as the main executable, with the menu agent as the nested
-# login-item app "Contents/Library/LoginItems/Provenant Menu.app" (dev.provenant.menu, no Dock icon).
+# Builds "Provenant Console.app": the console and the menu helper share Contents/MacOS.
+# The `dev.provenant.quota-menubar` LaunchAgent is the only launch path; the helper is not a login item.
 # Usage: apps/quota-menubar/bundle [output directory, default .build/bundle]
 set -eu
 cd "$(dirname "$0")"
@@ -15,12 +15,10 @@ fi
 swift build -c release
 bin="$(swift build -c release --show-bin-path)"
 rm -rf "$out"
-helper="$out/Contents/Library/LoginItems/Provenant Menu.app"
-mkdir -p "$out/Contents/MacOS" "$out/Contents/Resources" "$helper/Contents/MacOS" "$helper/Contents/Resources"
+helper="$out/Contents/MacOS/quota-menubar"
+mkdir -p "$out/Contents/MacOS" "$out/Contents/Resources"
 cp "$bin/provenant-console" "$out/Contents/MacOS/"
-cp "$bin/quota-menubar" "$helper/Contents/MacOS/"
-cp Resources/Menu-Info.plist "$helper/Contents/Info.plist"
-plutil -replace CFBundleShortVersionString -string "$version" "$helper/Contents/Info.plist"
+cp "$bin/quota-menubar" "$helper"
 # The brand icon (Icon Composer format) is compiled by actool. Without Xcode the app is built with no icon.
 icon_name=Provenant
 icon_source="$PWD/../../assets/brand/$icon_name.icon"
@@ -69,8 +67,6 @@ $icon_keys
 </dict>
 </plist>
 PLIST
-# Sign nested code first, then the outer app, so the outer seal covers the signed helper.
-codesign --force --sign - "$helper"
 codesign --force --sign - "$out"
 codesign --verify --deep --strict "$out"
 echo "$out"

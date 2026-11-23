@@ -36,6 +36,13 @@ pub fn app_path(dir: &Path) -> PathBuf {
     dir.join(APP_BUNDLE)
 }
 
+/// The nested menu app an older bundle shipped, if it is still installed. macOS
+/// registered it as a login item in addition to the LaunchAgent, so a host that
+/// still has it can start the menu bar twice.
+pub fn stale_login_item(dir: &Path) -> PathBuf {
+    app_path(dir).join("Contents/Library/LoginItems/Provenant Menu.app")
+}
+
 /// `CFBundleShortVersionString` of the installed app, when it can be read.
 /// The bundle stamps the CLI version at build time; an older bundle may carry
 /// the template placeholder `0`, which counts as behind.
@@ -152,6 +159,17 @@ mod tests {
         .unwrap();
         assert_eq!(super::installed_version(&root).as_deref(), Some("2.6.6"));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stale_login_item_is_located_inside_the_installed_bundle() {
+        let dir = std::path::Path::new("/Applications");
+        assert_eq!(
+            super::stale_login_item(dir),
+            std::path::Path::new(
+                "/Applications/Provenant Console.app/Contents/Library/LoginItems/Provenant Menu.app"
+            )
+        );
     }
 
     #[test]
