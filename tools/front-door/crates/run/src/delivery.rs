@@ -2219,7 +2219,10 @@ impl HostDeliveryContext {
                     other => other,
                 })?
         };
-        let absent_helpers = args.starts_with(&["config", "--get-regexp"])
+        // `git config --get-regexp` exits 1 with no output when nothing
+        // matches, which is an absent setting rather than a failed read.
+        let absent_helpers = args.first() == Some(&"config")
+            && args.contains(&"--get-regexp")
             && output.termination == Termination::Exit(1)
             && output.stdout.bytes.is_empty();
         let absent_default = args.starts_with(&["symbolic-ref", "--quiet"])
@@ -2707,13 +2710,8 @@ impl HostDeliveryContext {
             return Err(RunError::IntegrationHeadMoved);
         } else {
             // A configured merge driver may execute arbitrary repository code.
-            let config = provenant_os::git_config::read(
-                provenant_os::git_config::ConfigContext {
-                    operation: "check configured merge drivers",
-                    file: writer.worktree.join(".git/config"),
-                    key: None,
-                },
-                provenant_os::git_config::Read::GetRegexp("^merge\\..*\\.driver$"),
+            let config = provenant_os::git_config::merge_drivers(
+                writer.worktree.join(".git/config"),
                 |args| {
                     self.command_for_config(
                         &writer.worktree,

@@ -18,6 +18,8 @@
       "lanes.gh_budget",
       "lanes.isolation",
       "lanes.receipts",
+      "lanes.history.rebase",
+      "lanes.history.unrooted_tip",
       "routing.exclude",
       "routing.graph_exclude",
       "fabric.accept_handoff",
@@ -170,7 +172,6 @@
       "sandboxed_routes": {"type": "string_list", "allowed": "up to 64 route prefixes (adapter/model), printable ASCII", "default": "[]", "effect": "Routes whose lanes run sandboxed under default configuration, matched by prefix on the route id. Default is empty; users can add routes (e.g. OpenCode Zen tier opencode/opencode/). lanes.sandbox=off overrides listed routes with a warning; an empty list leaves the knob to decide."},
       "sandbox_cache_reads": {"type": "string_list", "allowed": "up to 16 absolute, safe directory paths outside credential roots", "default": "[]", "effect": "Host cache directories, such as a compiler cache, that a sandboxed lane may read but never write. Paths that do not exist at launch are skipped; a writer's own write root inside one keeps its write grant. Unsandboxed lanes are not limited by this list."},
       "projects.{project}.sandbox_cache_reads": {"type": "string_list", "allowed": "up to 16 absolute, safe directory paths outside credential roots", "default": "host sandbox_cache_reads", "effect": "Replace the host sandbox_cache_reads for this project; an empty list grants none."},
-      "push_conflict_markers": {"type": "bool", "allowed": "true or false", "default": "true", "effect": "Refuse pushes that add lines starting with <<<<<<< or >>>>>>>"},
       "projects.{project}.writer_writes": {"type": "string_list", "allowed": "up to 16 absolute, safe directory paths outside credential roots", "default": "host writer_writes", "effect": "Replace the host writer_writes list for this project; an empty list grants no host-configured writer roots. Origin: host configuration [domains.run.projects.<project ID>]."},
       "host_policy.deny_read": {"type": "array", "allowed": "list of paths", "default": "unset", "effect": "Paths the host denies to writer lanes for reads; invalid entries warn at launch and never relax mandatory boundaries."},
       "host_policy.deny_write": {"type": "array", "allowed": "list of paths", "default": "unset", "effect": "Paths the host denies to writer lanes for writes; invalid entries warn at launch and never relax mandatory boundaries."},
@@ -570,7 +571,6 @@
       "policy.PORT_COMMAND_EVIDENCE": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "A port command ran but its evidence record failed or was not durable; the result is returned with a warning. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
       "policy.INSTALL_HOOKS_UNAVAILABLE": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "Hooks were requested but no selected harness has a HookSpec; hooks are skipped with a warning. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
       "policy.PUSH_PATCH_EVIDENCE": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "Optional patch evidence is unavailable; the push warns. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
-      "policy.PUSH_CONFLICT_MARKERS": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "A pushed patch contains conflict markers; the push warns with the line count. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
       "policy.PLAN_STATE_SCRATCH_OVERLAP": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "Private state overlapping scratch warns. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
       "policy.WORKTREE_BASE_UNVERIFIED": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "A base whose tracking ref the remote did not advertise is used with a warning naming the resolved object. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
       "policy.STREAM_IDENTITY_MISMATCH": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "A streamed model or session that differs from the expected one is recorded as a conflict and warns. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
@@ -582,7 +582,6 @@
       "policy.GRAPH_HOST_NATIVE_FALLBACK": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "A host-native route without a fallback warns. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
       "policy.LAUNCH_FIELD_UNSUPPORTED": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "A non-write launch field (model, effort, network, resume, skills) unsupported by the route is dropped with a warning; write support stays an authority refusal. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
       "policy.SECRET_SHAPED_INPUT": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "Secret-shaped input warns with its field path and proceeds; exact credential values are handled at their owning boundary. The setting source is named in each warning."},
-      "policy.LANE_TIP_UNROOTED": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "A lane tip with no known ancestor publishes the lane's own branch with a warning, so no work is lost. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
       "policy.DIRTY_WRITER": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "A writer worktree with uncommitted edits launches and records the dirty state; checked-out and detached writers stay refused. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
       "policy.SOURCE_TREE_ENTRY_OMITTED": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "A gitlink, unsupported object or oversized entry is omitted from the read-only view with a warning naming it. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
       "policy.QUOTA_READINESS_STALE": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "Expired quota readiness warns; an exhausted allowance still skips the route. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
@@ -974,6 +973,44 @@
       "reader": "tools/front-door/crates/run/src/holder.rs",
       "effect": "Delivery requested by a writer always runs and records its outcome. Set per graph node with `attempt.receipts` or the `light` preset.",
       "trade_off": "none suits read-only or scratch work; nothing is published or recorded as delivered."
+    },
+    "lanes.history.rebase": {
+      "type": "enum",
+      "values": ["allow", "refuse"],
+      "default": "allow",
+      "status": "wired",
+      "reader": "tools/front-door/crates/run/src/objects.rs",
+      "effect": "Whether a lane may rebase or merge its own branch. allow (default) publishes a lane tip that diverged from the host branch by first merging the host branch into it; a real merge conflict retains the lane's commits and names the conflicting files and this setting, and unrelated histories, a configured merge.*.driver or a branch rewound behind its launch base retain them with their own typed cause. refuse retains the diverged commits in the attempt's private Git and refuses with the divergence cause, naming this setting. The effective value and its source appear in every divergence warning and refusal, and an unrecognised value warns with its layer and keeps this default. Set per run with --knob lanes.history.rebase=refuse or under [knobs].",
+      "trade_off": "allow keeps a rebased or force-pushed lane's work and adds one host merge commit when the branch moved; refuse preserves the old history unchanged but needs the chair to reconcile the branch."
+    },
+    "lanes.history.unrooted_tip": {
+      "type": "enum",
+      "values": ["warn", "off", "refuse"],
+      "default": "warn",
+      "status": "wired",
+      "reader": "tools/front-door/crates/run/src/objects.rs",
+      "effect": "What publication does when a lane tip descends from none of its launch base, the origin default, the launch ref, a pushed remote-tracking branch or the host lane branch the tip already contains. The head is judged before any host merge, so a merge cannot supply ancestry it lacks. warn (default) publishes the lane's own branch and names the tip and bases with this setting and its source. off publishes silently. refuse keeps the branch unchanged and refuses with LANE_TIP_UNROOTED, naming this setting. warn and off decide only this observation: when the host branch has unrelated history, lanes.history.rebase=allow still refuses the merge as unrelated. An unrecognised value warns with its layer and keeps this default. Set per run with --knob lanes.history.unrooted_tip=refuse or under [knobs].",
+      "trade_off": "warn loses no work; off is quiet for histories the host already accepts; refuse is a configured stop for a history the owner wants to inspect first."
+    },
+    "lanes.history.conflict_markers": {
+      "type": "enum",
+      "values": ["warn", "off", "refuse"],
+      "default": "warn",
+      "host_only": true,
+      "status": "wired",
+      "reader": "tools/front-door/crates/confinement/src/push.rs, tools/front-door/src/hooks.rs",
+      "effect": "What a pre-push check does with added lines that begin with a literal conflict marker. warn (default) prints the marker lines and lets the push proceed. off does not warn. refuse stops the push with this setting and its source named. The setting does not change the default-branch, deletion or linked-worktree checks. Set under [knobs] in the host configuration.",
+      "trade_off": "warn prefers an unblocked push; off suits a repository that tracks marker fixtures; refuse keeps marker-looking lines out of a shared branch at the cost of a manual amend."
+    },
+    "lanes.history.default_branch_rewrite": {
+      "type": "enum",
+      "values": ["refuse", "allow"],
+      "default": "refuse",
+      "host_only": true,
+      "status": "wired",
+      "reader": "tools/front-door/crates/confinement/src/push.rs, tools/front-door/src/hooks.rs",
+      "effect": "Whether the owner permits a non-fast-forward rewrite of the default branch by a push. refuse (default) is the owner gate: the push is refused with this setting and its source named. allow proceeds with a warning after the owner sets it in the host configuration; a dispatch --knob cannot grant it. Deleting the default branch and pushing it from a linked worktree stay refused under every value.",
+      "trade_off": "refuse protects shared history; allow is the owner's explicit, host-only authority to replace it."
     },
     "lanes.prepare_deps": {
       "type": "bool", "default": true, "status": "wired",

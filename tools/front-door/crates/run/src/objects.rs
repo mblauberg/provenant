@@ -1,5 +1,6 @@
 //! Import lane objects through Git's quarantined receive path.
-use crate::{AdmissionError, Result, RunError};
+use crate::{AdmissionError, LaneTipRefusal, Result, RunError};
+use provenant_config::{HistoryEffect, LaneHistory, REBASE, Rebase, UNROOTED_TIP};
 use provenant_confinement::{
     repo::VerifiedRepo,
     utility::{UtilityError, execute_with_git_lock_retry},
@@ -11,7 +12,7 @@ use provenant_os::{
 };
 use std::{
     ffi::{OsStr, OsString},
-    io::Read,
+    io::{Read, Write as _},
     path::Path,
     time::Duration,
 };
@@ -93,90 +94,23 @@ pub(crate) fn execute_bounded(
     cancel: Option<&CancelToken>,
     settings: Execution<'_>,
 ) -> Result<Vec<u8>> {
-    let mut env: Vec<(OsString, OsString)> = [
-        ("PATH", "/usr/bin:/bin"),
-        ("GIT_CONFIG_NOSYSTEM", "1"),
-        ("GIT_CONFIG_GLOBAL", "/dev/null"),
-        ("GIT_CONFIG_SYSTEM", "/dev/null"),
-        ("GIT_NO_REPLACE_OBJECTS", "1"),
-        ("GIT_GRAFT_FILE", "/dev/null"),
-        ("GIT_NO_LAZY_FETCH", "1"),
-        ("GIT_TERMINAL_PROMPT", "0"),
-        ("LC_ALL", "C"),
-    ]
-    .into_iter()
-    .map(|(k, v)| (k.into(), v.into()))
-    .collect();
-    if let Some(objects) = settings.object_directory {
-        env.push((
-            "GIT_OBJECT_DIRECTORY".into(),
-            objects.as_os_str().to_owned(),
-        ));
-    }
-    if let Some(index) = settings.index_file {
-        env.push(("GIT_INDEX_FILE".into(), index.as_os_str().to_owned()));
-    }
-    env.push((
-        "GIT_ALTERNATE_OBJECT_DIRECTORIES".into(),
-        settings
-            .alternate_directory
-            .map(quote_alternate)
-            .unwrap_or_default()
-            .into(),
-    ));
-    if let Some(common_dir) = settings.common_directory {
-        env.push(("GIT_COMMON_DIR".into(), common_dir.as_os_str().to_owned()));
-    }
-    // argv confines GIT_DIR to the sender; receive-pack opens the destination.
-    let argv: Vec<OsString> = std::iter::once(git.into())
-        .chain([OsString::from("--git-dir"), git_dir.into()])
-        .chain(args(&[
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "core.fsmonitor=false",
-            "-c",
-            "gc.auto=0",
-            "-c",
-            "maintenance.auto=false",
-            "-c",
-            "advice.graftFileDeprecated=false",
-        ]))
-        .chain(arguments.iter().cloned())
-        .collect();
-    let executor = SystemExecutor::new(1).map_err(|_| invalid())?;
     let retry_cancel = cancel.cloned().unwrap_or_default();
     let mut incomplete = None;
     let mut run_attempt = |timeout| {
-        let mut options = ExecOptions::new(&argv, cwd, timeout);
-        options.env = Some(&env);
-        options.cancel = Some(&retry_cancel);
-        options.process_group = true;
-        options.stdout = if settings.discard {
-            StreamPolicy::Discard
-        } else {
-            StreamPolicy::Capture {
-                limit: 64 * 1024 * 1024,
-            }
-        };
-        options.stdin = settings.input;
-        options.stderr = StreamPolicy::Tail { limit: 4096 };
-        let output = executor.execute(options)?;
-        if output.cancelled {
-            return Err(UtilityError::Cancelled);
-        }
-        if output.timed_out {
-            return Err(UtilityError::TimedOut);
-        }
-        if output.drain_truncated
-            || output.stdout.truncated
-            || output.stdout.read_failed
-            || output.stderr.read_failed
-        {
-            incomplete = Some(output);
-            return Err(UtilityError::Incomplete);
-        }
-        Ok(output)
+        run_operation(
+            git,
+            git_dir,
+            cwd,
+            arguments,
+            &retry_cancel,
+            &settings,
+            timeout,
+        )
+        .map_err(|failure| {
+            let (error, output) = *failure;
+            incomplete = output;
+            error
+        })
     };
     let buffered_transaction = settings.input.is_some()
         && arguments.len() >= 2
@@ -239,6 +173,127 @@ pub(crate) fn execute_bounded(
         );
     }
     Ok(output.stdout.bytes)
+}
+
+/// One bounded Git execution without applying a non-zero exit as an error, so
+/// a caller that reads a plumbing command's exit status can see its output.
+fn run_operation(
+    git: &Path,
+    git_dir: &Path,
+    cwd: &Path,
+    arguments: &[OsString],
+    cancel: &CancelToken,
+    settings: &Execution<'_>,
+    timeout: Duration,
+) -> std::result::Result<ExecOutcome, Box<(UtilityError, Option<ExecOutcome>)>> {
+    let mut env: Vec<(OsString, OsString)> = [
+        ("PATH", "/usr/bin:/bin"),
+        ("GIT_CONFIG_NOSYSTEM", "1"),
+        ("GIT_CONFIG_GLOBAL", "/dev/null"),
+        ("GIT_CONFIG_SYSTEM", "/dev/null"),
+        ("GIT_NO_REPLACE_OBJECTS", "1"),
+        ("GIT_GRAFT_FILE", "/dev/null"),
+        ("GIT_NO_LAZY_FETCH", "1"),
+        ("GIT_TERMINAL_PROMPT", "0"),
+        ("LC_ALL", "C"),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.into(), v.into()))
+    .collect();
+    if let Some(objects) = settings.object_directory {
+        env.push((
+            "GIT_OBJECT_DIRECTORY".into(),
+            objects.as_os_str().to_owned(),
+        ));
+    }
+    if let Some(index) = settings.index_file {
+        env.push(("GIT_INDEX_FILE".into(), index.as_os_str().to_owned()));
+    }
+    env.push((
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES".into(),
+        settings
+            .alternate_directory
+            .map(quote_alternate)
+            .unwrap_or_default()
+            .into(),
+    ));
+    if let Some(common_dir) = settings.common_directory {
+        env.push(("GIT_COMMON_DIR".into(), common_dir.as_os_str().to_owned()));
+    }
+    // argv confines GIT_DIR to the sender; receive-pack opens the destination.
+    let argv: Vec<OsString> = std::iter::once(git.into())
+        .chain([OsString::from("--git-dir"), git_dir.into()])
+        .chain(args(&[
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "gc.auto=0",
+            "-c",
+            "maintenance.auto=false",
+            "-c",
+            "advice.graftFileDeprecated=false",
+        ]))
+        .chain(arguments.iter().cloned())
+        .collect();
+    let executor =
+        SystemExecutor::new(1).map_err(|error| Box::new((UtilityError::from(error), None)))?;
+    let mut options = ExecOptions::new(&argv, cwd, timeout);
+    options.env = Some(&env);
+    options.cancel = Some(cancel);
+    options.process_group = true;
+    options.stdout = if settings.discard {
+        StreamPolicy::Discard
+    } else {
+        StreamPolicy::Capture {
+            limit: 64 * 1024 * 1024,
+        }
+    };
+    options.stdin = settings.input;
+    options.stderr = StreamPolicy::Tail { limit: 4096 };
+    let output = executor
+        .execute(options)
+        .map_err(|error| Box::new((UtilityError::from(error), None)))?;
+    if output.cancelled {
+        return Err(Box::new((UtilityError::Cancelled, Some(output))));
+    }
+    if output.timed_out {
+        return Err(Box::new((UtilityError::TimedOut, Some(output))));
+    }
+    if output.drain_truncated
+        || output.stdout.truncated
+        || output.stdout.read_failed
+        || output.stderr.read_failed
+    {
+        return Err(Box::new((UtilityError::Incomplete, Some(output))));
+    }
+    Ok(output)
+}
+
+/// Run a plumbing command whose non-zero exit carries information, such as
+/// `merge-tree` reporting a conflict on exit 1.
+fn raw_outcome(
+    git: &Path,
+    git_dir: &Path,
+    cwd: &Path,
+    arguments: &[OsString],
+) -> Result<ExecOutcome> {
+    let settings = Execution::default();
+    let cancel = CancelToken::default();
+    run_operation(
+        git,
+        git_dir,
+        cwd,
+        arguments,
+        &cancel,
+        &settings,
+        settings.timeout,
+    )
+    .map_err(|failure| match *failure {
+        (UtilityError::Incomplete, output) => operation_io(git_dir, output),
+        _ => invalid(),
+    })
 }
 
 fn operation_io(git_dir: &Path, output: Option<ExecOutcome>) -> RunError {
@@ -586,13 +641,17 @@ impl Ancestor {
 // Rebasing a lane onto the branch it feeds is a legitimate writer action, so
 // any history the host already knows is acceptable. Order is fixed: the launch
 // base, the origin default, the ref the lane launched against, then the first
-// pushed remote-tracking branch the tip contains.
+// pushed remote-tracking branch the tip contains, then the host lane branch
+// itself, which counts only when it is already in the tip. A merge that adds
+// the branch as a parent must not root a history the judged tip does not have.
 fn known_ancestor(
     git: &Path,
     repo: &VerifiedRepo,
     base: GitOid,
     launch_ref: Option<&str>,
     head: GitOid,
+    branch: &str,
+    branch_root: Option<GitOid>,
 ) -> Result<Option<Ancestor>> {
     let descends = |ancestor| is_ancestor(git, repo, ancestor, head);
     if descends(base) {
@@ -632,6 +691,14 @@ fn known_ancestor(
             }));
         }
     }
+    if let Some(root) = branch_root
+        && descends(root)
+    {
+        return Ok(Some(Ancestor::Known {
+            reference: branch.to_owned(),
+            oid: root,
+        }));
+    }
     Ok(None)
 }
 
@@ -641,21 +708,160 @@ pub(crate) struct BranchPublication<'a> {
     pub launch_ref: Option<&'a str>,
     pub head: GitOid,
     pub attempt: AttemptId,
+    pub history: LaneHistory,
 }
 
 /// What a branch publication established. `previous` is the host tip the CAS
 /// replaced: the tree the native index is expected to match before it advances.
+/// `tip` is the commit that now ends the branch, which differs from the lane
+/// head when publication merged a diverged history.
 #[derive(Debug)]
 pub(crate) struct Published {
     pub ancestor: Ancestor,
     pub previous: GitOid,
+    pub tip: GitOid,
+    /// Whether publication merged a diverged host history into the lane tip.
+    pub merged: bool,
+}
+
+impl Published {
+    /// Whether the branch now ends in this writer's own history: at the
+    /// verified head, or at a merge of that head with the host branch. A head
+    /// the branch already contained publishes nothing, so the tip may be a
+    /// commit someone else advanced; moving this worktree's files to it would
+    /// discard what that head describes.
+    pub(crate) fn ends_at_head(&self, head: GitOid) -> bool {
+        self.merged || self.tip == head
+    }
+}
+
+/// What a worktree-free host merge of a diverged lane tip produced.
+enum HostMerge {
+    /// The merge commit that now ends the branch.
+    Merged(GitOid),
+    /// Real conflicts in these paths; the lane's private history is retained.
+    Conflict(Vec<String>),
+    /// The two tips share no commit, so Git refuses to merge them.
+    Unrelated,
+    /// The host repository configures a merge driver, which Git would execute
+    /// under the lane's attributes.
+    DriverConfigured,
+}
+
+/// Whether two commits share any history. `merge-base --all` exits 1 when they
+/// do not, which is a fact about the two histories rather than a failure.
+fn shares_history(git: &Path, repo: &VerifiedRepo, left: GitOid, right: GitOid) -> Result<bool> {
+    let output = raw_outcome(
+        git,
+        repo.common_git_dir(),
+        repo.root_path(),
+        &args(&["merge-base", "--all", &left.to_string(), &right.to_string()]),
+    )?;
+    match output.termination {
+        Termination::Exit(0) => Ok(true),
+        Termination::Exit(1) => Ok(false),
+        _ => Err(operation_io(repo.common_git_dir(), Some(output))),
+    }
+}
+
+/// Whether the host repository configures any `merge.*.driver`. A driver runs
+/// repository code selected by lane-controlled attributes, and delivery refuses
+/// the same configuration before it merges (its "check configured merge
+/// drivers" guard). Both read the shared effective scope, so an included or
+/// worktree config cannot widen the merge past its guard.
+fn configured_merge_driver(git: &Path, repo: &VerifiedRepo) -> Result<bool> {
+    let output =
+        provenant_os::git_config::merge_drivers(repo.common_git_dir().join("config"), |command| {
+            raw_outcome(
+                git,
+                repo.common_git_dir(),
+                repo.root_path(),
+                command.as_ref(),
+            )
+        })
+        .map_err(|error| RunError::ConfigCommandFailed {
+            reason: provenant_core::bounded_line(&error.to_string(), 512),
+        })?;
+    match output.termination {
+        // One `key value` line per configured driver.
+        Termination::Exit(0) => Ok(!output.stdout.bytes.is_empty()),
+        Termination::Exit(1) => Ok(false),
+        _ => Err(operation_io(repo.common_git_dir(), Some(output))),
+    }
+}
+
+/// Merge the host lane branch into a diverged lane tip without a worktree. The
+/// merge runs only when no merge driver is configured and the two tips share
+/// history; every outcome is classified so the caller can name the setting that
+/// decides it. A conflict retains the lane's private history.
+fn host_merge(git: &Path, repo: &VerifiedRepo, current: GitOid, head: GitOid) -> Result<HostMerge> {
+    if configured_merge_driver(git, repo)? {
+        return Ok(HostMerge::DriverConfigured);
+    }
+    if !shares_history(git, repo, current, head)? {
+        return Ok(HostMerge::Unrelated);
+    }
+    let output = raw_outcome(
+        git,
+        repo.common_git_dir(),
+        repo.root_path(),
+        &args(&[
+            "merge-tree",
+            "--write-tree",
+            "--name-only",
+            "--no-messages",
+            &current.to_string(),
+            &head.to_string(),
+        ]),
+    )?;
+    match output.termination {
+        Termination::Exit(0) => {
+            let text = String::from_utf8_lossy(&output.stdout.bytes);
+            let tree = text.lines().next().unwrap_or_default().trim();
+            let commit = execute(
+                git,
+                repo.common_git_dir(),
+                repo.root_path(),
+                &args(&[
+                    "-c",
+                    "user.name=Provenant",
+                    "-c",
+                    "user.email=provenant@localhost",
+                    "commit-tree",
+                    tree,
+                    "-p",
+                    &current.to_string(),
+                    "-p",
+                    &head.to_string(),
+                    "-m",
+                    "provenant: merge diverged lane history",
+                ]),
+                None,
+            )?;
+            let merged =
+                GitOid::parse(String::from_utf8_lossy(&commit).trim()).map_err(|_| invalid())?;
+            Ok(HostMerge::Merged(merged))
+        }
+        // The first line is the tree of the conflicted merge; the rest name the
+        // paths that conflict.
+        Termination::Exit(1) => Ok(HostMerge::Conflict(
+            String::from_utf8_lossy(&output.stdout.bytes)
+                .lines()
+                .skip(1)
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_owned)
+                .collect(),
+        )),
+        // Any other exit is Git failing, not a fact about the two histories.
+        _ => Err(operation_io(repo.common_git_dir(), Some(output))),
+    }
 }
 
 pub(crate) fn publish_branch(
     git: &Path,
     repo: &VerifiedRepo,
     publication: BranchPublication<'_>,
-    policy: &provenant_records::policy::Policy,
 ) -> Result<Published> {
     let BranchPublication {
         branch,
@@ -663,36 +869,113 @@ pub(crate) fn publish_branch(
         launch_ref,
         head,
         attempt,
+        history,
     } = publication;
     let current = resolve_ref(git, repo, branch)?;
-    // Fast-forward from the launch base or from later lane commits, but not
-    // from a branch rewound behind its base.
-    let advances_current = current == base
-        || (is_ancestor(git, repo, current, head) && !is_ancestor(git, repo, current, base));
-    if !advances_current && !is_ancestor(git, repo, head, current) {
-        return Err(RunError::PublicationDiverged);
+    // A head the branch already contains publishes nothing, so it asks no
+    // history question and cannot be refused for one. A branch still at its
+    // launch base has not moved since launch, so a head behind it is the
+    // lane's own rewind and publishes like any lane tip.
+    let contains_head = current != base && is_ancestor(git, repo, head, current);
+    // A branch rewound behind its launch base is judged before any history
+    // question: a fast-forward would reinstate the history the host removed,
+    // and a warning about the tip would only precede that refusal.
+    if !contains_head && current != base && is_ancestor(git, repo, current, base) {
+        return Err(RunError::PublicationRewound {
+            branch_tip: current,
+            base,
+        });
     }
-    let ancestor = match known_ancestor(git, repo, base, launch_ref, head)? {
-        Some(ancestor) => ancestor,
-        None => {
-            policy.warn_or(
-                "LANE_TIP_UNROOTED",
-                provenant_records::policy::Facts::violation(format!(
-                    "lane tip {head} has no known ancestor; publishing lane branch anyway"
-                )),
-                |_| RunError::LaneTipUnrooted {
+    let advances_current = !contains_head && is_ancestor(git, repo, current, head);
+    // The unrooted setting judges the lane head, before any host merge exists:
+    // a merge's parents must never supply ancestry the head does not have. The
+    // host branch counts as a known root only when it is already in the tip.
+    let lane_ancestor = known_ancestor(
+        git,
+        repo,
+        base,
+        launch_ref,
+        head,
+        branch,
+        (contains_head || advances_current).then_some(current),
+    )?;
+    if lane_ancestor.is_none() && !contains_head {
+        match history.unrooted_tip.value {
+            HistoryEffect::Off => {}
+            HistoryEffect::Warn => {
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: lane tip {head} has no known ancestor; it does not descend from its launch base {base}; publishing {branch} anyway; {}; set {UNROOTED_TIP} to refuse to stop instead",
+                    history.unrooted_tip.setting(UNROOTED_TIP),
+                );
+            }
+            HistoryEffect::Refuse => {
+                return Err(RunError::LaneTipUnrooted(Box::new(LaneTipRefusal {
                     tip: head,
                     base,
                     launch_ref: launch_ref.map(str::to_owned),
-                },
-            )?;
-            Ancestor::Unrooted
+                    setting: history.unrooted_tip.setting(UNROOTED_TIP),
+                })));
+            }
         }
+    }
+    let (target, merged) = if contains_head {
+        // The branch already contains the lane head, so publishing changes
+        // nothing.
+        (current, false)
+    } else if current == base || advances_current {
+        // Fast-forward from the launch base or from later lane commits.
+        (head, false)
+    } else {
+        match history.rebase.value {
+            Rebase::Refuse => {
+                return Err(RunError::PublicationDiverged {
+                    setting: history.rebase.setting(REBASE),
+                });
+            }
+            Rebase::Allow => match host_merge(git, repo, current, head)? {
+                HostMerge::Merged(target) => (target, true),
+                HostMerge::Conflict(conflicting_files) => {
+                    return Err(RunError::PublicationConflict {
+                        conflicting_files,
+                        setting: history.rebase.setting(REBASE),
+                    });
+                }
+                HostMerge::Unrelated => {
+                    return Err(RunError::PublicationUnrelated {
+                        setting: history.rebase.setting(REBASE),
+                    });
+                }
+                HostMerge::DriverConfigured => {
+                    return Err(RunError::PublicationMergeDriver {
+                        setting: history.rebase.setting(REBASE),
+                    });
+                }
+            },
+        }
+    };
+    if merged {
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "warning: lane history on {branch} diverged from the host branch; published a host merge of {head} and {current} as {target}; {}; set {REBASE} to refuse to retain the lane's private history instead",
+            history.rebase.setting(REBASE),
+        );
+    }
+    // The published tip's own ancestry. A merge adds the host branch as a
+    // parent, so the merge's ancestry says nothing about what the head lacked.
+    let ancestor = if merged || target != head {
+        match known_ancestor(git, repo, base, launch_ref, target, branch, Some(current))? {
+            Some(ancestor) => ancestor,
+            // The branch tip the publication replaced is always in the
+            // published tip, so a miss is a broken Git answer, not a history.
+            None => return Err(invalid()),
+        }
+    } else {
+        lane_ancestor.unwrap_or(Ancestor::Unrooted)
     };
     // receive-pack has checked the graph. Git's CAS protects concurrent host
     // updates, including when a lane rebases or merges its private branch.
     {
-        let target = if advances_current { head } else { current };
         let message = match &ancestor {
             Ancestor::LaunchBase => "provenant: verified lane objects".to_owned(),
             Ancestor::Unrooted => "provenant: verified lane objects (no known ancestor)".to_owned(),
@@ -739,6 +1022,8 @@ pub(crate) fn publish_branch(
     Ok(Published {
         ancestor,
         previous: current,
+        tip: target,
+        merged,
     })
 }
 

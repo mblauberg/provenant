@@ -335,6 +335,7 @@ fn resolve_writer_with(
 
 pub(crate) struct TerminalPolicy<'a> {
     pub enforcement: &'a provenant_records::policy::Policy,
+    pub history: provenant_config::LaneHistory,
     pub preservation_stop: Option<crate::settlement::PreservationStop>,
     pub budget_stop: bool,
     pub work: Option<StopWorkPolicy<'a>>,
@@ -3891,6 +3892,7 @@ impl WriterLaunch {
     ) -> Result<()> {
         let TerminalPolicy {
             enforcement,
+            history,
             preservation_stop,
             budget_stop,
             work,
@@ -4047,11 +4049,11 @@ impl WriterLaunch {
                     launch_ref: request.task.base_ref.as_deref(),
                     head: verified_tip,
                     attempt: custody.scope().attempt,
+                    history,
                 },
-                enforcement,
             )?;
-            let ancestor = published.ancestor;
-            if let Some(warning) = ancestor.warning(self.branch.as_str(), base, verified_tip) {
+            let ancestor = &published.ancestor;
+            if let Some(warning) = ancestor.warning(self.branch.as_str(), base, published.tip) {
                 // Best effort: the ancestor is also in the branch reflog.
                 let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
                 let _ = attempt
@@ -4061,7 +4063,7 @@ impl WriterLaunch {
                         &crate::db::bytes(&serde_json::json!({
                             "schema_version": 1,
                             "branch": self.branch.as_str(),
-                            "tip": verified_tip,
+                            "tip": published.tip,
                             "launch_base": base,
                             "warning": warning,
                         }))?,
@@ -4069,19 +4071,26 @@ impl WriterLaunch {
                     )
                     .and_then(|publication| publication.require_durable());
             }
-            let at_tip = match &source {
+            // The files, index and branch converge on the published tip: when
+            // publication merged a diverged history the branch ends at the
+            // merge commit, not at the verified head. A head the branch already
+            // contained publishes nothing, so the tip may be a commit someone
+            // else advanced; this worktree must not move to it.
+            let at_published_tip = match &source {
                 Some(source) => {
-                    crate::objects::private_tip(source, self.branch.as_str())? == verified_tip
+                    published.ends_at_head(verified_tip)
+                        && crate::objects::private_tip(source, self.branch.as_str())?
+                            == verified_tip
                         && crate::objects::resolve_ref(
                             &git_executable,
                             self.worktree.repo(),
                             self.branch.as_str(),
-                        )? == verified_tip
+                        )? == published.tip
                 }
                 None => false,
             };
-            if at_tip {
-                self.advance_files(attempt, verified_tip)?;
+            if at_published_tip {
+                self.advance_files(attempt, published.tip)?;
             }
             if source.is_some() {
                 // Every settlement and resume runs this: it advances from the
@@ -4094,7 +4103,7 @@ impl WriterLaunch {
                 };
                 self.sync_native_index(attempt, custody.scope(), fallback);
             }
-            if at_tip {
+            if at_published_tip {
                 crate::objects::clear_import_refs(
                     &git_executable,
                     self.worktree.repo(),

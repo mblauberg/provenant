@@ -84,6 +84,11 @@ impl<E: std::error::Error + 'static> std::error::Error for ConfigError<E> {
     }
 }
 
+/// Every configured `merge.*.driver`. A driver is repository code that Git
+/// runs under lane-controlled attributes, so both a host merge and delivery
+/// refuse any configuration that names one.
+const MERGE_DRIVER_KEY: &str = r"^merge\..*\.driver$";
+
 /// The supported config read shapes. Argument construction stays private.
 pub enum Read<'a> {
     Listing,
@@ -95,6 +100,7 @@ pub enum Read<'a> {
     GetLocal(&'a str),
     GetRegexp(&'a str),
     GetRegexpLocal(&'a str),
+    MergeDrivers,
     Snapshot,
     LocalBareOrigins,
     UrlRewrites,
@@ -156,6 +162,9 @@ pub fn read<T, E>(
         Read::GetRegexpLocal(pattern) => {
             args.extend(["--local", "--get-regexp", "--", pattern].map(OsString::from))
         }
+        Read::MergeDrivers => {
+            args.extend(["--includes", "--get-regexp", "--", MERGE_DRIVER_KEY].map(OsString::from))
+        }
         Read::HooksPath => args.extend(["--path", "--get", "core.hooksPath"].map(OsString::from)),
         Read::UrlRewrites => args.extend(
             [
@@ -183,6 +192,29 @@ pub fn read<T, E>(
         ),
     }
     run(&ReadCommand(args)).map_err(|source| ConfigError { context, source })
+}
+
+/// Read every configured `merge.*.driver` from the repository's effective
+/// configuration: the repository config file, the `include.path` and
+/// `includeIf` files it pulls in, and the worktree config when
+/// `extensions.worktreeConfig` enables it. A driver runs repository code
+/// selected by lane-controlled attributes, so the host merge and delivery both
+/// refuse any configuration that names one; the shared read keeps their scopes
+/// identical.
+///
+/// `config` names the repository's config file for the failure context, and
+/// the caller supplies the process policy that runs the read. Its working
+/// directory must be inside the repository so Git resolves the same effective
+/// scope a merge would.
+pub fn merge_drivers<T, E>(
+    config: impl Into<PathBuf>,
+    run: impl FnOnce(&ReadCommand) -> Result<T, E>,
+) -> Result<T, ConfigError<E>> {
+    read(
+        ConfigContext::new("check configured merge drivers", config, None),
+        Read::MergeDrivers,
+        run,
+    )
 }
 
 /// The settings Provenant writes in a bare store or slot repository.
@@ -377,6 +409,29 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.context, context);
         assert_eq!(error.source.kind(), std::io::ErrorKind::Other);
+    }
+
+    #[test]
+    fn merge_drivers_reads_the_effective_configuration_with_includes() {
+        let argv = merge_drivers("/repo/.git/config", |command| {
+            Ok::<_, ()>(
+                command
+                    .iter()
+                    .map(|arg| arg.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .unwrap();
+        assert_eq!(
+            argv,
+            [
+                "config",
+                "--includes",
+                "--get-regexp",
+                "--",
+                "^merge\\..*\\.driver$"
+            ]
+        );
     }
 
     #[test]

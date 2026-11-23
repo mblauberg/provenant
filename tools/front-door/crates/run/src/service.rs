@@ -938,8 +938,12 @@ impl From<&RunError> for ErrorKind {
             RunError::RetainedWriterImport { .. } => Self::RetainedWriterImport,
             RunError::GitUnavailable => Self::Git,
             RunError::ObjectImportLimit(_) => Self::ObjectImportLimit,
-            RunError::LaneTipUnrooted { .. } => Self::LaneTipUnrooted,
-            RunError::PublicationDiverged => Self::Conflict,
+            RunError::LaneTipUnrooted(_) => Self::LaneTipUnrooted,
+            RunError::PublicationDiverged { .. }
+            | RunError::PublicationConflict { .. }
+            | RunError::PublicationUnrelated { .. }
+            | RunError::PublicationMergeDriver { .. }
+            | RunError::PublicationRewound { .. } => Self::Conflict,
             RunError::Validation(_)
             | RunError::Handoff(_)
             | RunError::WriterLineage(_)

@@ -291,8 +291,11 @@ are enforced by the [permission policy](supervisor.md#permission-policy).
 
 ### Pre-push refuses data loss
 
-The pre-push guard protects shared default-branch history and reports advisory
-conflict markers.
+The pre-push guard protects shared default-branch history. Conflict markers warn by default;
+`lanes.history.conflict_markers = "refuse"` makes them a configured stop, and `off` suppresses
+the warning. A non-fast-forward rewrite of the default branch is the owner gate
+`lanes.history.default_branch_rewrite`: `refuse` by default, and `allow` only from the owner's
+host configuration.
 
 - Why: shared history must not be deleted or rewritten accidentally.
 

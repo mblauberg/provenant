@@ -1195,15 +1195,6 @@ knob = "policy.PUSH_PATCH_EVIDENCE"
 justification = "Optional patch evidence is unavailable; the push warns."
 
 [[rule]]
-code = "PUSH_CONFLICT_MARKERS"
-site = "confinement/src/push.rs#conflict_markers"
-boundary = "none"
-strength = "warn"
-refusable = true
-knob = "policy.PUSH_CONFLICT_MARKERS"
-justification = "A pushed patch contains conflict markers; the push warns with the line count."
-
-[[rule]]
 code = "PLAN_STATE_SCRATCH_OVERLAP"
 site = "confinement/src/permissions/render.rs#overlap"
 boundary = "none"
@@ -1292,15 +1283,6 @@ strength = "warn"
 refusable = true
 knob = "policy.LAUNCH_FIELD_UNSUPPORTED"
 justification = "A non-write launch field (model, effort, network, resume, skills) unsupported by the route is dropped with a warning; write support stays an authority refusal."
-
-[[rule]]
-code = "LANE_TIP_UNROOTED"
-site = "run/src/objects.rs#lane_tip"
-boundary = "none"
-strength = "warn"
-refusable = true
-knob = "policy.LANE_TIP_UNROOTED"
-justification = "A lane tip with no known ancestor publishes the lane's own branch with a warning, so no work is lost."
 
 [[rule]]
 code = "SECRET_SHAPED_INPUT"

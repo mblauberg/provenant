@@ -159,9 +159,14 @@ in its attempt directory, so siblings never see each other's staging or unpublis
 ([custody](run-launch.md#admission-and-custody)). The host never executes with lane-mutable
 Git configuration; confinement protects the repository's shared Git state.
 Import uses Git's quarantined receive and verification, and publication compare-and-swaps the
-host branch against the tip it observed. A lane whose history forked from the branch is
-refused at once and its private Git is retained for recovery. The base stays pinned until
-publication.
+host branch against the tip it observed. A lane whose history diverged from the branch is merged
+by the host and published when the merge is clean and `lanes.history.rebase` is `allow` (the
+default). A real conflict, unrelated histories, a configured merge driver, or `rebase = refuse`
+retains the lane's private Git and names the cause and the setting; a branch rewound behind the
+pinned launch base is refused rather than fast-forwarded over, and is judged before the unrooted
+tip. `lanes.history.unrooted_tip` judges the lane head before any merge runs, so a merge cannot
+supply ancestry the head lacks; its `warn` and `off` values never override an unrelated-history
+refusal. The base stays pinned until publication.
 
 The worktree's native index follows the branch from a recorded commit and the digest of the
 index Provenant left, advanced under a per-worktree lock (never the admission gate) after

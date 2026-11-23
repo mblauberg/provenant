@@ -681,6 +681,64 @@ mod ceiling_tests {
     }
 
     #[test]
+    fn lane_history_family_is_documented_with_its_defaults() {
+        let registry = registry().unwrap();
+        for (name, values, default) in [
+            ("lanes.history.rebase", &["allow", "refuse"][..], "allow"),
+            (
+                "lanes.history.unrooted_tip",
+                &["warn", "off", "refuse"][..],
+                "warn",
+            ),
+            (
+                "lanes.history.conflict_markers",
+                &["warn", "off", "refuse"][..],
+                "warn",
+            ),
+            (
+                "lanes.history.default_branch_rewrite",
+                &["refuse", "allow"][..],
+                "refuse",
+            ),
+        ] {
+            // Every knob is documented in the advanced reference, which is
+            // generated from the registry itself. The compact page is capped,
+            // so host-only keys stay out of it.
+            assert!(registry.knobs.contains_key(name), "{name}");
+            let spec = &registry.knobs[name];
+            assert_eq!(spec.default, default, "{name}");
+            // Flexible defaults that warn: an unknown value keeps the
+            // documented default and `lane_history` reports it with its source.
+            // A typo must not refuse the file, and the family is never strict.
+            assert!(!spec.strict, "{name}");
+            assert_eq!(
+                spec.values,
+                values
+                    .iter()
+                    .map(|value| (*value).to_owned())
+                    .collect::<Vec<_>>(),
+                "{name}"
+            );
+        }
+        for name in ["lanes.history.rebase", "lanes.history.unrooted_tip"] {
+            assert!(documented_field(name), "{name}");
+        }
+        for name in [
+            "lanes.history.conflict_markers",
+            "lanes.history.default_branch_rewrite",
+        ] {
+            assert!(
+                !documented_field(name),
+                "{name} is host-only and documented in the advanced reference"
+            );
+        }
+        // The host pre-push hook reads the conflict-marker setting, and the
+        // default-branch rewrite is the owner's gate: no dispatch override.
+        assert!(registry.knobs["lanes.history.conflict_markers"].host_only);
+        assert!(registry.knobs["lanes.history.default_branch_rewrite"].host_only);
+    }
+
+    #[test]
     fn registry_runtime_deadline_maximum_is_the_lane_ceiling() {
         let registry: Value = serde_json::from_str(REGISTRY).unwrap();
         assert_eq!(
