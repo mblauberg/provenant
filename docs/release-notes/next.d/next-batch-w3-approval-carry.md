@@ -1,6 +1,6 @@
-## Changes
+## Behaviour changes
 
-### Verification and landing
+### Lanes and settlement
 
 - Approval carry now runs the port table's declared `verify.format` command
   instead of guessing a formatter from the verify tiers. With no declaration,

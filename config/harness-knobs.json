@@ -16,7 +16,6 @@
       "lanes.verification",
       "lanes.writer_dirty",
       "lanes.read_source",
-      "lanes.read_source_fetch_first",
       "lanes.gh_budget",
       "lanes.isolation",
       "lanes.receipts",
