@@ -1027,6 +1027,7 @@ fn integrate_delivery_receipt_projects_when_head_differs_from_writer_head() -> T
             schema_version: 1,
             head: base,
             stop_work: None,
+            warnings: Vec::new(),
         })?,
         RECORD_LIMIT,
     )?;
@@ -1136,6 +1137,7 @@ fn project_delivery_receipt(
             schema_version: 1,
             head: base,
             stop_work: None,
+            warnings: Vec::new(),
         })?,
         RECORD_LIMIT,
     )?;
