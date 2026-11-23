@@ -4664,9 +4664,6 @@ pub(super) fn prepare_candidates_inner(
             project_root,
             launch_preamble.as_deref(),
         );
-        if let Ok(ports) = provenant_config::PortTable::read_for(project_root, state_root) {
-            brief.set_static_checks_from_ports(&ports);
-        }
         let role = if writer.is_some() {
             run::BriefRole::Writer
         } else if matches!(&task.route, run::RequestedRoute::Review { .. }) {
@@ -4674,6 +4671,9 @@ pub(super) fn prepare_candidates_inner(
         } else {
             run::BriefRole::ReadOnly
         };
+        if let Ok(ports) = provenant_config::PortTable::read_for(project_root, state_root) {
+            brief.set_static_checks_from_ports(&ports, role);
+        }
         let extras = run::PreambleExtras {
             route: Some(provider.clone()),
             location: writer.as_ref().map(|writer| run::LaneLocation {

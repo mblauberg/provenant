@@ -2349,12 +2349,15 @@ pub fn free_pools(adapter: &str, free: impl FnOnce() -> bool) -> Vec<String> {
 
 /// The one route-model canonicaliser: decide the single full `ADAPTER/ID`
 /// spelling from a route's adapter, declared model and effective catalogue.
-/// It is pure and idempotent: a declared id that already names the adapter is
-/// returned byte-for-byte (with a typed warning when the catalogue does not
-/// know it), never prefixed again. Only a bare or short `NAMESPACE/NAME` is
-/// resolved: catalogue match, else a single unique namespaced candidate, else
-/// the adapter-prefixed spelling with a warning. A model id may itself contain
-/// `/`, so the declared spelling is never split by hand.
+/// It is pure and idempotent. A declared id that already names the adapter is
+/// final and returned byte-for-byte (with a typed warning when the catalogue
+/// does not know it), never prefixed again — except on a namespaced adapter
+/// (such as opencode) whose model segment has no `/`, e.g. `opencode/glm`:
+/// that is a short `PROVIDER/NAME` form and is resolved below. A bare name or
+/// a short `NAMESPACE/NAME` resolves by catalogue match, else a single unique
+/// namespaced candidate, else the adapter-prefixed spelling with a warning.
+/// A model id may itself contain `/`, so the declared spelling is never split
+/// by hand.
 /// Spec: docs/specs/fabric.md#one-model-spelling-per-route
 pub fn canonical_route_model(
     adapter: &str,

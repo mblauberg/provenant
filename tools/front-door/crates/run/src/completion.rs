@@ -519,10 +519,20 @@ impl BriefPreamble {
     }
 
     /// Copy the project's `verify.static_checks` into the writer preamble.
-    /// Invalid declarations are advice, not a gate: each one is dropped with a
-    /// typed warning rather than refusing the launch, and the surviving checks
-    /// are labelled with the layer and key that declared them.
-    pub fn set_static_checks_from_ports(&mut self, ports: &provenant_config::PortTable) {
+    /// Only a writer renders the `Static checks:` paragraph, so a review or
+    /// read-only lane neither reads nor validates the list: invalid entries
+    /// there are not its advice and must not warn. Invalid declarations are
+    /// advice, not a gate: each one is dropped with a typed warning rather
+    /// than refusing the launch, and the surviving checks are labelled with
+    /// the layer and key that declared them.
+    pub fn set_static_checks_from_ports(
+        &mut self,
+        ports: &provenant_config::PortTable,
+        role: BriefRole,
+    ) {
+        if role != BriefRole::Writer {
+            return;
+        }
         let origin = format!("{}#verify.static_checks", provenant_config::PORTS_CONFIG);
         let source = Source {
             layer: ports
@@ -1019,7 +1029,7 @@ mod tests {
 
         let mut brief = BriefPreamble::default();
         let ((), warnings) = provenant_records::warning::capture(|| {
-            brief.set_static_checks_from_ports(&ports);
+            brief.set_static_checks_from_ports(&ports, BriefRole::Writer);
         });
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         let warning = &warnings[0];
@@ -1059,6 +1069,50 @@ mod tests {
             writer.contains("source: project; .provenant/ports.json#verify.static_checks"),
             "{writer}"
         );
+    }
+
+    /// A review or read-only lane never renders the `Static checks:` paragraph,
+    /// so it neither reads nor validates the project's list: an invalid entry
+    /// must not emit the writer-preamble warning on those launches.
+    /// Spec: docs/specs/run-launch.md#layered-brief-preamble
+    #[test]
+    fn non_writer_launches_do_not_warn_about_invalid_static_checks() {
+        let state = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join(".provenant")).unwrap();
+        std::fs::write(
+            project.path().join(".provenant/ports.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "verify": {
+                    "static_checks": [
+                        {"argv": ["scripts/check-extra-fields"], "cwd": ".", "timeout_seconds": 30},
+                        {"argv": [], "cwd": ".", "timeout_seconds": 30},
+                    ],
+                },
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let ports = provenant_config::PortTable::read_for(Some(project.path()), state.path())
+            .expect("an invalid static check is not a table refusal");
+        assert_eq!(ports.verify.static_checks.len(), 2);
+
+        for role in [BriefRole::Review, BriefRole::ReadOnly] {
+            let mut brief = BriefPreamble::default();
+            let ((), warnings) = provenant_records::warning::capture(|| {
+                brief.set_static_checks_from_ports(&ports, role);
+            });
+            assert!(
+                warnings
+                    .iter()
+                    .all(|warning| warning.code.as_ref() != PORT_STATIC_CHECK_INVALID.as_str()),
+                "{role:?} warned about a writer-only static check: {warnings:?}"
+            );
+            assert!(
+                brief.static_checks.is_empty(),
+                "{role:?} kept writer-only static checks"
+            );
+        }
     }
 
     /// Spec: docs/specs/run-launch.md#layered-brief-preamble
