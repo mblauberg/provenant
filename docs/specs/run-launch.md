@@ -121,11 +121,18 @@ provisioning, and provisioning verifies the exact branch and head.
 - Why: an owned writer must land in one project-owned location wherever the launch ran, and a
   failed bind must not leave a half-made worktree.
 
-`run --explain` runs the same pre-attempt admission checks as a launch, including graph
-exclusions, the submission snapshot, host writer preflight detection and delivery-target
-validation. An explanation that passes therefore admits the same input; the remaining launch
-work is writer provisioning and provider preparation.
-- Why: an explanation must not pass where the launch's own admission would refuse it.
+`run --explain` runs the same pre-attempt admission checks as a launch, in read-only form:
+graph exclusions, the submission snapshot, the refusal of host-authored writer-preflight
+fields, protected delivery targets and every declared writer branch, read from an existing
+checkout or from the node's `new_worktree` declaration. It allocates no graph execution,
+attempt record or writer checkout, and its `source_admission` rows report a proposed worktree
+without registering it. The dirty-worktree preflight and its WIP commit stay launch-only:
+they inspect and may write each existing writer checkout, so explain neither runs nor previews
+them. An explanation that passes therefore passes the same admission gates, and the launch can
+still refuse at its dirty-writer preflight before proceeding to writer provisioning and
+provider preparation.
+- Why: an explanation must not pass where the launch's own admission would refuse it, and it
+  must not write or claim a result it never observed.
 
 Every writer lane's prompt opens its host preamble with one `Lane location` paragraph built once
 by `lane_preamble_with`: the absolute bound worktree path, branch and base commit, and that the

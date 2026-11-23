@@ -625,6 +625,37 @@ fn graph_records(path: &Path) -> std::io::Result<Vec<PathBuf>> {
     Ok(found)
 }
 
+/// Attempt rows in the run journal, so a read-only preview can prove it
+/// admitted none. A missing database, or one without the table yet, holds none.
+fn attempt_records(state: &Path) -> Result<i64> {
+    let database = state.join("run.sqlite3");
+    if !database.exists() {
+        return Ok(0);
+    }
+    let connection = rusqlite::Connection::open(&database)?;
+    let table: i64 = connection.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='attempts'",
+        [],
+        |row| row.get(0),
+    )?;
+    if table == 0 {
+        return Ok(0);
+    }
+    Ok(connection.query_row("SELECT count(*) FROM attempts", [], |row| row.get(0))?)
+}
+
+/// A command's terminal record. `wait` emits progress events before its final
+/// envelope, so only the last non-empty line is the command result.
+fn last_record(output: &Output) -> Result<Value> {
+    let text = std::str::from_utf8(&output.stdout)?;
+    let line = text
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .ok_or("command produced no record")?;
+    Ok(serde_json::from_str(line)?)
+}
+
 #[test]
 fn corrupt_graph_listing_gives_a_working_retirement_command() -> Result {
     let rig = GraphProject::new()?;
@@ -1076,24 +1107,57 @@ fn batch_launch_provisions_planned_slice_worktrees_and_explains_same_admission()
         !managed.exists() || std::fs::read_dir(&managed)?.next().is_none(),
         "explain must not create managed worktrees: {explained}"
     );
+    // Explain is a reader: it must not journal the graph execution or admit an
+    // attempt for the input it previews.
+    assert!(
+        graph_records(&rig.state())?.is_empty(),
+        "explain allocated a graph execution record: {explained}"
+    );
+    assert_eq!(
+        attempt_records(&rig.state())?,
+        0,
+        "explain allocated an attempt record: {explained}"
+    );
 
     let (launch, launched) = rig.run(&["run", "--file", document])?;
+    assert!(
+        launch.status.success(),
+        "launch was refused after explain admitted the same input: {launched}"
+    );
     let graph = launched["data"]["checkpoint"]["graph_id"]
         .as_str()
-        .ok_or_else(|| {
-            format!("launch must admit the graph explain admitted: {launch:?}; {launched}")
-        })?
+        .ok_or_else(|| format!("launch must admit the graph explain admitted: {launched}"))?
         .to_owned();
-    if let Some(code) = launched["error"]["code"].as_str() {
-        assert!(
-            !matches!(code, "worktree_missing" | "invalid_input"),
-            "launch was refused after explain admitted it: {launched}"
-        );
-    }
-    let _ = rig
+    let wait_output = rig
         .command()
         .args(["wait", &graph, "--timeout", "15s"])
         .output()?;
+    let waited = last_record(&wait_output)?;
+    assert_eq!(
+        waited["data"]["timed_out"].as_bool(),
+        Some(false),
+        "wait did not settle the graph the launch admitted: {waited}"
+    );
+    let settle = waited["data"]["targets"]
+        .as_array()
+        .and_then(|targets| {
+            targets
+                .iter()
+                .find(|target| target["target"] == graph.as_str())
+        })
+        .and_then(|target| target["settle"].as_str())
+        .ok_or_else(|| format!("wait did not report {graph}: {waited}"))?;
+    let expected_exit = match settle {
+        "succeeded" => 0,
+        "unsuccessful" => 1,
+        "needs_input" => 5,
+        other => return Err(format!("unexpected wait settle {other}: {waited}").into()),
+    };
+    assert_eq!(
+        wait_output.status.code(),
+        Some(expected_exit),
+        "wait exit disagrees with settle {settle}: {waited}"
+    );
     let checkpoint_path = graph_records(&rig.state())?
         .into_iter()
         .find(|path| {
@@ -1126,6 +1190,40 @@ fn batch_launch_provisions_planned_slice_worktrees_and_explains_same_admission()
         provisioned.insert(path.to_owned());
     }
     assert_eq!(provisioned.len(), 2, "each slice owns a distinct worktree");
+
+    // The negative case keeps the dead-guard's intent: a refusal is reported
+    // with the same code by explain and launch, so a passing explanation is
+    // checked against a refusal and not only against an admission.
+    let missing = rig.document(&json!({
+        "schema_version": support::GRAPH_DOCUMENT_SCHEMA_VERSION,
+        "graph_id": "batch-missing-writer",
+        "nodes": [{
+            "id": "writer",
+            "prompt": "write the change",
+            "access": "worktree_write",
+            "worktree": ".worktrees/batch-missing-writer",
+            "write_scope": ["."],
+            "delivery": "push",
+            "route": {"adapter": "fixture", "model": "fixture/model"},
+        }],
+    }))?;
+    let missing = missing.to_str().ok_or("document path")?;
+    let (missing_explain_output, missing_explain) =
+        rig.run(&["run", "--file", missing, "--explain"])?;
+    assert!(
+        !missing_explain_output.status.success(),
+        "{missing_explain}"
+    );
+    assert_eq!(
+        missing_explain["error"]["code"], "worktree_missing",
+        "{missing_explain}"
+    );
+    let (missing_launch_output, missing_launch) = rig.run(&["run", "--file", missing])?;
+    assert!(!missing_launch_output.status.success(), "{missing_launch}");
+    assert_eq!(
+        missing_launch["error"]["code"], missing_explain["error"]["code"],
+        "{missing_launch}"
+    );
     Ok(())
 }
 
@@ -1179,6 +1277,62 @@ fn explain_refuses_a_writer_on_the_integration_branch_like_launch() -> Result {
     assert!(
         launch_cause.contains("on the integration branch batch/integration"),
         "{launched}"
+    );
+    Ok(())
+}
+
+// Spec: docs/specs/run-launch.md#writer-binding
+#[test]
+fn explain_previews_a_new_writer_without_creating_its_checkout() -> Result {
+    let rig = GraphProject::new()?;
+    let checkout = rig.project.join(".worktrees/explain-new-writer");
+    let document = rig.document(&json!({
+        "schema_version": support::GRAPH_DOCUMENT_SCHEMA_VERSION,
+        "graph_id": "explain-new-writer",
+        "nodes": [{
+            "id": "writer",
+            "prompt": "write the change",
+            "access": "worktree_write",
+            "worktree": ".worktrees/explain-new-writer",
+            "write_scope": ["."],
+            "delivery": "push",
+            "attempt": {"new_worktree": {"branch": "topic/explain-new-writer", "base": "HEAD"}},
+            "route": {"adapter": "fixture", "model": "fixture/model"},
+        }],
+    }))?;
+    let document = document.to_str().ok_or("document path")?;
+    // The checkout does not exist yet; explain admits the node from its
+    // declared branch rather than resolving a writer Git home for it.
+    let (explained_output, explained) = rig.run(&["run", "--file", document, "--explain"])?;
+    assert!(
+        explained_output.status.success(),
+        "explain must preview a declared new worktree: {explained}"
+    );
+    assert!(
+        !checkout.exists(),
+        "explain created the writer checkout: {explained}"
+    );
+
+    let (launch, launched) = rig.run(&["run", "--file", document])?;
+    let graph = launched["data"]["checkpoint"]["graph_id"]
+        .as_str()
+        .ok_or_else(|| {
+            format!("launch must admit the writer explain previewed: {launch:?}; {launched}")
+        })?
+        .to_owned();
+    let wait_output = rig
+        .command()
+        .args(["wait", &graph, "--timeout", "15s"])
+        .output()?;
+    let waited = last_record(&wait_output)?;
+    assert_eq!(
+        waited["data"]["timed_out"].as_bool(),
+        Some(false),
+        "wait did not settle the writer graph: {waited}"
+    );
+    assert!(
+        checkout.is_dir(),
+        "launch did not provision the checkout it previewed: {waited}"
     );
     Ok(())
 }
