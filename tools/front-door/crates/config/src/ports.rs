@@ -313,6 +313,8 @@ pub struct VerifyPort {
     pub affected: VerifyAffectedPort,
     /// Cheap repository checks a writer runs before pushing. They need no
     /// build, so a lane may run them even though it otherwise only formats.
+    /// Invalid entries are dropped with a typed warning at the writer preamble,
+    /// not refused here: they are advice to the writer, not a launch gate.
     #[serde(default)]
     pub static_checks: Vec<VerifyStaticCheck>,
 }
@@ -1205,7 +1207,6 @@ impl PortEntry for VerifyPort {
             && self.test_threads.is_none_or(|threads| threads > 0)
             && (self.tiers.is_empty() || self.tiers.contains_key(&self.default_tier))
             && self.tiers.iter().all(|(name, tier)| !name.is_empty() && !tier.commands.is_empty())
-            && self.static_checks.iter().all(VerifyStaticCheck::is_valid)
     }
 }
 impl PortEntry for LandPort {
@@ -2783,6 +2784,58 @@ mod tests {
             assert_eq!(warnings.len(), 1);
             assert_eq!(warnings[0].0, path);
             assert!(warnings[0].1.contains("verify.tiers.0") && warnings[0].1.contains(reason));
+        }
+    }
+
+    /// A static check is usable only with a command, a relative cwd and a
+    /// positive time cap. These are the invariants the writer-preamble mapping
+    /// uses to drop advice that could not be run.
+    #[test]
+    fn verify_static_check_validity_table() {
+        let valid = VerifyStaticCheck {
+            argv: vec!["scripts/check-extra-fields".into()],
+            cwd: PathBuf::from("."),
+            timeout_seconds: 30,
+        };
+        assert!(valid.is_valid(), "{valid:?}");
+        for (label, check) in [
+            (
+                "empty argv",
+                VerifyStaticCheck {
+                    argv: vec![],
+                    ..valid.clone()
+                },
+            ),
+            (
+                "empty program",
+                VerifyStaticCheck {
+                    argv: vec!["".into()],
+                    ..valid.clone()
+                },
+            ),
+            (
+                "absolute cwd",
+                VerifyStaticCheck {
+                    cwd: PathBuf::from("/absolute"),
+                    ..valid.clone()
+                },
+            ),
+            (
+                "parent-relative cwd",
+                VerifyStaticCheck {
+                    cwd: PathBuf::from("a/../b"),
+                    ..valid.clone()
+                },
+            ),
+            (
+                "zero timeout",
+                VerifyStaticCheck {
+                    timeout_seconds: 0,
+                    ..valid.clone()
+                },
+            ),
+        ] {
+            assert!(!check.is_valid(), "{label}: {check:?}");
         }
     }
 

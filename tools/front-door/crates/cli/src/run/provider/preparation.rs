@@ -4665,29 +4665,7 @@ pub(super) fn prepare_candidates_inner(
             launch_preamble.as_deref(),
         );
         if let Ok(ports) = provenant_config::PortTable::read_for(project_root, state_root) {
-            brief.static_checks = ports
-                .verify
-                .static_checks
-                .iter()
-                .map(|check| run::BriefStaticCheck {
-                    argv: check.argv.clone(),
-                    cwd: check.cwd.clone(),
-                    timeout_seconds: check.timeout_seconds,
-                })
-                .collect();
-            if !ports.verify.static_checks.is_empty() {
-                brief.static_checks_source = Some(provenant_records::Source {
-                    layer: ports
-                        .provenance()
-                        .get("verify.static_checks")
-                        .copied()
-                        .unwrap_or(ports.verify.source),
-                    origin: Some(format!(
-                        "{}#verify.static_checks",
-                        provenant_config::PORTS_CONFIG
-                    )),
-                });
-            }
+            brief.set_static_checks_from_ports(&ports);
         }
         let role = if writer.is_some() {
             run::BriefRole::Writer
