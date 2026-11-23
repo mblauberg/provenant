@@ -1373,6 +1373,7 @@ fn recover_provisioning(
                     | WorktreeError::DetachedPrimary
                     | WorktreeError::DetachedWorktree { .. }
                     | WorktreeError::CheckedOut
+                    | WorktreeError::InvalidRequest
                     | WorktreeError::WorktreeExists { .. }
                     | WorktreeError::BranchCollision { .. }
                     | WorktreeError::BranchExistsWithBase { .. }
@@ -3113,6 +3114,29 @@ mod provisioning_tests {
     #[test]
     fn worktree_exists_refusal_blocks_the_node_with_its_reason()
     -> Result<(), Box<dyn std::error::Error>> {
+        // A directory at the managed path with no Git registration makes
+        // create refuse before any mutation, with a typed WorktreeExists
+        // reason that must reach the node alongside the refusal.
+        refused_provisioning_blocks_the_node(
+            ".worktrees/unregistered-writer",
+            true,
+            Some("the path is not a registered worktree"),
+        )
+    }
+
+    // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
+    #[test]
+    fn writer_path_outside_the_layout_blocks_the_node() -> Result<(), Box<dyn std::error::Error>> {
+        // A path that maps to no managed branch is refused before any Git
+        // mutation, so the node blocks and its fence clears.
+        refused_provisioning_blocks_the_node("elsewhere/writer", false, None)
+    }
+
+    fn refused_provisioning_blocks_the_node(
+        path: &str,
+        occupy: bool,
+        cause: Option<&str>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         use provenant_fabric_runtime::graph::{
             GraphCheckpoint, GraphDocument, GraphExecution, NodeState,
         };
@@ -3141,11 +3165,9 @@ mod provisioning_tests {
         let cancel = CancelToken::new();
         let clock = provenant_os::clock::SystemClock::new();
         let budget = WaitBudget::cli(clock.mono_now(), 30)?;
-        let path = ".worktrees/unregistered-writer";
-        // A directory at the managed path with no Git registration makes
-        // create refuse before any mutation, with a typed WorktreeExists
-        // reason that must reach the node alongside the refusal.
-        std::fs::create_dir_all(project.join(path))?;
+        if occupy {
+            std::fs::create_dir_all(project.join(path))?;
+        }
         let document: GraphDocument = serde_json::from_value(json!({
             "schema_version":1,"graph_id":"g-exists","nodes":[{
                 "id":"writer","access":"worktree_write","worktree":path,"prompt":"Write","route":{"alias":"junior"}
@@ -3186,10 +3208,9 @@ mod provisioning_tests {
         )?
         .ok_or("existing worktree refusal")?;
         let message = error.to_string();
-        assert!(
-            message.contains("the path is not a registered worktree"),
-            "{message}"
-        );
+        if let Some(cause) = cause {
+            assert!(message.contains(cause), "{message}");
+        }
         assert_eq!(checkpoint.nodes[0].state, NodeState::Blocked);
         assert_eq!(
             checkpoint.nodes[0].advance_error_code.as_deref(),
@@ -3199,10 +3220,7 @@ mod provisioning_tests {
             .advance_error
             .as_deref()
             .ok_or("blocked node reason")?;
-        assert!(
-            blocked.contains("the path is not a registered worktree"),
-            "{blocked}"
-        );
+        assert!(blocked.contains(cause.unwrap_or(error.code())), "{blocked}");
         assert!(relay::pending_provisioning(&checkpoint).is_empty());
         Ok(())
     }
