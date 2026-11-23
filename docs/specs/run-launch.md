@@ -271,13 +271,21 @@ proceeds, and records `effective=false` and the reason in the sandbox receipt.
 
 ## Inputs and resources
 
-A plain read-only launch from a checkout behind its fetched upstream reviews that upstream head.
-`read_only_source_ref` resolves the default branch as last fetched, without fetching, and
-`bind_default_read_only_source` pins the graph's read-only nodes to it; the warning names the ref,
-the commit and the stale local head it replaced. A level or ahead checkout keeps its local tree,
-as do an explicit `source` of `local`, a review range, an authored document and a writer launch.
-Absent or unusable Git evidence stays advisory and never refuses the launch.
-- Why: file:line evidence from a stale working tree reports findings upstream has fixed.
+The tree a read-only lane reads is the sourced `lanes.read_source` setting, resolved by one
+resolver, `read_only_source_ref`. `checkout` keeps the local checkout; `default_branch` pins the
+fetched default branch; any other value is an explicit Git ref; `lanes.read_source_fetch_first`
+fetches from the resolved remote before the ref is read. `--source local` maps onto `checkout`
+and `--source upstream` onto `default_branch` at the launch layer, so the flag wins over the
+host or project knob. Under the compiled default (no setting at that name) only a checkout behind
+its fetched upstream is pinned, as last fetched; a level or ahead checkout keeps its local tree.
+`bind_default_read_only_source` pins the graph's read-only nodes to the resolved commit, and the
+plan node of `implement --plan` binds to the launch's `--base` through the same resolver. A review
+range, an authored document and a writer launch keep resolving their own subject. The warning
+names the ref, the commit and the layer that chose it; `read_source` on the launch result and the
+explain status names the same commit. Absent or unusable Git evidence stays advisory and never
+refuses the launch.
+- Why: file:line evidence from a stale working tree reports findings upstream has fixed, and a
+  plan should read the base it will implement rather than the caller's checkout.
 
 Unreadable required host inputs reject an attempt before launch, and a pinned source view reports
 its failure without exposing captured contents or credentials.

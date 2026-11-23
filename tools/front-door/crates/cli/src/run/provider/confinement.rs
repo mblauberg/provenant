@@ -1886,23 +1886,71 @@ pub(super) fn read_only_plan(
 /// Advisory freshness of the checkout a read-only lane reads, for the launch
 /// warnings. The lane reads `source`: the `--worktree` checkout, or the caller's
 /// checkout when none is named. Absent or unusable Git data yields no warning.
-pub(in crate::run) fn read_only_checkout_warning(state: &Path, source: &Path) -> Option<String> {
-    let selected = read_only_source_ref(state, source)?;
+pub(in crate::run) fn read_only_checkout_warning(
+    state: &Path,
+    source: &Path,
+    choice: &crate::run::ReadSourceChoice,
+) -> Option<String> {
+    let selected = read_only_source_ref(state, source, choice)?;
     Some(crate::run::read_only_local_checkout_warning(
         source, &selected,
     ))
 }
 
-/// The fetched upstream head a stale read-only checkout should review instead
-/// of its own working tree. This is advisory: missing or unusable Git data
-/// yields no pin, so the launch keeps its existing local-source behaviour.
+/// Run a bounded host-side fetch so a fetch-first source resolves a ref that
+/// the checkout's last fetch did not yet have. This runs on the host at launch,
+/// never inside a lane, and uses the host's own Git and credential settings.
+fn fetch_read_source(remote: &str, repo: &Path) -> bool {
+    use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
+
+    let Some(git) = provenant_os::git::git_executable() else {
+        return false;
+    };
+    let Ok(executor) = SystemExecutor::new(1) else {
+        return false;
+    };
+    let argv: Vec<std::ffi::OsString> = vec![
+        git.as_os_str().to_owned(),
+        std::ffi::OsString::from("--no-pager"),
+        std::ffi::OsString::from("fetch"),
+        std::ffi::OsString::from("--no-tags"),
+        std::ffi::OsString::from("--quiet"),
+        std::ffi::OsString::from(remote),
+    ];
+    let env: Vec<(std::ffi::OsString, std::ffi::OsString)> = std::env::vars_os()
+        .filter(|(key, _)| {
+            let key = key.to_string_lossy();
+            key != "GIT_TERMINAL_PROMPT" && key != "GIT_ASKPASS"
+        })
+        .chain([(
+            std::ffi::OsString::from("GIT_TERMINAL_PROMPT"),
+            std::ffi::OsString::from("0"),
+        )])
+        .collect();
+    let mut options = ExecOptions::new(&argv, repo, std::time::Duration::from_secs(60));
+    options.env = Some(&env);
+    executor
+        .execute(options)
+        .map(|out| out.termination == Termination::Exit(0))
+        .unwrap_or(false)
+}
+
+/// The one resolver for a read-only lane's source. The compiled default still
+/// pins only a checkout behind its fetched upstream; `checkout` keeps the
+/// local tree, `default_branch` pins the fetched default and any other value is
+/// an explicit ref. `fetch_first` fetches from the resolved remote before the
+/// ref is read. Missing or unusable Git evidence is advisory, never a refusal.
 pub(in crate::run) fn read_only_source_ref(
     state: &Path,
     source: &Path,
+    choice: &crate::run::ReadSourceChoice,
 ) -> Option<crate::run::ReadOnlySourceRef> {
     use provenant_confinement::{GitRead, UtilityBudget, UtilityRuntime, run_read_utility};
     use provenant_os::exec::SystemExecutor;
 
+    if choice.value == "checkout" {
+        return None;
+    }
     let git = provenant_os::git::git_executable()?;
     let utility_home = host_git_home(state).ok()?;
     let utility = UtilityRuntime::new(&git, utility_home.path(), state).ok()?;
@@ -1910,6 +1958,18 @@ pub(in crate::run) fn read_only_source_ref(
     let budget = UtilityBudget::bounded(std::time::Duration::from_secs(5)).ok()?;
     let cancel = provenant_core::CancelToken::new();
     let ancestor = source.ancestors().find(|path| path.join(".git").exists())?;
+    if choice.fetch_first
+        && let Some(remote) = resolved_forge_remote(state, ancestor)
+        && !fetch_read_source(&remote, ancestor)
+    {
+        warn(Warning::new(
+            provenant_records::warning::UPSTREAM_UNRESOLVED,
+            format!(
+                "lanes.read_source_fetch_first: fetch from {remote} did not complete; resolving {} from the last fetched refs",
+                choice.value
+            ),
+        ));
+    }
     let repo = utility
         .open_read_repo(&executor, ancestor, budget, &cancel)
         .ok()?;
@@ -1924,8 +1984,8 @@ pub(in crate::run) fn read_only_source_ref(
     .ok()
     .and_then(|out| String::from_utf8(out.stdout.bytes).ok())
     .and_then(|text| provenant_core::GitOid::parse(text.trim()).ok())?;
-    let (commit, reference) = configured_upstream(&executor, &repo, &utility, budget, &cancel)
-        .or_else(|| {
+    let (commit, reference) = if choice.value.is_empty() {
+        configured_upstream(&executor, &repo, &utility, budget, &cancel).or_else(|| {
             // The remote comes from the one declared/inferred context, never a
             // compiled `origin`: a fork checkout must not pin its review base to
             // the fork's default when `upstream` is the real forge. An
@@ -1941,9 +2001,21 @@ pub(in crate::run) fn read_only_source_ref(
                 format!("read-only source could not resolve this branch's configured upstream; using {} instead, which may not track this checkout", fallback.1),
             ));
             Some(fallback)
-        })?;
-    let behind = commits_behind(&executor, &repo, &utility, budget, &cancel, head, commit)?;
-    (behind > 0).then_some(crate::run::ReadOnlySourceRef {
+        })?
+    } else if choice.value == "default_branch" {
+        configured_upstream(&executor, &repo, &utility, budget, &cancel).or_else(|| {
+            let remote = resolved_forge_remote(state, ancestor)?;
+            default_upstream(&executor, &repo, &utility, budget, &cancel, &remote)
+        })?
+    } else {
+        resolve_upstream_ref(&executor, &repo, &utility, budget, &cancel, &choice.value)?
+    };
+    let behind =
+        commits_behind(&executor, &repo, &utility, budget, &cancel, head, commit).unwrap_or(0);
+    if choice.value.is_empty() && behind == 0 {
+        return None;
+    }
+    Some(crate::run::ReadOnlySourceRef {
         commit,
         reference,
         behind,
