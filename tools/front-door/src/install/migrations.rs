@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 /// Ordered steps for this release. Steps are deleted in the release after the
 /// one that ships them.
 const STEPS: &[&dyn Migration] = &[
+    &HostProjectDirs,
     &PortSourceSpellings,
     &PortConfigSourceSpellings,
     &RetireWarningMarkers,
@@ -35,6 +36,81 @@ const OLD_PORT_RECEIPT_VERSION: u64 = 2;
 const NEW_PORT_RECEIPT_VERSION: u64 = 3;
 const OLD_PORTS_VERSION: u64 = 2;
 const NEW_PORTS_VERSION: u64 = 3;
+/// Length of the obsolete 64-hex `project_key` directory name.
+const OLD_PROJECT_KEY_LEN: usize = 64;
+/// A ProjectId spelling is the first 16 bytes of that same digest, in hex.
+const PROJECT_ID_HEX_LEN: usize = 32;
+
+fn is_old_project_key(name: &str) -> bool {
+    name.len() == OLD_PROJECT_KEY_LEN
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// Host-project settings were once filed under `projects/<project_key>`, the
+/// 64-hex SHA-256 of the canonical common Git dir. Project bindings key the same
+/// directory by ProjectId: the first 16 bytes of that digest. Move the old
+/// directory to its binding name. The target's absence is the merge condition;
+/// when both exist neither is touched and the conflict names both paths.
+struct HostProjectDirs;
+
+impl Migration for HostProjectDirs {
+    fn id(&self) -> &'static str {
+        "host-project-dirs"
+    }
+
+    fn apply(&self, state_root: &Path) -> Result<MigrationReport, MigrationError> {
+        let mut report = MigrationReport::new(self.id());
+        let projects = state_root.join("projects");
+        let entries = match std::fs::read_dir(&projects) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(report),
+            Err(error) => return Err(error.into()),
+        };
+        for entry in entries {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            if !is_old_project_key(&name) {
+                continue;
+            }
+            let project_id = &name[..PROJECT_ID_HEX_LEN];
+            if provenant_core::ProjectId::parse(project_id).is_err() {
+                continue;
+            }
+            let from = entry.path();
+            let to = projects.join(project_id);
+            if std::fs::symlink_metadata(&to).is_ok() {
+                report.warnings.push(
+                    Warning::new(
+                        MIGRATION_STEP_FAILED,
+                        format!(
+                            "host-project directory conflict: {} and {} both exist; neither was changed",
+                            from.display(),
+                            to.display()
+                        ),
+                    )
+                    .subject(from.display().to_string())
+                    .repair(format!(
+                        "move the settings from {} into {} by hand, then rerun `provenant install`",
+                        from.display(),
+                        to.display()
+                    )),
+                );
+                continue;
+            }
+            std::fs::rename(&from, &to)?;
+            report.changed.push(to.display().to_string());
+        }
+        report.changed.sort();
+        Ok(report)
+    }
+}
 
 /// Rewrite one JSON file in place, returning whether its bytes changed.
 fn rewrite_json(
@@ -434,6 +510,62 @@ mod tests {
             .apply(root.path())
             .expect("apply twice");
         assert!(again.changed.is_empty(), "second run must change nothing");
+    }
+
+    /// Spec: docs/specs/state.md#format-changes-migrate-once-at-install
+    #[test]
+    fn host_project_dirs_moves_the_old_key_directory() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let old_key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let old = root.path().join("projects").join(old_key);
+        std::fs::create_dir_all(&old).expect("old project dir");
+        std::fs::write(old.join("config.toml"), "[admission.test]\nslots = 3\n")
+            .expect("write config");
+        let target = root.path().join("projects").join(&old_key[..32]);
+
+        let report = super::HostProjectDirs
+            .apply(root.path())
+            .expect("apply once");
+        assert_eq!(report.id, "host-project-dirs");
+        assert_eq!(report.changed, [target.display().to_string()]);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        assert!(!old.exists(), "old key directory was moved");
+        assert_eq!(
+            std::fs::read_to_string(target.join("config.toml")).expect("read moved config"),
+            "[admission.test]\nslots = 3\n"
+        );
+        let again = super::HostProjectDirs
+            .apply(root.path())
+            .expect("apply twice");
+        assert!(again.changed.is_empty(), "second run must change nothing");
+    }
+
+    /// Spec: docs/specs/state.md#format-changes-migrate-once-at-install
+    #[test]
+    fn host_project_dirs_conflict_warns_and_leaves_both() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let old_key = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        let old = root.path().join("projects").join(old_key);
+        let target = root.path().join("projects").join(&old_key[..32]);
+        std::fs::create_dir_all(&old).expect("old project dir");
+        std::fs::create_dir_all(&target).expect("binding project dir");
+        std::fs::write(old.join("config.toml"), "slots = 3\n").expect("write old config");
+        std::fs::write(target.join("config.toml"), "slots = 7\n").expect("write new config");
+
+        let report = super::HostProjectDirs.apply(root.path()).expect("apply");
+        assert!(report.changed.is_empty(), "{report:?}");
+        assert_eq!(report.warnings.len(), 1, "{report:?}");
+        let message = &report.warnings[0].message;
+        assert!(message.contains(&old.display().to_string()), "{message}");
+        assert!(message.contains(&target.display().to_string()), "{message}");
+        assert_eq!(
+            std::fs::read_to_string(old.join("config.toml")).expect("old kept"),
+            "slots = 3\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.join("config.toml")).expect("target kept"),
+            "slots = 7\n"
+        );
     }
 
     struct Succeeds(&'static str);

@@ -95,13 +95,21 @@ fn decode_policy(bytes: &[u8]) -> Result<GithubPolicy, ConfigError> {
 impl GithubPolicy {
     /// Read the policy for the host-bound project. Only absence means empty.
     pub fn read(state: &StateRoot, project_id: ProjectId) -> Result<Self, ConfigError> {
-        let root = Directory::open_anchor(state.as_path())?;
-        let projects = match root.open_verified_directory(OsStr::new("projects")) {
+        // The binding directory is the single owner of the host-project
+        // layout; never rebuild `projects/<id>` here.
+        let binding_dir = crate::project_binding_dir(state.as_path(), project_id);
+        let projects_path = binding_dir
+            .parent()
+            .ok_or(ConfigError::InvalidGithubPolicy)?;
+        let name = binding_dir
+            .file_name()
+            .ok_or(ConfigError::InvalidGithubPolicy)?;
+        let projects = match Directory::open_anchor(projects_path) {
             Ok(dir) => dir,
             Err(e) if e.is_not_found() => return Ok(Self::default()),
             Err(e) => return Err(e.into()),
         };
-        let project = match projects.open_verified_directory(OsStr::new(&project_id.to_string())) {
+        let project = match projects.open_verified_directory(name) {
             Ok(dir) => dir,
             Err(e) if e.is_not_found() => return Ok(Self::default()),
             Err(e) => return Err(e.into()),
@@ -122,13 +130,7 @@ impl GithubPolicy {
             return Err(ConfigError::InvalidGithubPolicy);
         }
         let mut policy = decode_policy(&bytes)?;
-        let source = state
-            .as_path()
-            .join("projects")
-            .join(project_id.to_string())
-            .join("github.json")
-            .display()
-            .to_string();
+        let source = binding_dir.join("github.json").display().to_string();
         for key in policy.extra.keys() {
             crate::loader::warn_unknown_input_once(
                 state.as_path(),

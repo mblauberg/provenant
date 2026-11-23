@@ -769,7 +769,7 @@ pub fn maintain(state: &Path, home: &Path, project: &Path, now: SystemTime) -> M
     }
     let key = provenant_config::project_key_for(project)
         .unwrap_or_else(|| provenant_config::project_key(project));
-    let limit = ResolvedAdmissionClass::resolve("build", state, Some(project), Some(&key)).slots;
+    let limit = ResolvedAdmissionClass::resolve("build", state, Some(project)).slots;
     if limit == 0 {
         outcome.warning = Some("build maintenance needs at least one build slot".into());
         return outcome;

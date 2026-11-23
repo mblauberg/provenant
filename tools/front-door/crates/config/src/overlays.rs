@@ -3,10 +3,12 @@
 //! Overlays live in the same host and project configuration files the other
 //! cross-cutting domains use, in the same precedence order as admission and
 //! ports: host `<state>/config.toml`, host-project
-//! `<state>/projects/<key>/config.toml`, then project
-//! `<project>/.provenant/config.toml`. A later layer replaces an entry with the
-//! same key; it never merges one entry into another. The bundled asset is the
-//! base layer and is supplied by the owning domain, not read here.
+//! `<state>/projects/<ProjectId>/config.toml`, then project
+//! `<project>/.provenant/config.toml`. The host-project directory is resolved
+//! once by [`crate::host_project_dir`], the same binding resolver install and
+//! the port layer use. A later layer replaces an entry with the same key; it
+//! never merges one entry into another. The bundled asset is the base layer and
+//! is supplied by the owning domain, not read here.
 //!
 //! A single invalid entry does not refuse the whole overlay. Each owner skips
 //! the entry and records an [`OverlayWarning`] naming the layer and the reason.
@@ -82,15 +84,11 @@ pub struct OverlayLayer {
 pub fn read_layers(
     state: &Path,
     project: Option<&Path>,
-    project_key: Option<&str>,
     name: &str,
 ) -> (Vec<OverlayLayer>, Vec<OverlayWarning>) {
     let mut paths = vec![(OverlaySource::Host, state.join("config.toml"))];
-    if let Some(key) = project_key {
-        paths.push((
-            OverlaySource::Host,
-            state.join("projects").join(key).join("config.toml"),
-        ));
+    if let Some(dir) = project.and_then(|project| crate::host_project_dir(state, project)) {
+        paths.push((OverlaySource::Host, dir.join("config.toml")));
     }
     if let Some(project) = project {
         paths.push((
@@ -127,4 +125,44 @@ pub fn read_layers(
         layers.push(OverlayLayer { source, text });
     }
     (layers, warnings)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Spec: docs/specs/state.md#host-project-state-has-one-key
+    #[test]
+    fn host_project_overlay_is_read_from_the_binding_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::create_dir_all(project.join(".git")).unwrap();
+
+        let bound = crate::host_project_dir(&state, &project).unwrap();
+        std::fs::create_dir_all(&bound).unwrap();
+        std::fs::write(
+            bound.join("config.toml"),
+            "[catalogue]\nentries = [\"from-binding\"]\n",
+        )
+        .unwrap();
+
+        // The obsolete sha256 key names a different directory. A layer filed
+        // there is never read, even though it carries a conflicting value.
+        let canonical = std::fs::canonicalize(project.join(".git")).unwrap();
+        let old = state
+            .join("projects")
+            .join(crate::project_key(&canonical))
+            .join("config.toml");
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        std::fs::write(&old, "[catalogue]\nentries = [\"from-old-key\"]\n").unwrap();
+
+        let (layers, warnings) = read_layers(&state, Some(&project), "catalogue");
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(layers.len(), 1, "{layers:?}");
+        assert_eq!(layers[0].source, OverlaySource::Host);
+        assert!(layers[0].text.contains("from-binding"), "{:?}", layers[0]);
+        assert!(!layers[0].text.contains("from-old-key"), "{:?}", layers[0]);
+    }
 }

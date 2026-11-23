@@ -504,7 +504,7 @@ fn schedule_build_hygiene(resolved: &crate::roots::Resolved) -> Vec<String> {
         host.build.slot_idle_duration().value,
         host.build.snapshot_retention_duration().value,
     );
-    let limit = provenant_config::ResolvedAdmissionClass::resolve("build", state, None, None).slots;
+    let limit = provenant_config::ResolvedAdmissionClass::resolve("build", state, None).slots;
     let mut settings: BTreeMap<String, (Duration, Duration)> = BTreeMap::new();
     let mut projects: Vec<(PathBuf, String)> = Vec::new();
     for binding in provenant_config::registered_gc_projects(&resolved.roots).unwrap_or_default() {

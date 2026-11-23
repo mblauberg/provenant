@@ -4600,12 +4600,8 @@ pub(super) fn prepare_candidates_inner(
                     .and_then(|provider| provider.runtime_deadline_seconds),
             },
         );
-        let build_class = provenant_config::ResolvedAdmissionClass::resolve(
-            "build",
-            state_root,
-            Some(&source),
-            provenant_config::project_key_for(&source).as_deref(),
-        );
+        let build_class =
+            provenant_config::ResolvedAdmissionClass::resolve("build", state_root, Some(&source));
         let model_id =
             provenant_routing::ModelId::parse(&label).map_err(|error| error.to_string())?;
         let exact_model = resolved_launch_model(&catalogue, &model_id);

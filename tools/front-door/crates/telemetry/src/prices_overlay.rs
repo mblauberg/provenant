@@ -89,7 +89,6 @@ pub fn load(
     assets: &Path,
     state: &Path,
     project: Option<&Path>,
-    project_key: Option<&str>,
 ) -> Result<LayeredPrices, PriceLoadError> {
     let path = assets.join("config/telemetry-prices.toml");
     let text = std::fs::read_to_string(&path).map_err(|source| PriceLoadError::Read {
@@ -101,8 +100,7 @@ pub fn load(
             path: path.clone(),
             message: error.to_string(),
         })?;
-    let (layers, mut warnings) =
-        provenant_config::overlays::read_layers(state, project, project_key, "prices");
+    let (layers, mut warnings) = provenant_config::overlays::read_layers(state, project, "prices");
     let mut sources = std::collections::BTreeMap::new();
     for layer in &layers {
         let document: toml_edit::DocumentMut = match layer.text.parse() {

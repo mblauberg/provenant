@@ -757,7 +757,6 @@ fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::
                     serde_json::to_value(config::ResolvedAdmissionClass::resolve_all(
                         roots.state.as_path(),
                         Some(&context.project),
-                        provenant_config::project_key_for(&context.project).as_deref(),
                     ))?;
                 let policy = resolved.domains.policy.resolve_with_knobs(
                     &provenant_os::git::repository_path(
@@ -1287,7 +1286,6 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
                     class,
                     state,
                     Some(&resolved.project),
-                    provenant_config::project_key_for(&resolved.project).as_deref(),
                 );
                 if let Err(error) =
                     provenant_os::admission::AdmissionSlots::provision(state, class, config.slots)
