@@ -10,10 +10,9 @@ fn declare_forge(
     fixture: &SettlementFixture,
     default_branch: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let directory = fixture.rig.project.join(".provenant");
-    std::fs::create_dir_all(&directory)?;
+    std::fs::create_dir_all(fixture.rig.project.join(".provenant"))?;
     std::fs::write(
-        directory.join(provenant_config::PORTS_CONFIG),
+        fixture.rig.project.join(provenant_config::PORTS_CONFIG),
         serde_json::to_vec(&serde_json::json!({
             "schema_version": provenant_config::PORTS_SCHEMA_VERSION,
             "git": {"remote": "origin", "default_branch": default_branch, "protected": []},

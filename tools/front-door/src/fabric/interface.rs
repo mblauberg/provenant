@@ -4143,10 +4143,9 @@ mod tests {
     /// default branch, so a graph that checks a delivery target must declare
     /// both. Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
     fn declare_forge(rig: &TestRig, default_branch: &str) -> Result {
-        let directory = rig.project.join(".provenant");
-        std::fs::create_dir_all(&directory)?;
+        std::fs::create_dir_all(rig.project.join(".provenant"))?;
         std::fs::write(
-            directory.join(provenant_config::PORTS_CONFIG),
+            rig.project.join(provenant_config::PORTS_CONFIG),
             serde_json::to_vec(&json!({
                 "schema_version": provenant_config::PORTS_SCHEMA_VERSION,
                 "git": {"remote":"origin", "default_branch":default_branch, "protected":[]},

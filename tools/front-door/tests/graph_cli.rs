@@ -593,10 +593,9 @@ impl GraphProject {
     /// checks a delivery target in a local-only fixture must declare both.
     /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
     fn declare_forge(&self, default_branch: &str) -> Result {
-        let directory = self.project.join(".provenant");
-        std::fs::create_dir_all(&directory)?;
+        std::fs::create_dir_all(self.project.join(".provenant"))?;
         std::fs::write(
-            directory.join(provenant_config::PORTS_CONFIG),
+            self.project.join(provenant_config::PORTS_CONFIG),
             serde_json::to_vec(&json!({
                 "schema_version": provenant_config::PORTS_SCHEMA_VERSION,
                 "git": {"remote": "origin", "default_branch": default_branch, "protected": []},
