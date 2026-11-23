@@ -302,7 +302,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "writer_settlement_merges_upstream_advance",
             "writer_terminal_refuses_sequencer_state",
             "writer_production_plan_denies_outside_writes",
-            "writer_reconcile_refuses_unfinished_cherry_pick_and_releases",
+            "writer_reconcile_keeps_unfinished_cherry_pick_and_releases",
             "recreated_worktree_accepts_writer_after_settlement",
             "existing_branch_behind_base_warns_and_keeps_its_tip",
             "existing_branch_with_base_names_the_repair_in_json_and_human_output",
@@ -416,8 +416,8 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 "writer_production_plan_denies_outside_writes" => {
                     writer_production_plan_denies_outside_writes()
                 }
-                "writer_reconcile_refuses_unfinished_cherry_pick_and_releases" => {
-                    writer_reconcile_refuses_unfinished_cherry_pick_and_releases()
+                "writer_reconcile_keeps_unfinished_cherry_pick_and_releases" => {
+                    writer_reconcile_keeps_unfinished_cherry_pick_and_releases()
                 }
                 "recreated_worktree_accepts_writer_after_settlement" => {
                     recreated_worktree_accepts_writer_after_settlement()

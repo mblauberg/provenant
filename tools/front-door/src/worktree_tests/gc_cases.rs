@@ -330,8 +330,11 @@ pub(super) fn gc_collects_bound_bare_worktrees() -> Result {
         ok(&rig, args)?;
         assert!(path.exists(), "held bare worktree removed ({mode})");
         drop(held);
-        ok(&rig, args)?;
-        assert!(!path.exists(), "bound bare worktree retained ({mode})");
+        let report = ok(&rig, args)?;
+        assert!(
+            !path.exists(),
+            "bound bare worktree retained ({mode}): {report}"
+        );
     }
     Ok(())
 }

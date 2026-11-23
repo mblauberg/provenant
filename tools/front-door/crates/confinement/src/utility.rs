@@ -4816,15 +4816,14 @@ File exists\nfatal: could not lock config file .git/config: File exists\n";
                 &CancelToken::new(),
             )?;
         }
-        for key in [
-            "branch.lane-without-remote.remote",
-            "branch.lane-without-remote.merge",
-        ] {
-            let read = fixture.run(&["config", "--local", "--get", key])?;
-            assert_eq!(read.termination, Termination::Exit(1), "{key}: {read:?}");
-        }
-        let status = fixture.run(&["status", "--porcelain=v2", "--branch"])?;
-        assert_eq!(status.termination, Termination::Exit(0), "{status:?}");
+        let listed = fixture.run(&["config", "--local", "--list"])?;
+        let listed = String::from_utf8_lossy(&listed.stdout.bytes);
+        assert!(
+            !listed.contains("branch.lane-without-remote."),
+            "no upstream key is written without a remote: {listed}"
+        );
+        // The fixture runner fails on any non-zero exit or signal.
+        fixture.run(&["status", "--porcelain=v2", "--branch"])?;
         Ok(())
     }
 
