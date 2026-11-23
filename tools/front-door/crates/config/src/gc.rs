@@ -404,25 +404,17 @@ impl LaneBuildSettings {
     fn resolved_memory_pressure(&self) -> provenant_records::Sourced<MemoryPressureThreshold> {
         use provenant_records::diagnostic::PRESSURE_PRECEDENCE;
         use provenant_records::{Layer, Source, Sourced, warn_ignored};
-        let mut candidates = vec![Sourced {
-            value: MemoryPressureThreshold::default(),
+        let host = self.memory_pressure_threshold.map(|value| Sourced {
+            value,
             source: Source {
-                layer: Layer::Default,
+                layer: Layer::Host,
                 origin: None,
             },
-        }];
-        if let Some(value) = self.memory_pressure_threshold {
-            candidates.push(Sourced {
-                value,
-                source: Source {
-                    layer: Layer::Host,
-                    origin: None,
-                },
-            });
-        }
-        let merge = PRESSURE_PRECEDENCE.merge(candidates);
-        warn_ignored(&merge.ignored, "memory pressure threshold");
-        merge.winner.expect("the default threshold always resolves")
+        });
+        let resolved =
+            PRESSURE_PRECEDENCE.merge_over_default(MemoryPressureThreshold::default(), host);
+        warn_ignored(&resolved.ignored, "memory pressure threshold");
+        resolved.winner
     }
 
     pub fn memory_pressure_threshold(&self) -> MemoryPressureThreshold {

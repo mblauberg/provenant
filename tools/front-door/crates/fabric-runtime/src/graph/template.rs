@@ -1476,7 +1476,7 @@ impl TemplateLibrary {
                     let base_name = name.rsplit_once('.').map(|(base, _)| base);
                     self.unknown_name_message(name, base_name)
                 })?;
-                Ok(Template::flavour(base, own))
+                Ok(Template::flavour(base, &own))
             }
             None => own.ok_or_else(|| self.unknown_name_message(name, None)),
         }

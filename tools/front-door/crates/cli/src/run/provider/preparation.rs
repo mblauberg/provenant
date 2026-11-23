@@ -5867,15 +5867,6 @@ pub(super) fn resolve_lane_access(
     const KEY: &str = "lanes.access";
     let mut candidates: Vec<Sourced<LaneAccess>> = Vec::new();
 
-    // The compiled floor: an ambient launch runs with host access.
-    candidates.push(Sourced {
-        value: LaneAccess::Host,
-        source: Source {
-            layer: Layer::Default,
-            origin: None,
-        },
-    });
-
     // The knob at the layer that actually set it (launch, template, tier, ...).
     if task.profile.knobs.contains_key(KEY) || task.profile.knob_sources.contains_key(KEY) {
         let layer = task
@@ -5915,9 +5906,10 @@ pub(super) fn resolve_lane_access(
         });
     }
 
-    let merge = LANE_ACCESS_PRECEDENCE.merge(candidates);
-    provenant_records::warn_ignored(&merge.ignored, KEY);
-    let winner = merge.winner.expect("the default candidate always resolves");
+    // The compiled floor: an ambient launch runs with host access.
+    let resolved = LANE_ACCESS_PRECEDENCE.merge_over_default(LaneAccess::Host, candidates);
+    provenant_records::warn_ignored(&resolved.ignored, KEY);
+    let winner = resolved.winner;
     LaneAccessReceipt {
         access: winner.value,
         source: winner.source.layer,

@@ -113,6 +113,18 @@ pub struct Merge<T> {
     pub ignored: Vec<Sourced<T>>,
 }
 
+/// The outcome of merging one family's candidates over a built-in default:
+/// a value always wins, so callers never assert that one resolved.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Resolved<T> {
+    /// The highest declared candidate, or the default when none was given.
+    pub winner: Sourced<T>,
+    /// Listed candidates that lost to the winner, the default included.
+    pub shadowed: Vec<Sourced<T>>,
+    /// Candidates whose layer this family does not list.
+    pub ignored: Vec<Sourced<T>>,
+}
+
 /// Warn for every candidate whose layer a family does not declare, naming its
 /// source. Pair this with [`Precedence::merge`] so an ignored value is reported
 /// rather than silently dropped.
@@ -169,6 +181,39 @@ impl Precedence {
             ignored,
         }
     }
+
+    /// [`Self::merge`] with the built-in default as the floor: the default
+    /// sits below every declared layer and wins only when nothing else does.
+    pub fn merge_over_default<T>(
+        &self,
+        default: T,
+        candidates: impl IntoIterator<Item = Sourced<T>>,
+    ) -> Resolved<T> {
+        let default = Sourced {
+            value: default,
+            source: Source {
+                layer: Layer::Default,
+                origin: None,
+            },
+        };
+        let Merge {
+            winner,
+            mut shadowed,
+            ignored,
+        } = self.merge(candidates);
+        let winner = match winner {
+            Some(winner) => {
+                shadowed.insert(0, default);
+                winner
+            }
+            None => default,
+        };
+        Resolved {
+            winner,
+            shadowed,
+            ignored,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -215,6 +260,29 @@ mod tests {
         );
         assert_eq!(merge.ignored.len(), 1);
         assert_eq!(merge.ignored[0].source.layer, Layer::Account);
+    }
+
+    /// A family with a built-in default always resolves: the default wins only
+    /// when no declared layer gives a value, and is shadowed otherwise.
+    /// Spec: docs/specs/state.md#every-setting-reports-its-layer
+    #[test]
+    fn merge_over_default_always_resolves_with_the_default_as_floor() {
+        const FAMILY: Precedence = Precedence(&[Layer::Default, Layer::Host, Layer::Project]);
+        let alone = FAMILY.merge_over_default("default", []);
+        assert_eq!(alone.winner.value, "default");
+        assert_eq!(alone.winner.source.layer, Layer::Default);
+        assert!(alone.shadowed.is_empty());
+
+        let over =
+            FAMILY.merge_over_default("default", [sourced("host", Layer::Host, "config.toml")]);
+        assert_eq!(over.winner.value, "host");
+        assert_eq!(
+            over.shadowed
+                .iter()
+                .map(|candidate| candidate.value)
+                .collect::<Vec<_>>(),
+            ["default"]
+        );
     }
 
     /// Spec: docs/specs/state.md#every-setting-reports-its-layer

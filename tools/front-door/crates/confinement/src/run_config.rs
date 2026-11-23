@@ -377,13 +377,7 @@ impl Default for RunConfig {
 /// sandbox) are applied by the caller beside the winning layer.
 fn sandbox_layer_choice(knob: Option<&str>, listed: bool, parent_sandboxed: bool) -> (bool, Layer) {
     use provenant_records::{Source, Sourced, warn_ignored};
-    let mut candidates: Vec<Sourced<bool>> = vec![Sourced {
-        value: false,
-        source: Source {
-            layer: Layer::Default,
-            origin: None,
-        },
-    }];
+    let mut candidates: Vec<Sourced<bool>> = Vec::new();
     match knob {
         Some("on") | Some("off") => candidates.push(Sourced {
             value: knob == Some("on"),
@@ -413,10 +407,9 @@ fn sandbox_layer_choice(knob: Option<&str>, listed: bool, parent_sandboxed: bool
             },
         });
     }
-    let merge = provenant_records::run::SANDBOX_PRECEDENCE.merge(candidates);
-    warn_ignored(&merge.ignored, "lanes.sandbox");
-    let winner = merge.winner.expect("the default always resolves");
-    (winner.value, winner.source.layer)
+    let resolved = provenant_records::run::SANDBOX_PRECEDENCE.merge_over_default(false, candidates);
+    warn_ignored(&resolved.ignored, "lanes.sandbox");
+    (resolved.winner.value, resolved.winner.source.layer)
 }
 
 impl RunConfig {

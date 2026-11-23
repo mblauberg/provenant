@@ -316,13 +316,7 @@ impl GraphLand {
             crucial: self.crucial,
             terminal: self.terminal,
         };
-        let mut candidates: Vec<Sourced<LandPolicy>> = vec![Sourced {
-            value: Self::default_policy(tier),
-            source: Source {
-                layer: Layer::Default,
-                origin: None,
-            },
-        }];
+        let mut candidates: Vec<Sourced<LandPolicy>> = Vec::new();
         if let Some(policy) = host.get(tier) {
             candidates.push(Sourced {
                 value: policy,
@@ -344,9 +338,9 @@ impl GraphLand {
                 },
             });
         }
-        let merge = LAND_PRECEDENCE.merge(candidates);
-        warn_ignored(&merge.ignored, "land policy");
-        let winner = merge.winner.expect("the default policy always resolves");
+        let resolved = LAND_PRECEDENCE.merge_over_default(Self::default_policy(tier), candidates);
+        warn_ignored(&resolved.ignored, "land policy");
+        let winner = resolved.winner;
         LandChoice {
             policy: winner.value,
             source: winner.source.layer,

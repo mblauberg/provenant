@@ -45,39 +45,44 @@ fn parse_size(s: &str) -> Option<u64> {
 /// Merge one admission-class field across the layers that declare it. The
 /// class's precedence const is the one declaration of order, and an ignored
 /// candidate is reported rather than silently dropped.
-fn resolve_field<T>(
-    layers: &[(Layer, AdmissionClassConfig)],
-    default: Option<T>,
-    pick: impl Fn(&AdmissionClassConfig) -> Option<T>,
-) -> (Option<T>, Option<Layer>) {
+fn candidates<'a, T>(
+    layers: &'a [(Layer, AdmissionClassConfig)],
+    pick: impl Fn(&AdmissionClassConfig) -> Option<T> + 'a,
+) -> impl Iterator<Item = provenant_records::Sourced<T>> + 'a {
     use provenant_records::{Source, Sourced};
-    let mut candidates: Vec<Sourced<T>> = Vec::new();
-    if let Some(value) = default {
-        candidates.push(Sourced {
+    layers.iter().filter_map(move |(layer, config)| {
+        pick(config).map(|value| Sourced {
             value,
             source: Source {
-                layer: Layer::Default,
+                layer: *layer,
                 origin: None,
             },
-        });
-    }
-    for (layer, config) in layers {
-        if let Some(value) = pick(config) {
-            candidates.push(Sourced {
-                value,
-                source: Source {
-                    layer: *layer,
-                    origin: None,
-                },
-            });
-        }
-    }
-    let merge = ADMISSION_PRECEDENCE.merge(candidates);
+        })
+    })
+}
+
+/// A field with no built-in default: absent when no layer declares it.
+fn resolve_field<T>(
+    layers: &[(Layer, AdmissionClassConfig)],
+    pick: impl Fn(&AdmissionClassConfig) -> Option<T>,
+) -> (Option<T>, Option<Layer>) {
+    let merge = ADMISSION_PRECEDENCE.merge(candidates(layers, pick));
     provenant_records::warn_ignored(&merge.ignored, "admission class");
     match merge.winner {
         Some(winner) => (Some(winner.value), Some(winner.source.layer)),
         None => (None, None),
     }
+}
+
+/// A field with a built-in default: always resolves, with the winning layer.
+fn resolve_defaulted<T>(
+    layers: &[(Layer, AdmissionClassConfig)],
+    default: T,
+    pick: impl Fn(&AdmissionClassConfig) -> Option<T>,
+) -> (T, Layer) {
+    let resolved = ADMISSION_PRECEDENCE.merge_over_default(default, candidates(layers, pick));
+    provenant_records::warn_ignored(&resolved.ignored, "admission class");
+    (resolved.winner.value, resolved.winner.source.layer)
 }
 
 impl AdmissionClassConfig {
@@ -132,10 +137,10 @@ impl ResolvedAdmissionClass {
         if let Some(config) = read_class_from_file(&state.join("config.toml"), class) {
             layers.push((Layer::Host, config));
         }
-        if let Some(dir) = project.and_then(|project| crate::host_project_dir(state, project)) {
-            if let Some(config) = read_class_from_file(&dir.join("config.toml"), class) {
-                layers.push((Layer::HostProject, config));
-            }
+        if let Some(dir) = project.and_then(|project| crate::host_project_dir(state, project))
+            && let Some(config) = read_class_from_file(&dir.join("config.toml"), class)
+        {
+            layers.push((Layer::HostProject, config));
         }
         if let Some(project) = project {
             let path = project.join(".provenant").join("config.toml");
@@ -145,30 +150,27 @@ impl ResolvedAdmissionClass {
         }
 
         let (slots, slots_source) =
-            resolve_field(&layers, Some(default_slots), |config| config.slots);
+            resolve_defaulted(&layers, default_slots, |config| config.slots);
         let (memory_bytes, memory_source) =
-            resolve_field(&layers, None, |config| config.memory_per_slot_bytes());
-        let (disk_bytes, disk_source) =
-            resolve_field(&layers, None, |config| config.disk_floor_bytes());
+            resolve_field(&layers, |config| config.memory_per_slot_bytes());
+        let (disk_bytes, disk_source) = resolve_field(&layers, |config| config.disk_floor_bytes());
         let (trim_action, trim_source) =
-            resolve_field(&layers, None, |config| config.trim_action.clone());
+            resolve_field(&layers, |config| config.trim_action.clone());
         let (wait_seconds, wait_source) =
-            resolve_field(&layers, Some(DEFAULT_WAIT_SECONDS), |config| {
-                config.wait_seconds
-            });
+            resolve_defaulted(&layers, DEFAULT_WAIT_SECONDS, |config| config.wait_seconds);
 
         Self {
             name: class.to_string(),
-            slots: slots.expect("the default slot count always resolves"),
-            slots_source: slots_source.expect("the default slot count has a layer"),
+            slots,
+            slots_source,
             memory_per_slot_bytes: memory_bytes,
             memory_per_slot_source: memory_source,
             disk_floor_bytes: disk_bytes,
             disk_floor_source: disk_source,
             trim_action,
             trim_action_source: trim_source,
-            wait_seconds: wait_seconds.expect("the default wait always resolves"),
-            wait_seconds_source: wait_source.expect("the default wait has a layer"),
+            wait_seconds,
+            wait_seconds_source: wait_source,
         }
     }
 
