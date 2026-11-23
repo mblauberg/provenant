@@ -413,13 +413,8 @@ pub fn forge_remote(context: &WorktreeContext<'_>) -> Result<Option<String>, Wor
     let config = provenant_config::ForgeConfig::new(&ports, (*policy).clone());
     let git = provenant_config::ForgeGit::new(project)
         .map_err(|error| WorktreeError::PortConfiguration(std::io::Error::other(error)))?;
-    match provenant_config::ForgeContext::remote(&config, &git) {
-        Ok(remote) => Ok(Some(remote.value)),
-        Err(provenant_config::ForgeContextError::NoRemote { remotes, .. })
-            if remotes.is_empty() =>
-        {
-            Ok(None)
-        }
+    match provenant_config::ForgeContext::remote_if_any(&config, &git) {
+        Ok(remote) => Ok(remote.map(|remote| remote.value)),
         Err(error) => Err(WorktreeError::PortConfiguration(std::io::Error::other(
             error,
         ))),

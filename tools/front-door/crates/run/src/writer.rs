@@ -364,15 +364,11 @@ fn terminal_forge_remote(state: &Path, project: &Path) -> String {
     let Ok(git) = provenant_config::ForgeGit::new(project) else {
         return String::new();
     };
-    match provenant_config::ForgeContext::remote(&config, &git) {
-        Ok(remote) => remote.value,
-        Err(provenant_config::ForgeContextError::NoRemote { remotes, .. })
-            if remotes.is_empty() =>
-        {
-            String::new()
-        }
-        Err(_) => String::new(),
-    }
+    provenant_config::ForgeContext::remote_if_any(&config, &git)
+        .ok()
+        .flatten()
+        .map(|remote| remote.value)
+        .unwrap_or_default()
 }
 
 /// The result of comparing a retry's worktree head with its pinned commit.
@@ -1993,20 +1989,13 @@ fn prepare_writer_git(
         kind: crate::ErrorKind::Invalid,
         message: error.to_string(),
     })?;
-    let remote = match provenant_config::ForgeContext::remote(&config, &git) {
-        Ok(remote) => remote.value,
-        Err(provenant_config::ForgeContextError::NoRemote { remotes, .. })
-            if remotes.is_empty() =>
-        {
-            String::new()
-        }
-        Err(error) => {
-            return Err(RunError::Input {
-                kind: crate::ErrorKind::Invalid,
-                message: error.to_string(),
-            });
-        }
-    };
+    let remote = provenant_config::ForgeContext::remote_if_any(&config, &git)
+        .map_err(|error| RunError::Input {
+            kind: crate::ErrorKind::Invalid,
+            message: error.to_string(),
+        })?
+        .map(|remote| remote.value)
+        .unwrap_or_default();
     let remote = remote.as_str();
     let path = writer.worktree.path().to_path_buf();
     // Git replaces config atomically. Open a verified snapshot and reopen after

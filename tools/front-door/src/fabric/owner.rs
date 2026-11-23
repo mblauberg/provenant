@@ -1620,15 +1620,9 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         let config = provenant_config::ForgeConfig::new(ports, (*policy).clone());
         let git = provenant_config::ForgeGit::new(&project)
             .map_err(|_| FacadeError::io("forge context Git metadata"))?;
-        let forge_remote = match provenant_config::ForgeContext::remote(&config, &git) {
-            Ok(remote) => Some(remote.value),
-            Err(provenant_config::ForgeContextError::NoRemote { remotes, .. })
-                if remotes.is_empty() =>
-            {
-                None
-            }
-            Err(_) => return Err(FacadeError::io("forge context resolution")),
-        };
+        let forge_remote = provenant_config::ForgeContext::remote_if_any(&config, &git)
+            .map_err(|_| FacadeError::io("forge context resolution"))?
+            .map(|remote| remote.value);
         // Only a new top-level writer may prefer a remote-only branch. Child
         // provisioning and recovery always use their checkpointed source.
         let remote_tip = provenant_confinement::worktrees::with_context_using_facts(
@@ -2131,15 +2125,9 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         // refuse a read-only base lookup in a checkout that declares none. Only
         // a remote-qualified branch needs the resolved remote name.
         // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
-        let forge_remote = match provenant_config::ForgeContext::remote(&config, &git) {
-            Ok(remote) => Some(remote.value),
-            Err(provenant_config::ForgeContextError::NoRemote { remotes, .. })
-                if remotes.is_empty() =>
-            {
-                None
-            }
-            Err(_) => return Err(FacadeError::io("forge context resolution")),
-        };
+        let forge_remote = provenant_config::ForgeContext::remote_if_any(&config, &git)
+            .map_err(|_| FacadeError::io("forge context resolution"))?
+            .map(|remote| remote.value);
         let reference = if let Some(remote) = forge_remote.as_deref()
             && let Some(branch) = branch.strip_prefix(&format!("{remote}/"))
         {

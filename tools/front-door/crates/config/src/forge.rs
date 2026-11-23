@@ -189,6 +189,22 @@ impl ForgeContext {
         Err(ForgeContextError::NoRemote { remotes, close })
     }
 
+    /// The remote, or `None` when the checkout has no remote at all. A
+    /// remote-less checkout is an absence, never an empty name: Git crashes on
+    /// an empty `branch.<name>.remote`, and `refs/remotes//` names nothing.
+    /// An ambiguous set of remotes is still a refusal.
+    /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    pub fn remote_if_any(
+        config: &Config<'_>,
+        git: &Git,
+    ) -> Result<Option<Sourced<String>>, ForgeContextError> {
+        match Self::remote(config, git) {
+            Ok(remote) => Ok(Some(remote)),
+            Err(ForgeContextError::NoRemote { remotes, .. }) if remotes.is_empty() => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     fn resolve_default_branch(
         config: &Config<'_>,
         git: &Git,
@@ -459,6 +475,7 @@ impl Git {
             .into_iter()
             .find(|(name, _)| name == &branch)
             .and_then(|(_, values)| values.get("remote").cloned())
+            .filter(|remote| !remote.trim().is_empty())
             .map(|remote| (branch, remote))
     }
 

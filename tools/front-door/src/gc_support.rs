@@ -219,25 +219,24 @@ fn host_git_with_tail(
 /// a real resolution failure and stays an error.
 fn forge_remote(context: &WorktreeContext<'_>) -> Result<Option<String>, Error> {
     let invalid = || Error::GcObservation("cannot resolve forge context");
-    let project = context.layout.project().ok_or_else(invalid)?;
+    // A bound bare repository's layout is host-only: no checkout, so no remote
+    // to compare against. That is an absence, as in the confinement twin.
+    // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    let Some(project) = context.layout.project() else {
+        return Ok(None);
+    };
     let state = context.host_state().map_err(|_| invalid())?;
     let ports =
         provenant_config::PortTable::read_for(Some(project), &state).map_err(|_| invalid())?;
     let policy = provenant_config::operation_policy(&state, project, &ports);
     let config = provenant_config::ForgeConfig::new(&ports, (*policy).clone());
     let git = provenant_config::ForgeGit::new(project).map_err(|_| invalid())?;
-    match provenant_config::ForgeContext::remote(&config, &git) {
-        Ok(remote) => Ok(Some(remote.value)),
-        Err(provenant_config::ForgeContextError::NoRemote { remotes, .. })
-            if remotes.is_empty() =>
-        {
-            Ok(None)
-        }
-        // Keep the typed refusal: its remotes and close matches reach the
-        // warning and its repair, instead of the circular collection message.
-        // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
-        Err(error) => Err(Error::ForgeContextUnresolved(error)),
-    }
+    // Keep the typed refusal: its remotes and close matches reach the
+    // warning and its repair, instead of the circular collection message.
+    // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    provenant_config::ForgeContext::remote_if_any(&config, &git)
+        .map(|remote| remote.map(|remote| remote.value))
+        .map_err(Error::ForgeContextUnresolved)
 }
 
 /// Refresh only the writer's tracking ref. An absent remote branch is normal.
