@@ -22,6 +22,28 @@ case "${1:-}" in
   *) usage ;;
 esac
 version=${1#v}
+
+# A cut consumes every fragment, but _intro.md used to survive. Refuse when it
+# still repeats the newest published release's intro: that is a leftover, not
+# a summary of the release being prepared. Compare with the same link rewrite
+# collation applies, so a copied intro with relative links still matches.
+previous=$(printf '%s\n' docs/release-notes/v[0-9]*.[0-9]*.[0-9]*.md |
+  sort -V | tail -n 1)
+[ -f "$previous" ] || previous=
+if [ -n "$previous" ] && [ -f "$notes/_intro.md" ]; then
+  previous_intro=$(awk '
+    /^## / { exit }
+    /^Released / { seen = 1; next }
+    seen && NF { print }
+  ' "$previous")
+  current_intro=$(awk 'NF { print }' "$notes/_intro.md" |
+    sed 's|](\.\./\.\./|](../|g')
+  if [ -n "$previous_intro" ] && [ "$previous_intro" = "$current_intro" ]; then
+    echo "prepare-release: $notes/_intro.md repeats the intro in $previous; rewrite $notes/_intro.md before cutting $1" >&2
+    exit 1
+  fi
+fi
+
 "$script_dir/collate-release-notes" --check
 tmp=$(mktemp "${TMPDIR:-/tmp}/prepare-release.XXXXXX")
 trap 'rm -f "$tmp"' EXIT HUP INT TERM
@@ -97,9 +119,11 @@ fragment_check() {
   done
 }
 
-# Collation checks the fragments again; a release cut consumes them.
+# Collation checks the fragments again; a release cut consumes them. Consume
+# the intro too, so a later release cannot inherit the one just published.
 fragment_check
 "$script_dir/collate-release-notes" "$1"
+rm -f -- "$notes/_intro.md"
 
 echo
 echo 'Next steps:'

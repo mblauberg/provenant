@@ -37,9 +37,11 @@ Edit living docs in place. Each user-visible change adds a fragment under
 [fragment rules](docs/release-notes/README.md#writing-a-fragment).
 `scripts/collate-release-notes --check` validates them in CI. Before a release,
 read the collated preview (`scripts/collate-release-notes`), merge related
-entries, align terms and write `_intro.md` last; `scripts/prepare-release` then
-collates and consumes the fragments, and you reset `_intro.md` for the next
-release. GitHub Releases holds published history.
+entries, align terms and write `_intro.md` last; `scripts/prepare-release`
+refuses when that intro still repeats the newest published release's, then
+collates and consumes the fragments, including `_intro.md`. Write a fresh
+`_intro.md` for the next release before committing the cut. GitHub Releases
+holds published history.
 
 ### Specifications
 
