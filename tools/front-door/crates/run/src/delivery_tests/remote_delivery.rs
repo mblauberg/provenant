@@ -100,6 +100,44 @@ fn stop_publish_preparation_leaves_the_launch_pr_delivery_untouched()
     Ok(())
 }
 
+// Spec: docs/specs/run-launch.md#writer-binding
+#[test]
+fn launch_and_stop_publication_share_one_remote_refresh()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    let git = provenant_os::git::git_executable().ok_or("git")?;
+    let wrapper = fixture.root.join("git-wrapper");
+    let refreshes = fixture.root.join("remote-refreshes");
+    fixture.executable(
+        &wrapper,
+        &format!(
+            "#!/bin/sh\nfor arg in \"$@\"; do if [ \"$arg\" = ls-remote ]; then printf '%s\\n' \"$*\" >> '{}'; break; fi; done\nexec '{}' \"$@\"\n",
+            refreshes.display(),
+            git.display()
+        ),
+    )?;
+    fixture
+        .environment
+        .push(("PROVENANT_GIT".into(), wrapper.into_os_string()));
+
+    let launch = fixture.prepare()?;
+    let request = HostDeliveryContext::destination(DeliveryMode::Push, "lane")?
+        .ok_or("stop-publish destination")?;
+    let stopped = launch.prepare_stop_publish(&fixture.writer, &request)?;
+    assert!(
+        stopped.has_stop_publish(),
+        "stop publication stays bound without a second fetch"
+    );
+
+    let log = std::fs::read_to_string(&refreshes).unwrap_or_default();
+    assert_eq!(
+        log.lines().count(),
+        1,
+        "delivery and stop publication share the launch's remote refresh: {log}"
+    );
+    Ok(())
+}
+
 #[test]
 fn integration_refuses_default_fallbacks_remote_head_and_primary_branch()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
