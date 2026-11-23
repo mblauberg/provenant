@@ -97,13 +97,15 @@ grep -F 'warning: merge #102 since v2.2.0' "$tmp/err" > /dev/null
 if grep -F 'warning: merge #101' "$tmp/err" > /dev/null; then exit 1; fi
 if grep -F 'warning: merge #103' "$tmp/err" > /dev/null; then exit 1; fi
 
-# collate-release-notes was reused, not reimplemented, and the intro is
-# consumed with the other fragments instead of surviving the cut.
+# collate-release-notes was reused, not reimplemented; it consumes the other
+# fragments but keeps _intro.md for the next cut. With no published note yet
+# the guard warns, naming why, instead of passing silently.
 [ -f docs/release-notes/v2.3.0.md ]
 grep -F 'Fix one. (#101)' docs/release-notes/v2.3.0.md > /dev/null
 grep -F 'Intro.' docs/release-notes/v2.3.0.md > /dev/null
 [ ! -e docs/release-notes/next.d/101-fix.md ]
-[ ! -e docs/release-notes/next.d/_intro.md ]
+[ -f docs/release-notes/next.d/_intro.md ]
+grep -F 'no readable previous release note; skipping the stale-intro guard' "$tmp/err" > /dev/null
 grep -F 'Next steps:' "$tmp/out" > /dev/null
 
 # Without gh the fragment check warns and is skipped, but the cut still runs.
@@ -117,7 +119,7 @@ grep -F 'gh is unavailable; skipping the fragment check' "$tmp/err2" > /dev/null
 grep -F 'version = "2.3.1"' tools/front-door/Cargo.toml > /dev/null
 [ -f docs/release-notes/v2.3.1.md ]
 grep -F 'A later release.' docs/release-notes/v2.3.1.md > /dev/null
-[ ! -e docs/release-notes/next.d/_intro.md ]
+[ -f docs/release-notes/next.d/_intro.md ]
 
 # A malformed fragment stops the release before any version, lock or template
 # change, and before collation.
@@ -137,8 +139,9 @@ rm -f docs/release-notes/next.d/bad.md
 
 # A leftover intro that repeats the newest published release's is refused
 # before any version, lock or template change or collation, and the file to
-# rewrite is named.
-printf 'A later release.\n' > docs/release-notes/next.d/_intro.md
+# rewrite is named. Re-wrapping it must not hide the copy: the guard compares
+# whitespace-normalised text, not lines.
+printf 'A later\n  release.\n' > docs/release-notes/next.d/_intro.md
 : > "$CARGO_LOG"
 if "$script" v2.3.4 > "$tmp/out5" 2> "$tmp/err5"; then
   echo 'prepare-release accepted an intro repeated from the previous release' >&2
@@ -152,10 +155,30 @@ grep -F 'version = "2.3.1"' tools/front-door/Cargo.toml > /dev/null
 [ -f docs/release-notes/next.d/_intro.md ]
 rm -f docs/release-notes/next.d/_intro.md
 
+# When the version sort cannot be read, the guard warns naming why instead of
+# silently passing; the cut still runs and keeps the intro.
+mkdir -p "$tmp/badsort"
+cat > "$tmp/badsort/sort" <<'EOF'
+#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = -V ]; then
+    exit 1
+  fi
+done
+exec /usr/bin/sort "$@"
+EOF
+chmod +x "$tmp/badsort/sort"
+printf 'Sort warning case.\n' > docs/release-notes/next.d/_intro.md
+PATH="$tmp/badsort:$tmp/bin:/usr/bin:/bin" "$script" v2.3.5 > "$tmp/out6" 2> "$tmp/err6"
+grep -F 'cannot sort the release-note versions; skipping the stale-intro guard' "$tmp/err6" > /dev/null
+grep -F 'Sort warning case.' docs/release-notes/v2.3.5.md > /dev/null
+[ -f docs/release-notes/next.d/_intro.md ]
+rm -f docs/release-notes/next.d/_intro.md
+
 if "$script" 2.3.2 > "$tmp/out3" 2> "$tmp/err3"; then
   echo 'prepare-release accepted a version without a v prefix' >&2
   exit 1
 fi
 grep -F 'usage: prepare-release vX.Y.Z' "$tmp/err3" > /dev/null
 
-echo 'prepare-release version, template, lock, warning, collation, intro consumption and stale-intro refusal checks passed'
+echo 'prepare-release version, template, lock, collation, intro retention, stale-intro refusal and guard-warning checks passed'

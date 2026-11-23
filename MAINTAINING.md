@@ -38,10 +38,10 @@ Edit living docs in place. Each user-visible change adds a fragment under
 `scripts/collate-release-notes --check` validates them in CI. Before a release,
 read the collated preview (`scripts/collate-release-notes`), merge related
 entries, align terms and write `_intro.md` last; `scripts/prepare-release`
-refuses when that intro still repeats the newest published release's, then
-collates and consumes the fragments, including `_intro.md`. Write a fresh
-`_intro.md` for the next release before committing the cut. GitHub Releases
-holds published history.
+refuses an intro identical to the newest published release's, then collates and
+consumes the other fragments. `_intro.md` stays in place so collation keeps
+passing between cuts; rewrite it for the next release. GitHub Releases holds
+published history.
 
 ### Specifications
 

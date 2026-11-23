@@ -23,24 +23,37 @@ case "${1:-}" in
 esac
 version=${1#v}
 
-# A cut consumes every fragment, but _intro.md used to survive. Refuse when it
-# still repeats the newest published release's intro: that is a leftover, not
-# a summary of the release being prepared. Compare with the same link rewrite
-# collation applies, so a copied intro with relative links still matches.
-previous=$(printf '%s\n' docs/release-notes/v[0-9]*.[0-9]*.[0-9]*.md |
-  sort -V | tail -n 1)
-[ -f "$previous" ] || previous=
-if [ -n "$previous" ] && [ -f "$notes/_intro.md" ]; then
-  previous_intro=$(awk '
-    /^## / { exit }
-    /^Released / { seen = 1; next }
-    seen && NF { print }
-  ' "$previous")
-  current_intro=$(awk 'NF { print }' "$notes/_intro.md" |
-    sed 's|](\.\./\.\./|](../|g')
-  if [ -n "$previous_intro" ] && [ "$previous_intro" = "$current_intro" ]; then
-    echo "prepare-release: $notes/_intro.md repeats the intro in $previous; rewrite $notes/_intro.md before cutting $1" >&2
-    exit 1
+# A cut keeps _intro.md in place, so a leftover from the previous release can
+# survive into the next one. Refuse when the whole intro text repeats the newest
+# published release's intro paragraph, comparing whitespace-normalised text so
+# wrapping cannot hide a copy. Warn, naming the reason, when the comparison
+# cannot run instead of passing silently.
+normalise() {
+  tr '\n\r\t' '   ' | tr -s ' ' | sed 's/^ //; s/ $//'
+}
+intro=$notes/_intro.md
+if [ -f "$intro" ]; then
+  if ! sorted=$(printf '%s\n' docs/release-notes/v[0-9]*.[0-9]*.[0-9]*.md | sort -V); then
+    echo 'prepare-release: warning: cannot sort the release-note versions; skipping the stale-intro guard' >&2
+  else
+    previous=$(printf '%s\n' "$sorted" | sed '/^$/d' | tail -n 1)
+    if [ -z "$previous" ] || [ ! -f "$previous" ] || [ ! -r "$previous" ]; then
+      echo 'prepare-release: warning: no readable previous release note; skipping the stale-intro guard' >&2
+    else
+      previous_intro=$(awk '
+        /^## / { exit }
+        /^Released[[:space:]]/ { next }
+        /^#[[:space:]]/ { next }
+        NF { print }
+      ' "$previous" | normalise)
+      current_intro=$(sed 's|](\.\./\.\./|](../|g' "$intro" | normalise)
+      if [ -z "$previous_intro" ]; then
+        echo "prepare-release: warning: $previous has no intro paragraph; skipping the stale-intro guard" >&2
+      elif [ "$previous_intro" = "$current_intro" ]; then
+        echo "prepare-release: $intro repeats the intro in $previous; rewrite $intro before cutting $1" >&2
+        exit 1
+      fi
+    fi
   fi
 fi
 
@@ -119,11 +132,10 @@ fragment_check() {
   done
 }
 
-# Collation checks the fragments again; a release cut consumes them. Consume
-# the intro too, so a later release cannot inherit the one just published.
+# Collation checks the fragments again; a release cut consumes them but keeps
+# _intro.md, which the stale-intro guard above handles on the next cut.
 fragment_check
 "$script_dir/collate-release-notes" "$1"
-rm -f -- "$notes/_intro.md"
 
 echo
 echo 'Next steps:'
