@@ -310,3 +310,68 @@ fn settle_all(state: &Path, rows: &[Row]) -> Result<Appended> {
         &CancelToken::new(),
     )?)
 }
+
+/// Spec: docs/specs/telemetry.md#usage-merges-by-declared-semantics
+#[test]
+fn usage_ledger_v4_round_trips_a_v3_fixture_and_is_idempotent() -> Result {
+    let (_temp, state) = state()?;
+    let directory = state.join(DIRECTORY);
+    std::fs::create_dir_all(&directory)?;
+    let segment = "2026-10-01.jsonl";
+    let v3 = serde_json::json!({
+        "format": V3_FORMAT,
+        "source": "settlement",
+        "project": "11111111111111111111111111111111",
+        "graph": "g", "node": "n", "attempt": "a",
+        "identity": {"kind": "unknown"},
+        "outcome": "succeeded",
+        "finished": "2026-10-01T00:00:00.000000Z",
+        "tokens": {"uncached_input": 12, "cache_read": 3, "extra": {}},
+    });
+    let unmappable = {
+        let mut value = v3.clone();
+        value["source"] = serde_json::json!("future-source");
+        value
+    };
+    let v4 = {
+        let mut value = v3.clone();
+        value["format"] = serde_json::json!(FORMAT);
+        value["source"] = serde_json::json!("ingest");
+        value
+    };
+    let lines = [
+        serde_json::to_vec(&v3)?,
+        serde_json::to_vec(&unmappable)?,
+        serde_json::to_vec(&v4)?,
+    ];
+    let mut bytes = Vec::new();
+    for line in &lines {
+        bytes.extend_from_slice(line);
+        bytes.push(b'\n');
+    }
+    std::fs::write(directory.join(segment), &bytes)?;
+
+    let migrated = migrate_to_v4(&state)?;
+    assert_eq!(migrated.unmapped.len(), 1);
+    assert_eq!(migrated.unmapped[0].line, Some(2));
+    let rewritten = std::fs::read(directory.join(segment))?;
+    let values: Vec<serde_json::Value> = serde_json::Deserializer::from_slice(&rewritten)
+        .into_iter::<serde_json::Value>()
+        .map(|value| value.map_err(Into::into))
+        .collect::<Result<Vec<_>>>()?;
+    assert_eq!(values.len(), 3);
+    assert_eq!(values[0]["format"], serde_json::json!(FORMAT));
+    assert_eq!(values[0]["source"], serde_json::json!("ingest"));
+    assert_eq!(values[0]["tokens"]["uncached_input"], serde_json::json!(12));
+    assert_eq!(values[1], unmappable, "an unmappable line is not guessed");
+    assert_eq!(values[2], v4, "a v4 line carries over unchanged");
+    let sidecar = std::fs::read(directory.join(format!("{segment}.v3-unmapped")))?;
+    assert_eq!(
+        sidecar,
+        lines[1].iter().copied().chain([b'\n']).collect::<Vec<u8>>()
+    );
+
+    let again = migrate_to_v4(&state)?;
+    assert!(again.changed.is_empty(), "a second run changes nothing");
+    Ok(())
+}

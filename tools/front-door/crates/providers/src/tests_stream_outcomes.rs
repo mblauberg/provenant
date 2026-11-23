@@ -810,18 +810,23 @@ fn claude_usage_comes_from_the_result_event() -> Result<(), ProviderError> {
     let (events, _) = replay(&claude::Claude, stream, EXIT)?;
     let usage: Vec<_> = events
         .iter()
-        .filter(|event| matches!(event, ProviderEvent::Usage { .. }))
+        .filter(|event| matches!(event, ProviderEvent::Usage(_)))
         .collect();
     assert_eq!(
         usage,
-        [&ProviderEvent::Usage {
-            input: 10,
-            output: 20,
+        [&ProviderEvent::Usage(UsageReport::step(provenant_records::Tokens {
+            input: Some(10),
+            output: Some(20),
             cache_read: Some(30),
             cache_write: Some(40),
             cache_write_1h: Some(25),
-        }]
+            ..provenant_records::Tokens::default()
+        }))]
     );
+    // Spec: docs/specs/telemetry.md#usage-merges-by-declared-semantics
+    let total = usage_total(&events, "claude");
+    assert_eq!(total.input, Some(10));
+    assert_eq!(total.cache_write_1h, Some(25));
     Ok(())
 }
 
@@ -860,8 +865,22 @@ fn claude_success_that_stopped_for_another_reason_is_an_early_stop() -> Result<(
 fn usage_events(events: &[ProviderEvent]) -> Vec<&ProviderEvent> {
     events
         .iter()
-        .filter(|event| matches!(event, ProviderEvent::Usage { .. }))
+        .filter(|event| matches!(event, ProviderEvent::Usage(_)))
         .collect()
+}
+
+/// Fold the adapter's reports the way the CLI does, using the declared
+/// semantics, so a recorded fixture's total is checked at the public boundary.
+fn usage_total(events: &[ProviderEvent], adapter: &str) -> provenant_records::Tokens {
+    let spec = provenant_records::AdapterSpec::get(adapter).expect("declared adapter");
+    let mut accumulator = UsageAccumulator::new(spec.usage);
+    for event in usage_events(events) {
+        let ProviderEvent::Usage(report) = event else {
+            panic!("a usage event");
+        };
+        accumulator.push(report.clone());
+    }
+    accumulator.total().0
 }
 
 #[test]
@@ -874,14 +893,18 @@ fn codex_cached_input_is_cache_read_and_leaves_uncached_input() -> Result<(), Pr
     let (events, _) = replay(&codex::Codex, stream, EXIT)?;
     assert_eq!(
         usage_events(&events),
-        [&ProviderEvent::Usage {
-            input: 981,
-            output: 5,
+        [&ProviderEvent::Usage(UsageReport::step(provenant_records::Tokens {
+            input: Some(13501),
+            output: Some(5),
             cache_read: Some(11520),
             cache_write: Some(1000),
-            cache_write_1h: None,
-        }]
+            ..provenant_records::Tokens::default()
+        }))]
     );
+    // Spec: docs/specs/telemetry.md#usage-merges-by-declared-semantics
+    let total = usage_total(&events, "codex");
+    assert_eq!(total.input, Some(981));
+    assert_eq!(total.cache_read, Some(11520));
     Ok(())
 }
 
@@ -897,22 +920,22 @@ fn codex_usage_without_cache_fields_stays_unknown_and_never_underflows() -> Resu
     assert_eq!(
         usage_events(&events),
         [
-            &ProviderEvent::Usage {
-                input: 7,
-                output: 2,
-                cache_read: None,
-                cache_write: None,
-                cache_write_1h: None,
-            },
-            &ProviderEvent::Usage {
-                input: 0,
-                output: 2,
+            &ProviderEvent::Usage(UsageReport::step(provenant_records::Tokens {
+                input: Some(7),
+                output: Some(2),
+                ..provenant_records::Tokens::default()
+            })),
+            &ProviderEvent::Usage(UsageReport::step(provenant_records::Tokens {
+                input: Some(5),
+                output: Some(2),
                 cache_read: Some(9),
-                cache_write: None,
-                cache_write_1h: None,
-            },
+                ..provenant_records::Tokens::default()
+            })),
         ]
     );
+    // Spec: docs/specs/telemetry.md#usage-merges-by-declared-semantics
+    let total = usage_total(&events, "codex");
+    assert_eq!(total.input, Some(7));
     Ok(())
 }
 
@@ -925,14 +948,40 @@ fn cursor_cache_tokens_are_recorded_beside_input() -> Result<(), ProviderError> 
     let (events, _) = replay(&cursor::Cursor, stream, EXIT)?;
     assert_eq!(
         usage_events(&events),
-        [&ProviderEvent::Usage {
-            input: 10,
-            output: 20,
+        [&ProviderEvent::Usage(UsageReport::step(provenant_records::Tokens {
+            input: Some(10),
+            output: Some(20),
             cache_read: Some(30),
             cache_write: Some(40),
-            cache_write_1h: None,
-        }]
+            ..provenant_records::Tokens::default()
+        }))]
     );
+    // Spec: docs/specs/telemetry.md#usage-merges-by-declared-semantics
+    let total = usage_total(&events, "cursor");
+    assert_eq!(total.input, Some(10));
+    assert_eq!(total.cache_write, Some(40));
+    Ok(())
+}
+
+#[test]
+fn agy_result_usage_has_only_the_buckets_it_observed() -> Result<(), ProviderError> {
+    let stream = concat!(
+        r#"{"event":"result","result":{"conversation_id":"c","status":"OK","response":"answer","usage":{"input_tokens":12,"output_tokens":7}}}"#,
+        "\n",
+    );
+    let (events, _) = replay(&agy::Agy, stream, EXIT)?;
+    assert_eq!(
+        usage_events(&events),
+        [&ProviderEvent::Usage(UsageReport::step(provenant_records::Tokens {
+            input: Some(12),
+            output: Some(7),
+            ..provenant_records::Tokens::default()
+        }))]
+    );
+    // Spec: docs/specs/telemetry.md#usage-merges-by-declared-semantics
+    let total = usage_total(&events, "agy");
+    assert_eq!(total.input, Some(12));
+    assert_eq!(total.cache_read, None);
     Ok(())
 }
 

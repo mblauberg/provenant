@@ -3,7 +3,8 @@
 use crate::support;
 use provenant_core::{ProjectId, WallTime};
 use provenant_records::AccountIdentity;
-use provenant_telemetry::ledger::{self, Cost, Row, Source, Tokens};
+use provenant_records::UsageSource;
+use provenant_telemetry::ledger::{self, Cost, Row, Tokens};
 use serde_json::{Value, json};
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -43,7 +44,7 @@ fn row(
     let some = Some(10);
     Ok(Row {
         format: ledger::FORMAT.into(),
-        source: Source::Settlement,
+        source: UsageSource::Ingest,
         project: ProjectId::from_bytes([3; 16]),
         // Each attempt is the only one of its own one-node graph, so a cost
         // target names it as `graph-X` (its first id letter).

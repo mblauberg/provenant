@@ -1436,15 +1436,18 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
         } => {
             let mut events = vec![E::Session(session_id)];
             if let Some(usage) = usage {
-                events.push(E::Usage {
-                    input: usage.input_tokens,
-                    output: usage.output_tokens,
-                    cache_read: usage.cache_read_input_tokens,
-                    cache_write: usage.cache_creation_input_tokens,
-                    cache_write_1h: usage
-                        .cache_creation
-                        .and_then(|split| split.ephemeral_1h_input_tokens),
-                });
+                events.push(E::Usage(crate::usage::UsageReport::step(
+                    provenant_records::Tokens {
+                        input: Some(usage.input_tokens),
+                        output: Some(usage.output_tokens),
+                        cache_read: usage.cache_read_input_tokens,
+                        cache_write: usage.cache_creation_input_tokens,
+                        cache_write_1h: usage
+                            .cache_creation
+                            .and_then(|split| split.ephemeral_1h_input_tokens),
+                        ..provenant_records::Tokens::default()
+                    },
+                )));
             }
             // Claude reports denials accumulated during the session, but does not
             // say whether any denial ended the work. Record them without turning

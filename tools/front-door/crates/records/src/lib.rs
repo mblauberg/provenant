@@ -71,7 +71,7 @@ pub use ports::{CommandExitCodes, ExitDisposition, PORT_PRECEDENCE, PortCommand,
 pub use provenance::{Layer, Merge, Precedence, Source, Sourced};
 pub use source::{SourceDigest, SourceDigestError, SourceInput, source_digest};
 pub use trace::Trace;
-pub use usage::{Cost, CostOrigin, Tokens, UsageScope, UsageSource};
+pub use usage::{Cost, CostOrigin, Tokens, UsageScope, UsageSemantics, UsageSource};
 pub use usage_identity::{
     AccountIdentity, Identity, IdentityEpoch, IdentityEvidenceSource, UnknownIdentityReason,
 };

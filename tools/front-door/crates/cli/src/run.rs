@@ -8,7 +8,7 @@ use provenant_core::{AttemptId, CancelToken, Clock, DeliveryId, OperationId, Roo
 use provenant_fabric_runtime::hosts::plain_text;
 use provenant_os::clock::SystemClock;
 use provenant_providers::{OutcomeStatus, ProviderEvent, REGISTRY};
-use provenant_records::{CommandError, CommandResult, Outcome as Status};
+use provenant_records::{CommandError, CommandResult, Outcome as Status, UsageSource};
 use provenant_routing::{Fallback, ModelId, RouteChoice, RouteName};
 use provenant_run as run;
 use provenant_supervisor::custody::ExitObservation;
@@ -45,6 +45,18 @@ pub use key::{resolve_fail, resolve_target};
 pub use launch::*;
 pub use output::*;
 pub use steer_pacing::pace_steer_restart;
+/// Why an adapter that should report usage did not. Kept beside the typed
+/// source as evidence, not as a substitute for it.
+const USAGE_ABSENCE_REASON: &str = "usage_absence_reason";
+
+fn absent_usage(reason: &str) -> run::UsageRecord {
+    let mut usage = run::UsageRecord::default();
+    usage
+        .extra
+        .insert(USAGE_ABSENCE_REASON.into(), json!(reason));
+    usage
+}
+
 pub fn provider_executable(name: &str) -> Result<PathBuf, String> {
     provider::find_executable(name)
 }
@@ -918,10 +930,10 @@ impl Registry<'_> {
             result: String::new(),
             complete: false,
             observed_route: None,
-            // `source` names why the current observation has no usage.
-            usage: run::UsageRecord {
-                source: result_event_usage.then(|| "absent: no result event".into()),
-                ..run::UsageRecord::default()
+            usage: if result_event_usage {
+                absent_usage("absent: no result event")
+            } else {
+                run::UsageRecord::default()
             },
             session: None,
             reason: Some(reason.into()),
@@ -1214,6 +1226,18 @@ impl Registry<'_> {
             turns: Vec::new(),
         };
         let mut has_usage = false;
+        // The adapter declares what one report means; the accumulator is the
+        // only merge. A name we do not have a spec for reports nothing live.
+        let usage_semantics = provenant_records::AdapterSpec::get(adapter.id())
+            .map(|spec| spec.usage)
+            .unwrap_or_else(|| {
+                provenant_records::UsageSemantics::new(
+                    provenant_records::UsageScope::Step,
+                    false,
+                    false,
+                )
+            });
+        let mut accumulator = provenant_providers::UsageAccumulator::new(usage_semantics);
         let mut early_stop = false;
         let mut result_fallback = false;
         for event in &events {
@@ -1237,24 +1261,17 @@ impl Registry<'_> {
                         .push(run::PartialSignal::ProviderStop);
                     early_stop = true;
                 }
-                ProviderEvent::Usage {
-                    input,
-                    output,
-                    cache_read,
-                    cache_write,
-                    cache_write_1h,
-                } => {
+                ProviderEvent::Usage(report) => {
                     has_usage = true;
-                    decoded.usage.uncached_input = Some(*input);
-                    decoded.usage.output_excluding_reasoning = Some(*output);
-                    decoded.usage.cache_read = *cache_read;
-                    decoded.usage.cache_write = *cache_write;
-                    decoded.usage.cache_write_1h = *cache_write_1h;
-                    decoded.usage.source = Some("provider".into());
+                    accumulator.push(report.clone());
                 }
                 _ => {}
             }
         }
+        let (tokens, cost) = accumulator.total();
+        decoded.usage.tokens = tokens;
+        decoded.usage.cost = cost;
+        decoded.usage.source = UsageSource::Stream;
         // Provider config-deprecation notices are advice, not failures. Show
         // each distinct notice once per attempt beside the applied route,
         // naming the config file the provider reported. The same notice can
@@ -1303,11 +1320,14 @@ impl Registry<'_> {
                 serde_json::from_slice::<serde_json::Value>(line)
                     .is_ok_and(|event| event["type"] == "result")
             });
-            decoded.usage.source = Some(if has_result {
-                "absent: result event has no usage".into()
-            } else {
-                "absent: no result event".into()
-            });
+            decoded.usage.extra.insert(
+                USAGE_ABSENCE_REASON.into(),
+                json!(if has_result {
+                    "absent: result event has no usage"
+                } else {
+                    "absent: no result event"
+                }),
+            );
         }
         let failure_cause = if events.contains(&ProviderEvent::AuthRequired) {
             provenant_providers::FailureCause::AuthRequired

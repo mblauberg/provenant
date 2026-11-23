@@ -761,12 +761,12 @@ fn claude_usage_records_cache_read_and_cache_write() {
             Path::new("/unused"),
         )
         .unwrap();
-    assert_eq!(decoded.usage.uncached_input, Some(10));
-    assert_eq!(decoded.usage.output_excluding_reasoning, Some(20));
-    assert_eq!(decoded.usage.cache_read, Some(30));
-    assert_eq!(decoded.usage.cache_write, Some(40));
-    assert_eq!(decoded.usage.cache_write_1h, Some(25));
-    assert_eq!(decoded.usage.source.as_deref(), Some("provider"));
+    assert_eq!(decoded.usage.tokens.input, Some(10));
+    assert_eq!(decoded.usage.tokens.output, Some(20));
+    assert_eq!(decoded.usage.tokens.cache_read, Some(30));
+    assert_eq!(decoded.usage.tokens.cache_write, Some(40));
+    assert_eq!(decoded.usage.tokens.cache_write_1h, Some(25));
+    assert_eq!(decoded.usage.source, provenant_records::UsageSource::Stream);
 }
 #[test]
 fn a_claude_success_after_a_tool_result_with_a_wide_integer_is_published() {
@@ -800,9 +800,9 @@ fn a_claude_success_after_a_tool_result_with_a_wide_integer_is_published() {
     assert_eq!(decoded.outcome, run::Outcome::Succeeded);
     assert_eq!(decoded.result, "answer");
     assert_eq!(decoded.reason, None);
-    assert_eq!(decoded.usage.uncached_input, Some(10));
-    assert_eq!(decoded.usage.output_excluding_reasoning, Some(20));
-    assert_eq!(decoded.usage.source.as_deref(), Some("provider"));
+    assert_eq!(decoded.usage.tokens.input, Some(10));
+    assert_eq!(decoded.usage.tokens.output, Some(20));
+    assert_eq!(decoded.usage.source, provenant_records::UsageSource::Stream);
     // A malformed frame is an evidence defect, never a task failure derived
     // from the earlier messages whose suffix has not been read.
     let decoded = decode(&format!(
@@ -1027,14 +1027,14 @@ fn codex_usage_records_cache_read_apart_from_uncached_input() {
             Path::new("/unused"),
         )
         .unwrap();
-    assert_eq!(decoded.usage.uncached_input, Some(20));
-    assert_eq!(decoded.usage.cache_read, Some(80));
-    assert_eq!(decoded.usage.cache_write, None);
-    assert_eq!(decoded.usage.output_excluding_reasoning, Some(7));
+    assert_eq!(decoded.usage.tokens.input, Some(20));
+    assert_eq!(decoded.usage.tokens.cache_read, Some(80));
+    assert_eq!(decoded.usage.tokens.cache_write, None);
+    assert_eq!(decoded.usage.tokens.output, Some(7));
 }
 
 #[test]
-fn codex_last_turn_completed_is_the_session_total() {
+fn codex_completed_turns_add_by_declared_semantics() {
     let route = run::RouteRecord {
         provider: Some("codex".into()),
         ..Default::default()
@@ -1052,9 +1052,10 @@ fn codex_last_turn_completed_is_the_session_total() {
             Path::new("/unused"),
         )
         .unwrap();
-    assert_eq!(decoded.usage.uncached_input, Some(50));
-    assert_eq!(decoded.usage.cache_read, Some(100));
-    assert_eq!(decoded.usage.output_excluding_reasoning, Some(12));
+    // Spec: docs/specs/telemetry.md#usage-merges-by-declared-semantics
+    assert_eq!(decoded.usage.tokens.input, Some(70));
+    assert_eq!(decoded.usage.tokens.cache_read, Some(180));
+    assert_eq!(decoded.usage.tokens.output, Some(19));
 }
 #[test]
 fn command_exit_keeps_requested_route() {
@@ -1086,9 +1087,14 @@ fn claude_absent_usage_names_its_reason() {
             Path::new("/unused"),
         )
         .unwrap();
-    assert_eq!(decoded.usage.uncached_input, None);
+    assert_eq!(decoded.usage.tokens.input, None);
+    assert_eq!(decoded.usage.source, provenant_records::UsageSource::Stream);
     assert_eq!(
-        decoded.usage.source.as_deref(),
+        decoded
+            .usage
+            .extra
+            .get("usage_absence_reason")
+            .and_then(|v| v.as_str()),
         Some("absent: no result event")
     );
 
@@ -1104,9 +1110,13 @@ fn claude_absent_usage_names_its_reason() {
             Path::new("/unused"),
         )
         .unwrap();
-    assert_eq!(decoded_no_usage.usage.uncached_input, None);
+    assert_eq!(decoded_no_usage.usage.tokens.input, None);
     assert_eq!(
-        decoded_no_usage.usage.source.as_deref(),
+        decoded_no_usage
+            .usage
+            .extra
+            .get("usage_absence_reason")
+            .and_then(|v| v.as_str()),
         Some("absent: result event has no usage")
     );
 
@@ -1117,7 +1127,10 @@ fn claude_absent_usage_names_its_reason() {
     let decoded_unknown = Registry::default()
         .decode(&unknown, b"", &clean_exit(), Path::new("/unused"))
         .unwrap();
-    assert_eq!(decoded_unknown.usage.source, None);
+    assert_eq!(
+        decoded_unknown.usage.source,
+        provenant_records::UsageSource::Stream
+    );
 }
 #[test]
 fn every_adapter_sign_in_failure_settles_auth_required() -> Result<(), Box<dyn std::error::Error>> {

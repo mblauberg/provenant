@@ -4114,10 +4114,13 @@ mod provisioned_writer_submission_tests {
                 applied_route: Some(route.clone()),
                 observed_route: Some(route),
                 usage: provenant_records::run::UsageRecord {
-                    uncached_input: Some(20),
-                    cache_read: Some(60),
-                    cache_write: Some(0),
-                    output_excluding_reasoning: Some(20),
+                    tokens: provenant_records::Tokens {
+                        input: Some(20),
+                        cache_read: Some(60),
+                        cache_write: Some(0),
+                        output: Some(20),
+                        ..provenant_records::Tokens::default()
+                    },
                     ..Default::default()
                 },
                 session: None,

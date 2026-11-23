@@ -458,9 +458,9 @@ fn project_lane_inner(
                 )
                 .exists(),
             cache_read_share: provenant_routing::cache_read_share(
-                usage.uncached_input,
-                usage.cache_read,
-                usage.cache_write,
+                usage.tokens.input,
+                usage.tokens.cache_read,
+                usage.tokens.cache_write,
             ),
             ..Default::default()
         },

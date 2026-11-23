@@ -1,5 +1,6 @@
 //! Closed adapter identities and shared facts. Mechanics stay in their modules.
 use crate::{
+    UsageScope, UsageSemantics,
     control::{ControlCapabilities, ControlSupport},
     run::NetworkAccess,
 };
@@ -710,6 +711,9 @@ pub struct AdapterSpec {
     pub answer_from_text: bool,
     /// Diagnose absent usage from structured result events.
     pub result_event_usage: bool,
+    /// The declared meaning of this adapter's usage reports. The accumulator
+    /// reads it; no reader guesses scope, cache inclusion or liveness.
+    pub usage: UsageSemantics,
     /// Provider-specific explanation when writer token budgets cannot stop it.
     pub token_budget_notice: Option<&'static str>,
     /// Usage totals are session-wide unless an attempt marks them per-attempt,
@@ -956,6 +960,7 @@ const SKILL_INSTALL_ROOTS: &[&str] = &[concat!(
 adapter_specs! { $;
     Claude [] (claude: 1) {
         name: "claude",
+        usage: UsageSemantics::new(UsageScope::Cumulative, false, true),
         stdout: StreamContract::ProviderJsonl,
         model_listing: None,
         default_models: None,
@@ -1078,6 +1083,7 @@ adapter_specs! { $;
     },
     Codex [] (codex: 0) {
         name: "codex",
+        usage: UsageSemantics::new(UsageScope::Step, true, true),
         stdout: StreamContract::ProviderJsonl,
         model_listing: Some(ModelListingFormat::CodexJson),
         default_models: None,
@@ -1211,6 +1217,7 @@ adapter_specs! { $;
     },
     Cursor [] (cursor: 2) {
         name: "cursor",
+        usage: UsageSemantics::new(UsageScope::Step, false, false),
         stdout: StreamContract::ProviderJsonl,
         model_listing: Some(ModelListingFormat::CursorText),
         default_models: Some(&["auto", "composer-*", "grok-*"]),
@@ -1342,6 +1349,7 @@ adapter_specs! { $;
     },
     Agy [] (agy: 3) {
         name: "agy",
+        usage: UsageSemantics::new(UsageScope::Step, false, false),
         stdout: StreamContract::ProviderJsonl,
         model_listing: Some(ModelListingFormat::AgyText),
         default_models: None,
@@ -1474,6 +1482,7 @@ adapter_specs! { $;
     },
     Opencode [] (opencode: 4) {
         name: "opencode",
+        usage: UsageSemantics::new(UsageScope::Step, false, false),
         stdout: StreamContract::ProviderJsonl,
         model_listing: Some(ModelListingFormat::OpencodeText),
         default_models: None,
@@ -1604,6 +1613,7 @@ adapter_specs! { $;
     },
     Command [] (command: 5) {
         name: "command",
+        usage: UsageSemantics::new(UsageScope::Step, false, false),
         stdout: StreamContract::Raw,
         model_listing: None,
         default_models: None,
@@ -1705,6 +1715,7 @@ adapter_specs! { $;
     // decoding, accounts and confinement remain owned by that provider.
     HostNative [serde(rename = "host-native")] () {
         name: "host-native",
+        usage: UsageSemantics::new(UsageScope::Step, false, false),
         stdout: StreamContract::ProviderJsonl,
         model_listing: None,
         default_models: None,
@@ -1805,6 +1816,7 @@ adapter_specs! { $;
     #[cfg(feature = "registry-fixture")]
     FixtureProvider [serde(rename = "fixture-provider")] () {
         name: "fixture-provider",
+        usage: UsageSemantics::new(UsageScope::Step, false, false),
         stdout: StreamContract::ProviderJsonl,
         model_listing: None,
         default_models: None,

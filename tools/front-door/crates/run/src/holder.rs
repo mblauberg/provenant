@@ -7,6 +7,7 @@ use crate::{
 };
 use provenant_core::{ActorId, AttemptId, CancelToken, Clock, OperationId, ProjectId, RootInputs};
 use provenant_os::{clock::SystemClock, exec::Termination, fs::Directory};
+use provenant_records::Tokens;
 use provenant_supervisor::{
     custody::{self, CustodyError, ExitObservation},
     machine::StopReason,
@@ -48,27 +49,30 @@ fn codex_attempt_usage(
         }
         Some(_) => current.zip(previous).and_then(|(a, b)| a.checked_sub(b)),
     };
-    usage.uncached_input = delta(
-        total.uncached_input,
-        baseline.as_ref().and_then(|b| b.uncached_input),
+    usage.tokens.input = delta(
+        total.tokens.input,
+        baseline.as_ref().and_then(|b| b.tokens.input),
     );
-    usage.cache_read = delta(
-        total.cache_read,
-        baseline.as_ref().and_then(|b| b.cache_read),
+    usage.tokens.cache_read = delta(
+        total.tokens.cache_read,
+        baseline.as_ref().and_then(|b| b.tokens.cache_read),
     );
-    usage.cache_write = delta(
-        total.cache_write,
-        baseline.as_ref().and_then(|b| b.cache_write),
+    usage.tokens.cache_write = delta(
+        total.tokens.cache_write,
+        baseline.as_ref().and_then(|b| b.tokens.cache_write),
     );
-    usage.cache_write_1h = delta(
-        total.cache_write_1h,
-        baseline.as_ref().and_then(|b| b.cache_write_1h),
+    usage.tokens.cache_write_1h = delta(
+        total.tokens.cache_write_1h,
+        baseline.as_ref().and_then(|b| b.tokens.cache_write_1h),
     );
-    usage.output_excluding_reasoning = delta(
-        total.output_excluding_reasoning,
-        baseline.as_ref().and_then(|b| b.output_excluding_reasoning),
+    usage.tokens.output = delta(
+        total.tokens.output,
+        baseline.as_ref().and_then(|b| b.tokens.output),
     );
-    usage.reasoning = delta(total.reasoning, baseline.as_ref().and_then(|b| b.reasoning));
+    usage.tokens.reasoning = delta(
+        total.tokens.reasoning,
+        baseline.as_ref().and_then(|b| b.tokens.reasoning),
+    );
     usage.per_attempt = Some(true);
     usage.session_total = Some(Box::new(total));
 }
@@ -79,36 +83,35 @@ mod codex_usage_tests {
 
     #[test]
     fn codex_session_deltas_and_unknown_baseline() {
-        let mut first = UsageRecord {
-            uncached_input: Some(20),
-            cache_read: Some(80),
-            output_excluding_reasoning: Some(7),
+        let record = |input, cache_read, output| UsageRecord {
+            tokens: Tokens {
+                input: Some(input),
+                cache_read: Some(cache_read),
+                output: Some(output),
+                ..Tokens::default()
+            },
             ..Default::default()
         };
+        let mut first = record(20, 80, 7);
         codex_attempt_usage(&mut first, Some("t"), None, false);
-        assert_eq!(first.uncached_input, Some(20));
+        assert_eq!(first.tokens.input, Some(20));
         assert_eq!(
             first
                 .session_total
                 .as_deref()
-                .and_then(|total| total.cache_read),
+                .and_then(|total| total.tokens.cache_read),
             Some(80)
         );
-        let mut second = UsageRecord {
-            uncached_input: Some(50),
-            cache_read: Some(100),
-            output_excluding_reasoning: Some(12),
-            ..Default::default()
-        };
+        let mut second = record(50, 100, 12);
         codex_attempt_usage(&mut second, Some("t"), Some((Some("t"), &first)), false);
-        assert_eq!(second.uncached_input, Some(30));
-        assert_eq!(second.cache_read, Some(20));
-        assert_eq!(second.output_excluding_reasoning, Some(5));
+        assert_eq!(second.tokens.input, Some(30));
+        assert_eq!(second.tokens.cache_read, Some(20));
+        assert_eq!(second.tokens.output, Some(5));
         assert_eq!(
             second
                 .session_total
                 .as_deref()
-                .and_then(|total| total.uncached_input),
+                .and_then(|total| total.tokens.input),
             Some(50)
         );
         let mut unknown = second.clone();
@@ -118,7 +121,7 @@ mod codex_usage_tests {
             Some((Some("t"), &UsageRecord::default())),
             false,
         );
-        assert_eq!(unknown.uncached_input, None);
+        assert_eq!(unknown.tokens.input, None);
     }
 }
 
@@ -7501,7 +7504,10 @@ mod writer_recovery_tests {
         ) {
             fake.codex_usage = Some(UsageRecord {
                 per_attempt: Some(true),
-                uncached_input: Some(1_000_001),
+                tokens: Tokens {
+                    input: Some(1_000_001),
+                    ..Tokens::default()
+                },
                 ..Default::default()
             });
         }

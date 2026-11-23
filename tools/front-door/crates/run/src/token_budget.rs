@@ -15,11 +15,12 @@ pub enum Verdict {
     Unreported,
 }
 
-/// Whether `provider` reports live token usage while running, allowing the
-/// guardian to enforce a writer token budget. Codex exec reports usage after
-/// each completed turn, so it can be stopped between turns but not mid-turn.
+/// Whether `provider` declares live token usage while running, allowing the
+/// guardian to enforce a writer token budget. The adapter declares liveness;
+/// no reader maintains a parallel list of provider names. Codex reports usage
+/// after each completed turn, so it can be stopped between turns, not mid-turn.
 pub fn enforces(provider: &str) -> bool {
-    matches!(provider, "claude" | "codex")
+    provenant_records::AdapterSpec::get(provider).is_some_and(|spec| spec.usage.live)
 }
 
 /// Fresh tokens the provider reported, summed. Cache reads do not count:
@@ -55,7 +56,10 @@ mod tests {
     impl FakeProvider {
         fn report(&self, step: usize) -> UsageRecord {
             UsageRecord {
-                uncached_input: self.0.get(step).copied().flatten(),
+                tokens: provenant_records::Tokens {
+                    input: self.0.get(step).copied().flatten(),
+                    ..provenant_records::Tokens::default()
+                },
                 ..UsageRecord::default()
             }
         }
@@ -64,11 +68,14 @@ mod tests {
     #[test]
     fn fresh_tokens_count_towards_the_budget_and_cache_reads_are_ignored() {
         let usage = UsageRecord {
-            uncached_input: Some(100),
-            cache_read: Some(400),
-            cache_write: Some(50),
-            output_excluding_reasoning: Some(10),
-            reasoning: Some(5),
+            tokens: provenant_records::Tokens {
+                input: Some(100),
+                cache_read: Some(400),
+                cache_write: Some(50),
+                output: Some(10),
+                reasoning: Some(5),
+                ..provenant_records::Tokens::default()
+            },
             ..UsageRecord::default()
         };
         // 100 (uncached) + 50 (cache write) + 10 (output) + 5 (reasoning) = 165.
@@ -115,5 +122,13 @@ mod tests {
         assert!(enforces("codex"));
         assert!(!enforces("opencode"));
         assert!(!enforces("cursor"));
+    }
+
+    /// Spec: docs/specs/telemetry.md#usage-merges-by-declared-semantics
+    #[test]
+    fn enforcement_is_read_from_the_adapter_declaration() {
+        for spec in provenant_records::ADAPTER_SPECS {
+            assert_eq!(enforces(spec.name), spec.usage.live, "{}", spec.name);
+        }
     }
 }
