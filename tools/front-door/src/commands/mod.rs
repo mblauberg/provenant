@@ -34,6 +34,7 @@ mod help;
 mod hook;
 mod hosts;
 mod inbox;
+mod init;
 mod install;
 mod internal;
 mod land;
@@ -88,6 +89,7 @@ pub static DOMAINS: &[&Domain] = &[
     &hook::DOMAIN,
     &hosts::DOMAIN,
     &inbox::DOMAIN,
+    &init::DOMAIN,
     &install::DOMAIN,
     &internal::DOMAIN,
     &land::DOMAIN,

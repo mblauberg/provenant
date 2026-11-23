@@ -28,6 +28,13 @@ with a receipt skip the prompts. A bare `provenant install --source "$RELEASE"`
 targets every detected client CLI and `~/.claude-*` directory; with a receipt it
 reuses the recorded targets and binary directory.
 
+After installing, run `provenant init` in each repository you want Provenant to
+work in. It detects the remote, default branch and toolchain, writes a minimal
+`.provenant/ports.json` with only the choices a later read cannot re-derive, and
+prints each choice with its source. It never overwrites an existing ports file:
+it reports what it would add instead. The
+[quickstart](../quickstart.md#3-initialise-a-repository) shows it in context.
+
 Read the preview for the native configuration files it will write, and keep
 clients and editors that rewrite those files closed from the preview through
 `check install`: the installer checks for drift before each write, but that is not

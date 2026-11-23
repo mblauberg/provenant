@@ -1,5 +1,6 @@
 //! One sourced, versioned declaration for repository integration ports.
 use provenant_records::FileDigest;
+use provenant_records::provenance::Source;
 use provenant_records::warning::{CONFIG_MALFORMED, Warning, warn};
 pub use provenant_records::{
     CommandExitCodes, DEFAULT_PORT_COMMAND_RECEIPT_AGE_DAYS, ExitDisposition, Layer,
@@ -1208,6 +1209,105 @@ declare_ports! {
     release: Port,
     admission: Port,
     build: BuildPort,
+}
+
+/// One choice `provenant init` made for a project's port table, with the exact
+/// place it came from. The source names detection's origin (the remote, the
+/// remote HEAD, the stack scan), not the project file it will be written to.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct InitChoice {
+    /// Dotted port leaf this choice declares, such as `git.remote`.
+    pub key: &'static str,
+    /// The detected value, ready to place in a project overlay.
+    pub value: serde_json::Value,
+    /// Where the resolver got the value.
+    pub source: Source,
+}
+
+/// The minimal project declaration and the choices behind it.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct InitPlan {
+    /// The `.provenant/ports.json` document. Stack detection already re-derives
+    /// `verify.tiers` and `verify.default_tier` on every read, so those leaves
+    /// are left to it; the document holds only choices a later read cannot
+    /// reconstruct on its own.
+    pub document: serde_json::Value,
+    /// Every choice, in declaration order, with its source.
+    pub choices: Vec<InitChoice>,
+}
+
+/// Build the minimal project declaration from one resolved forge context and
+/// port-table stack detection.
+///
+/// The remote, its protected branches, the verify base and remote, and the
+/// detected toolchain names are not derived by the read path: without a project
+/// file they fall back to a compiled default or a use-time inference. Init pins
+/// exactly those choices. Detection-owned leaves are reported but not written,
+/// so the file never restates what detection will supply again anyway.
+pub fn init_plan(
+    forge: &crate::forge::ForgeContext,
+    detection: &crate::detect::Detection,
+) -> InitPlan {
+    let remote = forge.remote.value.clone();
+    let protected = forge.protected.value.clone();
+    let base = format!("{remote}/{}", forge.default_branch.value);
+    let stacks: Vec<serde_json::Value> = detection
+        .stacks
+        .iter()
+        .map(|stack| serde_json::Value::String(stack.stack.clone()))
+        .collect();
+
+    let mut git = serde_json::Map::new();
+    git.insert("remote".into(), serde_json::json!(remote.clone()));
+    git.insert("protected".into(), serde_json::json!(protected.clone()));
+    let mut verify = serde_json::Map::new();
+    verify.insert("remote".into(), serde_json::json!(remote.clone()));
+    verify.insert("base".into(), serde_json::json!(base.clone()));
+    let mut build = serde_json::Map::new();
+    build.insert("stacks".into(), serde_json::Value::Array(stacks.clone()));
+    let mut document = serde_json::Map::new();
+    document.insert(
+        "schema_version".into(),
+        serde_json::json!(PORTS_SCHEMA_VERSION),
+    );
+    document.insert("git".into(), serde_json::Value::Object(git));
+    document.insert("verify".into(), serde_json::Value::Object(verify));
+    document.insert("build".into(), serde_json::Value::Object(build));
+
+    let choices = vec![
+        InitChoice {
+            key: "git.remote",
+            value: serde_json::json!(remote.clone()),
+            source: forge.remote.source.clone(),
+        },
+        InitChoice {
+            key: "git.protected",
+            value: serde_json::json!(protected),
+            source: forge.protected.source.clone(),
+        },
+        InitChoice {
+            key: "verify.remote",
+            value: serde_json::json!(remote),
+            source: forge.remote.source.clone(),
+        },
+        InitChoice {
+            key: "verify.base",
+            value: serde_json::json!(base),
+            source: forge.default_branch.source.clone(),
+        },
+        InitChoice {
+            key: "build.stacks",
+            value: serde_json::Value::Array(stacks),
+            source: Source {
+                layer: Layer::Detected,
+                origin: Some("port-table stack detection".to_owned()),
+            },
+        },
+    ];
+    InitPlan {
+        document: serde_json::Value::Object(document),
+        choices,
+    }
 }
 
 /// An error in one port-table layer always names its file and the key that
