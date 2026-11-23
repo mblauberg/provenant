@@ -1876,7 +1876,7 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         // #3869 threads an absent remote as Option; #3866 splits it back under 2000.
         ("src/handoff.rs", 2014),
         ("src/hooks.rs", 2636),
-        ("src/install.rs", 3986),
+        ("src/install.rs", 3159),
         ("src/lane_cleanup.rs", 3148),
         ("src/pr/landing/adapters.rs", 2984),
         ("src/pr/landing/driver.rs", 3967),
