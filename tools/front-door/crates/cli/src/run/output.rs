@@ -215,38 +215,31 @@ pub(super) fn output_summary(
             ("base", "writer_base"),
             ("committed head", "writer_head"),
             ("publication", "publication"),
+            ("residual tree state", "residual_tree"),
         ] {
-            lines.push(format!(
-                "{label}: {}",
-                data[key].as_str().unwrap_or("unavailable")
-            ));
-        }
-        lines.push(format!(
-            "residual tree state: {}",
-            data["residual_tree"].as_str().unwrap_or("unavailable")
-        ));
-    }
-    if headed && let Some(files) = data.get("changed_files") {
-        lines.push(match files.as_array() {
-            Some(paths) => {
-                let total = data["changed_files_total"]
-                    .as_u64()
-                    .map_or(paths.len(), |total| total as usize);
-                let more = total.saturating_sub(paths.len());
-                let listed = paths
-                    .iter()
-                    .filter_map(structured_path_text)
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let more = if more > 0 {
-                    format!(" (+{more} more)")
-                } else {
-                    String::new()
-                };
-                format!("changed files ({total}): {listed}{more}")
+            // A present key with a null value is absent evidence, not a line
+            // saying so: only real values render a header.
+            if let Some(value) = data[key].as_str() {
+                lines.push(format!("{label}: {value}"));
             }
-            None => "changed files: unavailable".into(),
-        });
+        }
+    }
+    if headed && let Some(paths) = data.get("changed_files").and_then(Value::as_array) {
+        let total = data["changed_files_total"]
+            .as_u64()
+            .map_or(paths.len(), |total| total as usize);
+        let more = total.saturating_sub(paths.len());
+        let listed = paths
+            .iter()
+            .filter_map(structured_path_text)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let more = if more > 0 {
+            format!(" (+{more} more)")
+        } else {
+            String::new()
+        };
+        lines.push(format!("changed files ({total}): {listed}{more}"));
     }
     // An empty result uses its safe diagnostic as human text. The settlement
     // header already contains that detail, so render it only once.
@@ -1123,6 +1116,58 @@ mod tests {
                 .lines
                 .iter()
                 .any(|line| line == "2 commits pushed at abcdef0123456789")
+        );
+    }
+
+    // Spec: docs/specs/cli.md#output-references-and-bounded-tails
+    #[test]
+    fn output_summary_prints_headers_only_for_non_null_values() {
+        let null_headers = json!({
+            "state":"succeeded",
+            "writer_base":null, "writer_head":null, "publication":null,
+            "residual_tree":null, "changed_files":null
+        });
+        let summary = output_summary(&null_headers, "answer", true, None);
+        for key in [
+            "base",
+            "committed head",
+            "publication",
+            "residual tree state",
+            "changed files",
+        ] {
+            let prefix = format!("{key}:");
+            assert!(
+                !summary.lines.iter().any(|line| line.starts_with(&prefix)),
+                "null {key} still rendered a header: {:?}",
+                summary.lines
+            );
+        }
+
+        let real_headers = json!({
+            "state":"succeeded",
+            "writer_base":"aaaa", "writer_head":"bbbb", "publication":"pushed",
+            "residual_tree":"clean (current observation)",
+            "changed_files":["src/main.rs"], "changed_files_total":1
+        });
+        let summary = output_summary(&real_headers, "", true, None);
+        for (label, value) in [
+            ("base", "aaaa"),
+            ("committed head", "bbbb"),
+            ("publication", "pushed"),
+            ("residual tree state", "clean (current observation)"),
+        ] {
+            let expected = format!("{label}: {value}");
+            assert!(
+                summary.lines.contains(&expected),
+                "non-null {label} lost its header: {:?}",
+                summary.lines
+            );
+        }
+        assert!(
+            summary
+                .lines
+                .iter()
+                .any(|line| line.starts_with("changed files (1):"))
         );
     }
 
