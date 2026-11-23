@@ -2237,7 +2237,6 @@ fn stopped_merge_retains_private_state_without_adoption_by_a_new_attempt() -> Te
             None,
             super::ImportScope {
                 attempt: fixture.import_attempt,
-                history: LaneHistory::default(),
                 custody: None,
             },
         )
@@ -2263,7 +2262,6 @@ fn stopped_merge_retains_private_state_without_adoption_by_a_new_attempt() -> Te
         None,
         super::ImportScope {
             attempt: fixture.import_attempt,
-            history: LaneHistory::default(),
             custody: None,
         },
     )?;

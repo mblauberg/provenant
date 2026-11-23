@@ -106,7 +106,8 @@ pub(crate) fn execute_bounded(
             &settings,
             timeout,
         )
-        .map_err(|(error, output)| {
+        .map_err(|failure| {
+            let (error, output) = *failure;
             incomplete = output;
             error
         })
@@ -184,7 +185,7 @@ fn run_operation(
     cancel: &CancelToken,
     settings: &Execution<'_>,
     timeout: Duration,
-) -> std::result::Result<ExecOutcome, (UtilityError, Option<ExecOutcome>)> {
+) -> std::result::Result<ExecOutcome, Box<(UtilityError, Option<ExecOutcome>)>> {
     let mut env: Vec<(OsString, OsString)> = [
         ("PATH", "/usr/bin:/bin"),
         ("GIT_CONFIG_NOSYSTEM", "1"),
@@ -236,7 +237,8 @@ fn run_operation(
         ]))
         .chain(arguments.iter().cloned())
         .collect();
-    let executor = SystemExecutor::new(1).map_err(|error| (UtilityError::from(error), None))?;
+    let executor =
+        SystemExecutor::new(1).map_err(|error| Box::new((UtilityError::from(error), None)))?;
     let mut options = ExecOptions::new(&argv, cwd, timeout);
     options.env = Some(&env);
     options.cancel = Some(cancel);
@@ -252,19 +254,19 @@ fn run_operation(
     options.stderr = StreamPolicy::Tail { limit: 4096 };
     let output = executor
         .execute(options)
-        .map_err(|error| (UtilityError::from(error), None))?;
+        .map_err(|error| Box::new((UtilityError::from(error), None)))?;
     if output.cancelled {
-        return Err((UtilityError::Cancelled, Some(output)));
+        return Err(Box::new((UtilityError::Cancelled, Some(output))));
     }
     if output.timed_out {
-        return Err((UtilityError::TimedOut, Some(output)));
+        return Err(Box::new((UtilityError::TimedOut, Some(output))));
     }
     if output.drain_truncated
         || output.stdout.truncated
         || output.stdout.read_failed
         || output.stderr.read_failed
     {
-        return Err((UtilityError::Incomplete, Some(output)));
+        return Err(Box::new((UtilityError::Incomplete, Some(output))));
     }
     Ok(output)
 }
@@ -288,8 +290,8 @@ fn raw_outcome(
         &settings,
         settings.timeout,
     )
-    .map_err(|(error, output)| match error {
-        UtilityError::Incomplete => operation_io(git_dir, output),
+    .map_err(|failure| match *failure {
+        (UtilityError::Incomplete, output) => operation_io(git_dir, output),
         _ => invalid(),
     })
 }

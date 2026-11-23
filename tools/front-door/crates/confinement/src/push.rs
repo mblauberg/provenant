@@ -261,10 +261,12 @@ mod tests {
             HistoryEffect::Off,
             HistoryEffect::Refuse,
         ] {
-            let mut history = LaneHistory::default();
-            history.conflict_markers = Setting {
-                value,
-                source: LimitSource::Host,
+            let history = LaneHistory {
+                conflict_markers: Setting {
+                    value,
+                    source: LimitSource::Host,
+                },
+                ..LaneHistory::default()
             };
             let context = PushContext {
                 repo: &repo,
@@ -314,10 +316,12 @@ mod tests {
             (DefaultBranchRewrite::Refuse, false),
             (DefaultBranchRewrite::Allow, true),
         ] {
-            let mut history = LaneHistory::default();
-            history.default_branch_rewrite = Setting {
-                value,
-                source: LimitSource::Host,
+            let history = LaneHistory {
+                default_branch_rewrite: Setting {
+                    value,
+                    source: LimitSource::Host,
+                },
+                ..LaneHistory::default()
             };
             let context = PushContext {
                 repo: &repo,
