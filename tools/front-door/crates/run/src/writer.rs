@@ -351,6 +351,30 @@ pub(crate) struct StopWorkPolicy<'a> {
     pub publish_granted: bool,
 }
 
+/// The remote a stopped writer's summary and stop-publication recovery must
+/// use. A checkout without a remote has no tracking branch, so an empty remote
+/// is an absence rather than a guess.
+/// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+fn terminal_forge_remote(state: &Path, project: &Path) -> String {
+    let Ok(ports) = provenant_config::PortTable::read_for(Some(project), state) else {
+        return String::new();
+    };
+    let policy = provenant_config::operation_policy(state, project, &ports);
+    let config = provenant_config::ForgeConfig::new(&ports, (*policy).clone());
+    let Ok(git) = provenant_config::ForgeGit::new(project) else {
+        return String::new();
+    };
+    match provenant_config::ForgeContext::remote(&config, &git) {
+        Ok(remote) => remote.value,
+        Err(provenant_config::ForgeContextError::NoRemote { remotes, .. })
+            if remotes.is_empty() =>
+        {
+            String::new()
+        }
+        Err(_) => String::new(),
+    }
+}
+
 /// The result of comparing a retry's worktree head with its pinned commit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RepinOutcome {
@@ -2529,6 +2553,23 @@ mod cargo_setup_tests {
         Ok(true)
     }
 
+    #[test]
+    fn terminal_forge_remote_follows_the_checkout_not_a_compiled_origin() {
+        let fixture = WriterFixture::new().unwrap();
+        fixture
+            .run_git(&[
+                "remote",
+                "add",
+                "upstream",
+                fixture.root.join("upstream.git").to_str().unwrap(),
+            ])
+            .unwrap();
+        assert_eq!(
+            terminal_forge_remote(&fixture.state, &fixture.project),
+            "upstream"
+        );
+    }
+
     fn oid(digit: char) -> GitOid {
         GitOid::parse(&digit.to_string().repeat(40)).unwrap()
     }
@@ -3257,6 +3298,15 @@ mod cargo_setup_tests {
             return Ok(());
         }
         let fixture = WriterFixture::new()?;
+        // The tracked reflog path now follows the resolved forge remote, so
+        // declare the sole remote that makes that path origin's.
+        // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+        fixture.run_git(&[
+            "remote",
+            "add",
+            "origin",
+            fixture.project.to_str().ok_or("project path")?,
+        ])?;
         let lane = fixture.add_worktree("chore/x", "lane")?;
         let mut writer = fixture.prepare(&lane)?;
         let target = fixture.root.join("reflog-target");
@@ -4394,6 +4444,19 @@ impl WriterLaunch {
             }
             return Ok(());
         }
+        // A non-origin checkout must count and recover against its own remote.
+        // The sealed stop binding carries the resolved remote; recovery has no
+        // binding yet, so resolve the same identity from the port table.
+        // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+        let stop_remote = work
+            .as_ref()
+            .and_then(|policy| policy.publish)
+            .and_then(|host| {
+                host.stop_publish_remote()
+                    .or_else(|| host.delivery_remote())
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| terminal_forge_remote(state, self.worktree.repo().root_path()));
         let stop_work = work.map(|policy| {
             use provenant_records::run::StopWorkPush;
             let dirty_paths = self
@@ -4401,7 +4464,7 @@ impl WriterLaunch {
                 .ok()
                 .and_then(|paths| u64::try_from(paths.len()).ok());
             let ahead = self
-                .ahead_of_remote(&git_executable, verified_tip, "origin")
+                .ahead_of_remote(&git_executable, verified_tip, &stop_remote)
                 .ok()
                 .flatten();
             let recovered = if policy.publish.is_none() && policy.publish_granted {
@@ -4414,7 +4477,7 @@ impl WriterLaunch {
                     let request = crate::HostDeliveryContext::destination(
                         crate::DeliveryMode::Push,
                         branch,
-                        &crate::forge_for("origin", "main", &[]),
+                        &crate::forge_for(&stop_remote, "", &[]),
                     )?
                     .ok_or(RunError::Validation("stop publication destination missing"))?;
                     crate::HostDeliveryContext::capture()

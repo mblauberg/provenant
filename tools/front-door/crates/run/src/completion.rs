@@ -837,7 +837,13 @@ mod tests {
             &extras,
         );
         assert!(preamble.contains("build` admission class cap of 7"));
-        assert!(preamble.contains("source: host; `[admission.build].slots`"));
+        // A setting reports its layer with the shared person-readable name:
+        // Host is "host configuration", not the old free-form "host".
+        // Spec: docs/specs/state.md#every-setting-reports-its-layer
+        assert!(
+            preamble.contains("source: host configuration; `[admission.build].slots`"),
+            "{preamble}"
+        );
     }
 
     /// Spec: docs/specs/run-launch.md#layered-brief-preamble
@@ -953,7 +959,9 @@ mod tests {
         .unwrap();
         let project = temp.path().join("project");
         std::fs::create_dir_all(project.join(".provenant")).unwrap();
-        let missing = project.join(".provenant").join("absent.md");
+        // A project knob path is relative to the project root, so the warning
+        // must name the path that was actually attempted.
+        let missing = project.join("absent.md");
         std::fs::write(
             project.join(".provenant").join("config.toml"),
             "schema_version=1\n[knobs.lanes]\nbrief_preamble = \"absent.md\"\n",

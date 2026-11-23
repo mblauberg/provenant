@@ -423,6 +423,7 @@ impl RunStore {
                             .or(Some(false)),
                     )
                     .with_policy(policy.clone())
+                    .with_forge(&forge)
                     .prepare_stop_publish(writer_request, &request)?;
                 host.seal_stop_publish_binding(&self.attempt_dir(id, false)?, scope)?;
                 holder.host_delivery = Some(host);
