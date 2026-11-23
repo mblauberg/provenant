@@ -4,8 +4,9 @@
 //! Writer-ness is the resolved graph's answer, so the base is resolved once by
 //! role before the launch identity is sealed. Read-only members of a writer
 //! graph (the plan node of `implement --plan`, a composite's review agents) read
-//! that base; gates, decisions and landings take no execution binding rather than the caller checkout's stale upstream;
-//! only a writer that names no base at all falls back to the caller checkout.
+//! that base rather than the caller checkout's stale upstream; gates, decisions
+//! and landings take no execution binding. Only a writer that names no base at
+//! all falls back to the caller checkout.
 
 use provenant_cli::run::{ReadSourceChoice, read_only_source_ref};
 use provenant_fabric_runtime::graph::{AccessMode, GraphNode, NodeKind, SourceBinding};
