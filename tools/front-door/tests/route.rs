@@ -846,15 +846,18 @@ fn help_list_and_resolve_are_pure_and_resolve_reports_exact_candidates() -> Resu
         .map(|m| m["model"].as_str().ok_or("model"))
         .collect::<std::result::Result<_, _>>()?;
     models.sort_unstable();
-    assert_eq!(
-        models,
-        [
-            "opencode/opencode-go/deepseek-v4.1-flash",
-            "opencode/opencode-go/glm-5.3-flash",
-            "opencode/opencode/deepseek-v4.1-flash-free",
-            "opencode/opencode/glm-5.3-flash-free",
-        ]
-    );
+    // `route list` is the bundled catalogue filtered by adapter, so derive the
+    // expectation from the catalogue rather than pinning its entries here.
+    let catalogue = provenant_routing::Catalogue::bundled()?;
+    let mut expected: Vec<&str> = catalogue
+        .models()
+        .iter()
+        .map(|entry| &entry.model)
+        .filter(|model| model.adapter() == "opencode")
+        .map(provenant_routing::ModelId::as_str)
+        .collect();
+    expected.sort_unstable();
+    assert_eq!(models, expected);
     let pool = call(
         &rig,
         &["route", "resolve", "--route", "utility", "--confidential"],

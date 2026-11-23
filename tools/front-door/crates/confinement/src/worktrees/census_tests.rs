@@ -1,5 +1,5 @@
 //! Worker census and native observation tests.
-use super::census::worker_evidence_from_census;
+use super::census::{unreadable_cohort_pids, worker_evidence_from_census};
 use super::lifecycle_tests::*;
 use super::*;
 use crate::test_support::Fixture;
@@ -817,6 +817,62 @@ fn unreadable_process_without_candidate_paths_only_blocks_the_root_it_occupies()
     );
     assert!(mark_unreadable_process_warning("eperm-test", 200));
     assert!(!mark_unreadable_process_warning("eperm-test", 200));
+    Ok(())
+}
+
+// Spec: docs/specs/disk.md#scratch-and-cache-custody
+#[test]
+fn unreadable_warning_counts_only_processes_that_could_own_the_checkout()
+-> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let root = fixture.root.join("eperm-cohort");
+    fs::create_dir(&root)?;
+    let owner = provenant_os::fs::effective_uid();
+    let foreign_uid = if owner == 0 { 501 } else { 0 };
+    let own_uids = ProcessUids {
+        real: owner,
+        effective: owner,
+        saved: owner,
+    };
+    let foreign_uids = ProcessUids {
+        real: foreign_uid,
+        effective: foreign_uid,
+        saved: foreign_uid,
+    };
+    let current = refused_fact(100);
+    let census = provenant_supervisor::census::Census::from_observations(
+        [current.clone()],
+        [
+            (200, ObservationIssue::PermissionDenied),
+            (201, ObservationIssue::PermissionDenied),
+            (202, ObservationIssue::PermissionDenied),
+        ],
+        [],
+        true,
+        false,
+        32,
+    )?;
+    let observer = InjectedCensus {
+        census,
+        cwds: BTreeMap::from([
+            (200, CwdObservation::PermissionDenied),
+            (201, CwdObservation::PermissionDenied),
+            (202, CwdObservation::PermissionDenied),
+        ]),
+        current,
+        platform_uids: BTreeMap::from([(200, foreign_uids), (201, own_uids)]),
+    };
+    let roots = [root];
+    // A foreign uid cannot hold the same-user checkout, so it is not unknown
+    // custody for this warning. Unreadable credentials stay in the cohort.
+    assert_eq!(
+        unreadable_cohort_pids(&BTreeSet::from([200]), &observer, &roots),
+        BTreeSet::new()
+    );
+    assert_eq!(
+        unreadable_cohort_pids(&BTreeSet::from([200, 201, 202]), &observer, &roots),
+        BTreeSet::from([201, 202])
+    );
     Ok(())
 }
 

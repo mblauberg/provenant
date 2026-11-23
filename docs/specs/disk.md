@@ -1,7 +1,8 @@
 # Disk report
 
 Owner: `crates/os/src/disk.rs` (measurement), `crates/confinement/src/disk.rs`
-(lane classes), `crates/run/src/disk.rs` (run inventory), `src/disk.rs`
+(lane classes), `crates/confinement/src/worktrees/census.rs` (EPERM census),
+`crates/run/src/disk.rs` (run inventory), `src/disk.rs`
 (composition), `src/gc_sweep.rs` (sweep custody),
 `crates/run/src/build_dir_gc.rs` (Cargo targets),
 `crates/run/src/retention.rs` (scratch)
@@ -94,7 +95,11 @@ and eviction stays oldest-use-first rather than ranking by bytes freed.
 
 An EPERM process with complete descriptor evidence and no cwd or descriptor
 beneath a candidate yields one aggregate warning with a count, not one line per
-process or an unknown worktree; per-PID detail is behind `gc --full`. Positive
+process or an unknown worktree; per-PID detail is behind `gc --full`. Only a
+process that could own a candidate counts towards that warning: kernel
+credentials that differ from the current user and every root owner put other
+users and system daemons outside the cohort, and missing credentials keep a
+process in it. No warning is printed when the cohort is empty. Positive
 path evidence protects the candidate, and incomplete descriptor evidence or other
 unknown custody still prevents removal. Foreign policy uses verified worktree
 creation and lane custody, not a configured path: a verified primary checkout and
