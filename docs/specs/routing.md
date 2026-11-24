@@ -112,8 +112,8 @@ head on the host, independent of the launching checkout; supplying both
 adds `--set review_base=SHA` to `--pr N`: the head and PR binding still come
 from the forge, while the diff narrows to `review_base...head`, matching the
 three-dot range the host writes into its review context. `subject` stays
-exclusive with `--pr`, since replacing the head would lose the PR link in
-status. Diff evidence and selection use base...head, including branches that
+exclusive with `--pr`, since both would name the head and `--pr` takes it
+from the forge. Diff evidence and selection use base...head, including branches that
 merged main. Because the forge can report the previous head seconds after a
 push, `--pr N --head SHA` pins the expected head: the host rereads the forge
 within a bounded wait and refuses, naming both SHAs, if the mismatch persists.
