@@ -74,9 +74,9 @@ fn preflight_writer_worktrees(
     facts: &provenant_confinement::worktrees::RepoFacts,
     document: &mut provenant_fabric_runtime::graph::GraphDocument,
     expanded: &provenant_fabric_runtime::graph::GraphDocument,
-) -> Result<Vec<(String, String, String)>, FacadeError> {
+) -> Result<Vec<(String, String, provenant_run::writer_dirty::WriterRefusal)>, FacadeError> {
     use provenant_fabric_runtime::graph::AccessMode;
-    use provenant_run::writer_dirty::{self, Preflight};
+    use provenant_run::writer_dirty::{self, Preflight, WriterRefusal};
     let resolved = writer_dirty_setting(factory);
     let git =
         provenant_os::git::git_executable().ok_or_else(|| FacadeError::io("git for preflight"))?;
@@ -140,10 +140,15 @@ fn preflight_writer_worktrees(
         // files. Boundary 2 refuses the whole graph instead of adopting them.
         let attached = writer.attached_lanes().map_err(run_error)?;
         if !attached.is_empty() {
+            // Name the reservation's attempt and its exact reconcile command,
+            // never an instruction to commit another lane's edits. A live
+            // holder with no unambiguous attempt only gets a wait step.
+            // Spec: docs/specs/run-launch.md#writer-binding
+            let holder = writer.attached_holder().map_err(run_error)?;
             refusals.push((
                 node.id.clone(),
                 path.to_owned(),
-                writer_dirty::held_refusal(&attached, path),
+                WriterRefusal::held(&attached, path, holder),
             ));
             outcomes.insert(path.to_owned(), (None, None));
             continue;
@@ -164,7 +169,11 @@ fn preflight_writer_worktrees(
                 outcomes.insert(path.to_owned(), (None, None));
             }
             Preflight::Refuse(reason) => {
-                refusals.push((node.id.clone(), path.to_owned(), reason));
+                refusals.push((
+                    node.id.clone(),
+                    path.to_owned(),
+                    WriterRefusal::dirty(reason),
+                ));
                 outcomes.insert(path.to_owned(), (None, None));
             }
             Preflight::WipCommit => {
@@ -1645,8 +1654,8 @@ impl Factory {
                 prices: None,
                 tick: false,
             };
-            for (node, path, reason) in &submission_refusals {
-                owner.retain_submission_refusal(&document.graph_id, node, path, reason)?;
+            for (node, path, refusal) in &submission_refusals {
+                owner.retain_submission_refusal(&document.graph_id, node, path, refusal)?;
             }
             let graph_config = &owner.factory.context.config.graph;
             let mut journal = AnnouncingJournal {
@@ -1682,7 +1691,7 @@ impl Factory {
             } else {
                 let refusals: Vec<_> = submission_refusals
                     .iter()
-                    .map(|(node, _, reason)| (node.clone(), reason.clone()))
+                    .map(|(node, _, refusal)| (node.clone(), refusal.reason.clone()))
                     .collect();
                 provenant_fabric_runtime::graph::advance_with_submission_refusals(
                     document,
@@ -2075,6 +2084,109 @@ pub(super) fn graph_operation(
 )]
 mod tests {
     use super::*;
+
+    // A real launch-time submission preflight, not just target lowering: the
+    // reused checkout is held by an unsettled attempt's writer reservation, so
+    // the refusal must name that holder and the exact reconcile command and
+    // must never advise committing or preserving its edits.
+    // Spec: docs/specs/run-launch.md#writer-binding
+    #[test]
+    fn a_held_reused_linked_checkout_refuses_at_submission_with_holder_and_command()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if !crate::worktree_tests::writer_backend_available()? {
+            return Ok(());
+        }
+        let rig = crate::worktree_tests::repository()?;
+        crate::worktree_tests::git(
+            &rig,
+            &[
+                "worktree",
+                "add",
+                "-qb",
+                "reuse-held",
+                ".worktrees/reuse-held",
+            ],
+        )?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let factory = Factory {
+            context: Context::open(roots.clone(), &rig.home, &rig.project)?,
+            project_attribution: false,
+            clock: SystemClock,
+            backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?,
+            home: rig.home.clone(),
+            cwd: rig.project.clone(),
+            assets: rig.project.clone(),
+            host_launch: None,
+            workers: &provenant_confinement::worktrees::SystemWorkerObserver,
+        };
+        let facts = provenant_confinement::worktrees::RepoFacts::default();
+        let worktree = rig.project.join(".worktrees/reuse-held");
+        let relative = ".worktrees/reuse-held";
+        let request = provenant_run::resolve_writer(
+            roots.state.as_path(),
+            &rig.project,
+            Path::new(relative),
+        )?;
+        let prepared = provenant_run::prepare_writer_with_facts(
+            &request,
+            roots.state.as_path(),
+            factory.context.identity.project,
+            &facts,
+        )?;
+        let holder = provenant_core::AttemptId::from_bytes([53; 16]);
+        let binding = provenant_supervisor::custody::WriterBinding::from_verified(
+            prepared.worktree.repo().root_dir(),
+            prepared.worktree.repo().private_dir(),
+            prepared.branch.as_str(),
+            prepared.base,
+        )
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let slot = rig
+            .state
+            .join("worktrees")
+            .join(factory.context.identity.project.to_string())
+            .join(provenant_confinement::worktrees::state_dir_name(&worktree));
+        let clock = provenant_os::clock::SystemClock;
+        let cancel = CancelToken::new();
+        let _lease = provenant_supervisor::fixture::acquire_writer_with_binding(
+            provenant_os::fs::Directory::open_anchor(&slot)?,
+            provenant_records::custody::Scope {
+                attempt: holder,
+                generation: 1,
+            },
+            binding,
+            provenant_core::WaitBudget::nonblocking(clock.mono_now()),
+            &cancel,
+            &clock,
+        )
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+
+        // This is the document shape a reused `--branch`/`--pr` launch binds:
+        // a worktree, and no `new_worktree` provisioning intent.
+        let mut document: provenant_fabric_runtime::graph::GraphDocument =
+            serde_json::from_value(serde_json::json!({
+                "schema_version": 1, "graph_id": "held-reuse", "nodes": [
+                    {"id":"writer", "access":"worktree_write", "prompt":"Repair",
+                     "route":{"alias":"senior"}, "worktree":".worktrees/reuse-held"}
+                ]
+            }))?;
+        let expanded = document.clone();
+        let refusals =
+            super::preflight_writer_worktrees(&factory, &facts, &mut document, &expanded)?;
+        assert_eq!(refusals.len(), 1, "{refusals:?}");
+        let (_, _, refusal) = &refusals[0];
+        assert!(refusal.reason.contains("reuse-held"), "{refusal:?}");
+        assert!(refusal.reason.contains(&holder.to_string()), "{refusal:?}");
+        assert!(refusal.next.contains(&holder.to_string()), "{refusal:?}");
+        assert!(refusal.next.contains("provenant reconcile"), "{refusal:?}");
+        assert!(
+            !refusal.reason.contains("commit or preserve"),
+            "{refusal:?}"
+        );
+        assert!(!refusal.next.contains("commit or preserve"), "{refusal:?}");
+        Ok(())
+    }
 
     // Spec: docs/specs/fabric.md#checkpoint-envelope
     #[test]

@@ -10,6 +10,8 @@
 //! warns. A worktree another lane holds is always refused (boundary 2), as are
 //! credential and Git internal roots.
 
+use provenant_core::AttemptId;
+
 /// The registry knob.
 pub const KNOB: &str = "lanes.writer_dirty";
 
@@ -129,14 +131,58 @@ pub fn preflight(resolved: &ResolvedWriterDirty, paths: &[String]) -> Preflight 
     }
 }
 
+/// The exact remedy for a worktree another lane holds or leaves unsettled.
+/// One projection shared by the submission preflight and the run diagnostics:
+/// it names the holder and the command that settles it, and never advises
+/// committing or preserving another attempt's edits.
+/// Spec: docs/specs/run-launch.md#writer-binding
+pub fn held_writer_next(holder: Option<AttemptId>) -> String {
+    match holder {
+        Some(holder) => format!(
+            "reconcile the holding attempt with `provenant reconcile {holder}` before retrying writer binding"
+        ),
+        None => "wait for the current writer or lock holder to finish, then retry".to_owned(),
+    }
+}
+
 /// A worktree another lane holds is never adopted: committing or moving that
 /// lane's uncommitted work would cross boundary 2. This refusal is
-/// unconditional and does not depend on `lanes.writer_dirty`.
-pub fn held_refusal(lanes: &[String], path: &str) -> String {
+/// unconditional and does not depend on `lanes.writer_dirty`. The detail
+/// carries the exact remedy too, because a refused node has no separate next
+/// step of its own.
+pub fn held_refusal(lanes: &[String], path: &str, holder: Option<AttemptId>) -> String {
     format!(
-        "worktree {path} is in use by {}; refusing to adopt another lane's uncommitted work",
-        lanes.join(", ")
+        "worktree {path} is in use by {}; refusing to adopt another lane's uncommitted work; {}",
+        lanes.join(", "),
+        held_writer_next(holder)
     )
+}
+
+/// An operator-facing submission refusal: the detail recorded on the node and
+/// the next step recorded on the refusal notice. A held checkout settles its
+/// holder; an unheld dirty tree is the operator's own to preserve or commit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WriterRefusal {
+    pub reason: String,
+    pub next: String,
+}
+
+impl WriterRefusal {
+    /// A worktree another lane holds or leaves unsettled.
+    pub fn held(lanes: &[String], path: &str, holder: Option<AttemptId>) -> Self {
+        Self {
+            reason: held_refusal(lanes, path, holder),
+            next: held_writer_next(holder),
+        }
+    }
+
+    /// An unheld dirty tree refused by `lanes.writer_dirty`.
+    pub fn dirty(reason: String) -> Self {
+        Self {
+            reason,
+            next: "commit or preserve the worktree changes before retrying".to_owned(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -175,11 +221,32 @@ mod tests {
     // Spec: docs/specs/run.md#writer-pin-and-re-pin
     #[test]
     fn a_held_worktree_is_never_adopted() {
-        let lanes = vec!["w3/other (attempt 4)".to_owned()];
-        let reason = held_refusal(&lanes, ".worktrees/writer");
-        assert!(reason.contains(".worktrees/writer"), "{reason}");
-        assert!(reason.contains("w3/other"), "{reason}");
-        assert!(reason.contains("another lane"), "{reason}");
+        let holder = AttemptId::from_bytes([53; 16]);
+        let lanes = vec![format!("w3/other (attempt {holder})")];
+        let refusal = WriterRefusal::held(&lanes, ".worktrees/writer", Some(holder));
+        assert!(refusal.reason.contains(".worktrees/writer"), "{refusal:?}");
+        assert!(refusal.reason.contains("w3/other"), "{refusal:?}");
+        assert!(refusal.reason.contains("another lane"), "{refusal:?}");
+        // The holder and the exact command reach both the node detail and the
+        // refusal notice; committing or preserving the holder's edits is never
+        // offered. Spec: docs/specs/run-launch.md#writer-binding
+        assert!(refusal.reason.contains(&holder.to_string()), "{refusal:?}");
+        assert!(refusal.next.contains(&holder.to_string()), "{refusal:?}");
+        assert!(refusal.next.contains("provenant reconcile"), "{refusal:?}");
+        assert!(
+            !refusal.reason.contains("commit or preserve"),
+            "{refusal:?}"
+        );
+        assert!(!refusal.next.contains("commit or preserve"), "{refusal:?}");
+    }
+
+    // Spec: docs/specs/run-launch.md#writer-binding
+    #[test]
+    fn a_live_holder_without_an_attempt_gets_a_wait_step() {
+        let next = held_writer_next(None);
+        assert!(next.contains("wait for"), "{next}");
+        assert!(!next.contains("commit"), "{next}");
+        assert!(!next.contains("preserve"), "{next}");
     }
 
     // Spec: docs/specs/run.md#writer-pin-and-re-pin

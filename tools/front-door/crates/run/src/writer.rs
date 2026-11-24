@@ -468,6 +468,23 @@ impl WriterLaunch {
         Ok(lanes)
     }
 
+    /// The single reservation attempt attached to this worktree, when one is
+    /// recorded. A live holder with no reservation, or several reservations,
+    /// has no unambiguous attempt to name in a refusal. Observation only.
+    pub fn attached_holder(&self) -> Result<Option<provenant_core::AttemptId>> {
+        let Some((slot, _)) = &self.custody else {
+            return Ok(None);
+        };
+        let listing = provenant_supervisor::custody::list_writer_reservations_in_slot(slot)
+            .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?;
+        let mut attempts = listing
+            .reservations
+            .iter()
+            .map(|reservation| reservation.scope.attempt);
+        let holder = attempts.next();
+        Ok(holder.filter(|_| attempts.next().is_none()))
+    }
+
     pub(crate) fn other_holders_live(&self, attempt: Option<&Directory>) -> Result<bool> {
         let Some((slot, _)) = &self.custody else {
             return Ok(false);

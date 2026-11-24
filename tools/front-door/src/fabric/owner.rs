@@ -272,7 +272,7 @@ impl BoundGraphOwner<'_> {
         graph_id: &str,
         node_id: &str,
         worktree: &str,
-        reason: &str,
+        refusal: &provenant_run::writer_dirty::WriterRefusal,
     ) -> Result<(), FacadeError> {
         let key = provenant_fabric_runtime::graph::AttemptKey {
             extra: Default::default(),
@@ -314,12 +314,12 @@ impl BoundGraphOwner<'_> {
         let error = FacadeError::DispatchRefused {
             fact: None,
             disk: None,
-            reason: reason.to_owned(),
+            reason: refusal.reason.clone(),
         };
         let diagnostic = provenant_records::diagnostic::Diagnostic::new("WRITER_SCOPE")
             .category("refused")
-            .detail(reason)
-            .next("commit or preserve the worktree changes before retrying");
+            .detail(refusal.reason.clone())
+            .next(refusal.next.clone());
         self.retain_graph_refusal(&scope, &error, diagnostic)
     }
 
