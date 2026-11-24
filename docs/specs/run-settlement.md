@@ -181,19 +181,22 @@ handoffs and never count as negative provider-quality evidence.
 
 The handoff is the closed `handoff` fence that ends the answer, which always wins. When an answer
 contains several blocks, the last one that ends the answer is authoritative: earlier blocks and the
-prose between them are ordinary answer text. Without one, a `json` fence that ends the answer and
-decodes as a handoff is accepted with a warning naming the fallback. Adjacent repeated blocks are
-one declaration (identical copies accepted, differing copies settle on the last), each with a
-warning. When exactly one block closes and only ordinary prose follows it (#3928), the declaration
-still settles and the output-order tolerance is recorded in the terminal reason. Prose after a
-repeated last block, a fence or near-miss `handoff` opener after the declaration, and a truncated
-or invalid block still fail, with a diagnostic naming the recovery ("end the answer with one
-handoff; retry the node"). With turn boundaries, a turn that ran tool work keeps the strict rule
+prose between them are ordinary answer text. Without one, a `json` fence that decodes as a handoff
+and is followed only by ordinary prose is accepted with a warning naming the fallback; a
+verdict-shaped line, a second fence, or a fence nested in a larger block leaves it ordinary content
+(#3941). Adjacent repeated blocks are one declaration (identical copies accepted, differing copies
+settle on the last), each with a warning. When exactly one block closes and only ordinary prose
+follows it (#3928) — including a line over 12 KiB or one that merely mentions a verdict (#3941) —
+the declaration still settles and the output-order tolerance is recorded in the terminal reason.
+Prose after a repeated last block, a fence or near-miss `handoff` opener after the declaration, and
+a truncated or invalid block still fail, with a diagnostic naming the recovery ("end the answer with
+one handoff; retry the node"). With turn boundaries, a turn that ran tool work keeps the strict rule
 until turn ends order tool work against the handoff (#3938). A review's final handoff may be
 followed by exactly one recognised standalone verdict and nothing else; a prose line on either side
 of that verdict keeps the strict rule, and an accepted order tolerance is recorded in the terminal
-reason. The two tolerances are mutually exclusive and diagnostic only: neither changes the
-handoff's fields or authority.
+reason. The trailing-verdict and trailing-prose tolerances are mutually exclusive and diagnostic
+only: neither changes the handoff's fields or authority; a json fallback warning may accompany the
+trailing-prose note.
 - Why: providers drift to `json` fences and repeat blocks, a late background task can append prose
   and a corrected handoff, and a finished writer that keeps explaining its work after one complete
   declaration must not be failed; refusing a complete declaration for its label or trailing prose
