@@ -21,6 +21,38 @@ fn tier_override_preserves_leaf_family_constraints() {
 }
 
 #[test]
+// Spec: docs/specs/run-launch.md#inputs-and-resources
+fn pinned_review_prompt_says_the_subject_is_checked_out_in_the_working_directory() {
+    use provenant_fabric_runtime::graph::{GraphNode, SourceBinding};
+    let head = "1111111111111111111111111111111111111111";
+    let mut node: GraphNode = serde_json::from_value(json!({
+        "id": "review", "access": "read_only", "prompt": "review the subject",
+        "review_behaviour": "lens",
+    }))
+    .unwrap();
+    super::bind_submission_subject(&mut node, head);
+    assert_eq!(
+        node.source,
+        Some(SourceBinding::Commit {
+            commit: head.into()
+        })
+    );
+    assert!(
+        node.prompt.contains(&format!(
+            "already checked out at {head} in your working directory"
+        )),
+        "{}",
+        node.prompt
+    );
+    assert!(
+        node.prompt
+            .contains("Do not check out, switch or reset any other checkout"),
+        "{}",
+        node.prompt
+    );
+}
+
+#[test]
 fn an_exact_model_route_tier_lowers_to_an_adapter_and_model_route() {
     use provenant_fabric_runtime::graph::GraphNode;
     for tier in [
