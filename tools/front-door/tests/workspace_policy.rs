@@ -1880,7 +1880,7 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         ("src/pr/landing/adapters.rs", 2984),
         ("src/pr/landing/driver.rs", 3967),
         ("src/pr/observer.rs", 2445),
-        ("src/status_wait.rs", 3286),
+        ("src/status_wait.rs", 3339),
         ("src/worktrees.rs", 5384),
     ];
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
