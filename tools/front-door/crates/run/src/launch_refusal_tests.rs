@@ -253,3 +253,78 @@ fn git_setup_preparation_failure_projects_its_reason_and_remedy_to_status()
     );
     Ok(())
 }
+
+/// The launch withdrawal maps a typed Git-setup preparation refusal to its own
+/// failure and note. Drive the production mapping rather than hand-building a
+/// terminal record, so reverting it cannot leave this green (#3931).
+#[test]
+fn git_setup_handoff_maps_to_git_setup_failure_and_remote_remedy()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    use provenant_records::run::PreparationFailure;
+
+    const MESSAGE: &str = "Git setup: no Git remote is declared and none can be inferred; remotes seen: [\"origin\", \"pr\"]; did you mean origin?";
+    let handoff = HandOff::TypedLocal {
+        message: MESSAGE.into(),
+        cause: TerminalCause::PreparationRefused,
+    };
+    let reason = format!("launch preparation failed: {MESSAGE}");
+    let (failure, note) = super::handoff_preparation(&handoff, &reason);
+    assert_eq!(failure, Some(PreparationFailure::GitSetup));
+    let note = note.ok_or("missing preparation note")?;
+    assert!(
+        note.contains("declare `ports.git.remote` or set the branch's upstream"),
+        "{note}"
+    );
+    // The status reason reads this same typed note and cause.
+    let state = AttemptState::Terminal {
+        extra: Default::default(),
+        terminal_cause: Some(TerminalCause::PreparationRefused),
+        terminal_note: Some(note),
+        stop: None,
+        outcome: Outcome::Rejected,
+        exit_code: None,
+        finished_at: provenant_core::WallTime::from_micros(1).unwrap(),
+        reason: Some(reason),
+    };
+    let (_, status_reason) = LaneRow::state_and_reason(&state);
+    let status_reason = status_reason.ok_or("missing status reason")?;
+    assert!(
+        status_reason.starts_with(TerminalCause::PreparationRefused.detail()),
+        "{status_reason}"
+    );
+    assert!(
+        status_reason.contains("no Git remote is declared"),
+        "{status_reason}"
+    );
+    assert!(
+        !status_reason.contains("provenant reconcile"),
+        "{status_reason}"
+    );
+
+    // Every other local refusal stays an adapter failure and owns its note;
+    // a boundary never establishes safe preparation for fallback.
+    let local = HandOff::Local("Git setup: some other failure".into());
+    let (failure, note) = super::handoff_preparation(
+        &local,
+        "launch preparation failed: Git setup: some other failure",
+    );
+    assert_eq!(failure, Some(PreparationFailure::AdapterUnavailable));
+    assert!(note.is_none());
+    let typed_other = HandOff::TypedLocal {
+        message: "writer lineage".into(),
+        cause: TerminalCause::HandoffRefused,
+    };
+    let (failure, _) =
+        super::handoff_preparation(&typed_other, "launch preparation failed: writer lineage");
+    assert_eq!(failure, Some(PreparationFailure::AdapterUnavailable));
+    let boundary = HandOff::Boundary {
+        message: "authority".into(),
+        class: provenant_records::diagnostic::BoundaryClass::Authority,
+        cause: None,
+    };
+    let (failure, note) =
+        super::handoff_preparation(&boundary, "launch preparation failed: authority");
+    assert_eq!(failure, None);
+    assert!(note.is_none());
+    Ok(())
+}

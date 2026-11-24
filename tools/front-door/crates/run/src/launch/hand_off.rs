@@ -848,6 +848,37 @@ mod tests {
         provenant_records::policy::Policy::default()
     }
 
+    /// The Git-setup refusal reaches hand_off as a RunError::Input produced by
+    /// the production ForgeContextError conversion. Its typed classification
+    /// must be chosen here, not inferred later from the host's message (#3931).
+    #[test]
+    fn git_setup_input_is_classified_as_a_typed_preparation_refusal() {
+        let error = RunError::from(provenant_config::ForgeContextError::NoRemote {
+            remotes: vec!["origin".into(), "pr".into()],
+            close: vec!["origin".into()],
+        });
+        let HandOff::TypedLocal { cause, message } =
+            super::typed_preparation(&test_policy(), "Git setup", &error)
+        else {
+            panic!("expected a typed local preparation refusal");
+        };
+        assert_eq!(cause, TerminalCause::PreparationRefused);
+        assert!(
+            message.starts_with("Git setup: no Git remote is declared"),
+            "{message}"
+        );
+        // A hard boundary fact keeps its own cause: only an untyped local
+        // refusal is upgraded to a preparation refusal.
+        let boundary = RunError::Input {
+            kind: crate::ErrorKind::WriterProjectMismatch,
+            message: "writer project mismatch".into(),
+        };
+        assert!(matches!(
+            super::typed_preparation(&test_policy(), "Git setup", &boundary),
+            HandOff::Boundary { .. }
+        ));
+    }
+
     #[test]
     fn custody_refusals_distinguish_authority_from_operational_failures() {
         use crate::writer::WriterCustodyError;

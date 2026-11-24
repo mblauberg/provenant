@@ -912,6 +912,35 @@ enum HandOff {
     /// The guardian may have received the launch.
     Uncertain(String),
 }
+
+/// The typed pre-provider evidence a handoff carries into withdrawal. A
+/// Git-setup preparation refusal is local setup, not an adapter failure: its
+/// typed failure names the step to repair and its note names the remedy implied
+/// by the host's bounded reason. Other local refusals keep the adapter-failure
+/// failure fact and own their note through the refusal kind.
+fn handoff_preparation(
+    error: &HandOff,
+    reason: &str,
+) -> (
+    Option<provenant_records::run::PreparationFailure>,
+    Option<String>,
+) {
+    match error {
+        HandOff::TypedLocal {
+            cause: TerminalCause::PreparationRefused,
+            ..
+        } => (
+            Some(provenant_records::run::PreparationFailure::GitSetup),
+            Some(TerminalCause::preparation_note(reason)),
+        ),
+        HandOff::Local(_) | HandOff::TypedLocal { .. } => (
+            Some(provenant_records::run::PreparationFailure::AdapterUnavailable),
+            None,
+        ),
+        _ => (None, None),
+    }
+}
+
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub enum Started {
     Launched(AttemptId),
@@ -2512,25 +2541,6 @@ impl RunStore {
                         // local lease has been withdrawn. Preserve that typed
                         // pre-provider failure for graph fallback; a boundary or
                         // retained import does not establish safe preparation.
-                        // A local preparation refusal is not an adapter failure:
-                        // its typed failure names the step to repair.
-                        let preparation_refused = matches!(
-                            &error,
-                            HandOff::TypedLocal {
-                                cause: TerminalCause::PreparationRefused,
-                                ..
-                            }
-                        );
-                        let preparation_failure = match &error {
-                            HandOff::TypedLocal {
-                                cause: TerminalCause::PreparationRefused,
-                                ..
-                            } => Some(provenant_records::run::PreparationFailure::GitSetup),
-                            HandOff::Local(_) | HandOff::TypedLocal { .. } => {
-                                Some(provenant_records::run::PreparationFailure::AdapterUnavailable)
-                            }
-                            _ => None,
-                        };
                         let terminal_cause = match &error {
                             HandOff::TypedLocal { cause, .. } => Some(*cause),
                             HandOff::Boundary { cause, .. } => {
@@ -2542,7 +2552,7 @@ impl RunStore {
                             }
                             _ => Some(TerminalCause::HandoffRefused),
                         };
-                        let (reason, kind) = match error {
+                        let (reason, kind) = match &error {
                             HandOff::Busy => ("worktree is busy".into(), RefusalKind::WorktreeBusy),
                             HandOff::Local(error) | HandOff::TypedLocal { message: error, .. } => (
                                 format!("launch preparation failed: {error}"),
@@ -2550,11 +2560,11 @@ impl RunStore {
                             ),
                             HandOff::Boundary { message, class, .. } => (
                                 format!("launch preparation failed: {message}"),
-                                RefusalKind::HandoffBoundary(class),
+                                RefusalKind::HandoffBoundary(*class),
                             ),
                             HandOff::Resource { message, fact } => (
                                 format!("launch preparation failed: {message}"),
-                                RefusalKind::HandoffResource(fact),
+                                RefusalKind::HandoffResource(fact.clone()),
                             ),
                             HandOff::RetainedImport { fence, worktree } => (
                                 RunError::RetainedWriterImport {
@@ -2563,8 +2573,8 @@ impl RunStore {
                                 }
                                 .to_string(),
                                 RefusalKind::RetainedImport {
-                                    fence: *fence,
-                                    worktree,
+                                    fence: (**fence).clone(),
+                                    worktree: worktree.clone(),
                                 },
                             ),
                             _ => unreachable!(),
@@ -2582,6 +2592,8 @@ impl RunStore {
                         } else {
                             (Outcome::Rejected, reason.clone())
                         };
+                        let (preparation_failure, preparation_note) =
+                            handoff_preparation(&error, &reason);
                         match self.withdraw_with_preparation_failure(
                             id,
                             crate::store::Withdrawal {
@@ -2593,11 +2605,8 @@ impl RunStore {
                                 finished_at: now()?,
                                 failure: preparation_failure.filter(|_| !cancelled),
                                 terminal_cause,
-                                terminal_note: if preparation_refused {
-                                    Some(TerminalCause::preparation_note(&reason))
-                                } else {
-                                    kind.terminal_note()
-                                },
+                                terminal_note: preparation_note
+                                    .unwrap_or_else(|| kind.terminal_note()),
                             },
                             call,
                         ) {
