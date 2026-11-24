@@ -136,6 +136,6 @@ pub fn held_writer_next(holder: Option<AttemptId>, key: Option<&WorkKey>) -> Str
                 "reconcile the holding attempt {holder} with `provenant reconcile` before retrying writer binding"
             ),
         },
-        None => "wait for the current writer or lock holder to finish, then retry".to_owned(),
+        None => "wait for the current writer to finish, or reconcile the holding attempt with `provenant reconcile` before retrying writer binding".to_owned(),
     }
 }
