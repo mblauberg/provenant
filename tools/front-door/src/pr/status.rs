@@ -726,17 +726,8 @@ fn parse_required_checks(
         }
     };
     let mut needs = Vec::new();
-    // A disabled classic protection, or one without a required-checks block,
-    // requires nothing; a ruleset may still require checks below.
-    if let Some(checks) = protection
-        .filter(|protection| {
-            protection
-                .get("enabled")
-                .and_then(serde_json::Value::as_bool)
-                != Some(false)
-        })
-        .and_then(|protection| protection.get("required_status_checks"))
-    {
+    if let Some(protection) = protection {
+        let checks = protection.get("required_status_checks")?;
         if !checks.is_null() {
             if let Some(listed) = checks.get("checks") {
                 for check in listed.as_array()? {
@@ -968,13 +959,16 @@ fn observed_policy<F: provenant_config::Forge, C: super::observer::Clock>(
     };
     // The branch read carries its classic protection's required checks, so no
     // admin-only `/protection` read is needed; an unprotected branch has none.
-    let protection = if protected {
-        match info.get("protection") {
-            Some(value) => Some(value.clone()),
-            None => return Requirement::Unreadable,
+    // A branch protected only by a ruleset reports `protected` with its classic
+    // protection disabled; that protection requires nothing and the ruleset read
+    // below supplies the required set.
+    let protection = match info.get("protection") {
+        _ if !protected => None,
+        Some(value) if value.get("enabled").and_then(serde_json::Value::as_bool) == Some(false) => {
+            None
         }
-    } else {
-        None
+        Some(value) => Some(value.clone()),
+        None => return Requirement::Unreadable,
     };
     let Ok(rules) = observer.resource(
         &format!("rules/branches/{branch}?per_page=100"),
