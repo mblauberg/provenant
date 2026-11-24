@@ -200,6 +200,24 @@ handoff's fields or authority.
   loses finished work, while the warning and the named recovery keep the drift visible.
 - Owner: `crates/records/src/handoff.rs`, `crates/run/src/completion.rs`
 
+The `<attempt>/handoff.json` snapshot slot is owned by settlement, not the lane. Settlement publishes
+the snapshot derived from captured output together with `handoff.settlement-seal`, a digest of those
+exact bytes; only a snapshot whose digest still matches that tag is trusted as a sealed result. A
+file found in the slot at capture that has no matching tag was written by the provider, commonly
+because its scratch and `$TMPDIR` live under the attempt directory. Settlement keeps those bytes as
+`handoff.provider-written.json`, warns that the file was provider-written, clears the slot and seals
+the snapshot from output: a complete answer still settles rather than retrying forever (#3844). An
+unreadable file that does carry the tag is a malformed handoff: settlement seals `handoff_malformed`
+with its diagnostic and keeps the raw file, instead of retrying an unchanging failure. The launch
+prompt tells the lane that the harness writes those records. Provider scratch and `$TMPDIR` remain
+under the attempt directory; ownership, not location, is what keeps a lane's file out of the sealed
+record.
+- Why: a lane can discover supervisor records from its scratch and write a bare handoff object that
+  fails the sealed-envelope decode; trusting it, or retrying a decode that can never change, strands
+  a finished attempt. Keeping the foreign bytes as evidence preserves what happened and the digest
+  tag distinguishes the host's own snapshot on a settlement resume.
+- Owner: `crates/run/src/completion.rs`, `crates/run/src/launch.rs`
+
 `crates/records/src/handoff.rs` owns the fields, decoding and bounds. A valid JSON object keeps
 independently valid and forward fields and drops an invalid declared field whole; the diagnostic
 lists dropped paths. Retained fields are evidence for the chair and never turn a malformed
