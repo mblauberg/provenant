@@ -139,6 +139,10 @@ pub struct RouteDiagnostics {
     pub pacing_reserve_fact: Option<crate::diagnostic::ResourceFact>,
     pub account_load: Option<AccountLoad>,
     pub account_exclusions: Vec<String>,
+    /// The recorded offer mismatch that refused the selected route, projected
+    /// from the same offer evidence resolve judged so launch says the same.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offer_mismatch: Option<crate::run::AccountOfferMismatch>,
     /// Warnings produced while preparing this exact route for launch.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub launch_warnings: Vec<String>,

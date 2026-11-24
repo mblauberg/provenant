@@ -2289,20 +2289,23 @@ fn unoffered_model(
 }
 
 /// The typed lane refusal for an account whose recorded offers exclude the
-/// route's model. Shared by the candidate gate and its focused test.
+/// route's model. The fact comes from resolve's own offer evidence, so resolve
+/// and preparation name the same account, offers and age.
 fn offer_mismatch_skip(
     route: &ResolvedRoute,
-    offered_models: Vec<String>,
-    age_seconds: u64,
+    mismatch: provenant_records::run::AccountOfferMismatch,
 ) -> SkippedRoute {
     let label = format!("{}/{}", route.adapter, route.model);
     let mut skipped = skip(&label, SkipKind::Refused, "");
     skipped.set_cause(provenant_records::RouteExclusionReason::AccountDoesNotOffer);
     skipped.set_offer_mismatch(provenant_records::run::AccountOfferMismatch {
-        account: route.account_key.clone().unwrap_or_default(),
+        account: route
+            .account_key
+            .clone()
+            .unwrap_or_else(|| mismatch.account.clone()),
         model: label,
-        offered_models,
-        age_seconds,
+        offered_models: mismatch.offered_models,
+        age_seconds: mismatch.age_seconds,
     });
     skipped
 }
@@ -2425,8 +2428,12 @@ mod stale_readiness_tests {
         .unwrap();
         let skipped = offer_mismatch_skip(
             &route,
-            vec!["Gemini 3.8 Flash".into(), "Claude Sonnet 4.6".into()],
-            1800,
+            provenant_records::run::AccountOfferMismatch {
+                account: route.account_key.clone().unwrap_or_default(),
+                model: "agy/gemini-4-hydrogen".into(),
+                offered_models: vec!["Gemini 3.8 Flash".into(), "Claude Sonnet 4.6".into()],
+                age_seconds: 1800,
+            },
         );
         assert_eq!(skipped.kind, SkipKind::Refused);
         assert_eq!(
@@ -3941,6 +3948,23 @@ pub(super) fn prepare_candidates_inner(
             reasons.push(skip(&label, SkipKind::Refused, "read-only model policy"));
             continue;
         }
+        // Resolve's own typed fact wins here: it names the offers and age from
+        // the source resolve judged, which may be a fresh snapshot when the
+        // availability probe has not run. The availability-only check below is
+        // for a route resolve did not classify as an offer mismatch.
+        if let provenant_records::RouteReadiness::Unavailable {
+            reason: provenant_records::RouteExclusionReason::AccountDoesNotOffer,
+            ..
+        } = &route.readiness
+            && let Some(mismatch) = route.diagnostics.offer_mismatch.clone()
+        {
+            reason_boundaries.insert(
+                reasons.len(),
+                provenant_records::diagnostic::BoundaryClass::Authority,
+            );
+            reasons.push(offer_mismatch_skip(&route, mismatch));
+            continue;
+        }
         if let Some((offered, age_seconds)) =
             unoffered_model(&availability, &route, clock.unix_seconds())
         {
@@ -3948,7 +3972,15 @@ pub(super) fn prepare_candidates_inner(
                 reasons.len(),
                 provenant_records::diagnostic::BoundaryClass::Authority,
             );
-            reasons.push(offer_mismatch_skip(&route, offered, age_seconds));
+            reasons.push(offer_mismatch_skip(
+                &route,
+                provenant_records::run::AccountOfferMismatch {
+                    account: route.account_key.clone().unwrap_or_default(),
+                    model: format!("{}/{}", route.adapter, route.model),
+                    offered_models: offered,
+                    age_seconds,
+                },
+            ));
             continue;
         }
         let Some(registration) = provider_registry

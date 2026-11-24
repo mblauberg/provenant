@@ -838,6 +838,189 @@ fn known_quota_offers_withhold_an_unoffered_agy_account_unpinned()
     );
     assert!(exclusions.contains("Gemini 3.8 Flash"), "{exclusions}");
     assert!(exclusions.contains("provenant quota tick"), "{exclusions}");
+    let fact = pinned
+        .diagnostics
+        .offer_mismatch
+        .as_ref()
+        .expect("resolve must carry the typed offer fact for launch");
+    assert_eq!(fact.account, "isolated-agy");
+    assert_eq!(fact.model, "agy/gemini-4-neon");
+    assert!(fact.offered_models.iter().any(|m| m == "Gemini 3.8 Flash"));
+    assert_eq!(
+        fact.age_seconds, 20,
+        "snapshot fallback must carry its own age"
+    );
+    Ok(())
+}
+
+// Spec: docs/specs/routing.md#provider-model-discovery
+#[test]
+fn usage_probe_offers_take_precedence_over_quota_snapshot_offers()
+-> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let availability = [provenant_providers::AvailabilityRecord {
+        observed_models: vec!["Gemini 4 Neon".into()],
+        ..agy_account("probe-agy")
+    }];
+    let scope = provenant_quota::AccountScope {
+        extra: Default::default(),
+        adapter: "agy".into(),
+        account_key: "probe-agy".into(),
+        label: "probe-agy".into(),
+    };
+    let mut record = provenant_quota::AccountRecord::empty(scope.clone());
+    record.revision = 1;
+    record.snapshot = Some(provenant_quota::QuotaSnapshot {
+        extra: Default::default(),
+        schema_version: 1,
+        account: scope,
+        revision: 1,
+        status: provenant_quota::QuotaStatus::Available,
+        observed_unix_seconds: 80,
+        source_ref: "fixture".into(),
+        authority_ref: None,
+        details: Some(provenant_quota::QuotaDetails {
+            extra: Default::default(),
+            models: vec!["Gemini 3.8 Flash".into()],
+            ..Default::default()
+        }),
+        windows: Vec::new(),
+    });
+    let accounts = [record];
+    let access = readiness_access();
+    let ctx = RoutingContext {
+        availability: &availability,
+        accounts: &accounts,
+        access: &access,
+        ..context(&catalogue, &config, now()?)
+    };
+    let query = request("agy/gemini-4-neon")?;
+    let route = resolve_for_account_with_seed(&query, &ctx, Some("probe-agy"), "probe-first", 0)?;
+    assert!(
+        matches!(route.readiness, RouteReadiness::Ready { .. }),
+        "a fresh usage probe that serves the model must win over an older snapshot: {:?}",
+        route.readiness
+    );
+    assert!(
+        route.diagnostics.offer_mismatch.is_none(),
+        "no refusal may be built from superseded snapshot offers"
+    );
+    Ok(())
+}
+
+// Spec: docs/specs/routing.md#provider-model-discovery
+#[test]
+fn stale_availability_does_not_refuse_on_snapshot_offers() -> Result<(), Box<dyn std::error::Error>>
+{
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let availability = [provenant_providers::AvailabilityRecord {
+        expires_unix_seconds: 60,
+        ..agy_account("stale-agy")
+    }];
+    let scope = provenant_quota::AccountScope {
+        extra: Default::default(),
+        adapter: "agy".into(),
+        account_key: "stale-agy".into(),
+        label: "stale-agy".into(),
+    };
+    let mut record = provenant_quota::AccountRecord::empty(scope.clone());
+    record.revision = 1;
+    record.snapshot = Some(provenant_quota::QuotaSnapshot {
+        extra: Default::default(),
+        schema_version: 1,
+        account: scope,
+        revision: 1,
+        status: provenant_quota::QuotaStatus::Available,
+        observed_unix_seconds: 80,
+        source_ref: "fixture".into(),
+        authority_ref: None,
+        details: Some(provenant_quota::QuotaDetails {
+            extra: Default::default(),
+            models: vec!["Gemini 3.8 Flash".into()],
+            ..Default::default()
+        }),
+        windows: Vec::new(),
+    });
+    let accounts = [record];
+    let access = readiness_access();
+    let ctx = RoutingContext {
+        availability: &availability,
+        accounts: &accounts,
+        access: &access,
+        ..context(&catalogue, &config, now()?)
+    };
+    let query = request("agy/gemini-4-neon")?;
+    let route = resolve_for_account_with_seed(&query, &ctx, Some("stale-agy"), "stale", 0)?;
+    assert!(
+        !matches!(
+            route.readiness,
+            RouteReadiness::Unavailable {
+                reason: RouteExclusionReason::AccountDoesNotOffer,
+                ..
+            }
+        ),
+        "stale availability keeps its re-probe path: {:?}",
+        route.readiness
+    );
+    assert!(route.diagnostics.offer_mismatch.is_none());
+    Ok(())
+}
+
+// Spec: docs/specs/routing.md#provider-model-discovery
+#[test]
+fn an_expired_snapshot_cannot_refuse_on_its_offers() -> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let mut config = RoutingConfig::default();
+    config.freshness.snapshot_seconds = 10;
+    let availability = [agy_account("old-snapshot-agy")];
+    let scope = provenant_quota::AccountScope {
+        extra: Default::default(),
+        adapter: "agy".into(),
+        account_key: "old-snapshot-agy".into(),
+        label: "old-snapshot-agy".into(),
+    };
+    let mut record = provenant_quota::AccountRecord::empty(scope.clone());
+    record.revision = 1;
+    record.snapshot = Some(provenant_quota::QuotaSnapshot {
+        extra: Default::default(),
+        schema_version: 1,
+        account: scope,
+        revision: 1,
+        status: provenant_quota::QuotaStatus::Available,
+        observed_unix_seconds: 80,
+        source_ref: "fixture".into(),
+        authority_ref: None,
+        details: Some(provenant_quota::QuotaDetails {
+            extra: Default::default(),
+            models: vec!["Gemini 3.8 Flash".into()],
+            ..Default::default()
+        }),
+        windows: Vec::new(),
+    });
+    let accounts = [record];
+    let access = readiness_access();
+    let ctx = RoutingContext {
+        availability: &availability,
+        accounts: &accounts,
+        access: &access,
+        ..context(&catalogue, &config, now()?)
+    };
+    let query = request("agy/gemini-4-neon")?;
+    let route =
+        resolve_for_account_with_seed(&query, &ctx, Some("old-snapshot-agy"), "old-snapshot", 0)?;
+    assert!(
+        !matches!(
+            route.readiness,
+            RouteReadiness::Unavailable {
+                reason: RouteExclusionReason::AccountDoesNotOffer,
+                ..
+            }
+        ),
+        "an expired snapshot is not refusal evidence: {:?}",
+        route.readiness
+    );
     Ok(())
 }
 

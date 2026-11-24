@@ -418,8 +418,9 @@ impl RouteExclusionReason {
             .next(next)
     }
 
-    /// Whether persisted account evidence (mismatch, refusal or malformed
-    /// records) excluded the route, as opposed to readiness, access or pacing.
+    /// Whether persisted account evidence (mismatch, refusal, malformed
+    /// records or recorded offers) excluded the route, as opposed to
+    /// readiness, access or pacing.
     pub fn is_account_block(&self) -> bool {
         matches!(
             self,
@@ -427,6 +428,18 @@ impl RouteExclusionReason {
                 | Self::FreeTierRefused
                 | Self::ProviderRefused
                 | Self::InvalidAccountEvidence
+                | Self::AccountDoesNotOffer
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    // Spec: docs/specs/routing.md#provider-model-discovery
+    fn recorded_offers_are_persisted_account_evidence() {
+        assert!(RouteExclusionReason::AccountDoesNotOffer.is_account_block());
     }
 }

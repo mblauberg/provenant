@@ -20,7 +20,8 @@ fn launch_prompt_refuses_invalid_input_before_account_resolution()
             base_ref: None,
             profile: Default::default(),
             prompt_digest: provenant_records::CanonicalV1::file_digest(full.as_bytes()),
-            route: run::RequestedRoute::Model { required_family: None,
+            route: run::RequestedRoute::Model {
+                required_family: None,
                 extra: Default::default(),
                 provider: adapter.into(),
                 model: format!("{adapter}/fixture-model"),
@@ -367,7 +368,7 @@ fn registry_only_provider_resolves_prepares_and_reports_quota()
         .ok_or("fixture AdapterSpec is missing")?;
     assert!(spec.local_login);
     assert_eq!(spec.local_account, ("fixture", "work"));
-    registry_provider_resolves_prepares_and_reports_quota("fixture-provider", "work", false)
+    registry_provider_resolves_prepares_and_reports_quota("fixture-provider", "work", false, false)
 }
 
 #[test]
@@ -392,7 +393,11 @@ fn registry_spec_drives_local_provider_preparation_and_quota()
     assert!(!assess("local").constrained);
     let registered = assess("registered");
     assert!(!registered.constrained);
-    assert!(registered.detail.contains("estimated cycle: calendar month UTC"));
+    assert!(
+        registered
+            .detail
+            .contains("estimated cycle: calendar month UTC")
+    );
     assert!(registered.detail.contains("usage source:"));
     let scope = provenant_quota::AccountScope {
         extra: Default::default(),
@@ -438,14 +443,24 @@ fn registry_spec_drives_local_provider_preparation_and_quota()
         .expect("monthly assessment")
         .constrained
     );
-    registry_provider_resolves_prepares_and_reports_quota("cursor", "local", false)
+    registry_provider_resolves_prepares_and_reports_quota("cursor", "local", false, false)
+}
+
+#[test]
+// Spec: docs/specs/routing.md#provider-model-discovery
+fn snapshot_only_offers_reach_the_lane_refusal() -> Result<(), Box<dyn std::error::Error>> {
+    // The usage probe records no models; only the fresh quota snapshot says
+    // which models this pinned account offers. Resolve judges that snapshot and
+    // preparation must refuse with the same typed fact, offers and age.
+    registry_provider_resolves_prepares_and_reports_quota("agy", "work", false, true)
 }
 
 #[test]
 // Spec: docs/specs/routing.md#accounts-and-credentials
-fn unknown_identity_policy_reaches_provider_preparation() -> Result<(), Box<dyn std::error::Error>> {
+fn unknown_identity_policy_reaches_provider_preparation() -> Result<(), Box<dyn std::error::Error>>
+{
     // Keep monthly eligibility out of this identity-policy fixture.
-    registry_provider_resolves_prepares_and_reports_quota("fixture-provider", "work", true)
+    registry_provider_resolves_prepares_and_reports_quota("fixture-provider", "work", true, false)
 }
 
 // Spec: docs/specs/routing.md#monthly-allowance-ledger
@@ -645,17 +660,31 @@ fn local_login_preparation_booking_survives_ordinary_quota_tick()
     let retained: provenant_quota::AccountRecord =
         serde_json::from_slice(&std::fs::read(&quota_record)?)?;
     assert_eq!(retained.allowance.launches, 1);
-    assert!(retained.snapshot.is_none(), "quota observations must be dropped");
+    assert!(
+        retained.snapshot.is_none(),
+        "quota observations must be dropped"
+    );
     let model = provenant_routing::ModelId::parse("cursor/composer-2.5")?;
     let catalogue = provenant_routing::Catalogue::bundled()?;
     let pacing = provenant_routing::RoutingConfig::default();
     let observation = provenant_routing::QuotaObservation::from_record(model.clone(), &retained, 0);
     let assessment = provenant_routing::monthly_allowance_assessment(
-        &catalogue, &pacing, provenant_os::clock::SystemClock::new().wall_now()?,
-        &model, Some("local"), Some(&observation),
-    ).expect("local monthly assessment");
-    assert!(!assessment.constrained, "an inferred cycle must not hold a launch");
-    assert!(assessment.windows[0].estimated_basis_points >= 5100, "the retained booking must count against headroom");
+        &catalogue,
+        &pacing,
+        provenant_os::clock::SystemClock::new().wall_now()?,
+        &model,
+        Some("local"),
+        Some(&observation),
+    )
+    .expect("local monthly assessment");
+    assert!(
+        !assessment.constrained,
+        "an inferred cycle must not hold a launch"
+    );
+    assert!(
+        assessment.windows[0].estimated_basis_points >= 5100,
+        "the retained booking must count against headroom"
+    );
     assert!(assessment.detail.contains("estimated cycle:"));
     let second = prepare([2; 16], "local-pacing-second")?;
     assert_eq!(second.route.account_key.as_deref(), Some("local"));
@@ -678,10 +707,14 @@ fn registry_provider_resolves_prepares_and_reports_quota(
     adapter_name: &'static str,
     account_key: &'static str,
     unknown_identity: bool,
+    offer_mismatch: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use provenant_core::{AttemptId, CancelToken, Digest, OperationId};
     use provenant_os::exec::SystemExecutor;
-    use provenant_providers::{Adapter, Continuation, ExitObservation, LaunchSpec, PrepareInput, ProviderError, ProviderEvent, ProviderOutcome, RouteProvenance, StreamState, VerifiedLineage, };
+    use provenant_providers::{
+        Adapter, Continuation, ExitObservation, LaunchSpec, PrepareInput, ProviderError,
+        ProviderEvent, ProviderOutcome, RouteProvenance, StreamState, VerifiedLineage,
+    };
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 
     struct Fixture(&'static str);
@@ -785,7 +818,8 @@ fn registry_provider_resolves_prepares_and_reports_quota(
             plan: &provenant_quota::QuotaProbePlan,
             _: &provenant_quota::ProbeCapture,
         ) -> Result<provenant_quota::QuotaSnapshot, provenant_quota::QuotaError> {
-            Ok(provenant_quota::QuotaSnapshot { extra: Default::default(),
+            Ok(provenant_quota::QuotaSnapshot {
+                extra: Default::default(),
                 schema_version: 1,
                 account: plan.account.clone(),
                 revision: 0,
@@ -803,7 +837,8 @@ fn registry_provider_resolves_prepares_and_reports_quota(
         fn accounts(
             &self,
         ) -> Result<Vec<provenant_quota::AccountScope>, provenant_quota::QuotaError> {
-            Ok(vec![provenant_quota::AccountScope { extra: Default::default(),
+            Ok(vec![provenant_quota::AccountScope {
+                extra: Default::default(),
                 adapter: self.1.into(),
                 account_key: self.2.into(),
                 label: self.2.into(),
@@ -825,8 +860,11 @@ fn registry_provider_resolves_prepares_and_reports_quota(
     }
     static FIXTURE: Fixture = Fixture("fixture-provider");
     static LOCAL: Fixture = Fixture("cursor");
+    static AGY: Fixture = Fixture("agy");
     let adapter = if adapter_name == LOCAL.0 {
         &LOCAL
+    } else if adapter_name == AGY.0 {
+        &AGY
     } else {
         &FIXTURE
     };
@@ -881,6 +919,39 @@ fn registry_provider_resolves_prepares_and_reports_quota(
             .any(|row| row.account.adapter == adapter_name
                 && row.status == provenant_quota::QuotaStatus::Available)
     );
+    if offer_mismatch {
+        // The account's offers exist only in its quota snapshot; the usage
+        // probe will be cleared by `alter` below. This is the case where a
+        // launch refusal must carry resolve's recorded offers and their age.
+        let path = state
+            .join("quota")
+            .join(account_key)
+            .join(format!("{adapter_name}.json"));
+        let mut record: provenant_quota::AccountRecord =
+            serde_json::from_slice(&std::fs::read(&path)?)?;
+        let scope = record.account.clone();
+        let observed = record
+            .snapshot
+            .as_ref()
+            .map_or(0, |snapshot| snapshot.observed_unix_seconds);
+        record.snapshot = Some(provenant_quota::QuotaSnapshot {
+            extra: Default::default(),
+            schema_version: 1,
+            account: scope,
+            revision: record.revision,
+            status: provenant_quota::QuotaStatus::Available,
+            observed_unix_seconds: observed,
+            source_ref: "fixture".into(),
+            authority_ref: None,
+            details: Some(provenant_quota::QuotaDetails {
+                extra: Default::default(),
+                models: vec!["Gemini 3.8 Flash".into()],
+                ..Default::default()
+            }),
+            windows: Vec::new(),
+        });
+        std::fs::write(&path, serde_json::to_vec(&record)?)?;
+    }
     let utility =
         provenant_confinement::UtilityRuntime::new(&git, &git_home, roots.state.as_path())?;
     let cancel = CancelToken::new();
@@ -917,19 +988,24 @@ fn registry_provider_resolves_prepares_and_reports_quota(
             .create(path)?;
     }
     let prompt = "fixture prompt";
-    let model = if adapter_name == "cursor" {
+    let model = if offer_mismatch {
+        "agy/gemini-4-neon".to_owned()
+    } else if adapter_name == "cursor" {
         "cursor/grok-4.7".to_owned()
     } else {
         format!("{adapter_name}/test")
     };
     let readiness_dir = state.join("readiness").join(account_key);
     std::fs::create_dir_all(&readiness_dir)?;
-    let stale = provenant_quota::ReadinessFile { extra: Default::default(),
+    let stale = provenant_quota::ReadinessFile {
+        extra: Default::default(),
         schema_version: provenant_quota::READINESS_SCHEMA_VERSION,
         login: None,
-        records: vec![provenant_quota::RouteReadiness { extra: Default::default(),
+        records: vec![provenant_quota::RouteReadiness {
+            extra: Default::default(),
             schema_version: provenant_quota::READINESS_SCHEMA_VERSION,
-            scope: provenant_quota::ReadinessScope { extra: Default::default(),
+            scope: provenant_quota::ReadinessScope {
+                extra: Default::default(),
                 host: provenant_quota::LOCAL_HOST.into(),
                 adapter: adapter_name.into(),
                 account_key: account_key.into(),
@@ -959,7 +1035,8 @@ fn registry_provider_resolves_prepares_and_reports_quota(
         base_ref: None,
         profile: Default::default(),
         prompt_digest: provenant_records::CanonicalV1::file_digest(prompt.as_bytes()),
-        route: run::RequestedRoute::Model { required_family: None,
+        route: run::RequestedRoute::Model {
+            required_family: None,
             extra: Default::default(),
             provider: adapter_name.into(),
             model,
@@ -985,10 +1062,24 @@ fn registry_provider_resolves_prepares_and_reports_quota(
         repo_facts: Default::default(),
     };
     let locate = |name: &str| {
-        if name == adapter_name { Ok(executable.clone()) } else { Err("unavailable".into()) }
+        if name == adapter_name {
+            Ok(executable.clone())
+        } else {
+            Err("unavailable".into())
+        }
     };
     let alter = |records: &mut Vec<provenant_providers::AvailabilityRecord>| {
-        for record in records { record.account_key = None; }
+        if offer_mismatch {
+            // Force the snapshot-only path: the usage probe carries no offers,
+            // so resolve must fall back to the fresh snapshot written above.
+            for record in records {
+                record.observed_models.clear();
+            }
+        } else if unknown_identity {
+            for record in records {
+                record.account_key = None;
+            }
+        }
     };
     if unknown_identity {
         task.profile.policy_overrides.insert(
@@ -996,15 +1087,29 @@ fn registry_provider_resolves_prepares_and_reports_quota(
             provenant_records::policy::Strength::Refuse,
         );
         let result = super::preparation::prepare_candidates_inner(
-            &registry, &providers, &task, prompt, &paths, None, Some(&locate), None, None, None,
+            &registry,
+            &providers,
+            &task,
+            prompt,
+            &paths,
+            None,
+            Some(&locate),
+            None,
+            None,
+            None,
             Some(&alter),
         );
-        assert!(matches!(
-            result,
-            Err(super::preparation::PrepareError::Candidates { skipped_routes, .. })
-                if skipped_routes.iter().any(|route| route.cause == Some(provenant_records::RouteExclusionReason::UnknownAccount))
-        ), "strict unknown identity must refuse preparation for that reason");
-        task.profile.policy_overrides.remove("QUOTA_IDENTITY_UNKNOWN");
+        assert!(
+            matches!(
+                result,
+                Err(super::preparation::PrepareError::Candidates { skipped_routes, .. })
+                    if skipped_routes.iter().any(|route| route.cause == Some(provenant_records::RouteExclusionReason::UnknownAccount))
+            ),
+            "strict unknown identity must refuse preparation for that reason"
+        );
+        task.profile
+            .policy_overrides
+            .remove("QUOTA_IDENTITY_UNKNOWN");
     }
     let prepared = super::preparation::prepare_candidates_inner(
         &registry,
@@ -1017,17 +1122,58 @@ fn registry_provider_resolves_prepares_and_reports_quota(
         None,
         None,
         None,
-        if unknown_identity { Some(&alter) } else { None },
-    )?;
+        if unknown_identity || offer_mismatch {
+            Some(&alter)
+        } else {
+            None
+        },
+    );
+    if offer_mismatch {
+        // The lane refusal must carry resolve's own typed fact: the account,
+        // the recorded offers from the snapshot, and the observation age.
+        let Err(super::preparation::PrepareError::Candidates { skipped_routes, .. }) = prepared
+        else {
+            return Err("snapshot-only offer mismatch was not refused".into());
+        };
+        let skipped = skipped_routes
+            .iter()
+            .find(|route| {
+                route.cause == Some(provenant_records::RouteExclusionReason::AccountDoesNotOffer)
+            })
+            .ok_or("no AccountDoesNotOffer lane refusal")?;
+        let fact = skipped
+            .offer_mismatch
+            .as_ref()
+            .ok_or("lane refusal lost the typed offer fact")?;
+        assert_eq!(fact.account, account_key);
+        assert_eq!(fact.model, model);
+        assert!(
+            fact.offered_models
+                .iter()
+                .any(|offered| offered == "Gemini 3.8 Flash"),
+            "{fact:?}"
+        );
+        let text = skipped.describe();
+        // Resolve and preparation project the same typed fact into one detail.
+        let detail = fact.detail();
+        assert!(text.contains(detail.as_str()), "{text}");
+        assert!(text.contains("provenant quota tick"), "{text}");
+        return Ok(());
+    }
+    let prepared = prepared?;
     assert_eq!(prepared.route.provider.as_deref(), Some(adapter_name));
-    assert_eq!(prepared.route.account_key.as_deref(), (!unknown_identity).then_some(account_key));
+    assert_eq!(
+        prepared.route.account_key.as_deref(),
+        (!unknown_identity).then_some(account_key)
+    );
     assert!(!prepared.argv.is_empty());
-    assert!(unknown_identity ||
-        prepared
-            .route
-            .availability_warning
-            .as_deref()
-            .is_some_and(|v| v.contains("Stale"))
+    assert!(
+        unknown_identity
+            || prepared
+                .route
+                .availability_warning
+                .as_deref()
+                .is_some_and(|v| v.contains("Stale"))
     );
     Ok(())
 }
@@ -1247,7 +1393,10 @@ fn opencode_signout_expires_then_prepares_with_an_unverified_warning()
         let out = SystemExecutor::new(1)?.execute(options)?;
         assert_eq!(out.termination, Termination::Exit(0), "{out:?}");
         assert!(!out.timed_out, "{out:?}");
-        assert!(String::from_utf8_lossy(&out.stdout.bytes).contains("1 passed"), "{out:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stdout.bytes).contains("1 passed"),
+            "{out:?}"
+        );
         return Ok(());
     }
     let temp = tempfile::tempdir()?;
@@ -1292,7 +1441,10 @@ fn opencode_signout_expires_then_prepares_with_an_unverified_warning()
         label: "go".into(),
     };
     crate::quota::persist_preparation_login_failure(
-        &state, &account, provenant_quota::ReadinessReason::SignedOut, now,
+        &state,
+        &account,
+        provenant_quota::ReadinessReason::SignedOut,
+        now,
     )?;
     let readiness_path = state.join("readiness/go/opencode.json");
     let attempt_id = AttemptId::from_bytes([1; 16]);
@@ -1327,7 +1479,8 @@ fn opencode_signout_expires_then_prepares_with_an_unverified_warning()
         base_ref: None,
         profile: Default::default(),
         prompt_digest: provenant_records::CanonicalV1::file_digest(prompt.as_bytes()),
-        route: run::RequestedRoute::Model { required_family: None,
+        route: run::RequestedRoute::Model {
+            required_family: None,
             extra: Default::default(),
             provider: "opencode".into(),
             model: "opencode/opencode-go/deepseek-v4.1-flash".into(),
@@ -1352,21 +1505,23 @@ fn opencode_signout_expires_then_prepares_with_an_unverified_warning()
         cancel: Some(&cancel),
         repo_facts: Default::default(),
     };
-    let prepare = || prepare_with(
-        &registry,
-        &task,
-        prompt,
-        &paths,
-        None,
-        |name| {
-            if name == "opencode" {
-                Ok(executable.clone())
-            } else {
-                Err("fixture provider unavailable".into())
-            }
-        },
-        None,
-    );
+    let prepare = || {
+        prepare_with(
+            &registry,
+            &task,
+            prompt,
+            &paths,
+            None,
+            |name| {
+                if name == "opencode" {
+                    Ok(executable.clone())
+                } else {
+                    Err("fixture provider unavailable".into())
+                }
+            },
+            None,
+        )
+    };
     let refused = prepare().err().ok_or("fresh sign-out was accepted")?;
     assert!(matches!(
         refused,
@@ -1374,16 +1529,21 @@ fn opencode_signout_expires_then_prepares_with_an_unverified_warning()
             if skipped_routes.iter().any(|route| route.cause == Some(provenant_records::RouteExclusionReason::AuthRequired))
     ));
     // Advance the persisted observation beyond its interval without deleting it.
-    let mut readiness: provenant_quota::ReadinessFile = serde_json::from_slice(&std::fs::read(&readiness_path)?)?;
+    let mut readiness: provenant_quota::ReadinessFile =
+        serde_json::from_slice(&std::fs::read(&readiness_path)?)?;
     readiness.records[0].observed_unix_seconds = now - 301;
     readiness.records[0].expires_unix_seconds = now - 1;
     std::fs::write(&readiness_path, serde_json::to_vec(&readiness)?)?;
     let prepared = prepare()?;
     assert_eq!(prepared.route.provider.as_deref(), Some("opencode"));
     assert_eq!(prepared.route.account_key.as_deref(), Some("go"));
-    assert!(prepared.route.launch_warnings.iter().any(|warning| {
-        warning.contains("login status is unverified")
-    }));
+    assert!(
+        prepared
+            .route
+            .launch_warnings
+            .iter()
+            .any(|warning| { warning.contains("login status is unverified") })
+    );
     Ok(())
 }
 
@@ -1473,21 +1633,28 @@ fn prepare_with_partial_account_estimates(
     // Keep readiness positive so this invariant isolates advisory local usage
     // estimates from the independent account-login admission boundary.
     let readiness_root = state.join("readiness");
-    std::fs::DirBuilder::new().mode(0o700).create(&readiness_root)?;
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&readiness_root)?;
     for key in ["ready", "spent-a", "spent-b"] {
         let directory = readiness_root.join(key);
         std::fs::DirBuilder::new().mode(0o700).create(&directory)?;
         let readiness_path = directory.join("opencode.json");
-        let readiness = provenant_quota::ReadinessFile { extra: Default::default(),
+        let readiness = provenant_quota::ReadinessFile {
+            extra: Default::default(),
             schema_version: provenant_quota::READINESS_SCHEMA_VERSION,
             login: None,
-            records: vec![provenant_quota::RouteReadiness { extra: Default::default(),
+            records: vec![provenant_quota::RouteReadiness {
+                extra: Default::default(),
                 schema_version: provenant_quota::READINESS_SCHEMA_VERSION,
-                scope: provenant_quota::ReadinessScope { extra: Default::default(),
+                scope: provenant_quota::ReadinessScope {
+                    extra: Default::default(),
                     host: provenant_quota::LOCAL_HOST.into(),
                     adapter: "opencode".into(),
                     account_key: key.into(),
-                    route: provenant_quota::ReadinessRoute::from_text("opencode/opencode-go/deepseek-v4.1-flash"),
+                    route: provenant_quota::ReadinessRoute::from_text(
+                        "opencode/opencode-go/deepseek-v4.1-flash",
+                    ),
                 },
                 state: provenant_quota::ReadinessState::Ready,
                 reason: None,
@@ -1498,21 +1665,20 @@ fn prepare_with_partial_account_estimates(
             }],
         };
         std::fs::write(&readiness_path, serde_json::to_vec(&readiness)?)?;
-        std::fs::set_permissions(
-            &readiness_path,
-            std::fs::Permissions::from_mode(0o600),
-        )?;
+        std::fs::set_permissions(&readiness_path, std::fs::Permissions::from_mode(0o600))?;
     }
     let quota = state.join("quota");
     std::fs::DirBuilder::new().mode(0o700).create(&quota)?;
     for key in spent {
-        let account = provenant_quota::AccountScope { extra: Default::default(),
+        let account = provenant_quota::AccountScope {
+            extra: Default::default(),
             adapter: "opencode".into(),
             account_key: (*key).into(),
             label: (*key).into(),
         };
         let mut record = provenant_quota::AccountRecord::empty(account.clone());
-        record.snapshot = Some(provenant_quota::QuotaSnapshot { extra: Default::default(),
+        record.snapshot = Some(provenant_quota::QuotaSnapshot {
+            extra: Default::default(),
             schema_version: 1,
             account,
             revision: 0,
@@ -1528,7 +1694,8 @@ fn prepare_with_partial_account_estimates(
                 coverage: Some("partial".into()),
                 ..Default::default()
             }),
-            windows: vec![provenant_quota::QuotaWindow { extra: Default::default(),
+            windows: vec![provenant_quota::QuotaWindow {
+                extra: Default::default(),
                 pool: "five_hour".into(),
                 window_seconds: None,
                 used_basis_points: 10000,
@@ -1590,7 +1757,8 @@ fn prepare_with_partial_account_estimates(
         base_ref: None,
         profile: Default::default(),
         prompt_digest: provenant_records::CanonicalV1::file_digest(prompt.as_bytes()),
-        route: run::RequestedRoute::Model { required_family: None,
+        route: run::RequestedRoute::Model {
+            required_family: None,
             extra: Default::default(),
             provider: "opencode".into(),
             model: "opencode/opencode-go/deepseek-v4.1-flash".into(),
@@ -1663,16 +1831,17 @@ fn partial_account_estimates_allow_launch_without_swapping_a_pinned_account()
 #[test]
 fn spent_account_falls_back_to_another_account_of_the_same_model()
 -> Result<(), Box<dyn std::error::Error>> {
-    if rerun_in_clean_environment(
-        "spent_account_falls_back_to_another_account_of_the_same_model",
-    )? {
+    if rerun_in_clean_environment("spent_account_falls_back_to_another_account_of_the_same_model")?
+    {
         return Ok(());
     }
     let prepared = prepare_with_partial_account_estimates(&["ready", "spent-a"], true, None)?
         .map_err(|error| format!("{error}"))?;
     assert_eq!(prepared.route.account_key.as_deref(), Some("spent-b"));
-    assert!(prepared.skipped_routes.iter().all(|route| {
-        route.cause != Some(provenant_records::RouteExclusionReason::Exhausted)
-    }));
+    assert!(
+        prepared.skipped_routes.iter().all(|route| {
+            route.cause != Some(provenant_records::RouteExclusionReason::Exhausted)
+        })
+    );
     Ok(())
 }
