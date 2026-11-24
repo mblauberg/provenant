@@ -2684,7 +2684,7 @@ fn innermost_error(value: &serde_json::Value) -> Option<(String, String)> {
     match child_envelopes(message)
         .into_iter()
         .filter_map(|v| innermost_error(&v))
-        .last()
+        .next_back()
     {
         Some(deeper) => Some(deeper),
         None => Some((code, first_meaningful_line(message))),
@@ -2697,7 +2697,7 @@ fn innermost_error_text(report: &str) -> (String, String) {
     child_envelopes(report)
         .into_iter()
         .filter_map(|value| innermost_error(&value))
-        .last()
+        .next_back()
         .unwrap_or_else(|| {
             let line = first_meaningful_line(report);
             (
@@ -2722,7 +2722,7 @@ fn first_error_line(output: &str) -> String {
     let reason = child_envelopes(output)
         .into_iter()
         .filter_map(|value| innermost_error(&value))
-        .last()
+        .next_back()
         .map(|(code, message)| format!("{code}: {message}"))
         .unwrap_or_else(|| {
             let line = first_meaningful_line(output);
