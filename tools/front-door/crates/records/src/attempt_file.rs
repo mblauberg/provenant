@@ -44,6 +44,7 @@ pub enum AttemptFile {
     BudgetCommit,
     PayloadEvicted,
     Handoff,
+    HandoffProviderWritten,
     Tmp,
     Scratch,
     ProviderState,
@@ -52,7 +53,7 @@ pub enum AttemptFile {
 }
 
 impl AttemptFile {
-    pub const ALL: [Self; 31] = [
+    pub const ALL: [Self; 32] = [
         Self::Prompt,
         Self::Result,
         Self::Stdout,
@@ -79,6 +80,7 @@ impl AttemptFile {
         Self::BudgetCommit,
         Self::PayloadEvicted,
         Self::Handoff,
+        Self::HandoffProviderWritten,
         Self::Tmp,
         Self::Scratch,
         Self::ProviderState,
@@ -115,6 +117,7 @@ impl AttemptFile {
             Self::BudgetCommit => "budget-commit.json",
             Self::PayloadEvicted => "payload-evicted.json",
             Self::Handoff => "handoff.json",
+            Self::HandoffProviderWritten => "handoff.provider-written.json",
             Self::Tmp => "tmp",
             Self::Scratch => "scratch",
             Self::ProviderState => "provider-state",
@@ -159,7 +162,8 @@ impl AttemptFile {
             | Self::Stderr
             | Self::Scratch
             | Self::ProviderHistory
-            | Self::Quarantine => AttemptFileClass::Retained,
+            | Self::Quarantine
+            | Self::HandoffProviderWritten => AttemptFileClass::Retained,
             _ => AttemptFileClass::Record,
         }
     }
@@ -237,6 +241,10 @@ mod tests {
             AttemptFileClass::ProviderState
         );
         assert_eq!(AttemptFile::Stderr.class(), AttemptFileClass::Retained);
+        assert_eq!(
+            AttemptFile::HandoffProviderWritten.class(),
+            AttemptFileClass::Retained
+        );
         assert_eq!(AttemptFile::Launch.class(), AttemptFileClass::Record);
     }
 }

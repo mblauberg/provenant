@@ -4340,7 +4340,12 @@ mod budget_result_tests {
         });
         let handoff = provenant_records::handoff::Handoff::from_json(&serde_json::to_vec(&done)?)?;
         let stored: provenant_records::handoff::HandoffResult = Ok(Some(handoff));
-        crate::completion::seal_snapshot(&attempt, &serde_json::to_vec(&stored)?)?;
+        crate::artifacts::seal(
+            &attempt,
+            provenant_records::AttemptFile::Handoff.name(),
+            &serde_json::to_vec(&stored)?,
+            provenant_records::handoff::HANDOFF_BYTES as u64 * 4,
+        )?;
         if let Some(answer) = answer {
             crate::artifacts::seal(&attempt, "stdout.log", answer.as_bytes(), CAPTURE_LIMIT)?;
         }
@@ -4478,7 +4483,7 @@ mod budget_result_tests {
             std::fs::read(
                 attempt
                     .current_path()?
-                    .join("handoff.provider-written.json")
+                    .join(provenant_records::AttemptFile::HandoffProviderWritten.name())
             )?,
             provider_bytes,
             "provider bytes are kept as evidence under a distinct name"
@@ -4837,7 +4842,12 @@ mod writer_recovery_tests {
         let handoff =
             provenant_records::handoff::Handoff::from_json(&serde_json::to_vec(progress)?)?;
         let stored: provenant_records::handoff::HandoffResult = Ok(Some(handoff));
-        crate::completion::seal_snapshot(attempt, &serde_json::to_vec(&stored)?)?;
+        crate::artifacts::seal(
+            attempt,
+            provenant_records::AttemptFile::Handoff.name(),
+            &serde_json::to_vec(&stored)?,
+            provenant_records::handoff::HANDOFF_BYTES as u64 * 4,
+        )?;
         Ok(())
     }
 

@@ -1,11 +1,11 @@
 //! Settlement snapshots of the shared handoff, independent of provider history.
 use crate::{
-    artifacts::{read_sealed, read_settled, replace, seal},
+    artifacts::{read_sealed, read_settled, seal},
     *,
 };
 use provenant_os::fs::Directory;
 use provenant_records::{
-    AttemptFile, CanonicalV1, Layer, Source,
+    AttemptFile, Layer, Source,
     handoff::{HANDOFF_BYTES, Handoff, HandoffError, HandoffResult},
     run::{PathScope, WriteSource},
     warning::{CONFIG_MALFORMED, CONFIG_UNAVAILABLE, PORT_STATIC_CHECK_INVALID, Warning, warn},
@@ -52,8 +52,8 @@ impl RunStore {
         decoded: &Decoded,
     ) -> Result<provenant_records::handoff::HandoffParse> {
         // Settlement owns the snapshot slot. A provider that finds its scratch
-        // inside the attempt directory can write there before it exits; such a
-        // file is evidence, never a sealed result (#3844).
+        // inside the attempt directory can write there before it exits; bytes
+        // that are not a settled envelope are evidence, never a result (#3844).
         set_aside_foreign_snapshot(attempt, record)?;
         let parsed = decoded.handoff_report();
         if let Some(repeated) =
@@ -219,83 +219,62 @@ fn validate_handoff(handoff: &Handoff) -> Result<Handoff> {
 // addition to the bounded provider payload. This is not the input byte cap.
 const HANDOFF_RECORD_BYTES: usize = HANDOFF_BYTES * 4;
 
-// Settlement alone publishes the attempt's handoff snapshot. The digest tag
-// is the ownership proof: a file in the slot with no matching tag was written
-// by the provider, often from scratch inside the attempt directory (#3844).
-const HANDOFF_SEAL_TAG: &str = "handoff.settlement-seal";
-const HANDOFF_SEAL_TAG_BYTES: u64 = 128;
-const PROVIDER_HANDOFF_EVIDENCE: &str = "handoff.provider-written.json";
+// Settlement alone publishes the attempt's handoff snapshot. The bytes are a
+// `HandoffResult` envelope; a lane that writes its own bare handoff into the
+// slot produces different bytes, so the shape is the provenance (#3844).
 
-/// Publish the snapshot and its ownership tag as one settlement act. Every
-/// host write of `<attempt>/handoff.json` goes through here, and a reader
-/// accepts the slot only while the tag still binds those exact bytes.
+/// Every host write of `<attempt>/handoff.json` goes through here. The sealed
+/// publish is the whole settlement act: a resume after a crash either finds
+/// these bytes or writes them, and an earlier build's snapshot is the same
+/// envelope shape.
 pub(crate) fn seal_snapshot(attempt: &Directory, bytes: &[u8]) -> Result<()> {
     seal(
         attempt,
         AttemptFile::Handoff.name(),
         bytes,
         HANDOFF_RECORD_BYTES as u64,
-    )?;
-    replace(
-        attempt,
-        HANDOFF_SEAL_TAG,
-        CanonicalV1::file_digest(bytes).to_string().as_bytes(),
-        HANDOFF_SEAL_TAG_BYTES,
     )
 }
 
-fn handoff_is_sealed(attempt: &Directory, bytes: &[u8]) -> bool {
-    let digest = CanonicalV1::file_digest(bytes).to_string().into_bytes();
-    read_sealed(attempt, HANDOFF_SEAL_TAG, HANDOFF_SEAL_TAG_BYTES)
-        .ok()
-        .flatten()
-        .is_some_and(|tag| tag == digest)
+fn is_settlement_snapshot(bytes: &[u8]) -> bool {
+    serde_json::from_slice::<HandoffResult>(bytes).is_ok()
 }
 
-/// Keep a provider-written file that landed in the snapshot slot as evidence
-/// and clear the slot before captured output is sealed. A tagged snapshot is
-/// settlement's own and is left untouched. An unreadable entry is left for
-/// `read_snapshot` to report as malformed; a reader never moves it aside.
+/// Keep a non-snapshot file that landed in the slot as evidence and clear it
+/// before captured output is sealed. Only bytes that were actually read and do
+/// not decode as a `HandoffResult` are moved aside; a read or unsafe-entry
+/// failure keeps its typed `RunError` so settlement can retry it (#3844).
 fn set_aside_foreign_snapshot(attempt: &Directory, record: &AttemptRecord) -> Result<()> {
-    let Ok(Some(bytes)) = read_settled(attempt, AttemptFile::Handoff, HANDOFF_RECORD_BYTES as u64)
+    let Some(bytes) = read_settled(attempt, AttemptFile::Handoff, HANDOFF_RECORD_BYTES as u64)?
     else {
         return Ok(());
     };
-    if handoff_is_sealed(attempt, &bytes) {
+    if is_settlement_snapshot(&bytes) {
         return Ok(());
     }
     attempt.replace(
         OsStr::new(AttemptFile::Handoff.name()),
         attempt,
-        OsStr::new(PROVIDER_HANDOFF_EVIDENCE),
+        OsStr::new(AttemptFile::HandoffProviderWritten.name()),
     )?;
     attempt.sync()?;
     handoff_advisory(
         record.attempt_id,
         format!(
-            "provider-written handoff.json kept as {PROVIDER_HANDOFF_EVIDENCE}; the sealed snapshot comes from captured output"
+            "provider-written handoff.json kept as {}; the sealed snapshot comes from captured output",
+            AttemptFile::HandoffProviderWritten.name()
         ),
     );
     Ok(())
 }
 
 fn read_snapshot(attempt: &Directory) -> Result<Option<HandoffResult>> {
-    let bytes = match read_settled(attempt, AttemptFile::Handoff, HANDOFF_RECORD_BYTES as u64) {
-        Ok(Some(bytes)) => bytes,
-        Ok(None) => return Ok(None),
-        Err(_) => {
-            return Ok(Some(Err(HandoffError::new(
-                "$",
-                "handoff snapshot unreadable",
-            ))));
-        }
+    let Some(bytes) = read_settled(attempt, AttemptFile::Handoff, HANDOFF_RECORD_BYTES as u64)?
+    else {
+        return Ok(None);
     };
-    if !handoff_is_sealed(attempt, &bytes) {
-        return Ok(Some(Err(HandoffError::new(
-            "$",
-            "handoff snapshot unreadable",
-        ))));
-    }
+    // Only bytes that were read and do not decode are a malformed snapshot.
+    // A failure to read the slot keeps its typed, retriable `RunError`.
     let handoff: HandoffResult = match serde_json::from_slice(&bytes) {
         Ok(handoff) => handoff,
         Err(_) => {
@@ -1292,9 +1271,11 @@ mod tests {
         let attempt = store.attempt_dir(record.attempt_id, false)?;
         let raw = snapshot("done");
         let original = Handoff::from_json(&raw).map_err(std::io::Error::other)?;
-        seal_snapshot(
+        seal(
             &attempt,
+            AttemptFile::Handoff.name(),
             &serde_json::to_vec(&Ok::<_, HandoffError>(Some(original.clone())))?,
+            HANDOFF_RECORD_BYTES as u64,
         )?;
         let mut paths = Vec::new();
         for index in 0..HANDOFF_BYTES / 32 {
@@ -1463,9 +1444,11 @@ mod tests {
         let attempt = store.attempt_dir(record.attempt_id, false)?;
         let bytes = snapshot("done");
         let expected = Handoff::from_json(&bytes)?;
-        seal_snapshot(
+        seal(
             &attempt,
+            AttemptFile::Handoff.name(),
             &serde_json::to_vec(&Ok::<_, HandoffError>(Some(expected.clone())))?,
+            HANDOFF_RECORD_BYTES as u64,
         )?;
         let path = attempt.current_path()?.join(AttemptFile::Handoff.name());
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))?;
@@ -1488,8 +1471,8 @@ mod tests {
         Ok(())
     }
 
-    /// #3844: an unreadable snapshot that settlement itself published must
-    /// settle as malformed and keep the raw file, never retry forever.
+    /// #3844: a settled envelope carrying a malformed payload must settle as
+    /// malformed and keep the raw file, never retry forever.
     // Spec: docs/specs/run-settlement.md#outcome-before-release
     #[test]
     fn an_unreadable_owned_snapshot_settles_malformed_and_keeps_the_raw_file() -> TestResult {
@@ -1515,7 +1498,10 @@ mod tests {
         )?;
         store.claim(id, &clock, &call)?.ok_or("not admitted")?;
         let attempt = store.attempt_dir(id, false)?;
-        let raw = b"not a handoff result";
+        // Bare non-envelope bytes are moved aside as provider evidence at
+        // capture; only a malformed settled envelope settles malformed.
+        let malformed: HandoffResult = Err(HandoffError::new("$", "handoff snapshot unreadable"));
+        let raw = serde_json::to_vec(&malformed)?;
         seal_snapshot(&attempt, raw.as_slice())?;
         let mut observed = exit();
         observed.scope = RunStore::scope(&store.record(id, &call)?);
@@ -1541,7 +1527,135 @@ mod tests {
         assert_eq!(
             read_settled(&attempt, AttemptFile::Handoff, HANDOFF_RECORD_BYTES as u64)?,
             Some(raw.to_vec()),
-            "the unreadable file stays as evidence"
+            "the malformed envelope stays as evidence"
+        );
+        Ok(())
+    }
+
+    /// #3844: an envelope sealed by the previous build has no tag and must
+    /// still read as settlement's snapshot, with no migration.
+    // Spec: docs/specs/run-settlement.md#outcome-before-release
+    #[test]
+    fn a_snapshot_sealed_without_a_tag_still_reads_as_sealed() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let clock = clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let input = input();
+        store.create(&input, &call)?;
+        let record = store.record(input.attempt_id, &call)?;
+        let attempt = store.attempt_dir(record.attempt_id, false)?;
+        let expected = Handoff::from_json(&snapshot("done"))?;
+        seal(
+            &attempt,
+            AttemptFile::Handoff.name(),
+            &serde_json::to_vec(&Ok::<_, HandoffError>(Some(expected.clone())))?,
+            HANDOFF_RECORD_BYTES as u64,
+        )?;
+        assert!(
+            !attempt
+                .current_path()?
+                .join("handoff.settlement-seal")
+                .try_exists()?,
+            "no separate tag is published"
+        );
+        assert_eq!(store.handoff(&record)??, Some(expected));
+        Ok(())
+    }
+
+    /// #3844: a settlement retry against its own snapshot must keep it, not
+    /// relabel the host's record as provider-written. This is the crash window
+    /// the old two-file tag publish left behind.
+    // Spec: docs/specs/run-settlement.md#outcome-before-release
+    #[test]
+    fn a_second_capture_keeps_an_existing_settlement_snapshot() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let clock = clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let input = input();
+        store.create(&input, &call)?;
+        let record = store.record(input.attempt_id, &call)?;
+        let attempt = store.attempt_dir(record.attempt_id, false)?;
+        let first = Handoff::from_json(&snapshot("done"))?;
+        let bytes = serde_json::to_vec(&Ok::<_, HandoffError>(Some(first.clone())))?;
+        seal(
+            &attempt,
+            AttemptFile::Handoff.name(),
+            &bytes,
+            HANDOFF_RECORD_BYTES as u64,
+        )?;
+        let captured = store
+            .capture_handoff(&attempt, &record, &decoded())?
+            .handoff?;
+        assert_eq!(captured, Some(first), "the sealed snapshot wins on retry");
+        assert_eq!(
+            read_settled(&attempt, AttemptFile::Handoff, HANDOFF_RECORD_BYTES as u64)?,
+            Some(bytes),
+            "the host snapshot is not rewritten"
+        );
+        assert!(
+            !attempt
+                .current_path()?
+                .join(AttemptFile::HandoffProviderWritten.name())
+                .try_exists()?,
+            "the host snapshot was not moved aside"
+        );
+        Ok(())
+    }
+
+    /// #3844: a slot that cannot be read safely keeps its typed, retriable
+    /// error. It is neither a malformed handoff nor provider evidence.
+    // Spec: docs/specs/run-settlement.md#outcome-before-release
+    #[test]
+    fn an_unreadable_snapshot_slot_stays_a_typed_read_failure() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let clock = clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let input = input();
+        store.create(&input, &call)?;
+        let record = store.record(input.attempt_id, &call)?;
+        let attempt = store.attempt_dir(record.attempt_id, false)?;
+        let foreign = temp.path().join("foreign-handoff.json");
+        std::fs::write(&foreign, snapshot("done"))?;
+        std::fs::hard_link(
+            &foreign,
+            attempt.current_path()?.join(AttemptFile::Handoff.name()),
+        )?;
+        let error = store.handoff(&record).expect_err("a hard link must refuse");
+        assert!(
+            matches!(
+                error,
+                RunError::UnsafePath {
+                    check: PathCheck::Links,
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+        let error = store
+            .capture_handoff(&attempt, &record, &decoded())
+            .expect_err("capture must retry the unsafe entry");
+        assert!(
+            matches!(
+                error,
+                RunError::UnsafePath {
+                    check: PathCheck::Links,
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+        assert!(
+            !attempt
+                .current_path()?
+                .join(AttemptFile::HandoffProviderWritten.name())
+                .try_exists()?,
+            "an unreadable entry was moved aside"
         );
         Ok(())
     }
