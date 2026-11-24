@@ -1,3 +1,0 @@
-## Fixes
-### Git and safety
-- A writer branch is no longer refused because its name only collided with a remote-tracking ref under a remote alias that does not exist. The collision check now splits `refs/remotes/` only at the names `git remote` reports, longest first (or, when no remote is configured, at a tracking directory that holds a ref, as in a bare store fed by explicit fetches), so a configured remote containing `/` still matches while a stray ref such as `refs/remotes/origin/w1ci/smoke` no longer invents `origin/w1ci`. The refusal now names the colliding ref, with display-unsafe characters withheld. (#3901)
