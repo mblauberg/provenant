@@ -1027,13 +1027,27 @@ fn missing_project_target_error_has_one_code_and_a_repair() {
 }
 
 #[test]
-fn a_stop_cause_is_one_bounded_line_that_names_it() {
-    let row = json!({"state":"failed","cause_code":"budget_exhausted",
-            "reason":"x".repeat(4096),"waiting_for":null});
+fn a_stop_cause_is_kept_whole_in_the_row_and_bounded_in_the_summary() {
+    // A row builder must not clip before the render mode is known: --full prints
+    // this whole reason, while the compact summary applies SUMMARY_ROW_BYTES.
+    let reason = "x".repeat(4096);
+    let row = json!({"kind":"node","id":"fix-login/writer#2","state":"failed",
+            "cause_code":"budget_exhausted","reason":reason,"waiting_for":null});
     let line = status_line("fix-login/writer#2", &row, Some("codex/gpt"));
     assert_eq!(line.lines().count(), 1);
-    assert!(line.trim_end().len() <= provenant_cli::limits::SUMMARY_ROW_BYTES);
+    assert!(
+        line.contains(&reason),
+        "the row builder clipped the reason: {line}"
+    );
     assert!(line.contains("cause=budget_exhausted"), "{line}");
+
+    let summary = status_summary(&[row]);
+    let bounded = &summary.lines[1];
+    assert!(
+        bounded.len() <= provenant_cli::limits::SUMMARY_ROW_BYTES,
+        "{bounded}"
+    );
+    assert!(bounded.ends_with("..."), "no clip marker: {bounded}");
 }
 
 // Spec: docs/specs/cli.md#status-selection
@@ -1461,12 +1475,14 @@ fn remote_status_failure_downgrades_the_current_running_node_to_unknown() {
 }
 
 #[test]
-fn graph_status_reading_keeps_failure_cause_and_command_within_budget() {
+fn graph_status_full_reading_keeps_the_reason_and_compact_bounds_it() {
     let mut checkpoint = checkpoint("g");
     checkpoint.nodes[0].state = NodeState::Failed;
     checkpoint.nodes[0].advance_error_code = Some("AUTH_REQUIRED".into());
-    checkpoint.nodes[0].advance_error =
-        Some(format!("credentials unavailable {}", "界".repeat(4096)));
+    // `status_rows` itself sanitises a reason to 1024 characters, so keep the
+    // fixture inside that bound while staying far past the 200-byte row cap.
+    let long_reason = format!("credentials unavailable {}", "界".repeat(300));
+    checkpoint.nodes[0].advance_error = Some(long_reason.clone());
     let target = GraphTarget {
         graph: "g".into(),
         node: None,
@@ -1479,10 +1495,10 @@ fn graph_status_reading_keeps_failure_cause_and_command_within_budget() {
         many.extend(rows.iter().filter(|row| row["kind"] != "graph").cloned());
     }
     let reading = render_graph_status(&many);
-    // The owner summary bound (cli.md "Agent output"): the graph line, at
-    // most LISTING_ROWS node lines and the omission count, each line within
-    // SUMMARY_ROW_BYTES. The suggested command is a typed step, rendered by
-    // the edge from the same argv the JSON envelope carries.
+    // The row count stays bounded: the graph line, at most LISTING_ROWS node
+    // lines and the omission count. Line *length*, however, is the renderer's
+    // choice: --full keeps the whole reason, so no per-line byte cap belongs
+    // in the row builder.
     use provenant_cli::limits::{LISTING_ROWS, SUMMARY_ROW_BYTES};
     let lines: Vec<_> = reading.lines().collect();
     let omissions = lines
@@ -1491,14 +1507,43 @@ fn graph_status_reading_keeps_failure_cause_and_command_within_budget() {
         .count();
     assert!(lines.len() <= 1 + LISTING_ROWS + omissions, "{reading}");
     assert!(
-        reading.lines().all(|line| line.len() <= SUMMARY_ROW_BYTES),
-        "{reading}"
+        reading.contains(&long_reason),
+        "the full reading clipped the failure reason: {reading}"
     );
     // Failed work is listed first, after the graph line.
     let first_node = reading.lines().nth(1).unwrap();
     assert!(first_node.starts_with("g/parent"), "{reading}");
     assert!(first_node.contains(" failed "), "{reading}");
     assert!(first_node.contains("AUTH_REQUIRED"), "{reading}");
+
+    // The default view bounds the same rows and shows the clip marker.
+    let summary = status_summary(&many);
+    let result = provenant_records::CommandResult::new(
+        "status",
+        provenant_records::Outcome::Ok,
+        json!({"rows": many}),
+    );
+    let mut out = Vec::new();
+    provenant_cli::render(
+        &result,
+        provenant_cli::RenderMode::Compact {
+            text: &reading,
+            read_only: true,
+            summary: Some(&summary),
+        },
+        &mut out,
+    )
+    .expect("compact render");
+    let compact = String::from_utf8(out).expect("utf8");
+    assert!(
+        compact
+            .lines()
+            .skip(1)
+            .all(|line| line.len() <= SUMMARY_ROW_BYTES),
+        "a compact row exceeded the bound: {compact}"
+    );
+    assert!(compact.contains("..."), "no clip marker: {compact}");
+
     let step = graph_status_next(&rows).expect("a failed graph offers a next step");
     assert_eq!(step.argv, ["provenant", "retry", "g/parent"]);
     // Per-state omission counts are checked at the CLI boundary; do not

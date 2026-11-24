@@ -692,6 +692,12 @@ fn plain(value: &Value) -> String {
     provenant_fabric_runtime::hosts::plain_text(value.as_str().unwrap_or(""), 1024)
 }
 
+/// Peer text sanitized but not abbreviated. Row builders keep whole facts;
+/// only the compact renderer imposes `SUMMARY_ROW_BYTES`.
+fn whole_text(value: &Value) -> String {
+    provenant_fabric_runtime::hosts::plain_text(value.as_str().unwrap_or(""), usize::MAX)
+}
+
 /// Whether an attempt row is settled. Lane projections carry `finished_at` for
 /// every terminal attempt; graph rows carry a terminal state. Everything else
 /// — pending, running, starting, settling and the liveness-overridden
@@ -780,7 +786,8 @@ fn row_model(row: &Value) -> String {
 }
 
 /// One status line, `NAME STATE [MODEL]`, naming a stop or failure cause and
-/// its note when there is one. At most `SUMMARY_ROW_BYTES`.
+/// its note when there is one. The whole line is returned; the compact renderer
+/// bounds it with `SUMMARY_ROW_BYTES`, while `--full` prints it whole.
 pub(crate) fn status_line(name: &str, row: &Value, model: Option<&str>) -> String {
     let mut line = format!("{name} {}", plain(&row["state"]));
     if let Some(model) = model
@@ -798,7 +805,7 @@ pub(crate) fn status_line(name: &str, row: &Value, model: Option<&str>) -> Strin
         &row["reason"]
     };
     if !note.is_null() {
-        line.push_str(&format!(": {}", plain(note)));
+        line.push_str(&format!(": {}", whole_text(note)));
     }
     if let Some(work) = row.get("stop_work").filter(|value| !value.is_null()) {
         let head = work["head"].as_str().unwrap_or("unknown");
@@ -816,7 +823,6 @@ pub(crate) fn status_line(name: &str, row: &Value, model: Option<&str>) -> Strin
             line.push_str(&format!(" | {dirty} dirty paths left uncommitted"));
         }
     }
-    let mut line = provenant_cli::bounded_text(&line, provenant_cli::limits::SUMMARY_ROW_BYTES);
     line.push('\n');
     append_status_warnings(&mut line, row);
     line
@@ -976,10 +982,7 @@ pub(crate) fn status_summary(rows: &[Value]) -> provenant_cli::Summary {
 
     let omitted = lines.len().saturating_sub(shown_indices.len());
 
-    provenant_cli::Summary {
-        lines: std::iter::once(headline).chain(summary_rows).collect(),
-        omitted,
-    }
+    provenant_cli::Summary::bounded(headline, summary_rows, omitted)
 }
 
 fn append_status_warnings(line: &mut String, row: &Value) {

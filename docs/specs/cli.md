@@ -241,7 +241,9 @@ names the source (`output`, `started` or `queued`), so old output is not mistake
 for a heartbeat. `child_command` is set only for a command that went through the
 admission shim, and a lane waiting on a heavy-job lock reports the command it
 waits to run. The attempt directory and child command stay host-local and never
-cross a peer boundary.
+cross a peer boundary. `--full` prints each status row whole, including a long
+refusal reason naming its path; the default summary bounds each row to
+`SUMMARY_ROW_BYTES` with a clip marker.
 
 `status` and `worktree list` report `stranded work` (`stranded_work` in
 `status --json`): a worktree with uncommitted edits or an interrupted Git

@@ -36,6 +36,14 @@ fn text(value: &Value, limit: usize) -> Option<String> {
         .map(|s| provenant_fabric_runtime::hosts::plain_text(s, limit))
 }
 
+/// A sanitized field kept whole. The digest builder owns the facts; the compact
+/// renderer owns the `SUMMARY_ROW_BYTES` bound, so no fact is cut here.
+fn whole_text(value: &Value) -> Option<String> {
+    value
+        .as_str()
+        .map(|s| provenant_fabric_runtime::hosts::plain_text(s, usize::MAX))
+}
+
 /// The one state vocabulary shared by the status listing and the detail view.
 /// A live attempt is running; only work before admission or launch is pending.
 /// An observed but non-live writer keeps its own presence label, so neither
@@ -257,17 +265,18 @@ pub(crate) fn node_digests(rows: &[Value]) -> Vec<NodeDigest> {
                 line.push_str(&format!(" evidence_unavailable={error}"));
             }
             if let Some(summary) =
-                text(&attempt["result_summary"], 200).filter(|summary| !summary.is_empty())
+                whole_text(&attempt["result_summary"]).filter(|summary| !summary.is_empty())
             {
                 line.push_str(&format!(" result={summary}"));
             } else if let Some(reason) =
-                text(&node["reason"], 200).or_else(|| text(&node["waiting_for"], 200))
+                whole_text(&node["reason"]).or_else(|| whole_text(&node["waiting_for"]))
             {
                 line.push_str(&format!(" note={reason}"));
             }
             // Identity, outcome and all evidence fields stay in the structured
-            // digest even when a long human line is abbreviated.
-            line = provenant_fabric_runtime::hosts::plain_text(&line, 4096);
+            // digest; the whole human line is kept and bounded only by the
+            // compact renderer, never before the render mode is known.
+            line = provenant_fabric_runtime::hosts::plain_text(&line, usize::MAX);
             Some(NodeDigest {
                 key,
                 outcome,
@@ -458,5 +467,29 @@ mod tests {
             );
             assert!(!digest.settled);
         }
+    }
+
+    #[test]
+    fn digest_line_keeps_a_long_refusal_reason_whole() {
+        // A worktree_missing refusal names its path; the renderer, not the
+        // digest builder, decides how much of it a bounded view shows.
+        use super::node_digests;
+        use provenant_core::ProjectId;
+        use provenant_records::WorkKey;
+        use serde_json::{Value, json};
+
+        let key = json!(WorkKey::new(ProjectId::from_bytes([9; 16]), "g", "node", 1).unwrap());
+        let path = format!("/host/{}", "long/path/segment/".repeat(40));
+        let reason = format!("worktree_missing: checkout at {path} was removed");
+        let rows: Vec<Value> = vec![json!({
+            "kind":"node","work_key":key,"state":"failed","reason":reason
+        })];
+
+        let digest = node_digests(&rows).remove(0);
+        assert!(
+            digest.line.contains(&reason),
+            "digest clipped the reason: {}",
+            digest.line
+        );
     }
 }
