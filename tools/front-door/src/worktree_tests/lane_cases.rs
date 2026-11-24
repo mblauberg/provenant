@@ -342,8 +342,11 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
         let store = provenant_run::RunStore::open(&context, &call)?;
         store.create(&prepared, &call)?;
         let task = &prepared.request.task;
+        // Production creates every run-store directory private; a fixture
+        // that pre-creates them must too, or the store refuses the mode.
         for path in [&paths.scratch, &paths.provider_state, &paths.temporary] {
-            fs::create_dir_all(path)?;
+            std::os::unix::fs::DirBuilderExt::mode(fs::DirBuilder::new().recursive(true), 0o700)
+                .create(path)?;
         }
         // Bound to the registered account, as the host loader binds it.
         let token = provenant_providers::claude::refresh_for_account(
