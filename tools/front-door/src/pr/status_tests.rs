@@ -1,4 +1,3 @@
-
 #[allow(dead_code)] // Also compiled, unrun, by the harness-less worktrees driver.
 fn row(number: u64, head: &str, error: Option<&str>) -> super::Line {
     super::Line {

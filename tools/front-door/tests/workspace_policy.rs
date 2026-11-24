@@ -1879,7 +1879,7 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         ("src/lane_cleanup.rs", 3148),
         ("src/pr/landing/adapters.rs", 2984),
         ("src/pr/landing/driver.rs", 3967),
-        ("src/pr/observer.rs", 2504),
+        ("src/pr/observer.rs", 2508),
         ("src/status_wait.rs", 3339),
         ("src/worktrees.rs", 5384),
     ];

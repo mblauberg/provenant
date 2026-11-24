@@ -726,8 +726,17 @@ fn parse_required_checks(
         }
     };
     let mut needs = Vec::new();
-    if let Some(protection) = protection {
-        let checks = protection.get("required_status_checks")?;
+    // A disabled classic protection, or one without a required-checks block,
+    // requires nothing; a ruleset may still require checks below.
+    if let Some(checks) = protection
+        .filter(|protection| {
+            protection
+                .get("enabled")
+                .and_then(serde_json::Value::as_bool)
+                != Some(false)
+        })
+        .and_then(|protection| protection.get("required_status_checks"))
+    {
         if !checks.is_null() {
             if let Some(listed) = checks.get("checks") {
                 for check in listed.as_array()? {

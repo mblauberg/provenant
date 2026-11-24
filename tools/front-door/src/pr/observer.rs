@@ -1803,9 +1803,13 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
                     "repos/Owner/Repo/pulls/7".into(),
                     pull_resource("MERGEABLE", "CLEAN", "main"),
                 );
+                // The shape GitHub returns for a branch protected only by a
+                // ruleset: protected, classic protection disabled (its own
+                // endpoint answers 404), the required check in the ruleset.
                 world.resources.insert(
                     "repos/Owner/Repo/branches/main".into(),
-                    json!({"protected":false}),
+                    json!({"protected":true,"protection":{"enabled":false,
+                        "required_status_checks":{"enforcement_level":"off","contexts":[],"checks":[]}}}),
                 );
                 world.resources.insert(
                     "repos/Owner/Repo/rules/branches/main?per_page=100".into(),
