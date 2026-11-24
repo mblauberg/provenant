@@ -365,6 +365,54 @@ fn malformed_graph_refuses_unlisted_outputs_without_disclosing_prompt() -> Resul
     Ok(())
 }
 
+// Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
+#[test]
+fn invalid_plan_refusal_names_its_node_and_validator_reason() -> Result {
+    let rig = GraphProject::new()?;
+    let path = rig.document(&json!({
+        "schema_version": support::GRAPH_DOCUMENT_SCHEMA_VERSION,
+        "graph_id": "invalid-plan-reason",
+        "nodes": [{
+            "id": "reader", "prompt": "read", "access": "read_only",
+            "route": {"alias": "senior"}, "deadline_seconds": 0
+        }]
+    }))?;
+    let (output, refusal) =
+        rig.run(&["run", "--file", path.to_str().ok_or("path")?, "--explain"])?;
+    assert!(!output.status.success(), "{refusal}");
+    assert_eq!(refusal["error"]["code"], "dispatch_refused", "{refusal}");
+    let wire = refusal.to_string();
+    assert!(wire.contains("node reader"), "{wire}");
+    assert!(wire.contains("deadline_seconds must be positive"), "{wire}");
+    assert!(
+        wire.contains("fix the named graph node and validator reason, then retry"),
+        "{wire}"
+    );
+    Ok(())
+}
+
+// Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
+#[test]
+fn composite_admission_refusal_names_its_node_and_validator_reason() -> Result {
+    let rig = GraphProject::new()?;
+    let path = rig.document(&json!({
+        "schema_version": support::GRAPH_DOCUMENT_SCHEMA_VERSION,
+        "graph_id": "invalid-composite-reason",
+        "nodes": [{
+            "id": "expand", "kind": "loop", "access": "read_only",
+            "loop": {"body": [], "until": "done", "max_rounds": 0}
+        }]
+    }))?;
+    let (output, refusal) =
+        rig.run(&["run", "--file", path.to_str().ok_or("path")?, "--explain"])?;
+    assert!(!output.status.success(), "{refusal}");
+    assert_eq!(refusal["error"]["code"], "dispatch_refused", "{refusal}");
+    let wire = refusal.to_string();
+    assert!(wire.contains("node expand"), "{wire}");
+    assert!(wire.contains("loop.max_rounds must be positive"), "{wire}");
+    Ok(())
+}
+
 #[test]
 fn existing_git_worktree_with_spaces_has_a_followable_branch_remedy() -> Result {
     let rig = GraphProject::new()?;
@@ -2471,6 +2519,52 @@ fn bundled_smoke_binds_branch_and_worktree_controls_to_its_write_node() -> Resul
     Ok(())
 }
 
+/// `--route` takes what `run implement --model` takes: an alias or an exact
+/// model. The smoke graph is the upgrade verification path, so it must compile
+/// with a short or full catalogue id and carry one canonical spelling.
+// Spec: docs/specs/routing.md#launch-route-and-role-tiers
+#[test]
+fn smoke_explains_with_an_exact_model_route() -> Result {
+    fn leaves(nodes: &[Value], out: &mut Vec<Value>) {
+        for node in nodes {
+            if let Some(children) = node["composite"]["nodes"].as_array() {
+                leaves(children, out);
+            } else if let Some(body) = node["loop"]["body"].as_array() {
+                leaves(body, out);
+            } else {
+                out.push(node.clone());
+            }
+        }
+    }
+    let rig = GraphProject::new()?;
+    for (tier, expected) in [
+        (
+            "opencode/opencode/deepseek-v4.1-flash-free",
+            "opencode/opencode/deepseek-v4.1-flash-free",
+        ),
+        (
+            "opencode/hy4-flash-free",
+            "opencode/opencode/hy4-flash-free",
+        ),
+    ] {
+        let (output, explained) = rig.run(&["run", "smoke", "--explain", "--route", tier])?;
+        assert!(output.status.success(), "{tier}: {explained}");
+        let nodes = explained["data"]["document"]["nodes"][0]["composite"]["nodes"]
+            .as_array()
+            .ok_or_else(|| format!("smoke nodes: {explained}"))?;
+        let mut routed = Vec::new();
+        leaves(nodes, &mut routed);
+        routed.retain(|node| !node["route"].is_null());
+        assert!(!routed.is_empty(), "{tier}: {explained}");
+        for node in &routed {
+            assert_eq!(node["route"]["adapter"], "opencode", "{tier}: {node}");
+            assert_eq!(node["route"]["model"], expected, "{tier}: {node}");
+            assert!(node["route"]["alias"].is_null(), "{tier}: {node}");
+        }
+    }
+    Ok(())
+}
+
 /// A refusal of a launch input names its field, never a bare "invalid input".
 // Spec: docs/specs/run-launch.md#writer-binding
 #[test]
@@ -2601,6 +2695,64 @@ fn assert_compile_refusal_matches(
     Ok(())
 }
 
+/// A composite admission refusal names the validator reason. Unlike the exact
+/// helper above, this pins the parts of the reason that are stable while the
+/// offending node id may be long or scoped.
+fn assert_compile_refusal_contains(
+    rig: &GraphProject,
+    templates: &[(&str, String)],
+    name: &str,
+    document: &Value,
+    config: &str,
+    expected: &[&str],
+) -> Result {
+    let directory = rig.project.join(".provenant/templates");
+    std::fs::create_dir_all(&directory)?;
+    for (file, text) in templates {
+        std::fs::write(directory.join(format!("{file}.toml")), text)?;
+    }
+    std::fs::write(rig.state().join("config.toml"), config)?;
+    let path = rig.document(document)?;
+    let mut messages = Vec::new();
+    for args in [vec!["run", name, "--explain"], vec!["run", name]] {
+        let (output, value) = rig.run(&args)?;
+        assert!(!output.status.success(), "{name} {args:?}: {value}");
+        messages.push(
+            value["error"]["message"]
+                .as_str()
+                .ok_or("message")?
+                .to_owned(),
+        );
+    }
+    for explain in [true, false] {
+        let mut command = rig.command();
+        command.args(["run", "--file"]).arg(&path);
+        if explain {
+            command.arg("--explain");
+        }
+        let output = command.output()?;
+        let value: Value = serde_json::from_slice(&output.stdout)?;
+        assert!(
+            !output.status.success(),
+            "{name} --file explain={explain}: {value}"
+        );
+        messages.push(
+            value["error"]["message"]
+                .as_str()
+                .ok_or("message")?
+                .to_owned(),
+        );
+    }
+    assert!(
+        messages
+            .iter()
+            .all(|message| expected.iter().all(|part| message.contains(*part))),
+        "{name}: {messages:?}"
+    );
+    assert!(graph_records(&rig.state())?.is_empty(), "{name}");
+    Ok(())
+}
+
 #[test]
 fn oversized_graph_expansion_is_refused_before_journalling() -> Result {
     let rig = GraphProject::new()?;
@@ -2682,7 +2834,7 @@ fn oversized_graph_expansion_is_refused_before_journalling() -> Result {
     let second = "b".repeat(64);
     let third = "c".repeat(64);
     let fourth = "d".repeat(64);
-    assert_compile_refusal_matches(
+    assert_compile_refusal_contains(
         &rig,
         &[
             (
@@ -2715,11 +2867,14 @@ fn oversized_graph_expansion_is_refused_before_journalling() -> Result {
             "exports":[{"node":second,"outputs":["result"]}]
         }}]}),
         "schema_version = 1\n",
-        "graph composite or loop expansion is invalid",
+        &[
+            "expanded node id",
+            "is invalid; use at most 200 ASCII letters, digits, dots, underscores or hyphens",
+        ],
     )?;
 
-    // Composite expansion refuses duplicate exports of one member.
-    assert_compile_refusal_matches(
+    // Composite expansion refuses duplicate exports of one member and names why.
+    assert_compile_refusal_contains(
         &rig,
         &[(
             "duplicate-export",
@@ -2732,7 +2887,7 @@ fn oversized_graph_expansion_is_refused_before_journalling() -> Result {
             "exports":[{"node":"member","outputs":["result"]},{"node":"member","outputs":["result"]}]
         }}]}),
         "schema_version = 1\n",
-        "graph composite or loop expansion is invalid",
+        &["composite export must select a unique direct child"],
     )?;
     Ok(())
 }

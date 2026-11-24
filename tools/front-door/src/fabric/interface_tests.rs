@@ -21,6 +21,48 @@ fn tier_override_preserves_leaf_family_constraints() {
 }
 
 #[test]
+fn an_exact_model_route_tier_lowers_to_an_adapter_and_model_route() {
+    use provenant_fabric_runtime::graph::GraphNode;
+    for tier in [
+        "opencode/opencode/deepseek-v4.1-flash-free",
+        "opencode/hy4-flash-free",
+    ] {
+        let choice = super::RouteChoice::parse(&json!(tier)).unwrap();
+        let mut node: GraphNode = serde_json::from_value(json!({
+            "id":"read", "access":"read_only", "prompt":"p",
+            "route":{"alias":"junior"}
+        }))
+        .unwrap();
+        super::override_tier(&mut node, &choice);
+        let route = node.route.unwrap();
+        assert_eq!(route.adapter.as_deref(), Some("opencode"), "{tier}");
+        assert_eq!(route.model.as_deref(), Some(tier), "{tier}");
+        assert_eq!(route.alias, None, "{tier}");
+    }
+}
+
+/// An exact model route cannot be held by the relay's tier controls: a later
+/// child rewrite would turn the adapter/model route into an alias that cannot
+/// carry a model id. Spec: docs/specs/routing.md#launch-route-and-role-tiers
+#[test]
+fn child_request_suppresses_the_tier_for_an_exact_model_route() -> Result {
+    let rig = TestRig::new()?;
+    let factory = factory(&rig)?;
+    let child = factory.child_request(&json!({
+        "op":"run", "brief":"Inspect the parser", "route":"opencode/hy4-flash-free"
+    }))?;
+    assert_eq!(child.tier, None, "{child:?}");
+    let launch = child.launch.as_ref().ok_or("missing launch")?;
+    assert_eq!(launch.node["route"]["adapter"], "opencode", "{launch:?}");
+    assert_eq!(
+        launch.node["route"]["model"], "opencode/hy4-flash-free",
+        "{launch:?}"
+    );
+    assert!(launch.node["route"]["alias"].is_null(), "{launch:?}");
+    Ok(())
+}
+
+#[test]
 fn a_role_map_sets_each_node_to_its_role_tier_or_keeps_the_default() {
     use provenant_fabric_runtime::graph::GraphNode;
     let node = |fields: Value| -> GraphNode {
@@ -40,7 +82,7 @@ fn a_role_map_sets_each_node_to_its_role_tier_or_keeps_the_default() {
     ];
     let choice = super::RouteChoice::parse(&json!("writer=junior, review=senior")).unwrap();
     for (role, mut node) in cases {
-        assert_eq!(super::route_role(&node), role);
+        assert_eq!(super::route::route_role(&node), role);
         super::override_tier(&mut node, &choice);
         let expected = choice.tier_for(role).unwrap_or("declared");
         assert_eq!(

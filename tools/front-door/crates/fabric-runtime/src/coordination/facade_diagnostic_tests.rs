@@ -413,6 +413,62 @@ fn graph_plan_refusal_retains_token_shaped_node_identifier_as_metadata() {
     assert!(detail.contains("writer worktree"));
 }
 
+// Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
+#[test]
+fn graph_plan_admission_names_the_node_and_validator_reason() {
+    let reason =
+        "node read: route alias must be an identifier; exact models require an adapter or --model";
+    let error = FacadeError::graph_admission(crate::graph::AdmissionError::Plan(reason.into()));
+    let diagnostic = error.diagnostic();
+    assert_eq!(diagnostic.code, "dispatch_refused");
+    assert_eq!(diagnostic.detail.as_deref(), Some(reason));
+    assert_eq!(
+        diagnostic.next.as_deref(),
+        Some("fix the named graph node and validator reason, then retry")
+    );
+    let fact = match &error {
+        FacadeError::DispatchRefused {
+            fact: Some(fact), ..
+        } => fact,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(fact, &super::DispatchRefusalFact::GraphPlan);
+    let wire = serde_json::to_value(&error).unwrap();
+    assert_eq!(wire["reason"], serde_json::json!(reason));
+}
+
+// Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
+#[test]
+fn graph_admission_keeps_composite_schema_and_output_kind_reasons() {
+    use crate::graph::{AdmissionError, GraphOutputField};
+    for (error, reason) in [
+        (
+            AdmissionError::Composite("node a: loop.max_rounds must be positive".into()),
+            "node a: loop.max_rounds must be positive",
+        ),
+        (
+            AdmissionError::Schema("schema version".into()),
+            "schema version",
+        ),
+        (
+            AdmissionError::OutputKind {
+                field: GraphOutputField::Input,
+                reason: "node b: inputs[].outputs selects verdict, which review does not supply"
+                    .into(),
+            },
+            "node b: inputs[].outputs selects verdict, which review does not supply",
+        ),
+    ] {
+        let refusal = FacadeError::graph_admission(error);
+        let diagnostic = refusal.diagnostic();
+        assert_eq!(diagnostic.code, "dispatch_refused");
+        assert_eq!(diagnostic.detail.as_deref(), Some(reason));
+        let wire = serde_json::to_value(&refusal).unwrap();
+        assert_eq!(wire["reason"], serde_json::json!(reason));
+        assert!(!wire["fact"].is_null(), "{wire}");
+    }
+}
+
 #[test]
 fn detached_writer_refusal_keeps_its_typed_cause_across_transport() {
     let error = FacadeError::DispatchRefused {

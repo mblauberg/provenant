@@ -7,16 +7,19 @@ use crate::coordination::{facade::GraphInput, input::ValidateInput};
 pub enum CandidateError {
     #[error("invalid input field `extend`: extension syntax")]
     Input,
-    #[error("graph candidate schema or topology is invalid")]
-    Plan,
+    #[error("{0}")]
+    Plan(String),
     #[error("{CLOUD_PLACEMENT_REMOVED}")]
     CloudPlacementRemoved,
-    #[error("graph schema is invalid")]
-    Schema,
-    #[error("graph composite is invalid")]
-    Composite,
-    #[error("graph output kind is invalid")]
-    OutputKind(GraphOutputField),
+    #[error("{0}")]
+    Schema(String),
+    #[error("{0}")]
+    Composite(String),
+    #[error("{reason}")]
+    OutputKind {
+        field: GraphOutputField,
+        reason: String,
+    },
     #[error("node {node}: dependency cycle")]
     Cycle { node: refusal::GraphIdentifier },
     #[error("node {node}: writer worktree")]
@@ -47,14 +50,15 @@ impl CandidateError {
             AdmissionError::CloudPlacementRemoved => Self::CloudPlacementRemoved,
             AdmissionError::Cycle { node } => Self::Cycle { node },
             AdmissionError::WriterWorktree { node } => Self::WriterWorktree { node },
-            AdmissionError::Schema(_) => Self::Schema,
-            AdmissionError::Composite(_) => Self::Composite,
-            AdmissionError::OutputKind { field, .. } => Self::OutputKind(field),
+            AdmissionError::Schema(reason) => Self::Schema(reason),
+            AdmissionError::Composite(reason) => Self::Composite(reason),
+            AdmissionError::OutputKind { field, reason } => Self::OutputKind { field, reason },
             AdmissionError::StructuralLimit(limit) => Self::Structural(limit),
             AdmissionError::Envelope(limit) => Self::Envelope(limit),
-            // Other admission errors can contain caller text. Retain only a
-            // closed cause until their diagnostic facts have a typed owner.
-            _ => Self::Plan,
+            // A plan rejection names the node and the validator reason. Carry
+            // that text through so the dispatch refusal can be followed.
+            // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
+            AdmissionError::Plan(reason) => Self::Plan(reason),
         }
     }
 }
@@ -217,8 +221,8 @@ fn admit(
         validate_flat_plan(&expanded, &generous).map_err(CandidateError::from_admission)?;
     validate_output_kinds(&expanded).map_err(CandidateError::from_admission)?;
     let topology_changes = if running_unchanged {
-        let previous = plans::expand(document, saved, expansions, &generous)
-            .map_err(|_| CandidateError::Plan)?;
+        let previous =
+            plans::expand(document, saved, expansions, &generous).map_err(CandidateError::Plan)?;
         previous != expanded
     } else {
         false

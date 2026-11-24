@@ -1705,8 +1705,11 @@ impl Factory {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .into(),
+            // The compiled launch already carries an exact model route. Keeping
+            // it as a tier here would let relay child controls replace it with
+            // an alias, which cannot hold a model id.
             tier: match &route {
-                Some(RouteChoice::Alias(alias)) => Some(alias.clone()),
+                Some(RouteChoice::Alias(alias)) if !alias.contains('/') => Some(alias.clone()),
                 _ => None,
             },
             timeout_seconds: None,
@@ -3865,76 +3868,9 @@ fn route_choice(input: &Value, raw: Option<&Value>) -> Result<Option<RouteChoice
         .transpose()
 }
 
-/// The role a launched node plays, which `--route role=tier` addresses.
-fn route_role(node: &provenant_fabric_runtime::graph::GraphNode) -> &'static str {
-    use provenant_fabric_runtime::graph::{AccessMode, NodeKind};
-    if node.review_behaviour.is_some() || provenant_fabric_runtime::graph::is_review_node(node) {
-        "review"
-    } else if node.plan.is_some() {
-        "plan"
-    } else if node.kind == Some(NodeKind::Synthesise) {
-        "synthesis"
-    } else if node.access == AccessMode::WorktreeWrite {
-        "writer"
-    } else {
-        "task"
-    }
-}
-
-fn override_tier(node: &mut provenant_fabric_runtime::graph::GraphNode, choice: &RouteChoice) {
-    if let Some(composite) = &mut node.composite {
-        for child in &mut composite.nodes {
-            override_tier(child, choice);
-        }
-    } else if let Some(body) = &mut node.loop_body {
-        for child in &mut body.body {
-            override_tier(child, choice);
-        }
-    } else if !matches!(
-        node.kind,
-        Some(
-            provenant_fabric_runtime::graph::NodeKind::Gate
-                | provenant_fabric_runtime::graph::NodeKind::Decide
-                | provenant_fabric_runtime::graph::NodeKind::Land
-        )
-    ) && let Some(alias) = choice.tier_for(route_role(node))
-    {
-        let Ok(route) = serde_json::from_value::<provenant_fabric_runtime::graph::GraphRoute>(
-            json!({"alias": alias}),
-        ) else {
-            return;
-        };
-        let constraints: Vec<_> = node
-            .route
-            .iter()
-            .chain(node.routes.iter().flatten())
-            .map(|existing| existing.required_family.clone())
-            .collect();
-        let replace = |family: Option<&String>| {
-            let mut replacement = route.clone();
-            replacement.required_family = family.cloned();
-            replacement
-        };
-        if constraints.windows(2).any(|pair| pair[0] != pair[1]) {
-            // Keep different requirements on their original alternatives.
-            node.routes = Some(
-                constraints
-                    .iter()
-                    .map(|family| replace(family.as_ref()))
-                    .collect(),
-            );
-            node.route = None;
-        } else {
-            node.route = Some(replace(constraints.first().and_then(Option::as_ref)));
-            node.routes = None;
-        }
-    }
-    if let Some(fallback) = node.plan.as_mut().and_then(|plan| plan.fallback.as_mut()) {
-        for child in &mut fallback.nodes {
-            override_tier(child, choice);
-        }
-    }
-}
+#[path = "interface_route.rs"]
+mod route;
+use route::override_tier;
 
 fn add(row: &mut Value, key: &str, value: u64) {
     row[key] = json!(row[key].as_u64().unwrap_or(0).saturating_add(value));

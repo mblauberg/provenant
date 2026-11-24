@@ -249,7 +249,10 @@ structural overrun gets `StructuralLimit`; malformed fragments stay
 `InvalidPlanExpansion`. Persisted topology is checked before prospective
 topology, so a corrupt checkpoint keeps its node and `bad_checkpoint` diagnosis.
 Extensions have no separate cap; the retained extension list counts toward the
-checkpoint envelope.
+checkpoint envelope. A validator rejection — plan, composite, schema or output
+kind — carries its node and reason through the candidate into `dispatch_refused`,
+so the repair text that says to fix the named node and reason can be followed.
+The typed fact still owns the next action; only the detail takes the reason.
 
 Refusals may name node IDs, loop keys, field paths that passed the identifier
 grammar, host-owned rule identifiers and schema positions, and a display-sanitised

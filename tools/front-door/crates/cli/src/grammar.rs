@@ -698,8 +698,9 @@ pub struct GraphRunArgs {
     /// Account label for routing and quota accounting
     #[arg(long)]
     pub account: Option<String>,
-    /// Route tier for every node (junior, senior, principal), or a role map such
-    /// as writer=junior,review=senior; a role not named keeps the template's tier
+    /// Route tier for every node (junior, senior, principal), a role map such as
+    /// writer=junior,review=senior, or an exact model as ADAPTER/ID like
+    /// `--model`; a role not named keeps the template's tier
     #[arg(long)]
     pub route: Option<String>,
     /// Access for a plain task; writer targets imply worktree-write

@@ -788,3 +788,39 @@ fn gate_validation_rejects_agent_fields_bad_thresholds_and_failure_cycles() {
         assert_eq!(validate_plan(&document).err(), Some(expected));
     }
 }
+
+/// A source binding on a non-agent node is refused at admission, and the
+/// validator's reason reaches the operator's refusal detail unchanged (#3867).
+// Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
+#[test]
+fn source_binding_on_a_gate_is_refused_with_the_validator_reason() {
+    let mut document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 1, "graph_id": "g-test", "nodes": [
+            {"id": "review", "prompt": "Review", "access": "read_only",
+             "route": {"adapter": "fixture", "model": "fixture/model"}},
+            {"id": "gate", "kind": "gate", "access": "read_only", "depends_on": ["review"],
+             "inputs": [{"node": "review", "outputs": ["verdict"]}],
+             "condition": {"type": "verdict", "expected": "VERDICT: PASS", "threshold": "all"}}
+        ]
+    }))
+    .unwrap();
+    document.nodes[1].source = Some(crate::graph::SourceBinding::Commit {
+        commit: "a".repeat(40),
+    });
+    let mut journal = MemoryJournal::default();
+    let error = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap_err();
+    let GraphError::Admission(admission) = error else {
+        panic!("expected an admission refusal, got {error:?}");
+    };
+    assert!(
+        matches!(&admission, AdmissionError::Plan(reason) if reason.contains("execution bindings require an agent node")),
+        "{admission:?}"
+    );
+    let refusal = crate::coordination::facade::FacadeError::graph_admission(admission);
+    let detail = refusal.diagnostic().detail.unwrap_or_default();
+    assert!(
+        detail.contains("execution bindings require an agent node"),
+        "{detail}"
+    );
+    assert!(journal.0.is_none());
+}
