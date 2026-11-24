@@ -474,11 +474,22 @@ fn create_refuses_branch_colliding_with_slashed_remote() -> Result<(), Box<dyn E
 /// `smoke`, so `b/smoke/x` is free while `smoke/x` collides.
 #[test]
 fn create_splits_at_the_longest_matching_remote() -> Result<(), Box<dyn Error>> {
-    let fixture = Fixture::new()?;
-    let url = fixture.root.to_str().ok_or("non-UTF8 fixture root")?;
-    fixture.run(&["config", "remote.a.url", url])?;
-    fixture.run(&["config", "remote.a/b.url", url])?;
+    let mut fixture = Fixture::new()?;
+    let url = fixture
+        .root
+        .to_str()
+        .ok_or("non-UTF8 fixture root")?
+        .to_owned();
+    fixture.run(&["config", "remote.a.url", &url])?;
+    fixture.run(&["config", "remote.a/b.url", &url])?;
     fixture.run(&["update-ref", "refs/remotes/a/b/smoke", "HEAD"])?;
+    // Config edits change the digested repository view; re-anchor the handle.
+    fixture.repo = fixture.runtime.open_repo(
+        &fixture.executor,
+        &fixture.root,
+        fixture.budget()?,
+        &cancel(),
+    )?;
     let test_context = TestContext::new(&fixture)?;
     let context = test_context.context();
     let base = Some(fixture.head()?.to_string());
@@ -517,15 +528,26 @@ fn create_splits_at_the_longest_matching_remote() -> Result<(), Box<dyn Error>> 
 /// boundary for `refs/remotes/origin/smoke`.
 #[test]
 fn create_refuses_collision_with_an_included_remote() -> Result<(), Box<dyn Error>> {
-    let fixture = Fixture::new()?;
-    let url = fixture.root.to_str().ok_or("non-UTF8 fixture root")?;
-    fixture.run(&["config", "remote.backup.url", url])?;
+    let mut fixture = Fixture::new()?;
+    let url = fixture
+        .root
+        .to_str()
+        .ok_or("non-UTF8 fixture root")?
+        .to_owned();
+    fixture.run(&["config", "remote.backup.url", &url])?;
     std::fs::write(
         fixture.root.join(".git/remotes.inc"),
         "[remote \"origin\"]\n\turl = /origin.invalid\n",
     )?;
     fixture.run(&["config", "include.path", "remotes.inc"])?;
     fixture.run(&["update-ref", "refs/remotes/origin/smoke", "HEAD"])?;
+    // Config edits change the digested repository view; re-anchor the handle.
+    fixture.repo = fixture.runtime.open_repo(
+        &fixture.executor,
+        &fixture.root,
+        fixture.budget()?,
+        &cancel(),
+    )?;
     let test_context = TestContext::new(&fixture)?;
     let context = test_context.context();
 
