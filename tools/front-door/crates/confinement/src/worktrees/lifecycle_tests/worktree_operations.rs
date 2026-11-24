@@ -523,6 +523,84 @@ fn create_splits_at_the_longest_matching_remote() -> Result<(), Box<dyn Error>> 
     Ok(())
 }
 
+/// Issue #3848: `origin/batch/next` is `origin`'s branch `batch/next`; the
+/// intermediate `origin/batch` is not a remote, so `next/x` is free. Real
+/// collisions at the branch and below it still refuse.
+#[test]
+fn create_splits_batch_next_only_at_configured_origin() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let url = fixture.root.to_str().ok_or("non-UTF8 fixture root")?;
+    fixture.run(&["remote", "add", "origin", url])?;
+    fixture.run(&["update-ref", "refs/remotes/origin/batch/next", "HEAD"])?;
+    let test_context = TestContext::new(&fixture)?;
+    let context = test_context.context();
+    let base = fixture.head()?.to_string();
+
+    let created = create(
+        &context,
+        WorktreeCreate {
+            branch: "next/x".into(),
+            base: Some(base.clone()),
+        },
+        &cancel(),
+    )?;
+    assert_eq!(created.branch.as_deref(), Some("refs/heads/next/x"));
+
+    for branch in ["batch/next/x", "batch"] {
+        let error = create(
+            &context,
+            WorktreeCreate {
+                branch: branch.into(),
+                base: Some(base.clone()),
+            },
+            &cancel(),
+        );
+        assert!(
+            matches!(error, Err(WorktreeError::BranchCollision { ref existing }) if existing == "refs/remotes/origin/batch/next"),
+            "unexpected result for {branch}: {error:?}"
+        );
+    }
+    Ok(())
+}
+
+/// A ref under no configured remote has no boundary to split at: its whole name
+/// is the candidate. `review/next/x` collides with `refs/remotes/review/next`,
+/// but the intermediate `review` does not make `next/x` collide.
+#[test]
+fn create_compares_ref_under_no_configured_remote_as_is() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let url = fixture.root.to_str().ok_or("non-UTF8 fixture root")?;
+    fixture.run(&["remote", "add", "origin", url])?;
+    fixture.run(&["update-ref", "refs/remotes/review/next", "HEAD"])?;
+    let test_context = TestContext::new(&fixture)?;
+    let context = test_context.context();
+    let base = fixture.head()?.to_string();
+
+    let created = create(
+        &context,
+        WorktreeCreate {
+            branch: "next/y".into(),
+            base: Some(base.clone()),
+        },
+        &cancel(),
+    )?;
+    assert_eq!(created.branch.as_deref(), Some("refs/heads/next/y"));
+
+    let error = create(
+        &context,
+        WorktreeCreate {
+            branch: "review/next/x".into(),
+            base: Some(base),
+        },
+        &cancel(),
+    );
+    assert!(
+        matches!(error, Err(WorktreeError::BranchCollision { ref existing }) if existing == "refs/remotes/review/next"),
+        "unexpected result: {error:?}"
+    );
+    Ok(())
+}
+
 /// Git sees remotes from included config. A directly configured remote keeps the
 /// tracking-directory fallback off, so an included `origin` must still define a
 /// boundary for `refs/remotes/origin/smoke`.

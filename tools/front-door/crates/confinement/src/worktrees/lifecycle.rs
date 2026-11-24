@@ -853,17 +853,18 @@ fn create_with_default(
                 .is_some_and(|candidate| provenant_core::refs_collide(&request.branch, candidate));
             // Only a configured remote defines a remote/branch boundary; an
             // invented alias from an intermediate slash is not a remote. Remotes
-            // are longest first, so the first match is the one Git would use.
+            // are longest first, so the first match is the one Git would use. A
+            // ref under no configured remote keeps its whole name as the
+            // candidate rather than escaping the collision check.
             let remote_collision = text.strip_prefix("refs/remotes/").is_some_and(|rest| {
-                remotes
+                let candidate = remotes
                     .iter()
                     .find_map(|remote| {
                         rest.strip_prefix(remote.as_str())
                             .and_then(|rest| rest.strip_prefix('/'))
                     })
-                    .is_some_and(|candidate| {
-                        provenant_core::refs_collide(&request.branch, candidate)
-                    })
+                    .unwrap_or(rest);
+                provenant_core::refs_collide(&request.branch, candidate)
             });
             if local_collision || remote_collision {
                 return Err(WorktreeError::BranchCollision {
