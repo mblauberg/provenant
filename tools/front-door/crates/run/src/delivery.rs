@@ -750,7 +750,7 @@ impl HostDeliveryContext {
         self
     }
     /// A validated sealed remote: a malformed record refuses, naming its value.
-    fn sealed_remote(name: Option<&str>) -> Result<Option<provenant_config::RemoteName>, RunError> {
+    fn sealed_remote(name: Option<&str>) -> Result<Option<provenant_config::RemoteName>> {
         name.map(|name| {
             provenant_config::RemoteName::new(name)
                 .map_err(|_| RunError::InvalidSealedRemote(name.to_owned()))
@@ -758,13 +758,11 @@ impl HostDeliveryContext {
         .transpose()
     }
     /// The remote named by the sealed launch destination.
-    pub(crate) fn delivery_remote(&self) -> Result<Option<provenant_config::RemoteName>, RunError> {
+    pub(crate) fn delivery_remote(&self) -> Result<Option<provenant_config::RemoteName>> {
         Self::sealed_remote(self.bound.as_ref().map(|b| b.destination.remote.as_str()))
     }
     /// The remote named by the sealed stop-publication destination.
-    pub(crate) fn stop_publish_remote(
-        &self,
-    ) -> Result<Option<provenant_config::RemoteName>, RunError> {
+    pub(crate) fn stop_publish_remote(&self) -> Result<Option<provenant_config::RemoteName>> {
         Self::sealed_remote(
             self.stop_publish_bound
                 .as_ref()
