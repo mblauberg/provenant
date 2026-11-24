@@ -321,9 +321,7 @@ fn session_refusal_uses_decision_evidence_and_a_stably_absent_root_keeps_its_ver
     // placement, not the session, decides what an absent root holds.
     let missing = root.join("missing");
     assert!(session.observe_roots(std::slice::from_ref(&missing))[&missing].is_available());
-    let states = session.observe_roots(&[root.clone(), missing.clone()]);
-    assert!(states[&root].is_available());
-    assert!(states[&missing].is_available());
+    assert!(session.observe_roots(std::slice::from_ref(&root))[&root].is_available());
     Ok(())
 }
 
@@ -2331,9 +2329,19 @@ fn unreadable_platform_policy_rechecks_identity_and_preserves_other_unknowns()
         .cwds
         .insert(300, CwdObservation::Path(root.clone()));
     assert!(observer.observe_roots(std::slice::from_ref(&root))[&root].is_observed());
-    // Owner/identity lookup failure never licenses exclusion or placement.
-    let missing = root.join("missing-root");
-    assert!(observer.observe_roots(std::slice::from_ref(&missing))[&missing].is_unknown());
+    // Identity lookup failure never licenses exclusion or placement.
+    let unreadable = root.join("dangling-root");
+    std::os::unix::fs::symlink(root.join("missing-target"), &unreadable)?;
+    assert!(observer.observe_roots(std::slice::from_ref(&unreadable))[&unreadable].is_unknown());
+    // A removed root is decided: the system process is excused against this
+    // user's uid and the readable process lies outside it.
+    let removed = root.join("removed-root");
+    assert!(observer.observe_roots(std::slice::from_ref(&removed))[&removed].is_available());
+    // A process left inside the removed tree still holds it.
+    observer
+        .cwds
+        .insert(300, CwdObservation::Path(removed.join("src")));
+    assert!(!observer.observe_roots(std::slice::from_ref(&removed))[&removed].is_available());
     Ok(())
 }
 
