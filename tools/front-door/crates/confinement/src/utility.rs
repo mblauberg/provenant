@@ -2960,7 +2960,7 @@ pub fn set_lane_upstream_key(
     // `branch.<name>.remote` makes Git itself crash on the next status read.
     let Some(remote) = provenant_config::ForgeContext::remote_if_any(&config, &git)
         .map_err(|_| UtilityError::InvalidOperationValue)?
-        .map(|remote| remote.value)
+        .map(|remote| remote.into_string())
     else {
         return Ok(());
     };

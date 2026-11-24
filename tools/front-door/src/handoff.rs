@@ -144,7 +144,7 @@ fn inspect(
     src: &Source,
     workers: &dyn WorkerObserver,
     facts: &worktrees::RepoFacts,
-    remote: Option<&str>,
+    remote: Option<&provenant_config::RemoteName>,
 ) -> Result<Vec<Tree>, Refusal> {
     crate::worktrees::with_context_using_facts(
         &src.roots,
@@ -173,7 +173,7 @@ fn inspect_context(
     context: &worktrees::WorktreeContext<'_>,
     facts: &worktrees::RepoFacts,
     cancel: &CancelToken,
-    remote_name: Option<&str>,
+    remote_name: Option<&provenant_config::RemoteName>,
 ) -> Result<Vec<Tree>, crate::worktrees::Error> {
     let context = &worktrees::WorktreeContext { facts, ..*context };
     let observations = worktrees::list(context, cancel)?;
@@ -336,7 +336,7 @@ pub(crate) fn wip(
     workers: &dyn WorkerObserver,
     facts: &worktrees::RepoFacts,
     tree: &Tree,
-    remote: Option<&str>,
+    remote: Option<provenant_config::RemoteName>,
 ) -> Result<(), Refusal> {
     // A WIP commit is published to the checkout's remote; without one there is
     // nowhere to push and no name to pass to Git.
@@ -372,7 +372,7 @@ pub(crate) fn wip(
     )
 }
 
-fn wip_git(tree: &Tree, remote: &str) -> Result<(), Refusal> {
+fn wip_git(tree: &Tree, remote: &provenant_config::RemoteName) -> Result<(), Refusal> {
     let branch = tree.branch.as_deref().ok_or_else(|| {
         Refusal::refused("WIP_REFUSED", "a detached worktree has no branch to push")
     })?;
@@ -396,7 +396,7 @@ fn wip_git(tree: &Tree, remote: &str) -> Result<(), Refusal> {
     }
     // A full refspec cannot be confused with a tag of the same name.
     let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
-    step(&["push", "--set-upstream", remote, &refspec])
+    step(&["push", "--set-upstream", remote.as_str(), &refspec])
 }
 /// Untracked files Git does not ignore. `--wip` commits tracked changes only,
 /// so these would stay behind.
@@ -560,7 +560,7 @@ pub(crate) fn resolve_remote(
     state: &Path,
     project: &Path,
     ports: &provenant_config::PortTable,
-) -> Result<Option<String>, Refusal> {
+) -> Result<Option<provenant_config::RemoteName>, Refusal> {
     let policy = provenant_config::operation_policy(state, project, ports);
     let config = provenant_config::ForgeConfig::new(ports, (*policy).clone());
     let git = provenant_config::ForgeGit::new(project).map_err(|error| {
@@ -570,15 +570,13 @@ pub(crate) fn resolve_remote(
             format!("cannot read the checkout's Git metadata: {error}"),
         )
     })?;
-    provenant_config::ForgeContext::remote_if_any(&config, &git)
-        .map(|remote| remote.map(|remote| remote.value))
-        .map_err(|error| {
-            Refusal::new(
-                Outcome::Refused,
-                "FORGE_CONTEXT_UNRESOLVED",
-                error.to_string(),
-            )
-        })
+    provenant_config::ForgeContext::remote_if_any(&config, &git).map_err(|error| {
+        Refusal::new(
+            Outcome::Refused,
+            "FORGE_CONTEXT_UNRESOLVED",
+            error.to_string(),
+        )
+    })
 }
 
 // The writer advisory is part of the handoff hook's stderr protocol.
@@ -731,7 +729,7 @@ fn execute(
 
     // 2. Worktrees must be clean and pushed, unless the caller says otherwise.
     let facts = worktrees::RepoFacts::default();
-    let mut trees = inspect(&src, workers, &facts, remote.as_deref())?;
+    let mut trees = inspect(&src, workers, &facts, remote.as_ref())?;
     let mut input = request(&trees)?;
     for advisory in trees
         .iter()
@@ -782,7 +780,7 @@ fn execute(
             if !args.dry_run {
                 let mut pushed: Vec<String> = Vec::new();
                 for tree in &problems {
-                    if let Err(mut refusal) = wip(&src, workers, &facts, tree, remote.as_deref()) {
+                    if let Err(mut refusal) = wip(&src, workers, &facts, tree, remote.clone()) {
                         if !pushed.is_empty() {
                             let _ = write!(
                                 refusal.message,
@@ -794,7 +792,7 @@ fn execute(
                     }
                     pushed.push(tree.branch.clone().unwrap_or_default());
                 }
-                trees = inspect(&src, workers, &facts, remote.as_deref())?;
+                trees = inspect(&src, workers, &facts, remote.as_ref())?;
                 let left: Vec<String> = trees
                     .iter()
                     .filter(|t| !t.problems().is_empty())
@@ -1155,7 +1153,7 @@ fn fetch_recreation_base<T, E>(
 pub(crate) fn recreate(
     target: &Target<'_>,
     branches: &[String],
-    remote: Option<&str>,
+    remote: Option<provenant_config::RemoteName>,
 ) -> Vec<HandoffWorktree> {
     // Branch recreation starts from `<remote>/<branch>`; without a remote there
     // is no base to fetch and no name to build that ref from.
@@ -1259,7 +1257,7 @@ pub(crate) fn recreate(
                     path: Some(info.path.to_string_lossy().into_owned()),
                     head: Some(info.head.to_string()),
                     created,
-                    error: worktree_warning(&info, &base, remote),
+                    error: worktree_warning(&info, &base, &remote),
                 },
                 Err(error) => failed(error.to_string()),
             }
@@ -1271,7 +1269,7 @@ pub(crate) fn recreate(
 fn worktree_warning(
     info: &worktrees::WorktreeInfo,
     base: &provenant_core::GitOid,
-    remote: &str,
+    remote: &provenant_config::RemoteName,
 ) -> Option<String> {
     let mut found = Vec::new();
     if info.head != *base {
@@ -1372,7 +1370,7 @@ pub(crate) fn receive(
             };
         }
     };
-    let worktrees = recreate(target, &input.branches, remote.as_deref());
+    let worktrees = recreate(target, &input.branches, remote);
     let source_label = context
         .config
         .peers

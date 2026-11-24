@@ -25,6 +25,68 @@ use thiserror::Error;
 /// The project root, as seen by the owner resolving the context.
 pub type Project = Path;
 
+/// A Git remote name that is known to be present and non-blank.
+///
+/// The forge boundary creates this once; every consumer below it receives the
+/// typed value, so an absent remote cannot be flattened into `Some("")` and
+/// reach Git as a push destination or a `refs/remotes/` namespace.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct RemoteName(String);
+
+/// The supplied remote name was empty or whitespace-only.
+#[derive(Debug, Error, PartialEq, Eq)]
+#[error("a Git remote name cannot be empty or whitespace-only")]
+pub struct RemoteNameError;
+
+impl RemoteName {
+    /// Build a remote name, refusing an empty or whitespace-only value.
+    pub fn new(name: impl AsRef<str>) -> Result<Self, RemoteNameError> {
+        let name = name.as_ref();
+        if name.trim().is_empty() {
+            return Err(RemoteNameError);
+        }
+        Ok(Self(name.to_owned()))
+    }
+
+    /// The remote name as a string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Consume the name into its string.
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl AsRef<str> for RemoteName {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Display for RemoteName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl TryFrom<&str> for RemoteName {
+    type Error = RemoteNameError;
+
+    fn try_from(name: &str) -> Result<Self, Self::Error> {
+        Self::new(name)
+    }
+}
+
+impl TryFrom<String> for RemoteName {
+    type Error = RemoteNameError;
+
+    fn try_from(name: String) -> Result<Self, Self::Error> {
+        Self::new(name)
+    }
+}
+
 /// A refusal from one step of context resolution. It never invents a default:
 /// it lists what was seen and the closest spellings, so the operator can add a
 /// declaration instead of guessing why a command picked another remote.
@@ -197,9 +259,11 @@ impl ForgeContext {
     pub fn remote_if_any(
         config: &Config<'_>,
         git: &Git,
-    ) -> Result<Option<Sourced<String>>, ForgeContextError> {
+    ) -> Result<Option<RemoteName>, ForgeContextError> {
         match Self::remote(config, git) {
-            Ok(remote) => Ok(Some(remote)),
+            // A blank name names no remote, so it is the same absence as a
+            // checkout with none; the constructor keeps it out of consumers.
+            Ok(remote) => Ok(RemoteName::new(&remote.value).ok()),
             Err(ForgeContextError::NoRemote { remotes, .. }) if remotes.is_empty() => Ok(None),
             Err(error) => Err(error),
         }
@@ -833,6 +897,17 @@ mod tests {
         );
     }
 
+    #[test]
+    fn remote_name_refuses_an_empty_or_whitespace_name() {
+        assert_eq!(RemoteName::new(""), Err(RemoteNameError));
+        assert_eq!(RemoteName::new("   "), Err(RemoteNameError));
+        assert_eq!(RemoteName::new("\t\n"), Err(RemoteNameError));
+        assert_eq!(
+            RemoteName::new("upstream").expect("name").as_str(),
+            "upstream"
+        );
+    }
+
     /// A checkout with no remote at all is an absence, never an empty name.
     /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
     #[test]
@@ -843,6 +918,20 @@ mod tests {
         assert_eq!(
             ForgeContext::remote_if_any(&config, &fixture.git()).expect("absence"),
             None
+        );
+    }
+
+    /// The resolver creates the typed name at the boundary; consumers never
+    /// rebuild one from a bare string.
+    /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    #[test]
+    fn remote_if_any_returns_a_typed_remote_name() {
+        let fixture = Fixture::new("[remote \"upstream\"]\n");
+        let ports = PortTable::builtin();
+        let config = Config::new(&ports, Policy::default());
+        assert_eq!(
+            ForgeContext::remote_if_any(&config, &fixture.git()).expect("remote"),
+            Some(RemoteName::new("upstream").expect("name"))
         );
     }
 

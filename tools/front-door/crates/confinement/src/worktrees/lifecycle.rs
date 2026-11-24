@@ -807,7 +807,7 @@ fn create_with_default(
         // absent remote is an absence, not an `origin` guess.
         // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
         let forge_remote = super::forge_remote(context)?;
-        let default = default_creation_base(context, facts, cancel, forge_remote.as_deref())?;
+        let default = default_creation_base(context, facts, cancel, forge_remote.as_ref())?;
         return create_with_default(context, request, cancel, Some(default), naming_warnings);
     }
 
@@ -944,7 +944,7 @@ pub fn default_creation_base(
     context: &WorktreeContext<'_>,
     facts: &RepoFacts,
     cancel: &CancelToken,
-    remote: Option<&str>,
+    remote: Option<&provenant_config::RemoteName>,
 ) -> Result<(GitOid, Vec<String>), WorktreeError> {
     if let Some(remote) = remote {
         match crate::utility::fetch_missing_remote_branch(
@@ -991,7 +991,7 @@ pub fn default_creation_base(
     Ok((oid, vec![warning]))
 }
 
-fn default_base_warning(oid: GitOid, remote: Option<&str>) -> String {
+fn default_base_warning(oid: GitOid, remote: Option<&provenant_config::RemoteName>) -> String {
     match remote {
         Some(remote) => {
             format!("could not fetch {remote}'s default branch; using local HEAD {oid}")

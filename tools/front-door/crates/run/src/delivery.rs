@@ -750,16 +750,16 @@ impl HostDeliveryContext {
         self
     }
     /// The remote named by the sealed launch destination.
-    pub(crate) fn delivery_remote(&self) -> Option<&str> {
+    pub(crate) fn delivery_remote(&self) -> Option<provenant_config::RemoteName> {
         self.bound
             .as_ref()
-            .map(|bound| bound.destination.remote.as_str())
+            .and_then(|bound| provenant_config::RemoteName::new(&bound.destination.remote).ok())
     }
     /// The remote named by the sealed stop-publication destination.
-    pub(crate) fn stop_publish_remote(&self) -> Option<&str> {
+    pub(crate) fn stop_publish_remote(&self) -> Option<provenant_config::RemoteName> {
         self.stop_publish_bound
             .as_ref()
-            .map(|bound| bound.destination.remote.as_str())
+            .and_then(|bound| provenant_config::RemoteName::new(&bound.destination.remote).ok())
     }
     /// The explicit state root, else the captured PROVENANT_STATE_DIR, else
     /// the default root under the captured HOME.
@@ -1614,10 +1614,8 @@ impl HostDeliveryContext {
         });
         self.validate_transport_helpers(writer)?;
         if fetch && !matches!(request.mode, crate::DeliveryMode::Integrate(_)) {
-            // This all-branch fetch is the same shared refresh `refresh_origin`
-            // performs. Taking the fetch lock coalesces a refresh another
-            // launch just completed, and the concurrent-transaction tolerance
-            // keeps an unrelated forced ref update from failing the launch.
+            // The shared refresh lock coalesces another launch's fetch; the
+            // tolerance keeps an unrelated forced ref update from failing it.
             let common = self.common_git_dir(&writer.project, stage)?;
             let common = Directory::open_anchor(&common)?;
             let requested = OriginRefreshRequest::capture()?;
@@ -1636,7 +1634,7 @@ impl HostDeliveryContext {
     /// `target` is the private Git directory and the one remote to refresh.
     pub(crate) fn refresh_origin(
         writer: &WriterRequest,
-        target: (&Path, Option<&str>),
+        target: (&Path, Option<provenant_config::RemoteName>),
         host_state: &Path,
         cancel: &provenant_core::CancelToken,
         facts: &provenant_confinement::worktrees::RepoFacts,
@@ -1654,7 +1652,7 @@ impl HostDeliveryContext {
             .with_repo_facts(facts)
             .with_host_state(host_state);
         host.cancellation = Some(cancel.clone());
-        host.refresh_origin_with(writer, git_dir, remote)
+        host.refresh_origin_with(writer, git_dir, remote.as_str())
     }
     pub(super) fn refresh_origin_with(
         self,
@@ -1852,7 +1850,9 @@ impl HostDeliveryContext {
         let branch_ref = GitRefName::branch(branch)
             .map_err(|error| RunError::delivery(stage, DeliveryCause::parse(error)))?;
         let common = self.common_git_dir(&writer.project, stage)?;
-        crate::writer::verify_writer_git_paths(&common, &branch_ref, Some(remote))?;
+        let checked = provenant_config::RemoteName::new(remote)
+            .map_err(|_| delivery_refusal(stage, "delivery needs a configured remote name"))?;
+        crate::writer::verify_writer_git_paths(&common, &branch_ref, Some(&checked))?;
         self.validate_transport_helpers(writer)?;
         let source = format!("refs/heads/{branch}");
         // Read and fetch the same sealed destination used for the later push.
