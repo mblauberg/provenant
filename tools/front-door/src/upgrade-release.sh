@@ -13,11 +13,35 @@ trap 'exit 130' INT
 trap 'exit 143' TERM HUP
 base=https://github.com/mblauberg/provenant/releases/download/$release_tag
 archive=provenant-aarch64-apple-darwin.tar.gz
+# One bounded, resumable fetch for the package and its checksum. A dropped
+# stream resumes the partial file inside a fixed attempt budget; verification
+# runs only after both complete, and a final failure names bytes and time.
+download_artefact() {
+    dl_name=$1
+    dl_dest=$2
+    dl_label=$3
+    dl_attempts=0
+    dl_max_attempts=3
+    : > "$dl_dest"
+    dl_start=$(date +%s)
+    while [ "$dl_attempts" -lt "$dl_max_attempts" ]; do
+        dl_attempts=$((dl_attempts + 1))
+        if curl -fLsS --proto '=https' --tlsv1.2 -C - \
+            --retry 5 --retry-all-errors --retry-delay 1 \
+            "$base/$dl_name" -o "$dl_dest" </dev/null; then
+            return 0
+        fi
+    done
+    dl_bytes=$(wc -c < "$dl_dest" 2>/dev/null | tr -d '[:space:]') || dl_bytes=0
+    [ -n "$dl_bytes" ] || dl_bytes=0
+    dl_elapsed=$(( $(date +%s) - dl_start ))
+    printf 'Cannot download release %s after %s attempts: received %s bytes in %s seconds\n' \
+        "$dl_label" "$dl_attempts" "$dl_bytes" "$dl_elapsed" >&2
+    exit 4
+}
 verify_artefact() {
     artefact=$1
-    curl -fLsS --proto '=https' --tlsv1.2 "$base/$artefact.sha256" -o "$scratch/checksum" </dev/null || {
-        printf '%s\n' 'Cannot download release checksum' >&2; exit 4;
-    }
+    download_artefact "$artefact.sha256" "$scratch/checksum" checksum
     expected=$(awk 'NR == 1 {print $1}' "$scratch/checksum")
     [ "${#expected}" -eq 64 ] || { printf '%s\n' 'Invalid checksum' >&2; exit 4; }
     case "$expected" in *[!0-9a-fA-F]*) printf '%s\n' 'Invalid checksum' >&2; exit 4 ;; esac
@@ -25,32 +49,7 @@ verify_artefact() {
     actual=${actual%% *}
     [ "$actual" = "$expected" ] || { printf '%s\n' 'Release checksum mismatch' >&2; exit 4; }
 }
-download_package() {
-    artefact=$1
-    dest=$scratch/$artefact
-    # A dropped HTTP/2 stream must not abort the whole peer upgrade. Resume the
-    # partial file and retry within a bounded budget. Verification runs only
-    # after this function returns, so a partial file is never accepted.
-    attempts=0
-    max_attempts=3
-    : > "$dest"
-    start=$(date +%s)
-    while [ "$attempts" -lt "$max_attempts" ]; do
-        attempts=$((attempts + 1))
-        if curl -fLsS --proto '=https' --tlsv1.2 -C - \
-            --retry 5 --retry-all-errors --retry-delay 1 \
-            "$base/$artefact" -o "$dest" </dev/null; then
-            return 0
-        fi
-    done
-    bytes=$(wc -c < "$dest" 2>/dev/null | tr -d '[:space:]') || bytes=0
-    [ -n "$bytes" ] || bytes=0
-    elapsed=$(( $(date +%s) - start ))
-    printf 'Cannot download release package after %s attempts: received %s bytes in %s seconds\n' \
-        "$attempts" "$bytes" "$elapsed" >&2
-    exit 4
-}
-download_package "$archive"
+download_artefact "$archive" "$scratch/$archive" package
 verify_artefact "$archive"
 mkdir "$scratch/package"
 tar -xzpf "$scratch/$archive" -C "$scratch/package" </dev/null || {

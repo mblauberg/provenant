@@ -1101,14 +1101,26 @@ fn remote_upgrade_script_resumes_and_retries_before_verifying() {
     // Verification is downstream of the bounded download, and a checksum
     // mismatch still refuses: a partial file is never verified as complete.
     let download = script
-        .find("download_package \"$archive\"")
-        .expect("bounded download call");
+        .find("download_artefact \"$archive\" \"$scratch/$archive\" package")
+        .expect("bounded package download call");
     let verify = script
         .find("verify_artefact \"$archive\"")
         .expect("verification call");
     assert!(
         download < verify,
         "download {download} must precede verify {verify}"
+    );
+    // The checksum goes through the same bounded, resumable fetch rather than a
+    // second single-shot curl that a dropped stream could abort.
+    assert!(
+        script.contains("download_artefact \"$artefact.sha256\" \"$scratch/checksum\" checksum"),
+        "{script}"
+    );
+    // One helper body serves both artefacts: no copy of the retry loop remains.
+    assert_eq!(
+        script.matches("download_artefact() {").count(),
+        1,
+        "{script}"
     );
     assert!(script.contains("Release checksum mismatch"), "{script}");
 
