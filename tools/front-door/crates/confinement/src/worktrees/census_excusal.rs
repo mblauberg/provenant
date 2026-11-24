@@ -1,13 +1,15 @@
 //! Typed classification of unreadable processes for worktree occupancy.
 //!
 //! An unreadable process is not, by itself, proof that a lane worktree is
-//! occupied. Three typed policies may excuse one: the existing listed
-//! service-uid policy for a path or root identity that cannot be placed, an
-//! owner-uid platform daemon with an approved executable and a readable cwd
-//! outside every scoped root, and a configured image entry that extends both
-//! to every unreadable failure class. Every other unreadable process keeps the
-//! root unknown, with the PID named in the refusal. Nothing here parses the
-//! `process_details` diagnostic string.
+//! occupied. Three typed policies may excuse one: the listed service-uid
+//! policy for a path that cannot be placed, an owner-uid platform daemon with
+//! an approved executable and a readable cwd outside every scoped root, and a
+//! configured image entry that extends both to every unreadable failure class.
+//! Placement evidence for the cwd and every descriptor is computed for every
+//! root before any excusal; a positive placement always wins. Root identity
+//! that cannot be read, and a listed uid the kernel will not reveal, fail
+//! closed and keep the root unknown. Nothing here parses the `process_details`
+//! diagnostic string.
 
 use super::*;
 
@@ -16,12 +18,97 @@ use super::*;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum UnreadableFailure {
     /// A cwd or descriptor path could not be placed under a root by directory
-    /// identity. `listed` is the already-checked service-uid policy decision.
+    /// identity. `listed` is the already-checked service-uid policy decision;
+    /// it is false when a root's own identity cannot be read (fail closed).
     PathOrRootIdentityUnreadable { listed: bool },
     /// The descriptor table was refused with EPERM.
     DescriptorsDenied,
     /// The kernel refused the cwd query.
     CwdDenied,
+}
+
+/// Placement of one readable path against every candidate root, decided by
+/// directory identity before any excusal is consulted. Computed for the cwd and
+/// each descriptor path; it mirrors `record_live_path_with_audit` rather than a
+/// textual prefix test, so `/` and `/Users/user` are outside a root under
+/// `/Users`, while the root itself and its descendants are inside.
+#[derive(Default)]
+pub(super) struct PlacementEvidence {
+    inside: BTreeSet<PathBuf>,
+    uncertain: BTreeSet<PathBuf>,
+}
+
+impl PlacementEvidence {
+    /// Place by directory identity: canonicalise the nearest extant path, then
+    /// compare the `(dev, ino)` of every ancestor with the root's. An unreadable
+    /// root or ancestor is uncertain, never "outside".
+    pub(super) fn from_path(path: &Path, roots: &[PathBuf]) -> Self {
+        let mut evidence = Self::default();
+        let Some(canonical) = super::census::canonical_cwd(path) else {
+            evidence.uncertain.extend(roots.iter().cloned());
+            return evidence;
+        };
+        if !canonical.is_absolute() {
+            evidence.uncertain.extend(roots.iter().cloned());
+            return evidence;
+        }
+        let ancestors = canonical
+            .ancestors()
+            .try_fold(BTreeSet::new(), |mut ids, part| {
+                match std::fs::metadata(part) {
+                    Ok(metadata) if metadata.is_dir() => {
+                        ids.insert((metadata.dev(), metadata.ino()));
+                        Some(ids)
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(ids),
+                    _ => None,
+                }
+            });
+        let Some(ids) = ancestors else {
+            evidence.uncertain.extend(roots.iter().cloned());
+            return evidence;
+        };
+        for root in roots {
+            match std::fs::metadata(root) {
+                Ok(metadata) if metadata.is_dir() => {
+                    if ids.contains(&(metadata.dev(), metadata.ino())) {
+                        evidence.inside.insert(root.clone());
+                    }
+                }
+                _ => {
+                    evidence.uncertain.insert(root.clone());
+                }
+            }
+        }
+        evidence
+    }
+
+    /// A positive placement inside any root, or an undecidable root, must win
+    /// over every excusal arm, including the configured one.
+    pub(super) fn blocks_excusal(&self) -> bool {
+        !self.inside.is_empty() || !self.uncertain.is_empty()
+    }
+
+    /// True only when every root was decided and the path lies outside all of
+    /// them. Used by the built-in platform-daemon default: an undecidable root
+    /// never grants an excusal.
+    pub(super) fn outside_every_root(&self) -> bool {
+        !self.blocks_excusal()
+    }
+}
+
+/// An excusal holds when all three credentials are system accounts foreign to
+/// every candidate root's owner. An unreadable root identity cannot be proven
+/// foreign, so it fails closed rather than claiming an excusal that cannot fire.
+pub(super) fn excusal_applies(
+    excusal: &provenant_os::pid::UnreadablePolicyExcusal,
+    roots: &[PathBuf],
+) -> bool {
+    excusal.uids.all_system()
+        && roots.iter().all(|root| {
+            std::fs::metadata(root)
+                .is_ok_and(|metadata| excusal.uids.all_differ_from(metadata.uid()))
+        })
 }
 
 fn owner_uids(roots: &[PathBuf]) -> Vec<u32> {
@@ -40,17 +127,24 @@ pub(super) fn listed_uid_excusal(
     cwd_observer: &dyn CwdObserver,
     pid: i64,
     roots: &[PathBuf],
+    entries: &[CensusIgnoreEntry],
 ) -> bool {
     cwd_observer
-        .unreadable_policy_uids(pid, &[])
-        .is_ok_and(|excusal| super::census::excusal_applies(&excusal, roots))
+        .unreadable_policy_uids(pid, entries)
+        .is_ok_and(|excusal| excusal_applies(&excusal, roots))
 }
 
 /// The host's configured exception extends the built-in defaults to any
 /// unreadable failure class. The observer matches the canonical executable and
 /// team identifier; a configured path that only looks similar never excuses.
-fn configured_excusal(cwd_observer: &dyn CwdObserver, pid: i64) -> bool {
-    cwd_observer.configured_unreadable_image(pid, &[]).is_some()
+fn configured_excusal(
+    cwd_observer: &dyn CwdObserver,
+    pid: i64,
+    entries: &[CensusIgnoreEntry],
+) -> bool {
+    cwd_observer
+        .configured_unreadable_image(pid, entries)
+        .is_some()
 }
 
 fn approved_daemon_executable(path: &Path) -> bool {
@@ -66,13 +160,19 @@ fn approved_daemon_executable(path: &Path) -> bool {
 }
 
 /// An owner-uid process with EPERM-unreadable descriptors is host-owned only
-/// when all three typed signals agree: the live platform signature, an
-/// approved system-agent directory, and a readable cwd outside every root.
+/// when all three typed signals agree: all three credentials belong to the
+/// owner (a setuid-root image launched by the owner is not an owner daemon),
+/// the live platform signature, an approved system-agent directory, and a
+/// readable cwd placed outside every root by directory identity.
 fn owner_platform_daemon(cwd_observer: &dyn CwdObserver, pid: i64, roots: &[PathBuf]) -> bool {
     let Some(uids) = cwd_observer.process_uids(pid) else {
         return false;
     };
-    if !owner_uids(roots).contains(&uids.real) {
+    let owners = owner_uids(roots);
+    if ![uids.real, uids.effective, uids.saved]
+        .into_iter()
+        .all(|uid| owners.contains(&uid))
+    {
         return false;
     }
     if cwd_observer.platform_signed_image(pid).is_none() {
@@ -87,9 +187,7 @@ fn owner_platform_daemon(cwd_observer: &dyn CwdObserver, pid: i64, roots: &[Path
     let Ok(CwdObservation::Path(cwd)) = cwd_observer.cwd(pid) else {
         return false;
     };
-    roots
-        .iter()
-        .all(|root| !super::census::occupancy_path_could_be_under(&cwd, root))
+    PlacementEvidence::from_path(&cwd, roots).outside_every_root()
 }
 
 /// Excuse one unreadable process from blocking the census, or return false
@@ -100,6 +198,7 @@ pub(super) fn excuse_unreadable(
     roots: &[PathBuf],
     failure: UnreadableFailure,
     placed_inside: bool,
+    entries: &[CensusIgnoreEntry],
     unplaceable: &mut dyn FnMut(Option<i64>, Option<&'static str>),
 ) -> bool {
     if placed_inside {
@@ -112,7 +211,9 @@ pub(super) fn excuse_unreadable(
         UnreadableFailure::DescriptorsDenied if owner_platform_daemon(cwd_observer, pid, roots) => {
             "platform daemon with cwd outside every root"
         }
-        _ if configured_excusal(cwd_observer, pid) => "configured unreadable image exception",
+        _ if configured_excusal(cwd_observer, pid, entries) => {
+            "configured unreadable image exception"
+        }
         _ => return false,
     };
     let path = cwd_observer

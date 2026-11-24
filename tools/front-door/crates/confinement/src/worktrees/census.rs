@@ -1,6 +1,7 @@
 //! Process census and worker observation.
 use super::census_excusal::{
-    UnreadableFailure, excuse_unreadable, listed_uid_excusal, warn_unreadable_processes,
+    PlacementEvidence, UnreadableFailure, excusal_applies, excuse_unreadable, listed_uid_excusal,
+    warn_unreadable_processes,
 };
 use super::*;
 
@@ -1306,6 +1307,7 @@ fn system_worker_evidence_while(
         &PolicyCwdObserver(entries),
         &current,
         keep_going,
+        entries,
     )
 }
 
@@ -1316,6 +1318,7 @@ pub(super) fn worker_evidence_from_census(
     cwd_observer: &dyn CwdObserver,
     current: &ProcessFact,
     keep_going: Option<&dyn Fn() -> bool>,
+    entries: &[CensusIgnoreEntry],
 ) -> WorkerEvidence {
     let mut incomplete = false;
     let mut unreadable_warnings = BTreeSet::new();
@@ -1336,6 +1339,7 @@ pub(super) fn worker_evidence_from_census(
         },
         &mut held,
         keep_going,
+        entries,
     );
     warn_unreadable_processes(
         &current.identity.boot,
@@ -1419,6 +1423,7 @@ pub(super) fn observe_worker_root_taints(
         current,
         ancestors,
         &mut |_, _| {},
+        &[],
     );
     (states, taints)
 }
@@ -1442,6 +1447,7 @@ pub(super) fn observe_worker_holders(
         current,
         ancestors,
         &mut |_, _| {},
+        &[],
     );
     (states, holders, details)
 }
@@ -1468,6 +1474,7 @@ pub(super) fn observe_worker_holders_with_audit(
         current,
         ancestors,
         unplaceable,
+        &[],
     );
     (states, holders, details)
 }
@@ -1486,6 +1493,7 @@ pub(super) fn observe_worker_holders_with_taints_and_audit(
     current: &ProcessFact,
     ancestors: bool,
     unplaceable: &mut dyn FnMut(Option<i64>, Option<&'static str>),
+    entries: &[CensusIgnoreEntry],
 ) -> WorkerHolderAudit {
     let mut held = BTreeMap::new();
     observe_worker_holders_while(
@@ -1497,6 +1505,7 @@ pub(super) fn observe_worker_holders_with_taints_and_audit(
         unplaceable,
         &mut held,
         None,
+        entries,
     )
 }
 
@@ -1513,6 +1522,7 @@ pub(super) fn observe_worker_holders_while(
     unplaceable: &mut dyn FnMut(Option<i64>, Option<&'static str>),
     held: &mut HeldProcesses,
     keep_going: Option<&dyn Fn() -> bool>,
+    entries: &[CensusIgnoreEntry],
 ) -> WorkerHolderAudit {
     let within_budget = || keep_going.is_none_or(|check| check());
     let mut states: BTreeMap<_, _> = roots
@@ -1612,8 +1622,10 @@ pub(super) fn observe_worker_holders_while(
             // prove that the other roots are clear.
             let descriptors_denied =
                 occupancy.gap == Some(provenant_os::pid::OccupancyGap::DescriptorsDenied);
-            let listed = listed_uid_excusal(cwd_observer, pid, roots);
-            let configured = cwd_observer.configured_unreadable_image(pid, &[]).is_some();
+            let listed = listed_uid_excusal(cwd_observer, pid, roots, entries);
+            let configured = cwd_observer
+                .configured_unreadable_image(pid, entries)
+                .is_some();
             let cwd_supported = matches!(
                 &cwd,
                 Ok(CwdObservation::Path(_)
@@ -1675,6 +1687,7 @@ pub(super) fn observe_worker_holders_while(
                     roots,
                     failure,
                     under_candidate,
+                    entries,
                     unplaceable,
                 )
             {
@@ -1898,7 +1911,17 @@ pub(super) fn observe_worker_holders_while(
                 );
             }
         }
-        let placed = !descriptor_roots.is_empty() || !descriptor_uncertain_roots.is_empty();
+        // Placement evidence for every root, from the cwd as well as the
+        // descriptors, is computed before any excusal. A cwd inside a root (or
+        // a root whose identity cannot be decided) always wins, for every arm
+        // including the configured one; it never reaches a `continue`.
+        let cwd_placement = match &cwd {
+            NativeCwd::Path(path) => PlacementEvidence::from_path(path, roots),
+            _ => PlacementEvidence::default(),
+        };
+        let placed = cwd_placement.blocks_excusal()
+            || !descriptor_roots.is_empty()
+            || !descriptor_uncertain_roots.is_empty();
         if occupancy_gap == Some(provenant_os::pid::OccupancyGap::DescriptorsDenied)
             && excuse_unreadable(
                 cwd_observer,
@@ -1906,6 +1929,7 @@ pub(super) fn observe_worker_holders_while(
                 roots,
                 UnreadableFailure::DescriptorsDenied,
                 placed,
+                entries,
                 unplaceable,
             )
         {
@@ -1922,6 +1946,7 @@ pub(super) fn observe_worker_holders_while(
                 roots,
                 UnreadableFailure::CwdDenied,
                 placed,
+                entries,
                 unplaceable,
             )
         {
@@ -2098,19 +2123,6 @@ pub(super) fn observe_worker_holders_while(
 /// ancestor and re-append the rest. A process inside a deleted subdirectory of
 /// a root therefore still counts as inside that root. Any other failure is
 /// unobservable.
-/// An excusal holds when every credential is a system account foreign to each
-/// candidate root's owner.
-pub(super) fn excusal_applies(
-    excusal: &provenant_os::pid::UnreadablePolicyExcusal,
-    roots: &[PathBuf],
-) -> bool {
-    excusal.uids.all_system()
-        && roots.iter().all(|root| {
-            std::fs::metadata(root)
-                .is_ok_and(|metadata| excusal.uids.all_differ_from(metadata.uid()))
-        })
-}
-
 pub(super) fn canonical_cwd(path: &Path) -> Option<PathBuf> {
     let mut existing = path;
     let mut rest = Vec::new();

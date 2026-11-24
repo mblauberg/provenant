@@ -262,25 +262,33 @@ abandonment proceeds; otherwise it refuses and names the blocker, including any 
 unidentifiable PID or omitted descendants.
 
 An unreadable process alone is not an occupant, but only an explicit host policy may free a
-root. For an occupancy path or root identity that cannot be placed, the existing listed-uid
-excusal applies: a service uid accepted by `unreadable_policy_uids` and foreign to every root
-owner, such as `launchd`, is excused. For EPERM-unreadable descriptors, an owner-uid process is
-excused only when it is platform-signed (`team_id=platform`) AND its executable is under
-`/usr/libexec/`, `/System/Library/` or `/usr/sbin/` AND its cwd was read and lies outside every
-scoped root; `/bin`, `/usr/bin` and unreadable cwd never qualify. A configured
-`confinement.census_ignore_unreadable` entry, matched on the canonical executable path and
-team id, extends these defaults to every unreadable failure class (descriptors EPERM, occupancy
-path or root identity unreadable, cwd unreadable). Each excusal raises a typed warning naming
-the PID and path instead of blocking settlement. Every other unreadable process remains
-Unknown/blocking with its PID named; a human uid and the owner are never excused through the
-uid listing, and positive cwd or descriptor evidence inside a root always wins. Credentials,
-signature, configuration and paths are typed observer signals; the `process_details`
-diagnostic string is never parsed to decide custody.
+root. Before any excusal the census computes placement evidence for every root from the
+process's readable cwd and descriptor paths by directory identity, the same `(dev, ino)`
+ancestor test used to place a live path: a cwd equal to or beneath a root is inside it, while
+`/` and other ancestors are outside. A positive placement inside any root, or a root whose
+identity cannot be decided, wins for every policy arm including a configured entry. Three
+policies may then excuse: a listed service uid whose real, effective and saved uids are all
+system uids foreign to every readable root owner, for an unplaceable path; an owner-uid process
+with EPERM-unreadable descriptors when it is platform-signed (`team_id=platform`) AND its
+executable is under `/usr/libexec/`, `/System/Library/` or `/usr/sbin/` AND its cwd was read and
+placed outside every root by directory identity — all three credentials must be owner uids, so
+a setuid binary launched by the owner is not excused, and `/bin`, `/usr/bin`, unreadable cwd and
+undecidable root identity never qualify; and a configured
+`confinement.census_ignore_unreadable` entry, matched on the canonical executable path and team
+id, which extends these defaults to every unreadable failure class (descriptors EPERM,
+unplaceable path, cwd unreadable). Each excusal raises a typed warning naming the PID and path.
+Every other unreadable process remains Unknown/blocking with its PID named; a human uid and the
+owner are never excused through the uid listing. Unreadable root identity fails closed, and a
+listed uid the kernel will not reveal (for example `launchd`, pid 1) cannot be evaluated, so
+`launchd` is excused only by a configured entry or by a listed uid whose credentials the code
+can actually read — not by the built-in uid listing. Credentials, signature, configuration and
+paths are typed observer signals; the `process_details` diagnostic string is never parsed to
+decide custody.
 - Why: host daemons such as `launchd` and `UserEventAgent` cannot occupy a lane worktree, and
   an unreadable EPERM process must not deadlock every blocked settlement, but a plausible image
   alone must not excuse a process that could be the lane's writer.
 - Owner: `crates/confinement/src/worktrees/census.rs`,
-  `crates/confinement/src/worktrees/census_excusal.rs`, `crates/run/src/settlement.rs`
+  `crates/confinement/src/worktrees/census_excusal.rs`
 
 ## Continuation
 
