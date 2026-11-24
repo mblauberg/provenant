@@ -103,7 +103,6 @@ pub(crate) fn remove(temporary: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use provenant_os::fs::Directory;
 
     type Check = std::result::Result<(), Box<dyn std::error::Error>>;
 
@@ -170,7 +169,7 @@ mod tests {
         for path in [&scratch, &temporary, &temporary.join("candidate-0")] {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
         }
-        let attempt = Directory::open_anchor(&scratch)?;
+        let attempt = provenant_os::fs::Directory::open_anchor(&scratch)?;
         use_parent_in_tests(Path::new("/private/tmp"));
 
         let alias = ensure(&temporary).ok_or("alias created")?;
