@@ -471,7 +471,7 @@ impl Drop for PreparedStart {
 
 fn output_prompt(directory: &std::path::Path, prompt: &str) -> String {
     format!(
-        "Durable output for this attempt: {result} (your final answer); {exit}, {stdout}, {stderr} (harness evidence). These are the only durable outputs. Put your report and evidence in your final answer; the harness writes these files. Keep scratch files under the provided $TMPDIR, not in the worktree. Files in $TMPDIR are discarded when the attempt ends. Provider history and harness-recorded handoff progress are kept; the harness writes those records, never the lane. Files left in $TMPDIR are not deliverables.\n\n{handoff}\n\n{prompt}",
+        "Durable output for this attempt: {result} (your final answer); {exit}, {stdout}, {stderr} (harness evidence). These are the only durable outputs. Put your report and evidence in your final answer; the harness writes these files. Keep scratch files under the provided $TMPDIR, not in the worktree. Files in $TMPDIR are discarded when the attempt ends. Provider history is kept. The harness writes the attempt's own records, including the sealed handoff.json in the attempt directory, and the lane never writes them; your progress handoff JSON under provider-state is yours to update throughout the task and is kept. Files left in $TMPDIR are not deliverables.\n\n{handoff}\n\n{prompt}",
         handoff = crate::completion::guidance(),
         result = directory.join("result.md").display(),
         exit = directory.join("process-exit.json").display(),
@@ -486,6 +486,41 @@ fn output_prompt_directs_scratch_outside_worktree() {
     let prompt = output_prompt(std::path::Path::new("/attempt"), "task");
     assert!(prompt.contains("$TMPDIR"));
     assert!(prompt.contains("not in the worktree"));
+}
+
+/// #3844: the launch prompt must not tell a lane to stop updating its own
+/// progress handoff while it also carries the progress-handoff instruction.
+/// Harness ownership is scoped to the attempt's records, not to the lane's
+/// provider-state handoff.
+#[cfg(test)]
+#[test]
+fn output_prompt_keeps_progress_handoff_and_attempt_record_ownership_consistent() {
+    let progress = crate::completion::handoff_progress_guidance(std::path::Path::new(
+        "/state/attempts/6/provider-state/candidate-0/handoff.json",
+    ));
+    let prompt = output_prompt(std::path::Path::new("/attempt"), &progress);
+    // The lane still owns and updates its progress handoff under provider-state.
+    assert!(prompt.contains("Progress handoff JSON:"), "{prompt}");
+    assert!(
+        prompt.contains("Update this file throughout the task"),
+        "{prompt}"
+    );
+    // The harness owns the attempt's own records, including the sealed snapshot.
+    assert!(
+        prompt.contains("harness writes the attempt's own records"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("sealed handoff.json in the attempt directory"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("the lane never writes them"), "{prompt}");
+    // No sentence tells the lane the harness writes its progress handoff.
+    assert!(
+        !prompt.contains("harness-recorded handoff progress"),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("never the lane"), "{prompt}");
 }
 
 /// Resolve policy once for this launch from host, project and dispatch settings.

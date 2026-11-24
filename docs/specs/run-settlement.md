@@ -209,15 +209,22 @@ its scratch and `$TMPDIR` live under the attempt directory. Settlement keeps tho
 the envelope from output: a complete answer still settles rather than retrying forever (#3844).
 Snapshots sealed by an earlier build are envelopes too and keep reading unchanged. Bytes that were
 read but do not decode as an envelope after settlement settle `handoff_malformed` with the typed
-diagnostic and keep the raw file, instead of retrying an unchanging decode. A failure to read the
-slot — an unsafe link or owner, a symlink, an over-long entry or storage IO — is not a malformed
-handoff: it keeps its typed, retriable cause and does not settle. The launch prompt tells the lane
-that the harness writes those records. Provider scratch and `$TMPDIR` remain under the attempt
-directory; ownership, not location, is what keeps a lane's file out of the sealed record.
+diagnostic and keep the raw file, instead of retrying an unchanging decode. An entry in the slot
+that cannot be read safely — an oversize file, a symlink, a hard link, a directory or another unsafe
+entry type — was left by a provider that is gone at settlement. Capture renames it aside by name
+without following or reading it, under `handoff.provider-written.json` (or that name plus `.unsafe`
+when the entry is not a regular file), warns that it was provider-written, and seals the envelope
+from captured output. A transient storage IO failure on a safe entry is not an unsafe class: it
+keeps its typed, retriable cause and does not settle. The launch prompt tells the lane that the
+harness writes the attempt's own records, including the sealed `handoff.json`, while the progress
+handoff under `provider-state` is the lane's to update throughout the task. Provider scratch and
+`$TMPDIR` remain under the attempt directory; ownership, not location, is what keeps a lane's file
+out of the sealed record.
 - Why: a lane can discover supervisor records from its scratch and write a bare handoff object that
   fails the sealed-envelope decode; trusting it, or retrying a decode that can never change, strands
   a finished attempt. The single sealed publish lets a settlement resume recognise its own record
-  without a second file, and an unsafe slot is retried rather than attributed to the provider.
+  without a second file, and an unchanging unsafe slot is not retried because the provider that
+  left it cannot clear it.
 - Owner: `crates/run/src/completion.rs`, `crates/run/src/artifacts.rs`, `crates/run/src/launch.rs`
 
 `crates/records/src/handoff.rs` owns the fields, decoding and bounds. A valid JSON object keeps

@@ -240,11 +240,66 @@ fn is_settlement_snapshot(bytes: &[u8]) -> bool {
     serde_json::from_slice::<HandoffResult>(bytes).is_ok()
 }
 
-/// Keep a non-snapshot file that landed in the slot as evidence and clear it
-/// before captured output is sealed. Only bytes that were actually read and do
-/// not decode as a `HandoffResult` are moved aside; a read or unsafe-entry
-/// failure keeps its typed `RunError` so settlement can retry it (#3844).
+/// An entry in the snapshot slot that settlement cannot read safely. The
+/// provider is gone at settlement, so the entry cannot change; retrying a typed
+/// read error forever would strand a finished attempt (#3844). Kind, link count
+/// and size are judged from a no-follow stat, so the rename never follows a
+/// link or reads the bytes. A regular, singly linked entry within the bound is
+/// left to `read_settled`, which still reports transient IO as retriable and
+/// repairs an over-broad mode on a provider-written input.
+fn unsafe_snapshot_entry(meta: provenant_os::fs::Metadata) -> bool {
+    meta.kind != provenant_os::fs::FileKind::Regular
+        || meta.links != 1
+        || meta.size > HANDOFF_RECORD_BYTES as u64
+}
+
+/// A non-regular entry is renamed to a suffixed name so a symlink, directory or
+/// other type is not published under a `.json` evidence name (#3844).
+fn snapshot_evidence_name(meta: provenant_os::fs::Metadata) -> String {
+    let base = AttemptFile::HandoffProviderWritten.name();
+    if meta.kind == provenant_os::fs::FileKind::Regular {
+        base.to_owned()
+    } else {
+        format!("{base}.unsafe")
+    }
+}
+
+/// Rename the slot entry aside by name without reading it, then warn that the
+/// bytes were provider-written. The sealed snapshot comes from captured output.
+fn retain_foreign_snapshot(
+    attempt: &Directory,
+    record: &AttemptRecord,
+    retained: &OsStr,
+) -> Result<()> {
+    attempt.replace(OsStr::new(AttemptFile::Handoff.name()), attempt, retained)?;
+    attempt.sync()?;
+    handoff_advisory(
+        record.attempt_id,
+        format!(
+            "provider-written handoff.json kept as {}; the sealed snapshot comes from captured output",
+            retained.to_string_lossy()
+        ),
+    );
+    Ok(())
+}
+
+/// Keep an entry that landed in the slot but is not a settlement snapshot as
+/// evidence and clear it before captured output is sealed (#3844). An unsafe
+/// entry is moved aside by rename without following or reading it: the provider
+/// is gone and cannot clear it, so it must not retry forever. Only a safe entry
+/// whose bytes were actually read and do not decode as a `HandoffResult` is
+/// moved aside; a transient read IO failure keeps its typed `RunError`.
 fn set_aside_foreign_snapshot(attempt: &Directory, record: &AttemptRecord) -> Result<()> {
+    let slot = OsStr::new(AttemptFile::Handoff.name());
+    let meta = match attempt.metadata_at(slot, false) {
+        Ok(meta) => meta,
+        Err(error) if error.is_not_found() => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    if unsafe_snapshot_entry(meta) {
+        let retained = snapshot_evidence_name(meta);
+        return retain_foreign_snapshot(attempt, record, OsStr::new(&retained));
+    }
     let Some(bytes) = read_settled(attempt, AttemptFile::Handoff, HANDOFF_RECORD_BYTES as u64)?
     else {
         return Ok(());
@@ -252,20 +307,11 @@ fn set_aside_foreign_snapshot(attempt: &Directory, record: &AttemptRecord) -> Re
     if is_settlement_snapshot(&bytes) {
         return Ok(());
     }
-    attempt.replace(
-        OsStr::new(AttemptFile::Handoff.name()),
+    retain_foreign_snapshot(
         attempt,
+        record,
         OsStr::new(AttemptFile::HandoffProviderWritten.name()),
-    )?;
-    attempt.sync()?;
-    handoff_advisory(
-        record.attempt_id,
-        format!(
-            "provider-written handoff.json kept as {}; the sealed snapshot comes from captured output",
-            AttemptFile::HandoffProviderWritten.name()
-        ),
-    );
-    Ok(())
+    )
 }
 
 fn read_snapshot(attempt: &Directory) -> Result<Option<HandoffResult>> {
@@ -1606,11 +1652,17 @@ mod tests {
         Ok(())
     }
 
-    /// #3844: a slot that cannot be read safely keeps its typed, retriable
-    /// error. It is neither a malformed handoff nor provider evidence.
-    // Spec: docs/specs/run-settlement.md#outcome-before-release
-    #[test]
-    fn an_unreadable_snapshot_slot_stays_a_typed_read_failure() -> TestResult {
+    /// An unsafe slot entry cannot change once the provider is gone, so capture
+    /// must move it aside by name and settle from output rather than retry a
+    /// typed read failure forever (#3844). The read accessor still refuses the
+    /// entry before capture; only the settlement act clears it.
+    fn assert_unsafe_snapshot_slot_settles(
+        plant: impl FnOnce(&std::path::Path) -> std::result::Result<(), Box<dyn std::error::Error>>,
+        evidence: &str,
+    ) -> TestResult {
+        use crate::dispatch_tests::{Fake, seal_exit};
+        use crate::tests::route;
+
         let temp = tempfile::tempdir()?;
         let clock = clock();
         let cancel = provenant_core::CancelToken::new();
@@ -1618,46 +1670,95 @@ mod tests {
         let store = RunStore::open(&context(temp.path())?, &call)?;
         let input = input();
         store.create(&input, &call)?;
-        let record = store.record(input.attempt_id, &call)?;
-        let attempt = store.attempt_dir(record.attempt_id, false)?;
-        let foreign = temp.path().join("foreign-handoff.json");
-        std::fs::write(&foreign, snapshot("done"))?;
-        std::fs::hard_link(
-            &foreign,
-            attempt.current_path()?.join(AttemptFile::Handoff.name()),
+        let id = input.attempt_id;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
         )?;
-        let error = store.handoff(&record).expect_err("a hard link must refuse");
+        store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+        let attempt = store.attempt_dir(id, false)?;
+        let slot = attempt.current_path()?.join(AttemptFile::Handoff.name());
+        plant(&slot)?;
+        store
+            .handoff(&store.record(id, &call)?)
+            .expect_err("an unsafe slot must refuse a read before capture");
+
+        let answer = "```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"sealed from output\",\"remaining\":[],\"decisions\":[],\"verify\":[]}\n```";
+        let mut observed = exit();
+        observed.scope = RunStore::scope(&store.record(id, &call)?);
+        seal_exit(&store, &observed)?;
+        let fake = Fake::with_observed(Some(route()), Some(Outcome::Succeeded))
+            .with_answer(Some(answer.to_owned()), Some(true));
+        let finished = store.finish(id, &attempt, &observed, &fake, &call)?;
         assert!(
             matches!(
-                error,
-                RunError::UnsafePath {
-                    check: PathCheck::Links,
+                &finished.state,
+                AttemptState::Terminal {
+                    outcome: Outcome::Succeeded,
                     ..
                 }
             ),
-            "{error:?}"
+            "a complete answer must still settle: {:?}",
+            finished.state
         );
-        let error = store
-            .capture_handoff(&attempt, &record, &decoded())
-            .expect_err("capture must retry the unsafe entry");
-        assert!(
-            matches!(
-                error,
-                RunError::UnsafePath {
-                    check: PathCheck::Links,
-                    ..
-                }
-            ),
-            "{error:?}"
+        let handoff = store.handoff(&finished)??.ok_or("sealed snapshot")?;
+        assert_eq!(
+            handoff.note, "sealed from output",
+            "the unsafe entry left the slot and the snapshot was sealed from output"
         );
         assert!(
-            !attempt
-                .current_path()?
-                .join(AttemptFile::HandoffProviderWritten.name())
-                .try_exists()?,
-            "an unreadable entry was moved aside"
+            std::fs::symlink_metadata(attempt.current_path()?.join(evidence)).is_ok(),
+            "the unsafe entry was kept as {evidence}"
         );
         Ok(())
+    }
+
+    /// #3844: a hard link in the slot is an unsafe entry, not a retriable read.
+    /// Capture keeps it as provider evidence and seals from output.
+    // Spec: docs/specs/run-settlement.md#outcome-before-release
+    #[test]
+    fn a_hard_linked_snapshot_slot_is_moved_aside_and_settles() -> TestResult {
+        assert_unsafe_snapshot_slot_settles(
+            |slot| {
+                let foreign = slot.with_file_name("foreign-handoff.json");
+                std::fs::write(&foreign, snapshot("done"))?;
+                std::fs::hard_link(&foreign, slot)?;
+                Ok(())
+            },
+            AttemptFile::HandoffProviderWritten.name(),
+        )
+    }
+
+    /// #3844: an oversize slot entry cannot be read under the bound and the
+    /// provider is gone, so capture keeps it as evidence and still settles.
+    // Spec: docs/specs/run-settlement.md#outcome-before-release
+    #[test]
+    fn an_oversize_snapshot_slot_is_moved_aside_and_settles() -> TestResult {
+        assert_unsafe_snapshot_slot_settles(
+            |slot| {
+                std::fs::write(slot, vec![b'x'; HANDOFF_RECORD_BYTES + 1])?;
+                Ok(())
+            },
+            AttemptFile::HandoffProviderWritten.name(),
+        )
+    }
+
+    /// #3844: a symlink slot must never be followed; capture renames the link
+    /// itself aside under a non-regular evidence name and settles.
+    // Spec: docs/specs/run-settlement.md#outcome-before-release
+    #[test]
+    fn a_symlinked_snapshot_slot_is_moved_aside_and_settles() -> TestResult {
+        assert_unsafe_snapshot_slot_settles(
+            |slot| {
+                std::os::unix::fs::symlink("not-read-target", slot)?;
+                Ok(())
+            },
+            "handoff.provider-written.json.unsafe",
+        )
     }
 
     /// Provider boundary for exercising holder recovery when this host cannot
