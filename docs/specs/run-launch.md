@@ -128,7 +128,12 @@ creates the worktree from that commit and binds it by source identity and head, 
 a primary checkout, a linked worktree, a separate Git directory or a bare linked checkout. An
 existing clean worktree at the exact checkpointed head, including one a chair pre-created with
 `provenant worktree create`, is rebound; a different branch, head or unclean tree is refused with
-the named cause. Relative `--worktree` and graph writer paths resolve from the project's primary
+the named cause. When the managed path already holds a registered linked checkout on the named
+branch, `--branch` and the branch resolved by `run implement --pr N` bind that checkout in place
+as `--worktree` would, and report its path on an info line rather than provisioning it again. A
+live writer or an unsettled attempt on that checkout still refuses, naming the holder and the
+exact `provenant reconcile <holder>` command; that refusal protects another lane's uncommitted
+work. Relative `--worktree` and graph writer paths resolve from the project's primary
 root, so a launch from a linked worktree of the same repository selects the same managed
 checkouts as the primary checkout. A host-planned writer (`provision_worktree` with no attempt
 `new_worktree`) is skipped by the pre-attempt integration-target check: it has no branch until

@@ -831,6 +831,67 @@ fn lowered_writes_worktree(node: &Value) -> bool {
         })
 }
 
+/// Read the branch a linked checkout has checked out from its Git admin dir.
+/// This is a read-only observation: a missing or unreadable registration is
+/// not evidence of the requested branch, so the ordinary provisioning path
+/// still reports the precise cause.
+fn linked_worktree_branch(path: &Path) -> Option<String> {
+    let marker = path.join(".git");
+    let text = std::fs::read_to_string(marker).ok()?;
+    let gitdir = text.trim().strip_prefix("gitdir:")?.trim();
+    let directory = PathBuf::from(gitdir);
+    let directory = if directory.is_absolute() {
+        directory
+    } else {
+        path.join(directory)
+    };
+    let head = std::fs::read_to_string(directory.join("HEAD")).ok()?;
+    head.trim()
+        .strip_prefix("ref: refs/heads/")
+        .map(str::to_owned)
+}
+
+/// Bind one writer target for `--pr`, `--branch` and `--worktree`. A branch
+/// whose managed linked checkout already exists is bound in place like
+/// `--worktree`; only a branch with no such checkout is provisioned from its
+/// base. Occupancy and dirty-worktree admission stay downstream, so a held
+/// checkout still refuses with its holder and remedy.
+fn bind_writer_target(
+    node: &mut Value,
+    path: &Path,
+    provision: Option<(&str, &str, bool)>,
+) -> Result<(), FacadeError> {
+    node["worktree"] = json!(path);
+    let Some((branch, base, default_base)) = provision else {
+        return Ok(());
+    };
+    if linked_worktree_branch(path).as_deref() == Some(branch) {
+        // A document may have carried a provisioning intent for this branch;
+        // the existing checkout supersedes it.
+        if let Some(attempt) = node.get_mut("attempt").and_then(Value::as_object_mut) {
+            attempt.remove("new_worktree");
+        }
+        warn_operator(format!(
+            "branch {branch} already has linked worktree {}; launching into that checkout with --worktree semantics",
+            path.display()
+        ));
+        return Ok(());
+    }
+    if node.get("attempt").is_none() {
+        node["attempt"] = json!({});
+    }
+    if !node["attempt"].is_object() {
+        return Err(FacadeError::invalid(InvalidInputDetail::Field(
+            "attempt".into(),
+        )));
+    }
+    node["attempt"]["new_worktree"] = json!({"branch":branch,"base":base});
+    if default_base {
+        node["attempt"]["new_worktree"]["default_base"] = json!(true);
+    }
+    Ok(())
+}
+
 /// Apply plain-task execution controls before template lowering and patch admission.
 fn bind_launch_controls(
     input: &Value,
@@ -875,17 +936,11 @@ fn bind_launch_controls(
         let worktree = ports
             .managed_writer_path(branch)
             .map_err(|_| invalid("branch"))?;
-        node["worktree"] = json!(project_root.join(worktree));
-        if node.get("attempt").is_none() {
-            node["attempt"] = json!({});
-        }
-        if !node["attempt"].is_object() {
-            return Err(invalid("attempt"));
-        }
-        node["attempt"]["new_worktree"] = json!({"branch":branch,"base":base});
-        if input.get("base").is_none_or(Value::is_null) {
-            node["attempt"]["new_worktree"]["default_base"] = json!(true);
-        }
+        bind_writer_target(
+            node,
+            &project_root.join(worktree),
+            Some((branch, base, input.get("base").is_none_or(Value::is_null))),
+        )?;
     } else if let Some(worktree) = worktree {
         let path = Path::new(
             worktree
@@ -893,11 +948,12 @@ fn bind_launch_controls(
                 .filter(|value| !value.is_empty())
                 .ok_or_else(|| invalid("worktree"))?,
         );
-        node["worktree"] = json!(if path.is_absolute() {
+        let path = if path.is_absolute() {
             path.to_owned()
         } else {
             project_root.join(path)
-        });
+        };
+        bind_writer_target(node, &path, None)?;
     }
     if let Some(scope) = input.get("write_scope").filter(|value| !value.is_null()) {
         if !scope

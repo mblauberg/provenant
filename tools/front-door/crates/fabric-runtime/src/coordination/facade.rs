@@ -1068,8 +1068,12 @@ impl FacadeError {
             Self::WriterBusy { holder } => {
                 if let Some(holder) = holder {
                     projected = projected.detail(format!("writer is held by attempt {holder}"));
+                    projected = projected.next(format!(
+                        "run `provenant reconcile {holder}` to settle that holder, then retry"
+                    ));
+                } else {
+                    projected = projected.next("wait for the current writer or lock holder to finish");
                 }
-                projected = projected.next("wait for the current writer or lock holder to finish");
             }
             Self::WriterLockBusy => projected = projected.detail(self.to_string()).next("wait for the writer lock holder to finish, then retry"),
             Self::WriterUnknown | Self::WorktreeUnregistered { .. } => projected = projected.next("inspect worktree registration and custody before selecting a checkout with --worktree"),
@@ -1106,7 +1110,13 @@ impl FacadeError {
                 if !facts.is_empty() {
                     projected = projected.detail(facts.join(", "));
                 }
-                projected = projected.next("reconcile the holding attempt before retrying writer binding");
+                projected = projected.next(if let Some(holder) = holder {
+                    format!(
+                        "reconcile the holding attempt with `provenant reconcile {holder}` before retrying writer binding"
+                    )
+                } else {
+                    "reconcile the holding attempt before retrying writer binding".into()
+                });
             }
             Self::RunKind { resource: Some(fact), .. } => projected = fact.project(projected),
             Self::RunKind { next, detail, resource: None, .. } => {
