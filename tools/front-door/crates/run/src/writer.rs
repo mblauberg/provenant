@@ -444,7 +444,7 @@ pub struct WriterLaunch {
 impl WriterLaunch {
     /// The commit this writer launch was prepared from.
     pub fn base(&self) -> GitOid {
-        self.base.clone()
+        self.base
     }
     /// Lanes that hold or retain this worktree's occupancy: every recorded
     /// reservation, plus an unnamed entry when a live holder has none. Empty
