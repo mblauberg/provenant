@@ -1872,7 +1872,7 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         ("src/fabric/owner.rs", 5533),
         ("src/fabric/peer.rs", 2274),
         ("src/fabric/run_owner.rs", 2748),
-        ("src/fabric/unified.rs", 4272),
+        ("src/fabric/unified.rs", 4275),
         ("src/handoff.rs", 1425),
         ("src/hooks.rs", 2636),
         ("src/install.rs", 3159),
@@ -1880,7 +1880,7 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         ("src/pr/landing/adapters.rs", 2984),
         ("src/pr/landing/driver.rs", 3967),
         ("src/pr/observer.rs", 2445),
-        ("src/status_wait.rs", 3286),
+        ("src/status_wait.rs", 3339),
         ("src/worktrees.rs", 5384),
     ];
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));

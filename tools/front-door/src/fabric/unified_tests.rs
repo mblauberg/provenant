@@ -1027,13 +1027,57 @@ fn missing_project_target_error_has_one_code_and_a_repair() {
 }
 
 #[test]
-fn a_stop_cause_is_one_bounded_line_that_names_it() {
-    let row = json!({"state":"failed","cause_code":"budget_exhausted",
-            "reason":"x".repeat(4096),"waiting_for":null});
+fn a_stop_cause_is_kept_whole_in_the_row_and_bounded_in_the_summary() {
+    // A row builder must not clip before the render mode is known: --full prints
+    // this whole reason, while the compact summary applies SUMMARY_ROW_BYTES.
+    let reason = "x".repeat(4096);
+    let row = json!({"kind":"node","id":"fix-login/writer#2","state":"failed",
+            "cause_code":"budget_exhausted","reason":reason,"waiting_for":null});
     let line = status_line("fix-login/writer#2", &row, Some("codex/gpt"));
     assert_eq!(line.lines().count(), 1);
-    assert!(line.trim_end().len() <= provenant_cli::limits::SUMMARY_ROW_BYTES);
+    assert!(
+        line.contains(&reason),
+        "the row builder clipped the reason: {line}"
+    );
     assert!(line.contains("cause=budget_exhausted"), "{line}");
+
+    let summary = status_summary(&[row]);
+    let bounded = &summary.lines[1];
+    assert!(
+        bounded.len() <= provenant_cli::limits::SUMMARY_ROW_BYTES,
+        "{bounded}"
+    );
+    assert!(bounded.ends_with("..."), "no clip marker: {bounded}");
+}
+
+#[test]
+fn a_long_result_excerpt_is_kept_whole_in_the_row() -> Result<(), Box<dyn std::error::Error>> {
+    // Past the old 200-byte projection cap: the row keeps the fact, and only
+    // the compact renderer clips it. --full must be able to print it whole.
+    let excerpt = "x".repeat(200 + 256);
+    let mut value = serde_json::to_value(checkpoint("g"))?;
+    value["nodes"][0]["outputs"] = json!({
+        "schema_version":1,
+        "result":{"digest":"sha256:test","excerpt":excerpt,"truncated":false,"path":"result.txt"},
+        "verdict":null,"findings":[],"findings_available":null,
+        "branch":"feat/work","commit":"abc123","warnings":[]
+    });
+    let checkpoint: GraphCheckpoint = serde_json::from_value(value)?;
+    let target = GraphTarget {
+        graph: "g".into(),
+        node: None,
+        attempt: None,
+    };
+    let rows = status_rows(&graph_snapshot(checkpoint), &target);
+    let node = rows
+        .iter()
+        .find(|row| row["kind"] == "node")
+        .expect("a node row");
+    assert_eq!(
+        node["result_summary"], excerpt,
+        "the row projection clipped the result summary before rendering"
+    );
+    Ok(())
 }
 
 // Spec: docs/specs/cli.md#status-selection
@@ -1534,28 +1578,34 @@ fn remote_status_failure_downgrades_the_current_running_node_to_unknown() {
 }
 
 #[test]
-fn graph_status_reading_keeps_failure_cause_and_command_within_budget() {
+fn graph_status_full_reading_keeps_the_reason_and_compact_bounds_it() {
     let mut checkpoint = checkpoint("g");
     checkpoint.nodes[0].state = NodeState::Failed;
     checkpoint.nodes[0].advance_error_code = Some("AUTH_REQUIRED".into());
-    checkpoint.nodes[0].advance_error =
-        Some(format!("credentials unavailable {}", "界".repeat(4096)));
+    // Far past the old 1024-character row cap: a row builder must keep the
+    // reason whole so --full can print it, and only the compact renderer clips.
+    let long_reason = format!("credentials unavailable {}", "界".repeat(4096));
+    checkpoint.nodes[0].advance_error = Some(long_reason.clone());
     let target = GraphTarget {
         graph: "g".into(),
         node: None,
         attempt: None,
     };
     let rows = status_rows(&graph_snapshot(checkpoint), &target);
+    assert_eq!(
+        rows[1]["reason"], long_reason,
+        "the row builder clipped the reason before the render mode was known"
+    );
     // One graph row, then many node and attempt rows.
     let mut many = rows.clone();
     for _ in 0..100 {
         many.extend(rows.iter().filter(|row| row["kind"] != "graph").cloned());
     }
     let reading = render_graph_status(&many);
-    // The owner summary bound (cli.md "Agent output"): the graph line, at
-    // most LISTING_ROWS node lines and the omission count, each line within
-    // SUMMARY_ROW_BYTES. The suggested command is a typed step, rendered by
-    // the edge from the same argv the JSON envelope carries.
+    // The row count stays bounded: the graph line, at most LISTING_ROWS node
+    // lines and the omission count. Line *length*, however, is the renderer's
+    // choice: --full keeps the whole reason, so no per-line byte cap belongs
+    // in the row builder.
     use provenant_cli::limits::{LISTING_ROWS, SUMMARY_ROW_BYTES};
     let lines: Vec<_> = reading.lines().collect();
     let omissions = lines
@@ -1564,20 +1614,132 @@ fn graph_status_reading_keeps_failure_cause_and_command_within_budget() {
         .count();
     assert!(lines.len() <= 1 + LISTING_ROWS + omissions, "{reading}");
     assert!(
-        reading.lines().all(|line| line.len() <= SUMMARY_ROW_BYTES),
-        "{reading}"
+        reading.contains(&long_reason),
+        "the full reading clipped the failure reason: {reading}"
     );
     // Failed work is listed first, after the graph line.
     let first_node = reading.lines().nth(1).unwrap();
     assert!(first_node.starts_with("g/parent"), "{reading}");
     assert!(first_node.contains(" failed "), "{reading}");
     assert!(first_node.contains("AUTH_REQUIRED"), "{reading}");
+
+    // The default view bounds the same rows and shows the clip marker.
+    let summary = status_summary(&many);
+    let result = provenant_records::CommandResult::new(
+        "status",
+        provenant_records::Outcome::Ok,
+        json!({"rows": many}),
+    );
+    let mut out = Vec::new();
+    provenant_cli::render(
+        &result,
+        provenant_cli::RenderMode::Compact {
+            text: &reading,
+            read_only: true,
+            summary: Some(&summary),
+        },
+        &mut out,
+    )
+    .expect("compact render");
+    let compact = String::from_utf8(out).expect("utf8");
+    assert!(
+        compact
+            .lines()
+            .skip(1)
+            .all(|line| line.len() <= SUMMARY_ROW_BYTES),
+        "a compact row exceeded the bound: {compact}"
+    );
+    assert!(compact.contains("..."), "no clip marker: {compact}");
+
+    // --full renders the same rows through the human mode, which passes the
+    // owner's text through verbatim: the reason must survive that boundary.
+    let mut full_out = Vec::new();
+    provenant_cli::render(
+        &result,
+        provenant_cli::RenderMode::Human {
+            text: &reading,
+            read_only: true,
+            summary: Some(&summary),
+        },
+        &mut full_out,
+    )
+    .expect("full render");
+    let full = String::from_utf8(full_out).expect("utf8");
+    assert!(
+        full.contains(&long_reason),
+        "the full render clipped the failure reason: {full}"
+    );
+
     let step = graph_status_next(&rows).expect("a failed graph offers a next step");
     assert_eq!(step.argv, ["provenant", "retry", "g/parent"]);
     // Per-state omission counts are checked at the CLI boundary; do not
     // pin the human omission sentence here.
     assert_eq!(rows[1]["cause_code"], "AUTH_REQUIRED");
     assert_eq!(rows[1]["next"], "provenant retry g/parent");
+}
+
+#[test]
+fn compact_row_keeps_the_reason_leading_clause_with_a_long_path()
+-> Result<(), Box<dyn std::error::Error>> {
+    // A `worktree_missing` refusal names its path before the first ';'. The
+    // compact renderer bounds a row from its front, so the digest carries that
+    // clause ahead of the longer evidence fields (#3835).
+    let mut checkpoint = checkpoint("g");
+    // A node with no attempt keeps the compact row's prefix short, as on a
+    // graph whose advance was refused before the writer launched.
+    let node = &mut checkpoint.nodes[1];
+    let node_id = node.id.clone();
+    node.state = NodeState::Failed;
+    let path = format!("/private/var/folders/xy/{}", "long-segment/".repeat(5));
+    let first_clause = format!("node parent--child: local worktree {path} does not exist");
+    let reason = format!("{first_clause}; create it with `provenant worktree create`");
+    node.advance_error = Some(reason.clone());
+    let target = GraphTarget {
+        graph: "g".into(),
+        node: None,
+        attempt: None,
+    };
+    let rows = status_rows(&graph_snapshot(checkpoint), &target);
+    let node_row = rows
+        .iter()
+        .find(|row| row["kind"] == "node" && row["node_id"] == node_id.as_str())
+        .expect("the failed node's row");
+    assert_eq!(
+        node_row["reason"], reason,
+        "the row builder clipped the reason"
+    );
+
+    let summary = status_summary(&rows);
+    let result = provenant_records::CommandResult::new(
+        "status",
+        provenant_records::Outcome::Ok,
+        json!({"rows": rows}),
+    );
+    let mut out = Vec::new();
+    provenant_cli::render(
+        &result,
+        provenant_cli::RenderMode::Compact {
+            text: "",
+            read_only: true,
+            summary: Some(&summary),
+        },
+        &mut out,
+    )?;
+    let compact = String::from_utf8(out)?;
+    let row = compact
+        .lines()
+        .find(|line| line.starts_with(&format!("g/{node_id} failed")))
+        .ok_or_else(|| format!("no compact node row carries the reason:\n{compact}"))?;
+    assert!(
+        row.contains(&first_clause),
+        "compact row lost the reason's leading clause: {row}"
+    );
+    assert!(row.ends_with("..."), "no clip marker: {row}");
+    assert!(
+        row.len() <= provenant_cli::limits::SUMMARY_ROW_BYTES,
+        "compact row exceeded the bound: {row}"
+    );
+    Ok(())
 }
 
 #[test]

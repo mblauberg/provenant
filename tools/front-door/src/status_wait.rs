@@ -356,7 +356,19 @@ fn local_branch_tip(cwd: &Path, branch: &str) -> Option<String> {
 /// succeeded outcome; a paused graph needs input.
 fn classify_rows(label: &str, rows: &[Value]) -> Reading {
     let pick = |kind: &str| rows.iter().rfind(|row| row["kind"] == kind);
-    let data = json!({ "rows": rows, "digests": crate::fabric::node_digests(rows) });
+    let mut data = json!({ "rows": rows, "digests": crate::fabric::node_digests(rows) });
+    // The wait is a stream of one-line events, not a detail view: bound both
+    // the target line and each digest line here so a whole reason from a row
+    // builder cannot grow --follow transitions or JSONL payloads. `--full`
+    // status keeps the whole text; a wait never re-renders it.
+    let bound = provenant_cli::limits::SUMMARY_ROW_BYTES;
+    if let Some(digests) = data["digests"].as_array_mut() {
+        for digest in digests {
+            if let Some(line) = digest["line"].as_str() {
+                digest["line"] = json!(provenant_cli::bounded_text(line, bound));
+            }
+        }
+    }
     let Some(row) = pick("graph")
         .or_else(|| pick("node"))
         .or_else(|| pick("attempt"))
@@ -393,9 +405,10 @@ fn classify_rows(label: &str, rows: &[Value]) -> Reading {
     };
     Reading {
         settle,
-        line: crate::fabric::status_line(label, row, None)
-            .trim_end()
-            .to_owned(),
+        line: provenant_cli::bounded_text(
+            crate::fabric::status_line(label, row, None).trim_end(),
+            bound,
+        ),
         data,
     }
 }
@@ -3051,6 +3064,46 @@ mod tests {
             assert_eq!(data["mode"], label);
             assert_eq!(data["timed_out"], false);
             assert!(data["local_observation"].is_null());
+        }
+    }
+
+    #[test]
+    fn wait_readings_bound_the_whole_event_line_not_just_the_target() {
+        use provenant_cli::limits::SUMMARY_ROW_BYTES;
+        use provenant_core::ProjectId;
+        use provenant_records::WorkKey;
+
+        let long_reason = format!("worktree_missing: {}", "x".repeat(SUMMARY_ROW_BYTES * 2));
+        let key = json!(WorkKey::new(ProjectId::from_bytes([9; 16]), "g", "node", 1).unwrap());
+        let reading = classify_rows(
+            "g",
+            &[
+                json!({"kind":"graph","state":"failed","reason":long_reason}),
+                json!({"kind":"node","work_key":key,"state":"failed","reason":long_reason}),
+            ],
+        );
+        assert!(
+            reading.line.len() <= SUMMARY_ROW_BYTES,
+            "wait target line is unbounded: {}",
+            reading.line
+        );
+        assert!(
+            reading.line.ends_with("..."),
+            "no clip marker on the wait target line: {}",
+            reading.line
+        );
+        let digests = reading.data["digests"].as_array().expect("digests");
+        assert_eq!(digests.len(), 1);
+        for digest in digests {
+            let line = digest["line"].as_str().expect("digest line");
+            assert!(
+                line.len() <= SUMMARY_ROW_BYTES,
+                "wait digest line is unbounded: {line}"
+            );
+            assert!(
+                line.ends_with("..."),
+                "no clip marker on a digest line: {line}"
+            );
         }
     }
 

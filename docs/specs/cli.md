@@ -198,7 +198,10 @@ relayed rows use the same paced reread because the relay has no remote
 subscription. Every blocking forge operation inside a wait shares one request
 context (the wait's absolute deadline, capped per read by
 `domains.wait.pr_read_timeout_seconds`, and its cancellation), and a wait that
-settles cancels the forge transport of its other targets.
+settles cancels the forge transport of its other targets. Wait event lines,
+including `--follow` transitions and their digest lines, stay bounded to
+`SUMMARY_ROW_BYTES` with a clip marker: a wait is a stream of observations, not
+a detail view, even though `status NAME --full` prints whole rows.
 
 Wait settings resolve in one place for every waiter. Configuration a waiter
 cannot use warns and leaves the compiled defaults in force, and reports name
@@ -241,7 +244,10 @@ names the source (`output`, `started` or `queued`), so old output is not mistake
 for a heartbeat. `child_command` is set only for a command that went through the
 admission shim, and a lane waiting on a heavy-job lock reports the command it
 waits to run. The attempt directory and child command stay host-local and never
-cross a peer boundary.
+cross a peer boundary. `--full` prints each status row whole, including a long
+refusal reason naming its path; the default summary bounds each row to
+`SUMMARY_ROW_BYTES` with a clip marker, keeping the reason's leading clause (the
+text before the first `;`) inside that bound.
 
 `status` and `worktree list` report `stranded work` (`stranded_work` in
 `status --json`): a worktree with uncommitted edits or an interrupted Git
