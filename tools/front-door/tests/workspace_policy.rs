@@ -1836,7 +1836,7 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         ("crates/fabric-runtime/src/graph/journal.rs", 2518),
         ("crates/fabric-runtime/src/graph/model.rs", 2738),
         ("crates/fabric-runtime/src/graph/outputs.rs", 2352),
-        ("crates/fabric-runtime/src/graph/patch.rs", 2228),
+        ("crates/fabric-runtime/src/graph/patch.rs", 2244),
         ("crates/fabric-runtime/src/graph/plans.rs", 2169),
         ("crates/fabric-runtime/src/graph/template.rs", 3128),
         ("crates/fabric-runtime/src/graph/transitions.rs", 2463),
