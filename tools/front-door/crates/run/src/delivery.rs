@@ -577,6 +577,43 @@ impl HostDeliveryContext {
             self.environment.clone(),
         )
     }
+    /// Bind recorded destinations directly for the sealed-name boundary tests.
+    /// Production never uses this: its bindings come from `prepare`.
+    #[cfg(test)]
+    pub(crate) fn with_bound_remotes_for_test(
+        mut self,
+        delivery_remote: &str,
+        stop_publish_remote: Option<&str>,
+    ) -> Self {
+        let bound = |remote: &str, mode: crate::DeliveryMode| BoundDelivery {
+            base_head: GitOid::parse(&"1".repeat(40)).expect("a valid stand-in head"),
+            push_url: "https://example.invalid/lane.git".to_owned(),
+            lane_branch: "lane".to_owned(),
+            pull_request_repo: None,
+            git_dir: PathBuf::from("/nonexistent-sealed/.git"),
+            common_git_dir: PathBuf::from("/nonexistent-sealed/.git"),
+            host_cwd: PathBuf::from("/nonexistent-sealed"),
+            destination: WriterDeliveryRequest {
+                extra: Default::default(),
+                mode,
+                remote: remote.to_owned(),
+                branch: "lane".to_owned(),
+                open_pr: false,
+                fast_forward_only: false,
+            },
+        };
+        self.bound = Some(bound(
+            delivery_remote,
+            if delivery_remote.is_empty() {
+                crate::DeliveryMode::Integrate("main".into())
+            } else {
+                crate::DeliveryMode::Push
+            },
+        ));
+        self.stop_publish_bound =
+            stop_publish_remote.map(|remote| bound(remote, crate::DeliveryMode::Push));
+        self
+    }
     fn attach_stop_publish(&mut self, prepared: Self) {
         self.stop_publish_bound = prepared.bound;
         self.stop_publish_host = Some(StopPublishHost {
@@ -750,12 +787,15 @@ impl HostDeliveryContext {
         self
     }
     /// A validated sealed remote: a malformed record refuses, naming its value.
+    /// An empty recorded remote is the deliberate local-integration sentinel,
+    /// not a corrupt name: it maps to the same absence as an unbound remote.
     fn sealed_remote(name: Option<&str>) -> Result<Option<provenant_config::RemoteName>> {
-        name.map(|name| {
-            provenant_config::RemoteName::new(name)
-                .map_err(|_| RunError::InvalidSealedRemote(name.to_owned()))
-        })
-        .transpose()
+        name.filter(|name| !name.is_empty())
+            .map(|name| {
+                provenant_config::RemoteName::new(name)
+                    .map_err(|_| RunError::InvalidSealedRemote(name.to_owned()))
+            })
+            .transpose()
     }
     /// The remote named by the sealed launch destination.
     pub(crate) fn delivery_remote(&self) -> Result<Option<provenant_config::RemoteName>> {

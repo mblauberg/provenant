@@ -2199,9 +2199,20 @@ fn resolved_forge_remote(state: &Path, project: &Path) -> Option<provenant_confi
     let policy = provenant_config::operation_policy(state, project, &ports);
     let config = provenant_config::ForgeConfig::new(&ports, (*policy).clone());
     let git = provenant_config::ForgeGit::new(project).ok()?;
-    provenant_config::ForgeContext::remote_if_any(&config, &git)
-        .ok()
-        .flatten()
+    match provenant_config::ForgeContext::remote_if_any(&config, &git) {
+        Ok(remote) => remote,
+        Err(provenant_config::ForgeContextError::InvalidRemote { remote }) => {
+            warn(
+                Warning::new(
+                    provenant_records::warning::FORGE_CONTEXT_UNRESOLVED,
+                    format!("configured remote {remote:?} is not a usable Git remote name; keeping the local source behaviour"),
+                )
+                .once_per_change(),
+            );
+            None
+        }
+        Err(_) => None,
+    }
 }
 
 /// The remote's default branch as last fetched, with the exact ref that named

@@ -30,9 +30,10 @@ pub type Project = Path;
 /// The forge boundary creates this once; every consumer below it receives the
 /// typed value, so an absent remote cannot be flattened into `Some("")` and
 /// reach Git as a push destination or a `refs/remotes/` namespace. The grammar
-/// is the one `git check-ref-format` applies to `refs/remotes/<name>/x`: each
-/// slash-separated component must be usable as a ref component, and '/' is
-/// allowed between components.
+/// follows the ref-component rules of `git check-ref-format` for
+/// `refs/remotes/<name>/x`, with extra argv-safety refusals: a leading '-' and
+/// padded values are legal in some Git ref names but must never be passed as a
+/// remote argument or a `refs/remotes/` component.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct RemoteName(String);
 

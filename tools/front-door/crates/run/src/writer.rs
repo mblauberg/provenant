@@ -351,6 +351,23 @@ pub(crate) struct StopWorkPolicy<'a> {
     pub publish_granted: bool,
 }
 
+/// The remote bound for stop publication wins over the launch destination: a
+/// local-integration launch deliberately records no remote, while its
+/// stop-publication binding names the real remote the stopped head must use.
+/// The launch binding is read only when the stop binding has no remote, and an
+/// empty recorded launch remote is an absence, not a corrupt name.
+pub(super) fn bound_stop_remote(
+    publish: Option<&crate::HostDeliveryContext>,
+) -> Result<Option<provenant_config::RemoteName>> {
+    let Some(host) = publish else {
+        return Ok(None);
+    };
+    match host.stop_publish_remote()? {
+        Some(remote) => Ok(Some(remote)),
+        None => host.delivery_remote(),
+    }
+}
+
 /// The remote a stopped writer's summary and stop-publication recovery must
 /// use. A checkout without a remote has no tracking branch, so it yields
 /// `None` rather than an empty remote name.
@@ -363,9 +380,21 @@ pub(super) fn terminal_forge_remote(
     let policy = provenant_config::operation_policy(state, project, &ports);
     let config = provenant_config::ForgeConfig::new(&ports, (*policy).clone());
     let git = provenant_config::ForgeGit::new(project).ok()?;
-    provenant_config::ForgeContext::remote_if_any(&config, &git)
-        .ok()
-        .flatten()
+    match provenant_config::ForgeContext::remote_if_any(&config, &git) {
+        Ok(remote) => remote,
+        Err(provenant_config::ForgeContextError::InvalidRemote { remote }) => {
+            use provenant_records::warning::{FORGE_CONTEXT_UNRESOLVED, Warning, warn};
+            warn(
+                Warning::new(
+                    FORGE_CONTEXT_UNRESOLVED,
+                    format!("configured remote {remote:?} is not a usable Git remote name; keeping the local remote behaviour"),
+                )
+                .once_per_change(),
+            );
+            None
+        }
+        Err(_) => None,
+    }
 }
 
 /// The result of comparing a retry's worktree head with its pinned commit.
@@ -3367,10 +3396,7 @@ impl WriterLaunch {
         // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
         // A local integration destination records no remote; the typed boundary
         // returns an absence rather than a name to pass to Git.
-        let bound_stop_remote = match work.as_ref().and_then(|policy| policy.publish) {
-            Some(host) => host.stop_publish_remote()?.or(host.delivery_remote()?),
-            None => None,
-        };
+        let bound_stop_remote = bound_stop_remote(work.as_ref().and_then(|policy| policy.publish))?;
         let stop_remote = bound_stop_remote
             .or_else(|| terminal_forge_remote(state, self.worktree.repo().root_path()));
         let stop_work = work.map(|policy| {
