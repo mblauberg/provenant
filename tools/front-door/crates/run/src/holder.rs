@@ -4475,6 +4475,90 @@ mod budget_result_tests {
         );
         Ok(())
     }
+
+    /// #3844: a provider whose scratch is inside the attempt directory wrote a
+    /// bare handoff into the snapshot slot before it exited. Settlement keeps
+    /// those bytes as evidence and still seals the handoff from output.
+    // Spec: docs/specs/run-settlement.md#outcome-before-release
+    #[test]
+    fn provider_written_snapshot_slot_is_preserved_and_sealed_from_output()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use crate::dispatch_tests::{Fake, seal_exit};
+        use crate::tests::{call, clock, context, input, route};
+
+        let temp = tempfile::tempdir()?;
+        let execution = context(temp.path())?;
+        let (test_clock, cancel) = (clock(), CancelToken::new());
+        let request = call(&test_clock, &cancel);
+        let store = RunStore::open(&execution, &request)?;
+        let run = input();
+        store.create(&run, &request)?;
+        let id = run.attempt_id;
+        store.mark_starting(
+            &store.record(id, &request)?,
+            &route(),
+            &[],
+            &Default::default(),
+            None,
+            &request,
+        )?;
+        store
+            .claim(id, &test_clock, &request)?
+            .ok_or("not admitted")?;
+        let attempt = store.attempt_dir(id, false)?;
+        let provider = serde_json::json!({
+            "schema_version": 2,
+            "status": "done",
+            "note": "written by the provider",
+            "remaining": [],
+            "decisions": [],
+            "verify": [],
+        });
+        let provider_bytes = serde_json::to_vec(&provider)?;
+        std::fs::write(
+            attempt.current_path()?.join("handoff.json"),
+            &provider_bytes,
+        )?;
+        let answer = "```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"sealed from output\",\"remaining\":[],\"decisions\":[],\"verify\":[]}\n```";
+        let mut observed = crate::tests::exit();
+        observed.scope = RunStore::scope(&store.record(id, &request)?);
+        seal_exit(&store, &observed)?;
+        let fake = Fake::with_observed(Some(route()), Some(Outcome::Succeeded))
+            .with_answer(Some(answer.to_owned()), Some(true));
+        let (finished, warnings) = provenant_records::warning::capture(|| {
+            store.finish(id, &attempt, &observed, &fake, &request)
+        });
+        let finished = finished?;
+        assert!(
+            matches!(
+                finished.state,
+                AttemptState::Terminal {
+                    outcome: Outcome::Succeeded,
+                    ..
+                }
+            ),
+            "a complete answer must still settle: {:?}",
+            finished.state
+        );
+        let handoff = store.handoff(&finished)??.ok_or("sealed snapshot")?;
+        assert_eq!(handoff.note, "sealed from output");
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.message.contains("provider-written")),
+            "warning must name the provider-written file: {warnings:?}"
+        );
+        assert_eq!(
+            std::fs::read(
+                attempt
+                    .current_path()?
+                    .join(provenant_records::AttemptFile::HandoffProviderWritten.name())
+            )?,
+            provider_bytes,
+            "provider bytes are kept as evidence under a distinct name"
+        );
+        Ok(())
+    }
 }
 
 #[cfg(test)]

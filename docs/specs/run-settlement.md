@@ -203,6 +203,40 @@ trailing-prose note.
   loses finished work, while the warning and the named recovery keep the drift visible.
 - Owner: `crates/records/src/handoff.rs`, `crates/run/src/completion.rs`
 
+The `<attempt>/handoff.json` snapshot slot is owned by settlement, not the lane. Settlement seals a
+`HandoffResult` envelope derived from captured output; the envelope shape is the provenance, so there
+is no separate tag and no window in which a snapshot exists without its proof. Bytes found in the
+slot at capture that do not decode as that envelope were written by the provider, commonly because
+its scratch and `$TMPDIR` live under the attempt directory. Settlement keeps those bytes as
+`handoff.provider-written.json`, warns that the file was provider-written, clears the slot and seals
+the envelope from output: a complete answer still settles rather than retrying forever (#3844).
+Only a `HandoffResult` envelope is settlement's snapshot. Before #3078 the slot held a bare
+`Handoff` (or `Option<Handoff>`), which is foreign evidence with no compatibility path: an attempt
+sealed by that build is reconciled by moving its bare snapshot aside as
+`handoff.provider-written.json` and settling from captured output, never by reading it as a sealed
+handoff. Bytes that were read but do not decode as an envelope after settlement settle
+`handoff_malformed` with the typed diagnostic and keep the raw file, instead of retrying an
+unchanging decode. An entry in the slot that cannot be read safely — an oversize file, a symlink, a
+hard link, a directory or another unsafe entry type — was left by a provider that is gone at
+settlement. Capture renames it aside by name without following or reading it, under
+`handoff.provider-written.json` (or the declared `handoff.provider-written.unsafe` when the entry
+is not a regular file), warns that it was provider-written, and seals the envelope from captured
+output. When the preferred evidence name is occupied by a directory, symlink or other non-regular
+entry, capture moves the slot entry to the declared unsafe name instead; only when both declared
+destinations are unusable does capture fail with the typed error. A transient storage IO failure on
+a safe entry is not an unsafe class: it
+keeps its typed, retriable cause and does not settle. The launch prompt tells the lane that the
+harness writes the attempt's own records, including the sealed `handoff.json`, while the progress
+handoff under `provider-state` is the lane's to update throughout the task. Provider scratch and
+`$TMPDIR` remain under the attempt directory; ownership, not location, is what keeps a lane's file
+out of the sealed record.
+- Why: a lane can discover supervisor records from its scratch and write a bare handoff object that
+  fails the sealed-envelope decode; trusting it, or retrying a decode that can never change, strands
+  a finished attempt. The single sealed publish lets a settlement resume recognise its own record
+  without a second file, and an unchanging unsafe slot is not retried because the provider that
+  left it cannot clear it.
+- Owner: `crates/run/src/completion.rs`, `crates/run/src/artifacts.rs`, `crates/run/src/launch.rs`
+
 `crates/records/src/handoff.rs` owns the fields, decoding and bounds. A valid JSON object keeps
 independently valid and forward fields and drops an invalid declared field whole; the diagnostic
 lists dropped paths. Retained fields are evidence for the chair and never turn a malformed

@@ -1861,6 +1861,7 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         ("crates/routing/src/resolve.rs", 4500),
         ("crates/routing/src/review.rs", 3000),
         ("crates/run/src/build_dir_gc.rs", 6250),
+        ("crates/run/src/completion.rs", 2500),
         ("crates/run/src/controls.rs", 5000),
         ("crates/run/src/delivery.rs", 4750),
         ("crates/run/src/git_context.rs", 3000),
