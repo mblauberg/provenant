@@ -247,7 +247,8 @@ other root. Nothing that still exists lies under it, so a process in an existing
 outside; a process path with removed components is inside when it splits at the same nearest
 existing directory, compared by identity, and its removed components start with the root's. A path
 that cannot be split, such as one through a directory this user cannot read, is outside when its
-nearest readable directory is none of the root's existing ancestors. An unreadable root or a
+nearest readable directory is none of the root's existing ancestors and no symlink lies below
+that directory. An unreadable root or a
 dangling symlink stays undecidable, and the root's owner is its nearest existing directory's
 owner.
 

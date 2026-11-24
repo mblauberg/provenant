@@ -157,11 +157,15 @@ fn an_unreadable_path_elsewhere_cannot_hold_a_removed_root() -> Result<(), Box<d
         fs::create_dir_all(locked.join("restricted/stream"))?;
         fs::set_permissions(locked.join("restricted"), fs::Permissions::from_mode(0o000))?;
     }
+    // A symlink loop cannot be split either, and could alias the root.
+    let looped = temp.path().join("loop");
+    std::os::unix::fs::symlink("loop", &looped)?;
     let unreadable = fs::metadata(elsewhere.join("restricted/stream")).is_err();
     let verdicts = [
         occupancy_path_could_be_under(&elsewhere.join("restricted/stream/local"), &root),
         occupancy_path_could_be_under(&sibling.join("restricted/stream/local"), &root),
         occupancy_path_could_be_under(&root.join("src/file"), &root),
+        occupancy_path_could_be_under(&looped.join("file"), &root),
     ];
     for locked in [&elsewhere, &sibling] {
         fs::set_permissions(locked.join("restricted"), fs::Permissions::from_mode(0o755))?;
@@ -171,8 +175,8 @@ fn an_unreadable_path_elsewhere_cannot_hold_a_removed_root() -> Result<(), Box<d
         return Ok(());
     }
     // Neither locked directory is an ancestor of the removed root; a path left
-    // in the removed tree still could be under it.
-    assert_eq!(verdicts, [false, false, true]);
+    // in the removed tree, or one through a symlink, still could be under it.
+    assert_eq!(verdicts, [false, false, true, true]);
     Ok(())
 }
 
