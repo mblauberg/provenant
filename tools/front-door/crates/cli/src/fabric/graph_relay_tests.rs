@@ -784,6 +784,96 @@ mod provisioning_tests {
         Ok(())
     }
 
+    // Spec: docs/specs/fabric.md#cli-and-relay-surfaces
+    #[test]
+    fn skipped_writer_fence_is_cleared_without_provisioning_a_worktree()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_fabric_runtime::graph::{
+            GraphCheckpoint, GraphDocument, GraphExecution, NodeState,
+        };
+        let root = tempfile::tempdir()?;
+        let home = root.path().join("home");
+        let project = home.join("project");
+        std::fs::create_dir_all(&project)?;
+        let git = |args: &[&str]| -> Result<String, Box<dyn std::error::Error>> {
+            let output = provenant_os::fixture::git_command()
+                .current_dir(&project)
+                .args(args)
+                .output()?;
+            assert!(output.status.success());
+            Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+        };
+        git(&["init", "-q"])?;
+        git(&["commit", "--allow-empty", "-qm", "base"])?;
+        let source = git(&["rev-parse", "HEAD"])?;
+        let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
+        inputs.state_dir = Some(root.path().join("state"));
+        let context = Context::open(
+            inputs.resolve(&provenant_os::fs::SystemPathResolver)?,
+            &home,
+            &project,
+        )?;
+        let cancel = CancelToken::new();
+        let clock = provenant_os::clock::SystemClock::new();
+        let budget = WaitBudget::cli(clock.mono_now(), 30)?;
+        let path = ".worktrees/skipped-writer";
+        let document: GraphDocument = serde_json::from_value(json!({
+            "schema_version":1,"graph_id":"g-skipped","nodes":[{
+                "id":"writer","access":"worktree_write","worktree":path,"prompt":"Write","route":{"alias":"junior"}
+            }]
+        }))?;
+        let mut checkpoint: GraphCheckpoint = serde_json::from_value(json!({
+            "schema_version":2,"graph_id":"g-skipped","plan_digest":"fixture",
+            "nodes":[{"id":"writer","state":"skipped","worktree":path,"attempts":[]}],
+            "expansions":[{"source":"parent","nodes":[{
+                "id":"writer","access":"worktree_write","worktree":path,
+                "provision_worktree":true,"prompt":"Write","route":{"alias":"junior"},
+                "when":[{"name":"flag","expected":"true","actual":"false"}]
+            }]}]
+        }))?;
+        bind_admitted_provisioning_owners(&mut checkpoint)?;
+        assert!(checkpoint.nodes[0].provisioned_owner.is_none());
+        relay::fence_provisioning(&mut checkpoint, "writer", path, &source);
+        let mut journal = FileJournal::open(
+            &context.roots.state,
+            context.identity.project,
+            "g-skipped",
+            budget,
+            &cancel,
+            &clock,
+        )?;
+        journal.bind(GraphExecution {
+            peer_origin_context: None,
+            peer_submission_digest: None,
+            requester_path: None,
+            extra: Default::default(),
+            bases: None,
+            directory: project.clone(),
+            document,
+        })?;
+        journal.prepare_fixture_checkpoint(&mut checkpoint)?;
+        journal.save(&checkpoint)?;
+        assert!(
+            recover_provisioning(
+                &context,
+                &mut journal,
+                &mut checkpoint,
+                &["writer".into()],
+                budget,
+                &cancel,
+            )?
+            .is_none(),
+            "a skipped writer must not refuse provisioning"
+        );
+        assert!(relay::pending_provisioning(&checkpoint).is_empty());
+        assert_eq!(checkpoint.nodes[0].state, NodeState::Skipped);
+        assert!(
+            !project.join(path).exists(),
+            "a skipped writer creates no checkout"
+        );
+        Ok(())
+    }
+
     #[test]
     fn relay_refusal_cause_reaches_the_lane_without_raw_source_text()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -997,7 +1087,9 @@ mod provisioning_tests {
     #[test]
     fn readonly_parent_add_and_edit_provision_writers_at_the_pinned_graph_source()
     -> Result<(), Box<dyn std::error::Error>> {
-        use provenant_fabric_runtime::graph::{GraphCheckpoint, GraphDocument, GraphExecution};
+        use provenant_fabric_runtime::graph::{
+            GraphCheckpoint, GraphDocument, GraphExecution, NodeState,
+        };
         let root = tempfile::tempdir()?;
         let home = root.path().join("home");
         let project = home.join("project");
@@ -1235,6 +1327,36 @@ mod provisioning_tests {
                 .and_then(|row| row.writer_binding.as_ref())
                 .and_then(|binding| binding.shared_worktree.as_ref()),
             Some(&sealed)
+        );
+
+        // A conditional writer added by a nested lane never runs, so it is
+        // skipped in the checkpoint and takes no shared binding. Its declared
+        // worktree is not the parent's, which used to refuse the whole add.
+        let skipped_path = ".worktrees/g-owner-owning--skipped";
+        nested_owner(json!({
+            "op":"add","id":"skipped","prompt":"never","idempotency_key":"skipped",
+            "launch":{"node":{
+                "id":"skipped","access":"worktree_write","worktree":skipped_path,
+                "write_scope":["src/lib"],"prompt":"never","route":{"alias":"senior"},
+                "when":[{"name":"flag","expected":"true","actual":"false"}]
+            }}
+        }))?;
+        let saved = FileJournal::read_checkpoint(
+            &context.roots.state,
+            context.identity.project,
+            "g-owner",
+        )?
+        .ok_or("checkpoint")?;
+        let row = saved
+            .nodes
+            .iter()
+            .find(|row| row.id == "owning--skipped")
+            .ok_or("skipped writer row")?;
+        assert_eq!(row.state, NodeState::Skipped, "{row:?}");
+        assert!(row.writer_binding.is_none(), "{row:?}");
+        assert!(
+            !project.join(skipped_path).exists(),
+            "a skipped writer creates no checkout"
         );
         Ok(())
     }

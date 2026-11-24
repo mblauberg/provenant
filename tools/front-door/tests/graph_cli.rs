@@ -2475,6 +2475,25 @@ fn bundled_smoke_runs_from_a_primary_checkout_and_a_linked_worktree() -> Result 
             !matches!(code, "WRITER_SCOPE" | "invalid_input"),
             "{name}: {launched}"
         );
+        assert_ne!(code, "writer_binding_unavailable", "{name}: {launched}");
+        let nodes = launched["data"]["checkpoint"]["nodes"]
+            .as_array()
+            .ok_or_else(|| format!("{name} launch carried no checkpoint nodes: {launched}"))?;
+        let by_name = |part: &str| {
+            nodes.iter().find(|node| {
+                node["id"]
+                    .as_str()
+                    .is_some_and(|id| id.split("--").any(|piece| piece == part))
+            })
+        };
+        let write = by_name("write")
+            .ok_or_else(|| format!("{name} launch carried no write node: {launched}"))?;
+        assert_eq!(write["state"], "skipped", "{name}: {write}");
+        assert!(write["writer_binding"].is_null(), "{name}: {write}");
+        assert!(write["advance_error_code"].is_null(), "{name}: {write}");
+        let read = by_name("read")
+            .ok_or_else(|| format!("{name} launch carried no read node: {launched}"))?;
+        assert_ne!(read["state"], "skipped", "{name}: {read}");
     }
     Ok(())
 }

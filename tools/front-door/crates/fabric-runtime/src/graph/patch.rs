@@ -1729,6 +1729,19 @@ pub(super) fn prepare(
                 format!("node {id}: replace swaps one unstarted leaf for another"),
             ));
         }
+        // A bound writer's checkout is already chosen. Moving it would launch
+        // the writer in one worktree while the plan names another.
+        if node.worktree != target.worktree
+            && checkpoint.nodes.iter().any(|progress| {
+                progress.id == id
+                    && (progress.writer_binding.is_some() || progress.writer_binding_pending)
+            })
+        {
+            return Err(PatchError::new(
+                "started",
+                format!("node {id}: replace cannot move a bound writer to another worktree"),
+            ));
+        }
         if let Some((planner, spec)) = planner {
             plans::prepare(&mut node, planner, spec, source, false)?;
         }
@@ -1887,9 +1900,32 @@ pub(super) fn commit(
         .as_ref()
         .map(|record| record.skipped.clone())
         .unwrap_or_default();
+    let replaced: BTreeSet<String> = expansion
+        .patch
+        .as_ref()
+        .map(|record| record.replaced.iter().map(|node| node.id.clone()).collect())
+        .unwrap_or_default();
     let revision = revision(checkpoint) + 1;
     checkpoint.expansions.push(expansion);
     loops::reconcile(checkpoint, plan);
+    // A replacement can change an unstarted row's worktree and give it a
+    // condition that no longer holds. Align its worktree with the new plan node
+    // so the checkpoint never reloads with a stale worktree, and settle it from
+    // its new condition here so the checkpoint stays the authority for every
+    // skip effect. Leaving it Pending would reach a scheduling pass under a
+    // false `when` and launch its writer unbound.
+    for (progress, node) in checkpoint.nodes.iter_mut().zip(&plan.nodes) {
+        if progress.id != node.id {
+            continue;
+        }
+        if replaced.contains(&progress.id) {
+            progress.worktree = node.worktree.clone();
+        }
+        if progress.state == NodeState::Pending && !when::holds(&node.when) {
+            progress.state = NodeState::Skipped;
+            progress.skip_reason = when::skip_reason(&node.when);
+        }
+    }
     for progress in &mut checkpoint.nodes {
         if skipped.contains(&progress.id) {
             progress.state = NodeState::Skipped;
