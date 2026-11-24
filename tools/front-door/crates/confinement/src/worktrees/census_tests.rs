@@ -31,20 +31,6 @@ impl WorkerObserver for DelegatingWriterObserver {
 }
 
 #[test]
-fn observe_writer_tree_absent_path_is_free_without_the_census() -> Result<(), Box<dyn Error>> {
-    let temp = tempfile::tempdir()?;
-    let missing = temp.path().join("absent-writer-tree");
-    assert_eq!(
-        super::census::observe_writer_tree(&AbsentPathObserver, &missing),
-        (
-            Occupancy::Available,
-            Some("writer worktree no longer exists".into())
-        )
-    );
-    Ok(())
-}
-
-#[test]
 fn observe_writer_tree_censuses_present_and_removed_trees() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let present = temp.path().join("present-writer-tree");
