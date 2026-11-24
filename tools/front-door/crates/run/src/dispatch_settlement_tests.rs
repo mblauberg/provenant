@@ -1305,7 +1305,7 @@ fn abandon_writer_creation_floor_requires_proven_removed_lane_worktree() -> Test
     // A registration older than the queue sets the floor: a reused checkout
     // can predate queued_at, and the floor must not move past its creation.
     let mut late = input();
-    late.attempt_id = AttemptId::from_bytes([6; 16]);
+    late.attempt_id = AttemptId::from_bytes([5; 16]);
     late.operation_id = "run-late".parse()?;
     late.created_at = WallTime::from_micros(4_000_000_000_000_000)?;
     late.request.task.writer = cont.request.task.writer.clone();
