@@ -36,7 +36,7 @@ fn text(value: &Value, limit: usize) -> Option<String> {
         .map(|s| provenant_fabric_runtime::hosts::plain_text(s, limit))
 }
 
-/// A sanitized field kept whole. The digest builder owns the facts; the compact
+/// A sanitised field kept whole. The digest builder owns the facts; the compact
 /// renderer owns the `SUMMARY_ROW_BYTES` bound, so no fact is cut here.
 fn whole_text(value: &Value) -> Option<String> {
     value

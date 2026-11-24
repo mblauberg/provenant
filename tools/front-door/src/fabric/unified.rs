@@ -692,7 +692,7 @@ fn plain(value: &Value) -> String {
     provenant_fabric_runtime::hosts::plain_text(value.as_str().unwrap_or(""), 1024)
 }
 
-/// Peer text sanitized but not abbreviated. Row builders keep whole facts;
+/// Peer text sanitised but not abbreviated. Row builders keep whole facts;
 /// only the compact renderer imposes `SUMMARY_ROW_BYTES`.
 fn whole_text(value: &Value) -> String {
     provenant_fabric_runtime::hosts::plain_text(value.as_str().unwrap_or(""), usize::MAX)
