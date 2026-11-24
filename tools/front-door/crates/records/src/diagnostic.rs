@@ -867,7 +867,8 @@ mod tests {
             | Cause::AccountMismatch
             | Cause::FreeTierRefused
             | Cause::ProviderRefused
-            | Cause::InvalidAccountEvidence => {}
+            | Cause::InvalidAccountEvidence
+            | Cause::AccountDoesNotOffer => {}
         }
     }
 

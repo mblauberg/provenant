@@ -1146,6 +1146,7 @@ fn peer_pacing_refusal_is_definite_and_preserves_its_fact_on_receipt_replay() ->
                 confinement_guard: None,
                 continuation_guard: None,
                 cause: Some(provenant_records::RouteExclusionReason::PacingReserve),
+                offer_mismatch: None,
                 detail: "PRIVATE_PACING_SENTINEL".into(),
             };
             route.set_guard_facts(None, Some(self.0.clone())).unwrap();
@@ -1301,6 +1302,7 @@ fn retry_output_names_the_recorded_refusal_route_and_reason() -> TestResult {
                     confinement_guard: None,
                     continuation_guard: None,
                     cause: None,
+                    offer_mismatch: None,
                     detail: "allowance spent".into(),
                 });
             Err(refusal)
@@ -1369,6 +1371,7 @@ fn retry_output_names_the_recorded_refusal_route_and_reason() -> TestResult {
         confinement_guard: None,
         continuation_guard: None,
         cause: None,
+        offer_mismatch: None,
         detail: "allowance spent".into(),
     };
     assert!(message.contains(&route.describe()), "{message}");
