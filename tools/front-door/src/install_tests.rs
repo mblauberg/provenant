@@ -1228,7 +1228,7 @@ fn upgrade_compact_human_leads_with_one_line_per_host_and_no_raw_json() {
             false,
             "Command failed (Exit(17)): ssh: connection refused\n",
         ),
-        fixture_smoke_host(true, smoke),
+        fixture_smoke_host(true, &smoke),
     ];
     let text = super::render_upgrade_hosts(&hosts, false);
     assert!(text.contains("local: upgraded\n"), "{text}");
@@ -1260,7 +1260,7 @@ fn upgrade_full_human_keeps_capability_notices_and_smoke_envelopes() {
     );
     let hosts = vec![
         fixture_upgrade_host("local", true, local),
-        fixture_smoke_host(true, smoke),
+        fixture_smoke_host(true, &smoke),
     ];
     let text = super::render_upgrade_hosts(&hosts, true);
     assert_eq!(
