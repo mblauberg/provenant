@@ -198,7 +198,10 @@ relayed rows use the same paced reread because the relay has no remote
 subscription. Every blocking forge operation inside a wait shares one request
 context (the wait's absolute deadline, capped per read by
 `domains.wait.pr_read_timeout_seconds`, and its cancellation), and a wait that
-settles cancels the forge transport of its other targets.
+settles cancels the forge transport of its other targets. Wait event lines,
+including `--follow` transitions and their digest lines, stay bounded to
+`SUMMARY_ROW_BYTES` with a clip marker: a wait is a stream of observations, not
+a detail view, even though `status NAME --full` prints whole rows.
 
 Wait settings resolve in one place for every waiter. Configuration a waiter
 cannot use warns and leaves the compiled defaults in force, and reports name

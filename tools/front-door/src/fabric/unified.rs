@@ -266,7 +266,7 @@ fn row(
     state: Value,
     reason: Option<&str>,
 ) -> Value {
-    let reason = reason.map(|text| provenant_fabric_runtime::hosts::plain_text(text, 1024));
+    let reason = reason.map(whole_text);
     json!({"id":id,"kind":kind,"graph_id":target.graph,"node_id":node,"attempt_id":attempt,"state":state,"reason":reason,"waiting_for":null,"cause_code":null,"outcome":null,"next":null,"latest_attempt":null})
 }
 
@@ -433,10 +433,7 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
             row["result_summary"] = json!(
                 node.and_then(|node| node.outputs.as_ref())
                     .and_then(|out| out.result.as_ref())
-                    .map(|result| provenant_fabric_runtime::hosts::plain_text(
-                        &result.excerpt,
-                        200
-                    ))
+                    .map(|result| whole_text(&result.excerpt))
             );
             row["result_path"] = json!(
                 node.and_then(|node| node.outputs.as_ref())
@@ -694,8 +691,8 @@ fn plain(value: &Value) -> String {
 
 /// Peer text sanitised but not abbreviated. Row builders keep whole facts;
 /// only the compact renderer imposes `SUMMARY_ROW_BYTES`.
-fn whole_text(value: &Value) -> String {
-    provenant_fabric_runtime::hosts::plain_text(value.as_str().unwrap_or(""), usize::MAX)
+fn whole_text(text: &str) -> String {
+    provenant_fabric_runtime::hosts::plain_text(text, usize::MAX)
 }
 
 /// Whether an attempt row is settled. Lane projections carry `finished_at` for
@@ -805,7 +802,7 @@ pub(crate) fn status_line(name: &str, row: &Value, model: Option<&str>) -> Strin
         &row["reason"]
     };
     if !note.is_null() {
-        line.push_str(&format!(": {}", whole_text(note)));
+        line.push_str(&format!(": {}", whole_text(note.as_str().unwrap_or(""))));
     }
     if let Some(work) = row.get("stop_work").filter(|value| !value.is_null()) {
         let head = work["head"].as_str().unwrap_or("unknown");
