@@ -20,6 +20,14 @@ common-only layout, and the common directory's parent is never a checkout claim.
 - Why: external metadata directories and linked checkouts do not encode a primary path by parent
   relationship.
 
+A new branch name collides with an existing ref when their NFC-lowercased components match or one is
+a path prefix of the other. A remote-tracking ref is split into a remote and a branch only at a name
+`git remote` reports, longest name first, or, when no remote is configured, at a tracking directory
+under `refs/remotes` that holds a ref, as in a bare store fed by explicit fetches. An intermediate
+slash never invents a remote, but a configured remote that contains `/` is still a valid boundary.
+- Why: treating every slash as a remote boundary invents remotes that do not exist and refuses names
+  that collide with nothing; a store with no configured remote still needs its tracking directories.
+
 A writer needs an explicit verified worktree: Git inventory establishes membership, a registry
 reservation alone does not, and only proven-owned work is eligible for cleanup.
 - Why: custody and cleanup must not claim another checkout.
@@ -51,13 +59,6 @@ configured at all, as in a bare store fed by explicit fetches. A refusal lists t
 branch is the declared `git.default_branch`, else `refs/remotes/<remote>/HEAD`, else the forge API;
 protected branches are declared, else the default branch plus forge-reported protection.
 - Why: a hidden guess can retire the wrong branch or push to the wrong repository.
-
-A new branch name collides with an existing ref when their NFC-lowercased components match or one is
-a path prefix of the other. A remote-tracking ref is split into a remote and a branch only at a
-configured remote name, longest name first; an intermediate slash never invents a remote, but a
-configured remote that contains `/` is still a valid boundary.
-- Why: treating every slash as a remote boundary invents remotes that do not exist and refuses names
-  that collide with nothing.
 
 The owner resolves the context when a delivery or target check first needs it (`ForgeOnce`), so a
 command that delivers nothing, such as a read-only graph, runs in a checkout with no remote.
