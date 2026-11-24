@@ -671,6 +671,28 @@ fn agy_account_offered_models_supersede_legacy_models_in_pools_and_select_capabl
     let pin = resolve(&request("agy/gemini-4-argon")?, &ctx)?;
     assert_eq!(pin.account_key.as_deref(), Some("michael-agy"));
 
+    // An explicit request for a model the account literally offers is never an
+    // offer refusal, even when the account also offers its successor (#3892).
+    let superseded = resolve_for_account_with_seed(
+        &request("agy/gemini-3.8-flash")?,
+        &ctx,
+        Some("michael-agy"),
+        "superseded",
+        0,
+    )?;
+    assert!(
+        !matches!(
+            superseded.readiness,
+            RouteReadiness::Unavailable {
+                reason: RouteExclusionReason::AccountDoesNotOffer,
+                ..
+            }
+        ),
+        "a listed model was refused because its successor is also listed: {:?}",
+        superseded.readiness
+    );
+    assert!(superseded.diagnostics.offer_mismatch.is_none());
+
     // With no offer list observed yet, unknown offerings retain shipped pool members without
     // withholding legacy models.
     let unknown = [agy_account("unprobed-agy")];

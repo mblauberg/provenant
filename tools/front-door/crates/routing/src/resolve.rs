@@ -1737,7 +1737,8 @@ fn account_reason<'q>(
     // stale evidence, leaving the StaleAvailability re-probe path intact.
     if reason.is_none()
         && let Some(mismatch) = recorded_offers(model, availability, context)
-        && !offered_list_serves_model(&mismatch.offered_models, model, context.catalogue, false)
+        // Supersedence orders candidates; it never makes a listed model unoffered.
+        && !offered_list_serves_model(&mismatch.offered_models, model, context.catalogue, true)
     {
         reason = Some(RouteExclusionReason::AccountDoesNotOffer);
     }
