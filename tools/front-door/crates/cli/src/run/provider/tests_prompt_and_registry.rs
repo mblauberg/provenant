@@ -1039,7 +1039,7 @@ fn registry_provider_resolves_prepares_and_reports_quota(
             required_family: None,
             extra: Default::default(),
             provider: adapter_name.into(),
-            model,
+            model: model.clone(),
             effort: None,
         },
         account: (!unknown_identity).then(|| account_key.into()),
