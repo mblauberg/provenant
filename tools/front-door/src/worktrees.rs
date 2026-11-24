@@ -1589,9 +1589,26 @@ fn gc_data_summary(data: &GcData) -> String {
     if let Some(notice) = &data.notice {
         human.push_str(&format!("{notice}\n"));
     }
+    // The default output aggregates uncollected candidates by class and
+    // reason so routine kept rows do not list every path; JSON and the
+    // detailed view keep one row per candidate.
+    let mut groups: std::collections::BTreeMap<(&str, String), (usize, Option<u64>)> =
+        std::collections::BTreeMap::new();
     for item in gc_uncollected(data) {
-        human.push_str(&item.human_line());
-        human.push('\n');
+        let entry = groups
+            .entry((item.class, item.reason))
+            .or_insert((0, Some(0)));
+        entry.0 += 1;
+        entry.1 = entry.1.zip(item.bytes).map(|(sum, bytes)| sum + bytes);
+    }
+    for ((class, reason), (count, bytes)) in groups {
+        let bytes = bytes.map_or_else(
+            || "bytes unknown".to_owned(),
+            |bytes| format!("{bytes} bytes"),
+        );
+        human.push_str(&format!(
+            "uncollected {class}: {count} item(s), {bytes}; kept: {reason}\n"
+        ));
     }
     human
 }
