@@ -97,13 +97,26 @@ pub(super) fn gc_cleanup_below_floor_starts_a_sweep() -> Result {
     let state = fixture.settled.roots.state_root.clone();
     fs::write(
         state.join("config.toml"),
-        b"schema_version=1\n[gc]\nfree_floor='1TiB'\n",
+        b"schema_version=1\n[gc]\nfree_floor='18446744073709551615B'\n",
     )?;
     let request = serde_json::to_string(&(
         fixture.settled.clone(),
         None::<provenant_run::WriterDeliveryReceipt>,
     ))?;
-    crate::fabric::gc_cleanup::run(&request, &FreeWorkers, |_| Ok(0))?;
+    // Drive the production entry point with the rig's installed environment;
+    // no volume has u64::MAX bytes free, so the real measurement is below it.
+    let cleanup = command(&fixture.rig, &["internal", "lane-cleanup", &request])?;
+    assert_eq!(
+        code(&cleanup),
+        0,
+        "{}",
+        String::from_utf8_lossy(&cleanup.stderr.bytes)
+    );
+    assert!(
+        !String::from_utf8_lossy(&cleanup.stderr.bytes).contains("did not complete"),
+        "{}",
+        String::from_utf8_lossy(&cleanup.stderr.bytes)
+    );
     let progress = state.join("tick").join("gc-progress.json");
     let record: Value = serde_json::from_slice(&fs::read(&progress)?)?;
     assert_eq!(record["trigger"], "scheduled", "{record}");
