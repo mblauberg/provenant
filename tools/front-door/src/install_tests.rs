@@ -366,6 +366,85 @@ fn verify_execs_the_installed_binary() -> Result<(), Box<dyn std::error::Error>>
         lines[1].contains("upgrade --verify --verify-only"),
         "{calls}"
     );
+    assert!(lines[1].contains("--json"), "{calls}");
+    Ok(())
+}
+
+#[test]
+fn verify_smoke_runs_outside_a_checkout_without_requiring_one()
+-> Result<(), Box<dyn std::error::Error>> {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().canonicalize()?;
+    let home = root.join("home");
+    // A plain directory, not a Git checkout: this is the cwd of a `upgrade
+    // --verify` run from $HOME that used to make the smoke child refuse.
+    let project = root.join("outside-checkout");
+    let state = root.join("state");
+    for directory in [&home, &project, &state] {
+        std::fs::create_dir(directory)?;
+    }
+    provenant_os::fixture::private_state_dir(&state)?;
+    let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
+    inputs.state_dir = Some(state.clone());
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let environment = Resolved {
+        assets: root.join("assets"),
+        home: home.clone(),
+        project: project.clone(),
+        roots,
+        claude_config: None,
+        codex_home: None,
+    };
+    let mut targets = provenant_config::Targets::new(
+        environment.roots.clone(),
+        &home,
+        &[],
+        std::sync::Arc::new(provenant_records::policy::Policy::default()),
+    );
+    targets.bin_dir = root.join("bin");
+    std::fs::create_dir(&targets.bin_dir)?;
+    let program = installed_destination(&targets);
+    let calls = root.join("verify-calls");
+    std::fs::write(
+        &program,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n",
+            calls.display()
+        ),
+    )?;
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))?;
+    let runner = UpgradeRunner {
+        executor: provenant_os::exec::SystemExecutor::new(1)?,
+        environment: std::env::vars_os().collect(),
+        cwd: home,
+    };
+
+    verify_installed_smoke(
+        &runner,
+        &environment,
+        &targets,
+        &cli::Upgrade {
+            yes: false,
+            from_source: None,
+            hosts: "all".into(),
+            verify: true,
+            verify_only: false,
+            dry_run: false,
+            host: None,
+            route: None,
+            set: Vec::new(),
+        },
+    )?;
+
+    let calls = std::fs::read_to_string(calls)?;
+    assert!(calls.contains("upgrade --verify --verify-only"), "{calls}");
+    assert!(calls.contains("--json"), "{calls}");
+    // The verifier makes its own scratch checkout; passing this non-checkout
+    // as --project would make the child refuse before the smoke could run.
+    assert!(!calls.contains("--project"), "{calls}");
     Ok(())
 }
 
@@ -999,15 +1078,76 @@ fn upgrade_refusal_names_each_failing_host_and_first_error_line() {
             "Command failed (Exit(17)): ssh: connection refused\nmore detail\n",
         ),
     ];
-    let view = super::render_upgrade_hosts(&hosts, false);
-    let message = super::failed_hosts_message(&hosts, &view);
-    assert!(message.contains("1 host(s) failed:"), "{message}");
-    assert!(message.contains("worker"), "{message}");
+    let message = super::failed_hosts_message(&hosts);
+    assert!(message.contains("1 host(s) failed:\n"), "{message}");
     assert!(
-        message.contains("Command failed (Exit(17)): ssh: connection refused"),
+        message.contains("worker: ssh: connection refused\n"),
         "{message}"
     );
+    // The successful host's detail and the executor wrapper never enter the
+    // refusal; each failing host is named once.
+    assert!(!message.contains("install created"), "{message}");
+    assert!(!message.contains("Command failed"), "{message}");
+    assert_eq!(message.matches("worker").count(), 1, "{message}");
     assert!(!message.contains("Some hosts failed"), "{message}");
+}
+
+#[test]
+fn refusal_reports_the_innermost_error_from_a_verify_envelope() {
+    // The real chain: the graph's error envelope is embedded in the verify
+    // child's `Command failed` report. The reason, not the wrapper chain or a
+    // clipped raw envelope, must reach the refusal and the host line.
+    let inner = serde_json::json!({
+        "schema_version": 2,
+        "command": "run",
+        "status": "error",
+        "data": {"graph": "smoke", "error": {
+            "code": "SMOKE_FAILED",
+            "message": "review gate returned VERDICT: FAIL",
+        }},
+    });
+    let report = format!("Command failed (Exit(1)): {inner}\n");
+    let hosts = vec![fixture_smoke_host(false, &report)];
+
+    let view = super::render_upgrade_hosts(&hosts, false);
+    let message = super::failed_hosts_message(&hosts);
+    for rendered in [&view, &message] {
+        assert!(
+            rendered.contains("SMOKE_FAILED: review gate returned VERDICT: FAIL"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("Command failed"), "{rendered}");
+        assert!(!rendered.contains("UPGRADE_VERIFY"), "{rendered}");
+        assert!(!rendered.contains("schema_version"), "{rendered}");
+    }
+}
+
+#[test]
+fn refusal_bounds_each_reason_and_omits_success_detail() {
+    let long = "x".repeat(2000);
+    let report = serde_json::json!({
+        "schema_version": 2,
+        "command": "upgrade",
+        "status": "error",
+        "data": {"error": {"code": "SMOKE_FAILED", "message": long}},
+    })
+    .to_string();
+    let hosts = vec![
+        fixture_upgrade_host("local", true, "install created 3 changes\n"),
+        fixture_smoke_host(false, &report),
+    ];
+    let message = super::failed_hosts_message(&hosts);
+    let lines: Vec<_> = message.lines().collect();
+    assert_eq!(lines.len(), 2, "{message}");
+    assert_eq!(lines[0], "1 host(s) failed:", "{message}");
+    let reason = lines[1];
+    assert!(reason.starts_with("smoke: SMOKE_FAILED: "), "{reason}");
+    assert!(!message.contains("install created"), "{message}");
+    assert!(
+        reason.len() <= "smoke: ".len() + super::HOST_REASON_LIMIT + 3,
+        "unbounded reason ({}+ bytes): {reason}",
+        reason.len()
+    );
 }
 
 #[test]
@@ -1015,11 +1155,9 @@ fn upgrade_compact_human_leads_with_one_line_per_host_and_no_raw_json() {
     let notice =
         "  native_capability_unavailable: /cfg/a (instructions: unsupported (source: host))\n";
     let local = format!("{notice}{notice}{notice}install created 3 changes\n");
-    let smoke = concat!(
-        "{\"schema_version\":2,\"command\":\"run\",\"status\":\"waiting\",\"data\":{}}\n",
-        "{\"schema_version\":2,\"command\":\"wait\",\"status\":\"complete\",\"data\":{}}\n",
-        "{\"schema_version\":2,\"command\":\"status\",\"status\":\"ok\",\"data\":{\"selected\":[{\"id\":\"review\",\"verdict\":\"VERDICT: PASS\"}]}}\n"
-    );
+    // The verify child runs with --json and publishes the verdict as typed
+    // data; the parent never re-parses clipped human envelopes.
+    let smoke = "{\"schema_version\":2,\"command\":\"upgrade\",\"status\":\"ok\",\"data\":{\"verify\":\"installed\",\"version\":\"2.9.1\",\"verdict\":\"VERDICT: PASS\"}}\n";
     let hosts = vec![
         fixture_upgrade_host("local", true, &local),
         fixture_upgrade_host(
@@ -1032,7 +1170,7 @@ fn upgrade_compact_human_leads_with_one_line_per_host_and_no_raw_json() {
     let text = super::render_upgrade_hosts(&hosts, false);
     assert!(text.contains("local: upgraded\n"), "{text}");
     assert!(
-        text.contains("worker: failed - Command failed (Exit(17)): ssh: connection refused\n"),
+        text.contains("worker: failed - ssh: connection refused\n"),
         "{text}"
     );
     assert!(text.contains("smoke: verified\n"), "{text}");

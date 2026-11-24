@@ -2240,16 +2240,32 @@ fn verify_installed_smoke(
     args: &cli::Upgrade,
 ) -> Result<String, String> {
     let program = installed_destination(targets);
+    // JSON keeps the child's envelopes typed. In compact human mode the
+    // verifier's own rows are clipped before the parent could read them, so
+    // both the innermost error and the smoke verdict would be lost.
     let mut argv = vec![
         program.into_os_string(),
+        "--json".into(),
         "--state-dir".into(),
         environment.roots.state.as_path().as_os_str().to_owned(),
-        "--project".into(),
-        environment.project.as_os_str().to_owned(),
-        "upgrade".into(),
-        "--verify".into(),
-        "--verify-only".into(),
     ];
+    // The verifier builds its own scratch checkout; the caller's project is
+    // only needed for config and root resolution. Passing a non-checkout makes
+    // the child refuse with INVALID before the smoke can start, which is why a
+    // `upgrade --verify` run from $HOME failed only its smoke host. Resolve from
+    // the child's own cwd instead when the selected project is not a checkout.
+    if provenant_os::git::repository_path(
+        &environment.project,
+        provenant_os::git::RepositoryPath::Toplevel,
+    )
+    .is_ok()
+    {
+        argv.extend([
+            "--project".into(),
+            environment.project.as_os_str().to_owned(),
+        ]);
+    }
+    argv.extend(["upgrade".into(), "--verify".into(), "--verify-only".into()]);
     if let Some(host) = &args.host {
         argv.extend(["--host".into(), host.clone().into()]);
     }
@@ -2273,24 +2289,38 @@ fn run_verify_only(
     let result = verify_smoke(targets, args);
     let version = env!("CARGO_PKG_VERSION");
     match result {
-        Ok(output) => super::emit(
-            &CommandResult::new(
+        Ok(output) => {
+            let human = format!("verified by provenant {version} (installed binary):\n{output}");
+            let verdict = graph_verdict(&output);
+            super::emit(
+                &CommandResult::new(
+                    "upgrade",
+                    Outcome::Ok,
+                    serde_json::json!({
+                        "verify": "installed",
+                        "version": version,
+                        "output": output,
+                        "verdict": verdict,
+                    }),
+                ),
+                globals,
+                &human,
+                false,
+            )
+        }
+        Err(report) => {
+            // Publish the innermost typed reason, not the nested `Command
+            // failed` wrappers the child executor stacks around a smoke error.
+            let (code, message) = innermost_error_text(&report);
+            super::fail(
                 "upgrade",
-                Outcome::Ok,
-                serde_json::json!({"verify": "installed", "version": version, "output": output}),
-            ),
-            globals,
-            &format!("verified by provenant {version} (installed binary):\n{output}"),
-            false,
-        ),
-        Err(error) => super::fail(
-            "upgrade",
-            Outcome::Error,
-            "UPGRADE_VERIFY",
-            &error,
-            "inspect the reported smoke failure, resolve it, then rerun `upgrade --verify`",
-            globals,
-        ),
+                Outcome::Error,
+                &code,
+                &message,
+                "inspect the reported smoke failure, resolve it, then rerun `upgrade --verify`",
+                globals,
+            )
+        }
     }
 }
 
@@ -2609,27 +2639,111 @@ struct HostUpgrade {
     app: Option<apps::Status>,
 }
 
-/// The first meaningful output line: the compact reason a host failed.
-fn first_error_line(output: &str) -> String {
-    let line = output
-        .lines()
+/// Cap for one host's reason in a refusal. The full per-host view stays in the
+/// human output; only this bounded summary travels in `error.message`.
+const HOST_REASON_LIMIT: usize = 300;
+
+/// The first meaningful line of a report, trimmed.
+fn first_meaningful_line(text: &str) -> String {
+    text.lines()
         .map(str::trim)
         .find(|line| !line.is_empty())
-        .unwrap_or("no error detail");
-    cli::bounded_text(line, 200)
+        .unwrap_or("no error detail")
+        .to_owned()
 }
 
-/// Refusal detail: name every failing host with its first error line, then the
-/// same one-line-per-host view used on success. A failed result's error message
-/// is the only text the human renderer prints, so the view travels with it.
-fn failed_hosts_message(hosts: &[HostUpgrade], host_view: &str) -> String {
-    let failed = hosts.iter().filter(|host| !host.success).count();
-    let mut message = format!("{failed} host(s) failed:\n{host_view}");
-    for host in hosts.iter().filter(|host| !host.success) {
-        let line = format!("{}: {}", host.host, first_error_line(&host.output));
-        if !message.contains(&line) {
-            message.push_str(&format!("\n{line}"));
+/// Parse the single-line JSON envelopes a child prints. An executor wraps a
+/// non-zero exit in `Command failed` prose before the report reaches us, so the
+/// envelope may be preceded by a prefix rather than starting the line.
+fn child_envelopes(text: &str) -> Vec<serde_json::Value> {
+    let mut values = Vec::new();
+    for line in text.lines() {
+        let (Some(start), Some(end)) = (line.find('{'), line.rfind('}')) else {
+            continue;
+        };
+        if end >= start
+            && let Ok(value) = serde_json::from_str::<serde_json::Value>(&line[start..=end])
+        {
+            values.push(value);
         }
+    }
+    values
+}
+
+/// The innermost `data.error` of an envelope: a machine code and its one-line
+/// message. A wrapper envelope may carry a deeper one inside its message; the
+/// deeper reason wins, so no wrapper chain reaches the operator.
+fn innermost_error(value: &serde_json::Value) -> Option<(String, String)> {
+    let error = value.get("data")?.get("error")?;
+    let code = error.get("code")?.as_str()?.to_owned();
+    let message = error
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| error.get("cause").and_then(serde_json::Value::as_str))
+        .unwrap_or_default();
+    match child_envelopes(message)
+        .into_iter()
+        .filter_map(|v| innermost_error(&v))
+        .last()
+    {
+        Some(deeper) => Some(deeper),
+        None => Some((code, first_meaningful_line(message))),
+    }
+}
+
+/// The typed reason from a failing child's report, falling back to its first
+/// line only when no envelope carried an error.
+fn innermost_error_text(report: &str) -> (String, String) {
+    child_envelopes(report)
+        .into_iter()
+        .filter_map(|value| innermost_error(&value))
+        .last()
+        .unwrap_or_else(|| {
+            let line = first_meaningful_line(report);
+            (
+                "UPGRADE_VERIFY".to_owned(),
+                unwrap_command_failure(&line).to_owned(),
+            )
+        })
+}
+
+/// Drop the executor's `Command failed (…): ` wrapper from a plain reason, so
+/// even a non-envelope failure names the cause rather than the exit status.
+fn unwrap_command_failure(line: &str) -> &str {
+    line.strip_prefix("Command failed (")
+        .and_then(|rest| rest.find("): ").map(|end| &rest[end + 3..]))
+        .unwrap_or(line)
+}
+
+/// The one-line reason a host failed. Typed envelopes give the innermost code
+/// and message; otherwise fall back to the first meaningful line with its
+/// executor wrapper removed. Never a `Command failed` chain or a raw envelope.
+fn first_error_line(output: &str) -> String {
+    let reason = child_envelopes(output)
+        .into_iter()
+        .filter_map(|value| innermost_error(&value))
+        .last()
+        .map(|(code, message)| format!("{code}: {message}"))
+        .unwrap_or_else(|| {
+            let line = first_meaningful_line(output);
+            unwrap_command_failure(&line).to_owned()
+        });
+    cli::bounded_text(&reason, HOST_REASON_LIMIT)
+}
+
+/// Refusal detail: name every failing host once with its bounded one-line
+/// reason. The full per-host view is emitted separately as the human output;
+/// it must never enter `error.message`, where a large capture could be paged
+/// away by the renderer.
+fn failed_hosts_message(hosts: &[HostUpgrade]) -> String {
+    let failed = hosts.iter().filter(|host| !host.success).count();
+    let mut message = format!("{failed} host(s) failed:\n");
+    for host in hosts.iter().filter(|host| !host.success) {
+        message.push_str(&format!(
+            "{}: {}\n",
+            host.host,
+            first_error_line(&host.output)
+        ));
     }
     message
 }
@@ -2670,37 +2784,30 @@ fn collect_verdicts(value: &serde_json::Value, verdicts: &mut Vec<String>) {
     }
 }
 
-/// Reduce a smoke child's JSON envelopes to one verdict line. Raw envelopes
-/// are kept only under `--full`.
+/// The graph verdict from the smoke child's `run`/`wait`/`status` envelopes.
+/// The verdict is typed data (`data.verdict` or a review row's verdict), never
+/// a line matched out of human prose.
+fn graph_verdict(output: &str) -> String {
+    let mut verdicts = Vec::new();
+    for value in child_envelopes(output) {
+        if value.get("schema_version").is_some() && value.get("command").is_some() {
+            collect_verdicts(&value["data"], &mut verdicts);
+        }
+    }
+    verdicts.into_iter().last().unwrap_or_default()
+}
+
+/// The smoke host's compact detail: the verdict the verify child published as
+/// typed data, one line. Raw envelopes are kept only under `--full`.
 fn smoke_verdict(output: &str) -> String {
-    let mut statuses: Vec<String> = Vec::new();
-    let mut verdicts: Vec<String> = Vec::new();
-    for line in output.lines() {
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        if value.get("schema_version").is_none() || value.get("command").is_none() {
-            continue;
-        }
-        if let Some(status) = value["status"].as_str()
-            && !statuses.iter().any(|seen| seen == status)
-        {
-            statuses.push(status.to_owned());
-        }
-        collect_verdicts(&value["data"], &mut verdicts);
+    match child_envelopes(output)
+        .into_iter()
+        .find_map(|value| value["data"]["verdict"].as_str().map(str::to_owned))
+        .filter(|verdict| !verdict.is_empty())
+    {
+        Some(verdict) => format!("  smoke graph: {verdict}\n"),
+        None => String::new(),
     }
-    if statuses.is_empty() && verdicts.is_empty() {
-        return String::new();
-    }
-    let mut summary = String::from("  smoke graph:");
-    if let Some(status) = statuses.last() {
-        summary.push_str(&format!(" {status}"));
-    }
-    if !verdicts.is_empty() {
-        summary.push_str(&format!(" ({})", verdicts.join(", ")));
-    }
-    summary.push('\n');
-    summary
 }
 
 /// Compact detail for one host: capability notices become a count, smoke
@@ -3094,7 +3201,7 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
             if let Some(warning) = &version_warning {
                 human.push_str(&format!("  Warning: {warning}\n"));
             }
-            let failure_message = (!success).then(|| failed_hosts_message(&hosts, &human));
+            let failure_message = (!success).then(|| failed_hosts_message(&hosts));
             let mut result = CommandResult::new(
                 "upgrade",
                 if success { Outcome::Ok } else { Outcome::Error },
