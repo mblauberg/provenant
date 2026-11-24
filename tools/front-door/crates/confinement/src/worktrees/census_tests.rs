@@ -2248,13 +2248,8 @@ fn unreadable_platform_policy_rechecks_identity_and_preserves_other_unknowns()
         .insert(300, CwdObservation::Path(root.clone()));
     assert!(observer.observe_roots(std::slice::from_ref(&root))[&root].is_observed());
     // Owner/identity lookup failure never licenses exclusion or placement.
-    let not_a_dir = root.join("root-identity-not-a-dir");
-    fs::write(&not_a_dir, b"x")?;
-    let unreadable = not_a_dir.join("root");
-    assert!(observer.observe_roots(std::slice::from_ref(&unreadable))[&unreadable].is_unknown());
-    // A root that no longer exists holds nothing, so it is not left unknown.
     let missing = root.join("missing-root");
-    assert!(!observer.observe_roots(std::slice::from_ref(&missing))[&missing].is_unknown());
+    assert!(observer.observe_roots(std::slice::from_ref(&missing))[&missing].is_unknown());
     Ok(())
 }
 

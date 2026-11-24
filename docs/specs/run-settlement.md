@@ -270,8 +270,7 @@ path cannot be placed (for example a descriptor beneath a non-directory, such as
 one excusable failure, but a positive placement inside any root still blocks every arm. A root
 whose own identity or metadata cannot be read makes placement undecidable for that root: it
 fails closed for every policy arm including a configured entry, blocks every excusal, and keeps
-that root Unknown. A root that no longer exists is decidable, since nothing can hold a path under
-it, so it never blocks. Three policies may then excuse: a listed service uid whose real, effective
+that root Unknown. Three policies may then excuse: a listed service uid whose real, effective
 and saved uids are all system uids foreign to every readable root owner, consulted for every
 failure class (descriptors EPERM, unplaceable process path, cwd unreadable) but never for a human
 uid or the owner; an owner-uid process with EPERM-unreadable descriptors when it is

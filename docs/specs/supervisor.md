@@ -459,8 +459,7 @@ a descriptor beneath a non-directory, such as launchd's) is one excusable
 failure, but positive cwd or descriptor placement still wins for every arm. A
 root whose own identity or metadata cannot be read makes placement undecidable
 for that root: it fails closed for every arm including a configured entry,
-blocks every excusal, and keeps that root `Unknown`. A root that no longer
-exists is decidable: nothing can hold a path under it, so it never blocks. Only then may a typed
+blocks every excusal, and keeps that root `Unknown`. Only then may a typed
 policy excuse the process. Three policies exist: a listed service uid whose
 real, effective and saved uids are all stable system uids foreign to every root
 owner is consulted for every failure class (descriptors EPERM, unplaceable
