@@ -700,10 +700,6 @@ struct GcData {
     /// their common directory has been gone past the idle lifetime.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     retired_projects: Vec<RetiredProject>,
-    /// Candidates deliberately kept, with their bytes and the reason that
-    /// protected them. A low-space pass reports these so an operator can act.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    uncollected: Vec<crate::gc_support::UncollectedItem>,
     #[serde(skip_serializing_if = "Option::is_none")]
     notice: Option<String>,
 }
@@ -942,10 +938,31 @@ fn gc_uncollected(data: &GcData) -> Vec<crate::gc_support::UncollectedItem> {
             reason: "recent write within the grace period".to_owned(),
         });
     }
+    // The target census measures bytes under managed roots but does not split
+    // them per kept target. Emit that total once instead of claiming each kept
+    // target has no measurable size.
+    if (!data.build_dirs.busy.is_empty() || !data.build_dirs.recent.is_empty())
+        && data.build_dirs.cache_bytes > 0
+    {
+        rows.push(UncollectedItem {
+            path: PathBuf::from("<managed cargo targets>"),
+            bytes: Some(data.build_dirs.cache_bytes),
+            class: "cargo_target",
+            reason: "class total under managed target roots".to_owned(),
+        });
+    }
     for issue in &data.provider_state.kept {
+        // Scratch that remains after a partial collection carries the bytes the
+        // census did measure for that directory; a lock-held scratch has none.
+        let bytes = data
+            .provider_state
+            .partial_tmp
+            .iter()
+            .find(|entry| entry.path == issue.path)
+            .map(|entry| entry.bytes);
         rows.push(UncollectedItem {
             path: issue.path.clone(),
-            bytes: None,
+            bytes,
             class: "provider_state",
             reason: issue.reason.clone(),
         });
@@ -1018,6 +1035,7 @@ pub(crate) fn scheduled_gc(
     globals: &Globals,
     idle_seconds: u64,
     workers: &dyn WorkerObserver,
+    home: Option<&Path>,
 ) -> Result<GcCompletion, String> {
     let command = Gc {
         scheduled: true,
@@ -1028,7 +1046,7 @@ pub(crate) fn scheduled_gc(
         idle: Some(idle_seconds),
         finished_branch: None,
     };
-    let data = gc(&command, globals, workers).map_err(|error| error.local_message())?;
+    let data = gc(&command, globals, workers, home).map_err(|error| error.local_message())?;
     if !data.provider_state.errors.is_empty()
         || !data.chair_logs.errors.is_empty()
         || !data.discard_archives.errors.is_empty()
@@ -1082,9 +1100,9 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
         }
         return crate::provider_retention::run_branch_scratch(globals, branch);
     }
-    match gc(&command, globals, workers) {
+    match gc(&command, globals, workers, None) {
         Ok(data) => {
-            let human = gc_compact_summary(&data);
+            let human = gc_compact_summary(&data, globals.full);
             let failed = !data.provider_state.errors.is_empty()
                 || !data.chair_logs.errors.is_empty()
                 || !data.discard_archives.errors.is_empty()
@@ -1150,7 +1168,32 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
     }
 }
 
-fn gc_compact_summary(data: &GcData) -> String {
+/// One line per kept class and reason. The default compact view shows this
+/// aggregate first so it survives the renderer's line clip; JSON and `--full`
+/// carry one row per candidate instead.
+fn gc_uncollected_aggregate_lines(data: &GcData) -> Vec<String> {
+    let mut groups: std::collections::BTreeMap<(&str, String), (usize, Option<u64>)> =
+        std::collections::BTreeMap::new();
+    for item in gc_uncollected(data) {
+        let entry = groups
+            .entry((item.class, item.reason))
+            .or_insert((0, Some(0)));
+        entry.0 += 1;
+        entry.1 = entry.1.zip(item.bytes).map(|(sum, bytes)| sum + bytes);
+    }
+    groups
+        .into_iter()
+        .map(|((class, reason), (count, bytes))| {
+            let bytes = bytes.map_or_else(
+                || "bytes unknown".to_owned(),
+                |bytes| format!("{bytes} bytes"),
+            );
+            format!("uncollected {class}: {count} item(s), {bytes}; kept: {reason}")
+        })
+        .collect()
+}
+
+fn gc_compact_summary(data: &GcData, full: bool) -> String {
     let trees: usize = data
         .worktree_cleanup
         .iter()
@@ -1171,6 +1214,10 @@ fn gc_compact_summary(data: &GcData) -> String {
         data.free_floor_bytes,
         data.free_floor_source
     );
+    for line in gc_uncollected_aggregate_lines(data) {
+        summary.push_str(&line);
+        summary.push('\n');
+    }
     if let Some(notice) = &data.notice {
         summary.push_str(notice);
         summary.push('\n');
@@ -1202,9 +1249,11 @@ fn gc_compact_summary(data: &GcData) -> String {
         summary.push_str(worktrees::HELD_CENSUS_INCOMPLETE_WARNING);
         summary.push('\n');
     }
-    for item in gc_uncollected(data) {
-        summary.push_str(&item.human_line());
-        summary.push('\n');
+    if full {
+        for item in gc_uncollected(data) {
+            summary.push_str(&item.human_line());
+            summary.push('\n');
+        }
     }
     summary
 }
@@ -1589,26 +1638,11 @@ fn gc_data_summary(data: &GcData) -> String {
     if let Some(notice) = &data.notice {
         human.push_str(&format!("{notice}\n"));
     }
-    // The default output aggregates uncollected candidates by class and
-    // reason so routine kept rows do not list every path; JSON and the
-    // detailed view keep one row per candidate.
-    let mut groups: std::collections::BTreeMap<(&str, String), (usize, Option<u64>)> =
-        std::collections::BTreeMap::new();
-    for item in gc_uncollected(data) {
-        let entry = groups
-            .entry((item.class, item.reason))
-            .or_insert((0, Some(0)));
-        entry.0 += 1;
-        entry.1 = entry.1.zip(item.bytes).map(|(sum, bytes)| sum + bytes);
-    }
-    for ((class, reason), (count, bytes)) in groups {
-        let bytes = bytes.map_or_else(
-            || "bytes unknown".to_owned(),
-            |bytes| format!("{bytes} bytes"),
-        );
-        human.push_str(&format!(
-            "uncollected {class}: {count} item(s), {bytes}; kept: {reason}\n"
-        ));
+    // The failure view also aggregates kept candidates: one line per class
+    // and reason, never a long list of per-path rows.
+    for line in gc_uncollected_aggregate_lines(data) {
+        human.push_str(&line);
+        human.push('\n');
     }
     human
 }
@@ -1633,6 +1667,8 @@ enum GcOutput<'a> {
     Detailed {
         #[serde(flatten)]
         data: &'a GcData,
+        #[serde(skip_serializing_if = "<[_]>::is_empty")]
+        uncollected: Vec<crate::gc_support::UncollectedItem>,
         retention_bytes: Vec<provenant_config::RetentionBytes>,
         removal_records: Vec<RemovalRecord>,
     },
@@ -1718,6 +1754,7 @@ fn gc_result_data(data: &GcData, detailed: bool) -> GcOutput<'_> {
     if detailed {
         return GcOutput::Detailed {
             data,
+            uncollected: gc_uncollected(data),
             retention_bytes: gc_retention_bytes(data),
             removal_records: gc_removal_records(data),
         };
@@ -2402,7 +2439,12 @@ fn stale_age_text(seconds: u64) -> String {
     }
 }
 
-fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<GcData, Error> {
+fn gc(
+    command: &Gc,
+    globals: &Globals,
+    workers: &dyn WorkerObserver,
+    home_override: Option<&Path>,
+) -> Result<GcData, Error> {
     use provenant_confinement::cache::CacheGcPolicy;
 
     let workspace = if command.scheduled {
@@ -2418,11 +2460,14 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
     };
     let roots::Resolved {
         assets,
-        home,
+        home: resolved_home,
         project,
         roots,
         ..
     } = resolved;
+    // A checkpoint carries the settlement's home explicitly so an in-process
+    // sweep never scans the host's real home cache.
+    let home = home_override.map_or(resolved_home, Path::to_path_buf);
     let facts = worktrees::RepoFacts::default();
     let mut projects = Vec::new();
     let mut scheduled_project_ids = Vec::new();
@@ -2477,12 +2522,11 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         });
     }
     let clock = SystemClock::new();
-    let deadline = crate::gc_sweep::Deadline::start(sweep_budget);
     // An explicit floor request joins an in-flight sweep instead of reporting
-    // an empty skip. The wait is bounded; on expiry it is an error, never a
-    // successful collection of zero bytes.
-    const HELD_SWEEP_WAIT: Duration = Duration::from_secs(20);
+    // an empty skip. The join is bounded by the configured sweep budget; on
+    // expiry it is an error, never a successful collection of zero bytes.
     let joins_held_sweep = command.free_floor.is_some() && !command.dry_run;
+    let wait_started = clock.mono_now();
     let mut lease = if command.dry_run {
         None
     } else {
@@ -2490,7 +2534,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             crate::gc_sweep::acquire_waiting(
                 roots.state.as_path(),
                 sweep_budget,
-                HELD_SWEEP_WAIT,
+                sweep_budget,
                 &clock,
             )
         } else {
@@ -2501,7 +2545,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             crate::gc_sweep::Acquire::Held(lease) => Some(lease),
             crate::gc_sweep::Acquire::Busy(warning) if joins_held_sweep => {
                 return Err(Error::RetentionCollection(format!(
-                    "GC sweep still running after a {HELD_SWEEP_WAIT:?} bounded wait; {}; this invocation collected nothing",
+                    "GC sweep still running after a {sweep_budget:?} bounded wait; {}; this invocation collected nothing",
                     warning.unwrap_or_else(|| "sweep already running".into())
                 )));
             }
@@ -2520,6 +2564,15 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             }
         }
     };
+    let waited = Duration::from_micros(
+        clock
+            .mono_now()
+            .as_micros()
+            .saturating_sub(wait_started.as_micros()),
+    );
+    // This invocation's deadline starts only once it holds the lease, with the
+    // budget the bounded join left over.
+    let deadline = crate::gc_sweep::Deadline::start(sweep_budget.saturating_sub(waited));
     if let Some(lease) = &mut lease {
         lease
             .watch_fence(deadline.cancel().clone())
@@ -4839,6 +4892,12 @@ mod gc_preview_tests {
                 path: PathBuf::from("/attempts/1/scratch"),
                 reason: "live holder".into(),
             });
+        data.provider_state
+            .partial_tmp
+            .push(provenant_run::AttemptTmpRemoval {
+                path: PathBuf::from("/attempts/1/scratch"),
+                bytes: 2048,
+            });
         data.retention_errors
             .push(provenant_config::RetentionIssue {
                 path: PathBuf::from("/state/gc/archive"),
@@ -4865,14 +4924,41 @@ mod gc_preview_tests {
                 .any(|row| row.reason.contains("retained evidence"))
         );
         assert!(rows.iter().any(|row| row.reason.contains("unmerged work")));
+        assert!(
+            rows.iter().any(|row| {
+                row.path == PathBuf::from("/attempts/1/scratch") && row.bytes == Some(2048)
+            }),
+            "measured scratch bytes must reach its kept row: {rows:?}"
+        );
         let json = serde_json::to_value(gc_result_data(&data, false)).unwrap();
         assert_eq!(json["free_floor_bytes"], 4096);
         assert_eq!(json["free_floor_source"], "host config.toml");
         assert_eq!(json["uncollected"].as_array().unwrap().len(), rows.len());
-        let human = gc_compact_summary(&data);
+        // --json emits the Detailed variant: its uncollected list is the one
+        // the CLI actually serialises, not just the Summary variant's.
+        let detailed = serde_json::to_value(gc_result_data(&data, true)).unwrap();
+        let detailed_rows = detailed["uncollected"].as_array().unwrap();
+        assert_eq!(detailed_rows.len(), rows.len(), "{detailed}");
         assert!(
-            human.contains("uncollected cargo_cache /cache/live: 8192 bytes; kept: live holder"),
-            "{human}"
+            detailed_rows.iter().any(|row| row["path"] == "/cache/live"
+                && row["bytes"] == 8192
+                && row["class"] == "cargo_cache"),
+            "{detailed}"
+        );
+        let human = gc_compact_summary(&data, false);
+        let head = human.lines().take(8).collect::<Vec<_>>().join("\n");
+        assert!(
+            head.contains("uncollected cargo_cache: 1 item(s), 8192 bytes; kept: live holder"),
+            "the aggregate must survive the compact line clip: {human}"
+        );
+        assert!(
+            !human.contains("uncollected cargo_cache /cache/live:"),
+            "the default view must not list every kept path: {human}"
+        );
+        let full = gc_compact_summary(&data, true);
+        assert!(
+            full.contains("uncollected cargo_cache /cache/live: 8192 bytes; kept: live holder"),
+            "--full must keep per-candidate rows: {full}"
         );
         assert!(human.contains("free-space floor: 4096 bytes (source: host config.toml)"));
     }
@@ -4928,6 +5014,15 @@ mod gc_preview_tests {
         assert_eq!(json["build_dir_budget_source"], "host");
         assert_eq!(json["build_dir_target_idle_setting"], "30d");
         assert_eq!(json["build_dir_target_idle_source"], "compiled default");
+        let rows = gc_uncollected(&data);
+        assert!(
+            rows.iter().any(|row| {
+                row.class == "cargo_target"
+                    && row.bytes == Some(8192)
+                    && row.reason.contains("class total")
+            }),
+            "kept Cargo targets must carry the measured class total: {rows:?}"
+        );
         let json = serde_json::to_value(gc_result_data(&data, true)).unwrap_or_default();
         assert_eq!(json["build_dirs"]["cache_bytes"], 8192);
         assert_eq!(json["build_dirs"]["budget_source"], "host");

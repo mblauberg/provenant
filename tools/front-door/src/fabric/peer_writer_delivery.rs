@@ -306,7 +306,7 @@ fn resumed_lane_settlement_defers_cleanup_and_keeps_work_without_removal_proof()
     // With no delivery and no integration target there is no exact ref to prove
     // removal, so collection keeps the work, stays retryable and replays cleanly.
     for _ in 0..2 {
-        gc_cleanup::run(&request_json, &FreeWorkers)?;
+        gc_cleanup::run(&request_json, &FreeWorkers, |_| Ok(u64::MAX))?;
         assert!(fixture.worktree.exists());
         let kept = fixture
             .store

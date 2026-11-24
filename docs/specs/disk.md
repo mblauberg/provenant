@@ -153,10 +153,11 @@ the cleanup worker, so no daemon is needed. Above the floor, or with
   healthy host is never swept merely because a lane started.
 
 An explicit `provenant gc --free-floor SIZE` that finds the single-flight
-lease held waits for that sweep within a bounded window, then runs its own
-collection on the freed lock. It never turns a busy lease into a successful
-empty skip: if the bound expires it fails with the wait, the holder and the
-fact that this invocation collected nothing.
+lease held joins that sweep for up to the configured `gc.sweep_budget`, then
+runs its own collection on the freed lock with the budget the join left over.
+It never turns a busy lease into a successful empty skip: if the bound expires
+it fails with the wait and the fact that this invocation collected nothing.
+The lease record does not carry a holder name, so neither does the failure.
 - Why: the operator who asks for space back must see either a real result or a
   failure, not "sweep already running; skipped" with zero bytes.
 
@@ -165,8 +166,12 @@ fact that this invocation collected nothing.
 Every gc report lists the candidates it deliberately kept: path, class,
 observed bytes (or an explicit unknown), and the reason — live holder,
 uncertain custody, retained evidence, unmerged work, held Cargo lock, recent
-write and similar. A measurement that cannot report bytes says so rather than
-claiming zero. The same list appears in human and JSON output.
+write and similar. Bytes already measured for attempt scratch and Cargo
+targets are carried into those rows; where only a class total was measured,
+the row reports that total. A measurement that cannot report bytes says so
+rather than claiming zero. JSON and `gc --full` give one row per candidate;
+the default human view aggregates by class and reason so the lines survive its
+compact clip.
 - Why: collection must preserve evidence and live data; naming what stayed is
   what lets an operator act on it.
 

@@ -54,13 +54,27 @@ impl UncollectedItem {
     }
 }
 
+/// Read free bytes on the state volume. The production measurement handed to
+/// [`collect_below_floor`]; tests inject a reading instead of depending on the
+/// host's disk state.
+pub(crate) fn state_volume_free_bytes(state_root: &Path) -> Result<u64, String> {
+    Directory::open_anchor(state_root)
+        .map_err(|error| error.to_string())
+        .and_then(|volume| volume.available_bytes().map_err(|error| error.to_string()))
+        .map_err(|error| format!("cannot measure free space: {error}"))
+}
+
 /// Start one bounded sweep from a natural checkpoint when the state volume is
-/// below `gc.free_floor`. All inputs are read from the state root, so this
-/// works from a detached settlement worker as well as a launch, and needs no
-/// daemon. The configured floor and its source travel with the settings.
+/// below `gc.free_floor`. All inputs are read from the state root and the
+/// caller's home, so this works from a detached settlement worker as well as a
+/// launch, and needs no daemon. The free-space reading is injected so a test
+/// never depends on ambient disk state. The configured floor and its source
+/// travel with the settings.
 pub(crate) fn collect_below_floor(
     state_root: &Path,
+    home: &Path,
     workers: &dyn WorkerObserver,
+    measure_free_bytes: impl FnOnce(&Path) -> Result<u64, String>,
 ) -> Result<bool, String> {
     let settings = provenant_config::GcSettings::read(state_root)
         .map_err(|error| format!("cannot read gc settings: {error}"))?;
@@ -70,10 +84,7 @@ pub(crate) fn collect_below_floor(
     let limits = settings
         .disk_limits(state_root)
         .map_err(|error| format!("cannot resolve gc.free_floor: {error}"))?;
-    let free = Directory::open_anchor(state_root)
-        .map_err(|error| error.to_string())
-        .and_then(|volume| volume.available_bytes().map_err(|error| error.to_string()))
-        .map_err(|error| format!("cannot measure free space: {error}"))?;
+    let free = measure_free_bytes(state_root)?;
     if free >= limits.free_floor {
         return Ok(false);
     }
@@ -87,7 +98,8 @@ pub(crate) fn collect_below_floor(
     // The trigger fired once the bounded sweep started. An incomplete result
     // is reported by that sweep; it does not mean the checkpoint failed to
     // start collection.
-    if let Err(error) = crate::worktrees::scheduled_gc(&globals, idle_seconds, workers) {
+    if let Err(error) = crate::worktrees::scheduled_gc(&globals, idle_seconds, workers, Some(home))
+    {
         provenant_records::warning::warn(
             provenant_records::warning::Warning::new(
                 provenant_records::warning::GC_SCHEDULE_FAILED,
