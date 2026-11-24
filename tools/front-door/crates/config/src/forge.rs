@@ -31,9 +31,9 @@ pub type Project = Path;
 /// typed value, so an absent remote cannot be flattened into `Some("")` and
 /// reach Git as a push destination or a `refs/remotes/` namespace. The grammar
 /// follows the ref-component rules of `git check-ref-format` for
-/// `refs/remotes/<name>/x`, with extra argv-safety refusals: a leading '-' and
-/// padded values are legal in some Git ref names but must never be passed as a
-/// remote argument or a `refs/remotes/` component.
+/// `refs/remotes/<name>/x`, and also refuses a leading '-', which Git accepts
+/// in a ref component but which would read as an option when passed as a remote
+/// argument.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct RemoteName(String);
 
