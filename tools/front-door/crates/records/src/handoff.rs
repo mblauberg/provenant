@@ -644,18 +644,28 @@ fn verdict_declarations(result: &str) -> u8 {
     capture.finish().declarations
 }
 
+/// Whether a trailing line is verdict-shaped: a verdict marker after the
+/// whitespace and blockquote markers the result scan skips. A prose line that
+/// merely mentions "verdict" is not verdict-shaped and is tolerated (#3941).
+fn line_is_verdict_shaped(marker: &str) -> bool {
+    let unquoted = marker.trim_start().trim_start_matches('>').trim_start();
+    let mut capture = crate::result_capture::VerdictCapture::default();
+    capture.push(unquoted.as_bytes());
+    capture.finish().declarations > 0
+}
+
 /// A line after a closed handoff that cannot be tolerated prose (#3928): a
 /// fence or handoff opener (including a partial one), or a verdict-shaped line
-/// in any form the result scan recognises. Only plain prose earns the new
-/// tolerance; everything else keeps the strict end-of-answer rule.
+/// in any form the result scan recognises. Only plain prose earns the tolerance;
+/// everything else keeps the strict end-of-answer rule. Mentioning the word
+/// "verdict" is ordinary prose: only a verdict-shaped line is structural
+/// (#3941).
 fn trailing_line_is_structural(marker: &str) -> bool {
     let trimmed = marker.trim();
     if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
         return true;
     }
-    let mut capture = crate::result_capture::VerdictCapture::default();
-    capture.push(marker.as_bytes());
-    capture.finish().declarations > 0 || trimmed.to_ascii_lowercase().contains("verdict")
+    line_is_verdict_shaped(marker)
 }
 
 /// Where one completed provider turn ends in the decoded result text, and
@@ -679,6 +689,9 @@ pub struct HandoffCapture {
     fenced_json: Option<Vec<u8>>,
     /// A closed ```json block that decodes as a handoff and is the last content.
     json_final: Option<Vec<u8>>,
+    /// A second fence followed the ```json candidate, so it is not a single
+    /// block and its trailing prose must keep the strict rule (#3941).
+    json_repeated: bool,
     /// The declaration came from a final ```json block, not a ```handoff block.
     json_fallback: bool,
     declaration: Option<Handoff>,
@@ -741,14 +754,36 @@ impl HandoffCapture {
         }
         if overflow {
             // This prefix may end in the middle of a UTF-8 character. Only
-            // ASCII fence syntax matters when discarding a long prose line.
+            // ASCII fence syntax and a leading verdict marker matter when
+            // classifying an oversized trailing line.
             let indent = line.iter().take_while(|byte| **byte == b' ').count();
             let fence_prefix = indent <= 3
                 && line
                     .get(indent..indent + 3)
                     .is_some_and(|prefix| prefix == b"```" || prefix == b"~~~");
-            if self.json.is_some() || self.declaration.is_some() || fence_prefix {
+            let prefix = String::from_utf8_lossy(&line);
+            let structural = fence_prefix || line_is_verdict_shaped(&prefix);
+            if self.json.is_some() || structural {
                 self.error = Some(HandoffError::new("$", "handoff line exceeds 12288 bytes"));
+                self.fenced_json = None;
+                self.json_final = None;
+                return;
+            }
+            if self.declaration.is_some() || self.json_final.is_some() {
+                if self.trailing_verdict || self.repeated.is_some() || self.json_repeated {
+                    // A verdict, a repeated last block and a verdict after
+                    // prose keep the strict rule (#3941).
+                    self.error = Some(HandoffError::new("$", MUST_END));
+                } else {
+                    // An oversized line after a single block is ordinary prose
+                    // (#3941); finish_source records the tolerance.
+                    self.trailing_prose = true;
+                }
+                self.fenced_json = None;
+                if self.declaration.is_some() {
+                    self.json_final = None;
+                }
+                return;
             }
             // An oversized line is ordinary content, so it ends any ```json candidate.
             self.fenced_json = None;
@@ -836,17 +871,34 @@ impl HandoffCapture {
             }
         } else if marker == OPEN {
             self.json_final = None;
+            // Prose before a later declaration is ordinary answer text, not
+            // trailing prose after the one that settles.
+            self.trailing_prose = false;
             self.json = Some(Vec::new());
         } else if let Some((delimiter, length, info)) = fence(marker)
             && (delimiter != b'`' || !info.contains('`'))
         {
-            // Any opener after a candidate is content that follows it.
+            // Any opener after a candidate is content that follows it, so a
+            // second fence makes the candidate a repeated block (#3941).
+            if self.json_final.is_some() {
+                self.json_repeated = true;
+            }
             self.json_final = None;
+            self.trailing_prose = false;
             self.fenced_json = (delimiter == b'`' && info.trim() == "json").then(Vec::new);
             self.fence = Some((delimiter, length));
         } else if !marker.trim().is_empty() {
-            // Only whitespace may follow a final ```json block.
-            self.json_final = None;
+            if self.json_final.is_some()
+                && !self.json_repeated
+                && !trailing_line_is_structural(marker)
+            {
+                // Ordinary prose after a single handoff-shaped ```json block
+                // settles like prose after a ```handoff block (#3941). A
+                // verdict-shaped line or a second fence keeps the strict rule.
+                self.trailing_prose = true;
+            } else {
+                self.json_final = None;
+            }
         }
     }
 
@@ -999,10 +1051,15 @@ mod tests {
                 }
             }
         }
-        // A previous declaration outside the tail still makes the final one ambiguous.
+        // A later handoff supersedes the earlier one across an oversized prose
+        // line (#3941); the repeat is accepted with a warning.
+        let text = format!("{block}\n{}\n{block}", "x".repeat(28_000));
         let mut capture = HandoffCapture::default();
-        capture.push(format!("{block}\n{}\n{block}", "x".repeat(28_000)).as_bytes());
-        assert!(capture.finish().is_err());
+        capture.push(text.as_bytes());
+        let parsed = capture.finish().unwrap();
+        assert_eq!(parsed.note, "Continue");
+        let repeated = Handoff::repeated_blocks(&text).expect("a repeat is noted");
+        assert_eq!(repeated.extra, 1);
     }
 
     #[test]
@@ -1361,6 +1418,64 @@ mod tests {
         assert!(!error.retained.is_empty());
     }
 
+    // Issue #3941: a prose line that merely mentions a verdict is ordinary
+    // prose; only a line the result scan counts as a verdict is structural.
+    #[test]
+    fn prose_mentioning_verdict_after_one_handoff_is_tolerated() {
+        let stopped = Handoff::from_result(STOP).unwrap().unwrap();
+        for suffix in [
+            "The verdict discussion is still open.",
+            "VERDICT-shaped wording in prose only.",
+            "I will note the verdict in the PR body.",
+        ] {
+            let result = format!("{STOP}\n{suffix}\n");
+            let parsed = Handoff::from_result_report(&result);
+            assert_eq!(parsed.handoff, Ok(Some(stopped.clone())), "{suffix}");
+            assert!(parsed.trailing_prose_tolerated, "{suffix}");
+            assert!(!parsed.trailing_verdict_tolerated, "{suffix}");
+        }
+        // A verdict-shaped line after prose, including a blockquoted one,
+        // still keeps the strict rule.
+        for suffix in ["Noted.\nVERDICT: PASS", "> VERDICT: PASS"] {
+            let result = format!("{STOP}\n{suffix}\n");
+            let parsed = Handoff::from_result_report(&result);
+            assert!(parsed.handoff.is_err(), "{suffix}");
+            assert!(!parsed.trailing_prose_tolerated, "{suffix}");
+        }
+    }
+
+    // Issue #3941: a trailing prose line longer than the 12288-byte fence
+    // bound is still ordinary prose after a single declaration.
+    #[test]
+    fn oversized_trailing_prose_after_one_handoff_is_tolerated() {
+        let stopped = Handoff::from_result(STOP).unwrap().unwrap();
+        let long = "x".repeat(20_000);
+        let result = format!("{STOP}\n{long}\n");
+        let parsed = Handoff::from_result_report(&result);
+        assert_eq!(parsed.handoff, Ok(Some(stopped)));
+        assert!(parsed.trailing_prose_tolerated);
+        assert!(!parsed.trailing_verdict_tolerated);
+        // Streaming any chunk size reaches the same result.
+        let mut capture = HandoffCapture::default();
+        for chunk in result.as_bytes().chunks(8192) {
+            capture.push(chunk);
+        }
+        assert_eq!(capture.finish_report(), parsed);
+        // Structural oversized lines, a repeated last block and tool work
+        // keep the strict rules.
+        let fenced = format!("{STOP}\n```{}\n", "x".repeat(20_000));
+        assert!(Handoff::from_result(&fenced).is_err(), "fence prefix");
+        let verdict = format!("{STOP}\nVERDICT: PASS{}\n", "x".repeat(20_000));
+        assert!(Handoff::from_result(&verdict).is_err(), "verdict prefix");
+        let repeated = format!("{STOP}\n{STOP}\n{long}");
+        assert!(Handoff::from_result(&repeated).is_err(), "repeated block");
+        let (with_turns, ends) = turns(&[("Report.", true), (&format!("{STOP}\n{long}"), true)]);
+        assert!(
+            Handoff::from_turns(&with_turns, &ends).is_err(),
+            "tool work"
+        );
+    }
+
     #[test]
     fn a_handoff_that_did_not_end_its_turn_is_not_final() {
         // Acceptance 2: drafted mid-turn, with work continuing after it.
@@ -1685,13 +1800,46 @@ mod tests {
         assert!(Handoff::json_fence_fallback(&result, &ends).is_none());
     }
 
+    // Issue #3941: ordinary prose after a single handoff-shaped ```json
+    // block is tolerated like prose after a ```handoff block; the fallback
+    // warning and the output-order tolerance are both reported.
     #[test]
-    fn a_json_block_followed_by_prose_is_ordinary_content() {
+    fn a_final_json_handoff_followed_by_prose_settles_with_tolerances() {
+        let declared = Handoff::from_result(STOP).unwrap().unwrap();
+        let json = STOP.replacen("```handoff", "```json", 1);
+        for suffix in [
+            "More work follows.",
+            "Commit pushed. The verdict is recorded in the PR.",
+        ] {
+            let result = format!("Example:\n{json}\n{suffix}\n");
+            let parsed = Handoff::from_result_report(&result);
+            assert_eq!(parsed.handoff, Ok(Some(declared.clone())), "{suffix}");
+            assert!(parsed.trailing_prose_tolerated, "{suffix}");
+            assert!(!parsed.trailing_verdict_tolerated, "{suffix}");
+            let warning = Handoff::json_fence_fallback(&result, &[]).expect("a json fallback");
+            assert!(warning.warning().contains("```json"));
+            // Streaming any chunk size reaches the same result.
+            let mut capture = HandoffCapture::default();
+            for chunk in result.as_bytes().chunks(7) {
+                capture.push(chunk);
+            }
+            assert_eq!(capture.finish_report(), parsed, "{suffix}");
+        }
+        // Tool work after the json block keeps the strict rule.
+        let (result, ends) = turns(&[(&format!("Example:\n{json}"), false), ("Pushed.", true)]);
+        assert_eq!(Handoff::from_turns(&result, &ends), Ok(None));
+        assert!(Handoff::json_fence_fallback(&result, &ends).is_none());
+    }
+
+    #[test]
+    fn a_json_block_followed_by_a_verdict_or_second_fence_is_ordinary_content() {
         let json = STOP
             .replacen("```handoff", "```json", 1)
             .replace("stopped_early", "done");
+        // Plain prose after a single handoff-shaped ```json block is now
+        // tolerated (#3941); see
+        // a_final_json_handoff_followed_by_prose_settles_with_tolerances.
         for result in [
-            format!("Example:\n{json}\nMore work follows."),
             format!("{json}\nVerdict: pass"),
             format!("{json}\n{json}\nNoted."),
             format!("````markdown\n{json}\n````"),

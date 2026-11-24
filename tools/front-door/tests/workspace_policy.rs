@@ -1860,7 +1860,8 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         ("crates/run/src/controls.rs", 4685),
         ("crates/run/src/delivery.rs", 4580),
         ("crates/run/src/git_context.rs", 2841),
-        ("crates/run/src/holder.rs", 9281),
+        // The #3941 end-to-end settlement test for trailing prose.
+        ("crates/run/src/holder.rs", 9350),
         ("crates/run/src/launch.rs", 3903),
         ("crates/run/src/retention.rs", 4898),
         ("crates/run/src/settlement.rs", 4183),
