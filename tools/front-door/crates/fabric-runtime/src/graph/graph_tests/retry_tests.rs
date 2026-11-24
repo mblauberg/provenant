@@ -2751,7 +2751,11 @@ fn retry_of_launch_blocked_writer_starts_a_new_attempt_in_the_same_worktree() {
     assert_eq!(run.checkpoint.nodes[0].state, NodeState::Succeeded);
     assert_eq!(run.checkpoint.nodes[0].attempts.len(), 1);
     assert_eq!(
-        run.checkpoint.nodes[0].writer_binding.unwrap().worktree,
+        run.checkpoint.nodes[0]
+            .writer_binding
+            .as_ref()
+            .unwrap()
+            .worktree,
         "/fixture/launch-blocked"
     );
     assert_eq!(next_owner.calls.len(), 1);
