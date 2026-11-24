@@ -492,9 +492,9 @@ mod tests {
             fs::create_dir_all(root.join("target"))?;
             fs::write(root.join("target/CACHEDIR.TAG"), "cache")?;
         }
-        fs::create_dir_all(state.join("attempts/attempt/tmp"))?;
+        fs::create_dir_all(state.join("attempt-scratch/attempt/tmp"))?;
         fs::create_dir_all(state.join("attempts/attempt/scratch"))?;
-        fs::write(state.join("attempts/attempt/tmp/keep"), "unindexed")?;
+        fs::write(state.join("attempt-scratch/attempt/tmp/keep"), "unindexed")?;
         fs::write(state.join("config.toml"), "schema_version = 1\n")?;
         for index in 0..50 {
             fs::write(state.join(format!("metadata-{index}")), "state")?;

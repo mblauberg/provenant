@@ -5422,7 +5422,7 @@ mod writer_recovery_tests {
             .map_err(|e| format!("retire clean index: {e}"))?;
         let mut scratch = provenant_os::scratch::Scratch::new(attempt.try_clone()?)?;
         scratch.settle()?;
-        std::fs::remove_dir_all(attempt.current_path()?.join("tmp"))?;
+        std::fs::remove_dir_all(store.temporary_path(id, &call)?)?;
         assert!(!candidate.exists());
         assert!(provenant_supervisor::custody::attempt_index_retired(
             &slot, scope
@@ -5460,7 +5460,7 @@ mod writer_recovery_tests {
         assert!(provenant_supervisor::custody::attempt_index_retired(
             &slot, scope
         )?);
-        assert!(!attempt.current_path()?.join("tmp").exists());
+        assert!(!store.temporary_path(id, &call)?.exists());
         assert!(store.custody_released(&store.record(id, &call)?, &call)?);
         Ok(())
     }

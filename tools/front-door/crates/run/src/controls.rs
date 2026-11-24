@@ -4216,11 +4216,7 @@ impl RunStore {
         }
         let id = record.attempt_id;
         let scope = Self::scope(record);
-        let path = self
-            .context
-            .state_root
-            .as_path()
-            .join(format!("attempts/{id}/tmp"));
+        let path = crate::plan::scratch_root(self.context.state_root.as_path(), id).join("tmp");
         let listing = match self.writer_fence_listing() {
             Ok(listing) => listing,
             Err(error) => {
@@ -4271,8 +4267,8 @@ impl RunStore {
             && crate::holder::object_import_refused(&directory, scope)?.is_none();
         // An unreadable reservation cannot establish absence of custody.
         if let Some(issue) = listing.issues.first() {
-            let temporary = self.attempt_dir(id, false).and_then(|attempt| {
-                attempt
+            let temporary = self.attempt_scratch_dir(id, false).and_then(|scratch| {
+                scratch
                     .metadata_at(std::ffi::OsStr::new("tmp"), false)
                     .map_err(Into::into)
             });
@@ -4365,11 +4361,11 @@ impl RunStore {
             self.set_temporary_retained(id, false, call)?;
             return Ok(None);
         }
-        let attempt = match self.attempt_dir(id, false).and_then(|attempt| {
-            attempt.metadata_at(std::ffi::OsStr::new("tmp"), false)?;
-            Ok(attempt)
+        let scratch = match self.attempt_scratch_dir(id, false).and_then(|scratch| {
+            scratch.metadata_at(std::ffi::OsStr::new("tmp"), false)?;
+            Ok(scratch)
         }) {
-            Ok(attempt) => attempt,
+            Ok(scratch) => scratch,
             Err(RunError::Filesystem(error)) if error.is_not_found() => {
                 self.set_temporary_retained(id, false, call)?;
                 return Ok(None);
@@ -4400,7 +4396,7 @@ impl RunStore {
             return Ok(None);
         }
         let remove = || -> Result<()> {
-            match attempt.metadata_at(std::ffi::OsStr::new("tmp"), false) {
+            match scratch.metadata_at(std::ffi::OsStr::new("tmp"), false) {
                 Err(error) if error.is_not_found() => return Ok(()),
                 Err(error) => return Err(error.into()),
                 Ok(_) => {}
@@ -4420,7 +4416,8 @@ impl RunStore {
                 Err(error) => return Err(error.into()),
             }
             artifacts::remove_unreserved_terminal_temporary(
-                &attempt,
+                &scratch,
+                &path,
                 &|| !call.cancel.is_cancelled(),
                 &mut 0,
             )?;
@@ -4472,11 +4469,8 @@ impl RunStore {
             if !self.release_admission(&record, call) {
                 self.set_temporary_retained(id, true, call)?;
                 return Ok(Some(Reconciled::TemporaryRetained {
-                    path: self
-                        .context
-                        .state_root
-                        .as_path()
-                        .join(format!("attempts/{id}/tmp")),
+                    path: crate::plan::scratch_root(self.context.state_root.as_path(), id)
+                        .join("tmp"),
                     reason: TemporaryReason::new(
                         TemporaryReasonKind::Error,
                         "repository admission release remains pending",

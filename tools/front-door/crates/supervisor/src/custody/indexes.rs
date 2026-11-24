@@ -374,8 +374,27 @@ fn verify_attempt_index(
     })
 }
 
+/// The lane's temporary directory is a sibling root of `attempts`, keyed by
+/// attempt id (#3947), never a child of the attempt record directory.
+fn temporary_dir(attempt: &Directory) -> Result<Directory> {
+    let path = attempt.current_path()?;
+    let name = path.file_name().ok_or_else(|| FsError::InvalidComponent {
+        name: OsString::from("attempt"),
+    })?;
+    let state = path
+        .parent()
+        .and_then(|parent| parent.parent())
+        .ok_or_else(|| FsError::InvalidComponent {
+            name: OsString::from("state"),
+        })?;
+    let root = Directory::open_anchor(state)?;
+    let scratch = root.open_verified_directory(OsStr::new("attempt-scratch"))?;
+    let scratch = scratch.open_verified_directory(name)?;
+    scratch.open_verified_directory(OsStr::new("tmp"))
+}
+
 fn private_git_directories(attempt: &Directory, candidate: &str) -> Result<(Directory, Directory)> {
-    let temporary = attempt.open_verified_directory(OsStr::new("tmp"))?;
+    let temporary = temporary_dir(attempt)?;
     let scratch = temporary.open_verified_directory(OsStr::new(candidate))?;
     Ok((
         scratch.open_verified_directory(OsStr::new("git-common"))?,
@@ -488,11 +507,11 @@ mod tests {
         fn new() -> TestResult<Self> {
             let root = tempfile::tempdir()?;
             let slot_path = root.path().join("slot");
-            let attempt_path = root.path().join("attempt");
+            let attempt_path = root.path().join("attempts/attempt");
             let worktree_path = root.path().join("worktree");
             let git_path = root.path().join("git");
             fs::create_dir(&slot_path)?;
-            fs::create_dir(&attempt_path)?;
+            fs::create_dir_all(&attempt_path)?;
             fs::create_dir(&worktree_path)?;
             fs::create_dir(&git_path)?;
             let slot = Directory::open_anchor(&slot_path)?;
@@ -516,8 +535,11 @@ mod tests {
                 &clock,
             )?;
             let attempt = Directory::open_anchor(&attempt_path)?;
-            attempt.mkdir(OsStr::new("tmp"), 0o700)?;
-            let temporary = attempt.open_verified_directory(OsStr::new("tmp"))?;
+            let scratch_root = root.path().join("attempt-scratch/attempt");
+            fs::create_dir_all(&scratch_root)?;
+            let scratch = Directory::open_anchor(&scratch_root)?;
+            scratch.mkdir(OsStr::new("tmp"), 0o700)?;
+            let temporary = scratch.open_verified_directory(OsStr::new("tmp"))?;
             temporary.mkdir(OsStr::new("candidate-0"), 0o700)?;
             let scratch = temporary.open_verified_directory(OsStr::new("candidate-0"))?;
             scratch.mkdir(OsStr::new("git-common"), 0o700)?;

@@ -277,10 +277,23 @@ alone, its own token helper entries are appended after the host configuration (a
 entry is filtered, copied or rewritten.
 - Why: lanes are free to see the host's Git settings, not a filtered subset (ADR 0035).
 
+### Lane scratch stays outside the attempt record
+
+A lane's temporary directory is `<state>/attempt-scratch/<attempt id>/tmp`: a sibling
+scratch root under the state root, keyed by attempt id, never `attempts/<id>/tmp`.
+`LaunchPaths::temporary`, the per-attempt alias target, the read-only lane's scratch
+write grant, and candidate staging all resolve there; no lane grant or `TMPDIR` points
+into the attempt record directory. Retention, disk classification, writer-Git readers
+and terminal cleanup follow the same root, and the alias is unlinked with its target.
+There is no link or fallback at the old path.
+- Why: a lane that walks up from its scratch reached `attempts/<id>` and could write
+  the attempt's own settlement records, which a foreign slot entry could not be
+  distinguished from the host's own handoff (#3844, #3947).
+
 ### Lane state stays outside the worktree
 
-`finalise_provider_env` rebinds `HOME` and the `XDG_*` homes into the attempt scratch
-(`scratch/home`, `scratch/xdg/<name>`, mode 0700) whenever the final value is the worktree or
+`finalise_provider_env` rebinds `HOME` and the `XDG_*` homes into the lane's per-attempt
+scratch (`scratch/home`, `scratch/xdg/<name>`, mode 0700) whenever the final value is the worktree or
 under it, compared lexically and canonically, and records one warning naming the variable, old
 path, new path and reason. Values outside the worktree are unchanged.
 - Why: a lane whose tool state resolves inside its checkout can commit that state with its work,

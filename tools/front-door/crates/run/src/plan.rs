@@ -2,23 +2,57 @@
 use crate::{artifacts::subdir, *};
 use provenant_confinement::{ConfinedPlan, PlanRequest, ReadOnlyRepo, plan::ReadOnlyPolicy};
 use provenant_core::{AttemptId, WorkScope};
-use std::{ffi::OsStr, path::PathBuf};
+use provenant_os::fs::Directory;
+use std::{
+    ffi::OsStr,
+    path::{Path, PathBuf},
+};
+
+/// Sibling scratch root, outside the attempt record directory. A lane that
+/// walks up from its scratch must never reach settlement-owned records (#3947).
+pub(crate) const ATTEMPT_SCRATCH: &str = "attempt-scratch";
+
+/// Per-attempt scratch root: `<state>/attempt-scratch/<attempt id>`.
+pub(crate) fn scratch_root(state: &Path, id: AttemptId) -> PathBuf {
+    state.join(ATTEMPT_SCRATCH).join(id.to_string())
+}
+
+/// Open the held temporary directory from an attempt's record directory.
+/// Settlement and diagnostics use this instead of resolving `attempts/<id>/tmp`.
+pub(crate) fn temporary_dir(attempt: &Directory) -> Result<Directory> {
+    let path = attempt.current_path()?;
+    let name = path
+        .file_name()
+        .and_then(OsStr::to_str)
+        .ok_or(RunError::Validation("attempt directory name"))?;
+    let id = AttemptId::parse(name).map_err(|_| RunError::Validation("attempt directory name"))?;
+    let state = path
+        .parent()
+        .and_then(Path::parent)
+        .ok_or(RunError::Validation("attempt directory parent"))?;
+    let root = Directory::open_anchor(state)?;
+    let scratch = subdir(&root, OsStr::new(ATTEMPT_SCRATCH), false)?;
+    let scratch = subdir(&scratch, OsStr::new(&id.to_string()), false)?;
+    subdir(&scratch, OsStr::new("tmp"), false)
+}
 
 impl RunStore {
+    /// The held per-attempt scratch root, never the attempt record directory.
+    pub(crate) fn attempt_scratch_dir(&self, id: AttemptId, create: bool) -> Result<Directory> {
+        let scratch = subdir(&self.root, OsStr::new(ATTEMPT_SCRATCH), create)?;
+        subdir(&scratch, OsStr::new(&id.to_string()), create)
+    }
+
     /// The lane's private temporary directory, `LaunchPaths::temporary`.
-    /// Provider temporary files live below this attempt, never in a
-    /// shared system temporary directory. Settlement removes it best-effort.
+    /// It lives under `attempt-scratch/<id>`, outside the attempt record
+    /// directory, so a relative write from scratch cannot reach settlement's
+    /// files. Provider temporary files never use a shared system directory.
+    /// Settlement removes it best-effort.
     pub fn temporary_path(&self, id: AttemptId, call: &Request<'_>) -> Result<PathBuf> {
         self.record(id, call)?;
-        let directory = self.attempt_dir(id, false)?;
+        let directory = self.attempt_scratch_dir(id, true)?;
         subdir(&directory, OsStr::new("tmp"), true)?;
-        Ok(self
-            .context
-            .state_root
-            .as_path()
-            .join("attempts")
-            .join(id.to_string())
-            .join("tmp"))
+        Ok(scratch_root(self.context.state_root.as_path(), id).join("tmp"))
     }
 
     /// The provider availability this attempt's preparation published, as
@@ -255,9 +289,16 @@ mod tests {
                 .writable_paths(),
             [".agent-run/locks"]
         );
-        assert_eq!(
-            plan.permissions().scratch.path,
-            store.temporary_path(id, &call)?
+        let scratch_grant = &plan.permissions().scratch.path;
+        assert_eq!(scratch_grant, &store.temporary_path(id, &call)?);
+        let attempt = context
+            .state_root
+            .as_path()
+            .join("attempts")
+            .join(id.to_string());
+        assert!(
+            !scratch_grant.starts_with(&attempt),
+            "the read-only lane's scratch write grant must sit outside the attempt record"
         );
         std::fs::write(&policy_path, r#"{"readOnlyWritable":[".git"]}"#)?;
         assert!(

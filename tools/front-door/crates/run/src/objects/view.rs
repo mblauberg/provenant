@@ -361,7 +361,7 @@ pub(crate) fn bind(attempt: &Directory, scratch: &Path) -> Result<()> {
         .to_str()
         .filter(|name| valid_candidate(name))
         .ok_or_else(invalid)?;
-    let temporary = attempt.open_verified_directory(OsStr::new("tmp"))?;
+    let temporary = crate::plan::temporary_dir(attempt)?;
     let held = temporary.open_verified_directory(OsStr::new(candidate))?;
     if held.current_path()? != scratch {
         return Err(invalid());
@@ -476,7 +476,7 @@ fn prepare_candidate(
         .and_then(OsStr::to_str)
         .filter(|name| valid_candidate(name))
         .ok_or_else(invalid)?;
-    let temporary = attempt.open_verified_directory(OsStr::new("tmp"))?;
+    let temporary = crate::plan::temporary_dir(attempt)?;
     let held = temporary.open_verified_directory(OsStr::new(candidate))?;
     if held.current_path()? != scratch {
         return Err(invalid());
@@ -527,7 +527,7 @@ pub(crate) fn bound_source(attempt: &Directory) -> Result<Option<ObjectSource>> 
     };
     let candidate = binding.candidate;
     // Open every lane-controlled component without following links.
-    let temporary = attempt.open_verified_directory(OsStr::new("tmp"))?;
+    let temporary = crate::plan::temporary_dir(attempt)?;
     let scratch = temporary.open_verified_directory(OsStr::new(&candidate))?;
     let objects = scratch.open_verified_directory(OsStr::new("git-objects"))?;
     let refs = scratch.open_verified_directory(OsStr::new("git-common"))?;

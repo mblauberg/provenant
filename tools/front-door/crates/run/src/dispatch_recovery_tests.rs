@@ -169,8 +169,12 @@ fn reconcile_settles_a_normal_terminal_attempt_after_reboot() -> TestResult {
     std::fs::write(&reservation, serde_json::to_vec(&value)?)?;
     artifacts::subdir(&attempt, std::ffi::OsStr::new("scratch"), true)?;
     // Recreate the private tmp root with production permissions, independent of umask.
-    artifacts::subdir(&attempt, std::ffi::OsStr::new("tmp"), true)?;
-    let temporary = path.join("tmp/candidate-0");
+    artifacts::subdir(
+        &store.attempt_scratch_dir(id, true)?,
+        std::ffi::OsStr::new("tmp"),
+        true,
+    )?;
+    let temporary = store.temporary_path(id, &call)?.join("candidate-0");
     std::fs::create_dir_all(&temporary)?;
     std::fs::write(temporary.join("payload.lock"), b"build output")?;
     store.set_temporary_retained(id, true, &call)?;
@@ -194,12 +198,13 @@ fn reconcile_settles_a_normal_terminal_attempt_after_reboot() -> TestResult {
     assert!(!path.join("scratch").exists());
     assert!(path.join("release.json").exists());
     assert!(!reservation.exists());
+    let temporary = store.temporary_path(id, &call)?;
     assert!(
-        path.join("tmp").exists(),
+        temporary.exists(),
         "released scratch remains available for follow-up"
     );
     assert_eq!(
-        std::fs::read_to_string(path.join("tmp/candidate-0/payload.lock"))?,
+        std::fs::read_to_string(temporary.join("candidate-0/payload.lock"))?,
         "build output"
     );
     assert_eq!(store.record(id, &call)?, record);
