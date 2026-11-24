@@ -4985,17 +4985,16 @@ impl CwdObserver for StartTimeSignals<'_> {
     }
 }
 
+type RootObservation = (
+    BTreeMap<PathBuf, Occupancy>,
+    Vec<provenant_records::warning::Warning>,
+);
+
 fn observe_unreadable_roots_with_starts(
     roots: &[PathBuf],
     signals: &UnreadableSignals,
     start_times: Vec<Option<provenant_core::WallTime>>,
-) -> Result<
-    (
-        BTreeMap<PathBuf, Occupancy>,
-        Vec<provenant_records::warning::Warning>,
-    ),
-    Box<dyn Error>,
-> {
+) -> Result<RootObservation, Box<dyn Error>> {
     use provenant_supervisor::census::{Census, ObservationIssue};
     let current = refused_fact(100);
     let processes = InjectedCensus {

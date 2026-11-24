@@ -246,13 +246,11 @@ pub(super) fn configured_entry_matches(
     let Some(matched) = cwd_observer.configured_unreadable_image(pid, entries) else {
         return false;
     };
-    if matched.started_before.is_some()
-        && (!matched.started_before_allows(start_before)
-            || cwd_observer.process_start_time(pid) != start_before)
-    {
-        return false;
-    }
-    true
+    // A conditioned entry needs a known start before the floor, read twice so
+    // a reused pid between the reads fails closed.
+    matched.started_before.is_none()
+        || (matched.started_before_allows(start_before)
+            && cwd_observer.process_start_time(pid) == start_before)
 }
 
 fn configured_excusal(
