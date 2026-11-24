@@ -97,16 +97,39 @@ pub(super) fn reconcile_inner(
         let reason = command
             .reason
             .ok_or(run::RunError::Validation("abandonment requires a reason"))?;
-        let policy_workers = provenant_confinement::worktrees::CensusPolicyWorkers::from_roots(
+        let record = session.store.record(id, &call)?;
+        let nonterminal = !matches!(
+            record.state,
+            run::AttemptState::Terminal { .. } | run::AttemptState::Queued { .. }
+        );
+        let common = session
+            .store
+            .request(id, &call)
+            .ok()
+            .and_then(|req| req.task.writer)
+            .and_then(|writer| {
+                let project = writer.custody_project.unwrap_or(record.project_id);
+                match provenant_config::lookup_gc_project(edge.roots, project).ok()? {
+                    provenant_config::GcProjectStatus::Git(binding) => {
+                        Some(binding.common_dir().to_owned())
+                    }
+                    provenant_config::GcProjectStatus::Transient(path) => Some(path),
+                    _ => None,
+                }
+            });
+        let creation_floor =
+            session
+                .service()
+                .abandon_writer_creation_floor(id, common.as_deref(), &call)?;
+        let mut policy_workers = provenant_confinement::worktrees::CensusPolicyWorkers::from_roots(
             &provenant_confinement::worktrees::SystemWorkerObserver,
             edge.roots,
         )
         .map_err(run::RunError::from)?;
+        if let Some(floor) = creation_floor {
+            policy_workers = policy_workers.with_creation_floor(floor);
+        }
         let workers = provenant_confinement::worktrees::CensusSession::new(&policy_workers, &clock);
-        let nonterminal = !matches!(
-            session.store.record(id, &call)?.state,
-            run::AttemptState::Terminal { .. } | run::AttemptState::Queued { .. }
-        );
         let state = session.service().abandon_settlement(
             id,
             &reason,

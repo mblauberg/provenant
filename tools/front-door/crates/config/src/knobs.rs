@@ -291,9 +291,14 @@ fn check(spec: &Spec, value: &Value) -> Result<(), &'static str> {
                 serde_json::from_value(value.clone()).map_err(|_| "type")?;
             let mut paths = std::collections::BTreeSet::new();
             if items.len() <= 128
-                && entries
-                    .iter()
-                    .all(|entry| entry.is_valid() && paths.insert(&entry.path))
+                && entries.iter().all(|entry| {
+                    entry.is_valid()
+                        && matches!(
+                            entry.started_before,
+                            None | Some(provenant_os::pid::StartedBefore::Root)
+                        )
+                        && paths.insert(&entry.path)
+                })
             {
                 Ok(())
             } else {

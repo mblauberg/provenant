@@ -1,7 +1,8 @@
 //! Process census and worker observation.
 use super::census_excusal::{
     ExcusalEvidence, PlacementEvidence, PolicyCwdObserver, UnreadableFailure,
-    any_root_identity_unreadable, excusal_applies, excuse_unreadable, listed_uid_excusal,
+    any_root_identity_unreadable, apply_override_floor, configured_entry_matches, excusal_applies,
+    excuse_unreadable, listed_uid_excusal, resolve_entries_for_roots, unknown_worker_evidence,
     warn_unreadable_processes,
 };
 use super::*;
@@ -202,7 +203,7 @@ pub(super) fn root_is_undecidable(root: &Path) -> bool {
 /// anchors the split, so a firmlink or symlink alias of the same directory
 /// splits the same way. `None` for a relative path, a parent traversal, a
 /// dangling symlink among the removed components or an unreadable ancestor.
-fn split_at_extant_directory(path: &Path) -> Option<((u64, u64), PathBuf)> {
+pub(super) fn split_at_extant_directory(path: &Path) -> Option<((u64, u64), PathBuf)> {
     use std::path::Component;
     if !path.is_absolute() || path.components().any(|part| part == Component::ParentDir) {
         return None;
@@ -904,6 +905,7 @@ pub struct CensusPolicyWorkers<'a> {
     inner: &'a dyn WorkerObserver,
     pub(super) entries: Vec<CensusIgnoreEntry>,
     pub(super) exclude_ancestors: bool,
+    pub(super) root_floor: Option<provenant_core::WallTime>,
     roots: provenant_core::Roots,
     for_run: bool,
 }
@@ -933,6 +935,7 @@ impl<'a> CensusPolicyWorkers<'a> {
             inner,
             entries: config.census_ignore_unreadable()?,
             exclude_ancestors: for_run && config.census_exclude_ancestors()?,
+            root_floor: None,
             roots: roots.clone(),
             for_run,
         })
@@ -981,7 +984,7 @@ impl WorkerObserver for CensusPolicyWorkers<'_> {
     fn epoch_policy(&self) -> Option<CensusEpochPolicy> {
         let config = provenant_config::read_knobs(&self.roots).ok()?;
         Some(CensusEpochPolicy {
-            entries: config.census_ignore_unreadable().ok()?,
+            entries: apply_override_floor(config.census_ignore_unreadable().ok()?, self.root_floor),
             exclude_ancestors: self.for_run && config.census_exclude_ancestors().ok()?,
         })
     }
@@ -1314,7 +1317,7 @@ pub(super) fn system_live_process_with_policy(
     observe_worker_holders(
         &roots,
         &SystemProcessObserver,
-        &PolicyCwdObserver::new(entries),
+        &PolicyCwdObserver::for_roots(&roots, entries),
         &current,
         ancestors,
     )
@@ -1358,46 +1361,17 @@ fn system_worker_evidence_while(
 ) -> WorkerEvidence {
     let ProcessObservation::Present(current) = current_process() else {
         let detail = process_detail(
-            &PolicyCwdObserver::new(entries),
+            &PolicyCwdObserver::for_roots(roots, entries),
             i64::from(std::process::id()),
             "current process unavailable",
         );
-        return WorkerEvidence {
-            states: roots
-                .iter()
-                .cloned()
-                .map(|root| {
-                    (
-                        root.clone(),
-                        Occupancy::census_unknown(root, detail.clone()),
-                    )
-                })
-                .collect(),
-            holders: BTreeMap::new(),
-            taints: roots
-                .iter()
-                .cloned()
-                .map(|root| {
-                    (
-                        root,
-                        TaintCause::Uncertainty(UncertaintyReason::CensusUnavailable),
-                    )
-                })
-                .collect(),
-            details: roots
-                .iter()
-                .cloned()
-                .map(|root| (root, detail.clone()))
-                .collect(),
-            held_incomplete: true,
-            ..WorkerEvidence::default()
-        };
+        return unknown_worker_evidence(roots, &detail);
     };
     worker_evidence_from_census(
         roots,
         ancestors,
         &SystemProcessObserver,
-        &PolicyCwdObserver::new(entries),
+        &PolicyCwdObserver::for_roots(roots, entries),
         &current,
         keep_going,
         entries,
@@ -1483,7 +1457,7 @@ pub(super) fn system_worker_roots_with_policy_taints(
     observe_worker_root_taints(
         roots,
         &SystemProcessObserver,
-        &PolicyCwdObserver::new(entries),
+        &PolicyCwdObserver::for_roots(roots, entries),
         &current,
         ancestors,
     )
@@ -1629,6 +1603,8 @@ pub(super) fn observe_worker_holders_while(
     if roots.is_empty() {
         return (states, holders, details, taints);
     }
+    let resolved_entries = resolve_entries_for_roots(roots, entries);
+    let entries = resolved_entries.as_ref();
     let census = match observer.census_while(65_536, &within_budget) {
         Ok(census) => census,
         Err(error) => {
@@ -1716,9 +1692,7 @@ pub(super) fn observe_worker_holders_while(
             let descriptors_denied =
                 occupancy.gap == Some(provenant_os::pid::OccupancyGap::DescriptorsDenied);
             let listed = listed_uid_excusal(cwd_observer, pid, roots, entries);
-            let configured = cwd_observer
-                .configured_unreadable_image(pid, entries)
-                .is_some();
+            let configured = configured_entry_matches(cwd_observer, pid, entries);
             let cwd_supported = matches!(
                 &cwd,
                 Ok(CwdObservation::Path(_)
@@ -1791,8 +1765,8 @@ pub(super) fn observe_worker_holders_while(
                         listed,
                         placed_inside: under_candidate,
                         root_undecidable,
+                        configured,
                     },
-                    entries,
                     unplaceable,
                 )
             {
@@ -2030,7 +2004,16 @@ pub(super) fn observe_worker_holders_while(
         // These processes were listed, so the listed-uid policy never applies;
         // `placed` already folds in undecidable roots, so no second blocking
         // signal is needed here.
-        if occupancy_gap == Some(provenant_os::pid::OccupancyGap::DescriptorsDenied)
+        let descriptors_denied =
+            occupancy_gap == Some(provenant_os::pid::OccupancyGap::DescriptorsDenied);
+        let cwd_denied = matches!(
+            &cwd,
+            NativeCwd::PolicyExcluded(_) | NativeCwd::PolicyRejected(_)
+        );
+        // One configured-image decision serves both arms below.
+        let configured = (descriptors_denied || cwd_denied)
+            && configured_entry_matches(cwd_observer, pid, entries);
+        if descriptors_denied
             && excuse_unreadable(
                 cwd_observer,
                 pid,
@@ -2040,17 +2023,13 @@ pub(super) fn observe_worker_holders_while(
                     listed: false,
                     placed_inside: placed,
                     root_undecidable: any_root_identity_unreadable(roots),
+                    configured,
                 },
-                entries,
                 unplaceable,
             )
         {
             continue;
         }
-        let cwd_denied = matches!(
-            &cwd,
-            NativeCwd::PolicyExcluded(_) | NativeCwd::PolicyRejected(_)
-        );
         if cwd_denied
             && excuse_unreadable(
                 cwd_observer,
@@ -2061,8 +2040,8 @@ pub(super) fn observe_worker_holders_while(
                     listed: false,
                     placed_inside: placed,
                     root_undecidable: any_root_identity_unreadable(roots),
+                    configured,
                 },
-                entries,
                 unplaceable,
             )
         {

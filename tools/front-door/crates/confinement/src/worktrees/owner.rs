@@ -166,6 +166,17 @@ pub fn owned_worktree_paths(
 /// and no process is observed, so status can join an attempt to its worktree
 /// without a full worktree context.
 pub fn worktree_owner_index(common: &Path) -> Result<Vec<(PathBuf, WorktreeOwner)>, WorktreeError> {
+    Ok(registered_owners(common)?
+        .into_iter()
+        .map(|(path, owner, _)| (path, owner))
+        .collect())
+}
+
+/// Each readable owner record with its checkout path and the path of the Git
+/// registration directory (`<common>/worktrees/<id>`) that holds it.
+fn registered_owners(
+    common: &Path,
+) -> Result<Vec<(PathBuf, WorktreeOwner, PathBuf)>, WorktreeError> {
     let directory = match Directory::open_anchor(common) {
         Ok(directory) => directory,
         Err(error) if error.is_not_found() => return Ok(Vec::new()),
@@ -182,6 +193,7 @@ pub fn worktree_owner_index(common: &Path) -> Result<Vec<(PathBuf, WorktreeOwner
             return Err(WorktreeError::InvalidOutput);
         }
         let name = name?;
+        let registration_path = common.join("worktrees").join(&name);
         if registrations.metadata_at(&name, false)?.kind == provenant_os::fs::FileKind::Regular {
             continue;
         }
@@ -205,9 +217,63 @@ pub fn worktree_owner_index(common: &Path) -> Result<Vec<(PathBuf, WorktreeOwner
         }
         let path = marker.parent().ok_or(WorktreeError::InvalidOutput)?;
         let path = path.to_path_buf();
-        index.push((path, owner));
+        index.push((path, owner, registration_path));
     }
     Ok(index)
+}
+
+/// Resolve the ownership record registered in `common` for `worktree` even if
+/// the checkout directory itself was already removed. Uses
+/// `split_at_extant_directory` so symlink/firmlink aliases match by directory
+/// identity and removed suffix; ambiguous matches fail closed (`Ok(None)`).
+pub fn worktree_owner_for_path(
+    common: &Path,
+    worktree: &Path,
+) -> Result<Option<WorktreeOwner>, WorktreeError> {
+    Ok(registration_for_path(common, worktree)?.map(|(owner, _)| owner))
+}
+
+/// The owner registered for `worktree` with the birth time of its Git
+/// registration directory, a lower bound on the checkout's creation that
+/// survives the checkout's removal. `git worktree add` creates
+/// `<common>/worktrees/<id>` before it populates the checkout, refuses a
+/// non-empty target, and `git worktree repair` or reuse keeps the original
+/// registration, so no process can have entered the checkout's contents
+/// before this time (#3914). Git does accept an existing empty directory as
+/// the target, so a process already sitting in such a directory predates the
+/// registration; lane checkouts are created at paths Provenant allocates, and
+/// that residual is accepted. Removal and prune delete the registration. The
+/// birth time is `None` when the filesystem does not report it or the
+/// registration is gone; callers fail closed.
+pub fn worktree_registration_for_path(
+    common: &Path,
+    worktree: &Path,
+) -> Result<Option<(WorktreeOwner, Option<WallTime>)>, WorktreeError> {
+    Ok(
+        registration_for_path(common, worktree)?.map(|(owner, registration)| {
+            let born = super::census_excusal::birth_time(&registration);
+            (owner, born)
+        }),
+    )
+}
+
+fn registration_for_path(
+    common: &Path,
+    worktree: &Path,
+) -> Result<Option<(WorktreeOwner, PathBuf)>, WorktreeError> {
+    let Some(target) = super::census::split_at_extant_directory(worktree) else {
+        return Ok(None);
+    };
+    let mut matched = None;
+    for (path, owner, registration) in registered_owners(common)? {
+        if super::census::split_at_extant_directory(&path).as_ref() == Some(&target) {
+            if matched.is_some() {
+                return Ok(None);
+            }
+            matched = Some((owner, registration));
+        }
+    }
+    Ok(matched)
 }
 
 pub fn save_owner(worktree: &VerifiedWorktree, owner: &WorktreeOwner) -> Result<(), WorktreeError> {

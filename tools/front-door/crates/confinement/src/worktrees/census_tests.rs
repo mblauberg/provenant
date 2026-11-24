@@ -1273,6 +1273,7 @@ fn configured_entry_excuses_unplaceable_descriptor_process() -> Result<(), Box<d
         entries: vec![CensusIgnoreEntry {
             path: PathBuf::from("/usr/libexec/UserEventAgent"),
             team_id: "platform".into(),
+            started_before: None,
         }],
         team_id: None,
         executable: Some(PathBuf::from("/usr/libexec/UserEventAgent")),
@@ -1316,6 +1317,7 @@ fn configured_entry_excuses_unplaceable_process_path_with_readable_roots()
         entries: vec![CensusIgnoreEntry {
             path: PathBuf::from("/usr/libexec/UserEventAgent"),
             team_id: "platform".into(),
+            started_before: None,
         }],
         team_id: None,
         executable: Some(PathBuf::from("/usr/libexec/UserEventAgent")),
@@ -1363,6 +1365,7 @@ fn mismatched_configured_entry_does_not_excuse() -> Result<(), Box<dyn Error>> {
         entries: vec![CensusIgnoreEntry {
             path: PathBuf::from("/usr/libexec/UserEventAgent"),
             team_id: "platform".into(),
+            started_before: None,
         }],
         team_id: None,
         executable: Some(PathBuf::from("/usr/bin/true")),
@@ -1484,6 +1487,7 @@ fn configured_entry_with_unreadable_root_metadata_keeps_root_unknown() -> Result
         entries: vec![CensusIgnoreEntry {
             path: PathBuf::from("/usr/libexec/UserEventAgent"),
             team_id: "platform".into(),
+            started_before: None,
         }],
         team_id: None,
         executable: Some(PathBuf::from("/usr/libexec/UserEventAgent")),
@@ -1534,6 +1538,7 @@ fn configured_entry_with_cwd_inside_root_and_denied_descriptors_blocks()
     let entries = [CensusIgnoreEntry {
         path: executable.clone(),
         team_id: "platform".into(),
+        started_before: None,
     }];
     struct ConfiguredInside<'a> {
         inner: &'a InjectedCensus,
@@ -2772,12 +2777,18 @@ fn host_policy_is_scoped_to_config_roots_and_preserves_injected_refusal()
         seen[0],
         vec![CensusIgnoreEntry {
             path: "/Library/Daemon".into(),
-            team_id: "TEAM123".into()
+            team_id: "TEAM123".into(),
+            started_before: None,
         }]
     );
-    assert!(
-        seen[1].is_empty(),
-        "policy must not leak across roots or wrappers"
+    assert_eq!(
+        seen[1],
+        vec![CensusIgnoreEntry {
+            path: "/usr/bin/login".into(),
+            team_id: "platform".into(),
+            started_before: Some(provenant_os::pid::StartedBefore::Root),
+        }],
+        "policy must not leak across roots or wrappers and unset config gets bundled login default"
     );
     Ok(())
 }
@@ -2805,6 +2816,7 @@ fn policy_cwd_observer_forwards_configured_entries_to_the_matcher() -> Result<()
     let entries = [CensusIgnoreEntry {
         path: PathBuf::from("/usr/libexec/UserEventAgent"),
         team_id: "TEAM123".into(),
+        started_before: None,
     }];
     let recorder = Recording(std::sync::Mutex::new(Vec::new()));
     let policy = PolicyCwdObserver::with_inner(&entries, &recorder);
@@ -4914,6 +4926,362 @@ fn held_report_aggregates_eperm_dwellers_and_excludes_the_caller() -> Result<(),
     assert!(
         rows.iter()
             .all(|row| row.kind == ProcessEvidenceKind::WorkingDirectory)
+    );
+    Ok(())
+}
+
+struct StartTimeSignals<'a> {
+    inner: &'a UnreadableSignals,
+    start_times: Vec<Option<provenant_core::WallTime>>,
+    reads: std::sync::atomic::AtomicUsize,
+}
+
+impl CwdObserver for StartTimeSignals<'_> {
+    fn cwd(&self, pid: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
+        self.inner.cwd(pid)
+    }
+    fn occupancy(&self, pid: i64) -> provenant_os::pid::OccupancyObservation {
+        self.inner.occupancy(pid)
+    }
+    fn process_uids(&self, pid: i64) -> Option<ProcessUids> {
+        self.inner.process_uids(pid)
+    }
+    fn platform_signed_image(&self, pid: i64) -> Option<provenant_os::pid::PlatformSignedImage> {
+        self.inner.platform_signed_image(pid)
+    }
+    fn configured_unreadable_image(
+        &self,
+        pid: i64,
+        entries: &[CensusIgnoreEntry],
+    ) -> Option<CensusIgnoreEntry> {
+        self.inner.configured_unreadable_image(pid, entries)
+    }
+    fn process_start_time(&self, _: i64) -> Option<provenant_core::WallTime> {
+        if self.start_times.is_empty() {
+            return None;
+        }
+        let index = self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.start_times
+            .get(index)
+            .or_else(|| self.start_times.last())
+            .copied()
+            .flatten()
+    }
+    fn unreadable_policy_uids(
+        &self,
+        pid: i64,
+        entries: &[CensusIgnoreEntry],
+    ) -> Result<
+        provenant_os::pid::UnreadablePolicyExcusal,
+        provenant_os::pid::UnreadablePolicyFailure,
+    > {
+        self.inner.unreadable_policy_uids(pid, entries)
+    }
+    fn executable(&self, pid: i64) -> Option<PathBuf> {
+        self.inner.executable(pid)
+    }
+    fn process_details(&self, pid: i64) -> Option<String> {
+        self.inner.process_details(pid)
+    }
+}
+
+type RootObservation = (
+    BTreeMap<PathBuf, Occupancy>,
+    Vec<provenant_records::warning::Warning>,
+);
+
+fn observe_unreadable_roots_with_starts(
+    roots: &[PathBuf],
+    signals: &UnreadableSignals,
+    start_times: Vec<Option<provenant_core::WallTime>>,
+) -> Result<RootObservation, Box<dyn Error>> {
+    use provenant_supervisor::census::{Census, ObservationIssue};
+    let current = refused_fact(100);
+    let processes = InjectedCensus {
+        census: Census::from_observations(
+            [current.clone()],
+            [(200, ObservationIssue::PermissionDenied)],
+            [],
+            true,
+            false,
+            32,
+        )?,
+        cwds: BTreeMap::new(),
+        current: current.clone(),
+        platform_uids: BTreeMap::new(),
+    };
+    let observer = StartTimeSignals {
+        inner: signals,
+        start_times,
+        reads: std::sync::atomic::AtomicUsize::new(0),
+    };
+    let (states, warnings) = provenant_records::warning::capture(|| {
+        observe_worker_holders_with_taints_and_audit(
+            roots,
+            &processes,
+            &observer,
+            &current,
+            false,
+            &mut |_, _| {},
+            &signals.entries,
+        )
+        .0
+    });
+    Ok((states, warnings))
+}
+
+#[test]
+fn started_before_root_requires_two_second_margin_and_stable_start_time()
+-> Result<(), Box<dyn Error>> {
+    use provenant_core::WallTime;
+    use provenant_os::pid::{STARTED_BEFORE_MARGIN_MICROS, StartedBefore};
+
+    let fixture = Fixture::new()?;
+    let root = fixture.root.join("login-floor-present");
+    fs::create_dir(&root)?;
+    let birth = fs::metadata(&root)?
+        .created()?
+        .duration_since(std::time::UNIX_EPOCH)?;
+    let birth = WallTime::from_micros(i64::try_from(birth.as_micros())?)?;
+    let at_margin = WallTime::from_micros(birth.as_micros() - STARTED_BEFORE_MARGIN_MICROS)?;
+    let too_recent = WallTime::from_micros(birth.as_micros() - STARTED_BEFORE_MARGIN_MICROS + 1)?;
+    let much_earlier = WallTime::from_micros(birth.as_micros() - 10_000_000)?;
+    let after_root = WallTime::from_micros(birth.as_micros() + 1_000_000)?;
+
+    let owner = provenant_os::fs::effective_uid();
+    let elevated = if owner == 0 { 1 } else { 0 };
+    let signals = UnreadableSignals {
+        uids: Some(ProcessUids {
+            real: owner,
+            effective: elevated,
+            saved: elevated,
+        }),
+        platform_signed: true,
+        entries: vec![CensusIgnoreEntry {
+            path: PathBuf::from("/usr/bin/login"),
+            team_id: "platform".into(),
+            started_before: Some(StartedBefore::Root),
+        }],
+        team_id: None,
+        executable: Some(PathBuf::from("/usr/bin/login")),
+        cwd: CwdObservation::PermissionDenied,
+        occupancy_paths: Vec::new(),
+    };
+
+    for allowed_start in [much_earlier, at_margin] {
+        let (states, warnings) = observe_unreadable_roots_with_starts(
+            std::slice::from_ref(&root),
+            &signals,
+            vec![Some(allowed_start)],
+        )?;
+        assert!(states[&root].is_available(), "{states:?}");
+        assert!(warning_names_process(&warnings, 200), "{warnings:?}");
+    }
+
+    for blocked in [
+        vec![Some(too_recent)],
+        vec![Some(after_root)],
+        vec![None],
+        vec![Some(much_earlier), Some(at_margin)],
+        vec![Some(much_earlier), None],
+    ] {
+        let (states, warnings) = observe_unreadable_roots_with_starts(
+            std::slice::from_ref(&root),
+            &signals,
+            blocked.clone(),
+        )?;
+        assert!(
+            states[&root].is_unknown(),
+            "{blocked:?} should fail closed: {states:?}"
+        );
+        assert!(!warning_names_process(&warnings, 200), "{warnings:?}");
+    }
+    Ok(())
+}
+
+#[test]
+fn started_before_root_fails_closed_when_any_root_absent_until_at_floor_supplied()
+-> Result<(), Box<dyn Error>> {
+    use provenant_core::WallTime;
+    use provenant_os::pid::StartedBefore;
+
+    let fixture = Fixture::new()?;
+    let present = fixture.root.join("floor-present");
+    fs::create_dir(&present)?;
+    let removed = fixture.root.join("floor-removed");
+    let floor = WallTime::from_micros(1_780_000_010_000_000)?;
+    let old_start = WallTime::from_micros(1_780_000_005_000_000)?;
+    let recent_start = WallTime::from_micros(1_780_000_009_000_000)?;
+
+    let owner = provenant_os::fs::effective_uid();
+    let elevated = if owner == 0 { 1 } else { 0 };
+    let mut signals = UnreadableSignals {
+        uids: Some(ProcessUids {
+            real: owner,
+            effective: elevated,
+            saved: elevated,
+        }),
+        platform_signed: true,
+        entries: vec![CensusIgnoreEntry {
+            path: PathBuf::from("/usr/bin/login"),
+            team_id: "platform".into(),
+            started_before: Some(StartedBefore::Root),
+        }],
+        team_id: None,
+        executable: Some(PathBuf::from("/usr/bin/login")),
+        cwd: CwdObservation::PermissionDenied,
+        occupancy_paths: Vec::new(),
+    };
+
+    // Removed root with StartedBefore::Root has no floor -> fails closed.
+    let (states, _) = observe_unreadable_roots_with_starts(
+        std::slice::from_ref(&removed),
+        &signals,
+        vec![Some(old_start)],
+    )?;
+    assert!(states[&removed].is_unknown(), "{states:?}");
+
+    // Mixed [present, absent] roots: missing floor for any scoped root fails closed.
+    let (mixed, _) = observe_unreadable_roots_with_starts(
+        &[present.clone(), removed.clone()],
+        &signals,
+        vec![Some(old_start)],
+    )?;
+    assert!(mixed[&present].is_unknown(), "{mixed:?}");
+    assert!(mixed[&removed].is_unknown(), "{mixed:?}");
+
+    // Supplying At(floor) excuses only when start_time precedes floor by >= 2s.
+    signals.entries[0].started_before = Some(StartedBefore::At(floor));
+    let (excused, warnings) = observe_unreadable_roots_with_starts(
+        std::slice::from_ref(&removed),
+        &signals,
+        vec![Some(old_start)],
+    )?;
+    assert!(excused[&removed].is_available(), "{excused:?}");
+    assert!(warning_names_process(&warnings, 200), "{warnings:?}");
+
+    let (rejected, _) = observe_unreadable_roots_with_starts(
+        std::slice::from_ref(&removed),
+        &signals,
+        vec![Some(recent_start)],
+    )?;
+    assert!(rejected[&removed].is_unknown(), "{rejected:?}");
+    Ok(())
+}
+
+#[test]
+fn policy_workers_with_creation_floor_rewrites_root_entries_only_when_supplied()
+-> Result<(), Box<dyn Error>> {
+    use provenant_core::WallTime;
+    use provenant_os::pid::StartedBefore;
+
+    struct Probe(std::sync::Mutex<Vec<Vec<CensusIgnoreEntry>>>);
+    impl WorkerObserver for Probe {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root.clone(), Occupancy::census_unknown(root, "fixture")))
+                .collect()
+        }
+        fn observe_roots_with_policy(
+            &self,
+            roots: &[PathBuf],
+            entries: &[CensusIgnoreEntry],
+            _: bool,
+        ) -> WorkerObservations {
+            self.0.lock().unwrap().push(entries.to_vec());
+            (self.observe_roots(roots), BTreeMap::new())
+        }
+    }
+
+    let fixture = Fixture::new()?;
+    let root = canonicalize(&fixture.root)?;
+    let mut inputs = provenant_core::RootInputs::new(root.join("home"), root.join("checkout"));
+    inputs.state_dir = Some(fixture._temp.path().join("state"));
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let floor = WallTime::from_micros(1_780_000_020_000_000)?;
+    let probe = Probe(Default::default());
+
+    let plain = CensusPolicyWorkers::from_roots(&probe, &roots)?;
+    let _ = plain.observe_roots(std::slice::from_ref(&root));
+    let floored = CensusPolicyWorkers::from_roots(&probe, &roots)?.with_creation_floor(floor);
+    let _ = floored.observe_roots(std::slice::from_ref(&root));
+    let clock = provenant_core::TestClock::new(floor, provenant_core::MonoTime::from_micros(0));
+    let session = CensusSession::new(&floored, &clock);
+    let _ = session.observe_roots(std::slice::from_ref(&root));
+
+    let seen = probe.0.lock().unwrap();
+    assert_eq!(seen[0][0].started_before, Some(StartedBefore::Root));
+    assert_eq!(seen[1][0].started_before, Some(StartedBefore::At(floor)));
+    assert_eq!(seen[2][0].started_before, Some(StartedBefore::At(floor)));
+    Ok(())
+}
+
+#[test]
+fn worktree_owner_for_path_matches_removed_checkout_by_directory_identity()
+-> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let canonical = canonicalize(&fixture.root)?;
+    let common = canonical.join("repo/.git");
+    let registration = common.join("worktrees/lane-1");
+    fs::create_dir_all(&registration)?;
+    let removed = canonical.join("trees/lane-1");
+    let owner = super::owner::WorktreeOwner {
+        attempt_id: Some(provenant_core::AttemptId::from_bytes([7; 16])),
+        operation_id: Some("op-owner".parse()?),
+        branch: "fix/3914".into(),
+        base: "1".repeat(40),
+        host: provenant_core::HostId::from_bytes([2; 16]),
+        created_at: provenant_core::WallTime::from_micros(1_780_000_000_000_000)?,
+        origin: super::owner::WorktreeOrigin::Lane,
+        label: None,
+        reference: None,
+    };
+    fs::write(
+        registration.join("gitdir"),
+        format!("{}/.git\n", removed.display()),
+    )?;
+    fs::write(
+        registration.join("provenant-owner.json"),
+        serde_json::to_vec(&owner)?,
+    )?;
+
+    assert_eq!(
+        super::owner::worktree_owner_for_path(&common, &removed)?,
+        Some(owner.clone())
+    );
+    // The registration's birth survives the checkout's removal and is the
+    // creation floor an abandon uses (#3914).
+    let registered = super::owner::worktree_registration_for_path(&common, &removed)?;
+    assert_eq!(
+        registered,
+        Some((
+            owner.clone(),
+            super::census_excusal::birth_time(&registration)
+        ))
+    );
+    #[cfg(target_os = "macos")]
+    assert!(
+        registered.is_some_and(|(_, born)| born.is_some()),
+        "APFS reports a registration birth time"
+    );
+    #[cfg(unix)]
+    {
+        let alias = canonical.join("alias");
+        std::os::unix::fs::symlink(&canonical, &alias)?;
+        assert_eq!(
+            super::owner::worktree_owner_for_path(&common, &alias.join("trees/lane-1"))?,
+            Some(owner)
+        );
+    }
+    assert_eq!(
+        super::owner::worktree_owner_for_path(&common, &canonical.join("trees/other"))?,
+        None
+    );
+    assert_eq!(
+        super::owner::worktree_owner_for_path(&common, Path::new("trees/lane-1"))?,
+        None
     );
     Ok(())
 }

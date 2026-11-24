@@ -1108,8 +1108,18 @@ pub(crate) fn unreadable_policy_uids(
         } else {
             None
         };
+        let start_before = crate::sys::process_start::start_time_for_entries(pid, entries);
         let platform_chain = || root_owned_executable_chain(&path, &executable);
-        let listed = listed_image_matches(entries, &path, flags, team.as_deref(), platform_chain);
+        let matched = listed_image_match(
+            entries,
+            &path,
+            flags,
+            team.as_deref(),
+            platform_chain,
+            start_before,
+            false,
+        );
+        let listed = matched.is_some();
         if !listed {
             builtin.map_err(builtin_failure)?;
         }
@@ -1126,12 +1136,16 @@ pub(crate) fn unreadable_policy_uids(
         if darwin_uids(pid).ok_or("real/effective/saved uid recheck unavailable")? != before {
             return Err("stable real/effective/saved uids required".into());
         }
+        let unstable = |condition| crate::pid::UnreadablePolicyFailure {
+            condition,
+            builtin_condition: builtin.err().map(BuiltinCondition::detail),
+            configurable: false,
+        };
         if listed && team.is_some() && darwin_team_id(pid) != team {
-            return Err(crate::pid::UnreadablePolicyFailure {
-                condition: "stable signing team required",
-                builtin_condition: builtin.err().map(BuiltinCondition::detail),
-                configurable: false,
-            });
+            return Err(unstable("stable signing team required"));
+        }
+        if !crate::sys::process_start::start_time_unchanged(pid, start_before, matched) {
+            return Err(unstable("stable process start time required"));
         }
         Ok(crate::pid::UnreadablePolicyExcusal { uids: before })
     }
@@ -1292,33 +1306,29 @@ pub(crate) fn configured_unreadable_image(
             .any(|entry| entry.team_id != "platform")
             .then(|| darwin_team_id(pid))
             .flatten();
+        let start_before = crate::sys::process_start::start_time_for_entries(pid, entries);
         let executable = std::fs::OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW)
             .open(&canonical)
             .ok()?;
-        let matched = entries.iter().find(|entry| {
-            if !entry.is_valid() {
-                return false;
-            }
-            let configured =
-                std::fs::canonicalize(&entry.path).unwrap_or_else(|_| entry.path.clone());
-            if configured != canonical {
-                return false;
-            }
-            if entry.team_id == "platform" {
-                darwin_platform_signature(flags)
-                    && root_owned_executable_chain(&canonical, &executable)
-            } else {
-                team.as_deref() == Some(entry.team_id.as_str())
-            }
-        })?;
+        let platform_chain = || root_owned_executable_chain(&canonical, &executable);
+        let matched = listed_image_match(
+            entries,
+            &canonical,
+            flags,
+            team.as_deref(),
+            platform_chain,
+            start_before,
+            true,
+        )?;
         if darwin_executable_path(pid)?.as_os_str() != path.as_os_str()
             || darwin_signing_status(pid)? != flags
+            || !crate::sys::process_start::start_time_unchanged(pid, start_before, Some(matched))
         {
             return None;
         }
-        Some((*matched).clone())
+        Some(matched.clone())
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -1552,23 +1562,35 @@ fn darwin_platform_signature(flags: u32) -> bool {
 }
 
 #[cfg(any(target_os = "macos", test))]
-fn listed_image_matches(
-    entries: &[crate::pid::CensusIgnoreEntry],
+fn listed_image_match<'a>(
+    entries: &'a [crate::pid::CensusIgnoreEntry],
     path: &std::path::Path,
     flags: u32,
     team: Option<&str>,
     platform_chain: impl Fn() -> bool,
-) -> bool {
-    darwin_valid_signature(flags)
-        && entries.iter().any(|entry| {
-            entry.is_valid()
-                && entry.path.as_os_str() == path.as_os_str()
-                && if entry.team_id == "platform" {
-                    darwin_platform_signature(flags) && platform_chain()
-                } else {
-                    team == Some(entry.team_id.as_str())
-                }
-        })
+    start_time: Option<provenant_core::WallTime>,
+    canonicalize_entries: bool,
+) -> Option<&'a crate::pid::CensusIgnoreEntry> {
+    if !darwin_valid_signature(flags) {
+        return None;
+    }
+    entries.iter().find(|entry| {
+        let configured = if canonicalize_entries {
+            std::borrow::Cow::Owned(
+                std::fs::canonicalize(&entry.path).unwrap_or_else(|_| entry.path.clone()),
+            )
+        } else {
+            std::borrow::Cow::Borrowed(entry.path.as_path())
+        };
+        entry.is_valid()
+            && configured.as_os_str() == path.as_os_str()
+            && entry.started_before_allows(start_time)
+            && if entry.team_id == "platform" {
+                darwin_platform_signature(flags) && platform_chain()
+            } else {
+                team == Some(entry.team_id.as_str())
+            }
+    })
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -2247,94 +2269,62 @@ mod tests {
     use super::*;
 
     #[test]
-    fn host_listing_requires_exact_path_signer_and_valid_live_signature() {
-        use crate::pid::CensusIgnoreEntry;
-        let entries = [CensusIgnoreEntry {
-            path: "/Library/Daemon".into(),
-            team_id: "TEAM123".into(),
-        }];
-        let path = std::path::Path::new("/Library/Daemon");
-        let signed = CS_VALID | CS_SIGNED;
-        assert!(
-            listed_image_matches(&entries, path, signed, Some("TEAM123"), || true),
-            "accepted listing"
-        );
-        assert!(
-            !listed_image_matches(&entries, path, signed, Some("TEAM999"), || true),
-            "team mismatch"
-        );
-        assert!(
-            !listed_image_matches(
-                &entries,
-                std::path::Path::new("/Library/Daemon-child"),
-                signed,
-                Some("TEAM123"),
-                || true
-            ),
-            "exact path mismatch"
-        );
-        assert!(
-            !listed_image_matches(
-                &entries,
-                std::path::Path::new("/Library//Daemon"),
-                signed,
-                Some("TEAM123"),
-                || true
-            ),
-            "do not normalize a listed path match"
-        );
-        assert!(
-            !listed_image_matches(&entries, path, signed, None, || true),
-            "unreadable team"
-        );
-        for invalid in [
-            signed & !1,
-            signed | 2,
-            signed | 4,
-            signed | CS_RESTRICT,
-            signed | CS_LINKER_SIGNED,
-            signed | CS_KILLED,
-        ] {
-            assert!(!listed_image_matches(
-                &entries,
-                path,
-                invalid,
-                Some("TEAM123"),
-                || true
-            ));
-        }
-        let platform = [CensusIgnoreEntry {
+    fn host_listing_requires_exact_path_signer_start_floor_and_valid_live_signature() {
+        use crate::pid::{CensusIgnoreEntry, StartedBefore};
+        let mk = |path: &str, team_id: &str, started_before| CensusIgnoreEntry {
             path: path.into(),
-            team_id: "platform".into(),
-        }];
-        assert!(!listed_image_matches(
-            &platform,
-            path,
-            signed,
-            Some("platform"),
-            || true
-        ));
-        assert!(listed_image_matches(
-            &platform,
-            path,
-            signed | CS_PLATFORM_BINARY,
-            None,
-            || true
-        ));
-        assert!(
-            !listed_image_matches(&platform, path, signed | CS_PLATFORM_BINARY, None, || false),
-            "platform selector requires the root-owned protected descriptor chain"
-        );
-        assert!(
-            !listed_image_matches(
-                &platform,
-                path,
-                signed | CS_PLATFORM_BINARY | CS_LINKER_SIGNED,
-                None,
-                || true
-            ),
-            "linker-signed code is refused even with a platform bit"
-        );
+            team_id: team_id.into(),
+            started_before,
+        };
+        let ok = |e: &[CensusIgnoreEntry], p: &str, f, t, chain, s| {
+            let path = std::path::Path::new(p);
+            listed_image_match(e, path, f, t, || chain, s, false).is_some()
+        };
+        let p = "/Library/Daemon";
+        let t = Some("TEAM123");
+        let e = [mk(p, "TEAM123", None)];
+        let s = CS_VALID | CS_SIGNED;
+        for (path, team, want) in [
+            (p, t, true),
+            (p, Some("TEAM999"), false),
+            ("/Library/Daemon-child", t, false),
+            ("/Library//Daemon", t, false),
+            (p, None, false),
+        ] {
+            assert_eq!(ok(&e, path, s, team, true, None), want);
+        }
+        for bad in [
+            s & !1,
+            s | 2,
+            s | 4,
+            s | CS_RESTRICT,
+            s | CS_LINKER_SIGNED,
+            s | CS_KILLED,
+        ] {
+            assert!(!ok(&e, p, bad, t, true, None));
+        }
+        let plat = [mk(p, "platform", None)];
+        let pf = s | CS_PLATFORM_BINARY;
+        for (flags, team, chain, want) in [
+            (s, Some("platform"), true, false),
+            (pf, None, true, true),
+            (pf, None, false, false),
+            (pf | CS_LINKER_SIGNED, None, true, false),
+        ] {
+            assert_eq!(ok(&plat, p, flags, team, chain, None), want);
+        }
+        let floor = provenant_core::WallTime::from_micros(1_780_000_010_000_000).unwrap();
+        let old = provenant_core::WallTime::from_micros(1_780_000_008_000_000).unwrap();
+        let recent = provenant_core::WallTime::from_micros(1_780_000_008_000_001).unwrap();
+        for (cond, start, want) in [
+            (StartedBefore::Root, Some(old), false),
+            (StartedBefore::At(floor), Some(old), true),
+            (StartedBefore::At(floor), Some(recent), false),
+            (StartedBefore::At(floor), None, false),
+        ] {
+            let c = [mk("/usr/bin/login", "platform", Some(cond))];
+            assert_eq!(ok(&c, "/usr/bin/login", pf, None, true, start), want);
+        }
     }
 
     #[test]

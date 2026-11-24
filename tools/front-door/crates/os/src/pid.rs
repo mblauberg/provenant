@@ -1,4 +1,5 @@
 //! Diagnostic CWD observations and explicit process stop/resume operations.
+use provenant_core::WallTime;
 use std::io;
 use std::path::PathBuf;
 use thiserror::Error;
@@ -172,6 +173,34 @@ pub struct SealedSystemImage {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlatformSignedImage;
 
+/// Minimum margin by which a process's kernel start time must precede a root
+/// floor for `StartedBefore`. Covers coarse birth-time / clock resolution.
+pub const STARTED_BEFORE_MARGIN_MICROS: i64 = 2_000_000;
+
+/// Start-time floor condition on a [`CensusIgnoreEntry`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StartedBefore {
+    Root,
+    At(WallTime),
+}
+
+impl StartedBefore {
+    /// True only when `start` is known and precedes a resolved `At(floor)` by
+    /// at least [`STARTED_BEFORE_MARGIN_MICROS`]. Unresolved `Root` fails closed.
+    pub fn allows(self, start: Option<WallTime>) -> bool {
+        let Self::At(floor) = self else {
+            return false;
+        };
+        start.is_some_and(|start| {
+            let margin = i128::from(STARTED_BEFORE_MARGIN_MICROS);
+            i128::from(start.as_micros())
+                .checked_add(margin)
+                .is_some_and(|adjusted| adjusted <= i128::from(floor.as_micros()))
+        })
+    }
+}
+
 /// Host-owner acceptance of the risk that this signed executable occupies a
 /// worktree despite an unreadable cwd. Paths and signers are exact matches.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -180,6 +209,14 @@ pub struct CensusIgnoreEntry {
     pub path: PathBuf,
     /// `platform` for Apple platform code, otherwise the kernel team identifier.
     pub team_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_before: Option<StartedBefore>,
+}
+
+impl CensusIgnoreEntry {
+    pub fn started_before_allows(&self, start: Option<WallTime>) -> bool {
+        self.started_before.is_none_or(|cond| cond.allows(start))
+    }
 }
 
 /// Credentials read together from the kernel, never inferred from effective uid.
@@ -325,6 +362,12 @@ pub trait CwdObserver: Send + Sync {
         None
     }
 
+    /// Process kernel start time as wall-clock time, if available.
+    /// Observers that cannot read it return `None` so `started_before` fails closed.
+    fn process_start_time(&self, _pid: i64) -> Option<WallTime> {
+        None
+    }
+
     /// A Linux kernel thread, which holds no files or cwd in any worktree.
     fn kernel_thread(&self, _pid: i64) -> bool {
         false
@@ -389,6 +432,11 @@ impl CwdObserver for SystemCwdObserver {
     ) -> Option<CensusIgnoreEntry> {
         let pid = i32::try_from(pid).ok().filter(|pid| *pid > 0)?;
         crate::sys::pid::configured_unreadable_image(pid, entries)
+    }
+
+    fn process_start_time(&self, pid: i64) -> Option<WallTime> {
+        let pid = i32::try_from(pid).ok().filter(|pid| *pid > 0)?;
+        crate::sys::process_start::process_start_time(pid)
     }
 
     fn kernel_thread(&self, pid: i64) -> bool {
@@ -551,6 +599,49 @@ mod tests {
         ));
         for pid in [-1, 0, i64::MAX] {
             assert!(SystemCwdObserver.unreadable_policy_uids(pid, &[]).is_err());
+            assert_eq!(SystemCwdObserver.process_start_time(pid), None);
         }
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        assert!(
+            SystemCwdObserver
+                .process_start_time(i64::from(std::process::id()))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn started_before_serde_and_two_second_floor_margin() {
+        let entry: CensusIgnoreEntry =
+            serde_json::from_str(r#"{"path":"/usr/bin/login","team_id":"platform"}"#).unwrap();
+        assert_eq!(entry.started_before, None);
+        assert!(
+            !serde_json::to_string(&entry)
+                .unwrap()
+                .contains("started_before")
+        );
+
+        let root_entry: CensusIgnoreEntry = serde_json::from_str(
+            r#"{"path":"/usr/bin/login","team_id":"platform","started_before":"root"}"#,
+        )
+        .unwrap();
+        assert_eq!(root_entry.started_before, Some(StartedBefore::Root));
+        assert!(
+            serde_json::to_value(&root_entry).unwrap()["started_before"]
+                == serde_json::json!("root")
+        );
+        assert!(
+            serde_json::from_str::<CensusIgnoreEntry>(
+                r#"{"path":"/usr/bin/login","team_id":"platform","started_before":"bogus"}"#
+            )
+            .is_err()
+        );
+
+        let floor = WallTime::from_micros(1_780_000_010_000_000).unwrap();
+        let at_edge = WallTime::from_micros(1_780_000_008_000_000).unwrap();
+        let inside_margin = WallTime::from_micros(1_780_000_008_000_001).unwrap();
+        assert!(!StartedBefore::Root.allows(Some(at_edge)));
+        assert!(!StartedBefore::At(floor).allows(None));
+        assert!(StartedBefore::At(floor).allows(Some(at_edge)));
+        assert!(!StartedBefore::At(floor).allows(Some(inside_margin)));
     }
 }

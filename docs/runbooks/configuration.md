@@ -242,8 +242,11 @@ starts one, so the attempt can settle.
 
 ## Unreadable process census exceptions
 
-Set `confinement.census_ignore_unreadable` only for signed executables whose risk
-you accept; see the
+By default, `confinement.census_ignore_unreadable` excuses Apple-platform
+`/usr/bin/login` only when its kernel start time precedes every scoped root's
+creation floor by at least two seconds (`started_before = "root"`). Override or
+clear it only for signed executables whose risk you accept; never list shells
+or interpreters. See the
 [supervisor spec](../specs/supervisor.md#unreadable-processes-need-positive-non-occupancy-evidence).
 
 ## OpenCode Go quota calibration
