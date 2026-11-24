@@ -1144,7 +1144,7 @@ fn refusal_bounds_each_reason_and_omits_success_detail() {
     assert!(reason.starts_with("smoke: SMOKE_FAILED: "), "{reason}");
     assert!(!message.contains("install created"), "{message}");
     assert!(
-        reason.len() <= "smoke: ".len() + super::HOST_REASON_LIMIT + 3,
+        reason.len() <= "smoke: ".len() + super::report::HOST_REASON_LIMIT + 3,
         "unbounded reason ({}+ bytes): {reason}",
         reason.len()
     );
