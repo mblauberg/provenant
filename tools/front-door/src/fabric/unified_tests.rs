@@ -1655,7 +1655,7 @@ fn compact_row_keeps_the_reason_leading_clause_with_a_long_path()
     let compact = String::from_utf8(out)?;
     let row = compact
         .lines()
-        .find(|line| line.contains("note="))
+        .find(|line| line.starts_with(&format!("g/{node_id} failed")))
         .ok_or_else(|| format!("no compact node row carries the reason:\n{compact}"))?;
     assert!(
         row.contains(&first_clause),
