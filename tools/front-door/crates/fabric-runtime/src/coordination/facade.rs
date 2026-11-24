@@ -1117,7 +1117,7 @@ impl FacadeError {
                 // valid reconcile command, whether or not a work key was
                 // resolved. Spec: docs/specs/run-launch.md#writer-binding
                 projected = projected.next(provenant_records::work_key::held_writer_next(
-                    holder.copied(),
+                    *holder,
                     None,
                 ));
             }
