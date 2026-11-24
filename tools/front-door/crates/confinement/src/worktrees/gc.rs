@@ -248,6 +248,11 @@ impl ForgeContextFailure {
             Self::Refusal(provenant_config::ForgeContextError::NoRemote { .. }) => {
                 format!("declare `git.remote` {declaration}, then rerun `provenant gc`")
             }
+            Self::Refusal(provenant_config::ForgeContextError::InvalidRemote { remote }) => {
+                format!(
+                    "set `git.remote` {declaration} to a valid Git remote name in place of                      {remote:?}, then rerun `provenant gc`"
+                )
+            }
             Self::Refusal(provenant_config::ForgeContextError::Io { .. })
             | Self::Unavailable(_) => format!(
                 "make the checkout's Git metadata and port table readable {declaration}, \
