@@ -31,15 +31,11 @@ impl WorkerObserver for DelegatingWriterObserver {
                 .cloned()
                 .map(|root| (root, self.0.clone()))
                 .collect(),
-            if self.1 {
-                roots
-                    .iter()
-                    .cloned()
-                    .map(|root| (root, "census detail".into()))
-                    .collect()
-            } else {
-                BTreeMap::new()
-            },
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, "census detail".into()))
+                .collect(),
         )
     }
 }
