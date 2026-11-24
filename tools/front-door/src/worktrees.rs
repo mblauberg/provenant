@@ -4926,7 +4926,7 @@ mod gc_preview_tests {
         assert!(rows.iter().any(|row| row.reason.contains("unmerged work")));
         assert!(
             rows.iter().any(|row| {
-                row.path == PathBuf::from("/attempts/1/scratch") && row.bytes == Some(2048)
+                row.path == std::path::Path::new("/attempts/1/scratch") && row.bytes == Some(2048)
             }),
             "measured scratch bytes must reach its kept row: {rows:?}"
         );
