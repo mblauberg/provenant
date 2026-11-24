@@ -991,26 +991,11 @@ pub fn peer(
                     }
                     let retry = graph_context.retry_limit;
                     let network = graph_context.network;
-                    let source = provenant_run::resolve_reader_source(
+                    let access = super::peer_source_binding::bind_reader_source(
                         context.roots.state.as_path(),
                         &cwd,
-                        &cwd,
-                    )
-                    .map_err(run_error)?;
-                    let directory = provenant_os::fs::Directory::open_anchor(&source)
-                        .map_err(|_| FacadeError::ConfinementRefused { resource: None })?;
-                    let metadata = directory
-                        .metadata()
-                        .map_err(|_| FacadeError::ConfinementRefused { resource: None })?;
-                    let access = provenant_records::run::LaneAccessRequest {
                         network,
-                        source_root: Some(source),
-                        source_identity: Some(provenant_records::run::SourceIdentity {
-                            device: metadata.device,
-                            inode: metadata.inode,
-                        }),
-                        ..Default::default()
-                    };
+                    )?;
                     let mut input = SubmitInput::clone(input);
                     let SubmitInput::Submit { task, .. } = &mut input;
                     {

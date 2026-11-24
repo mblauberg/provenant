@@ -371,6 +371,15 @@ impl ContinuationCopyLimit {
     }
 }
 
+/// A confinement boundary's named rule and display-sanitised refused path.
+/// Boxed inside [`ResourceFact`] so the error variants that carry a resource
+/// fact stay small.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfinementRule {
+    pub rule: String,
+    pub path: String,
+}
+
 /// Closed resource facts safe to project across host boundaries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -433,6 +442,9 @@ pub enum ResourceFact {
         limit: u64,
         reserved: u64,
     },
+    /// A confinement boundary that named the rule and path it refused. The
+    /// rule is a stable identifier; the path is display-sanitised by `project`.
+    ConfinementRule(Box<ConfinementRule>),
 }
 
 impl ResourceFact {
@@ -482,6 +494,13 @@ impl ResourceFact {
             Self::Processes { used, limit, reserved } => diagnostic
                 .detail(format!("host user process count is {used} of the operating system RLIMIT_NPROC soft limit {limit}; shipped reserved headroom is {reserved}"))
                 .next("reduce host process use or raise the per-user process limit before retrying"),
+            Self::ConfinementRule(rule) => diagnostic
+                .detail(format!(
+                    "confinement rule {} refused {}",
+                    safe_text(&rule.rule),
+                    safe_text(&rule.path)
+                ))
+                .next("inspect the named confinement rule and path before retrying"),
         }
     }
 }
