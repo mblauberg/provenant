@@ -354,8 +354,10 @@ impl std::fmt::Display for ArtifactProvenance {
     }
 }
 
-/// A source error whose fixed cause the run diagnostic may disclose. Its
-/// text, which can name paths or Git output, stays in the error chain only.
+/// A source error whose text can name paths or Git output. The raw text may
+/// reach an owner-facing local diagnostic through `DiagnosticFact`, but never
+/// the peer wire: facts are serde-skipped and only typed, sanitised fields are
+/// projected for a peer. `cause` is the fixed text safe to disclose there.
 #[derive(Debug)]
 pub(crate) struct CausedSource {
     text: String,
@@ -1175,29 +1177,74 @@ impl RunError {
                 diagnostic = diagnostic.next("inspect the host I/O failure before retrying");
             }
             Self::OperationIo {
-                operation, source, ..
+                operation,
+                path,
+                source,
             } => {
                 diagnostic = diagnostic
                     .fact(DiagnosticFact::Filesystem {
                         operation,
+                        detail: Some(Box::new(provenant_records::diagnostic::FilesystemDetail {
+                            path: path
+                                .as_ref()
+                                .map(|path| path.to_string_lossy().into_owned()),
+                            source: Some(source.to_string()),
+                        })),
                         cause: CausedSource::cause(source),
                     })
                     .next("inspect the host I/O failure before retrying");
             }
             Self::Filesystem(error) | Self::Publication(error) => {
                 use provenant_os::fs::FsError;
-                let operation = match error {
-                    FsError::Io { operation, .. } => *operation,
-                    FsError::ReadIo { .. } => "read file",
-                    FsError::Rename { .. } => "rename",
-                    FsError::Symlink { .. } => "resolve path",
-                    FsError::CrossDevice { .. } => "verify filesystem device",
-                    FsError::LockTimeout { .. } | FsError::Cancelled { .. } => "acquire lock",
-                    FsError::LockDeadlineOverflow { .. } => "set lock deadline",
-                    _ => "verify filesystem entry",
+                let (operation, path, source) = match error {
+                    FsError::Io {
+                        operation,
+                        path,
+                        source,
+                    } => (
+                        *operation,
+                        Some(path.to_string_lossy().into_owned()),
+                        Some(source.to_string()),
+                    ),
+                    FsError::ReadIo { path, source } => (
+                        "read file",
+                        Some(path.to_string_lossy().into_owned()),
+                        Some(source.to_string()),
+                    ),
+                    FsError::Rename {
+                        to_path, source, ..
+                    } => (
+                        "rename",
+                        Some(to_path.to_string_lossy().into_owned()),
+                        Some(source.to_string()),
+                    ),
+                    FsError::Symlink { path, source } => (
+                        "resolve path",
+                        Some(path.to_string_lossy().into_owned()),
+                        Some(source.to_string()),
+                    ),
+                    FsError::CrossDevice { path } => (
+                        "verify filesystem device",
+                        Some(path.to_string_lossy().into_owned()),
+                        None,
+                    ),
+                    FsError::LockTimeout { path, .. } | FsError::Cancelled { path } => (
+                        "acquire lock",
+                        Some(path.to_string_lossy().into_owned()),
+                        None,
+                    ),
+                    FsError::LockDeadlineOverflow { path } => (
+                        "set lock deadline",
+                        Some(path.to_string_lossy().into_owned()),
+                        None,
+                    ),
+                    _ => ("verify filesystem entry", None, None),
                 };
                 diagnostic = diagnostic.fact(DiagnosticFact::Filesystem {
                     operation,
+                    detail: (path.is_some() || source.is_some()).then(|| {
+                        Box::new(provenant_records::diagnostic::FilesystemDetail { path, source })
+                    }),
                     cause: None,
                 });
             }
@@ -1503,7 +1550,7 @@ mod diagnostic_projection_tests {
     }
 
     #[test]
-    fn untrusted_error_sources_do_not_enter_diagnostics() {
+    fn untrusted_error_sources_never_reach_the_peer_wire() {
         use provenant_confinement::worktrees::WorktreeError;
         use provenant_records::diagnostic::DiagnosticFact;
         let cases = [
@@ -1529,11 +1576,13 @@ mod diagnostic_projection_tests {
                 assert!(!encoded.chars().any(char::is_control));
                 if matches!(&error, RunError::Filesystem(_)) {
                     assert!(matches!(
-                        projection.fact,
+                        &projection.fact,
                         Some(DiagnosticFact::Filesystem {
                             operation: "read file",
                             cause: None,
-                        })
+                            detail: Some(detail),
+                        }) if detail.path.as_deref() == Some("/private/host")
+                            && detail.source.as_deref() == Some("TOKEN_SENTINEL")
                     ));
                 }
             }

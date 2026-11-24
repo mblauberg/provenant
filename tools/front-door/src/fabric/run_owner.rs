@@ -567,8 +567,26 @@ pub(crate) fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
                     path: "inspect worktree registration".into(),
                 };
             }
-            Some(DiagnosticFact::Filesystem { operation, cause }) => {
-                return FacadeError::io_caused(*operation, *cause);
+            Some(DiagnosticFact::Filesystem {
+                operation,
+                detail,
+                cause,
+            }) => {
+                let source = detail
+                    .as_ref()
+                    .and_then(|detail| detail.source.as_deref())
+                    .or(*cause);
+                let path = detail
+                    .as_ref()
+                    .and_then(|detail| detail.path.as_deref())
+                    .map(std::path::Path::new);
+                return FacadeError::io_failure(
+                    *operation,
+                    path,
+                    source
+                        .as_ref()
+                        .map(|source| source as &dyn std::fmt::Display),
+                );
             }
             Some(DiagnosticFact::DiskPressure {
                 available,
@@ -645,12 +663,12 @@ pub(crate) fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
         },
         Some(FacadeError::Io {
             operation,
+            path,
             delivery_limit,
             delivery_stage,
             resource,
             input_failure,
             cause,
-            ..
         }) => FacadeError::Io {
             delivery_limit,
             delivery_stage,
@@ -658,7 +676,7 @@ pub(crate) fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
             input_failure,
             cause,
             operation,
-            path: None,
+            path,
         },
         Some(error @ FacadeError::InvalidInput { detail: None }) => {
             with_run_detail(error, fail.projection.as_deref())
@@ -2744,5 +2762,43 @@ mod facade_kind_tests {
                 .unwrap()
                 .contains("candidate worktree path refused")
         );
+    }
+
+    #[test]
+    fn fail_error_operation_io_names_the_operation_and_path() {
+        let root = tempfile::tempdir().expect("create a temporary directory");
+        let worktree = root.path().join("writer");
+        let fail = provenant_cli::run::Fail::from(provenant_run::RunError::OperationIo {
+            operation: "create worktree dir",
+            path: Some(worktree.clone()),
+            source: std::io::Error::other("resource temporarily unavailable"),
+        });
+        let error = super::fail_error(fail);
+        let detail = error
+            .diagnostic()
+            .detail
+            .expect("a run io failure keeps a local detail");
+        let path_text = worktree.to_str().expect("test path is UTF-8");
+        assert!(detail.contains("create worktree dir"), "{detail}");
+        assert!(detail.contains(path_text), "{detail}");
+        assert!(
+            detail.contains("resource temporarily unavailable"),
+            "{detail}"
+        );
+        let wire = serde_json::to_string(&error).expect("serialise facade error");
+        assert!(!wire.contains(path_text), "{wire}");
+        assert!(!wire.contains("resource temporarily unavailable"), "{wire}");
+    }
+
+    #[test]
+    fn fail_error_filesystem_without_path_or_source_has_no_invented_detail() {
+        let fail = provenant_cli::run::Fail::from(provenant_run::RunError::Filesystem(
+            provenant_os::fs::FsError::NotPrivate {
+                name: "payload".into(),
+            },
+        ));
+        let error = super::fail_error(fail);
+        assert_eq!(error.cause(), None);
+        assert!(error.diagnostic().detail.is_none());
     }
 }

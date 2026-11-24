@@ -654,9 +654,12 @@ pub enum FacadeError {
         resource: Option<Box<provenant_records::diagnostic::ResourceFact>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         input_failure: Option<provenant_records::diagnostic::IoFact>,
-        /// The source error's fixed text, kept in-process for local edges.
+        /// The source error's text, kept in-process for local edges. A local
+        /// failure stores its operation, path and source here so the node
+        /// diagnostic names them; peer-supplied operations and paths are never
+        /// trusted and stay out of this field.
         #[serde(skip)]
-        cause: Option<&'static str>,
+        cause: Option<Box<str>>,
     },
 }
 
@@ -1056,9 +1059,11 @@ impl FacadeError {
             Self::Io { operation, .. } if operation == REPOSITORY_FACT_LIMIT_OPERATION => {
                 projected = projected.detail("repository fact output exceeded its capture limit");
             }
-            // Only the in-process fixed cause is disclosed: operation text can
-            // arrive from a peer and the path is unanchored.
-            Self::Io { cause: Some(cause), .. } => projected = projected.detail(*cause),
+            // Only the in-process local cause is disclosed: operation text can
+            // arrive from a peer and the path is unanchored. Local failures put
+            // their operation, path and source into this one field, so the
+            // writer-binding diagnostic names them without trusting wire text.
+            Self::Io { cause: Some(cause), .. } => projected = projected.detail(&**cause),
             Self::LaunchUnknown { operation_id } => projected = projected.next(format!("inspect the receipt for operation {operation_id} before retrying with the same operation ID")),
             Self::WriterBusy { holder } => {
                 if let Some(holder) = holder {
@@ -1268,19 +1273,43 @@ impl FacadeError {
         }
     }
 
-    /// A local I/O failure whose source error has the fixed text `cause`.
-    pub fn io_caused(operation: impl Into<String>, cause: Option<&'static str>) -> Self {
+    /// A local I/O failure that composes its operation, known path and source
+    /// text into the one in-process detail field. This is the typed carrier for
+    /// the writer-binding path: the operation and path reach the node
+    /// diagnostic without being re-formatted at each conversion site. When
+    /// neither a path nor a source is known the detail is absent, so no failure
+    /// text is invented. `operation` and `path` stay subject to their wire
+    /// projection; only the composed detail is local-only.
+    pub fn io_failure(
+        operation: impl Into<String>,
+        path: Option<&std::path::Path>,
+        source: Option<&dyn std::fmt::Display>,
+    ) -> Self {
+        let operation = operation.into();
+        let path_text = path.map(|path| path.to_string_lossy().into_owned());
+        let detail = match (path_text.as_deref(), source) {
+            (Some(path), Some(source)) => Some(format!("{operation} {path}: {source}")),
+            (Some(path), None) => Some(format!("{operation} {path}")),
+            (None, Some(source)) => Some(format!("{operation}: {source}")),
+            (None, None) => None,
+        };
         let mut error = Self::io(operation);
-        if let Self::Io { cause: slot, .. } = &mut error {
-            *slot = cause;
+        if let Self::Io {
+            cause: slot,
+            path: slot_path,
+            ..
+        } = &mut error
+        {
+            *slot_path = path_text;
+            *slot = detail.map(|detail| provenant_core::bounded_line(&detail, 4096).into());
         }
         error
     }
 
-    /// The source error's fixed text, when this failure kept one.
-    pub fn cause(&self) -> Option<&'static str> {
+    /// The source error's local text, when this failure kept one.
+    pub fn cause(&self) -> Option<&str> {
         match self {
-            Self::Io { cause, .. } => *cause,
+            Self::Io { cause, .. } => cause.as_deref(),
             _ => None,
         }
     }
@@ -1294,32 +1323,39 @@ impl FacadeError {
         anchor: Option<&std::path::Path>,
     ) -> Self {
         use provenant_os::fs::FsError;
-        let (operation, path) = match error {
+        let (operation, path, source) = match error {
             FsError::Io {
-                operation, path, ..
-            } => (*operation, Some(path.clone())),
-            FsError::ReadIo { path, .. } => ("read file", Some(path.clone())),
-            FsError::Rename { to_path, .. } => ("rename", Some(to_path.clone())),
-            FsError::Symlink { path, .. } => ("resolve path", Some(path.clone())),
-            FsError::CrossDevice { path } => ("verify filesystem device", Some(path.clone())),
-            FsError::LockTimeout { path, .. } | FsError::Cancelled { path } => {
-                ("acquire lock", Some(path.clone()))
+                operation,
+                path,
+                source,
+            } => (*operation, Some(path.clone()), Some(source.to_string())),
+            FsError::ReadIo { path, source } => {
+                ("read file", Some(path.clone()), Some(source.to_string()))
             }
-            FsError::LockDeadlineOverflow { path } => ("set lock deadline", Some(path.clone())),
-            _ => ("verify filesystem entry", None),
+            FsError::Rename {
+                to_path, source, ..
+            } => ("rename", Some(to_path.clone()), Some(source.to_string())),
+            FsError::Symlink { path, source } => {
+                ("resolve path", Some(path.clone()), Some(source.to_string()))
+            }
+            FsError::CrossDevice { path } => ("verify filesystem device", Some(path.clone()), None),
+            FsError::LockTimeout { path, .. } | FsError::Cancelled { path } => {
+                ("acquire lock", Some(path.clone()), None)
+            }
+            FsError::LockDeadlineOverflow { path } => {
+                ("set lock deadline", Some(path.clone()), None)
+            }
+            // No operation ran and neither path nor source is known; leave the
+            // detail absent rather than inventing one.
+            _ => ("verify filesystem entry", None, None),
         };
-        Self::Io {
-            delivery_limit: None,
-            delivery_stage: None,
-            resource: None,
-            input_failure: None,
-            cause: None,
-            operation: operation.into(),
-            path: path
-                .map(|path| anchor.map_or_else(|| path.clone(), |anchor| anchor.join(&path)))
-                .filter(|path| path.is_absolute())
-                .map(|path| path.to_string_lossy().into_owned()),
-        }
+        let path = path
+            .map(|path| anchor.map_or_else(|| path.clone(), |anchor| anchor.join(&path)))
+            .filter(|path| path.is_absolute());
+        let source = source
+            .as_ref()
+            .map(|source| source as &dyn std::fmt::Display);
+        Self::io_failure(operation, path.as_deref(), source)
     }
 }
 

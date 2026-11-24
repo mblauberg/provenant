@@ -591,6 +591,14 @@ pub struct DeliveryLimit {
     pub limit: u64,
 }
 
+/// The path and source text of a local filesystem failure. Boxed so the fact,
+/// and every error that carries one, stays small.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilesystemDetail {
+    pub path: Option<String>,
+    pub source: Option<String>,
+}
+
 /// Typed facts retained in-process until an edge chooses its envelope. They are
 /// never serialized as raw diagnostic strings.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -604,6 +612,9 @@ pub enum DiagnosticFact {
     WorktreeUnregistered,
     Filesystem {
         operation: &'static str,
+        /// Where the operation failed and the source error's text, when known.
+        /// `Diagnostic::fact` is serde-skipped, so this stays in-process only.
+        detail: Option<Box<FilesystemDetail>>,
         /// The source error's fixed text, when it names no path or value.
         cause: Option<&'static str>,
     },

@@ -863,8 +863,48 @@ pub(super) fn fail_node(
 mod tests {
     use super::super::next_step::settlement_fallback_decision;
     use super::*;
+    use crate::coordination::facade::FacadeError;
     use provenant_records::run::PreparationFailure;
     use provenant_routing::FallbackHandoff;
+
+    #[test]
+    fn writer_binding_io_failure_names_path_and_operation() {
+        // Drive the conversion `bind_child_directory` uses: opening a regular
+        // file as a directory fails, and `FacadeError::filesystem` must own the
+        // operation, known path and source in its one local detail field.
+        let root = tempfile::tempdir().expect("create a temporary worktree parent");
+        let blocker = root.path().join("not-a-directory");
+        std::fs::write(&blocker, b"occupied").expect("plant a regular file as the parent");
+        let fs_error = provenant_os::fs::Directory::open_anchor(&blocker)
+            .expect_err("opening a regular file as a directory must fail");
+        let source_text = match &fs_error {
+            provenant_os::fs::FsError::Io { source, .. } => source.to_string(),
+            other => other.to_string(),
+        };
+        let path_text = blocker.to_str().expect("test path is UTF-8");
+        let error = FacadeError::filesystem(&fs_error);
+
+        let diagnostic = error.diagnostic();
+        let detail = diagnostic
+            .detail
+            .as_deref()
+            .expect("binding io failure has local detail");
+        assert!(detail.contains("open anchor"), "{detail}");
+        assert!(detail.contains(path_text), "{detail}");
+        assert!(detail.contains(&source_text), "{detail}");
+
+        let reason = writer_binding_reason("node-7", &error);
+        assert!(reason.contains("cannot bind writer [io]"), "{reason}");
+        assert!(reason.contains("open anchor"), "{reason}");
+        assert!(reason.contains(path_text), "{reason}");
+        assert!(reason.contains(&source_text), "{reason}");
+
+        // The local detail is never published: the path is wire-projected and
+        // the composed detail is serde-skipped.
+        let wire = serde_json::to_string(&error).expect("serialise facade error");
+        assert!(!wire.contains(path_text), "{wire}");
+        assert!(!wire.contains(&source_text), "{wire}");
+    }
 
     #[test]
     fn contradictory_or_wrong_scope_evidence_cannot_switch() {
