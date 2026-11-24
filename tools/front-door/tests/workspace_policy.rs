@@ -1819,7 +1819,8 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         ("crates/cli/src/quota.rs", 6943),
         ("crates/cli/src/run.rs", 2521),
         ("crates/cli/src/run/provider/confinement.rs", 2669),
-        ("crates/cli/src/run/provider/preparation.rs", 7791),
+        // The typed offer-mismatch fact carried into the lane refusal (#3892).
+        ("crates/cli/src/run/provider/preparation.rs", 7827),
         ("crates/config/src/loader.rs", 2796),
         ("crates/config/src/managed.rs", 3120),
         ("crates/config/src/ports.rs", 2327),
@@ -1848,10 +1849,12 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         ("crates/quota/src/admission.rs", 2341),
         ("crates/quota/src/schedule.rs", 2812),
         ("crates/records/src/adapters.rs", 2273),
-        ("crates/records/src/run.rs", 4073),
+        // The persisted offer-mismatch fact and its owner-facing detail (#3892).
+        ("crates/records/src/run.rs", 4164),
         ("crates/redact/src/lib.rs", 2273),
         ("crates/routing/src/catalog.rs", 2347),
-        ("crates/routing/src/resolve.rs", 4249),
+        // Pinned-account offer judgement and the same-reason refusal detail (#3892).
+        ("crates/routing/src/resolve.rs", 4330),
         ("crates/routing/src/review.rs", 2671),
         ("crates/run/src/build_dir_gc.rs", 6032),
         ("crates/run/src/controls.rs", 4685),

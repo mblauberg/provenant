@@ -757,6 +757,11 @@ fn known_quota_offers_withhold_an_unoffered_agy_account_unpinned()
             label: key.into(),
         };
         let mut record = provenant_quota::AccountRecord::empty(scope.clone());
+        // A snapshot at revision 1 belongs to a record at revision 1. An
+        // inconsistent record is refused as invalid evidence before the offer
+        // mismatch can be judged, which would hide the typed reason this test
+        // pins.
+        record.revision = 1;
         record.snapshot = Some(provenant_quota::QuotaSnapshot {
             extra: Default::default(),
             schema_version: 1,
