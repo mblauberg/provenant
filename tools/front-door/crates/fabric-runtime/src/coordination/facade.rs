@@ -1273,34 +1273,26 @@ impl FacadeError {
         }
     }
 
-    /// A local I/O failure whose source error has the fixed text `cause`.
-    pub fn io_caused(operation: impl Into<String>, cause: Option<&'static str>) -> Self {
-        let mut error = Self::io(operation);
-        if let Self::Io { cause: slot, .. } = &mut error {
-            *slot = cause.map(Box::from);
-        }
-        error
-    }
-
-    /// A local I/O failure that keeps the operation and path it failed at,
-    /// together with the source error's text, in the one in-process detail
-    /// field. This is the typed carrier for the writer-binding path: the
-    /// operation and path travel beside the error to the node diagnostic
-    /// instead of being re-formatted at each conversion site. Only the
-    /// local-only cause is disclosed; `operation` and `path` stay subject to
-    /// their wire projection when this error crosses an edge.
+    /// A local I/O failure that composes its operation, known path and source
+    /// text into the one in-process detail field. This is the typed carrier for
+    /// the writer-binding path: the operation and path reach the node
+    /// diagnostic without being re-formatted at each conversion site. When
+    /// neither a path nor a source is known the detail is absent, so no failure
+    /// text is invented. `operation` and `path` stay subject to their wire
+    /// projection; only the composed detail is local-only.
     pub fn io_failure(
         operation: impl Into<String>,
         path: Option<&std::path::Path>,
-        source: impl std::fmt::Display,
+        source: Option<&dyn std::fmt::Display>,
     ) -> Self {
         let operation = operation.into();
-        let path = path.map(|path| path.to_string_lossy().into_owned());
-        let detail = match &path {
-            Some(path) => format!("{operation} {path}: {source}"),
-            None => format!("{operation}: {source}"),
+        let path_text = path.map(|path| path.to_string_lossy().into_owned());
+        let detail = match (path_text.as_deref(), source) {
+            (Some(path), Some(source)) => Some(format!("{operation} {path}: {source}")),
+            (Some(path), None) => Some(format!("{operation} {path}")),
+            (None, Some(source)) => Some(format!("{operation}: {source}")),
+            (None, None) => None,
         };
-        let detail = provenant_core::bounded_line(&detail, 4096);
         let mut error = Self::io(operation);
         if let Self::Io {
             cause: slot,
@@ -1308,8 +1300,8 @@ impl FacadeError {
             ..
         } = &mut error
         {
-            *slot_path = path;
-            *slot = Some(detail.into());
+            *slot_path = path_text;
+            *slot = detail.map(|detail| provenant_core::bounded_line(&detail, 4096).into());
         }
         error
     }
@@ -1331,32 +1323,39 @@ impl FacadeError {
         anchor: Option<&std::path::Path>,
     ) -> Self {
         use provenant_os::fs::FsError;
-        let (operation, path) = match error {
+        let (operation, path, source) = match error {
             FsError::Io {
-                operation, path, ..
-            } => (*operation, Some(path.clone())),
-            FsError::ReadIo { path, .. } => ("read file", Some(path.clone())),
-            FsError::Rename { to_path, .. } => ("rename", Some(to_path.clone())),
-            FsError::Symlink { path, .. } => ("resolve path", Some(path.clone())),
-            FsError::CrossDevice { path } => ("verify filesystem device", Some(path.clone())),
-            FsError::LockTimeout { path, .. } | FsError::Cancelled { path } => {
-                ("acquire lock", Some(path.clone()))
+                operation,
+                path,
+                source,
+            } => (*operation, Some(path.clone()), Some(source.to_string())),
+            FsError::ReadIo { path, source } => {
+                ("read file", Some(path.clone()), Some(source.to_string()))
             }
-            FsError::LockDeadlineOverflow { path } => ("set lock deadline", Some(path.clone())),
-            _ => ("verify filesystem entry", None),
+            FsError::Rename {
+                to_path, source, ..
+            } => ("rename", Some(to_path.clone()), Some(source.to_string())),
+            FsError::Symlink { path, source } => {
+                ("resolve path", Some(path.clone()), Some(source.to_string()))
+            }
+            FsError::CrossDevice { path } => ("verify filesystem device", Some(path.clone()), None),
+            FsError::LockTimeout { path, .. } | FsError::Cancelled { path } => {
+                ("acquire lock", Some(path.clone()), None)
+            }
+            FsError::LockDeadlineOverflow { path } => {
+                ("set lock deadline", Some(path.clone()), None)
+            }
+            // No operation ran and neither path nor source is known; leave the
+            // detail absent rather than inventing one.
+            _ => ("verify filesystem entry", None, None),
         };
-        Self::Io {
-            delivery_limit: None,
-            delivery_stage: None,
-            resource: None,
-            input_failure: None,
-            cause: None,
-            operation: operation.into(),
-            path: path
-                .map(|path| anchor.map_or_else(|| path.clone(), |anchor| anchor.join(&path)))
-                .filter(|path| path.is_absolute())
-                .map(|path| path.to_string_lossy().into_owned()),
-        }
+        let path = path
+            .map(|path| anchor.map_or_else(|| path.clone(), |anchor| anchor.join(&path)))
+            .filter(|path| path.is_absolute());
+        let source = source
+            .as_deref()
+            .map(|source| source as &dyn std::fmt::Display);
+        Self::io_failure(operation, path.as_deref(), source)
     }
 }
 

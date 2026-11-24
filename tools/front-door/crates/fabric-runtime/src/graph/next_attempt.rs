@@ -869,34 +869,38 @@ mod tests {
 
     #[test]
     fn writer_binding_io_failure_names_path_and_operation() {
+        // Drive the conversion `bind_child_directory` uses: opening a regular
+        // file as a directory fails, and `FacadeError::filesystem` must own the
+        // operation, known path and source in its one local detail field.
         let root = tempfile::tempdir().expect("create a temporary worktree parent");
         let blocker = root.path().join("not-a-directory");
         std::fs::write(&blocker, b"occupied").expect("plant a regular file as the parent");
-        let worktree = blocker.join("worktree");
-        let source = worktree
-            .try_exists()
-            .expect_err("a path beneath a regular file must fail");
-        let source_text = source.to_string();
-        let path_text = worktree.to_str().expect("test path is UTF-8");
+        let fs_error = provenant_os::fs::Directory::open_anchor(&blocker)
+            .expect_err("opening a regular file as a directory must fail");
+        let source_text = match &fs_error {
+            provenant_os::fs::FsError::Io { source, .. } => source.to_string(),
+            other => other.to_string(),
+        };
+        let path_text = blocker.to_str().expect("test path is UTF-8");
+        let error = FacadeError::filesystem(&fs_error);
 
-        let error = FacadeError::io_failure("inspect writer worktree", Some(&worktree), source);
         let diagnostic = error.diagnostic();
         let detail = diagnostic
             .detail
             .as_deref()
-            .expect("io failure has local detail");
-        assert!(detail.contains("inspect writer worktree"), "{detail}");
+            .expect("binding io failure has local detail");
+        assert!(detail.contains("open anchor"), "{detail}");
         assert!(detail.contains(path_text), "{detail}");
         assert!(detail.contains(&source_text), "{detail}");
 
         let reason = writer_binding_reason("node-7", &error);
         assert!(reason.contains("cannot bind writer [io]"), "{reason}");
-        assert!(reason.contains("inspect writer worktree"), "{reason}");
+        assert!(reason.contains("open anchor"), "{reason}");
         assert!(reason.contains(path_text), "{reason}");
         assert!(reason.contains(&source_text), "{reason}");
 
-        // A peer cannot use the local detail as a route for a raw path: the
-        // wire operation and path are projected without the trusted detail.
+        // The local detail is never published: the path is wire-projected and
+        // the composed detail is serde-skipped.
         let wire = serde_json::to_string(&error).expect("serialise facade error");
         assert!(!wire.contains(path_text), "{wire}");
         assert!(!wire.contains(&source_text), "{wire}");

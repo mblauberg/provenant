@@ -354,8 +354,10 @@ impl std::fmt::Display for ArtifactProvenance {
     }
 }
 
-/// A source error whose fixed cause the run diagnostic may disclose. Its
-/// text, which can name paths or Git output, stays in the error chain only.
+/// A source error whose text can name paths or Git output. The raw text may
+/// reach an owner-facing local diagnostic through `DiagnosticFact`, but never
+/// the peer wire: facts are serde-skipped and only typed, sanitised fields are
+/// projected for a peer. `cause` is the fixed text safe to disclose there.
 #[derive(Debug)]
 pub(crate) struct CausedSource {
     text: String,
@@ -1548,7 +1550,7 @@ mod diagnostic_projection_tests {
     }
 
     #[test]
-    fn untrusted_error_sources_do_not_enter_diagnostics() {
+    fn untrusted_error_sources_never_reach_the_peer_wire() {
         use provenant_confinement::worktrees::WorktreeError;
         use provenant_records::diagnostic::DiagnosticFact;
         let cases = [
