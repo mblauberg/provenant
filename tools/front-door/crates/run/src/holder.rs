@@ -2702,6 +2702,7 @@ impl RunStore {
         }
         let captured_handoff = self.capture_handoff(attempt, &record, &decoded)?;
         let trailing_verdict_tolerated = captured_handoff.trailing_verdict_tolerated;
+        let trailing_prose_tolerated = captured_handoff.trailing_prose_tolerated;
         let (mut handoff, handoff_error) = match captured_handoff.handoff {
             Ok(handoff) => (handoff, None),
             Err(error) => (None, Some(error)),
@@ -3725,6 +3726,15 @@ impl RunStore {
             decoded.reason = Some(match decoded.reason.take() {
                 Some(reason) => format!("{ORDER_NOTE}; {reason}"),
                 None => ORDER_NOTE.into(),
+            });
+        }
+        if trailing_prose_tolerated {
+            // #3928: a finished writer that adds prose after its single handoff
+            // keeps the declaration, with the drift visible in the status.
+            const PROSE_NOTE: &str = "accepted trailing prose after the closed handoff";
+            decoded.reason = Some(match decoded.reason.take() {
+                Some(reason) => format!("{PROSE_NOTE}; {reason}"),
+                None => PROSE_NOTE.into(),
             });
         }
         let decoded_reason = decoded.reason.take().map(bounded_reason);

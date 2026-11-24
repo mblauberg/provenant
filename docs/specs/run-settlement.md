@@ -184,13 +184,20 @@ contains several blocks, the last one that ends the answer is authoritative: ear
 prose between them are ordinary answer text. Without one, a `json` fence that ends the answer and
 decodes as a handoff is accepted with a warning naming the fallback. Adjacent repeated blocks are
 one declaration (identical copies accepted, differing copies settle on the last), each with a
-warning; prose after the last block still fails with a diagnostic naming the recovery ("end the
-answer with one handoff; retry the node"). A review's final handoff may be followed by exactly one
-recognised standalone verdict and nothing else; an accepted order tolerance is recorded in the
-terminal reason.
-- Why: providers drift to `json` fences and repeat blocks, and a late background task can append
-  prose and a corrected handoff; refusing a complete declaration for its label loses finished work
-  while the warning and the named recovery keep the drift visible and the repair path clear.
+warning. When exactly one block closes and only ordinary prose follows it (#3928), the declaration
+still settles and the output-order tolerance is recorded in the terminal reason. Prose after a
+repeated last block, a fence or near-miss `handoff` opener after the declaration, and a truncated
+or invalid block still fail, with a diagnostic naming the recovery ("end the answer with one
+handoff; retry the node"). With turn boundaries, a turn that ran tool work keeps the strict rule
+until turn ends order tool work against the handoff (#3938). A review's final handoff may be
+followed by exactly one recognised standalone verdict and nothing else; a prose line on either side
+of that verdict keeps the strict rule, and an accepted order tolerance is recorded in the terminal
+reason. The two tolerances are mutually exclusive and diagnostic only: neither changes the
+handoff's fields or authority.
+- Why: providers drift to `json` fences and repeat blocks, a late background task can append prose
+  and a corrected handoff, and a finished writer that keeps explaining its work after one complete
+  declaration must not be failed; refusing a complete declaration for its label or trailing prose
+  loses finished work, while the warning and the named recovery keep the drift visible.
 - Owner: `crates/records/src/handoff.rs`, `crates/run/src/completion.rs`
 
 `crates/records/src/handoff.rs` owns the fields, decoding and bounds. A valid JSON object keeps

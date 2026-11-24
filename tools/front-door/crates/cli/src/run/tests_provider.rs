@@ -667,9 +667,21 @@ fn agy_repeated_answer_is_captured_once() {
         assert_eq!(captured.declarations, 1);
         assert_eq!(decoded.result.matches("```findings").count(), 1);
     }
-    // Since #3910 a later handoff that ends the answer wins, so only prose
-    // after the final handoff stays malformed.
+    // Redesigned for #3928: plain prose after one handoff is accepted with a
+    // diagnostic tolerance rather than making the declaration malformed.
     let response = format!("{answer}\nextra");
+    let decoded = decode("", &response);
+    assert_eq!(decoded.result, response);
+    let parsed = provenant_records::handoff::Handoff::from_result_report(&decoded.result);
+    assert!(parsed.handoff.as_ref().is_ok_and(Option::is_some));
+    assert!(parsed.trailing_prose_tolerated);
+    // Since #3910 a later handoff that ends the answer wins; prose after a
+    // repeated final handoff is not the single-block tolerance and stays
+    // malformed.
+    let response = format!(
+        "{answer}\n{}\nextra",
+        answer.replace("\"note\":\"done\"", "\"note\":\"different\"")
+    );
     let decoded = decode("", &response);
     assert_eq!(decoded.result, response);
     assert!(provenant_records::handoff::Handoff::from_turns(&decoded.result, &[]).is_err());
@@ -731,7 +743,11 @@ fn a_claude_reply_to_a_late_notification_keeps_the_final_handoff() {
         decoded.result,
         format!("{handoff}\nThe wait was redundant.")
     );
-    assert!(provenant_records::handoff::Handoff::from_turns(&decoded.result, &[]).is_err());
+    // Redesigned for #3928: without boundaries the trailing acknowledgement
+    // is tolerated, while the turn-aware decode still settles the handoff.
+    let parsed = provenant_records::handoff::Handoff::from_result_report(&decoded.result);
+    assert!(parsed.handoff.as_ref().is_ok_and(Option::is_some));
+    assert!(parsed.trailing_prose_tolerated);
     assert_eq!(decoded.handoff().unwrap().unwrap().note, "finished");
     // A tool run after the declaration leaves the lane without one.
     let decoded = decode(&[&notification, &tool_use]);

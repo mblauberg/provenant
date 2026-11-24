@@ -13,13 +13,16 @@ const MUST_END: &str =
 /// Absent, valid, or malformed. Never discard the error to classify absence.
 pub type HandoffResult = Result<Option<Handoff>, HandoffError>;
 
-/// The sealed handoff result plus whether the bounded output-order tolerance
-/// was used. The tolerance is diagnostic only; it does not change the
-/// handoff's fields or authority.
+/// The sealed handoff result plus the bounded output-order tolerances that
+/// were used. Each is diagnostic only; neither changes the handoff's fields
+/// or authority. They are mutually exclusive: one canonical trailing verdict
+/// and ordinary trailing prose cannot both follow a single declaration.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HandoffParse {
     pub handoff: HandoffResult,
     pub trailing_verdict_tolerated: bool,
+    /// Ordinary prose followed the single closed handoff (#3928).
+    pub trailing_prose_tolerated: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -406,17 +409,18 @@ impl Handoff {
 
     /// The complete fence that ends the answer is the declaration. Earlier
     /// fences and prose between them are ordinary answer text, so a late
-    /// superseding handoff wins. A final, standalone review verdict may follow
-    /// the declaration as the sole trailing line; the caller can record that
-    /// narrow tolerance. A malformed declaration is explicit evidence, never
-    /// an absent handoff.
+    /// superseding handoff wins. A final, standalone review verdict, or
+    /// ordinary prose after a single block (#3928), may follow the
+    /// declaration; the caller can record either tolerance. A malformed
+    /// declaration is explicit evidence, never an absent handoff.
     pub fn from_result(result: &str) -> HandoffResult {
         Self::from_result_report(result).handoff
     }
 
-    /// Parse the final handoff and report whether one canonical verdict line
-    /// followed the closed handoff. All other trailing content remains an
-    /// error. Duplicate verdict declarations are rejected by ResultCapture.
+    /// Parse the final handoff and report the tolerances used: one canonical
+    /// verdict line, or ordinary prose with no further handoff opener (#3928),
+    /// after the closed handoff. Other trailing content remains an error.
+    /// Duplicate verdict declarations are rejected by ResultCapture.
     pub fn from_result_report(result: &str) -> HandoffParse {
         Self::parse_result(result).0
     }
@@ -479,12 +483,34 @@ impl Handoff {
         }
         for (segment_start, segment_end, text, tool_activity) in segments.into_iter().rev() {
             let (mut parsed, json) = Self::parse_result(text);
+            let mut trailing_prose_tolerated = parsed.trailing_prose_tolerated;
+            // A handoff followed by prose in a turn that also ran tool work may
+            // have been drafted mid-turn (#3916, acceptance 2). TurnEnd does not
+            // order tool work against the text, so the #3928 tolerance applies
+            // only to a turn that ran no tools (ordering: #3938).
+            if tool_activity && trailing_prose_tolerated {
+                trailing_prose_tolerated = false;
+                // Keep the declared fields, as any other malformed declaration
+                // does, so the chair still reads the writer's status and note.
+                let mut error = HandoffError::new("$", MUST_END);
+                if let Ok(Some(handoff)) = &parsed.handoff
+                    && let Ok(fields) = serde_json::from_value(serde_json::json!(handoff))
+                {
+                    error.retained = fields;
+                }
+                parsed = HandoffParse {
+                    handoff: Err(error),
+                    trailing_verdict_tolerated: false,
+                    trailing_prose_tolerated: false,
+                };
+            }
             // A verdict after a json block means that block did not end the
             // answer, so it is ordinary content rather than a declaration.
             if json && verdict_declarations(&result[segment_end..]) > 0 {
                 parsed = HandoffParse {
                     handoff: Ok(None),
                     trailing_verdict_tolerated: false,
+                    trailing_prose_tolerated: false,
                 };
             }
             match parsed.handoff {
@@ -500,6 +526,7 @@ impl Handoff {
                                     "verdict after handoff is not unique",
                                 )),
                                 trailing_verdict_tolerated: false,
+                                trailing_prose_tolerated: false,
                             };
                             return (parsed, false);
                         }
@@ -507,9 +534,11 @@ impl Handoff {
                             HandoffParse {
                                 handoff: Ok(Some(suffix_handoff)),
                                 trailing_verdict_tolerated: true,
+                                ..
                             } if suffix_handoff == handoff => HandoffParse {
                                 handoff: Ok(Some(handoff)),
                                 trailing_verdict_tolerated: true,
+                                trailing_prose_tolerated: false,
                             },
                             HandoffParse {
                                 handoff: Err(error),
@@ -517,10 +546,12 @@ impl Handoff {
                             } => HandoffParse {
                                 handoff: Err(error),
                                 trailing_verdict_tolerated: false,
+                                trailing_prose_tolerated: false,
                             },
                             _ => HandoffParse {
                                 handoff: Err(HandoffError::new("$", MUST_END)),
                                 trailing_verdict_tolerated: false,
+                                trailing_prose_tolerated: false,
                             },
                         };
                         return (parsed, false);
@@ -528,6 +559,7 @@ impl Handoff {
                     let parsed = HandoffParse {
                         handoff: Ok(Some(handoff)),
                         trailing_verdict_tolerated: false,
+                        trailing_prose_tolerated,
                     };
                     return (parsed, json);
                 }
@@ -535,6 +567,7 @@ impl Handoff {
                     let parsed = HandoffParse {
                         handoff: Err(error),
                         trailing_verdict_tolerated: false,
+                        trailing_prose_tolerated: false,
                     };
                     return (parsed, false);
                 }
@@ -542,6 +575,7 @@ impl Handoff {
                     let parsed = HandoffParse {
                         handoff: Ok(None),
                         trailing_verdict_tolerated: false,
+                        trailing_prose_tolerated: false,
                     };
                     return (parsed, false);
                 }
@@ -551,6 +585,7 @@ impl Handoff {
         let parsed = HandoffParse {
             handoff: Ok(None),
             trailing_verdict_tolerated: false,
+            trailing_prose_tolerated: false,
         };
         (parsed, false)
     }
@@ -609,6 +644,20 @@ fn verdict_declarations(result: &str) -> u8 {
     capture.finish().declarations
 }
 
+/// A line after a closed handoff that cannot be tolerated prose (#3928): a
+/// fence or handoff opener (including a partial one), or a verdict-shaped line
+/// in any form the result scan recognises. Only plain prose earns the new
+/// tolerance; everything else keeps the strict end-of-answer rule.
+fn trailing_line_is_structural(marker: &str) -> bool {
+    let trimmed = marker.trim();
+    if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+        return true;
+    }
+    let mut capture = crate::result_capture::VerdictCapture::default();
+    capture.push(marker.as_bytes());
+    capture.finish().declarations > 0 || trimmed.to_ascii_lowercase().contains("verdict")
+}
+
 /// Where one completed provider turn ends in the decoded result text, and
 /// whether that turn ran a tool.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -639,8 +688,12 @@ pub struct HandoffCapture {
     trailing_verdict: bool,
     /// Content after a declaration that is neither blank nor the tolerated
     /// verdict. A later handoff clears it and becomes authoritative; at the
-    /// end of the answer it is a malformed declaration naming the recovery.
+    /// end of the answer it is tolerated after a single block when it is
+    /// ordinary prose (#3928), and is otherwise a malformed declaration
+    /// naming the recovery.
     trailing_prose: bool,
+    /// The pending prose includes a structural line, so it is never tolerated.
+    trailing_structural: bool,
     verdict: crate::result_capture::VerdictCapture,
     error: Option<HandoffError>,
 }
@@ -708,26 +761,28 @@ impl HandoffCapture {
         };
         let marker = text.trim_end_matches('\r');
         if self.declaration.is_some() {
-            if marker == OPEN && !self.trailing_verdict {
+            if marker.trim().is_empty() {
+                // Blank lines carry no content after the declaration.
+            } else if marker == OPEN && !self.trailing_verdict {
                 // A later handoff ends the answer and becomes authoritative.
                 // Earlier blocks and any prose between them are ordinary
                 // answer text, so the pending prose is cleared here.
                 self.earlier = self.declaration.take();
                 self.trailing_prose = false;
+                self.trailing_structural = false;
                 self.json = Some(Vec::new());
-            } else if !marker.trim().is_empty() {
-                if self.trailing_verdict {
-                    // A verdict after a handoff is the only tolerated suffix.
-                    self.error = Some(HandoffError::new("$", MUST_END));
-                } else if crate::result_capture::is_standalone_verdict(marker)
-                    && !self.trailing_prose
-                {
-                    self.trailing_verdict = true;
-                } else {
-                    // Tolerate prose only in case a later handoff supersedes
-                    // this one; finish_source rejects it if none does.
-                    self.trailing_prose = true;
-                }
+            } else if self.trailing_verdict {
+                // A verdict after a handoff is the only tolerated suffix.
+                self.error = Some(HandoffError::new("$", MUST_END));
+            } else if crate::result_capture::is_standalone_verdict(marker) && !self.trailing_prose {
+                self.trailing_verdict = true;
+            } else {
+                // Pending prose: a later handoff supersedes this one, and
+                // finish_source tolerates it only as ordinary prose after a
+                // single block (#3928). A verdict after prose, a fence or a
+                // near-miss opener is structural and keeps the strict rule.
+                self.trailing_prose = true;
+                self.trailing_structural |= trailing_line_is_structural(marker);
             }
         } else if let Some(json) = &mut self.json {
             if marker == OPEN {
@@ -809,8 +864,12 @@ impl HandoffCapture {
     fn finish_source(mut self) -> (HandoffParse, bool) {
         self.end_line();
         // Prose after the last declaration with no later handoff to end the
-        // answer is malformed, with the writer's recovery named.
-        if self.error.is_none() && self.trailing_prose {
+        // answer is malformed, with the writer's recovery named, unless it is
+        // ordinary prose after a single block (#3928).
+        if self.error.is_none()
+            && self.trailing_prose
+            && (self.trailing_structural || self.repeated.is_some())
+        {
             self.error = Some(HandoffError::new("$", MUST_END));
         }
         // A ```handoff block always wins, so a json candidate applies only
@@ -858,18 +917,21 @@ impl HandoffCapture {
             let parsed = HandoffParse {
                 handoff: Err(error),
                 trailing_verdict_tolerated: false,
+                trailing_prose_tolerated: false,
             };
             (parsed, false)
         } else if self.json.is_some() {
             let parsed = HandoffParse {
                 handoff: Err(HandoffError::new("$", "handoff block incomplete")),
                 trailing_verdict_tolerated: false,
+                trailing_prose_tolerated: false,
             };
             (parsed, false)
         } else {
             let parsed = HandoffParse {
                 handoff: Ok(self.declaration),
                 trailing_verdict_tolerated: self.trailing_verdict,
+                trailing_prose_tolerated: self.trailing_prose,
             };
             (parsed, self.json_fallback)
         }
@@ -1084,11 +1146,17 @@ mod tests {
             ("The wait was redundant.", false),
             ("Noted.", false),
         ]);
-        assert!(Handoff::from_result(&result).is_err());
+        // Redesigned for #3928: the whole-answer parse now accepts that prose
+        // with a diagnostic tolerance; turn boundaries still decide authority
+        // when turns are known, so the turn-aware tolerance stays unset.
+        let whole = Handoff::from_result_report(&result);
+        assert_eq!(whole.handoff, Ok(stop.clone()));
+        assert!(whole.trailing_prose_tolerated);
         assert_eq!(Handoff::from_turns(&result, &ends), Ok(stop.clone()));
         let parsed = Handoff::from_turns_report(&result, &ends);
         assert_eq!(parsed.handoff, Ok(stop.clone()));
         assert!(!parsed.trailing_verdict_tolerated);
+        assert!(!parsed.trailing_prose_tolerated);
         // Acceptance 4: a later valid declaration wins.
         let (result, ends) = turns(&[(&report, true), ("Ack.", false), (&done, false)]);
         assert_eq!(
@@ -1124,12 +1192,13 @@ mod tests {
 
     // Spec: docs/specs/run-settlement.md#settlement
     #[test]
-    fn one_canonical_verdict_after_a_closed_handoff_is_the_only_tolerated_suffix() {
+    fn verdict_order_after_a_closed_handoff_is_still_strict() {
         let stopped = Handoff::from_result(STOP).unwrap();
         let result = format!("{STOP}\n\nVERDICT: PASS\n");
         let parsed = Handoff::from_result_report(&result);
         assert_eq!(parsed.handoff, Ok(stopped.clone()));
         assert!(parsed.trailing_verdict_tolerated);
+        assert!(!parsed.trailing_prose_tolerated);
         assert_eq!(Handoff::from_result(&result), Ok(stopped.clone()));
         for size in [1, 7, 8192] {
             let mut capture = HandoffCapture::default();
@@ -1145,6 +1214,7 @@ mod tests {
         let parsed = Handoff::from_turns_report(&multi_turn, &ends);
         assert_eq!(parsed.handoff, Ok(stopped.clone()));
         assert!(parsed.trailing_verdict_tolerated);
+        assert!(!parsed.trailing_prose_tolerated);
 
         let (extra_turn, ends) = turns(&[
             (STOP, false),
@@ -1206,9 +1276,11 @@ mod tests {
             assert!(!captured.verdict_invalid, "{line}");
         }
 
+        // "Review complete." moved to the #3928 tolerance test: plain prose
+        // after one declaration is now accepted, but any verdict-shaped line
+        // or a second handoff opener still keeps the strict rule.
         for suffix in [
             "VERDICT: MAYBE",
-            "Review complete.",
             "Review complete.\nVERDICT: PASS",
             "VERDICT: PASS\nReview complete.",
             "VERDICT: PASS\nVERDICT: PASS",
@@ -1220,12 +1292,73 @@ mod tests {
             let parsed = Handoff::from_result_report(&result);
             assert!(parsed.handoff.is_err(), "accepted suffix: {suffix}");
             assert!(!parsed.trailing_verdict_tolerated, "{suffix}");
+            assert!(!parsed.trailing_prose_tolerated, "{suffix}");
         }
 
         // A prior verdict plus the trailing verdict is still a duplicate even
         // though the final line itself has the recognised standalone form.
         let duplicate = format!("VERDICT: FAIL\n{STOP}\nVERDICT: PASS\n");
         assert!(Handoff::from_result(&duplicate).is_err());
+    }
+
+    // Spec: docs/specs/run-settlement.md#settlement
+    #[test]
+    fn one_closed_handoff_followed_only_by_prose_is_accepted_with_a_tolerance() {
+        let stopped = Handoff::from_result(STOP).unwrap().unwrap();
+        // A single complete declaration followed by ordinary prose still
+        // settles; the tolerance is diagnostic only (#3928).
+        for suffix in [
+            "Commit pushed. Now updating the PR body ...",
+            "Done.\n\nCommit pushed.\nPR body updated.",
+            "   \nNoted.\t",
+        ] {
+            let result = format!("{STOP}\n\n{suffix}\n");
+            let parsed = Handoff::from_result_report(&result);
+            assert_eq!(parsed.handoff, Ok(Some(stopped.clone())), "{suffix}");
+            assert!(parsed.trailing_prose_tolerated, "{suffix}");
+            assert!(!parsed.trailing_verdict_tolerated, "{suffix}");
+            // Bounded streaming reaches the same result at any chunk size.
+            let mut capture = HandoffCapture::default();
+            for chunk in result.as_bytes().chunks(7) {
+                capture.push(chunk);
+            }
+            assert_eq!(capture.finish_report(), parsed, "{suffix}");
+        }
+        // A truncated or invalid block is explicit evidence, never a pass.
+        for result in ["```handoff\n{\"schema_version\":2,", "```handoff\n{}\n```"] {
+            assert!(Handoff::from_result(result).is_err(), "{result}");
+        }
+        // After one declaration, a further (even partial) opener, a verdict
+        // declaration, or prose before a verdict still fails.
+        for suffix in [
+            "Commit pushed.\n```handoff\n{\"schema_version\":2,",
+            "Commit pushed.\n```handof\n{\"status\":\"done\"}",
+            "  ```handoff",
+            "Review complete.\nVERDICT: PASS",
+        ] {
+            let result = format!("{STOP}\n{suffix}\n");
+            let parsed = Handoff::from_result_report(&result);
+            assert!(parsed.handoff.is_err(), "accepted suffix: {suffix}");
+            assert!(!parsed.trailing_prose_tolerated, "{suffix}");
+        }
+        // Prose after a repeated block is not the single-block tolerance.
+        let repeated = format!("{STOP}\n{STOP}\nTrailing prose.");
+        let parsed = Handoff::from_result_report(&repeated);
+        assert!(parsed.handoff.is_err());
+        assert!(!parsed.trailing_prose_tolerated);
+
+        // With turn boundaries, a final turn that adds prose without tool work
+        // keeps the declaration and its tolerance; work after the handoff in
+        // the same turn still reaches the stricter #3916 rule.
+        let final_turn = format!("{STOP}\nCommit pushed.");
+        let (result, ends) = turns(&[("Report.", true), (&final_turn, false)]);
+        let parsed = Handoff::from_turns_report(&result, &ends);
+        assert_eq!(parsed.handoff, Ok(Some(stopped)));
+        assert!(parsed.trailing_prose_tolerated);
+        let (result, ends) = turns(&[("Report.", true), (&final_turn, true)]);
+        let error = Handoff::from_turns(&result, &ends).unwrap_err();
+        // The strict rule keeps the declared fields for the chair (#3932 F4).
+        assert!(!error.retained.is_empty());
     }
 
     #[test]
@@ -1489,9 +1622,10 @@ mod tests {
             assert_eq!(Handoff::from_result(result), Ok(None));
         }
         for result in [
-            format!("{STOP}\nMore text"),
-            // Adjacent and prose-separated repeats settle on the last block
-            // (see the repeated-block tests); prose after the last still fails.
+            // A single block followed only by prose is tolerated since #3928
+            // (see one_closed_handoff_followed_only_by_prose_is_accepted_with_a_tolerance);
+            // adjacent and prose-separated repeats settle on the last block, and
+            // prose after a repeated last block still fails.
             STOP.trim_end_matches("\n```").to_owned(),
             STOP.replace("\"remaining\":[\"Renderer\"],", ""),
             STOP.replace("stopped_early", "incomplete"),
@@ -1530,6 +1664,7 @@ mod tests {
             let parsed = Handoff::from_result_report(&result);
             assert_eq!(parsed.handoff, Ok(Some(declared.clone())));
             assert!(!parsed.trailing_verdict_tolerated);
+            assert!(!parsed.trailing_prose_tolerated);
             let warning = Handoff::json_fence_fallback(&result, &[]).expect("a json fallback");
             assert!(
                 warning.warning().contains("```json"),
