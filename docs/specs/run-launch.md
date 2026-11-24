@@ -317,6 +317,14 @@ refuses the launch.
 - Why: file:line evidence from a stale working tree reports findings upstream has fixed, and a
   plan should read the base it will implement rather than the caller's checkout.
 
+A review launch pinned to a pull-request head binds that head as its node source. The host materialises
+an attempt-private, read-only detached view of the commit and launches the review lane with that view
+as its working directory. The lane's prompt states that the subject is already checked out there at
+the requested head and forbids checking out, switching or resetting any other checkout, including the
+project's primary; a pinned review never needs to touch the primary checkout.
+- Why: a host-access lane can still reach the primary, so a model told only a SHA checks it out there
+  itself, leaving the primary detached and displacing concurrent writers (#3943).
+
 Unreadable required host inputs reject an attempt before launch, and a pinned source view reports
 its failure without exposing captured contents or credentials.
 - Why: a partial source view must not be mistaken for the requested input.

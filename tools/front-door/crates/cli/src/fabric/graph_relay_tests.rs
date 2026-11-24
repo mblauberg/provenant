@@ -1120,6 +1120,39 @@ mod provisioning_tests {
         Ok(())
     }
 
+    // Spec: docs/specs/run.md#writer-pin-and-re-pin
+    #[test]
+    fn dirty_launch_refusal_names_the_counted_paths() {
+        use provenant_fabric_runtime::coordination::facade::DispatchRefusalFact;
+        // This is the narrowest production function that turns a launch
+        // worktree error into the typed refusal the lane receives.
+        let error = provisioning_refusal(provenant_confinement::worktrees::WorktreeError::Dirty(
+            "src/first.rs, src/second.rs and 9 more\u{1b}".into(),
+        ));
+        let ServiceError::Facade(FacadeError::DispatchRefused {
+            fact: Some(DispatchRefusalFact::DirtyWriter { paths }),
+            reason,
+            ..
+        }) = &error
+        else {
+            panic!("expected a typed dirty-writer refusal: {error:?}");
+        };
+        assert!(reason.is_empty(), "untrusted reason must stay suppressed");
+        assert!(paths.contains("src/first.rs"), "{paths}");
+        assert!(paths.contains("src/second.rs"), "{paths}");
+        assert!(paths.contains("9 more"), "{paths}");
+        assert!(!paths.contains('\u{1b}'), "{paths}");
+        let ServiceError::Facade(facade) = &error else {
+            unreachable!()
+        };
+        let diagnostic = facade.diagnostic();
+        let detail = diagnostic.detail.as_deref().unwrap();
+        assert!(detail.contains("src/first.rs"), "{detail}");
+        assert!(detail.contains("9 more"), "{detail}");
+        assert!(!detail.contains('\u{1b}'), "{detail}");
+        assert!(diagnostic.next.as_deref().unwrap().contains("commit"));
+    }
+
     // Spec: docs/specs/fabric.md#cli-and-relay-surfaces
     #[test]
     fn readonly_parent_add_and_edit_provision_writers_at_the_pinned_graph_source()

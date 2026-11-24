@@ -225,6 +225,50 @@ fn commit_source_preparation_grants_an_immutable_materialised_view()
 }
 
 #[test]
+// Spec: docs/specs/run-launch.md#inputs-and-resources
+fn review_lane_working_directory_is_the_pinned_head_not_the_primary()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = CommitSourcePreparation::new()?;
+    // Advance the primary after the pin was resolved. A lane that reads the
+    // primary, or checks the requested head out there, sees this later tree.
+    std::fs::write(fixture.project.join("subject.txt"), "primary moved on\n")?;
+    provenant_os::fixture::run_git(&fixture.project, &["add", "subject.txt"])?;
+    provenant_os::fixture::run_git(&fixture.project, &["commit", "-qm", "primary moved"])?;
+    fixture.task.route = run::RequestedRoute::Review {
+        required_family: None,
+        extra: Default::default(),
+        name: "senior".into(),
+        effort: None,
+        excluded_families: Vec::new(),
+        distinct_families: true,
+        preferred_families: Vec::new(),
+        require_distinct: false,
+    };
+    let launch = fixture.prepare()?;
+    let pinned = fixture.task.head.as_deref().ok_or("pinned review head")?;
+    assert_ne!(
+        launch.cwd, fixture.project,
+        "a pinned review lane must not run in the primary checkout"
+    );
+    assert!(
+        launch.cwd.starts_with(&fixture.paths.temporary),
+        "a pinned review lane must run in its attempt-private view"
+    );
+    assert_eq!(
+        std::fs::read(launch.cwd.join("subject.txt"))?,
+        b"pinned subject\n",
+        "the view must hold the requested head, not the primary's later tree"
+    );
+    let view_head = std::fs::read_to_string(launch.cwd.join(".git").join("HEAD"))?;
+    assert_eq!(
+        view_head.trim(),
+        pinned,
+        "the view must be detached at the requested head"
+    );
+    Ok(())
+}
+
+#[test]
 fn host_denied_handoff_remains_best_effort() -> Result<(), Box<dyn std::error::Error>> {
     let fixture = CommitSourcePreparation::new()?;
     std::fs::write(fixture.state.join("config.toml"), format!(

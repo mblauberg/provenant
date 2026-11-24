@@ -4407,6 +4407,75 @@ mod budget_result_tests {
         Ok(())
     }
 
+    // Spec: docs/specs/run-settlement.md#settlement
+    // Issue #3941: the #3928 tolerance must reach the terminal reason and a
+    // done handoff plus prose must settle Completed end to end.
+    #[test]
+    fn done_handoff_with_trailing_prose_settles_completed_with_a_reason()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use crate::dispatch_tests::{Fake, seal_exit};
+        use crate::tests::{call, clock, context, exit, input, route};
+
+        let temp = tempfile::tempdir()?;
+        let execution = context(temp.path())?;
+        let (test_clock, cancel) = (clock(), CancelToken::new());
+        let request = call(&test_clock, &cancel);
+        let store = RunStore::open(&execution, &request)?;
+        let run = input();
+        store.create(&run, &request)?;
+        let id = run.attempt_id;
+        store.mark_starting(
+            &store.record(id, &request)?,
+            &route(),
+            &[],
+            &Default::default(),
+            None,
+            &request,
+        )?;
+        store
+            .claim(id, &test_clock, &request)?
+            .ok_or("not admitted")?;
+        let attempt = store.attempt_dir(id, false)?;
+        let done = serde_json::json!({
+            "schema_version": 2,
+            "status": "done",
+            "note": "finished",
+            "remaining": [],
+            "decisions": [],
+            "verify": [],
+        });
+        let answer = format!(
+            "{}\nCommit pushed. Now updating the PR body ...\n",
+            provenant_records::handoff::Handoff::from_json(&serde_json::to_vec(&done)?)?.fenced()
+        );
+        let mut observed = exit();
+        observed.scope = RunStore::scope(&store.record(id, &request)?);
+        seal_exit(&store, &observed)?;
+        let fake = Fake::with_observed(Some(route()), Some(Outcome::Succeeded))
+            .with_answer(Some(answer), Some(true));
+        let finished = store.finish(id, &attempt, &observed, &fake, &request)?;
+        let AttemptState::Terminal {
+            outcome, reason, ..
+        } = &finished.state
+        else {
+            return Err("settlement must be terminal".into());
+        };
+        assert_eq!(*outcome, Outcome::Succeeded, "reason: {reason:?}");
+        let reason = reason.as_deref().ok_or("terminal reason")?;
+        assert!(
+            reason.contains("accepted trailing prose after the closed handoff"),
+            "reason: {reason}"
+        );
+        let handoff = store.handoff(&store.record(id, &request)?)?;
+        assert!(
+            handoff.as_ref().is_ok_and(|handoff| handoff
+                .as_ref()
+                .is_some_and(|handoff| !handoff.unfinished())),
+            "the done declaration must survive the prose"
+        );
+        Ok(())
+    }
+
     /// #3844: a provider whose scratch is inside the attempt directory wrote a
     /// bare handoff into the snapshot slot before it exited. Settlement keeps
     /// those bytes as evidence and still seals the handoff from output.

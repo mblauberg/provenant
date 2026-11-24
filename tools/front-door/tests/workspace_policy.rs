@@ -1809,85 +1809,98 @@ fn usage_verbs_keep_their_persisted_spelling() {
 // Spec: docs/specs/rust-workspace.md#one-owner-per-command-domain
 // A ceiling is an overridable default: raise a file's entry in the same PR that
 // makes the growth deliberate, and split rather than raise where a module has
-// become an owner of unrelated mechanisms.
+// become an owner of unrelated mechanisms. Entries sit on 250-line bands with at
+// least 100 lines of headroom, so ordinary growth does not edit this shared list
+// and concurrent pull requests do not conflict on it; a raise moves an entry to
+// the next band above its size plus 100.
 #[test]
 fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Error>> {
     const DEFAULT_CEILING: usize = 2_000;
+    const BAND: usize = 250;
     const CEILINGS: &[(&str, usize)] = &[
-        ("crates/cli/src/fabric/graph_relay.rs", 2592),
-        ("crates/cli/src/lib.rs", 3830),
-        ("crates/cli/src/quota.rs", 6943),
-        ("crates/cli/src/run.rs", 2521),
-        ("crates/cli/src/run/provider/confinement.rs", 2669),
+        ("crates/cli/src/fabric/graph_relay.rs", 2750),
+        ("crates/cli/src/lib.rs", 4000),
+        ("crates/cli/src/quota.rs", 7250),
+        ("crates/cli/src/run.rs", 2750),
+        ("crates/cli/src/run/provider/confinement.rs", 3000),
         // The typed offer-mismatch fact carried into the lane refusal (#3892).
-        ("crates/cli/src/run/provider/preparation.rs", 7859),
-        ("crates/config/src/loader.rs", 2796),
-        ("crates/config/src/managed.rs", 3120),
-        ("crates/config/src/ports.rs", 2327),
-        ("crates/config/src/project_binding.rs", 2236),
-        ("crates/confinement/src/cache.rs", 3962),
-        ("crates/confinement/src/repo.rs", 2027),
-        ("crates/confinement/src/utility.rs", 6586),
-        ("crates/confinement/src/worktrees/census.rs", 2547),
-        ("crates/confinement/src/worktrees/gc.rs", 3230),
-        ("crates/confinement/src/worktrees/lifecycle.rs", 2734),
-        ("crates/fabric-runtime/src/coordination/facade.rs", 1694),
-        ("crates/fabric-runtime/src/graph.rs", 4208),
-        ("crates/fabric-runtime/src/graph/journal.rs", 2518),
-        ("crates/fabric-runtime/src/graph/model.rs", 2738),
-        ("crates/fabric-runtime/src/graph/outputs.rs", 2352),
-        ("crates/fabric-runtime/src/graph/patch.rs", 2244),
-        ("crates/fabric-runtime/src/graph/plans.rs", 2169),
-        ("crates/fabric-runtime/src/graph/template.rs", 3128),
-        ("crates/fabric-runtime/src/graph/transitions.rs", 2463),
-        ("crates/fabric-runtime/src/hosts.rs", 3673),
-        ("crates/os/src/sys/pid.rs", 2660),
-        ("crates/providers/src/lane.rs", 3529),
-        ("crates/providers/src/launch.rs", 2670),
-        ("crates/providers/src/opencode.rs", 1286),
-        ("crates/providers/src/package_cache.rs", 2295),
-        ("crates/quota/src/admission.rs", 2341),
-        ("crates/quota/src/schedule.rs", 2812),
-        ("crates/records/src/adapters.rs", 2273),
+        ("crates/cli/src/run/provider/preparation.rs", 8000),
+        ("crates/config/src/loader.rs", 3000),
+        ("crates/config/src/managed.rs", 3250),
+        ("crates/config/src/ports.rs", 2500),
+        ("crates/config/src/project_binding.rs", 2500),
+        ("crates/confinement/src/cache.rs", 4250),
+        ("crates/confinement/src/repo.rs", 2250),
+        ("crates/confinement/src/utility.rs", 6750),
+        ("crates/confinement/src/worktrees/census.rs", 2750),
+        ("crates/confinement/src/worktrees/gc.rs", 3500),
+        ("crates/confinement/src/worktrees/lifecycle.rs", 3000),
+        ("crates/fabric-runtime/src/coordination/facade.rs", 2000),
+        ("crates/fabric-runtime/src/graph.rs", 4500),
+        ("crates/fabric-runtime/src/graph/journal.rs", 2750),
+        ("crates/fabric-runtime/src/graph/model.rs", 3000),
+        ("crates/fabric-runtime/src/graph/outputs.rs", 2500),
+        ("crates/fabric-runtime/src/graph/patch.rs", 2500),
+        ("crates/fabric-runtime/src/graph/plans.rs", 2500),
+        ("crates/fabric-runtime/src/graph/template.rs", 3250),
+        ("crates/fabric-runtime/src/graph/transitions.rs", 2750),
+        ("crates/fabric-runtime/src/hosts.rs", 4000),
+        ("crates/os/src/sys/pid.rs", 2750),
+        ("crates/providers/src/lane.rs", 3750),
+        ("crates/providers/src/launch.rs", 3000),
+        ("crates/providers/src/opencode.rs", 1500),
+        ("crates/providers/src/package_cache.rs", 2500),
+        ("crates/quota/src/admission.rs", 2500),
+        ("crates/quota/src/schedule.rs", 3000),
+        ("crates/records/src/adapters.rs", 2500),
         // The persisted offer-mismatch fact and its owner-facing detail (#3892).
-        ("crates/records/src/run.rs", 4189),
-        ("crates/redact/src/lib.rs", 2273),
-        ("crates/routing/src/catalog.rs", 2347),
+        ("crates/records/src/run.rs", 4500),
+        ("crates/redact/src/lib.rs", 2500),
+        ("crates/routing/src/catalog.rs", 2500),
         // Pinned-account offer judgement and the same-reason refusal detail (#3892).
-        ("crates/routing/src/resolve.rs", 4377),
-        ("crates/routing/src/review.rs", 2671),
-        ("crates/run/src/build_dir_gc.rs", 6032),
-        // The #3844 settlement-slot ownership and its pinned capture tests (#3942).
-        ("crates/run/src/completion.rs", 2400),
-        ("crates/run/src/controls.rs", 4685),
-        ("crates/run/src/delivery.rs", 4580),
-        ("crates/run/src/git_context.rs", 2841),
-        ("crates/run/src/holder.rs", 9365),
-        ("crates/run/src/launch.rs", 3938),
-        ("crates/run/src/retention.rs", 4898),
-        ("crates/run/src/settlement.rs", 4183),
-        ("crates/run/src/store.rs", 2504),
-        ("crates/run/src/writer.rs", 3998),
-        ("crates/supervisor/src/custody.rs", 3845),
-        ("crates/supervisor/src/guardian.rs", 2991),
-        ("crates/workflow/src/session.rs", 3252),
-        ("src/ci.rs", 2243),
-        ("src/fabric/graph_execution.rs", 2425),
-        ("src/fabric/interface.rs", 3970),
-        ("src/fabric/owner.rs", 5550),
-        ("src/fabric/peer.rs", 2274),
-        ("src/fabric/run_owner.rs", 2806),
-        ("src/fabric/unified.rs", 4275),
-        ("src/handoff.rs", 1425),
-        ("src/hooks.rs", 2636),
-        ("src/install.rs", 3159),
-        ("src/lane_cleanup.rs", 3148),
-        ("src/pr/landing/adapters.rs", 2984),
-        ("src/pr/landing/driver.rs", 3967),
-        ("src/pr/observer.rs", 2508),
-        ("src/status_wait.rs", 3339),
-        ("src/worktrees.rs", 5384),
+        ("crates/routing/src/resolve.rs", 4500),
+        ("crates/routing/src/review.rs", 3000),
+        ("crates/run/src/build_dir_gc.rs", 6250),
+        ("crates/run/src/controls.rs", 5000),
+        ("crates/run/src/delivery.rs", 4750),
+        ("crates/run/src/git_context.rs", 3000),
+        // The #3941 end-to-end settlement test for trailing prose.
+        ("crates/run/src/holder.rs", 9500),
+        ("crates/run/src/launch.rs", 4250),
+        ("crates/run/src/retention.rs", 5000),
+        ("crates/run/src/settlement.rs", 4500),
+        ("crates/run/src/store.rs", 2750),
+        ("crates/run/src/writer.rs", 4250),
+        ("crates/supervisor/src/custody.rs", 4000),
+        ("crates/supervisor/src/guardian.rs", 3250),
+        ("crates/workflow/src/session.rs", 3500),
+        ("src/ci.rs", 2500),
+        ("src/fabric/graph_execution.rs", 2750),
+        ("src/fabric/interface.rs", 4250),
+        ("src/fabric/owner.rs", 5750),
+        ("src/fabric/peer.rs", 2500),
+        ("src/fabric/run_owner.rs", 3000),
+        ("src/fabric/unified.rs", 4500),
+        ("src/handoff.rs", 1750),
+        ("src/hooks.rs", 2750),
+        ("src/install.rs", 3250),
+        ("src/lane_cleanup.rs", 3250),
+        ("src/pr/landing/adapters.rs", 3250),
+        ("src/pr/landing/driver.rs", 4250),
+        ("src/pr/observer.rs", 2750),
+        ("src/status_wait.rs", 3500),
+        ("src/worktrees.rs", 5500),
     ];
+    let off_band: Vec<_> = CEILINGS
+        .iter()
+        .filter(|(_, ceiling)| ceiling % BAND != 0)
+        .map(|(file, ceiling)| format!("{file}: {ceiling}"))
+        .collect();
+    assert!(
+        off_band.is_empty(),
+        "line ceilings must sit on {BAND}-line bands so routine growth does not edit them:\n{}",
+        off_band.join("\n")
+    );
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut sources = Vec::new();
     for path in source_roots() {
@@ -1911,7 +1924,8 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         if lines > ceiling {
             violations.push(format!(
                 "{relative} is {lines} lines, over its ceiling of {ceiling}; split the file, or raise \
-                 its ceiling in this test in the same PR that justifies the growth"
+                 its ceiling to the next {BAND}-line band above {lines} + 100 in the same PR that \
+                 justifies the growth"
             ));
         }
     }

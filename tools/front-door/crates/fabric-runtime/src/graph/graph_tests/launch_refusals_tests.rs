@@ -341,7 +341,9 @@ fn graph_remedies_follow_writer_resource_and_unknown_handoff_causes() {
     let cases = [
         (
             FacadeError::DispatchRefused {
-                fact: Some(DispatchRefusalFact::DirtyWriter),
+                fact: Some(DispatchRefusalFact::DirtyWriter {
+                    paths: String::new(),
+                }),
                 disk: None,
                 reason: "TOKEN_SENTINEL".into(),
             },
@@ -478,7 +480,9 @@ fn writer_binding_failure_persists_only_the_safe_projection() {
     writer.worktree = Some("/fixture/worktree".into());
     let mut owner = ErrorLauncher {
         binding_error: Some(FacadeError::DispatchRefused {
-            fact: Some(crate::coordination::facade::DispatchRefusalFact::DirtyWriter),
+            fact: Some(crate::coordination::facade::DispatchRefusalFact::DirtyWriter {
+                paths: String::new(),
+            }),
             reason: "TOKEN_SENTINEL".into(),
             disk: None,
         }),

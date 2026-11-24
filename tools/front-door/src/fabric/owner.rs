@@ -207,6 +207,33 @@ fn stored_graph_refusal(
     })
 }
 
+/// The operator-facing WRITER_SCOPE refusal for a dirty writer checkout. The
+/// typed path summary is the only untrusted text rendered here, and it is
+/// display-sanitised and bounded before it is stored.
+fn writer_dirty_diagnostic(
+    error: &provenant_confinement::worktrees::WorktreeError,
+) -> Option<provenant_records::diagnostic::Diagnostic> {
+    match error {
+        provenant_confinement::worktrees::WorktreeError::Dirty(paths) => {
+            let detail = if paths.is_empty() {
+                "the writer worktree has uncommitted edits".to_owned()
+            } else {
+                format!(
+                    "the writer worktree has uncommitted edits: {}",
+                    provenant_records::diagnostic::safe_text(paths)
+                )
+            };
+            Some(
+                provenant_records::diagnostic::Diagnostic::new("WRITER_SCOPE")
+                    .category("refused")
+                    .detail(detail)
+                    .next("commit or preserve the worktree changes before retrying"),
+            )
+        }
+        _ => None,
+    }
+}
+
 impl BoundGraphOwner<'_> {
     fn fast_forward_writer(
         &self,
@@ -3264,16 +3291,7 @@ impl BoundGraphOwner<'_> {
                 },
             )
             .map_err(|error| {
-                let diagnostic = matches!(
-                    error,
-                    provenant_confinement::worktrees::WorktreeError::Dirty(_)
-                )
-                .then(|| {
-                    provenant_records::diagnostic::Diagnostic::new("WRITER_SCOPE")
-                        .category("refused")
-                        .detail("the writer worktree has uncommitted edits")
-                        .next("commit or preserve the worktree changes before retrying")
-                });
+                let diagnostic = writer_dirty_diagnostic(&error);
                 let error = graph_writer_initialisation_error(commit, error);
                 match diagnostic {
                     Some(diagnostic) => self
@@ -3313,16 +3331,7 @@ impl BoundGraphOwner<'_> {
                 node.writer_dirty_preflight,
             )
             .map_err(|error| {
-                let diagnostic = matches!(
-                    error,
-                    provenant_confinement::worktrees::WorktreeError::Dirty(_)
-                )
-                .then(|| {
-                    provenant_records::diagnostic::Diagnostic::new("WRITER_SCOPE")
-                        .category("refused")
-                        .detail("the writer worktree has uncommitted edits")
-                        .next("commit or preserve the worktree changes before retrying")
-                });
+                let diagnostic = writer_dirty_diagnostic(&error);
                 let error = graph_writer_initialisation_error(commit, error);
                 match diagnostic {
                     Some(diagnostic) => self

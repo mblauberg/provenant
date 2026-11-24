@@ -633,12 +633,29 @@ pub(super) enum WorktreeCleanliness {
     Unknown,
 }
 
+/// The one dirtiness observation a launch or retry makes: a fresh
+/// `git status --porcelain` reading, with ignored paths excluded. A recorded
+/// private attempt index is a snapshot of an earlier attempt, retained across
+/// stop, not an observation of this worktree; it must not refuse a new writer
+/// whose native status is clean. Removal and GC, which destroy that private
+/// Git, use [`worktree_cleanliness_with_attempt_indexes_at`] instead.
 pub(super) fn worktree_cleanliness_at(
     context: &WorktreeContext<'_>,
     repo: &VerifiedRepo,
     cancel: &CancelToken,
 ) -> Result<WorktreeCleanliness, WorktreeError> {
-    let cleanliness = native_worktree_cleanliness_at(context, repo, cancel)?;
+    native_worktree_cleanliness_at(context, repo, cancel)
+}
+
+/// The removal verdict also accounts for every durable private attempt index:
+/// removing the worktree destroys those indexes, so staged work invisible to
+/// the native status must still retain the tree.
+pub(super) fn worktree_cleanliness_with_attempt_indexes_at(
+    context: &WorktreeContext<'_>,
+    repo: &VerifiedRepo,
+    cancel: &CancelToken,
+) -> Result<WorktreeCleanliness, WorktreeError> {
+    let cleanliness = worktree_cleanliness_at(context, repo, cancel)?;
     require_attempt_indexes_clean(context, repo, cancel)?;
     Ok(cleanliness)
 }
