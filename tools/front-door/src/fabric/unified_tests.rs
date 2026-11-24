@@ -1656,7 +1656,7 @@ fn compact_row_keeps_the_reason_leading_clause_with_a_long_path()
     let row = compact
         .lines()
         .find(|line| line.contains("note="))
-        .expect("a compact node row carrying the reason");
+        .ok_or_else(|| format!("no compact node row carries the reason:\n{compact}"))?;
     assert!(
         row.contains(&first_clause),
         "compact row lost the reason's leading clause: {row}"
