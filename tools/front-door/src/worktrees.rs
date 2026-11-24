@@ -4797,9 +4797,11 @@ mod gc_preview_tests {
 
     #[test]
     fn gc_reports_uncollected_candidates_with_reasons_sizes_and_floor_source() {
-        let mut data = GcData::default();
-        data.free_floor_bytes = 4096;
-        data.free_floor_source = "host config.toml".into();
+        let mut data = GcData {
+            free_floor_bytes: 4096,
+            free_floor_source: "host config.toml".into(),
+            ..GcData::default()
+        };
         data.report
             .kept
             .push(provenant_confinement::cache::CacheGcEntry {
