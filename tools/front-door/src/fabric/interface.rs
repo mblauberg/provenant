@@ -607,7 +607,13 @@ fn bind_submission_subject(node: &mut provenant_fabric_runtime::graph::GraphNode
             bind_submission_subject(child, head);
         }
     } else if node.review_behaviour.is_some() {
-        node.prompt.push_str("\n\nWhen a review range is supplied, the host pins its commits and supplies Git context. The review lane has read-only Git metadata and cannot fetch; read the supplied commits and context.");
+        // The subject is materialised as an attempt-private detached view that
+        // becomes the lane's working directory (#3714). Say so explicitly: a
+        // host-access lane can still reach the primary checkout, and a model
+        // told only about a SHA will check it out there itself (#3943).
+        node.prompt.push_str(&format!(
+            "\n\nWhen a review range is supplied, the host pins its commits and supplies Git context. The subject is already checked out at {head} in your working directory, a dedicated read-only detached view; read it there. Do not check out, switch or reset any other checkout, including the project's primary checkout, and do not fetch."
+        ));
         node.source = Some(provenant_fabric_runtime::graph::SourceBinding::Commit {
             commit: head.into(),
         });
