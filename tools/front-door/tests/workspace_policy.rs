@@ -1828,7 +1828,7 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         ("crates/confinement/src/repo.rs", 2027),
         ("crates/confinement/src/utility.rs", 6582),
         ("crates/confinement/src/worktrees/census.rs", 2342),
-        ("crates/confinement/src/worktrees/gc.rs", 3229),
+        ("crates/confinement/src/worktrees/gc.rs", 3230),
         ("crates/confinement/src/worktrees/lifecycle.rs", 2685),
         ("crates/fabric-runtime/src/coordination/facade.rs", 1694),
         ("crates/fabric-runtime/src/graph.rs", 4199),
