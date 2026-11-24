@@ -403,17 +403,18 @@ impl Handoff {
         Self::decode(value)
     }
 
-    /// Only one complete fence at the end of the answer is a declaration. A
-    /// final, standalone review verdict may follow it as the sole trailing
-    /// line; the caller can record that narrow tolerance. A malformed
+    /// One complete fence is a declaration when only a final standalone review
+    /// verdict, or ordinary prose with no further handoff opener, follows it;
+    /// the caller can record either tolerance. A malformed
     /// declaration is explicit evidence, never an absent handoff.
     pub fn from_result(result: &str) -> HandoffResult {
         Self::from_result_report(result).handoff
     }
 
-    /// Parse the final handoff and report whether one canonical verdict line
-    /// followed the closed handoff. All other trailing content remains an
-    /// error. Duplicate verdict declarations are rejected by ResultCapture.
+    /// Parse the final handoff and report the tolerances used: one canonical
+    /// verdict line, or ordinary prose with no further handoff opener (#3928),
+    /// after the closed handoff. Other trailing content remains an error.
+    /// Duplicate verdict declarations are rejected by ResultCapture.
     pub fn from_result_report(result: &str) -> HandoffParse {
         Self::parse_result(result).0
     }
@@ -476,18 +477,11 @@ impl Handoff {
         }
         for (segment_start, segment_end, text, tool_activity) in segments.into_iter().rev() {
             let (mut parsed, json) = Self::parse_result(text);
-            let mut trailing_prose_tolerated = parsed.trailing_prose_tolerated;
-            // A handoff followed by prose in a turn that then ran tool work was
-            // drafted mid-turn, not a final declaration (#3916). The #3928
-            // tolerance applies only when that turn ended without more work.
-            if tool_activity && trailing_prose_tolerated {
-                trailing_prose_tolerated = false;
-                parsed = HandoffParse {
-                    handoff: Err(HandoffError::new("$", "handoff must end the answer")),
-                    trailing_verdict_tolerated: false,
-                    trailing_prose_tolerated: false,
-                };
-            }
+            // Within one turn the order of tool work and text is unknown, so a
+            // turn whose single closed handoff is followed by prose keeps the
+            // #3928 tolerance whether or not it ran tools; tool work in a later
+            // turn still replaces the declaration (below).
+            let trailing_prose_tolerated = parsed.trailing_prose_tolerated;
             // A verdict after a json block means that block did not end the
             // answer, so it is ordinary content rather than a declaration.
             if json && verdict_declarations(&result[segment_end..]) > 0 {
@@ -1059,6 +1053,21 @@ mod tests {
             });
         }
         (result, ends)
+    }
+
+    #[test]
+    fn a_tool_turn_whose_handoff_is_followed_by_prose_keeps_the_tolerance() {
+        // #3928: a turn that ran tools, declared, then explained in prose is
+        // the normal shape; order within a turn is unknown, so it settles.
+        let stop = Handoff::from_result(STOP).unwrap();
+        let last = format!("Report.\n{STOP}\nCommit pushed. Now updating the PR body.");
+        let (result, ends) = turns(&[("Reading the code.", true), (&last, true)]);
+        let parsed = Handoff::from_turns_report(&result, &ends);
+        assert_eq!(parsed.handoff, Ok(stop));
+        assert!(parsed.trailing_prose_tolerated);
+        // Tool work in a later turn still replaces the declaration.
+        let (result, ends) = turns(&[(&last, true), ("Pushed a fix.", true)]);
+        assert_eq!(Handoff::from_turns(&result, &ends), Ok(None));
     }
 
     #[test]
