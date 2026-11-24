@@ -1640,10 +1640,10 @@ pub(super) fn observe_worker_holders_while(
                     pid,
                     roots,
                     ExcusalEvidence {
-                        failure: failure,
-                        listed: listed,
+                        failure,
+                        listed,
                         placed_inside: under_candidate,
-                        root_undecidable: root_undecidable,
+                        root_undecidable,
                     },
                     entries,
                     unplaceable,
