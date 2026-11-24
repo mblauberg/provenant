@@ -76,6 +76,7 @@ fn an_absent_root_places_paths_lexically() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+#[allow(clippy::disallowed_methods)] // A real child keeps the kernel's view of a deleted cwd.
 fn a_process_left_in_a_removed_tree_is_placed_inside_it() -> Result<(), Box<dyn Error>> {
     use provenant_os::pid::{CwdObservation, CwdObserver, SystemCwdObserver};
     let temp = tempfile::tempdir()?;
