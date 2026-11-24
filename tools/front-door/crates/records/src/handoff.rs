@@ -490,8 +490,16 @@ impl Handoff {
             // only to a turn that ran no tools (ordering: #3938).
             if tool_activity && trailing_prose_tolerated {
                 trailing_prose_tolerated = false;
+                // Keep the declared fields, as any other malformed declaration
+                // does, so the chair still reads the writer's status and note.
+                let mut error = HandoffError::new("$", MUST_END);
+                if let Ok(Some(handoff)) = &parsed.handoff
+                    && let Ok(fields) = serde_json::from_value(serde_json::json!(handoff))
+                {
+                    error.retained = fields;
+                }
                 parsed = HandoffParse {
-                    handoff: Err(HandoffError::new("$", "handoff must end the answer")),
+                    handoff: Err(error),
                     trailing_verdict_tolerated: false,
                     trailing_prose_tolerated: false,
                 };
@@ -1348,7 +1356,9 @@ mod tests {
         assert_eq!(parsed.handoff, Ok(Some(stopped)));
         assert!(parsed.trailing_prose_tolerated);
         let (result, ends) = turns(&[("Report.", true), (&final_turn, true)]);
-        assert!(Handoff::from_turns(&result, &ends).is_err());
+        let error = Handoff::from_turns(&result, &ends).unwrap_err();
+        // The strict rule keeps the declared fields for the chair (#3932 F4).
+        assert!(!error.retained.is_empty());
     }
 
     #[test]
