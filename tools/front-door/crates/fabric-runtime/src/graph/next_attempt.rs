@@ -126,23 +126,56 @@ fn expected_preparation_failure(
     }
 }
 
+/// Stable owner codes that make a launch wait out writer contention instead
+/// of settling. Shared with checkpoint validation so the two cannot drift.
+pub(crate) fn launch_contention_code(code: &str) -> bool {
+    matches!(
+        code,
+        "busy" | "writer_lock_busy" | "writer_unknown" | "writer_busy"
+    )
+}
+
+/// Writer-custody codes that prove the launch had not reached the host when it
+/// failed. Generic `busy` is excluded: it also covers post-acceptance
+/// filesystem lock timeouts, where a live guardian may already exist.
+pub(crate) fn pre_host_contention(code: &str) -> bool {
+    matches!(code, "writer_lock_busy" | "writer_unknown" | "writer_busy")
+}
+
+/// Typed counterpart of `pre_host_contention`. Called at disposition time to
+/// record the fact on the attempt instead of inferring it from stored codes.
+pub(crate) fn launch_pre_host(error: &(dyn Error + 'static)) -> bool {
+    use crate::coordination::facade::FacadeError;
+    error
+        .downcast_ref::<FacadeError>()
+        .is_some_and(|error| pre_host_contention(error.static_code()))
+}
+
+/// The recorded fact that no non-terminal attempt crossed acceptance. The
+/// blocked diagnostic and the retry gate both read it; neither infers it from
+/// owner code strings. An empty attempt set is vacuously safe: writer-lock
+/// waits before the first attempt never reached the host either.
+pub(crate) fn all_attempts_refused_before_acceptance(progress: &NodeProgress) -> bool {
+    progress
+        .attempts
+        .iter()
+        .filter(|attempt| attempt.state != AttemptState::Terminal)
+        .all(|attempt| attempt.host_refused_before_acceptance)
+}
+
 /// Contention waits for this lane's launch deadline, independently of the
 /// retry-count policy used for transport failures.
 pub(crate) fn launch_contention(error: &(dyn Error + 'static)) -> bool {
     use crate::coordination::facade::FacadeError;
-    matches!(
-        error.downcast_ref::<FacadeError>(),
-        Some(
-            FacadeError::Busy
-                | FacadeError::WriterLockBusy
-                | FacadeError::WriterUnknown
-                | FacadeError::WriterBusy { .. }
-                | FacadeError::GitMutationFailed {
-                    lock_failure: true,
-                    ..
-                }
-        )
-    )
+    match error.downcast_ref::<FacadeError>() {
+        Some(FacadeError::GitMutationFailed {
+            lock_failure: true, ..
+        }) => true,
+        // static_code, not code: a dynamic relay refusal code must not be
+        // mistaken for a typed writer-custody cause.
+        Some(error) => launch_contention_code(error.static_code()),
+        None => false,
+    }
 }
 
 /// Classify whether a launch error is transient (eligible for retry) or permanent.
@@ -292,6 +325,9 @@ pub(crate) fn apply_launch_disposition(
         .next
         .as_deref()
         .unwrap_or("inspect the node's inputs and state before retrying");
+    // A blocked node whose attempts are all proved never to have crossed
+    // acceptance is safe to retry, and status must say so. This reads the same
+    // recorded fact the retry gate reads; it is not re-derived from codes.
     let recovery = if error
         .downcast_ref::<crate::coordination::facade::FacadeError>()
         .is_some_and(|e| {
@@ -300,11 +336,7 @@ pub(crate) fn apply_launch_disposition(
                 crate::coordination::facade::FacadeError::LaunchUnknown { .. }
             )
         })
-        || !progress
-            .attempts
-            .iter()
-            .filter(|attempt| attempt.state != AttemptState::Terminal)
-            .all(|attempt| attempt.host_refused_before_acceptance)
+        || !all_attempts_refused_before_acceptance(progress)
     {
         String::new()
     } else if [graph_id.as_str(), id.as_str()].iter().all(|value| {
@@ -356,13 +388,18 @@ pub(crate) fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
     timing: LaunchTiming,
     journal: &mut J,
 ) -> Result<(), GraphError<R::Error, J::Error>> {
-    let proof = !launch_retry_kind(error)
+    // Writer-custody contention is itself proof the host never accepted the
+    // launch: the failure happened while binding or provisioning the writer.
+    // Record the fact from the typed error now; do not infer it later from
+    // stored owner codes, which also cover post-acceptance lock timeouts.
+    let proved_by_owner = !launch_retry_kind(error)
         && checkpoint.nodes[index]
             .attempts
             .last()
             .is_some_and(|attempt| {
                 matches!(owner.launch_refused_before_acceptance(attempt), Ok(true))
             });
+    let proof = launch_pre_host(error) || proved_by_owner;
     if let Some(attempt) = checkpoint.nodes[index].attempts.last_mut() {
         attempt.host_refused_before_acceptance = proof;
     }
@@ -1172,7 +1209,7 @@ mod tests {
         }))
         .unwrap();
         let before = checkpoint.clone();
-        let busy = crate::coordination::facade::FacadeError::WriterLockBusy;
+        let busy = crate::coordination::facade::FacadeError::WriterLockBusy { holder: None };
         assert!(
             apply_launch_disposition(
                 &mut checkpoint,
@@ -1232,7 +1269,7 @@ mod tests {
             FacadeError::HomeUnavailable,
             FacadeError::WriterUnknown,
             FacadeError::WriterBusy { holder: None },
-            FacadeError::WriterLockBusy,
+            FacadeError::WriterLockBusy { holder: None },
             FacadeError::Io {
                 delivery_limit: None,
                 delivery_stage: None,
@@ -1272,6 +1309,41 @@ mod tests {
         }
         impl Error for Untyped {}
         assert!(!launch_retry_kind(&Untyped));
+    }
+
+    #[test]
+    fn pre_host_contention_is_classified_from_the_typed_error() {
+        use crate::coordination::facade::FacadeError;
+        // Writer custody codes prove the launch never reached the host.
+        assert!(pre_host_contention("writer_lock_busy"));
+        assert!(pre_host_contention("writer_unknown"));
+        assert!(pre_host_contention("writer_busy"));
+        // Generic busy also covers post-acceptance filesystem lock timeouts.
+        assert!(!pre_host_contention("busy"));
+        assert!(!pre_host_contention("io"));
+        // The wider wait classifier still includes generic busy.
+        assert!(launch_contention_code("busy"));
+        assert!(launch_contention_code("writer_lock_busy"));
+
+        let holder = provenant_core::AttemptId::from_bytes([31; 16]);
+        assert!(launch_pre_host(&FacadeError::WriterLockBusy {
+            holder: Some(holder)
+        }));
+        assert!(launch_pre_host(&FacadeError::WriterBusy { holder: None }));
+        assert!(launch_pre_host(&FacadeError::WriterUnknown));
+        assert!(!launch_pre_host(&FacadeError::Busy));
+        assert!(!launch_pre_host(&FacadeError::LaunchUnknown {
+            operation_id: provenant_core::OperationId::parse("op").unwrap()
+        }));
+
+        // The gate reads the recorded fact, not an owner-code string.
+        let mut node = progress(
+            vec![attempt(0, false, "starting", None)],
+            serde_json::json!({"advance_error_code": "launch_retry_exhausted"}),
+        );
+        assert!(!all_attempts_refused_before_acceptance(&node));
+        node.attempts[0].host_refused_before_acceptance = true;
+        assert!(all_attempts_refused_before_acceptance(&node));
     }
 
     #[test]

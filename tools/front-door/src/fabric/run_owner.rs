@@ -451,7 +451,7 @@ pub(crate) fn run_error(error: provenant_run::RunError) -> FacadeError {
                 | provenant_confinement::worktrees::WorktreeError::RegistryLockTimeout
         )
     ) {
-        return FacadeError::WriterLockBusy;
+        return FacadeError::WriterLockBusy { holder: None };
     }
     if let provenant_run::RunError::Writer(writer) = &error
         && let Some((operation, lock_failure)) = writer.mutation_failure()
@@ -867,7 +867,7 @@ pub(crate) fn facade_error_for_kind(kind: provenant_run::ErrorKind) -> FacadeErr
             age: None,
             live: None,
         },
-        E::WriterLockBusy => FacadeError::WriterLockBusy,
+        E::WriterLockBusy => FacadeError::WriterLockBusy { holder: None },
         E::WriterUnknown => FacadeError::WriterUnknown,
         E::CredentialRoot => FacadeError::CredentialRoot {
             access: "requested".into(),

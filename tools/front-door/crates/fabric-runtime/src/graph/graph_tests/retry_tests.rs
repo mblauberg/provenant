@@ -2687,12 +2687,16 @@ fn retry_of_launch_blocked_writer_starts_a_new_attempt_in_the_same_worktree() {
     // Exhaust the contention wait at the provisioning deadline. The
     // disposition error is a typed facade kind, so use the owner whose error
     // type is FacadeError (as every other launch_disposition call here does).
+    // A named holder must reach the blocked diagnostic.
+    let holder = provenant_core::AttemptId::from_bytes([42; 16]);
     let mut disposition_owner = ErrorLauncher::default();
     launch_disposition::<ErrorLauncher, MemoryJournal>(
         &mut disposition_owner,
         &mut checkpoint,
         0,
-        &FacadeError::WriterLockBusy,
+        &FacadeError::WriterLockBusy {
+            holder: Some(holder),
+        },
         LaunchTiming {
             clock: Some(at(0)),
             admission_seconds: 0,
@@ -2710,12 +2714,32 @@ fn retry_of_launch_blocked_writer_starts_a_new_attempt_in_the_same_worktree() {
         checkpoint.nodes[0].advance_owner_code.as_deref(),
         Some("writer_lock_busy")
     );
+    // The pre-host fact is recorded from the typed error at disposition time,
+    // not inferred from the owner code; it authorises both the retry gate and
+    // the retry remedy in the blocked diagnostic.
+    assert!(
+        checkpoint.nodes[0].attempts[0].host_refused_before_acceptance,
+        "contention before acceptance must be recorded as a fact"
+    );
+    let reason = checkpoint.nodes[0].advance_error.as_deref().unwrap();
+    assert!(
+        reason.contains(&holder.to_string()),
+        "blocked diagnostic must name the lock holder: {reason}"
+    );
+    assert!(
+        reason.contains("provenant retry"),
+        "blocked diagnostic must offer the retry remedy: {reason}"
+    );
 
     retry(&document, &mut checkpoint, None, None).unwrap();
     assert_eq!(checkpoint.nodes[0].state, NodeState::Pending);
     assert!(checkpoint.nodes[0].attempts.is_empty());
     assert_eq!(checkpoint.nodes[0].previous_attempts.len(), 1);
-    assert_eq!(checkpoint.nodes[0].writer_binding, Some(binding), "retry reuses the recorded worktree");
+    assert_eq!(
+        checkpoint.nodes[0].writer_binding,
+        Some(binding),
+        "retry reuses the recorded worktree"
+    );
 
     let mut resumed = MemoryJournal::default();
     resumed.0 = Some(checkpoint);
@@ -2726,6 +2750,9 @@ fn retry_of_launch_blocked_writer_starts_a_new_attempt_in_the_same_worktree() {
     let run = advance(&document, &mut next_owner, &mut resumed).unwrap();
     assert_eq!(run.checkpoint.nodes[0].state, NodeState::Succeeded);
     assert_eq!(run.checkpoint.nodes[0].attempts.len(), 1);
-    assert_eq!(run.checkpoint.nodes[0].writer_binding.unwrap().worktree, "/fixture/launch-blocked");
+    assert_eq!(
+        run.checkpoint.nodes[0].writer_binding.unwrap().worktree,
+        "/fixture/launch-blocked"
+    );
     assert_eq!(next_owner.calls.len(), 1);
 }

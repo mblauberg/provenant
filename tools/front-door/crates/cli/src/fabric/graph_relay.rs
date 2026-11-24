@@ -2112,7 +2112,7 @@ fn provisioning_refusal(error: provenant_confinement::worktrees::WorktreeError) 
         }
         WorktreeError::CheckedOut => Some(DispatchRefusalFact::CheckedOutWriter),
         WorktreeError::RegistryLockTimeout => {
-            return ServiceError::Facade(FacadeError::WriterLockBusy);
+            return ServiceError::Facade(FacadeError::WriterLockBusy { holder: None });
         }
         WorktreeError::WriterBusy { holder } => {
             return ServiceError::Facade(FacadeError::WriterBusy { holder: *holder });

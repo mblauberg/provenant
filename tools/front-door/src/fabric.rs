@@ -108,7 +108,7 @@ fn graph_writer_initialisation_error(
         };
     }
     match error {
-        WorktreeError::RegistryLockTimeout => FacadeError::WriterLockBusy,
+        WorktreeError::RegistryLockTimeout => FacadeError::WriterLockBusy { holder: None },
         WorktreeError::LockBusy => FacadeError::WriterBusy { holder: None },
         WorktreeError::WriterBusy { holder } => FacadeError::WriterBusy { holder },
         WorktreeError::UnknownWriter => FacadeError::WriterUnknown,

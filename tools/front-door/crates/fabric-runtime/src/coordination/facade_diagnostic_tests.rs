@@ -57,6 +57,36 @@ fn writer_busy_preserves_holder_and_reads_prior_frames() -> Result<(), Box<dyn s
 }
 
 #[test]
+fn writer_lock_busy_names_the_holder_in_its_diagnostic() -> Result<(), Box<dyn std::error::Error>> {
+    let old: FacadeError = serde_json::from_value(serde_json::json!({"code":"writer_lock_busy"}))?;
+    assert_eq!(old, FacadeError::WriterLockBusy { holder: None });
+    assert!(
+        old.diagnostic()
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("holder unknown"))
+    );
+    let holder = provenant_core::AttemptId::from_bytes([24; 16]);
+    let current = FacadeError::WriterLockBusy {
+        holder: Some(holder),
+    };
+    assert!(current.to_string().contains(&holder.to_string()));
+    assert!(
+        current
+            .diagnostic()
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains(&holder.to_string()))
+    );
+    assert_eq!(current.code(), "writer_lock_busy");
+    assert_eq!(
+        serde_json::from_value::<FacadeError>(serde_json::to_value(&current)?)?,
+        current
+    );
+    Ok(())
+}
+
+#[test]
 fn corrupt_store_diagnostic_exposes_safe_decode_kind() {
     let error = provenant_fabric_store::Error::Decode(provenant_records::DecodeError::Typed {
         line: 2,
