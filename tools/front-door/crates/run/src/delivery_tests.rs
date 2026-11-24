@@ -1401,9 +1401,11 @@ fn unpublish_is_noop_when_siblings_live() -> std::result::Result<(), Box<dyn std
     std::fs::create_dir_all(&slot_path)?;
     let slot_dir = Directory::open_anchor(&slot_path)?;
 
-    // Each real holder owns a slot-local attempt directory and holder.lock.
-    std::fs::create_dir_all(slot_path.join("attempt"))?;
-    let current_attempt = Directory::open_anchor(&slot_path.join("attempt"))?;
+    // Each real holder owns a slot-local attempt directory, named for its
+    // attempt, and holder.lock.
+    let current_slot = slot_path.join(attempt_path.file_name().ok_or("attempt name")?);
+    std::fs::create_dir_all(&current_slot)?;
+    let current_attempt = Directory::open_anchor(&current_slot)?;
     let current_holder_lock = current_attempt.try_lock(
         std::ffi::OsStr::new(provenant_supervisor::custody::HOLDER_LOCK),
         provenant_os::fs::LockMode::Exclusive,
