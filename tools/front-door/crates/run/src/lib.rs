@@ -1055,10 +1055,30 @@ impl RunError {
                     diagnostic = diagnostic
                         .detail(format!("writer occupancy is unknown for {scope}: {detail}"));
                 }
-                if matches!(error, WorktreeError::BranchCollision { .. }) {
-                    diagnostic = diagnostic
-                        .detail("branch name collides with an existing ref")
-                        .next("inspect existing Git refs and choose a different branch name");
+                if let WorktreeError::BranchCollision { existing } = error {
+                    // A ref Git listed may be named, but only once it is free of
+                    // display-control characters. The same shared projection
+                    // keeps every named fact bounded and escaped.
+                    // Spec: docs/specs/run-git.md#worktrees-and-refs
+                    let (detail, next) = if existing
+                        .chars()
+                        .any(provenant_records::diagnostic::unsafe_display_character)
+                    {
+                        (
+                            "branch name collides with an existing ref".to_owned(),
+                            "inspect existing Git refs and choose a different branch name"
+                                .to_owned(),
+                        )
+                    } else {
+                        (
+                            format!(
+                                "branch name collides with existing ref {}",
+                                provenant_records::diagnostic::safe_text(existing)
+                            ),
+                            "inspect the named ref and choose a different branch name".to_owned(),
+                        )
+                    };
+                    diagnostic = diagnostic.detail(detail).next(next);
                 }
                 if let WorktreeError::WriterLeaseHeld { .. } = error {
                     diagnostic = diagnostic
@@ -1518,6 +1538,38 @@ mod diagnostic_projection_tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn branch_collision_diagnostic_names_the_ref() {
+        use provenant_confinement::worktrees::WorktreeError;
+        let error = RunError::Writer(WorktreeError::BranchCollision {
+            existing: "refs/remotes/origin/team/smoke".into(),
+        });
+        for destination in [Destination::Local, Destination::Remote] {
+            let diagnostic = error.diagnostic(destination);
+            let detail = diagnostic.detail.expect("collision names the ref");
+            assert!(
+                detail.contains("refs/remotes/origin/team/smoke"),
+                "missing ref: {detail}"
+            );
+            assert!(!detail.chars().any(char::is_control));
+        }
+    }
+
+    #[test]
+    fn withheld_collision_ref_does_not_claim_a_named_ref() {
+        use provenant_confinement::worktrees::WorktreeError;
+        let error = RunError::Writer(WorktreeError::BranchCollision {
+            existing: "refs/remotes/origin/team/\u{1b}[31msmoke".into(),
+        });
+        let diagnostic = error.diagnostic(Destination::Local);
+        let detail = diagnostic.detail.expect("collision still has a detail");
+        assert!(!detail.contains("refs/remotes/origin/team"), "{detail}");
+        assert!(!detail.chars().any(char::is_control));
+        let next = diagnostic.next.expect("collision still has a next step");
+        assert!(next.contains("existing Git refs"), "{next}");
+        assert!(!next.contains("named ref"), "{next}");
     }
 
     #[test]

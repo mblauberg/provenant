@@ -403,6 +403,9 @@ pub enum GitRead {
     /// List registrations with the verified common repository's bare setting.
     WorktreeListBare,
     BranchTips,
+    /// The configured remote names, as Git reports them: includes, section case
+    /// and quoted names follow Git rather than a hand-parsed config file.
+    RemoteNames,
     /// Read remote-tracking refs for branch-name collision checks.
     RemoteBranchTips,
     FirstParentHistory {
@@ -2477,6 +2480,7 @@ fn git_read_tail(operation: GitRead) -> Result<Vec<OsString>, UtilityError> {
             "--format=%(refname)%00%(objectname)%00".into(),
             "refs/heads".into(),
         ],
+        GitRead::RemoteNames => vec!["remote".into()],
         GitRead::RemoteBranchTips => vec![
             "for-each-ref".into(),
             "--format=%(refname)%00%(objectname)%00".into(),
