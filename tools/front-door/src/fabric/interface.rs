@@ -3871,8 +3871,6 @@ fn route_choice(input: &Value, raw: Option<&Value>) -> Result<Option<RouteChoice
 #[path = "interface_route.rs"]
 mod route;
 use route::override_tier;
-#[cfg(test)]
-pub(super) use route::route_role;
 
 fn add(row: &mut Value, key: &str, value: u64) {
     row[key] = json!(row[key].as_u64().unwrap_or(0).saturating_add(value));

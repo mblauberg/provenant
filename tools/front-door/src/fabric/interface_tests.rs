@@ -82,7 +82,7 @@ fn a_role_map_sets_each_node_to_its_role_tier_or_keeps_the_default() {
     ];
     let choice = super::RouteChoice::parse(&json!("writer=junior, review=senior")).unwrap();
     for (role, mut node) in cases {
-        assert_eq!(super::route_role(&node), role);
+        assert_eq!(super::route::route_role(&node), role);
         super::override_tier(&mut node, &choice);
         let expected = choice.tier_for(role).unwrap_or("declared");
         assert_eq!(
