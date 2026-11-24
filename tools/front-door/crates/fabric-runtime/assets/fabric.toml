@@ -56,7 +56,7 @@ restart_spacing_ms = 2000 # minimum spacing between steer restarts; 0 disables t
 
 [graph]
 launch_wait_seconds = 55 # general launch and read/wait allowance
-writer_provision_seconds = 55 # independent allowance for each writer provisioning
+writer_provision_seconds = 120 # independent allowance for each writer provisioning; also bounds launch contention
 ci_poll_overrides = {}
 
 [graph.ci_poll_backoff]

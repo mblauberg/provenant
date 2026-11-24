@@ -813,3 +813,93 @@ fn launch_retry_kinds_are_decided_from_the_typed_error_only() {
     impl Error for Untyped {}
     assert!(!launch_retry_kind(&Untyped));
 }
+
+// Issue #3923: a launch contending for a held writer lock must keep retrying
+// for a full provisioning allowance, not settle blocked at the old 55 s bound.
+#[test]
+fn concurrent_launch_waits_past_the_reader_bound_for_a_held_writer_lock() {
+    use crate::coordination::facade::FacadeError;
+    // The provisioning allowance must cover a full concurrent launch.
+    assert!(
+        crate::config::GraphConfig::default().writer_provision_seconds > 55,
+        "provisioning allowance must outlast the old contention bound"
+    );
+
+    struct ContendedChair {
+        now: provenant_core::WallTime,
+        calls: Vec<AttemptKey>,
+    }
+    impl AttemptOwner for ContendedChair {
+        type Error = FacadeError;
+        fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+            provenant_config::PortTable::builtin().worktree_layout
+        }
+        fn actor(&self) -> String {
+            "chair".into()
+        }
+        fn wall_now(&self) -> Option<provenant_core::WallTime> {
+            Some(self.now)
+        }
+        fn admission_timeout_seconds(&self) -> Option<u64> {
+            Some(crate::config::GraphConfig::default().writer_provision_seconds)
+        }
+        fn launch_retry_policy(&self) -> LaunchRetryPolicy {
+            LaunchRetryPolicy {
+                limit: 0,
+                first_seconds: 1,
+                max_seconds: 1,
+                ..Default::default()
+            }
+        }
+        fn observe_or_start(
+            &mut self,
+            key: &AttemptKey,
+            _: NodeInput<'_>,
+            _: &GraphRoute,
+            _: AccessMode,
+            _: Option<&str>,
+            _: Replay<'_>,
+        ) -> Result<AttemptObservation, Self::Error> {
+            self.calls.push(key.clone());
+            if key.node_id == "holder" {
+                Ok(AttemptObservation::Pending {
+                    attempt_ref: Some("host/holder".into()),
+                })
+            } else if self.now < at(95) {
+                Err(FacadeError::WriterLockBusy)
+            } else {
+                Ok(terminal(AttemptOutcome::Succeeded))
+            }
+        }
+    }
+
+    let document = graph(vec![
+        node("holder", route("first")),
+        node("contender", route("first")),
+    ]);
+    let mut owner = ContendedChair {
+        now: at(0),
+        calls: Vec::new(),
+    };
+    let mut journal = MemoryJournal::default();
+    let first = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(first.checkpoint.nodes[0].state, NodeState::Running);
+    assert_eq!(first.checkpoint.nodes[1].state, NodeState::Running);
+
+    // The lock is held past the old 55 s bound. The contender stays Running
+    // and keeps the contention cause; it does not settle blocked.
+    for second in [6, 20, 56, 80] {
+        owner.now = at(second);
+        let pending = advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(pending.checkpoint.nodes[1].state, NodeState::Running, "at {second}s");
+        assert_eq!(
+            pending.checkpoint.nodes[1].advance_owner_code.as_deref(),
+            Some("writer_lock_busy")
+        );
+    }
+
+    owner.now = at(96);
+    let done = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(done.checkpoint.nodes[1].state, NodeState::Succeeded);
+    assert_eq!(done.checkpoint.nodes[0].state, NodeState::Running);
+}

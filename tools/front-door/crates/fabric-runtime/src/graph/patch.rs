@@ -973,17 +973,31 @@ fn container_brief_refusal(
 // An explicit host-proven refusal leaves a Starting row but no process to
 // stop. Apply the same proof to the selected node and every reset descendant;
 // stale launch flags alone never establish that a handoff was not accepted.
+// Writer-lock contention observed before acceptance is the same safe case:
+// the launch never reached the host, so the Starting row has no attempt
+// reference and the recorded worktree can be reused by the retry.
 fn refused_before_launch(progress: &NodeProgress) -> bool {
-    progress.state == NodeState::Blocked
-        && progress.advance_error_code.as_deref() == Some("launch_refused")
+    if progress.state != NodeState::Blocked {
+        return false;
+    }
+    let contention = matches!(
+        progress.advance_owner_code.as_deref(),
+        Some("busy" | "writer_lock_busy" | "writer_unknown" | "writer_busy")
+    );
+    let settled = match progress.advance_error_code.as_deref() {
+        Some("launch_refused") => true,
+        Some("launch_retry_exhausted") if contention => true,
+        _ => return false,
+    };
+    settled
         && progress
             .attempts
             .iter()
             .filter(|attempt| attempt.state != AttemptState::Terminal)
             .all(|attempt| {
-                attempt.host_refused_before_acceptance
-                    && attempt.attempt_ref.is_none()
+                attempt.attempt_ref.is_none()
                     && attempt.state == AttemptState::Starting
+                    && (contention || attempt.host_refused_before_acceptance)
             })
 }
 

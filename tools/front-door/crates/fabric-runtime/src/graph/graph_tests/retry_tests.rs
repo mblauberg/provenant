@@ -2647,3 +2647,82 @@ fn attempt_numbers_increase_across_retries_and_replay_is_stable() {
         );
     }
 }
+
+// Issue #3923: a launch blocked on writer-lock contention never reached the
+// host, so it is settled for retry and the worktree it created is reused.
+#[test]
+fn retry_of_launch_blocked_writer_starts_a_new_attempt_in_the_same_worktree() {
+    use crate::coordination::facade::FacadeError;
+    let mut writer = node("work", route("first"));
+    writer.access = AccessMode::WorktreeWrite;
+    writer.worktree = Some(".worktrees/launch-blocked".into());
+    writer.source = Some(SourceBinding::Commit {
+        commit: "a".repeat(40),
+    });
+    let document = graph(vec![writer]);
+    let mut owner = FakeOwner {
+        observations: [AttemptObservation::Pending { attempt_ref: None }].into(),
+        ..Default::default()
+    };
+    let mut checkpoint = advance(&document, &mut owner, &mut MemoryJournal::default())
+        .unwrap()
+        .checkpoint;
+    // The launch created its writer checkout before the lock wait expired.
+    let binding = WriterWorktreeBinding {
+        extra: Default::default(),
+        source_directory_identity: None,
+        shared_worktree: None,
+        worktree: "/fixture/launch-blocked".into(),
+        head: "a".repeat(40),
+    };
+    checkpoint.nodes[0].writer_binding = Some(binding.clone());
+    // A pre-acceptance launch error leaves the fenced Starting row; the
+    // observation above only supplies the attempt identity for the fixture.
+    checkpoint.nodes[0].attempts[0].state = AttemptState::Starting;
+    let attempt = checkpoint.nodes[0].attempts.last().unwrap();
+    assert_eq!(attempt.state, AttemptState::Starting);
+    assert!(attempt.attempt_ref.is_none());
+    assert!(!attempt.host_refused_before_acceptance);
+
+    // Exhaust the contention wait at the provisioning deadline.
+    launch_disposition::<FakeOwner, MemoryJournal>(
+        &mut owner,
+        &mut checkpoint,
+        0,
+        &FacadeError::WriterLockBusy,
+        LaunchTiming {
+            clock: Some(at(0)),
+            admission_seconds: 0,
+            policy: LaunchRetryPolicy::default(),
+        },
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    assert_eq!(checkpoint.nodes[0].state, NodeState::Blocked);
+    assert_eq!(
+        checkpoint.nodes[0].advance_error_code.as_deref(),
+        Some("launch_retry_exhausted")
+    );
+    assert_eq!(
+        checkpoint.nodes[0].advance_owner_code.as_deref(),
+        Some("writer_lock_busy")
+    );
+
+    retry(&document, &mut checkpoint, None, None).unwrap();
+    assert_eq!(checkpoint.nodes[0].state, NodeState::Pending);
+    assert!(checkpoint.nodes[0].attempts.is_empty());
+    assert_eq!(checkpoint.nodes[0].previous_attempts.len(), 1);
+    assert_eq!(checkpoint.nodes[0].writer_binding, Some(binding), "retry reuses the recorded worktree");
+
+    let mut resumed = MemoryJournal::default();
+    resumed.0 = Some(checkpoint);
+    let mut next_owner = FakeOwner {
+        observations: [done_as("retried-attempt")].into(),
+        ..Default::default()
+    };
+    let run = advance(&document, &mut next_owner, &mut resumed).unwrap();
+    assert_eq!(run.checkpoint.nodes[0].state, NodeState::Succeeded);
+    assert_eq!(run.checkpoint.nodes[0].attempts.len(), 1);
+    assert_eq!(run.checkpoint.nodes[0].writer_binding.unwrap().worktree, "/fixture/launch-blocked");
+    assert_eq!(next_owner.calls.len(), 1);
+}

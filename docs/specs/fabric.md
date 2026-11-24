@@ -151,9 +151,16 @@ schema capability, structural limits, the fully expanded plan, the checkpoint
 envelope and selected outputs. A launch retry without a wall clock leaves the
 prior checkpoint. Launch and read waits and writer provisioning have independent
 sourced allowances (`domains.fabric.graph.launch_wait_seconds`,
-`domains.fabric.graph.writer_provision_seconds`). An occupied concurrency
+`domains.fabric.graph.writer_provision_seconds`). A launch that contends for a
+writer's custody waits on the provisioning allowance, not the shorter reader
+wait: a concurrent launch holds its per-worktree writer guard across the whole
+worktree add and post-create setup, so the wait must cover one full provisioning
+(default 120 s, matching the writer mutation budget). Only after that bounded
+wait expires does the node settle `blocked` with the contention cause and a
+remedy. An occupied concurrency
 threshold warns and proceeds unless its declared policy refuses; writer custody
-remains a Git boundary.
+remains a Git boundary. A launch blocked this way is settled for `retry`, which
+starts the next attempt on the same recorded worktree.
 - Why: a graph that starts must be able to finish within its bounds.
 - Owner: `crates/fabric-runtime/src/graph.rs`
 
