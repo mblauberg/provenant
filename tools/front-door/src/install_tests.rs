@@ -1068,6 +1068,24 @@ fn fixture_smoke_host(success: bool, output: &str) -> super::HostUpgrade {
     }
 }
 
+/// A production-shaped `--json` envelope, serialised from the same typed
+/// `CommandResult` the CLI emits. Fixtures must not hand-write the wire shape:
+/// an envelope's error is top-level, never under `data`.
+#[allow(
+    dead_code,
+    reason = "the custom worktree driver omits libtest functions"
+)]
+fn envelope(
+    command: &str,
+    status: provenant_records::Outcome,
+    data: serde_json::Value,
+    error: Option<provenant_records::CommandError>,
+) -> String {
+    let mut result = provenant_records::CommandResult::new(command, status, data);
+    result.error = error;
+    serde_json::to_string(&result).unwrap()
+}
+
 #[test]
 fn upgrade_refusal_names_each_failing_host_and_first_error_line() {
     let hosts = vec![
@@ -1094,19 +1112,33 @@ fn upgrade_refusal_names_each_failing_host_and_first_error_line() {
 
 #[test]
 fn refusal_reports_the_innermost_error_from_a_verify_envelope() {
-    // The real chain: the graph's error envelope is embedded in the verify
-    // child's `Command failed` report. The reason, not the wrapper chain or a
-    // clipped raw envelope, must reach the refusal and the host line.
-    let inner = serde_json::json!({
-        "schema_version": 2,
-        "command": "run",
-        "status": "error",
-        "data": {"graph": "smoke", "error": {
-            "code": "SMOKE_FAILED",
-            "message": "review gate returned VERDICT: FAIL",
-        }},
-    });
-    let report = format!("Command failed (Exit(1)): {inner}\n");
+    // The real chain: the graph child's typed error envelope is embedded in the
+    // verify child's `Command failed` report. The innermost code and message,
+    // not the wrapper chain or a clipped raw envelope, must reach the refusal
+    // and the host line.
+    let child = envelope(
+        "run",
+        provenant_records::Outcome::Error,
+        serde_json::json!({"graph": "smoke"}),
+        Some(provenant_records::CommandError::new(
+            "SMOKE_FAILED",
+            "review gate returned VERDICT: FAIL",
+            None,
+            "fix the review gate",
+        )),
+    );
+    let outer = envelope(
+        "upgrade",
+        provenant_records::Outcome::Error,
+        serde_json::json!({"verify": "installed"}),
+        Some(provenant_records::CommandError::new(
+            "UPGRADE_VERIFY",
+            format!("graph child failed: {child}"),
+            None,
+            "resolve the child failure",
+        )),
+    );
+    let report = format!("Command failed (Exit(1)): {outer}\n");
     let hosts = vec![fixture_smoke_host(false, &report)];
 
     let view = super::render_upgrade_hosts(&hosts, false);
@@ -1123,15 +1155,34 @@ fn refusal_reports_the_innermost_error_from_a_verify_envelope() {
 }
 
 #[test]
+fn upgrade_failure_repair_points_at_json_per_host_detail() {
+    // A failed envelope drops the human view, so the repair must send the
+    // operator to the typed per-host detail, not to `--full`.
+    let hosts = vec![fixture_smoke_host(false, "graph child failed\n")];
+    let error = super::failed_upgrade_result(hosts).error.unwrap();
+    assert_eq!(error.code, "UPGRADE_FAILED");
+    let repair = error.repair.unwrap();
+    assert!(
+        repair.contains("provenant upgrade --verify --json"),
+        "{repair}"
+    );
+    assert!(!repair.contains("--full"), "{repair}");
+}
+
+#[test]
 fn refusal_bounds_each_reason_and_omits_success_detail() {
     let long = "x".repeat(2000);
-    let report = serde_json::json!({
-        "schema_version": 2,
-        "command": "upgrade",
-        "status": "error",
-        "data": {"error": {"code": "SMOKE_FAILED", "message": long}},
-    })
-    .to_string();
+    let report = envelope(
+        "upgrade",
+        provenant_records::Outcome::Error,
+        serde_json::json!({"verify": "installed"}),
+        Some(provenant_records::CommandError::new(
+            "SMOKE_FAILED",
+            long,
+            None,
+            "fix the smoke failure",
+        )),
+    );
     let hosts = vec![
         fixture_upgrade_host("local", true, "install created 3 changes\n"),
         fixture_smoke_host(false, &report),
@@ -1157,7 +1208,19 @@ fn upgrade_compact_human_leads_with_one_line_per_host_and_no_raw_json() {
     let local = format!("{notice}{notice}{notice}install created 3 changes\n");
     // The verify child runs with --json and publishes the verdict as typed
     // data; the parent never re-parses clipped human envelopes.
-    let smoke = "{\"schema_version\":2,\"command\":\"upgrade\",\"status\":\"ok\",\"data\":{\"verify\":\"installed\",\"version\":\"2.9.1\",\"verdict\":\"VERDICT: PASS\"}}\n";
+    let smoke = format!(
+        "{}\n",
+        envelope(
+            "upgrade",
+            provenant_records::Outcome::Ok,
+            serde_json::json!({
+                "verify": "installed",
+                "version": "2.9.1",
+                "verdict": "VERDICT: PASS",
+            }),
+            None,
+        )
+    );
     let hosts = vec![
         fixture_upgrade_host("local", true, &local),
         fixture_upgrade_host(
@@ -1186,7 +1249,15 @@ fn upgrade_full_human_keeps_capability_notices_and_smoke_envelopes() {
         "  native_capability_unavailable: /cfg/a (instructions: unsupported)\n",
         "  native_capability_unavailable: /cfg/a (hooks: unsupported)\n"
     );
-    let smoke = "{\"schema_version\":2,\"command\":\"status\",\"status\":\"ok\",\"data\":{\"verdict\":\"VERDICT: PASS\"}}\n";
+    let smoke = format!(
+        "{}\n",
+        envelope(
+            "status",
+            provenant_records::Outcome::Ok,
+            serde_json::json!({"verdict": "VERDICT: PASS"}),
+            None,
+        )
+    );
     let hosts = vec![
         fixture_upgrade_host("local", true, local),
         fixture_smoke_host(true, smoke),

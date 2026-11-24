@@ -2,8 +2,9 @@
 //! innermost typed error from its JSON envelopes and the graph and smoke
 //! verdicts. Pure text functions; the host rendering stays in `install.rs`.
 
-/// Cap for one host's reason in a refusal. The full per-host view stays in the
-/// human output; only this bounded summary travels in `error.message`.
+/// Cap for one host's reason in a refusal. The renderer drops human output when
+/// an error is set, so the full per-host view lives in `--verify --json`; only
+/// this bounded summary travels in `error.message`.
 pub(super) const HOST_REASON_LIMIT: usize = 300;
 
 /// The first meaningful line of a report, trimmed.
@@ -33,11 +34,11 @@ pub(super) fn child_envelopes(text: &str) -> Vec<serde_json::Value> {
     values
 }
 
-/// The innermost `data.error` of an envelope: a machine code and its one-line
-/// message. A wrapper envelope may carry a deeper one inside its message; the
-/// deeper reason wins, so no wrapper chain reaches the operator.
+/// The innermost top-level `error` of an envelope: a machine code and its
+/// one-line message. A wrapper envelope may carry a deeper one inside its
+/// message; the deeper reason wins, so no wrapper chain reaches the operator.
 pub(super) fn innermost_error(value: &serde_json::Value) -> Option<(String, String)> {
-    let error = value.get("data")?.get("error")?;
+    let error = value.get("error").filter(|error| !error.is_null())?;
     let code = error.get("code")?.as_str()?.to_owned();
     let message = error
         .get("message")

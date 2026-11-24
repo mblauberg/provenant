@@ -2644,9 +2644,9 @@ mod report;
 use report::{first_error_line, graph_verdict, innermost_error_text, is_envelope, smoke_verdict};
 
 /// Refusal detail: name every failing host once with its bounded one-line
-/// reason. The full per-host view is emitted separately as the human output;
-/// it must never enter `error.message`, where a large capture could be paged
-/// away by the renderer.
+/// reason. The full per-host view lives in `--verify --json`; it must never
+/// enter `error.message`, where a large capture could be paged away by the
+/// renderer.
 fn failed_hosts_message(hosts: &[HostUpgrade]) -> String {
     let failed = hosts.iter().filter(|host| !host.success).count();
     let mut message = format!("{failed} host(s) failed:\n");
@@ -2658,6 +2658,21 @@ fn failed_hosts_message(hosts: &[HostUpgrade]) -> String {
         ));
     }
     message
+}
+
+/// The `UPGRADE_FAILED` refusal. The renderer drops human output when an error
+/// is set, so the next step points at the typed per-host detail in `--json`,
+/// not at `--full`.
+fn failed_upgrade_result(hosts: Vec<HostUpgrade>) -> CommandResult<Vec<HostUpgrade>> {
+    let message = failed_hosts_message(&hosts);
+    let mut result = CommandResult::new("upgrade", Outcome::Error, hosts);
+    result.error = Some(CommandError::new(
+        "UPGRADE_FAILED",
+        message,
+        None,
+        "run `provenant upgrade --verify --json` for the full per-host detail, resolve the failing host, then rerun `provenant upgrade`",
+    ));
+    result
 }
 
 /// Compact detail for one host: capability notices become a count, smoke
@@ -3051,20 +3066,11 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
             if let Some(warning) = &version_warning {
                 human.push_str(&format!("  Warning: {warning}\n"));
             }
-            let failure_message = (!success).then(|| failed_hosts_message(&hosts));
-            let mut result = CommandResult::new(
-                "upgrade",
-                if success { Outcome::Ok } else { Outcome::Error },
-                hosts,
-            );
-            if let Some(message) = failure_message {
-                result.error = Some(CommandError::new(
-                    "UPGRADE_FAILED",
-                    message,
-                    None,
-                    "inspect the failing host's detail with `provenant upgrade --full`, resolve it, then rerun `provenant upgrade`",
-                ));
-            }
+            let result = if success {
+                CommandResult::new("upgrade", Outcome::Ok, hosts)
+            } else {
+                failed_upgrade_result(hosts)
+            };
             super::emit(&result, globals, &human, false)
         }
     }
