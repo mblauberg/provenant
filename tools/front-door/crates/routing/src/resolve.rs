@@ -557,11 +557,8 @@ pub fn offered_models_serve(offered: &[String], model: &ModelId, catalogue: &Cat
 }
 
 /// An account's offer list as recorded in its quota snapshot: the fallback for
-/// an account whose keychain-stamped usage probe has not run. The probe is the
-/// first source and is read from the availability record itself; callers that
-/// judge a refusal must check its freshness through [`recorded_offers`]. An
-/// empty list means the offers are unknown, never that the account serves every
-/// model.
+/// an account whose keychain-stamped usage probe has not run. An empty list
+/// means the offers are unknown, never that the account serves every model.
 fn snapshot_offered_models<'a>(
     accounts: &'a [provenant_quota::AccountRecord],
     adapter: &str,
@@ -579,28 +576,55 @@ fn snapshot_offered_models<'a>(
         .map(|details| details.models.as_slice())
 }
 
-/// Whether an account's quota snapshot is still fresh under the policy shared
-/// with quota reporting and admission. An expired snapshot never supplies
-/// offer evidence for a refusal.
-fn snapshot_is_fresh(context: &RoutingContext<'_>, adapter: &str, key: &str) -> bool {
-    context
+/// The one rule that decides offer evidence for selection, resolve and launch
+/// preparation. A fresh keychain-stamped usage probe is the first source; a
+/// fresh quota snapshot serves only when the probe has not run. Stale, expired,
+/// unknown or unaccounted availability is never offer evidence: it keeps its
+/// re-probe path instead of refusing the account. An empty list means the
+/// offers are unknown, never that the account serves every model.
+fn recorded_offer_models<'a>(
+    availability: &'a AvailabilityRecord,
+    context: &RoutingContext<'_>,
+) -> Option<(&'a [String], i64)> {
+    if !provenant_records::AdapterSpec::get(&availability.adapter)
+        .is_some_and(|spec| spec.offered_models)
+    {
+        return None;
+    }
+    // A stale observation must not preempt the documented StaleAvailability
+    // re-probe, whether it is judging a refusal or shaping selection.
+    if availability_reason(Some(availability), context).is_some() {
+        return None;
+    }
+    let key = availability.account_key.as_deref()?;
+    if !availability.observed_models.is_empty() {
+        return Some((
+            availability.observed_models.as_slice(),
+            availability.observed_unix_seconds,
+        ));
+    }
+    let snapshot = context
         .accounts
         .iter()
-        .find(|record| record.account.adapter == adapter && record.account.account_key == key)
-        .and_then(|record| record.snapshot.as_ref())
-        .is_some_and(|snapshot| {
-            context.config.freshness.snapshot_fresh(
-                snapshot,
-                context.now_seconds(),
-                context.quota_policies,
-            )
-        })
+        .find(|record| {
+            record.account.adapter == availability.adapter && record.account.account_key == key
+        })?
+        .snapshot
+        .as_ref()?;
+    if !context.config.freshness.snapshot_fresh(
+        snapshot,
+        context.now_seconds(),
+        context.quota_policies,
+    ) {
+        return None;
+    }
+    let offered = snapshot_offered_models(context.accounts, &availability.adapter, Some(key))?;
+    Some((offered, snapshot.observed_unix_seconds))
 }
 
-/// Give every selection the account's recorded offer list when its usage probe
-/// has not run and the snapshot offering it is still fresh. A pinned account is
-/// judged by the same offers as an unpinned one: a pin that does not offer the
-/// model is refused, not attempted anyway.
+/// Give every selection the account's recorded offer list under the same rule
+/// [`recorded_offer_models`] uses to judge a refusal. Stale availability keeps
+/// its own (empty) probe list rather than being judged by an unrelated snapshot.
 fn availability_with_known_offers(
     availability: &[AvailabilityRecord],
     context: &RoutingContext<'_>,
@@ -608,24 +632,15 @@ fn availability_with_known_offers(
     availability
         .iter()
         .map(|record| {
-            if !record.observed_models.is_empty()
-                || !provenant_records::AdapterSpec::get(&record.adapter)
-                    .is_some_and(|spec| spec.offered_models)
-            {
+            if !record.observed_models.is_empty() {
                 return record.clone();
             }
-            let Some(key) = record.account_key.as_deref() else {
+            let Some((offered, _)) = recorded_offer_models(record, context) else {
                 return record.clone();
             };
-            if !snapshot_is_fresh(context, &record.adapter, key) {
-                return record.clone();
-            }
-            match snapshot_offered_models(context.accounts, &record.adapter, Some(key)) {
-                Some(models) => AvailabilityRecord {
-                    observed_models: models.to_vec(),
-                    ..record.clone()
-                },
-                None => record.clone(),
+            AvailabilityRecord {
+                observed_models: offered.to_vec(),
+                ..record.clone()
             }
         })
         .collect()
@@ -1851,11 +1866,9 @@ pub fn exclusion_detail(reason: &RouteExclusionReason) -> String {
     )
 }
 /// The account's recorded offers and the age of that record, as one typed
-/// fact shared by resolve and launch preparation. The keychain-stamped
-/// availability probe is the first source and carries its own observation age;
-/// a quota snapshot serves only when the probe has not run and the snapshot is
-/// still fresh under the shared freshness policy. Stale availability is never
-/// offer evidence: it keeps its re-probe path instead of refusing the account.
+/// fact shared by resolve and launch preparation. It reads the single offer
+/// evidence rule in [`recorded_offer_models`], so selection and refusal cannot
+/// disagree about whether a probe, a snapshot or neither decides the account.
 fn recorded_offers(
     model: &ModelId,
     availability: &AvailabilityRecord,
@@ -1865,41 +1878,13 @@ fn recorded_offers(
     {
         return None;
     }
-    // A stale, unknown or unaccounted observation is not a refusal. In
-    // particular it must not preempt the documented StaleAvailability re-probe.
-    if availability_reason(Some(availability), context).is_some() {
-        return None;
-    }
+    let (offered, observed_at) = recorded_offer_models(availability, context)?;
     let key = availability.account_key.as_deref()?;
-    let now = context.now_seconds();
-    let (offered, observed_at) = if !availability.observed_models.is_empty() {
-        (
-            availability.observed_models.as_slice(),
-            availability.observed_unix_seconds,
-        )
-    } else {
-        let record = context.accounts.iter().find(|record| {
-            record.account.adapter == model.adapter() && record.account.account_key == key
-        })?;
-        let snapshot = record.snapshot.as_ref()?;
-        if !context
-            .config
-            .freshness
-            .snapshot_fresh(snapshot, now, context.quota_policies)
-        {
-            return None;
-        }
-        let details = snapshot.details.as_ref()?;
-        if details.models.is_empty() {
-            return None;
-        }
-        (details.models.as_slice(), snapshot.observed_unix_seconds)
-    };
     Some(provenant_records::run::AccountOfferMismatch {
         account: key.to_owned(),
         model: model.as_str().to_owned(),
         offered_models: offered.to_vec(),
-        age_seconds: now.saturating_sub(observed_at) as u64,
+        age_seconds: context.now_seconds().saturating_sub(observed_at) as u64,
     })
 }
 /// Persisted mismatch or refusal evidence, assessed by the same quota function

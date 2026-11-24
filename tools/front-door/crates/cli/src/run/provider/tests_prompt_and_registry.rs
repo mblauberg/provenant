@@ -452,7 +452,9 @@ fn snapshot_only_offers_reach_the_lane_refusal() -> Result<(), Box<dyn std::erro
     // The usage probe records no models; only the fresh quota snapshot says
     // which models this pinned account offers. Resolve judges that snapshot and
     // preparation must refuse with the same typed fact, offers and age.
-    registry_provider_resolves_prepares_and_reports_quota("agy", "work", false, true)
+    // agy's local login identity is `local`; a `work` pin has no registered
+    // entry, so preparation would fail before resolve could judge the snapshot.
+    registry_provider_resolves_prepares_and_reports_quota("agy", "local", false, true)
 }
 
 #[test]

@@ -915,7 +915,10 @@ fn stale_availability_does_not_refuse_on_snapshot_offers() -> Result<(), Box<dyn
 {
     let catalogue = Catalogue::bundled()?;
     let config = RoutingConfig::default();
+    // An observation must precede its own expiry; `now()` is 100, so this
+    // record is expired but still a well-formed availability observation.
     let availability = [provenant_providers::AvailabilityRecord {
+        observed_unix_seconds: 30,
         expires_unix_seconds: 60,
         ..agy_account("stale-agy")
     }];
@@ -965,6 +968,106 @@ fn stale_availability_does_not_refuse_on_snapshot_offers() -> Result<(), Box<dyn
         route.readiness
     );
     assert!(route.diagnostics.offer_mismatch.is_none());
+    Ok(())
+}
+
+// Spec: docs/specs/routing.md#provider-model-discovery
+#[test]
+fn offer_evidence_obeys_one_probe_first_rule() -> Result<(), Box<dyn std::error::Error>> {
+    // The same snapshot offers must be refused when the probe has not run, and
+    // ignored when the observation is stale. Selection and the typed refusal
+    // read one rule, so only freshness changes the verdict.
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let scope = provenant_quota::AccountScope {
+        extra: Default::default(),
+        adapter: "agy".into(),
+        account_key: "rule-agy".into(),
+        label: "rule-agy".into(),
+    };
+    let mut record = provenant_quota::AccountRecord::empty(scope.clone());
+    record.revision = 1;
+    record.snapshot = Some(provenant_quota::QuotaSnapshot {
+        extra: Default::default(),
+        schema_version: 1,
+        account: scope,
+        revision: 1,
+        status: provenant_quota::QuotaStatus::Available,
+        observed_unix_seconds: 80,
+        source_ref: "fixture".into(),
+        authority_ref: None,
+        details: Some(provenant_quota::QuotaDetails {
+            extra: Default::default(),
+            models: vec!["Gemini 3.8 Flash".into()],
+            ..Default::default()
+        }),
+        windows: Vec::new(),
+    });
+    let accounts = [record];
+    let access = readiness_access();
+    let query = request("agy/gemini-4-neon")?;
+
+    let stale = [provenant_providers::AvailabilityRecord {
+        observed_unix_seconds: 30,
+        expires_unix_seconds: 60,
+        ..agy_account("rule-agy")
+    }];
+    let ctx = RoutingContext {
+        availability: &stale,
+        accounts: &accounts,
+        access: &access,
+        ..context(&catalogue, &config, now()?)
+    };
+    let stale_route =
+        resolve_for_account_with_seed(&query, &ctx, Some("rule-agy"), "rule-stale", 0)?;
+    assert!(
+        !matches!(
+            stale_route.readiness,
+            RouteReadiness::Unavailable {
+                reason: RouteExclusionReason::AccountDoesNotOffer,
+                ..
+            }
+        ),
+        "stale availability must re-probe, not refuse: {:?}",
+        stale_route.readiness
+    );
+    assert!(stale_route.diagnostics.offer_mismatch.is_none());
+
+    let fresh = [provenant_providers::AvailabilityRecord {
+        expires_unix_seconds: 120,
+        ..agy_account("rule-agy")
+    }];
+    let ctx = RoutingContext {
+        availability: &fresh,
+        accounts: &accounts,
+        access: &access,
+        ..context(&catalogue, &config, now()?)
+    };
+    let fresh_route =
+        resolve_for_account_with_seed(&query, &ctx, Some("rule-agy"), "rule-fresh", 0)?;
+    assert!(
+        matches!(
+            fresh_route.readiness,
+            RouteReadiness::Unavailable {
+                reason: RouteExclusionReason::AccountDoesNotOffer,
+                ..
+            }
+        ),
+        "a fresh snapshot-only offer list must refuse: {:?}",
+        fresh_route.readiness
+    );
+    let fact = fresh_route
+        .diagnostics
+        .offer_mismatch
+        .as_ref()
+        .expect("resolve must carry the typed offer fact");
+    assert!(
+        fact.offered_models
+            .iter()
+            .any(|model| model == "Gemini 3.8 Flash"),
+        "{fact:?}"
+    );
+    assert_eq!(fact.age_seconds, 20);
     Ok(())
 }
 
