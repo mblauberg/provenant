@@ -854,8 +854,7 @@ fn create_with_default(
             // Only a configured remote defines a remote/branch boundary; an
             // invented alias from an intermediate slash is not a remote. Remotes
             // are longest first, so the first match is the one Git would use. A
-            // ref under no configured remote keeps its whole name as the
-            // candidate rather than escaping the collision check.
+            // ref matching no remote keeps its whole name as the collision candidate.
             let remote_collision = text.strip_prefix("refs/remotes/").is_some_and(|rest| {
                 let candidate = remotes
                     .iter()

@@ -528,10 +528,17 @@ fn create_splits_at_the_longest_matching_remote() -> Result<(), Box<dyn Error>> 
 /// collisions at the branch and below it still refuse.
 #[test]
 fn create_splits_batch_next_only_at_configured_origin() -> Result<(), Box<dyn Error>> {
-    let fixture = Fixture::new()?;
+    let mut fixture = Fixture::new()?;
     let url = fixture.root.to_str().ok_or("non-UTF8 fixture root")?;
     fixture.run(&["remote", "add", "origin", url])?;
     fixture.run(&["update-ref", "refs/remotes/origin/batch/next", "HEAD"])?;
+    // Config edits change the digested repository view; re-anchor the handle.
+    fixture.repo = fixture.runtime.open_repo(
+        &fixture.executor,
+        &fixture.root,
+        fixture.budget()?,
+        &cancel(),
+    )?;
     let test_context = TestContext::new(&fixture)?;
     let context = test_context.context();
     let base = fixture.head()?.to_string();
@@ -568,10 +575,17 @@ fn create_splits_batch_next_only_at_configured_origin() -> Result<(), Box<dyn Er
 /// but the intermediate `review` does not make `next/x` collide.
 #[test]
 fn create_compares_ref_under_no_configured_remote_as_is() -> Result<(), Box<dyn Error>> {
-    let fixture = Fixture::new()?;
+    let mut fixture = Fixture::new()?;
     let url = fixture.root.to_str().ok_or("non-UTF8 fixture root")?;
     fixture.run(&["remote", "add", "origin", url])?;
     fixture.run(&["update-ref", "refs/remotes/review/next", "HEAD"])?;
+    // Config edits change the digested repository view; re-anchor the handle.
+    fixture.repo = fixture.runtime.open_repo(
+        &fixture.executor,
+        &fixture.root,
+        fixture.budget()?,
+        &cancel(),
+    )?;
     let test_context = TestContext::new(&fixture)?;
     let context = test_context.context();
     let base = fixture.head()?.to_string();
