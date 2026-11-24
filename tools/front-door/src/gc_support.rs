@@ -71,7 +71,8 @@ pub(crate) fn collect_below_floor(
         .disk_limits(state_root)
         .map_err(|error| format!("cannot resolve gc.free_floor: {error}"))?;
     let free = Directory::open_anchor(state_root)
-        .and_then(|volume| volume.available_bytes())
+        .map_err(|error| error.to_string())
+        .and_then(|volume| volume.available_bytes().map_err(|error| error.to_string()))
         .map_err(|error| format!("cannot measure free space: {error}"))?;
     if free >= limits.free_floor {
         return Ok(false);

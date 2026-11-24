@@ -1653,7 +1653,7 @@ enum GcOutput<'a> {
         free_floor_bytes: u64,
         free_floor_source: &'a str,
         #[serde(skip_serializing_if = "<[_]>::is_empty")]
-        uncollected: &'a [crate::gc_support::UncollectedItem],
+        uncollected: Vec<crate::gc_support::UncollectedItem>,
         sweep_cursor: &'a Option<crate::gc_sweep::Cursor>,
         sweep_warning: &'a Option<String>,
         sweep_stopped: bool,
@@ -1698,7 +1698,6 @@ fn append_gc_removal_records(report: &mut worktrees::WorktreeGcReport) {
 }
 
 fn gc_result_data(data: &GcData, detailed: bool) -> GcOutput<'_> {
-    let uncollected = gc_uncollected(data);
     if detailed {
         return GcOutput::Detailed {
             data,
@@ -1742,7 +1741,7 @@ fn gc_result_data(data: &GcData, detailed: bool) -> GcOutput<'_> {
         sweep_budget_source: &data.sweep_budget_source,
         free_floor_bytes: data.free_floor_bytes,
         free_floor_source: &data.free_floor_source,
-        uncollected: &uncollected,
+        uncollected: gc_uncollected(data),
         sweep_cursor: &data.sweep_cursor,
         sweep_warning: &data.sweep_warning,
         sweep_stopped: data.sweep_stopped,
