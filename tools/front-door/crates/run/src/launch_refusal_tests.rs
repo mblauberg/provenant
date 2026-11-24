@@ -260,6 +260,7 @@ fn git_setup_preparation_failure_projects_its_reason_and_remedy_to_status()
 #[test]
 fn git_setup_handoff_maps_to_git_setup_failure_and_remote_remedy()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
+    use crate::launch::HandOff;
     use provenant_records::run::PreparationFailure;
 
     const MESSAGE: &str = "Git setup: no Git remote is declared and none can be inferred; remotes seen: [\"origin\", \"pr\"]; did you mean origin?";
@@ -268,7 +269,7 @@ fn git_setup_handoff_maps_to_git_setup_failure_and_remote_remedy()
         cause: TerminalCause::PreparationRefused,
     };
     let reason = format!("launch preparation failed: {MESSAGE}");
-    let (failure, note) = super::handoff_preparation(&handoff, &reason);
+    let (failure, note) = crate::launch::handoff_preparation(&handoff, &reason);
     assert_eq!(failure, Some(PreparationFailure::GitSetup));
     let note = note.ok_or("missing preparation note")?;
     assert!(
@@ -304,7 +305,7 @@ fn git_setup_handoff_maps_to_git_setup_failure_and_remote_remedy()
     // Every other local refusal stays an adapter failure and owns its note;
     // a boundary never establishes safe preparation for fallback.
     let local = HandOff::Local("Git setup: some other failure".into());
-    let (failure, note) = super::handoff_preparation(
+    let (failure, note) = crate::launch::handoff_preparation(
         &local,
         "launch preparation failed: Git setup: some other failure",
     );
@@ -314,8 +315,10 @@ fn git_setup_handoff_maps_to_git_setup_failure_and_remote_remedy()
         message: "writer lineage".into(),
         cause: TerminalCause::HandoffRefused,
     };
-    let (failure, _) =
-        super::handoff_preparation(&typed_other, "launch preparation failed: writer lineage");
+    let (failure, _) = crate::launch::handoff_preparation(
+        &typed_other,
+        "launch preparation failed: writer lineage",
+    );
     assert_eq!(failure, Some(PreparationFailure::AdapterUnavailable));
     let boundary = HandOff::Boundary {
         message: "authority".into(),
@@ -323,7 +326,7 @@ fn git_setup_handoff_maps_to_git_setup_failure_and_remote_remedy()
         cause: None,
     };
     let (failure, note) =
-        super::handoff_preparation(&boundary, "launch preparation failed: authority");
+        crate::launch::handoff_preparation(&boundary, "launch preparation failed: authority");
     assert_eq!(failure, None);
     assert!(note.is_none());
     Ok(())

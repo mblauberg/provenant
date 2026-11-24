@@ -885,7 +885,7 @@ pub trait Providers {
         )
     }
 }
-enum HandOff {
+pub(crate) enum HandOff {
     /// Failed before anything was sent to a guardian.
     Local(String),
     /// A typed boundary refused the prepared handoff.
@@ -918,7 +918,7 @@ enum HandOff {
 /// typed failure names the step to repair and its note names the remedy implied
 /// by the host's bounded reason. Other local refusals keep the adapter-failure
 /// failure fact and own their note through the refusal kind.
-fn handoff_preparation(
+pub(crate) fn handoff_preparation(
     error: &HandOff,
     reason: &str,
 ) -> (
@@ -2605,8 +2605,7 @@ impl RunStore {
                                 finished_at: now()?,
                                 failure: preparation_failure.filter(|_| !cancelled),
                                 terminal_cause,
-                                terminal_note: preparation_note
-                                    .unwrap_or_else(|| kind.terminal_note()),
+                                terminal_note: preparation_note.or_else(|| kind.terminal_note()),
                             },
                             call,
                         ) {
