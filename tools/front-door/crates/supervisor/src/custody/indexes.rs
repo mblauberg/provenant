@@ -390,7 +390,7 @@ fn temporary_dir(attempt: &Directory) -> Result<Directory> {
     let root = Directory::open_anchor(state)?;
     let scratch = root.open_verified_directory(OsStr::new("attempt-scratch"))?;
     let scratch = scratch.open_verified_directory(name)?;
-    scratch.open_verified_directory(OsStr::new("tmp"))
+    Ok(scratch.open_verified_directory(OsStr::new("tmp"))?)
 }
 
 fn private_git_directories(attempt: &Directory, candidate: &str) -> Result<(Directory, Directory)> {
