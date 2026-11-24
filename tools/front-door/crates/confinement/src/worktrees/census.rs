@@ -1,4 +1,5 @@
 //! Process census and worker observation.
+use super::census_excusal::{excuse_unreadable, warn_unreadable_processes};
 use super::*;
 
 pub(super) const UNREADABLE_NO_CANDIDATE_PATH: &str =
@@ -68,7 +69,8 @@ fn finish_held(mut held: HeldProcesses) -> HeldProcesses {
 
 /// When set by the gc CLI's `--full`, each PID is listed in addition to the
 /// aggregate warning. Other callers keep the compact single-line warning.
-static UNREADABLE_DETAIL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub(super) static UNREADABLE_DETAIL: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// gc passes its global `--full` flag here so the census can keep per-PID EPERM
 /// detail behind that flag instead of printing one line per process.
@@ -111,45 +113,6 @@ pub(super) fn unreadable_cohort_pids(
                 .is_none_or(|uids| owners.iter().any(|owner| !uids.all_differ_from(*owner)))
         })
         .collect()
-}
-
-/// Report the EPERM processes of one census as a single line with a count and
-/// what they mean. Processes already warned about in this boot are omitted, so
-/// repeated censuses on the same host do not repeat the warning. The per-PID
-/// list is emitted only when the caller asked for `--full`.
-fn warn_unreadable_processes(boot: &str, pids: &BTreeSet<i64>) {
-    let fresh: Vec<i64> = pids
-        .iter()
-        .copied()
-        .filter(|pid| mark_unreadable_process_warning(boot, *pid))
-        .collect();
-    if fresh.is_empty() {
-        return;
-    }
-    use provenant_records::warning::{UNREADABLE_PROCESS_CENSUS, Warning, warn};
-    if UNREADABLE_DETAIL.load(std::sync::atomic::Ordering::Relaxed) {
-        for pid in fresh {
-            // Spec: docs/specs/cli.md#warnings-are-typed-values
-            warn(
-                Warning::new(
-                    UNREADABLE_PROCESS_CENSUS,
-                    "process could not be inspected (EPERM); custody is unknown for this process (no observed cwd or descriptor under candidate worktrees)",
-                )
-                .subject(format!("process {pid}")),
-            );
-        }
-    } else {
-        warn(
-            Warning::new(
-                UNREADABLE_PROCESS_CENSUS,
-                format!(
-                    "{} process(es) could not be inspected (EPERM); custody is unknown for those processes (no observed cwd or descriptor under candidate worktrees)",
-                    fresh.len()
-                ),
-            )
-            .subject(format!("{} unreadable processes", fresh.len())),
-        );
-    }
 }
 
 /// A single acquisition supplies both the decision and its refusal evidence.
@@ -1675,6 +1638,9 @@ pub(super) fn observe_worker_holders_while(
                     unplaceable,
                 );
             }
+            if excuse_unreadable(cwd_observer, pid, roots, under_candidate, unplaceable) {
+                continue;
+            }
             if cwd_supported && occupancy.complete {
                 if !under_candidate {
                     unplaceable(Some(pid), Some(UNREADABLE_NO_CANDIDATE_PATH));
@@ -1893,6 +1859,10 @@ pub(super) fn observe_worker_holders_while(
                 );
             }
         }
+        let placed = !descriptor_roots.is_empty() || !descriptor_uncertain_roots.is_empty();
+        if excuse_unreadable(cwd_observer, pid, roots, placed, unplaceable) {
+            continue;
+        }
         match cwd {
             NativeCwd::Gone => {}
             NativeCwd::PolicyExcluded(_) | NativeCwd::PolicyRejected(_) => {
@@ -2093,7 +2063,7 @@ pub(super) fn canonical_cwd(path: &Path) -> Option<PathBuf> {
 
 // Resolve as much of the path as possible before ruling out a root. An
 // unresolved ancestor, relative path, or parent traversal cannot disprove it.
-fn occupancy_path_could_be_under(path: &Path, root: &Path) -> bool {
+pub(super) fn occupancy_path_could_be_under(path: &Path, root: &Path) -> bool {
     if !path.is_absolute()
         || path
             .components()

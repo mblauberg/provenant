@@ -820,6 +820,283 @@ fn unreadable_process_without_candidate_paths_only_blocks_the_root_it_occupies()
     Ok(())
 }
 
+/// Typed signals for one process whose cwd and descriptors the kernel refuses.
+/// No positive path is present, so only the typed classification decides
+/// whether the process can occupy a candidate root.
+struct UnreadableSignals {
+    uids: Option<ProcessUids>,
+    sealed: Option<provenant_os::pid::SealedSystemImage>,
+    executable: Option<PathBuf>,
+}
+
+impl CwdObserver for UnreadableSignals {
+    fn cwd(&self, _: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
+        Ok(CwdObservation::PermissionDenied)
+    }
+    fn occupancy(&self, _: i64) -> provenant_os::pid::OccupancyObservation {
+        provenant_os::pid::OccupancyObservation {
+            paths: Vec::new(),
+            complete: false,
+            gap: Some(provenant_os::pid::OccupancyGap::DescriptorsDenied),
+        }
+    }
+    fn process_uids(&self, _: i64) -> Option<ProcessUids> {
+        self.uids
+    }
+    fn sealed_system_image(&self, _: i64) -> Option<provenant_os::pid::SealedSystemImage> {
+        self.sealed
+    }
+    fn executable(&self, _: i64) -> Option<PathBuf> {
+        self.executable.clone()
+    }
+    fn process_details(&self, _: i64) -> Option<String> {
+        Some("path=/usr/libexec/UserEventAgent, ruid=0, team_id=platform".into())
+    }
+}
+
+/// One census outcome: the root state and detail, the unplaceable audit
+/// conditions and the typed warnings raised while observing it.
+struct UnreadableOutcome {
+    state: Occupancy,
+    detail: String,
+    audit: Vec<(Option<i64>, Option<&'static str>)>,
+    warnings: Vec<provenant_records::warning::Warning>,
+}
+
+/// Run one census with pid 200 unreadable beside `root`.
+fn observe_unreadable(
+    root: &Path,
+    signals: &UnreadableSignals,
+) -> Result<UnreadableOutcome, Box<dyn Error>> {
+    use provenant_supervisor::census::{Census, ObservationIssue};
+    let current = refused_fact(100);
+    let processes = InjectedCensus {
+        census: Census::from_observations(
+            [current.clone()],
+            [(200, ObservationIssue::PermissionDenied)],
+            [],
+            true,
+            false,
+            32,
+        )?,
+        cwds: BTreeMap::new(),
+        current: current.clone(),
+        platform_uids: BTreeMap::new(),
+    };
+    let roots = [root.to_path_buf()];
+    let (observed, warnings) = provenant_records::warning::capture(|| {
+        let mut audit = Vec::new();
+        let (states, _, details, _) = observe_worker_holders_with_taints_and_audit(
+            &roots,
+            &processes,
+            signals,
+            &current,
+            false,
+            &mut |pid, condition| audit.push((pid, condition)),
+        );
+        (
+            states[&roots[0]].clone(),
+            details.get(&roots[0]).cloned().unwrap_or_default(),
+            audit,
+        )
+    });
+    Ok(UnreadableOutcome {
+        state: observed.0,
+        detail: observed.1,
+        audit: observed.2,
+        warnings,
+    })
+}
+
+fn warning_names_process(warnings: &[provenant_records::warning::Warning], pid: i64) -> bool {
+    warnings
+        .iter()
+        .any(|warning| warning.subject.as_deref() == Some(format!("process {pid}").as_str()))
+}
+
+/// A real `reconcile --abandon` only needs the root free: an unreadable root
+/// process runs as another user, so it cannot be a lane writer. The warning
+/// names it instead of blocking settlement.
+#[test]
+fn unreadable_other_user_process_frees_the_root_with_a_warning() -> Result<(), Box<dyn Error>> {
+    use provenant_os::fs::effective_uid;
+    let fixture = Fixture::new()?;
+    let root = fixture.root.join("unreadable-root-process");
+    fs::create_dir(&root)?;
+    let foreign = if effective_uid() == 0 { 501 } else { 0 };
+    let signals = UnreadableSignals {
+        uids: Some(ProcessUids {
+            real: foreign,
+            effective: foreign,
+            saved: foreign,
+        }),
+        sealed: None,
+        executable: Some(PathBuf::from("/sbin/launchd")),
+    };
+    let UnreadableOutcome {
+        state,
+        detail,
+        audit,
+        warnings,
+    } = observe_unreadable(&root, &signals)?;
+    assert!(state.is_available(), "{state:?}: {detail}");
+    assert_eq!(audit, vec![(Some(200), Some("runs as another user"))]);
+    assert!(warning_names_process(&warnings, 200), "{warnings:?}");
+    Ok(())
+}
+
+/// A sealed platform binary outside the worktree is host-owned, not a lane
+/// writer, and likewise frees the root while naming the process in a warning.
+#[test]
+fn unreadable_platform_process_frees_the_root_with_a_warning() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let root = fixture.root.join("unreadable-platform-process");
+    fs::create_dir(&root)?;
+    let signals = UnreadableSignals {
+        uids: None,
+        sealed: Some(provenant_os::pid::SealedSystemImage {
+            setuid_transition: false,
+        }),
+        executable: Some(PathBuf::from("/usr/libexec/UserEventAgent")),
+    };
+    let UnreadableOutcome {
+        state,
+        detail,
+        warnings,
+        ..
+    } = observe_unreadable(&root, &signals)?;
+    assert!(state.is_available(), "{state:?}: {detail}");
+    assert!(warning_names_process(&warnings, 200), "{warnings:?}");
+    Ok(())
+}
+
+/// A same-user process whose readable executable is inside the worktree could
+/// still be its writer, so the census keeps the root unknown and names the PID.
+#[test]
+fn unreadable_same_user_process_inside_the_worktree_still_blocks() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let root = fixture.root.join("unreadable-inside-process");
+    fs::create_dir(&root)?;
+    let own = provenant_os::fs::effective_uid();
+    let signals = UnreadableSignals {
+        uids: Some(ProcessUids {
+            real: own,
+            effective: own,
+            saved: own,
+        }),
+        sealed: None,
+        executable: Some(root.join("writer")),
+    };
+    let UnreadableOutcome {
+        state,
+        detail,
+        warnings,
+        ..
+    } = observe_unreadable(&root, &signals)?;
+    assert!(state.is_unknown(), "{state:?}: {detail}");
+    assert!(detail.contains("process 200"), "{detail}");
+    assert!(!warning_names_process(&warnings, 200), "{warnings:?}");
+    Ok(())
+}
+
+/// A same-user process whose readable executable and cwd are both outside
+/// every root cannot be a dweller, even when its descriptors are unreadable.
+#[test]
+fn unreadable_process_with_executable_and_cwd_outside_frees_the_root() -> Result<(), Box<dyn Error>>
+{
+    let fixture = Fixture::new()?;
+    let root = fixture.root.join("unreadable-outside-process");
+    fs::create_dir(&root)?;
+    let own = provenant_os::fs::effective_uid();
+    struct ReadableOutside(ProcessUids, PathBuf, PathBuf);
+    impl CwdObserver for ReadableOutside {
+        fn cwd(&self, _: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
+            Ok(CwdObservation::Path(self.2.clone()))
+        }
+        fn occupancy(&self, _: i64) -> provenant_os::pid::OccupancyObservation {
+            provenant_os::pid::OccupancyObservation {
+                paths: Vec::new(),
+                complete: false,
+                gap: Some(provenant_os::pid::OccupancyGap::DescriptorsDenied),
+            }
+        }
+        fn process_uids(&self, _: i64) -> Option<ProcessUids> {
+            Some(self.0)
+        }
+        fn executable(&self, _: i64) -> Option<PathBuf> {
+            Some(self.1.clone())
+        }
+    }
+    let current = refused_fact(100);
+    let processes = InjectedCensus {
+        census: provenant_supervisor::census::Census::from_observations(
+            [current.clone()],
+            [(200, ObservationIssue::PermissionDenied)],
+            [],
+            true,
+            false,
+            32,
+        )?,
+        cwds: BTreeMap::new(),
+        current: current.clone(),
+        platform_uids: BTreeMap::new(),
+    };
+    let signals = ReadableOutside(
+        ProcessUids {
+            real: own,
+            effective: own,
+            saved: own,
+        },
+        PathBuf::from("/usr/bin/true"),
+        PathBuf::from("/tmp"),
+    );
+    let roots = [root.clone()];
+    let (state, warnings) = provenant_records::warning::capture(|| {
+        let (states, _, _, _) = observe_worker_holders_with_taints_and_audit(
+            &roots,
+            &processes,
+            &signals,
+            &current,
+            false,
+            &mut |_, _| {},
+        );
+        states[&root].clone()
+    });
+    assert!(state.is_available(), "{state:?}");
+    assert!(warning_names_process(&warnings, 200), "{warnings:?}");
+    Ok(())
+}
+
+/// With neither a readable executable nor a readable cwd, a same-user process
+/// could be inside, so the census keeps the root unknown and names its PID.
+#[test]
+fn unreadable_same_user_process_without_readable_paths_still_blocks() -> Result<(), Box<dyn Error>>
+{
+    let fixture = Fixture::new()?;
+    let root = fixture.root.join("unreadable-no-paths-process");
+    fs::create_dir(&root)?;
+    let own = provenant_os::fs::effective_uid();
+    let signals = UnreadableSignals {
+        uids: Some(ProcessUids {
+            real: own,
+            effective: own,
+            saved: own,
+        }),
+        sealed: None,
+        executable: None,
+    };
+    let UnreadableOutcome {
+        state,
+        detail,
+        warnings,
+        ..
+    } = observe_unreadable(&root, &signals)?;
+    assert!(state.is_unknown(), "{state:?}: {detail}");
+    assert!(detail.contains("process 200"), "{detail}");
+    assert!(!warning_names_process(&warnings, 200), "{warnings:?}");
+    Ok(())
+}
+
 // Spec: docs/specs/disk.md#scratch-and-cache-custody
 #[test]
 fn unreadable_warning_counts_only_processes_that_could_own_the_checkout()

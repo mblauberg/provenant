@@ -3,6 +3,7 @@
 mod archive;
 pub use archive::{ArchiveError, ArchiveInfo, ArchiveReport, collect_archives};
 mod census;
+mod census_excusal;
 mod context;
 mod custody;
 mod doctor;

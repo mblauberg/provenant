@@ -261,6 +261,21 @@ cleanup, first tries the same proof from a fresh census. A proof makes custody q
 abandonment proceeds; otherwise it refuses and names the blocker, including any live or
 unidentifiable PID or omitted descendants.
 
+An unreadable process alone is not an occupant. The census leaves a root free when typed
+evidence proves the process cannot be a lane writer: it runs as another user (a different real
+uid), it is a sealed platform-signed system binary (`team_id=platform`), or its readable
+executable lies outside every candidate root and its cwd, if readable, is outside too. The
+census raises a typed warning naming the process instead of blocking settlement. A same-user
+process whose readable executable is inside the worktree still keeps the root unknown and the
+refusal names its PID. Credentials, signature and paths are typed observer signals; the
+`process_details` diagnostic string is never parsed to decide custody. Positive cwd or
+descriptor evidence always wins: a process placed inside a root is live regardless of these
+exceptions.
+- Why: host daemons such as `launchd` and `UserEventAgent` cannot occupy a lane worktree, and
+  an unreadable EPERM process must not deadlock every blocked settlement.
+- Owner: `crates/confinement/src/worktrees/census.rs`,
+  `crates/confinement/src/worktrees/census_excusal.rs`, `crates/run/src/settlement.rs`
+
 ## Continuation
 
 A retry starts a fresh attempt with the original authority, not a provider session replay. A
