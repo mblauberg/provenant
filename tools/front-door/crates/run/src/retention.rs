@@ -4442,6 +4442,12 @@ mod tests {
         assert_eq!(report.attempt_tmp.len(), 1);
         assert!(!scratch_root_of(&attempt).join("tmp").exists());
         assert_eq!(fs::read_to_string(outside.path().join("keep"))?, "outside");
+        // Collection prunes the emptied per-attempt root; recreate it for the
+        // second case, a tmp that is itself a link.
+        assert!(!scratch_root_of(&attempt).exists());
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(scratch_root_of(&attempt))?;
         std::os::unix::fs::symlink(outside.path(), scratch_root_of(&attempt).join("tmp"))?;
         store.set_temporary_retained(input.attempt_id, true, &call)?;
         let report = sweep(&store, &context, 7, 7 * DAY_MICROS, false, &call)?;
