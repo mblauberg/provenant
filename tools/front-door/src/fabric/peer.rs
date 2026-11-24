@@ -991,40 +991,11 @@ pub fn peer(
                     }
                     let retry = graph_context.retry_limit;
                     let network = graph_context.network;
-                    let source = provenant_run::resolve_reader_source(
+                    let (source, access) = super::peer_source_binding::bind_reader_source(
                         context.roots.state.as_path(),
                         &cwd,
-                        &cwd,
-                    )
-                    .map_err(run_error)?;
-                    // The peer binds its own source checkout. If that binding
-                    // fails, name the rule and the path it refused rather than
-                    // returning an unattributable confinement refusal.
-                    let source_path = source.display().to_string();
-                    let source_refusal = |rule: &'static str| FacadeError::ConfinementRefused {
-                        resource: Some(
-                            provenant_records::diagnostic::ResourceFact::ConfinementRule(Box::new(
-                                provenant_records::diagnostic::ConfinementRule {
-                                    rule: rule.to_owned(),
-                                    path: source_path.clone(),
-                                },
-                            )),
-                        ),
-                    };
-                    let directory = provenant_os::fs::Directory::open_anchor(&source)
-                        .map_err(|_| source_refusal("peer_source_anchor"))?;
-                    let metadata = directory
-                        .metadata()
-                        .map_err(|_| source_refusal("peer_source_identity"))?;
-                    let access = provenant_records::run::LaneAccessRequest {
                         network,
-                        source_root: Some(source),
-                        source_identity: Some(provenant_records::run::SourceIdentity {
-                            device: metadata.device,
-                            inode: metadata.inode,
-                        }),
-                        ..Default::default()
-                    };
+                    )?;
                     let mut input = SubmitInput::clone(input);
                     let SubmitInput::Submit { task, .. } = &mut input;
                     {

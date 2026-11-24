@@ -1295,6 +1295,66 @@ pub fn publish<T: Serialize>(value: &CommandResult<T>, roots: &Roots) -> io::Res
 #[cfg(test)]
 mod tests {
     #[test]
+    // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
+    fn peer_call_names_the_rule_and_path_when_the_project_is_outside_home()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_core::{CancelToken, Clock, RootInputs, WaitBudget};
+        use provenant_fabric_runtime::{config::Peer, hosts::PeerAction};
+        use provenant_records::{AbsolutePath, diagnostic::ResourceFact};
+
+        let root = tempfile::tempdir()?;
+        let home = root.path().join("home");
+        let project = home.join("project");
+        std::fs::create_dir_all(&project)?;
+        let mut inputs = RootInputs::new(home.clone(), project.clone());
+        inputs.state_dir = Some(root.path().join("state"));
+        let mut context = super::Context::open(
+            inputs.resolve(&provenant_os::fs::SystemPathResolver)?,
+            &home,
+            &project,
+        )?;
+        let host = context.identity.host;
+        context.config.peers.insert(
+            "worker".into(),
+            Peer {
+                host,
+                destination: "worker".into(),
+                remote_executable: None,
+                connect_timeout_seconds: 10,
+            },
+        );
+        // A scratch checkout outside the peer host's home has no cross-host
+        // project key. ProjectLocator::new refuses it before any transport is
+        // opened, exercising the real mapping in `peer_bounded`.
+        let outside = root.path().join("scratch").join("project");
+        context.identity.common_dir = AbsolutePath::new(&outside)?;
+        let clock = provenant_os::clock::SystemClock;
+        let budget = WaitBudget::cli(clock.mono_now(), 30)?;
+        let failure = context
+            .peer(
+                &clock,
+                host,
+                PeerAction::Health {
+                    extra: Default::default(),
+                },
+                budget,
+                &CancelToken::new(),
+            )
+            .err()
+            .expect("a project outside home must be refused before peer transport");
+        match *failure.error {
+            super::FacadeError::ConfinementRefused {
+                resource: Some(ResourceFact::ConfinementRule(rule)),
+            } => {
+                assert_eq!(rule.rule, "peer_project_outside_home");
+                assert_eq!(rule.path, outside.display().to_string());
+            }
+            other => panic!("expected a named confinement refusal, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
     // Spec: docs/specs/cli.md#every-name-refusal-lists-close-matches
     fn a_one_edit_peer_label_typo_ranks_the_configured_label_first() {
         let close = super::close_host_names("worksttion", ["workstation", "laptop"]);

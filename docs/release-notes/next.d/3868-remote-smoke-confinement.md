@@ -1,4 +1,4 @@
-## Bug fixes
+## Fixes
 
 ### Fabric
 

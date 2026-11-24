@@ -252,8 +252,9 @@ Extensions have no separate cap; the retained extension list counts toward the
 checkpoint envelope.
 
 Refusals may name node IDs, loop keys, field paths that passed the identifier
-grammar, and host-owned rule identifiers and schema positions, and never echo
-free-form caller text such as prompt or brief bodies. `SchemaPath` keeps schema
+grammar, host-owned rule identifiers and schema positions, and a display-sanitised
+host-owned path carried with a named confinement rule, and never echo free-form
+caller text such as prompt or brief bodies. `SchemaPath` keeps schema
 positions only. Graph status keeps route fields verbatim. Over-length values or
 control characters warn without dropping the values. Limit causes name the host
 limit, never the supplied value; CLI stderr, diagnostic JSON and relay details

@@ -21,6 +21,7 @@ mod graph_auto_settle;
 mod graph_document;
 pub(crate) mod owner;
 mod peer;
+mod peer_source_binding;
 pub(crate) mod run_owner;
 pub(crate) mod settlement;
 mod steer;
