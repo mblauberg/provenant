@@ -74,6 +74,7 @@ fn preflight_writer_worktrees(
     facts: &provenant_confinement::worktrees::RepoFacts,
     document: &mut provenant_fabric_runtime::graph::GraphDocument,
     expanded: &provenant_fabric_runtime::graph::GraphDocument,
+    holder_key: &dyn Fn(provenant_core::AttemptId) -> Option<provenant_records::WorkKey>,
 ) -> Result<Vec<(String, String, provenant_run::writer_dirty::WriterRefusal)>, FacadeError> {
     use provenant_fabric_runtime::graph::AccessMode;
     use provenant_run::writer_dirty::{self, Preflight, WriterRefusal};
@@ -145,10 +146,11 @@ fn preflight_writer_worktrees(
             // holder with no unambiguous attempt only gets a wait step.
             // Spec: docs/specs/run-launch.md#writer-binding
             let holder = writer.attached_holder().map_err(run_error)?;
+            let key = holder.and_then(holder_key);
             refusals.push((
                 node.id.clone(),
                 path.to_owned(),
-                WriterRefusal::held(&attached, path, holder),
+                WriterRefusal::held(&attached, path, holder, key.as_ref()),
             ));
             outcomes.insert(path.to_owned(), (None, None));
             continue;
@@ -1182,8 +1184,34 @@ impl Factory {
                         // No node has launched yet: a dirty-worktree refusal here
                         // costs no plan-node tokens. WIP and continue modes record
                         // their outcome on the node before any launch.
-                        submission_refusals =
-                            preflight_writer_worktrees(self, &facts, &mut document, expanded)?;
+                        // Resolve a holder to its CLI-addressable work key from
+                        // the run store. An unreadable or absent record leaves
+                        // the key unresolved; the shared formatter then advises
+                        // the bare sweep and still names the attempt.
+                        let resolve_holder =
+                            |holder: provenant_core::AttemptId| -> Option<provenant_records::WorkKey> {
+                                let context = provenant_run::ExecutionContext {
+                                    state_root: self.context.roots.state.clone(),
+                                    project_id: self.context.identity.project,
+                                    actor_id: self.context.identity.inbox.actor,
+                                    read_prompts: false,
+                                };
+                                let cancel = CancelToken::new();
+                                let call = provenant_run::Request {
+                                    clock: &self.clock,
+                                    cancel: &cancel,
+                                };
+                                let store =
+                                    provenant_run::RunStore::open_read_only(&context, &call).ok()??;
+                                store.work_key(holder, &call).ok()
+                            };
+                        submission_refusals = preflight_writer_worktrees(
+                            self,
+                            &facts,
+                            &mut document,
+                            expanded,
+                            &resolve_holder,
+                        )?;
                     }
                     if !resume && document.submission_patch.is_none() {
                         let submission_key = document
@@ -2093,9 +2121,6 @@ mod tests {
     #[test]
     fn a_held_reused_linked_checkout_refuses_at_submission_with_holder_and_command()
     -> Result<(), Box<dyn std::error::Error>> {
-        if !crate::worktree_tests::writer_backend_available()? {
-            return Ok(());
-        }
         let rig = crate::worktree_tests::repository()?;
         crate::worktree_tests::git(
             &rig,
@@ -2172,14 +2197,34 @@ mod tests {
                 ]
             }))?;
         let expanded = document.clone();
+        // The holder's work key is injected instead of read from a live run
+        // record, so this fixture runs on Linux CI as well as macOS. The
+        // reservation itself is still real and observed by the preflight.
+        let holder_key = provenant_records::WorkKey::new(
+            factory.context.identity.project,
+            "held-reuse",
+            "writer",
+            1,
+        )?;
         let refusals =
-            super::preflight_writer_worktrees(&factory, &facts, &mut document, &expanded)?;
+            super::preflight_writer_worktrees(&factory, &facts, &mut document, &expanded, &|_| {
+                Some(holder_key.clone())
+            })?;
         assert_eq!(refusals.len(), 1, "{refusals:?}");
         let (_, _, refusal) = &refusals[0];
         assert!(refusal.reason.contains("reuse-held"), "{refusal:?}");
         assert!(refusal.reason.contains(&holder.to_string()), "{refusal:?}");
         assert!(refusal.next.contains(&holder.to_string()), "{refusal:?}");
-        assert!(refusal.next.contains("provenant reconcile"), "{refusal:?}");
+        // The remedy names a target the real CLI grammar accepts, not a raw
+        // attempt id. Spec: docs/specs/run-launch.md#writer-binding
+        let target = refusal
+            .next
+            .split_once("`provenant reconcile ")
+            .and_then(|(_, tail)| tail.split_once('`'))
+            .map(|(target, _)| target)
+            .ok_or("reconcile target in remedy")?;
+        let parsed = provenant_cli::target::Target::parse(target)?;
+        assert_eq!(parsed.to_string(), holder_key.to_string(), "{refusal:?}");
         assert!(
             !refusal.reason.contains("commit or preserve"),
             "{refusal:?}"

@@ -1083,9 +1083,13 @@ impl RunError {
                     diagnostic = diagnostic.detail(detail).next(next);
                 }
                 if let WorktreeError::WriterLeaseHeld { holder, .. } = error {
+                    // A diagnostic has no store to resolve the holder's work key:
+                    // the shared formatter advises the bare sweep and names the
+                    // attempt. The submission preflight resolves the key and
+                    // prints a target that names the holder directly.
                     diagnostic = diagnostic
                         .detail(error.to_string())
-                        .next(crate::writer_dirty::held_writer_next(Some(*holder)));
+                        .next(crate::writer_dirty::held_writer_next(Some(*holder), None));
                 }
                 if let WorktreeError::WriterBusy {
                     holder: Some(holder),
