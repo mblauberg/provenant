@@ -1,7 +1,8 @@
 //! Regression tests for #3869 outcome 3: a checkout with no Git remote must
 //! carry the absence as `None` through every writer Git-path consumer, never
-//! as an empty name. Re-flattening any of these `Option`s to `""` fails a test
-//! in this file.
+//! as an empty name. These tests pin each consumer's `None` handling and the
+//! resolved absence; a caller that turns that `None` into `Some("")` is not
+//! caught here, and #3888 makes it unrepresentable.
 //! Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
 
 use std::{
@@ -214,8 +215,9 @@ fn child_prepare_writer_git() -> FixtureResult<()> {
 /// The direct consumers above pass a literal `None`. This test is the one that
 /// resolves the absence from a real remote-less checkout and drives the
 /// production `prepare_writer_git`, where the resolved remote reaches the Git
-/// path checks and refresh. A re-flatten to `""` would appear in the recorded
-/// invocations as an empty argument, `refs/remotes//` or `--remotes=`.
+/// path checks and refresh. It pins that the production path runs Git without
+/// an empty argument, `refs/remotes//` or `--remotes=` for a remote-less
+/// checkout.
 #[test]
 fn prepare_writer_git_never_passes_an_empty_remote_to_git() -> FixtureResult<()> {
     if std::env::var_os(WRITER_CHILD).is_some() {
