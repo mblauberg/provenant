@@ -391,6 +391,28 @@ fn invalid_plan_refusal_names_its_node_and_validator_reason() -> Result {
     Ok(())
 }
 
+// Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
+#[test]
+fn composite_admission_refusal_names_its_node_and_validator_reason() -> Result {
+    let rig = GraphProject::new()?;
+    let path = rig.document(&json!({
+        "schema_version": support::GRAPH_DOCUMENT_SCHEMA_VERSION,
+        "graph_id": "invalid-composite-reason",
+        "nodes": [{
+            "id": "expand", "kind": "loop", "access": "read_only",
+            "loop": {"body": [], "until": "done", "max_rounds": 0}
+        }]
+    }))?;
+    let (output, refusal) =
+        rig.run(&["run", "--file", path.to_str().ok_or("path")?, "--explain"])?;
+    assert!(!output.status.success(), "{refusal}");
+    assert_eq!(refusal["error"]["code"], "dispatch_refused", "{refusal}");
+    let wire = refusal.to_string();
+    assert!(wire.contains("node expand"), "{wire}");
+    assert!(wire.contains("loop.max_rounds must be positive"), "{wire}");
+    Ok(())
+}
+
 #[test]
 fn existing_git_worktree_with_spaces_has_a_followable_branch_remedy() -> Result {
     let rig = GraphProject::new()?;
@@ -2673,6 +2695,64 @@ fn assert_compile_refusal_matches(
     Ok(())
 }
 
+/// A composite admission refusal names the validator reason. Unlike the exact
+/// helper above, this pins the parts of the reason that are stable while the
+/// offending node id may be long or scoped.
+fn assert_compile_refusal_contains(
+    rig: &GraphProject,
+    templates: &[(&str, String)],
+    name: &str,
+    document: &Value,
+    config: &str,
+    expected: &[&str],
+) -> Result {
+    let directory = rig.project.join(".provenant/templates");
+    std::fs::create_dir_all(&directory)?;
+    for (file, text) in templates {
+        std::fs::write(directory.join(format!("{file}.toml")), text)?;
+    }
+    std::fs::write(rig.state().join("config.toml"), config)?;
+    let path = rig.document(document)?;
+    let mut messages = Vec::new();
+    for args in [vec!["run", name, "--explain"], vec!["run", name]] {
+        let (output, value) = rig.run(&args)?;
+        assert!(!output.status.success(), "{name} {args:?}: {value}");
+        messages.push(
+            value["error"]["message"]
+                .as_str()
+                .ok_or("message")?
+                .to_owned(),
+        );
+    }
+    for explain in [true, false] {
+        let mut command = rig.command();
+        command.args(["run", "--file"]).arg(&path);
+        if explain {
+            command.arg("--explain");
+        }
+        let output = command.output()?;
+        let value: Value = serde_json::from_slice(&output.stdout)?;
+        assert!(
+            !output.status.success(),
+            "{name} --file explain={explain}: {value}"
+        );
+        messages.push(
+            value["error"]["message"]
+                .as_str()
+                .ok_or("message")?
+                .to_owned(),
+        );
+    }
+    assert!(
+        messages
+            .iter()
+            .all(|message| expected.iter().all(|part| message.contains(*part))),
+        "{name}: {messages:?}"
+    );
+    assert!(graph_records(&rig.state())?.is_empty(), "{name}");
+    Ok(())
+}
+
 #[test]
 fn oversized_graph_expansion_is_refused_before_journalling() -> Result {
     let rig = GraphProject::new()?;
@@ -2754,7 +2834,7 @@ fn oversized_graph_expansion_is_refused_before_journalling() -> Result {
     let second = "b".repeat(64);
     let third = "c".repeat(64);
     let fourth = "d".repeat(64);
-    assert_compile_refusal_matches(
+    assert_compile_refusal_contains(
         &rig,
         &[
             (
@@ -2787,11 +2867,14 @@ fn oversized_graph_expansion_is_refused_before_journalling() -> Result {
             "exports":[{"node":second,"outputs":["result"]}]
         }}]}),
         "schema_version = 1\n",
-        "graph composite or loop expansion is invalid",
+        &[
+            "expanded node id",
+            "is invalid; use at most 200 ASCII letters, digits, dots, underscores or hyphens",
+        ],
     )?;
 
-    // Composite expansion refuses duplicate exports of one member.
-    assert_compile_refusal_matches(
+    // Composite expansion refuses duplicate exports of one member and names why.
+    assert_compile_refusal_contains(
         &rig,
         &[(
             "duplicate-export",
@@ -2804,7 +2887,7 @@ fn oversized_graph_expansion_is_refused_before_journalling() -> Result {
             "exports":[{"node":"member","outputs":["result"]},{"node":"member","outputs":["result"]}]
         }}]}),
         "schema_version = 1\n",
-        "graph composite or loop expansion is invalid",
+        &["composite export must select a unique direct child"],
     )?;
     Ok(())
 }

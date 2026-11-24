@@ -914,135 +914,6 @@ impl FacadeError {
         )
     }
 
-    pub fn graph_candidate(error: crate::graph::CandidateError) -> Self {
-        use crate::graph::CandidateError;
-        match error {
-            CandidateError::Plan(reason) => {
-                Self::graph_admission(crate::graph::AdmissionError::Plan(reason))
-            }
-            CandidateError::CloudPlacementRemoved => {
-                Self::invalid(InvalidInputDetail::CloudPlacementRemoved)
-            }
-            CandidateError::Checkpoint => Self::StateCorrupt,
-            CandidateError::CheckpointTopology { node, invariant } => Self::StateCorruptDetail {
-                detail: format!("graph checkpoint node {node}: {invariant}"),
-            },
-            CandidateError::Cycle { node } => {
-                Self::graph_admission(crate::graph::AdmissionError::Cycle { node })
-            }
-            CandidateError::WriterWorktree { node } => {
-                Self::graph_admission(crate::graph::AdmissionError::WriterWorktree { node })
-            }
-            CandidateError::Schema => {
-                Self::graph_admission(crate::graph::AdmissionError::Schema(String::new()))
-            }
-            CandidateError::Composite => {
-                Self::graph_admission(crate::graph::AdmissionError::Composite(String::new()))
-            }
-            CandidateError::OutputKind(field) => {
-                Self::graph_admission(crate::graph::AdmissionError::OutputKind {
-                    field,
-                    reason: String::new(),
-                })
-            }
-            CandidateError::Extension(cause) => Self::DispatchRefused {
-                reason: cause.to_string(),
-                fact: Some(DispatchRefusalFact::GraphExtension(cause)),
-                disk: None,
-            },
-            CandidateError::NodeStructural { node, limit } => Self::DispatchRefused {
-                reason: format!("node {node}: {limit}"),
-                fact: Some(DispatchRefusalFact::GraphNodeLimit { node, limit }),
-                disk: None,
-            },
-            CandidateError::Structural(limit) => {
-                Self::graph_admission(crate::graph::AdmissionError::StructuralLimit(limit))
-            }
-            CandidateError::Envelope(limit) => {
-                Self::graph_admission(crate::graph::AdmissionError::Envelope(limit))
-            }
-            other => Self::DispatchRefused {
-                fact: None,
-                disk: None,
-                reason: other.to_string(),
-            },
-        }
-    }
-
-    /// Retain the typed admission stage while keeping its original refusal text.
-    pub fn graph_admission(error: crate::graph::AdmissionError) -> Self {
-        use crate::graph::AdmissionError;
-        // A plan rejection already names the node and the validator reason.
-        // Keep that text rather than flattening it to a generic topology
-        // refusal, so the repair text can be followed. Spec:
-        // docs/specs/fabric.md#graph-admission-and-refusal-causes
-        let plan_reason = match &error {
-            AdmissionError::Plan(reason)
-                if !reason.is_empty()
-                    && reason
-                        .strip_prefix("node ")
-                        .and_then(|reason| reason.strip_suffix(": writer worktree"))
-                        .is_none() =>
-            {
-                Some(reason.clone())
-            }
-            _ => None,
-        };
-        let fact = match &error {
-            AdmissionError::CloudPlacementRemoved => {
-                return Self::invalid(InvalidInputDetail::CloudPlacementRemoved);
-            }
-            AdmissionError::Schema(_) => DispatchRefusalFact::GraphSchema,
-            AdmissionError::Composite(_) => DispatchRefusalFact::GraphComposite,
-            AdmissionError::Plan(reason) => reason
-                .strip_prefix("node ")
-                .and_then(|reason| reason.strip_suffix(": writer worktree"))
-                .and_then(|node| node.to_owned().try_into().ok())
-                .map_or(DispatchRefusalFact::GraphPlan, |node| {
-                    DispatchRefusalFact::GraphWriterWorktree { node }
-                }),
-            AdmissionError::WriterWorktree { node } => {
-                DispatchRefusalFact::GraphWriterWorktree { node: node.clone() }
-            }
-            AdmissionError::Cycle { node } => {
-                DispatchRefusalFact::GraphCycle { node: node.clone() }
-            }
-            AdmissionError::StructuralLimit(limit) => {
-                DispatchRefusalFact::GraphStructuralLimit(*limit)
-            }
-            AdmissionError::Envelope(_) => DispatchRefusalFact::GraphEnvelope,
-            AdmissionError::OutputKind { field, .. } => {
-                DispatchRefusalFact::GraphOutputKind(*field)
-            }
-        };
-        Self::DispatchRefused {
-            reason: plan_reason.unwrap_or_else(|| match &fact {
-                DispatchRefusalFact::GraphStructuralLimit(limit) => limit.to_string(),
-                DispatchRefusalFact::GraphCycle { node } => {
-                    format!("node {node}: dependency cycle")
-                }
-                DispatchRefusalFact::GraphWriterWorktree { node } => {
-                    format!("node {node}: writer worktree")
-                }
-                DispatchRefusalFact::GraphEnvelope => {
-                    "graph checkpoint would exceed its size limit".into()
-                }
-                DispatchRefusalFact::GraphSchema => {
-                    "graph document schema_version is invalid".into()
-                }
-                DispatchRefusalFact::GraphOutputKind(_) => {
-                    "graph outputs select an unavailable output kind".into()
-                }
-                DispatchRefusalFact::GraphComposite => {
-                    "graph composite or loop expansion is invalid".into()
-                }
-                _ => "graph plan schema or topology is invalid".into(),
-            }),
-            disk: None,
-            fact: Some(fact),
-        }
-    }
-
     /// Local diagnostics preserve shape-only text. Peer publication applies
     /// its destination-aware projection to declared free-text fields.
     pub fn diagnostic(&self) -> provenant_records::diagnostic::Diagnostic {
@@ -1140,21 +1011,32 @@ impl FacadeError {
                     projected = projected.detail(reason);
                 }
             }
-            Self::DispatchRefused { fact: Some(fact), .. } => {
+            Self::DispatchRefused { fact: Some(fact), reason, .. } => {
+                // A validator rejection names its node and reason. Keep that
+                // bounded text in the detail so the repair can be followed,
+                // while the typed fact still owns the next action.
+                // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
+                let named = |fixed: &'static str| -> String {
+                    if reason.is_empty() {
+                        fixed.into()
+                    } else {
+                        provenant_core::bounded_line(reason, 4096)
+                    }
+                };
                 let (detail, action) = match fact {
                     DispatchRefusalFact::DetachedWriter => unreachable!(),
                     DispatchRefusalFact::DirtyWriter => ("the writer worktree has uncommitted edits", "preserve or commit the edits before retrying"),
                     DispatchRefusalFact::CheckedOutWriter => ("the branch is already checked out", "run `provenant worktree list`, inspect custody, then select the existing checkout with --worktree"),
-                    DispatchRefusalFact::GraphSchema => ("graph document schema_version is invalid", "use a schema version that supports the document fields"),
-                    DispatchRefusalFact::GraphComposite => ("graph composite or loop expansion is invalid", "inspect the composite or loop definition"),
+                    DispatchRefusalFact::GraphSchema => (named("graph document schema_version is invalid"), "use a schema version that supports the document fields"),
+                    DispatchRefusalFact::GraphComposite => (named("graph composite or loop expansion is invalid"), "inspect the composite or loop definition"),
                     DispatchRefusalFact::GraphPlan | DispatchRefusalFact::GraphCycle { .. } | DispatchRefusalFact::GraphWriterWorktree { .. } => unreachable!(),
                     DispatchRefusalFact::GraphStructuralLimit(_) => unreachable!(),
                     DispatchRefusalFact::GraphExtension(_) => unreachable!(),
                     DispatchRefusalFact::GraphNodeLimit { .. } => unreachable!(),
                     DispatchRefusalFact::Resource(_) => unreachable!(),
                     DispatchRefusalFact::GraphEnvelope => ("graph checkpoint would exceed its size limit", "split the graph into smaller runs"),
-                    DispatchRefusalFact::GraphOutputKind(crate::graph::GraphOutputField::Input) => ("graph inputs[].outputs selects an unavailable output kind", "select an output supplied by the source node"),
-                    DispatchRefusalFact::GraphOutputKind(crate::graph::GraphOutputField::CompositeExport) => ("graph composite.exports[].outputs selects an unavailable output kind", "select an output supplied by the source node"),
+                    DispatchRefusalFact::GraphOutputKind(crate::graph::GraphOutputField::Input) => (named("graph inputs[].outputs selects an unavailable output kind"), "select an output supplied by the source node"),
+                    DispatchRefusalFact::GraphOutputKind(crate::graph::GraphOutputField::CompositeExport) => (named("graph composite.exports[].outputs selects an unavailable output kind"), "select an output supplied by the source node"),
                 };
                 projected = projected.detail(detail).next(action);
             }
@@ -1577,6 +1459,9 @@ impl From<&provenant_fabric_store::Error> for FacadeError {
         }
     }
 }
+
+#[path = "facade_graph_admission.rs"]
+mod graph_admission;
 
 #[cfg(test)]
 #[path = "facade_diagnostic_tests.rs"]

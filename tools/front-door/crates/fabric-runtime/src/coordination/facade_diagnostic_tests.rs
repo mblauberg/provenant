@@ -416,7 +416,8 @@ fn graph_plan_refusal_retains_token_shaped_node_identifier_as_metadata() {
 // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
 #[test]
 fn graph_plan_admission_names_the_node_and_validator_reason() {
-    let reason = "node read: route alias must be an identifier; exact models require an adapter or --model";
+    let reason =
+        "node read: route alias must be an identifier; exact models require an adapter or --model";
     let error = FacadeError::graph_admission(crate::graph::AdmissionError::Plan(reason.into()));
     let diagnostic = error.diagnostic();
     assert_eq!(diagnostic.code, "dispatch_refused");
@@ -434,6 +435,37 @@ fn graph_plan_admission_names_the_node_and_validator_reason() {
     assert_eq!(fact, &super::DispatchRefusalFact::GraphPlan);
     let wire = serde_json::to_value(&error).unwrap();
     assert_eq!(wire["reason"], serde_json::json!(reason));
+}
+
+// Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
+#[test]
+fn graph_admission_keeps_composite_schema_and_output_kind_reasons() {
+    use crate::graph::{AdmissionError, GraphOutputField};
+    for (error, reason) in [
+        (
+            AdmissionError::Composite("node a: loop.max_rounds must be positive".into()),
+            "node a: loop.max_rounds must be positive",
+        ),
+        (
+            AdmissionError::Schema("schema version".into()),
+            "schema version",
+        ),
+        (
+            AdmissionError::OutputKind {
+                field: GraphOutputField::Input,
+                reason: "node b: execution bindings require an agent node".into(),
+            },
+            "node b: execution bindings require an agent node",
+        ),
+    ] {
+        let refusal = FacadeError::graph_admission(error);
+        let diagnostic = refusal.diagnostic();
+        assert_eq!(diagnostic.code, "dispatch_refused");
+        assert_eq!(diagnostic.detail.as_deref(), Some(reason));
+        let wire = serde_json::to_value(&refusal).unwrap();
+        assert_eq!(wire["reason"], serde_json::json!(reason));
+        assert!(!wire["fact"].is_null(), "{wire}");
+    }
 }
 
 #[test]

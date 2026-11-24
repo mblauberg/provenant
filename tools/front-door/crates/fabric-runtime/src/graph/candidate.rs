@@ -11,12 +11,15 @@ pub enum CandidateError {
     Plan(String),
     #[error("{CLOUD_PLACEMENT_REMOVED}")]
     CloudPlacementRemoved,
-    #[error("graph schema is invalid")]
-    Schema,
-    #[error("graph composite is invalid")]
-    Composite,
-    #[error("graph output kind is invalid")]
-    OutputKind(GraphOutputField),
+    #[error("{0}")]
+    Schema(String),
+    #[error("{0}")]
+    Composite(String),
+    #[error("{reason}")]
+    OutputKind {
+        field: GraphOutputField,
+        reason: String,
+    },
     #[error("node {node}: dependency cycle")]
     Cycle { node: refusal::GraphIdentifier },
     #[error("node {node}: writer worktree")]
@@ -47,9 +50,9 @@ impl CandidateError {
             AdmissionError::CloudPlacementRemoved => Self::CloudPlacementRemoved,
             AdmissionError::Cycle { node } => Self::Cycle { node },
             AdmissionError::WriterWorktree { node } => Self::WriterWorktree { node },
-            AdmissionError::Schema(_) => Self::Schema,
-            AdmissionError::Composite(_) => Self::Composite,
-            AdmissionError::OutputKind { field, .. } => Self::OutputKind(field),
+            AdmissionError::Schema(reason) => Self::Schema(reason),
+            AdmissionError::Composite(reason) => Self::Composite(reason),
+            AdmissionError::OutputKind { field, reason } => Self::OutputKind { field, reason },
             AdmissionError::StructuralLimit(limit) => Self::Structural(limit),
             AdmissionError::Envelope(limit) => Self::Envelope(limit),
             // A plan rejection names the node and the validator reason. Carry

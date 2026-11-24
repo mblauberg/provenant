@@ -41,6 +41,27 @@ fn an_exact_model_route_tier_lowers_to_an_adapter_and_model_route() {
     }
 }
 
+/// An exact model route cannot be held by the relay's tier controls: a later
+/// child rewrite would turn the adapter/model route into an alias that cannot
+/// carry a model id. Spec: docs/specs/routing.md#launch-route-and-role-tiers
+#[test]
+fn child_request_suppresses_the_tier_for_an_exact_model_route() -> Result {
+    let rig = TestRig::new()?;
+    let factory = factory(&rig)?;
+    let child = factory.child_request(&json!({
+        "op":"run", "brief":"Inspect the parser", "route":"opencode/hy4-flash-free"
+    }))?;
+    assert_eq!(child.tier, None, "{child:?}");
+    let launch = child.launch.as_ref().ok_or("missing launch")?;
+    assert_eq!(launch.node["route"]["adapter"], "opencode", "{launch:?}");
+    assert_eq!(
+        launch.node["route"]["model"], "opencode/hy4-flash-free",
+        "{launch:?}"
+    );
+    assert!(launch.node["route"]["alias"].is_null(), "{launch:?}");
+    Ok(())
+}
+
 #[test]
 fn a_role_map_sets_each_node_to_its_role_tier_or_keeps_the_default() {
     use provenant_fabric_runtime::graph::GraphNode;
