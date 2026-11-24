@@ -25,7 +25,6 @@ a path prefix of the other. A remote-tracking ref is split into a remote and a b
 `git remote` reports, longest name first, or, when no remote is configured, at a tracking directory
 under `refs/remotes` that holds a ref, as in a bare store fed by explicit fetches. An intermediate
 slash never invents a remote, but a configured remote that contains `/` is still a valid boundary.
-A ref matching no configured remote is compared under its whole name rather than ignored.
 - Why: treating every slash as a remote boundary invents remotes that do not exist and refuses names
   that collide with nothing; a store with no configured remote still needs its tracking directories.
 
