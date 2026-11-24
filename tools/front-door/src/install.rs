@@ -2641,10 +2641,9 @@ struct HostUpgrade {
 
 #[path = "install_report.rs"]
 mod report;
-use report::{
-    HOST_REASON_LIMIT, first_error_line, graph_verdict, innermost_error_text, is_envelope,
-    smoke_verdict,
-};
+#[cfg(test)]
+use report::HOST_REASON_LIMIT;
+use report::{first_error_line, graph_verdict, innermost_error_text, is_envelope, smoke_verdict};
 
 /// Refusal detail: name every failing host once with its bounded one-line
 /// reason. The full per-host view is emitted separately as the human output;

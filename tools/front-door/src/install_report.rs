@@ -91,7 +91,7 @@ pub(super) fn first_error_line(output: &str) -> String {
             let line = first_meaningful_line(output);
             unwrap_command_failure(&line).to_owned()
         });
-    cli::bounded_text(&reason, HOST_REASON_LIMIT)
+    provenant_cli::bounded_text(&reason, HOST_REASON_LIMIT)
 }
 
 /// Whether a captured line is a `--json` command envelope, not human text.
