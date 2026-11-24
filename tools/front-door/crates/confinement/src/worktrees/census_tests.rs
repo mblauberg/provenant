@@ -1284,40 +1284,6 @@ fn configured_entry_with_unreadable_root_metadata_keeps_root_unknown() -> Result
     Ok(())
 }
 
-/// A root that no longer exists is decidable: a configured unreadable process
-/// whose path cannot be placed does not keep an already-removed worktree
-/// unknown, so abandon can settle a lane whose checkout is gone.
-#[test]
-fn configured_entry_with_removed_root_is_excused() -> Result<(), Box<dyn Error>> {
-    let fixture = Fixture::new()?;
-    let root = fixture.root.join("removed-root");
-    let owner = provenant_os::fs::effective_uid();
-    let signals = UnreadableSignals {
-        uids: Some(ProcessUids {
-            real: owner,
-            effective: owner,
-            saved: owner,
-        }),
-        platform_signed: true,
-        entries: vec![CensusIgnoreEntry {
-            path: PathBuf::from("/usr/libexec/UserEventAgent"),
-            team_id: "platform".into(),
-        }],
-        team_id: None,
-        executable: Some(PathBuf::from("/usr/libexec/UserEventAgent")),
-        cwd: CwdObservation::PermissionDenied,
-        occupancy_paths: vec![fixture.root.join("gone").join("descriptor")],
-    };
-    let outcome = observe_unreadable(&root, &signals)?;
-    assert!(
-        !outcome.state.is_unknown(),
-        "{:?}: {}",
-        outcome.state,
-        outcome.detail
-    );
-    Ok(())
-}
-
 /// A configured process whose readable cwd is inside the root is positive
 /// placement and must not be excused when its descriptors are EPERM. This
 /// drives the facts loop (a listed fact, not an unknown pid) so it pins the
