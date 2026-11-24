@@ -2741,8 +2741,7 @@ fn retry_of_launch_blocked_writer_starts_a_new_attempt_in_the_same_worktree() {
         "retry reuses the recorded worktree"
     );
 
-    let mut resumed = MemoryJournal::default();
-    resumed.0 = Some(checkpoint);
+    let mut resumed = MemoryJournal(Some(checkpoint));
     let mut next_owner = FakeOwner {
         observations: [done_as("retried-attempt")].into(),
         ..Default::default()
