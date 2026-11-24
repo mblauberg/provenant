@@ -863,8 +863,44 @@ pub(super) fn fail_node(
 mod tests {
     use super::super::next_step::settlement_fallback_decision;
     use super::*;
+    use crate::coordination::facade::FacadeError;
     use provenant_records::run::PreparationFailure;
     use provenant_routing::FallbackHandoff;
+
+    #[test]
+    fn writer_binding_io_failure_names_path_and_operation() {
+        let root = tempfile::tempdir().expect("create a temporary worktree parent");
+        let blocker = root.path().join("not-a-directory");
+        std::fs::write(&blocker, b"occupied").expect("plant a regular file as the parent");
+        let worktree = blocker.join("worktree");
+        let source = worktree
+            .try_exists()
+            .expect_err("a path beneath a regular file must fail");
+        let source_text = source.to_string();
+        let path_text = worktree.to_str().expect("test path is UTF-8");
+
+        let error = FacadeError::io_failure("inspect writer worktree", Some(&worktree), source);
+        let diagnostic = error.diagnostic();
+        let detail = diagnostic
+            .detail
+            .as_deref()
+            .expect("io failure has local detail");
+        assert!(detail.contains("inspect writer worktree"), "{detail}");
+        assert!(detail.contains(path_text), "{detail}");
+        assert!(detail.contains(&source_text), "{detail}");
+
+        let reason = writer_binding_reason("node-7", &error);
+        assert!(reason.contains("cannot bind writer [io]"), "{reason}");
+        assert!(reason.contains("inspect writer worktree"), "{reason}");
+        assert!(reason.contains(path_text), "{reason}");
+        assert!(reason.contains(&source_text), "{reason}");
+
+        // A peer cannot use the local detail as a route for a raw path: the
+        // wire operation and path are projected without the trusted detail.
+        let wire = serde_json::to_string(&error).expect("serialise facade error");
+        assert!(!wire.contains(path_text), "{wire}");
+        assert!(!wire.contains(&source_text), "{wire}");
+    }
 
     #[test]
     fn contradictory_or_wrong_scope_evidence_cannot_switch() {

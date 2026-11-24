@@ -1175,29 +1175,71 @@ impl RunError {
                 diagnostic = diagnostic.next("inspect the host I/O failure before retrying");
             }
             Self::OperationIo {
-                operation, source, ..
+                operation,
+                path,
+                source,
             } => {
                 diagnostic = diagnostic
                     .fact(DiagnosticFact::Filesystem {
                         operation,
+                        path: path
+                            .as_ref()
+                            .map(|path| path.to_string_lossy().into_owned()),
+                        source: Some(source.to_string()),
                         cause: CausedSource::cause(source),
                     })
                     .next("inspect the host I/O failure before retrying");
             }
             Self::Filesystem(error) | Self::Publication(error) => {
                 use provenant_os::fs::FsError;
-                let operation = match error {
-                    FsError::Io { operation, .. } => *operation,
-                    FsError::ReadIo { .. } => "read file",
-                    FsError::Rename { .. } => "rename",
-                    FsError::Symlink { .. } => "resolve path",
-                    FsError::CrossDevice { .. } => "verify filesystem device",
-                    FsError::LockTimeout { .. } | FsError::Cancelled { .. } => "acquire lock",
-                    FsError::LockDeadlineOverflow { .. } => "set lock deadline",
-                    _ => "verify filesystem entry",
+                let (operation, path, source) = match error {
+                    FsError::Io {
+                        operation,
+                        path,
+                        source,
+                    } => (
+                        *operation,
+                        Some(path.to_string_lossy().into_owned()),
+                        Some(source.to_string()),
+                    ),
+                    FsError::ReadIo { path, source } => (
+                        "read file",
+                        Some(path.to_string_lossy().into_owned()),
+                        Some(source.to_string()),
+                    ),
+                    FsError::Rename {
+                        to_path, source, ..
+                    } => (
+                        "rename",
+                        Some(to_path.to_string_lossy().into_owned()),
+                        Some(source.to_string()),
+                    ),
+                    FsError::Symlink { path, source } => (
+                        "resolve path",
+                        Some(path.to_string_lossy().into_owned()),
+                        Some(source.to_string()),
+                    ),
+                    FsError::CrossDevice { path } => (
+                        "verify filesystem device",
+                        Some(path.to_string_lossy().into_owned()),
+                        None,
+                    ),
+                    FsError::LockTimeout { path, .. } | FsError::Cancelled { path } => (
+                        "acquire lock",
+                        Some(path.to_string_lossy().into_owned()),
+                        None,
+                    ),
+                    FsError::LockDeadlineOverflow { path } => (
+                        "set lock deadline",
+                        Some(path.to_string_lossy().into_owned()),
+                        None,
+                    ),
+                    _ => ("verify filesystem entry", None, None),
                 };
                 diagnostic = diagnostic.fact(DiagnosticFact::Filesystem {
                     operation,
+                    path,
+                    source,
                     cause: None,
                 });
             }
@@ -1529,11 +1571,13 @@ mod diagnostic_projection_tests {
                 assert!(!encoded.chars().any(char::is_control));
                 if matches!(&error, RunError::Filesystem(_)) {
                     assert!(matches!(
-                        projection.fact,
+                        &projection.fact,
                         Some(DiagnosticFact::Filesystem {
                             operation: "read file",
                             cause: None,
-                        })
+                            path: Some(path),
+                            source: Some(source),
+                        }) if path == "/private/host" && source == "TOKEN_SENTINEL"
                     ));
                 }
             }

@@ -654,9 +654,12 @@ pub enum FacadeError {
         resource: Option<Box<provenant_records::diagnostic::ResourceFact>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         input_failure: Option<provenant_records::diagnostic::IoFact>,
-        /// The source error's fixed text, kept in-process for local edges.
+        /// The source error's text, kept in-process for local edges. A local
+        /// failure stores its operation, path and source here so the node
+        /// diagnostic names them; peer-supplied operations and paths are never
+        /// trusted and stay out of this field.
         #[serde(skip)]
-        cause: Option<&'static str>,
+        cause: Option<String>,
     },
 }
 
@@ -1056,9 +1059,11 @@ impl FacadeError {
             Self::Io { operation, .. } if operation == REPOSITORY_FACT_LIMIT_OPERATION => {
                 projected = projected.detail("repository fact output exceeded its capture limit");
             }
-            // Only the in-process fixed cause is disclosed: operation text can
-            // arrive from a peer and the path is unanchored.
-            Self::Io { cause: Some(cause), .. } => projected = projected.detail(*cause),
+            // Only the in-process local cause is disclosed: operation text can
+            // arrive from a peer and the path is unanchored. Local failures put
+            // their operation, path and source into this one field, so the
+            // writer-binding diagnostic names them without trusting wire text.
+            Self::Io { cause: Some(cause), .. } => projected = projected.detail(cause.clone()),
             Self::LaunchUnknown { operation_id } => projected = projected.next(format!("inspect the receipt for operation {operation_id} before retrying with the same operation ID")),
             Self::WriterBusy { holder } => {
                 if let Some(holder) = holder {
@@ -1272,15 +1277,47 @@ impl FacadeError {
     pub fn io_caused(operation: impl Into<String>, cause: Option<&'static str>) -> Self {
         let mut error = Self::io(operation);
         if let Self::Io { cause: slot, .. } = &mut error {
-            *slot = cause;
+            *slot = cause.map(str::to_owned);
         }
         error
     }
 
-    /// The source error's fixed text, when this failure kept one.
-    pub fn cause(&self) -> Option<&'static str> {
+    /// A local I/O failure that keeps the operation and path it failed at,
+    /// together with the source error's text, in the one in-process detail
+    /// field. This is the typed carrier for the writer-binding path: the
+    /// operation and path travel beside the error to the node diagnostic
+    /// instead of being re-formatted at each conversion site. Only the
+    /// local-only cause is disclosed; `operation` and `path` stay subject to
+    /// their wire projection when this error crosses an edge.
+    pub fn io_failure(
+        operation: impl Into<String>,
+        path: Option<&std::path::Path>,
+        source: impl std::fmt::Display,
+    ) -> Self {
+        let operation = operation.into();
+        let path = path.map(|path| path.to_string_lossy().into_owned());
+        let detail = match &path {
+            Some(path) => format!("{operation} {path}: {source}"),
+            None => format!("{operation}: {source}"),
+        };
+        let detail = provenant_core::bounded_line(&detail, 4096);
+        let mut error = Self::io(operation);
+        if let Self::Io {
+            cause: slot,
+            path: slot_path,
+            ..
+        } = &mut error
+        {
+            *slot_path = path;
+            *slot = Some(detail);
+        }
+        error
+    }
+
+    /// The source error's local text, when this failure kept one.
+    pub fn cause(&self) -> Option<&str> {
         match self {
-            Self::Io { cause, .. } => *cause,
+            Self::Io { cause, .. } => cause.as_deref(),
             _ => None,
         }
     }

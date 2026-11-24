@@ -604,6 +604,11 @@ pub enum DiagnosticFact {
     WorktreeUnregistered,
     Filesystem {
         operation: &'static str,
+        /// The path the operation failed at, when known. `Diagnostic::fact` is
+        /// serde-skipped, so this stays in-process only.
+        path: Option<String>,
+        /// The source error's text, kept in-process for local diagnostics.
+        source: Option<String>,
         /// The source error's fixed text, when it names no path or value.
         cause: Option<&'static str>,
     },

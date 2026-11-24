@@ -567,8 +567,18 @@ pub(crate) fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
                     path: "inspect worktree registration".into(),
                 };
             }
-            Some(DiagnosticFact::Filesystem { operation, cause }) => {
-                return FacadeError::io_caused(*operation, *cause);
+            Some(DiagnosticFact::Filesystem {
+                operation,
+                path,
+                source,
+                cause,
+            }) => {
+                let source = source
+                    .as_deref()
+                    .or(*cause)
+                    .unwrap_or("I/O operation failed");
+                let path = path.as_deref().map(std::path::Path::new);
+                return FacadeError::io_failure(*operation, path, source);
             }
             Some(DiagnosticFact::DiskPressure {
                 available,
@@ -645,12 +655,12 @@ pub(crate) fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
         },
         Some(FacadeError::Io {
             operation,
+            path,
             delivery_limit,
             delivery_stage,
             resource,
             input_failure,
             cause,
-            ..
         }) => FacadeError::Io {
             delivery_limit,
             delivery_stage,
@@ -658,7 +668,7 @@ pub(crate) fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
             input_failure,
             cause,
             operation,
-            path: None,
+            path,
         },
         Some(error @ FacadeError::InvalidInput { detail: None }) => {
             with_run_detail(error, fail.projection.as_deref())

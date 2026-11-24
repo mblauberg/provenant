@@ -170,10 +170,9 @@ fn selected_writer_project(
     } else {
         factory.context.project_root.join(given)
     };
-    if !selected
-        .try_exists()
-        .map_err(|_| FacadeError::io("inspect writer worktree"))?
-    {
+    if !selected.try_exists().map_err(|source| {
+        FacadeError::io_failure("inspect writer worktree", Some(&selected), source)
+    })? {
         return Err(run_error(provenant_run::RunError::WorktreeMissing(
             selected,
         )));
