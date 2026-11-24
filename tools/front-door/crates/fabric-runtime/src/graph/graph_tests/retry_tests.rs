@@ -2684,9 +2684,12 @@ fn retry_of_launch_blocked_writer_starts_a_new_attempt_in_the_same_worktree() {
     assert!(attempt.attempt_ref.is_none());
     assert!(!attempt.host_refused_before_acceptance);
 
-    // Exhaust the contention wait at the provisioning deadline.
-    launch_disposition::<FakeOwner, MemoryJournal>(
-        &mut owner,
+    // Exhaust the contention wait at the provisioning deadline. The
+    // disposition error is a typed facade kind, so use the owner whose error
+    // type is FacadeError (as every other launch_disposition call here does).
+    let mut disposition_owner = ErrorLauncher::default();
+    launch_disposition::<ErrorLauncher, MemoryJournal>(
+        &mut disposition_owner,
         &mut checkpoint,
         0,
         &FacadeError::WriterLockBusy,
