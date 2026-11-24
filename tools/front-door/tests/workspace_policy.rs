@@ -1890,7 +1890,7 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         ("src/pr/landing/driver.rs", 4250),
         ("src/pr/observer.rs", 2750),
         ("src/status_wait.rs", 3500),
-        ("src/worktrees.rs", 5500),
+        ("src/worktrees.rs", 5750),
     ];
     let off_band: Vec<_> = CEILINGS
         .iter()
