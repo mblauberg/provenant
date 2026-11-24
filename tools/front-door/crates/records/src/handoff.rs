@@ -1546,7 +1546,8 @@ mod tests {
             assert_eq!(Handoff::from_result(result), Ok(None));
         }
         for result in [
-            format!("{STOP}\nMore text"),
+            // A single block followed only by prose is tolerated since #3928
+            // (see one_closed_handoff_followed_only_by_prose_is_accepted_with_a_tolerance).
             // Adjacent repeated blocks are one declaration since #3341 (see
             // the repeated-block tests); prose between them still fails.
             format!("{STOP}\nMore text\n{STOP}"),
