@@ -92,17 +92,19 @@ pub(super) fn gc_free_floor_bounded_join_fails_when_sweep_is_held() -> Result {
 /// The explicit home keeps that sweep inside the rig.
 pub(super) fn gc_cleanup_below_floor_starts_a_sweep() -> Result {
     let fixture = crate::fabric::peer_tests::SettlementFixture::resumed()?;
-    let rig = &fixture.rig;
+    // Settlement sweeps from the state root it recorded; configure and
+    // observe that root, not the rig's spelling of it.
+    let state = fixture.settled.roots.state_root.clone();
     fs::write(
-        rig.state.join("config.toml"),
-        b"schema_version=1\n[gc]\nfree_floor='18446744073709551615B'\n",
+        state.join("config.toml"),
+        b"schema_version=1\n[gc]\nfree_floor='1TiB'\n",
     )?;
     let request = serde_json::to_string(&(
         fixture.settled.clone(),
         None::<provenant_run::WriterDeliveryReceipt>,
     ))?;
     crate::fabric::gc_cleanup::run(&request, &FreeWorkers, |_| Ok(0))?;
-    let progress = rig.state.join("tick").join("gc-progress.json");
+    let progress = state.join("tick").join("gc-progress.json");
     let record: Value = serde_json::from_slice(&fs::read(&progress)?)?;
     assert_eq!(record["trigger"], "scheduled", "{record}");
     assert_eq!(record["released"], true, "{record}");
