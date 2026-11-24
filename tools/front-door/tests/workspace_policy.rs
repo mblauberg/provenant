@@ -1857,6 +1857,8 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         ("crates/routing/src/resolve.rs", 4377),
         ("crates/routing/src/review.rs", 2671),
         ("crates/run/src/build_dir_gc.rs", 6032),
+        // The #3844 settlement-slot ownership and its pinned capture tests (#3942).
+        ("crates/run/src/completion.rs", 2400),
         ("crates/run/src/controls.rs", 4685),
         ("crates/run/src/delivery.rs", 4580),
         ("crates/run/src/git_context.rs", 2841),

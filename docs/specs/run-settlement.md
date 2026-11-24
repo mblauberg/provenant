@@ -207,14 +207,21 @@ slot at capture that do not decode as that envelope were written by the provider
 its scratch and `$TMPDIR` live under the attempt directory. Settlement keeps those bytes as
 `handoff.provider-written.json`, warns that the file was provider-written, clears the slot and seals
 the envelope from output: a complete answer still settles rather than retrying forever (#3844).
-Snapshots sealed by an earlier build are envelopes too and keep reading unchanged. Bytes that were
-read but do not decode as an envelope after settlement settle `handoff_malformed` with the typed
-diagnostic and keep the raw file, instead of retrying an unchanging decode. An entry in the slot
-that cannot be read safely — an oversize file, a symlink, a hard link, a directory or another unsafe
-entry type — was left by a provider that is gone at settlement. Capture renames it aside by name
-without following or reading it, under `handoff.provider-written.json` (or that name plus `.unsafe`
-when the entry is not a regular file), warns that it was provider-written, and seals the envelope
-from captured output. A transient storage IO failure on a safe entry is not an unsafe class: it
+Only a `HandoffResult` envelope is settlement's snapshot. Before #3078 the slot held a bare
+`Handoff` (or `Option<Handoff>`), which is foreign evidence with no compatibility path: an attempt
+sealed by that build is reconciled by moving its bare snapshot aside as
+`handoff.provider-written.json` and settling from captured output, never by reading it as a sealed
+handoff. Bytes that were read but do not decode as an envelope after settlement settle
+`handoff_malformed` with the typed diagnostic and keep the raw file, instead of retrying an
+unchanging decode. An entry in the slot that cannot be read safely — an oversize file, a symlink, a
+hard link, a directory or another unsafe entry type — was left by a provider that is gone at
+settlement. Capture renames it aside by name without following or reading it, under
+`handoff.provider-written.json` (or the declared `handoff.provider-written.unsafe` when the entry
+is not a regular file), warns that it was provider-written, and seals the envelope from captured
+output. When the preferred evidence name is occupied by a directory, symlink or other non-regular
+entry, capture moves the slot entry to the declared unsafe name instead; only when both declared
+destinations are unusable does capture fail with the typed error. A transient storage IO failure on
+a safe entry is not an unsafe class: it
 keeps its typed, retriable cause and does not settle. The launch prompt tells the lane that the
 harness writes the attempt's own records, including the sealed `handoff.json`, while the progress
 handoff under `provider-state` is the lane's to update throughout the task. Provider scratch and
