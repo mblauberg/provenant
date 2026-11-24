@@ -210,9 +210,11 @@ impl Line {
             "REVIEW_REQUIRED" | "CHANGES_REQUESTED"
         ) {
             "review_required"
-        } else if self.required_unreadable || !self.required_pending.is_empty() {
-            "pending"
-        } else if self.checks_pending.unwrap_or(0) > 0 || self.checks_total.is_none() {
+        } else if self.required_unreadable
+            || !self.required_pending.is_empty()
+            || self.checks_pending.unwrap_or(0) > 0
+            || self.checks_total.is_none()
+        {
             "pending"
         } else if self.draft {
             "draft"
@@ -1790,7 +1792,7 @@ mod tests {
         assert!(pending.text().contains("required_pending=ci-status"));
 
         // A selector that finished does not create the required check.
-        let still_pending = read(&[passed_selector.clone()], required());
+        let still_pending = read(std::slice::from_ref(&passed_selector), required());
         assert_eq!(still_pending.verdict(), None);
         assert_eq!(still_pending.required_pending, ["ci-status"]);
 
