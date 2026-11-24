@@ -80,7 +80,12 @@ offers a superseding model, and an unpinned selection never picks an account
 whose known offer list lacks the model. `route resolve` reports the exclusion
 with the recorded offers. With no observed offer list, shipped members stay and
 supersedence is not applied; owner-configured pools stay pinned regardless. An
-explicit `--account` pin is attempted with a warning rather than withheld.
+explicit `--account` pin is judged by the same recorded offers: it is refused at
+resolve and at launch preparation with the same reason, which names the account
+and model, the recorded offers and their age, and names an offering account or
+`provenant quota tick` as the repair. The resolve selection line names the
+pinned account even when the account is refused, so another account of the same
+provider is never shown in its place.
 
 `quota tick` refreshes listings for installed adapters with a registered
 account and an enabled quota probe, concurrently within the tick's remaining

@@ -272,6 +272,9 @@ pub enum RouteExclusionReason {
     ProviderRefused,
     /// The account's persisted quota evidence is malformed, so only that account is excluded.
     InvalidAccountEvidence,
+    /// The account's recorded offer list excludes the selected model, including
+    /// when the account was pinned explicitly.
+    AccountDoesNotOffer,
 }
 
 impl RouteExclusionReason {
@@ -299,6 +302,7 @@ impl RouteExclusionReason {
         Self::FreeTierRefused,
         Self::ProviderRefused,
         Self::InvalidAccountEvidence,
+        Self::AccountDoesNotOffer,
     ];
 }
 
@@ -398,6 +402,10 @@ impl RouteExclusionReason {
             Self::InvalidAccountEvidence => (
                 "persisted account evidence is invalid",
                 "repair or re-register the account before retrying",
+            ),
+            Self::AccountDoesNotOffer => (
+                "the account's recorded offers exclude the selected model",
+                "select an account that offers the model, or refresh discovery with `provenant quota tick`",
             ),
         }
     }

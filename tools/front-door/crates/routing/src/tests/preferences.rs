@@ -810,9 +810,73 @@ fn known_quota_offers_withhold_an_unoffered_agy_account_unpinned()
             "unpinned seed {seed} must use the offering account"
         );
     }
-    // An explicit pin is still attempted: warn and proceed, never refuse.
+    // An explicit pin that does not offer the model is refused at resolve with
+    // the same typed reason launch preparation reports, not attempted anyway.
     let pinned =
         resolve_for_account_with_seed(&query, &ctx, Some("isolated-agy"), "known-offers", 0)?;
     assert_eq!(pinned.account_key.as_deref(), Some("isolated-agy"));
+    assert!(
+        matches!(
+            &pinned.readiness,
+            RouteReadiness::Unavailable {
+                reason: RouteExclusionReason::AccountDoesNotOffer,
+                ..
+            }
+        ),
+        "pinned account must be refused: {:?}",
+        pinned.readiness
+    );
+    let exclusions = pinned.diagnostics.account_exclusions.join("; ");
+    assert!(
+        exclusions.contains("account isolated-agy does not offer agy/gemini-4-neon"),
+        "{exclusions}"
+    );
+    assert!(exclusions.contains("Gemini 3.8 Flash"), "{exclusions}");
+    assert!(exclusions.contains("provenant quota tick"), "{exclusions}");
+    Ok(())
+}
+
+// Spec: docs/specs/routing.md#provider-model-discovery
+#[test]
+fn resolve_selection_line_names_the_pinned_account() -> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let availability = [agy_account("isolated-agy")];
+    let scope = provenant_quota::AccountScope {
+        extra: Default::default(),
+        adapter: "agy".into(),
+        account_key: "isolated-agy".into(),
+        label: "agy".into(),
+    };
+    let mut record = provenant_quota::AccountRecord::empty(scope.clone());
+    record.snapshot = Some(provenant_quota::QuotaSnapshot {
+        extra: Default::default(),
+        schema_version: 1,
+        account: scope,
+        revision: 1,
+        status: provenant_quota::QuotaStatus::Available,
+        observed_unix_seconds: 80,
+        source_ref: "fixture".into(),
+        authority_ref: None,
+        details: Some(provenant_quota::QuotaDetails {
+            extra: Default::default(),
+            models: vec!["Gemini 3.8 Flash".into()],
+            ..Default::default()
+        }),
+        windows: Vec::new(),
+    });
+    let accounts = [record];
+    let access = readiness_access();
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.availability = &availability;
+    ctx.accounts = &accounts;
+    ctx.access = &access;
+    ctx.policy_account_hint = Some("agy");
+    let rows = pacing_preview(&ModelId::parse("agy/gemini-4-neon")?, &ctx);
+    assert!(
+        rows.iter()
+            .any(|row| row.account.as_deref() == Some("isolated-agy")),
+        "the pinned account must appear on the selection line: {rows:?}"
+    );
     Ok(())
 }
