@@ -298,8 +298,14 @@ mod tests {
     #[test]
     fn pipe_timeout_refuses_an_unread_profile() -> io::Result<()> {
         let pipe = ProfilePipe::with_timeout(vec![b';'; 1024 * 1024], &argv(), Duration::ZERO)?;
-        let mut command = Command::new("/bin/cat");
-        command.stdout(Stdio::null()).stderr(Stdio::null());
+        // The consumer must not exit on its own: cat exits 0 at stdin EOF and
+        // races the timeout kill (#3956).
+        let mut command = Command::new("/bin/sleep");
+        command
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
         super::super::child::configure_command(&mut command, &[pipe.fd()], None, false)?;
         let mut child = command.spawn()?;
         let error = pipe.finish(&mut child).unwrap_err();
