@@ -123,6 +123,17 @@ pub(crate) struct Line {
     /// start later cannot be ruled out. It lasts only a bounded grace period.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) actions_grace: bool,
+    /// The base branch's required checks, when a waiter consulted its policy.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    required_checks: Vec<String>,
+    /// Required checks absent from this head or not yet passing on it. The
+    /// observed set alone cannot settle a head while any of these remain.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    required_pending: Vec<String>,
+    /// The required policy could not be read, so no verdict may be taken from
+    /// whatever checks happen to exist on the head.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    required_unreadable: bool,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     error: Option<String>,
     /// The open batch this pull request was merged into, when Git history
@@ -157,6 +168,9 @@ impl Line {
         self.failing_checks.clear();
         self.pending_checks.clear();
         self.failed_check_details.clear();
+        self.required_checks.clear();
+        self.required_pending.clear();
+        self.required_unreadable = true;
     }
     /// Whether a waiter should hold this reading through a grace period: it
     /// would settle an open pull request although no Actions run has been seen
@@ -196,6 +210,8 @@ impl Line {
             "REVIEW_REQUIRED" | "CHANGES_REQUESTED"
         ) {
             "review_required"
+        } else if self.required_unreadable || !self.required_pending.is_empty() {
+            "pending"
         } else if self.checks_pending.unwrap_or(0) > 0 || self.checks_total.is_none() {
             "pending"
         } else if self.draft {
@@ -324,6 +340,14 @@ impl Line {
         }
         if let Some(note) = &self.batch_uncertain {
             line.push_str(note);
+        }
+        if self.required_unreadable {
+            line.push_str(" required_checks=unavailable");
+        } else if !self.required_pending.is_empty() {
+            line.push_str(&format!(
+                " required_pending={}",
+                self.required_pending.join(",")
+            ));
         }
         line.push_str(&self.cause_suffix());
         line
@@ -506,6 +530,17 @@ impl Required {
     pub fn matches(&self, name: &str, app: Option<u64>) -> bool {
         self.name == name && self.app.is_none_or(|wanted| Some(wanted) == app)
     }
+}
+
+/// How a reading established the base branch's required checks.
+#[derive(Debug)]
+enum Requirement {
+    /// Display-only callers do not gate on a policy they did not read.
+    NotConsulted,
+    /// The policy could not be read: observed checks cannot settle the head.
+    Unreadable,
+    /// The policy was read; an empty set is a known, readable answer.
+    Known(Vec<Required>),
 }
 
 /// A CI result pinned to the commit that reported it.
@@ -903,6 +938,58 @@ pub(crate) fn wait_line_observed(
     Ok(line)
 }
 
+/// Read the base branch's required checks through the same observer as the PR
+/// and its checks. A ruleset is part of the branch's policy, so the names come
+/// from GitHub rather than from a job name compiled into this binary. An
+/// unreadable policy is reported as such rather than treated as an empty set.
+fn observed_policy<F: provenant_config::Forge, C: super::observer::Clock>(
+    observer: &mut super::observer::Observer<F, C>,
+    base: &str,
+    max_age: std::time::Duration,
+    request: &provenant_config::ports::Request,
+) -> Requirement {
+    let branch = encode(base);
+    let Ok(info) = observer.resource(&format!("branches/{branch}"), max_age, request) else {
+        return Requirement::Unreadable;
+    };
+    let Some(protected) = info.get("protected").and_then(serde_json::Value::as_bool) else {
+        return Requirement::Unreadable;
+    };
+    let protection = if protected {
+        match observer.resource(&format!("branches/{branch}/protection"), max_age, request) {
+            Ok(value) => Some(value),
+            Err(_) => return Requirement::Unreadable,
+        }
+    } else {
+        None
+    };
+    let Ok(rules) = observer.resource(
+        &format!("rules/branches/{branch}?per_page=100"),
+        max_age,
+        request,
+    ) else {
+        return Requirement::Unreadable;
+    };
+    // A paginated observer page is a flat array; the direct forge reader uses
+    // --slurp and returns an array of pages. Accept either shape.
+    let pages: Option<Vec<Vec<serde_json::Value>>> = if rules
+        .as_array()
+        .and_then(|array| array.first())
+        .is_some_and(serde_json::Value::is_array)
+    {
+        serde_json::from_value(rules).ok()
+    } else {
+        serde_json::from_value(rules).ok().map(|page| vec![page])
+    };
+    let Some(pages) = pages else {
+        return Requirement::Unreadable;
+    };
+    match parse_required_checks(protection.as_ref(), &pages) {
+        Some(checks) => Requirement::Known(checks),
+        None => Requirement::Unreadable,
+    }
+}
+
 /// One shared conditional host read of PR metadata and checks. Waiters use this
 /// only to reconcile; the tick indexes the same projection for replay.
 pub(crate) fn poll_line<F: provenant_config::Forge, C: super::observer::Clock>(
@@ -924,6 +1011,10 @@ pub(crate) fn poll_line<F: provenant_config::Forge, C: super::observer::Clock>(
         pull.state.to_ascii_uppercase()
     };
     let base = pull.base.as_ref().map(|base| base.branch.clone());
+    let requirement = match base.as_deref() {
+        Some(branch) => observed_policy(observer, branch, max_age, request),
+        None => Requirement::Unreadable,
+    };
     let view = View {
         state,
         head: pull.head.sha,
@@ -935,7 +1026,7 @@ pub(crate) fn poll_line<F: provenant_config::Forge, C: super::observer::Clock>(
         url: pull.html_url,
     };
     let checks = observer.checks(head_override.unwrap_or(&view.head), max_age, request)?;
-    let mut line = status_line(number, view, Some(&checks));
+    let mut line = status_line_with(number, view, Some(&checks), requirement);
     if checks.is_empty() {
         // Mergeability is read (and an UNKNOWN reread) only when it can change
         // the diagnosis: a head with checks needs no cause.
@@ -991,8 +1082,21 @@ pub(crate) fn wait_line(
     Ok(status_line(number, view, checks.as_deref()))
 }
 
-/// One row from the pull request view and its observed checks.
+/// One row from the pull request view and its observed checks, for display
+/// paths that did not read the branch's required policy.
 fn status_line(number: u64, view: View, checks: Option<&[super::observer::Check]>) -> Line {
+    status_line_with(number, view, checks, Requirement::NotConsulted)
+}
+
+/// One row from the pull request view, its observed checks and the branch's
+/// required set. A required check that is absent or not passing keeps the
+/// reading pending however small the observed set is.
+fn status_line_with(
+    number: u64,
+    view: View,
+    checks: Option<&[super::observer::Check]>,
+    requirement: Requirement,
+) -> Line {
     let checks = checks.filter(|checks| !checks.is_empty());
     let count = |buckets: &[&str]| {
         checks.map(|checks| {
@@ -1007,6 +1111,24 @@ fn status_line(number: u64, view: View, checks: Option<&[super::observer::Check]
             "none".to_owned()
         } else {
             text.to_lowercase()
+        }
+    };
+    let (required_checks, required_pending, required_unreadable) = match &requirement {
+        Requirement::NotConsulted => (Vec::new(), Vec::new(), false),
+        Requirement::Unreadable => (Vec::new(), Vec::new(), true),
+        Requirement::Known(needs) => {
+            let names = needs.iter().map(|need| need.name.clone()).collect();
+            let pending = needs
+                .iter()
+                .filter(|need| {
+                    !checks
+                        .unwrap_or(&[])
+                        .iter()
+                        .any(|check| need.matches(&check.name, check.app) && check.bucket == "pass")
+                })
+                .map(|need| need.name.clone())
+                .collect();
+            (names, pending, false)
         }
     };
     Line {
@@ -1048,6 +1170,9 @@ fn status_line(number: u64, view: View, checks: Option<&[super::observer::Check]
         next: None,
         awaiting: None,
         actions_grace: false,
+        required_checks,
+        required_pending,
+        required_unreadable,
         error: None,
         batch: None,
         batch_detail: None,
@@ -1158,6 +1283,9 @@ fn rest_line(project: &Path, state: &Path, number: u64, try_graphql: bool) -> Li
                 next: None,
                 awaiting: None,
                 actions_grace: false,
+                required_checks: Vec::new(),
+                required_pending: Vec::new(),
+                required_unreadable: false,
                 error: Some(provenant_cli::bounded_text(&error.to_string(), 256)),
                 batch: None,
                 batch_detail: None,
@@ -1350,6 +1478,9 @@ mod tests {
             next: None,
             awaiting: None,
             actions_grace: false,
+            required_checks: Vec::new(),
+            required_pending: Vec::new(),
+            required_unreadable: false,
             error: error.map(str::to_owned),
             batch: None,
             batch_detail: None,
@@ -1615,6 +1746,68 @@ mod tests {
         assert_eq!(line.wait_verdict(true), Some(true));
         line.await_head("new");
         assert_eq!(line.wait_verdict(true), None);
+    }
+
+    // Spec: docs/specs/cli.md#waitpr-causes
+    #[test]
+    fn a_head_with_only_a_pending_selector_waits_for_the_aggregate_check() {
+        let check = |name: &str, bucket: &str| super::super::observer::Check {
+            head: "head".into(),
+            name: name.into(),
+            bucket: bucket.into(),
+            app: None,
+            app_slug: None,
+            conclusion: None,
+            registered: None,
+            url: None,
+            excerpt: String::new(),
+        };
+        let view = || super::View {
+            state: "OPEN".into(),
+            head: "head".into(),
+            merge: "clean".into(),
+            review: None,
+            draft: false,
+            url: "https://github.com/owner/repo/pull/7".into(),
+        };
+        let required = || {
+            super::Requirement::Known(vec![super::Required {
+                name: "ci-status".into(),
+                app: None,
+            }])
+        };
+        let read = |checks: &[super::super::observer::Check], policy: super::Requirement| {
+            super::status_line_with(7, view(), Some(checks), policy)
+        };
+        let selector = check("Select CI suites", "pending");
+        let passed_selector = check("Select CI suites", "pass");
+        let aggregate = check("ci-status", "pass");
+
+        let pending = read(&[selector], required());
+        assert_eq!(pending.class(), "pending");
+        assert_eq!(pending.verdict(), None);
+        assert_eq!(pending.wait_verdict(true), None);
+        assert!(pending.text().contains("required_pending=ci-status"));
+
+        // A selector that finished does not create the required check.
+        let still_pending = read(&[passed_selector.clone()], required());
+        assert_eq!(still_pending.verdict(), None);
+        assert_eq!(still_pending.required_pending, ["ci-status"]);
+
+        let green = read(&[passed_selector, aggregate.clone()], required());
+        assert!(green.required_pending.is_empty());
+        assert_eq!(green.verdict(), Some(true));
+        assert_eq!(green.wait_verdict(true), Some(true));
+
+        let running = read(&[check("ci-status", "pending")], required());
+        assert_eq!(running.verdict(), None);
+        let failed = read(&[check("ci-status", "fail")], required());
+        assert_eq!(failed.verdict(), Some(false));
+
+        // An unreadable policy is not an empty one: no verdict from observed checks.
+        let unreadable = read(&[aggregate], super::Requirement::Unreadable);
+        assert_eq!(unreadable.verdict(), None);
+        assert_eq!(unreadable.wait_verdict(true), None);
     }
 
     #[test]

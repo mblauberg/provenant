@@ -462,6 +462,15 @@ names every target's settle state (`settled ok`, `failed`, `needs input` or
 `still running at timeout`) and the one next command; the observation method
 shows only under `--full` and in JSON.
 
+A head does not settle on whichever checks happen to exist. `wait --pr` reads
+the base branch's required-check policy through the same CI observer as the
+head's checks, and stays pending until every required check has been created
+and passed on that head. A pending selector job, a required check that has not
+been created, or an unreadable policy means wait; a failed required check
+settles a failure. The names come from branch protection and rulesets, so a
+change to the required set needs no code change. An unsuccessful wait names the
+failed check in its output rather than returning exit 1 without a reason.
+
 `ci failures pr NUMBER` and `ci failures run ID` read each ended job's log from
 the Actions jobs endpoint, so evidence is available when that job ends, not when
 the slowest job does. An aggregate gate whose only bad inputs were cancelled is
