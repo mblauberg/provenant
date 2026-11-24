@@ -476,13 +476,15 @@ pub(crate) fn run_error(error: provenant_run::RunError) -> FacadeError {
             reason: String::new(),
         };
     }
-    if matches!(
-        &error,
-        provenant_run::RunError::Writer(provenant_confinement::worktrees::WorktreeError::Dirty(_))
-    ) {
+    if let provenant_run::RunError::Writer(
+        provenant_confinement::worktrees::WorktreeError::Dirty(paths),
+    ) = &error
+    {
         return FacadeError::DispatchRefused {
             fact: Some(
-                provenant_fabric_runtime::coordination::facade::DispatchRefusalFact::DirtyWriter,
+                provenant_fabric_runtime::coordination::facade::DispatchRefusalFact::DirtyWriter {
+                    paths: provenant_records::diagnostic::safe_text(paths),
+                },
             ),
             disk: None,
             reason: String::new(),

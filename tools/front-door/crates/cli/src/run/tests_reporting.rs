@@ -126,7 +126,9 @@ fn cli_recorded_remedies_preserve_typed_causes() {
     let cases = [
         (
             FacadeError::DispatchRefused {
-                fact: Some(DispatchRefusalFact::DirtyWriter),
+                fact: Some(DispatchRefusalFact::DirtyWriter {
+                    paths: String::new(),
+                }),
                 disk: None,
                 reason: "TOKEN_SENTINEL".into(),
             },

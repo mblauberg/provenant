@@ -844,7 +844,9 @@ mod graph_writer_admission_tests {
         use provenant_records::diagnostic::{PressureLevel, PressureThreshold, ResourceFact, Layer, };
         for cause in [
             FacadeError::DispatchRefused {
-                fact: Some(DispatchRefusalFact::DirtyWriter),
+                fact: Some(DispatchRefusalFact::DirtyWriter {
+                    paths: String::new(),
+                }),
                 disk: None,
                 reason: "TOKEN_SENTINEL".into(),
             },
