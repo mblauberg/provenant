@@ -1,7 +1,7 @@
 //! Process census and worker observation.
 use super::census_excusal::{
-    PlacementEvidence, PolicyCwdObserver, UnreadableFailure, excusal_applies, excuse_unreadable,
-    listed_uid_excusal, warn_unreadable_processes,
+    ExcusalEvidence, PlacementEvidence, PolicyCwdObserver, UnreadableFailure, excusal_applies,
+    excuse_unreadable, listed_uid_excusal, warn_unreadable_processes,
 };
 use super::*;
 
@@ -1639,10 +1639,12 @@ pub(super) fn observe_worker_holders_while(
                     cwd_observer,
                     pid,
                     roots,
-                    failure,
-                    listed,
-                    under_candidate,
-                    root_undecidable,
+                    ExcusalEvidence {
+                        failure: failure,
+                        listed: listed,
+                        placed_inside: under_candidate,
+                        root_undecidable: root_undecidable,
+                    },
                     entries,
                     unplaceable,
                 )
@@ -1886,10 +1888,12 @@ pub(super) fn observe_worker_holders_while(
                 cwd_observer,
                 pid,
                 roots,
-                UnreadableFailure::DescriptorsDenied,
-                false,
-                placed,
-                false,
+                ExcusalEvidence {
+                    failure: UnreadableFailure::DescriptorsDenied,
+                    listed: false,
+                    placed_inside: placed,
+                    root_undecidable: false,
+                },
                 entries,
                 unplaceable,
             )
@@ -1905,10 +1909,12 @@ pub(super) fn observe_worker_holders_while(
                 cwd_observer,
                 pid,
                 roots,
-                UnreadableFailure::CwdDenied,
-                false,
-                placed,
-                false,
+                ExcusalEvidence {
+                    failure: UnreadableFailure::CwdDenied,
+                    listed: false,
+                    placed_inside: placed,
+                    root_undecidable: false,
+                },
                 entries,
                 unplaceable,
             )

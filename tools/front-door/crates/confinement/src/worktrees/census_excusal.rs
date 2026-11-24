@@ -273,6 +273,20 @@ fn owner_platform_daemon(cwd_observer: &dyn CwdObserver, pid: i64, roots: &[Path
     PlacementEvidence::from_path(&cwd, roots).outside_every_root()
 }
 
+/// The placement evidence gathered for one unreadable process before any
+/// excusal policy runs.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct ExcusalEvidence {
+    /// The observation that left custody unproven.
+    pub failure: UnreadableFailure,
+    /// The already-checked listed service-uid decision.
+    pub listed: bool,
+    /// A cwd or descriptor was placed inside a root.
+    pub placed_inside: bool,
+    /// A root's own identity could not be read, so placement is undecidable.
+    pub root_undecidable: bool,
+}
+
 /// Excuse one unreadable process from blocking the census, or return false
 /// when it could still occupy a root. Positive placement and an undecidable
 /// root both block every arm. `listed` is the already-checked service-uid
@@ -282,13 +296,16 @@ pub(super) fn excuse_unreadable(
     cwd_observer: &dyn CwdObserver,
     pid: i64,
     roots: &[PathBuf],
-    failure: UnreadableFailure,
-    listed: bool,
-    placed_inside: bool,
-    root_undecidable: bool,
+    evidence: ExcusalEvidence,
     entries: &[CensusIgnoreEntry],
     unplaceable: &mut dyn FnMut(Option<i64>, Option<&'static str>),
 ) -> bool {
+    let ExcusalEvidence {
+        failure,
+        listed,
+        placed_inside,
+        root_undecidable,
+    } = evidence;
     if placed_inside || root_undecidable {
         return false;
     }
