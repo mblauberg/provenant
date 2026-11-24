@@ -3434,7 +3434,7 @@ mod tests {
         fs::write(temporary.join("candidate-0/payload"), "disposable")?;
         let mut report = ProviderStateGc::default();
         let mut sizes = provenant_os::disk::DiskReport::with_walk_budget(
-            temporary.clone().into(),
+            temporary.clone(),
             0,
             100,
             std::time::Duration::from_secs(1),
