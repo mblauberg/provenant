@@ -1,3 +1,3 @@
 ## Fixes
 
-- A release cut no longer deletes `docs/release-notes/next.d/_intro.md`: `prepare-release` refuses an intro identical to the previous release's instead, so collation keeps passing between cuts and a stale summary cannot reach a release. (#3879)
+- `scripts/prepare-release` refuses to cut a release whose `_intro.md` repeats the previous release's intro, so a stale summary cannot ship; the intro file stays in place between cuts. (#3879)
