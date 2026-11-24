@@ -1023,10 +1023,10 @@ impl FacadeError {
                         provenant_core::bounded_line(reason, 4096)
                     }
                 };
-                let (detail, action) = match fact {
+                let (detail, action): (String, &str) = match fact {
                     DispatchRefusalFact::DetachedWriter => unreachable!(),
-                    DispatchRefusalFact::DirtyWriter => ("the writer worktree has uncommitted edits", "preserve or commit the edits before retrying"),
-                    DispatchRefusalFact::CheckedOutWriter => ("the branch is already checked out", "run `provenant worktree list`, inspect custody, then select the existing checkout with --worktree"),
+                    DispatchRefusalFact::DirtyWriter => ("the writer worktree has uncommitted edits".into(), "preserve or commit the edits before retrying"),
+                    DispatchRefusalFact::CheckedOutWriter => ("the branch is already checked out".into(), "run `provenant worktree list`, inspect custody, then select the existing checkout with --worktree"),
                     DispatchRefusalFact::GraphSchema => (named("graph document schema_version is invalid"), "use a schema version that supports the document fields"),
                     DispatchRefusalFact::GraphComposite => (named("graph composite or loop expansion is invalid"), "inspect the composite or loop definition"),
                     DispatchRefusalFact::GraphPlan | DispatchRefusalFact::GraphCycle { .. } | DispatchRefusalFact::GraphWriterWorktree { .. } => unreachable!(),
@@ -1034,7 +1034,7 @@ impl FacadeError {
                     DispatchRefusalFact::GraphExtension(_) => unreachable!(),
                     DispatchRefusalFact::GraphNodeLimit { .. } => unreachable!(),
                     DispatchRefusalFact::Resource(_) => unreachable!(),
-                    DispatchRefusalFact::GraphEnvelope => ("graph checkpoint would exceed its size limit", "split the graph into smaller runs"),
+                    DispatchRefusalFact::GraphEnvelope => ("graph checkpoint would exceed its size limit".into(), "split the graph into smaller runs"),
                     DispatchRefusalFact::GraphOutputKind(crate::graph::GraphOutputField::Input) => (named("graph inputs[].outputs selects an unavailable output kind"), "select an output supplied by the source node"),
                     DispatchRefusalFact::GraphOutputKind(crate::graph::GraphOutputField::CompositeExport) => (named("graph composite.exports[].outputs selects an unavailable output kind"), "select an output supplied by the source node"),
                 };
