@@ -2691,6 +2691,7 @@ fn candidate(
             })
             .collect();
     }
+    let offer_refused = reason == Some(RouteExclusionReason::AccountDoesNotOffer);
     let readiness = match (reason, availability) {
         (Some(reason), _) => RouteReadiness::Unavailable {
             skipped_accounts: skipped,
@@ -2722,7 +2723,7 @@ fn candidate(
     // Carry the fact resolve actually judged onto the route. Preparation must
     // not re-read a different availability list and lose the recorded offers.
     if let Some(a) = availability
-        && reason == Some(RouteExclusionReason::AccountDoesNotOffer)
+        && offer_refused
     {
         diagnostics.offer_mismatch = recorded_offers(model, a, context);
     }
@@ -3015,7 +3016,7 @@ pub fn resolve_for_account_with_seed_excluding_family(
         })
         .cloned()
         .collect();
-    let availability = availability_with_known_offers(&availability, context);
+    let availability = availability_with_known_offers(&availability, &context.0);
     let kept = ValidatedContext(RoutingContext {
         availability: &availability,
         ..context.0
