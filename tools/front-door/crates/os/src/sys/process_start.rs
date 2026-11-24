@@ -177,7 +177,7 @@ mod tests {
     #[test]
     fn darwin_timeval_conversion_rejects_invalid_and_negative_values() {
         let valid = timeval_to_wall_time(1_780_000_000, 123_456).unwrap();
-        assert_eq!(valid.as_micros(), 1_780_000_123_456);
+        assert_eq!(valid.as_micros(), 1_780_000_000_123_456);
         assert!(timeval_to_wall_time(-1, 0).is_none());
         assert!(timeval_to_wall_time(10, -1).is_none());
         assert!(timeval_to_wall_time(10, 1_000_000).is_none());

@@ -1765,8 +1765,8 @@ pub(super) fn observe_worker_holders_while(
                         listed,
                         placed_inside: under_candidate,
                         root_undecidable,
+                        configured,
                     },
-                    entries,
                     unplaceable,
                 )
             {
@@ -2004,7 +2004,16 @@ pub(super) fn observe_worker_holders_while(
         // These processes were listed, so the listed-uid policy never applies;
         // `placed` already folds in undecidable roots, so no second blocking
         // signal is needed here.
-        if occupancy_gap == Some(provenant_os::pid::OccupancyGap::DescriptorsDenied)
+        let descriptors_denied =
+            occupancy_gap == Some(provenant_os::pid::OccupancyGap::DescriptorsDenied);
+        let cwd_denied = matches!(
+            &cwd,
+            NativeCwd::PolicyExcluded(_) | NativeCwd::PolicyRejected(_)
+        );
+        // One configured-image decision serves both arms below.
+        let configured = (descriptors_denied || cwd_denied)
+            && configured_entry_matches(cwd_observer, pid, entries);
+        if descriptors_denied
             && excuse_unreadable(
                 cwd_observer,
                 pid,
@@ -2014,17 +2023,13 @@ pub(super) fn observe_worker_holders_while(
                     listed: false,
                     placed_inside: placed,
                     root_undecidable: any_root_identity_unreadable(roots),
+                    configured,
                 },
-                entries,
                 unplaceable,
             )
         {
             continue;
         }
-        let cwd_denied = matches!(
-            &cwd,
-            NativeCwd::PolicyExcluded(_) | NativeCwd::PolicyRejected(_)
-        );
         if cwd_denied
             && excuse_unreadable(
                 cwd_observer,
@@ -2035,8 +2040,8 @@ pub(super) fn observe_worker_holders_while(
                     listed: false,
                     placed_inside: placed,
                     root_undecidable: any_root_identity_unreadable(roots),
+                    configured,
                 },
-                entries,
                 unplaceable,
             )
         {

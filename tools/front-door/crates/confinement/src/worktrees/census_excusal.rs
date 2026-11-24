@@ -253,14 +253,6 @@ pub(super) fn configured_entry_matches(
             && cwd_observer.process_start_time(pid) == start_before)
 }
 
-fn configured_excusal(
-    cwd_observer: &dyn CwdObserver,
-    pid: i64,
-    entries: &[CensusIgnoreEntry],
-) -> bool {
-    configured_entry_matches(cwd_observer, pid, entries)
-}
-
 /// Rewrite every `StartedBefore::Root` entry to `StartedBefore::At(floor)` when
 /// a floor is available, or omit `Root`-conditioned entries when `floor` is `None`.
 fn rewrite_root_floor(
@@ -426,6 +418,9 @@ pub(super) struct ExcusalEvidence {
     pub placed_inside: bool,
     /// A root's own identity could not be read, so placement is undecidable.
     pub root_undecidable: bool,
+    /// The already-checked configured-image decision. It is taken once per
+    /// observation so its start-time recheck brackets the one decision used.
+    pub configured: bool,
 }
 
 /// Excuse one unreadable process from blocking the census, or return false
@@ -438,7 +433,6 @@ pub(super) fn excuse_unreadable(
     pid: i64,
     roots: &[PathBuf],
     evidence: ExcusalEvidence,
-    entries: &[CensusIgnoreEntry],
     unplaceable: &mut dyn FnMut(Option<i64>, Option<&'static str>),
 ) -> bool {
     let ExcusalEvidence {
@@ -446,6 +440,7 @@ pub(super) fn excuse_unreadable(
         listed,
         placed_inside,
         root_undecidable,
+        configured,
     } = evidence;
     if placed_inside || root_undecidable {
         return false;
@@ -459,9 +454,7 @@ pub(super) fn excuse_unreadable(
             {
                 "platform daemon with cwd outside every root"
             }
-            _ if configured_excusal(cwd_observer, pid, entries) => {
-                "configured unreadable image exception"
-            }
+            _ if configured => "configured unreadable image exception",
             _ => return false,
         }
     };
