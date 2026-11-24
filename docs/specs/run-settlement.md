@@ -179,14 +179,18 @@ handoffs and never count as negative provider-quality evidence.
 - Why: unfinished work must not appear complete or lose its handoff, and all readers need one cause
   for the next decision.
 
-The handoff is the closed `handoff` fence of the final answer, which always wins. Without one, a
-`json` fence that ends the answer and decodes as a handoff is accepted with a warning naming the
-fallback. Adjacent repeated blocks are one declaration (identical copies accepted, differing
-copies settle on the last), each with a warning; prose between blocks or after the last still
-fails. A review's final handoff may be followed by exactly one recognised standalone verdict and
-nothing else; an accepted order tolerance is recorded in the terminal reason.
-- Why: providers drift to `json` fences and repeat blocks, and refusing a complete declaration
-  for its label loses finished work while the warning keeps the drift visible.
+The handoff is the closed `handoff` fence that ends the answer, which always wins. When an answer
+contains several blocks, the last one that ends the answer is authoritative: earlier blocks and the
+prose between them are ordinary answer text. Without one, a `json` fence that ends the answer and
+decodes as a handoff is accepted with a warning naming the fallback. Adjacent repeated blocks are
+one declaration (identical copies accepted, differing copies settle on the last), each with a
+warning; prose after the last block still fails with a diagnostic naming the recovery ("end the
+answer with one handoff; retry the node"). A review's final handoff may be followed by exactly one
+recognised standalone verdict and nothing else; an accepted order tolerance is recorded in the
+terminal reason.
+- Why: providers drift to `json` fences and repeat blocks, and a late background task can append
+  prose and a corrected handoff; refusing a complete declaration for its label loses finished work
+  while the warning and the named recovery keep the drift visible and the repair path clear.
 - Owner: `crates/records/src/handoff.rs`, `crates/run/src/completion.rs`
 
 `crates/records/src/handoff.rs` owns the fields, decoding and bounds. A valid JSON object keeps

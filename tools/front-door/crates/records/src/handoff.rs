@@ -5,6 +5,10 @@ pub const HANDOFF_BYTES: usize = 12 * 1024;
 pub const NOTE_BYTES: usize = 4096;
 const ITEMS: usize = 64;
 const OPEN: &str = "```handoff";
+/// Diagnostic for a declaration that neither a later handoff nor the tolerated
+/// verdict ends. Names the writer's recovery path.
+const MUST_END: &str =
+    "handoff must end the answer; end the answer with one handoff; retry the node";
 
 /// Absent, valid, or malformed. Never discard the error to classify absence.
 pub type HandoffResult = Result<Option<Handoff>, HandoffError>;
@@ -400,10 +404,12 @@ impl Handoff {
         Self::decode(value)
     }
 
-    /// Only one complete fence at the end of the answer is a declaration. A
-    /// final, standalone review verdict may follow it as the sole trailing
-    /// line; the caller can record that narrow tolerance. A malformed
-    /// declaration is explicit evidence, never an absent handoff.
+    /// The complete fence that ends the answer is the declaration. Earlier
+    /// fences and prose between them are ordinary answer text, so a late
+    /// superseding handoff wins. A final, standalone review verdict may follow
+    /// the declaration as the sole trailing line; the caller can record that
+    /// narrow tolerance. A malformed declaration is explicit evidence, never
+    /// an absent handoff.
     pub fn from_result(result: &str) -> HandoffResult {
         Self::from_result_report(result).handoff
     }
@@ -513,7 +519,7 @@ impl Handoff {
                                 trailing_verdict_tolerated: false,
                             },
                             _ => HandoffParse {
-                                handoff: Err(HandoffError::new("$", "handoff must end the answer")),
+                                handoff: Err(HandoffError::new("$", MUST_END)),
                                 trailing_verdict_tolerated: false,
                             },
                         };
@@ -551,7 +557,7 @@ impl Handoff {
 
     /// Whether the answer repeats its handoff block, which the parser accepts
     /// as one declaration: identical adjacent copies, or differing ones that
-    /// settle on the last. Prose between blocks is still refused.
+    /// settle on the last, including copies separated by prose.
     pub fn repeated_blocks(result: &str) -> Option<Repeated> {
         let mut capture = HandoffCapture::default();
         capture.push(result.as_bytes());
@@ -631,6 +637,10 @@ pub struct HandoffCapture {
     earlier: Option<Handoff>,
     repeated: Option<Repeated>,
     trailing_verdict: bool,
+    /// Content after a declaration that is neither blank nor the tolerated
+    /// verdict. A later handoff clears it and becomes authoritative; at the
+    /// end of the answer it is a malformed declaration naming the recovery.
+    trailing_prose: bool,
     verdict: crate::result_capture::VerdictCapture,
     error: Option<HandoffError>,
 }
@@ -699,15 +709,24 @@ impl HandoffCapture {
         let marker = text.trim_end_matches('\r');
         if self.declaration.is_some() {
             if marker == OPEN && !self.trailing_verdict {
-                // Only blank lines can have followed the declaration, or it
-                // would already have failed as not ending the answer.
+                // A later handoff ends the answer and becomes authoritative.
+                // Earlier blocks and any prose between them are ordinary
+                // answer text, so the pending prose is cleared here.
                 self.earlier = self.declaration.take();
+                self.trailing_prose = false;
                 self.json = Some(Vec::new());
             } else if !marker.trim().is_empty() {
-                if self.trailing_verdict || !crate::result_capture::is_standalone_verdict(marker) {
-                    self.error = Some(HandoffError::new("$", "handoff must end the answer"));
-                } else {
+                if self.trailing_verdict {
+                    // A verdict after a handoff is the only tolerated suffix.
+                    self.error = Some(HandoffError::new("$", MUST_END));
+                } else if crate::result_capture::is_standalone_verdict(marker)
+                    && !self.trailing_prose
+                {
                     self.trailing_verdict = true;
+                } else {
+                    // Tolerate prose only in case a later handoff supersedes
+                    // this one; finish_source rejects it if none does.
+                    self.trailing_prose = true;
                 }
             }
         } else if let Some(json) = &mut self.json {
@@ -789,6 +808,11 @@ impl HandoffCapture {
     /// ```json block rather than a ```handoff block.
     fn finish_source(mut self) -> (HandoffParse, bool) {
         self.end_line();
+        // Prose after the last declaration with no later handoff to end the
+        // answer is malformed, with the writer's recovery named.
+        if self.error.is_none() && self.trailing_prose {
+            self.error = Some(HandoffError::new("$", MUST_END));
+        }
         // A ```handoff block always wins, so a json candidate applies only
         // when no handoff block was opened or completed.
         if self.error.is_none()
@@ -971,16 +995,61 @@ mod tests {
         assert_eq!(capture.finish(), Ok(Some(single)));
     }
 
+    // Issue #3910: a late background task appends prose and a corrected handoff.
     #[test]
-    fn a_repeat_is_not_a_way_around_the_must_end_the_answer_rule() {
-        // Prose between or after blocks still makes the declaration ambiguous.
-        for text in [
-            format!("{STOP}\nNow more work.\n{STOP}"),
-            format!("{STOP}\n{STOP}\nTrailing prose."),
-        ] {
-            assert!(Handoff::from_result(&text).is_err(), "{text}");
+    fn a_later_handoff_that_ends_the_answer_is_authoritative() {
+        let first = Handoff::from_result(STOP).unwrap().unwrap();
+        let second = STOP
+            .replace("stopped_early", "done")
+            .replace("Parser done.", "Parser and renderer done.");
+        let second_handoff = Handoff::from_result(&second).unwrap().unwrap();
+        assert_ne!(first, second_handoff);
+        let result =
+            format!("Report from the lane.\n{STOP}\nThe renderer finished meanwhile.\n{second}\n");
+        let parsed = Handoff::from_result_report(&result);
+        assert_eq!(parsed.handoff, Ok(Some(second_handoff.clone())));
+        assert!(!parsed.trailing_verdict_tolerated);
+        let repeated = Handoff::repeated_blocks(&result).expect("the superseded block is noted");
+        assert_eq!(
+            repeated,
+            Repeated {
+                extra: 1,
+                differing: true
+            }
+        );
+        assert!(repeated.warning().contains("differing"));
+        // A standalone verdict may still follow the last block.
+        let with_verdict = format!("{result}\nVERDICT: PASS\n");
+        let parsed = Handoff::from_result_report(&with_verdict);
+        assert_eq!(parsed.handoff, Ok(Some(second_handoff.clone())));
+        assert!(parsed.trailing_verdict_tolerated);
+        // Chunked streaming settles on the same last declaration.
+        for size in [1, 7, 8192] {
+            let mut capture = HandoffCapture::default();
+            for chunk in result.as_bytes().chunks(size) {
+                capture.push(chunk);
+            }
+            assert_eq!(capture.finish(), Ok(Some(second_handoff.clone())));
         }
-        // A malformed or unfinished repeat is explicit evidence, not a pass.
+    }
+
+    #[test]
+    fn a_repeat_still_requires_the_last_block_to_end_the_answer() {
+        // Prose between blocks settles on the last block (see the supersession
+        // test); prose after the last block still fails and names the recovery.
+        for text in [
+            format!("{STOP}\n{STOP}\nTrailing prose."),
+            format!("{STOP}\nMore work.\n{STOP}\nTrailing prose."),
+        ] {
+            let error = Handoff::from_result(&text).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("end the answer with one handoff; retry the node"),
+                "{text}"
+            );
+        }
+        // A malformed or unfinished last block is explicit evidence, not a pass.
         let broken = format!("{STOP}\n```handoff\n{{\"status\":\n```");
         assert!(Handoff::from_result(&broken).is_err());
         let open = format!("{STOP}\n```handoff\n{{}}");
@@ -1421,9 +1490,8 @@ mod tests {
         }
         for result in [
             format!("{STOP}\nMore text"),
-            // Adjacent repeated blocks are one declaration since #3341 (see
-            // the repeated-block tests); prose between them still fails.
-            format!("{STOP}\nMore text\n{STOP}"),
+            // Adjacent and prose-separated repeats settle on the last block
+            // (see the repeated-block tests); prose after the last still fails.
             STOP.trim_end_matches("\n```").to_owned(),
             STOP.replace("\"remaining\":[\"Renderer\"],", ""),
             STOP.replace("stopped_early", "incomplete"),
