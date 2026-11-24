@@ -104,11 +104,7 @@ pub(super) fn unreadable_cohort_pids(
     roots: &[PathBuf],
 ) -> BTreeSet<i64> {
     let mut owners = vec![provenant_os::fs::effective_uid()];
-    owners.extend(
-        roots
-            .iter()
-            .filter_map(|root| std::fs::metadata(root).ok().map(|metadata| metadata.uid())),
-    );
+    owners.extend(roots.iter().filter_map(|root| root_owner(root)));
     pids.iter()
         .copied()
         .filter(|pid| {
@@ -201,21 +197,69 @@ pub(super) fn root_is_undecidable(root: &Path) -> bool {
     root_identity(root).is_none()
 }
 
-/// Place a path against a root that no longer exists. With no directory
-/// identity left, the path is inside exactly when its canonical form, deleted
-/// components re-appended, lies under the root's canonical form. `None` when
-/// the root exists or is unreadable, or either path cannot be resolved.
-pub(super) fn absent_root_contains(path: &Path, root: &Path) -> Option<bool> {
-    if !root_is_absent(root)
-        || path
-            .components()
-            .any(|component| component == std::path::Component::ParentDir)
-    {
+/// Split an absolute path at its nearest existing directory: that directory's
+/// `(dev, ino)` and the removed components below it. Identity, not spelling,
+/// anchors the split, so a firmlink or symlink alias of the same directory
+/// splits the same way. `None` for a relative path, a parent traversal, a
+/// dangling symlink among the removed components or an unreadable ancestor.
+fn split_at_extant_directory(path: &Path) -> Option<((u64, u64), PathBuf)> {
+    use std::path::Component;
+    if !path.is_absolute() || path.components().any(|part| part == Component::ParentDir) {
         return None;
     }
-    let root = canonical_cwd(root)?;
-    let path = canonical_cwd(path)?;
-    (root.is_absolute() && path.is_absolute()).then(|| path.starts_with(&root))
+    let mut removed = Vec::new();
+    for ancestor in path.ancestors() {
+        match std::fs::metadata(ancestor) {
+            Ok(metadata) if metadata.is_dir() => {
+                let below = removed.iter().rev().collect::<PathBuf>();
+                return Some(((metadata.dev(), metadata.ino()), below));
+            }
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && std::fs::symlink_metadata(ancestor)
+                        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                removed.push(ancestor.file_name()?);
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// Place a path against a root that no longer exists. Nothing that still
+/// exists can lie under a removed root, so a fully existing path is outside.
+/// A path with removed components is inside exactly when it splits at the
+/// root's nearest existing directory, by identity, and its removed components
+/// start with the root's. `None` when the root exists or is unreadable, or
+/// either path cannot be split.
+pub(super) fn absent_root_contains(path: &Path, root: &Path) -> Option<bool> {
+    if !root_is_absent(root) {
+        return None;
+    }
+    let (root_directory, root_removed) = split_at_extant_directory(root)?;
+    let (path_directory, path_removed) = split_at_extant_directory(path)?;
+    if path_removed.as_os_str().is_empty() {
+        return Some(false);
+    }
+    Some(path_directory == root_directory && path_removed.starts_with(&root_removed))
+}
+
+/// The owner of a scoped root. A removed root is owned as its nearest existing
+/// directory is; an unreadable root has no provable owner.
+pub(super) fn root_owner(root: &Path) -> Option<u32> {
+    match root_identity(root)? {
+        RootIdentity::Directory(_, _, uid) => Some(uid),
+        RootIdentity::Absent => root
+            .ancestors()
+            .skip(1)
+            .find_map(|ancestor| {
+                std::fs::metadata(ancestor)
+                    .ok()
+                    .filter(|meta| meta.is_dir())
+            })
+            .map(|metadata| metadata.uid()),
+    }
 }
 
 fn root_identities(roots: &[PathBuf]) -> Option<BTreeMap<PathBuf, RootIdentity>> {

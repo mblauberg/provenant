@@ -187,23 +187,16 @@ impl PlacementEvidence {
 }
 
 /// An excusal holds when all three credentials are system accounts foreign to
-/// every candidate root's owner. An absent root would be owned by this user,
-/// so its owner is the effective uid. An unreadable root identity cannot be
-/// proven foreign, so it fails closed rather than claiming an excusal that
-/// cannot fire.
+/// every candidate root's owner; a removed root is owned as its nearest
+/// existing directory is. An unreadable root identity cannot be proven foreign,
+/// so it fails closed rather than claiming an excusal that cannot fire.
 pub(super) fn excusal_applies(
     excusal: &provenant_os::pid::UnreadablePolicyExcusal,
     roots: &[PathBuf],
 ) -> bool {
     excusal.uids.all_system()
         && roots.iter().all(|root| {
-            if super::census::root_is_absent(root) {
-                return excusal
-                    .uids
-                    .all_differ_from(provenant_os::fs::effective_uid());
-            }
-            std::fs::metadata(root)
-                .is_ok_and(|metadata| excusal.uids.all_differ_from(metadata.uid()))
+            super::census::root_owner(root).is_some_and(|owner| excusal.uids.all_differ_from(owner))
         })
 }
 
@@ -212,7 +205,7 @@ fn owner_uids(roots: &[PathBuf]) -> Vec<u32> {
     owners.extend(
         roots
             .iter()
-            .filter_map(|root| std::fs::metadata(root).ok().map(|meta| meta.uid())),
+            .filter_map(|root| super::census::root_owner(root)),
     );
     owners
 }

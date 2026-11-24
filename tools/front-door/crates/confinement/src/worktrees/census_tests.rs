@@ -76,6 +76,61 @@ fn an_absent_root_places_paths_lexically() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn a_process_left_in_a_removed_tree_is_placed_inside_it() -> Result<(), Box<dyn Error>> {
+    use provenant_os::pid::{CwdObservation, CwdObserver, SystemCwdObserver};
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().join("removed-writer-tree");
+    let inside = root.join("src");
+    fs::create_dir_all(&inside)?;
+    let mut child = std::process::Command::new("sleep")
+        .arg("30")
+        .current_dir(&inside)
+        .spawn()?;
+    let placed = (|| -> Result<(), Box<dyn Error>> {
+        fs::remove_dir_all(&root)?;
+        let CwdObservation::Path(cwd) = SystemCwdObserver.cwd(i64::from(child.id()))? else {
+            return Err("the child's cwd was not observable".into());
+        };
+        assert_eq!(
+            super::census::absent_root_contains(&cwd, &root),
+            Some(true),
+            "{cwd:?}"
+        );
+        Ok(())
+    })();
+    child.kill()?;
+    child.wait()?;
+    placed
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_removed_root_spelled_through_the_data_firmlink_places_by_identity()
+-> Result<(), Box<dyn Error>> {
+    use super::census::absent_root_contains;
+    let temp = tempfile::tempdir()?;
+    let canonical = fs::canonicalize(temp.path())?;
+    let data = std::path::Path::new("/System/Volumes/Data").join(canonical.strip_prefix("/")?);
+    if !data.is_dir() {
+        return Ok(());
+    }
+    let root = data.join("removed-writer-tree");
+    for spelling in [canonical.as_path(), temp.path()] {
+        let inside = spelling.join("removed-writer-tree/src");
+        assert_eq!(
+            absent_root_contains(&inside, &root),
+            Some(true),
+            "{inside:?}"
+        );
+    }
+    assert_eq!(
+        absent_root_contains(&canonical.join("other/src"), &root),
+        Some(false)
+    );
+    Ok(())
+}
+
+#[test]
 fn session_root_that_appears_during_the_census_is_unknown() -> Result<(), Box<dyn Error>> {
     struct Creating(PathBuf);
     impl WorkerObserver for Creating {

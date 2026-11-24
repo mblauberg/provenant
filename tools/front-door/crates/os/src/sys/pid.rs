@@ -1903,12 +1903,28 @@ pub(crate) fn cwd(pid: i32) -> Result<CwdObservation, PidError> {
     }
 }
 
+/// Linux appends " (deleted)" to the cwd link of a removed directory. Strip it
+/// when the marked path does not exist, so placement sees the removed path.
+#[cfg(any(target_os = "linux", test))]
+fn without_deleted_marker(path: std::path::PathBuf) -> std::path::PathBuf {
+    use std::os::unix::ffi::OsStrExt;
+    let bytes = path.as_os_str().as_bytes();
+    match bytes.strip_suffix(b" (deleted)") {
+        Some(stripped) if std::fs::symlink_metadata(&path).is_err() => {
+            std::path::PathBuf::from(std::ffi::OsStr::from_bytes(stripped))
+        }
+        _ => path,
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn linux_cwd(pid: i32) -> Result<CwdObservation, PidError> {
     let mut retries = 0;
     loop {
         match std::fs::read_link(format!("/proc/{pid}/cwd")) {
-            Ok(path) if path.is_absolute() => return Ok(CwdObservation::Path(path)),
+            Ok(path) if path.is_absolute() => {
+                return Ok(CwdObservation::Path(without_deleted_marker(path)));
+            }
             Ok(_) => {
                 return Err(PidError::MalformedCwdPath {
                     pid,
@@ -2507,6 +2523,20 @@ mod tests {
         ] {
             assert!(!darwin_daemon_path(std::path::Path::new(path)), "{path}");
         }
+    }
+
+    #[test]
+    fn deleted_cwd_marker_is_stripped_only_from_a_missing_path()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let marked = temp.path().join("lane (deleted)");
+        assert_eq!(
+            without_deleted_marker(marked.clone()),
+            temp.path().join("lane")
+        );
+        std::fs::create_dir(&marked)?;
+        assert_eq!(without_deleted_marker(marked.clone()), marked);
+        Ok(())
     }
 
     #[test]
