@@ -63,11 +63,12 @@ status reason, and a stalled custody-path refusal names the remedy (replace a sy
 path inside the attempt directory).
 - Why: a retained writer must not contend with itself or retry an unchanged failure forever.
 
-A lane's scratch is never a child of the attempt record directory: it lives at
-`<state>/attempt-scratch/<attempt id>/tmp`. GC, writer-Git reads, disk classification and
-terminal cleanup resolve that sibling root; no fallback resolves the old
-`attempts/<id>/tmp` path. Host-written records and the lane's handoff under
-`provider-state` stay inside the attempt directory, so a relative write from scratch
+A lane's temporary scratch directory is never a child of the attempt record directory:
+it lives at `<state>/attempt-scratch/<attempt id>/tmp`. GC, writer-Git reads, disk
+classification and terminal cleanup resolve that sibling root; no fallback resolves the
+old `attempts/<id>/tmp` path. The lane's `provider-state` and its handoff,
+`LaunchPaths::scratch`, and the prompt and durable output paths remain inside the attempt
+directory by design, as do host-written records. A relative write from temporary scratch
 cannot reach them.
 - Why: a lane could otherwise write the attempt's own settlement records by walking up
   from its scratch, and a foreign record could not be told from settlement's own

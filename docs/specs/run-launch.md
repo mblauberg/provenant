@@ -281,11 +281,14 @@ entry is filtered, copied or rewritten.
 
 A lane's temporary directory is `<state>/attempt-scratch/<attempt id>/tmp`: a sibling
 scratch root under the state root, keyed by attempt id, never `attempts/<id>/tmp`.
-`LaunchPaths::temporary`, the per-attempt alias target, the read-only lane's scratch
-write grant, and candidate staging all resolve there; no lane grant or `TMPDIR` points
-into the attempt record directory. Retention, disk classification, writer-Git readers
-and terminal cleanup follow the same root, and the alias is unlinked with its target.
-There is no link or fallback at the old path.
+`LaunchPaths::temporary`, the per-attempt alias target, the read-only lane's temporary
+scratch write grant, and candidate staging all resolve there; no grant or `TMPDIR` for
+that temporary directory points into the attempt record directory. Other grants do
+remain inside it by design: the lane's `provider-state` and its handoff
+(`attempts/<id>/provider-state/<candidate>`), `LaunchPaths::scratch`
+(`attempts/<id>/scratch`), and the prompt and other durable output paths. Retention,
+disk classification, writer-Git readers and terminal cleanup follow the sibling root,
+and the alias is unlinked with its target. There is no link or fallback at the old path.
 - Why: a lane that walks up from its scratch reached `attempts/<id>` and could write
   the attempt's own settlement records, which a foreign slot entry could not be
   distinguished from the host's own handoff (#3844, #3947).

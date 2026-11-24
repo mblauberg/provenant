@@ -1867,7 +1867,8 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         // The #3941 end-to-end settlement test for trailing prose.
         ("crates/run/src/holder.rs", 9500),
         ("crates/run/src/launch.rs", 4250),
-        ("crates/run/src/retention.rs", 5000),
+        // Scratch-root pruning and its pinned-Git invariants (#3947).
+        ("crates/run/src/retention.rs", 5250),
         ("crates/run/src/settlement.rs", 4500),
         ("crates/run/src/store.rs", 2750),
         ("crates/run/src/writer.rs", 4250),

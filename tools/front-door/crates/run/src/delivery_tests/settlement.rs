@@ -532,8 +532,8 @@ fn prepare_candidate_git(
     use provenant_confinement::{UtilityBudget, UtilityRuntime};
     use provenant_core::CancelToken;
     let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-    let attempt_path = fixture.root.join("attempt");
-    let scratch = attempt_path.join("tmp/candidate-0");
+    let (attempt_path, temporary) = fixture.attempt_layout()?;
+    let scratch = temporary.join("candidate-0");
     std::fs::create_dir_all(&scratch)?;
     let utility = UtilityRuntime::new(&git, fixture.root.join("home"), fixture.root.join("state"))?;
     let executor = SystemExecutor::new(1)?;
@@ -578,7 +578,7 @@ fn terminal_warns_and_publishes_a_cherry_pick_in_the_candidate_git()
         )?;
         Ok(())
     })?);
-    let candidate = fixture.root.join("attempt/tmp/candidate-0/git-common");
+    let candidate = fixture.attempt_layout()?.1.join("candidate-0/git-common");
     assert!(
         candidate.join("CHERRY_PICK_HEAD").is_file(),
         "the in-progress cherry-pick must be left in place"
@@ -650,7 +650,11 @@ fn terminal_refuses_before_import_when_the_host_checkout_is_mid_operation()
         "{error:?}"
     );
     assert!(
-        !fixture.root.join("attempt/writer-terminal.json").exists(),
+        !fixture
+            .attempt_layout()?
+            .0
+            .join("writer-terminal.json")
+            .exists(),
         "the refusal must precede import and publication"
     );
     assert_eq!(std::fs::read(&checkout).ok(), before);
@@ -683,7 +687,7 @@ fn terminal_warns_and_proceeds_for_an_unrelated_host_checkout_rebase()
         }),
         "{captured:?}"
     );
-    let attempt = provenant_os::fs::Directory::open_anchor(&fixture.root.join("attempt"))?;
+    let attempt = provenant_os::fs::Directory::open_anchor(&fixture.attempt_layout()?.0)?;
     let raw = crate::artifacts::read_sealed(&attempt, "writer-terminal.json", crate::RECORD_LIMIT)?
         .ok_or("settled writer terminal record")?;
     let terminal: crate::writer::WriterTerminal = crate::db::decode(&raw)?;

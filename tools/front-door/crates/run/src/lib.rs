@@ -86,7 +86,8 @@ pub use launch::{
 };
 pub use overview::{OverviewAttempt, OverviewState, RunOverview};
 pub use plan::{
-    isolated_read_only_plan, live_read_only_plan, prepare_read_only_git, read_only_plan,
+    ATTEMPT_SCRATCH, isolated_read_only_plan, live_read_only_plan, prepare_read_only_git,
+    read_only_plan, scratch_root,
 };
 pub use retention::{
     AttemptLogRemoval, AttemptTmpRemoval, PayloadEviction, PayloadReport, ProviderStateGc,

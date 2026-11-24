@@ -1085,15 +1085,16 @@ fn pinned_payload(attempt: &Directory, record: &AttemptRecord) -> Result<bool> {
             ..
         }
     ) && record.exit_evidence.is_none();
-    // Private Git objects live in `tmp` until their import settles.
-    let private_git = match attempt.metadata_at(OsStr::new(AttemptFile::Tmp.name()), false) {
+    // Private Git objects live in the sibling scratch's `tmp` until their
+    // import settles (#3947). The old attempt-record path is never probed.
+    let private_git = match crate::plan::temporary_dir(attempt) {
         Ok(_) => match attempt.metadata_at(OsStr::new("writer-objects.json"), false) {
             Ok(_) => true,
             Err(error) if error.is_not_found() => false,
             Err(error) => return Err(error.into()),
         },
-        Err(error) if error.is_not_found() => false,
-        Err(error) => return Err(error.into()),
+        Err(error) if missing_directory(&error) => false,
+        Err(error) => return Err(error),
     };
     Ok(uncertain_loss || private_git)
 }
@@ -1611,6 +1612,40 @@ fn collect_logs(
     Ok(())
 }
 
+/// Dispose of the per-attempt scratch root once its `tmp` has been collected.
+/// The short alias is unlinked with `tmp`; this only removes the empty `<id>`
+/// directory so terminal attempts do not leave one directory each behind.
+fn collect_empty_scratch_root(scratch: &Directory) -> Result<()> {
+    if !scratch
+        .metadata_at(OsStr::new("tmp"), false)
+        .is_err_and(|error| error.is_not_found())
+        || scratch.entries()?.next().is_some()
+    {
+        return Ok(());
+    }
+    let path = scratch.current_path()?;
+    let parent = path
+        .parent()
+        .ok_or(RunError::Validation("scratch parent directory"))?;
+    let name = path
+        .file_name()
+        .ok_or(RunError::Validation("scratch directory name"))?;
+    let root = Directory::open_anchor(parent)?;
+    match root.rmdir(name) {
+        Ok(()) => root.sync()?,
+        Err(error) if error.is_not_found() => {}
+        Err(error) => {
+            // A new entry from a concurrent writer means it is no longer ours
+            // to remove; anything else is a real cleanup failure.
+            if scratch.entries()?.next().is_some() {
+                return Ok(());
+            }
+            return Err(error.into());
+        }
+    }
+    Ok(())
+}
+
 fn collect_temporary(
     scratch: &Directory,
     path: &std::path::Path,
@@ -1629,6 +1664,7 @@ fn collect_temporary(
         Err(error) if error.is_not_found() => {
             if !dry_run {
                 crate::short_temporary::remove(path);
+                collect_empty_scratch_root(scratch)?;
             }
             return Ok(());
         }
@@ -1684,6 +1720,9 @@ fn collect_temporary(
         path: path.into(),
         bytes,
     });
+    if !dry_run {
+        collect_empty_scratch_root(scratch)?;
+    }
     Ok(())
 }
 
@@ -3376,6 +3415,60 @@ mod tests {
         );
         assert_eq!(fs::metadata(attempt.join("stdout.log"))?.len(), 200_000);
         assert!(!scratch_root_of(&attempt).join("tmp").exists());
+        assert!(
+            !scratch_root_of(&attempt).exists(),
+            "an emptied per-attempt scratch root must not accumulate"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn collecting_tmp_prunes_only_empty_attempt_scratch_roots() -> TestResult {
+        let (_temp, _context, store, input, attempt) = seeded()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        withdraw(&store, &input, &call)?;
+        let scratch_root = scratch_root_of(&attempt);
+        let temporary = scratch_root.join("tmp");
+        fs::create_dir_all(temporary.join("candidate-0"))?;
+        fs::write(temporary.join("candidate-0/payload"), "disposable")?;
+        let mut report = ProviderStateGc::default();
+        let mut sizes = provenant_os::disk::DiskReport::with_walk_budget(
+            temporary.clone().into(),
+            0,
+            100,
+            std::time::Duration::from_secs(1),
+        );
+        collect_temporary(
+            &Directory::open_anchor(&scratch_root)?,
+            &temporary,
+            false,
+            &mut report,
+            &mut sizes,
+            &|| true,
+        )?;
+        assert_eq!(report.attempt_tmp.len(), 1);
+        assert!(!temporary.exists());
+        assert!(!scratch_root.exists(), "empty scratch root was not pruned");
+
+        // A root still holding another entry belongs to its owner; keep it.
+        fs::create_dir_all(&scratch_root)?;
+        fs::write(scratch_root.join("sentinel"), "keep")?;
+        fs::create_dir_all(&temporary)?;
+        fs::write(temporary.join("payload"), "disposable")?;
+        collect_temporary(
+            &Directory::open_anchor(&scratch_root)?,
+            &temporary,
+            false,
+            &mut report,
+            &mut sizes,
+            &|| true,
+        )?;
+        assert!(scratch_root.join("sentinel").is_file());
+        assert!(
+            scratch_root.exists(),
+            "a non-empty scratch root must be kept"
+        );
         Ok(())
     }
 
@@ -4824,8 +4917,9 @@ mod tests {
     #[test]
     fn age_collection_keeps_unimported_git_until_custody_is_proven() -> TestResult {
         let pair = pair()?;
-        fs::create_dir(pair.older.join("tmp"))?;
-        fs::write(pair.older.join("tmp/objects"), "unlanded work")?;
+        let temporary = scratch_root_of(&pair.older).join("tmp");
+        fs::create_dir_all(&temporary)?;
+        fs::write(temporary.join("objects"), "unlanded work")?;
         fs::write(pair.older.join("writer-objects.json"), "{}")?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
@@ -4837,7 +4931,7 @@ mod tests {
                 .any(|issue| issue.path.starts_with(&pair.older))
         );
         assert_eq!(
-            fs::read_to_string(pair.older.join("tmp/objects"))?,
+            fs::read_to_string(temporary.join("objects"))?,
             "unlanded work"
         );
         assert!(pair.older.join("provider-state/candidate-0/blob").exists());
@@ -4847,7 +4941,7 @@ mod tests {
     #[test]
     fn payload_pressure_never_evicts_private_git_or_dry_runs() -> TestResult {
         let pair = pair()?;
-        fs::create_dir(pair.older.join("tmp"))?;
+        fs::create_dir_all(scratch_root_of(&pair.older).join("tmp"))?;
         fs::write(pair.older.join("writer-objects.json"), "{}")?;
         let preview = payload(&pair, 1_000, 8 * DAY_MICROS, true, true)?;
         assert_eq!(preview.evicted.len(), 1, "{preview:?}");

@@ -372,8 +372,11 @@ fn other_state(path: &Path, report: &mut DiskReport) {
     };
     let mut observed = false;
     for name in names {
+        // `attempt-scratch` is already measured as attempt_tmp by the run
+        // store scan; folding it in here would count the same bytes twice.
         if name != "attempts"
             && name != "children"
+            && name != provenant_run::ATTEMPT_SCRATCH
             && !name
                 .to_str()
                 .is_some_and(|name| name.starts_with("run.sqlite3"))
@@ -531,6 +534,20 @@ mod tests {
                 .iter()
                 .filter(|e| e.class == "attempt_tmp")
                 .all(|e| e.leak.is_none())
+        );
+        // The scratch payload is reported once as attempt_tmp, never again in
+        // the other_state rollup over the same state root.
+        let scratch_bytes = report.totals["attempt_tmp"].allocated_bytes;
+        fs::remove_file(state.join("attempt-scratch/attempt/tmp/keep"))?;
+        let after = collect_resolved(&roots, &rig.home, &rig.project)?;
+        assert!(
+            after.totals["attempt_tmp"].allocated_bytes < scratch_bytes,
+            "removing scratch must shrink attempt_tmp"
+        );
+        assert_eq!(
+            report.totals["other_state"].allocated_bytes,
+            after.totals["other_state"].allocated_bytes,
+            "attempt-scratch must not be counted in other_state"
         );
         let envelope = CommandResult::new("disk report", Outcome::Ok, Some(report));
         let mut output = Vec::new();

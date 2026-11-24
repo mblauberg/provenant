@@ -10,10 +10,10 @@ use std::{
 
 /// Sibling scratch root, outside the attempt record directory. A lane that
 /// walks up from its scratch must never reach settlement-owned records (#3947).
-pub(crate) const ATTEMPT_SCRATCH: &str = "attempt-scratch";
+pub const ATTEMPT_SCRATCH: &str = "attempt-scratch";
 
 /// Per-attempt scratch root: `<state>/attempt-scratch/<attempt id>`.
-pub(crate) fn scratch_root(state: &Path, id: AttemptId) -> PathBuf {
+pub fn scratch_root(state: &Path, id: AttemptId) -> PathBuf {
     state.join(ATTEMPT_SCRATCH).join(id.to_string())
 }
 
