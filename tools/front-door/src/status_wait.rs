@@ -2245,7 +2245,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
             );
             human.push_str(&line);
             human.push('\n');
-            if let (Source::Pr { complete: true, .. }, Some(reading)) = (source, reading)
+            if let (Source::Pr { .. }, Some(reading)) = (source, reading)
                 && let Ok(status) =
                     serde_json::from_value::<crate::pr::status::Line>(reading.data.clone())
             {
@@ -2317,7 +2317,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
     );
     // Completion reports must retain every failing check and its link in compact output.
     for (source, reading) in sources.iter().zip(&latest) {
-        if let (Source::Pr { complete: true, .. }, Some(reading)) = (source, reading)
+        if let (Source::Pr { .. }, Some(reading)) = (source, reading)
             && let Ok(status) =
                 serde_json::from_value::<crate::pr::status::Line>(reading.data.clone())
         {
