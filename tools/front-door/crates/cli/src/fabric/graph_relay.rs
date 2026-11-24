@@ -2106,7 +2106,9 @@ fn provisioning_refusal(error: provenant_confinement::worktrees::WorktreeError) 
         });
     }
     let fact = match &error {
-        WorktreeError::Dirty(_) => Some(DispatchRefusalFact::DirtyWriter),
+        WorktreeError::Dirty(paths) => Some(DispatchRefusalFact::DirtyWriter {
+            paths: provenant_records::diagnostic::safe_text(paths),
+        }),
         WorktreeError::DetachedWorktree { .. } | WorktreeError::DetachedPrimary => {
             Some(DispatchRefusalFact::DetachedWriter)
         }

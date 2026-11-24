@@ -186,7 +186,12 @@ bounded_input! {
 #[serde(rename_all = "snake_case")]
 pub enum DispatchRefusalFact {
     DetachedWriter,
-    DirtyWriter,
+    /// The bounded, display-sanitised summary of the dirty paths a launch or
+    /// retry counted. The free-form refusal reason stays untrusted and is not
+    /// carried here.
+    DirtyWriter {
+        paths: String,
+    },
     CheckedOutWriter,
     GraphSchema,
     GraphComposite,
@@ -1034,7 +1039,14 @@ impl FacadeError {
                 };
                 let (detail, action): (String, &str) = match fact {
                     DispatchRefusalFact::DetachedWriter => unreachable!(),
-                    DispatchRefusalFact::DirtyWriter => ("the writer worktree has uncommitted edits".into(), "preserve or commit the edits before retrying"),
+                    DispatchRefusalFact::DirtyWriter { paths } => {
+                        let detail = if paths.is_empty() {
+                            "the writer worktree has uncommitted edits".into()
+                        } else {
+                            format!("the writer worktree has uncommitted edits: {paths}")
+                        };
+                        (detail, "preserve or commit the edits before retrying")
+                    }
                     DispatchRefusalFact::CheckedOutWriter => ("the branch is already checked out".into(), "run `provenant worktree list`, inspect custody, then select the existing checkout with --worktree"),
                     DispatchRefusalFact::GraphSchema => (named("graph document schema_version is invalid"), "use a schema version that supports the document fields"),
                     DispatchRefusalFact::GraphComposite => (named("graph composite or loop expansion is invalid"), "inspect the composite or loop definition"),

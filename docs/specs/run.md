@@ -207,11 +207,12 @@ paths. A worktree another lane holds is always refused (boundary 2). The preflig
 writer leaves in composites and loops. WIP mutation holds writer exclusion, refuses unsettled
 reservations and rechecks head and dirty paths under it. Credential and Git-internal roots are
 refused under every value. Launch and retry make one fresh `git status --porcelain`
-observation of the checkout, excluding ignored paths; the refusal carries the typed cause,
-and untrusted path text is never echoed into a diagnostic. A recorded private attempt index is
-an earlier attempt's snapshot, not an observation of this checkout, so it does not gate a new
-writer: it survives the stop and is checked only by removal and GC, which would destroy it and
-its staged work.
+observation of the checkout, excluding ignored paths; the typed DirtyWriter refusal names the
+counted paths (the first few relative paths plus a count of the rest), display-sanitised and
+bounded, while untrusted free-form reason text is never echoed into a diagnostic. A recorded
+private attempt index is an earlier attempt's snapshot, not an observation of this checkout, so
+it does not gate a new writer: it survives the stop and is checked only by removal and GC, which
+would destroy it and its staged work.
 - Why: a stopped lane's worktree committed clean by the operator, with only ignored output
   left, must accept a new writer, while a genuinely dirty tree still refuses.
 - Owner: `crates/confinement/src/worktrees/custody.rs`
