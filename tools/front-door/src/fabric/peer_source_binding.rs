@@ -9,7 +9,7 @@ use provenant_records::{
     diagnostic::{ConfinementRule, ResourceFact},
     run::{LaneAccessRequest, NetworkAccess, SourceIdentity},
 };
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub(crate) fn refusal(rule: &'static str, path: &Path) -> FacadeError {
     FacadeError::ConfinementRefused {
