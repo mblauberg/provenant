@@ -1340,8 +1340,7 @@ mod tests {
                 budget,
                 &CancelToken::new(),
             )
-            .err()
-            .expect("a project outside home must be refused before peer transport");
+            .expect_err("a project outside home must be refused before peer transport");
         match *failure.error {
             super::FacadeError::ConfinementRefused {
                 resource: Some(ResourceFact::ConfinementRule(rule)),

@@ -25,7 +25,7 @@ pub(crate) fn bind_reader_source(
     state: &Path,
     cwd: &Path,
     network: Option<NetworkAccess>,
-) -> Result<(PathBuf, LaneAccessRequest), FacadeError> {
+) -> Result<LaneAccessRequest, FacadeError> {
     let source = provenant_run::resolve_reader_source(state, cwd, cwd)
         .map_err(|_| refusal("peer_source_resolve", cwd))?;
     let directory = provenant_os::fs::Directory::open_anchor(&source)
@@ -35,14 +35,14 @@ pub(crate) fn bind_reader_source(
         .map_err(|_| refusal("peer_source_identity", &source))?;
     let access = LaneAccessRequest {
         network,
-        source_root: Some(source.clone()),
+        source_root: Some(source),
         source_identity: Some(SourceIdentity {
             device: metadata.device,
             inode: metadata.inode,
         }),
         ..Default::default()
     };
-    Ok((source, access))
+    Ok(access)
 }
 
 #[cfg(test)]
@@ -58,8 +58,7 @@ mod tests {
         // A directory with no Git project cannot yield a reader source, so the
         // real resolution path must refuse with the named rule and refused path.
         let error = bind_reader_source(cwd, cwd, None)
-            .err()
-            .expect("a non-Git directory must not resolve a reader source");
+            .expect_err("a non-Git directory must not resolve a reader source");
         match error {
             FacadeError::ConfinementRefused {
                 resource: Some(ResourceFact::ConfinementRule(rule)),

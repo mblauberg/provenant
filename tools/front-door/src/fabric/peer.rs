@@ -991,7 +991,7 @@ pub fn peer(
                     }
                     let retry = graph_context.retry_limit;
                     let network = graph_context.network;
-                    let (source, access) = super::peer_source_binding::bind_reader_source(
+                    let access = super::peer_source_binding::bind_reader_source(
                         context.roots.state.as_path(),
                         &cwd,
                         network,
