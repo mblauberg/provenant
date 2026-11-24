@@ -291,6 +291,34 @@ fn schema_two_refuses_a_host_that_cannot_bind_a_writer() {
 }
 
 #[test]
+fn a_writer_with_a_false_launch_condition_is_never_bound() {
+    let mut writer = node("writer", route("fixture"));
+    writer.access = AccessMode::WorktreeWrite;
+    writer.worktree = Some("lane".into());
+    writer.when = vec![WhenTerm {
+        name: "smoke-write".into(),
+        expected: "true".into(),
+        actual: "false".into(),
+    }];
+    let document = graph(vec![writer]);
+    let mut owner = FakeOwner::default();
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    let progress = &run.checkpoint.nodes[0];
+    assert_eq!(progress.state, NodeState::Skipped);
+    assert!(
+        progress
+            .skip_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("smoke-write")),
+        "{progress:?}"
+    );
+    assert!(progress.writer_binding.is_none(), "{progress:?}");
+    assert_eq!(progress.advance_error_code.as_deref(), None);
+    assert!(run.advance_error.is_none(), "{run:?}");
+    assert_eq!(owner.implicit_bindings, 0);
+}
+
+#[test]
 fn implicit_writer_binding_applies_to_schema_one_when_host_supports_it() {
     let mut writer = node("writer", route("fixture"));
     writer.access = AccessMode::WorktreeWrite;
