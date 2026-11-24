@@ -344,17 +344,32 @@ fn summary(data: &Value, text: &str, headed: bool, full: bool) -> crate::Summary
         }
     }
     if full && headed {
-        for (label, key) in [
-            ("base", "writer_base"),
-            ("committed head", "writer_head"),
-            ("publication", "publication"),
-            ("residual tree state", "residual_tree"),
+        // A local read records writer-specific fields; a peer read projects the
+        // owning lane instead, where the committed head is `head` and a pushed
+        // publication is evidence in `delivery`. Read both shapes so a peer's
+        // real head and publication are not silently dropped. A missing or null
+        // value is absent evidence: never render a header saying "unavailable".
+        // Spec: docs/specs/lane-contracts.md#result-projection
+        let lane_publication = (data["delivery"]["state"]["state"].as_str() == Some("delivered")
+            && data["delivery"]["integration"]["remote"]
+                .as_str()
+                .is_some_and(|remote| !remote.is_empty()))
+        .then_some("pushed");
+        for (label, value) in [
+            ("base", data["writer_base"].as_str()),
+            (
+                "committed head",
+                data["writer_head"]
+                    .as_str()
+                    .or_else(|| data["head"].as_str()),
+            ),
+            (
+                "publication",
+                data["publication"].as_str().or(lane_publication),
+            ),
+            ("residual tree state", data["residual_tree"].as_str()),
         ] {
-            // A missing or null key is absent evidence, not a line saying so:
-            // only real values render a header. Do not gate the whole group on
-            // `writer_base`: a lane whose base was not observed may still carry
-            // a real committed head or publication.
-            if let Some(value) = data[key].as_str() {
+            if let Some(value) = value {
                 lines.push(format!("{label}: {value}"));
             }
         }
@@ -1412,40 +1427,159 @@ mod tests {
 
     // Spec: docs/specs/cli.md#output-references-and-bounded-tails
     #[test]
-    fn output_summary_prints_real_writer_headers_when_base_is_unobserved() {
-        // The header group must not be gated on `writer_base`: `is_some()` is
-        // true for JSON null and false for an absent key, neither of which may
-        // hide a real value in another writer field or print "unavailable".
-        let cases = [
-            json!({"state":"succeeded", "writer_head":"cccc", "publication":"pushed"}),
-            json!({"state":"succeeded", "writer_base":null, "writer_head":"cccc", "publication":"pushed"}),
-        ];
-        for data in cases {
-            let summary = output_summary(&data, "", true);
-            assert!(
-                summary.lines.contains(&"committed head: cccc".to_owned()),
-                "real committed head lost when base was unobserved: {:?}",
-                summary.lines
-            );
-            assert!(
-                summary.lines.contains(&"publication: pushed".to_owned()),
-                "real publication lost when base was unobserved: {:?}",
-                summary.lines
-            );
+    fn output_summary_keeps_local_headers_without_unavailable_lines() {
+        // The local read path (`output_read_part`) always inserts the writer
+        // keys, as null on a read-only or unpublished lane. Drive that shape
+        // through `render_output`: non-applicable headers are omitted, and no
+        // line says "unavailable". This invariant already held before the gate
+        // removal; keep it as a regression guard for the local path.
+        let command = crate::Output {
+            target: "repair/writer#2".parse().unwrap(),
+            part: crate::Part::Result,
+            to: None,
+            path: false,
+            offset: 0,
+            tail: None,
+            max_bytes: 65536,
+        };
+        let local = json!({
+            "state":"succeeded", "part":"result",
+            "writer_base":null, "writer_head":null,
+            "residual_tree":null, "publication":null, "changed_files":null
+        });
+        let rendered = super::render_output(command, Ok((local, "answer".into())));
+        let summary = output_summary(&rendered.result.data, &rendered.human, true);
+        for label in [
+            "base",
+            "committed head",
+            "publication",
+            "residual tree state",
+        ] {
             assert!(
                 !summary
                     .lines
                     .iter()
-                    .any(|line| line.contains("unavailable")),
-                "absent writer fields rendered as unavailable: {:?}",
-                summary.lines
-            );
-            assert!(
-                !summary.lines.iter().any(|line| line.starts_with("base:")),
-                "absent base rendered a header: {:?}",
+                    .any(|line| line.starts_with(&format!("{label}:"))),
+                "null {label} rendered a header: {:?}",
                 summary.lines
             );
         }
+        assert!(
+            !summary
+                .lines
+                .iter()
+                .any(|line| line.contains("unavailable")),
+            "a local null writer field rendered as unavailable: {:?}",
+            summary.lines
+        );
+
+        // An unobserved base must not hide a real committed head or publication.
+        let with_real_values = json!({
+            "state":"succeeded", "writer_base":null,
+            "writer_head":"cccc", "publication":"pushed"
+        });
+        let summary = output_summary(&with_real_values, "", true);
+        for expected in ["committed head: cccc", "publication: pushed"] {
+            assert!(
+                summary.lines.iter().any(|line| line == expected),
+                "{expected} lost when base was unobserved: {:?}",
+                summary.lines
+            );
+        }
+        assert!(
+            !summary.lines.iter().any(|line| line.starts_with("base:")),
+            "absent base rendered a header: {:?}",
+            summary.lines
+        );
+    }
+
+    // Spec: docs/specs/cli.md#output-references-and-bounded-tails
+    #[test]
+    fn peer_output_renders_committed_head_and_publication_from_lane_projection() {
+        use provenant_fabric_runtime::coordination::facade::{
+            AttemptTarget, OutputBytes, OutputInput, OutputPart, OutputResult,
+        };
+        let attempt = provenant_core::AttemptId::from_bytes([2; 16]);
+        let host = provenant_core::HostId::from_bytes([3; 16]);
+        let command = crate::Output {
+            target: "repair/writer#2".parse().unwrap(),
+            part: crate::Part::Result,
+            to: None,
+            path: false,
+            offset: 0,
+            tail: None,
+            max_bytes: 65536,
+        };
+        // A peer chunk's forward evidence is the owning lane projection: it
+        // carries `head` and `delivery`, never `writer_*` fields. Feed that
+        // shape through the real peer read so the assertion pins the path a
+        // reader actually takes, not a hand-built summary.
+        let extra: provenant_records::ExtraFields = serde_json::from_value(json!({
+            "head": "cccc",
+            "delivery": {
+                "schema_version": 1,
+                "remote": "origin",
+                "branch": "lane",
+                "state": {"state": "delivered"},
+                "integration": {
+                    "remote": "origin", "target": "refs/heads/main",
+                    "previous": null, "integrated": "dddd"
+                }
+            }
+        }))
+        .unwrap();
+        let chunk = OutputResult::Chunk {
+            peer: Default::default(),
+            length: Some(2),
+            planner_fallback: None,
+            extra,
+            target: AttemptTarget {
+                extra: Default::default(),
+                attempt,
+                host: Some(host),
+            },
+            part: OutputPart::Result,
+            state: "succeeded".into(),
+            reason: None,
+            offset: 0,
+            next_offset: 2,
+            eof: true,
+            digest: provenant_core::Digest::from_bytes([6; 32]),
+            bytes: OutputBytes::Utf8("ok".into()),
+        };
+        let reply =
+            super::output_from_host(command, host, attempt, |_: OutputInput| Ok(chunk.clone()));
+        assert_eq!(reply.result.status, Status::Ok);
+        assert_eq!(reply.result.data["head"], json!("cccc"));
+        assert_eq!(
+            reply.result.data["delivery"]["state"]["state"],
+            json!("delivered")
+        );
+        let summary = output_summary(&reply.result.data, &reply.human, true);
+        assert!(
+            summary
+                .lines
+                .iter()
+                .any(|line| line == "committed head: cccc"),
+            "peer committed head was dropped: {:?}",
+            summary.lines
+        );
+        assert!(
+            summary
+                .lines
+                .iter()
+                .any(|line| line == "publication: pushed"),
+            "peer publication was dropped: {:?}",
+            summary.lines
+        );
+        assert!(
+            !summary
+                .lines
+                .iter()
+                .any(|line| line.contains("unavailable")),
+            "peer lane fields rendered as unavailable: {:?}",
+            summary.lines
+        );
     }
 
     #[test]
