@@ -179,20 +179,25 @@ handoffs and never count as negative provider-quality evidence.
 - Why: unfinished work must not appear complete or lose its handoff, and all readers need one cause
   for the next decision.
 
-The handoff is the closed `handoff` fence of the final answer, which always wins. Without one, a
-`json` fence that ends the answer and decodes as a handoff is accepted with a warning naming the
-fallback. Adjacent repeated blocks are one declaration (identical copies accepted, differing
-copies settle on the last), each with a warning. When exactly one block closes and only ordinary
-prose follows it (#3928), the declaration still settles and the output-order tolerance is recorded
-in the terminal reason; prose between blocks, after a repeated block, or after a further (even
-partial) `handoff` opener still fails, as does a truncated or invalid block. A review's final
-handoff may be followed by exactly one recognised standalone verdict and nothing else; a prose
-line on either side of that verdict keeps the strict rule, and an accepted order tolerance is
-recorded in the terminal reason. The two tolerances are mutually exclusive and diagnostic only:
-neither changes the handoff's fields or authority.
-- Why: providers drift to `json` fences and repeat blocks, and a finished writer that keeps
-  explaining its work after one complete declaration must not be failed; refusing a complete
-  declaration for its trailing prose loses finished work while the warning keeps the drift visible.
+The handoff is the closed `handoff` fence that ends the answer, which always wins. When an answer
+contains several blocks, the last one that ends the answer is authoritative: earlier blocks and the
+prose between them are ordinary answer text. Without one, a `json` fence that ends the answer and
+decodes as a handoff is accepted with a warning naming the fallback. Adjacent repeated blocks are
+one declaration (identical copies accepted, differing copies settle on the last), each with a
+warning. When exactly one block closes and only ordinary prose follows it (#3928), the declaration
+still settles and the output-order tolerance is recorded in the terminal reason. Prose after a
+repeated last block, a fence or near-miss `handoff` opener after the declaration, and a truncated
+or invalid block still fail, with a diagnostic naming the recovery ("end the answer with one
+handoff; retry the node"). With turn boundaries, a turn that ran tool work keeps the strict rule
+until turn ends order tool work against the handoff (#3938). A review's final handoff may be
+followed by exactly one recognised standalone verdict and nothing else; a prose line on either side
+of that verdict keeps the strict rule, and an accepted order tolerance is recorded in the terminal
+reason. The two tolerances are mutually exclusive and diagnostic only: neither changes the
+handoff's fields or authority.
+- Why: providers drift to `json` fences and repeat blocks, a late background task can append prose
+  and a corrected handoff, and a finished writer that keeps explaining its work after one complete
+  declaration must not be failed; refusing a complete declaration for its label or trailing prose
+  loses finished work, while the warning and the named recovery keep the drift visible.
 - Owner: `crates/records/src/handoff.rs`, `crates/run/src/completion.rs`
 
 `crates/records/src/handoff.rs` owns the fields, decoding and bounds. A valid JSON object keeps
@@ -251,9 +256,12 @@ host must also prove worktree non-occupancy under exclusion; unknown or occupied
 read-only attempt has no worktree). A writer checkout removed from disk is censused like any
 other root. Nothing that still exists lies under it, so a process in an existing directory is
 outside; a process path with removed components is inside when it splits at the same nearest
-existing directory, compared by identity, and its removed components start with the root's. An
-unreadable root or a dangling symlink stays undecidable, and the root's owner is its nearest
-existing directory's owner.
+existing directory, compared by identity, and its removed components start with the root's. A path
+that cannot be split, such as one through a directory this user cannot read, is outside when its
+nearest readable directory is none of the root's existing ancestors and no symlink lies below
+that directory. An unreadable root or a
+dangling symlink stays undecidable, and the root's owner is its nearest existing directory's
+owner.
 
 Missing, replaced or unreadable lock evidence never proves loss. Identities are durable before any
 guardian can spawn and are rechecked after the worktree census and before release. The capability

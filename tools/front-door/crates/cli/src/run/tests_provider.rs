@@ -675,9 +675,11 @@ fn agy_repeated_answer_is_captured_once() {
     let parsed = provenant_records::handoff::Handoff::from_result_report(&decoded.result);
     assert!(parsed.handoff.as_ref().is_ok_and(Option::is_some));
     assert!(parsed.trailing_prose_tolerated);
-    // A repeated, differing declaration still fails (two verdicts).
+    // Since #3910 a later handoff that ends the answer wins; prose after a
+    // repeated final handoff is not the single-block tolerance and stays
+    // malformed.
     let response = format!(
-        "{answer}\n{}",
+        "{answer}\n{}\nextra",
         answer.replace("\"note\":\"done\"", "\"note\":\"different\"")
     );
     let decoded = decode("", &response);

@@ -523,6 +523,7 @@ fn attempt_record_enum_names_are_a_deliberate_contract() -> TestResult {
             "free_tier_refused",
             "provider_refused",
             "invalid_account_evidence",
+            "account_does_not_offer",
         ],
     )?;
     assert_unit_names::<BoundaryClass>(

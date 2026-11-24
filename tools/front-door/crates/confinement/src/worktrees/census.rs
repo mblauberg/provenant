@@ -249,6 +249,41 @@ pub(super) fn absent_root_contains(path: &Path, root: &Path) -> Option<bool> {
     Some(path_directory == root_directory && path_removed.starts_with(&root_removed))
 }
 
+/// Rule out a removed root for a path that cannot be split because a
+/// directory on it is unreadable to this user. A symlink-free path under the
+/// removed root passes through every existing ancestor of that root, so when
+/// the path's nearest readable directory is none of them, by identity, the
+/// path cannot lie under it. Kernel-reported paths are symlink-free; a path
+/// that shows a symlink below its nearest readable directory could still alias
+/// the root and stays possibly inside, as does anything unresolved. The rule
+/// assumes the root and the path are seen through one mount view.
+fn absent_root_could_hold(path: &Path, root: &Path) -> bool {
+    let directory = |candidate: &Path| {
+        std::fs::metadata(candidate)
+            .ok()
+            .filter(std::fs::Metadata::is_dir)
+            .map(|metadata| (metadata.dev(), metadata.ino()))
+    };
+    let root_ancestors = root
+        .ancestors()
+        .skip(1)
+        .filter_map(directory)
+        .collect::<Vec<_>>();
+    if root_ancestors.is_empty() {
+        return true;
+    }
+    for ancestor in path.ancestors() {
+        match std::fs::symlink_metadata(ancestor) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return true,
+            Ok(metadata) if metadata.is_dir() => {
+                return root_ancestors.contains(&(metadata.dev(), metadata.ino()));
+            }
+            _ => {}
+        }
+    }
+    true
+}
+
 /// The owner of a scoped root. A removed root is owned as its nearest existing
 /// directory is; an unreadable root has no provable owner.
 pub(super) fn root_owner(root: &Path) -> Option<u32> {
@@ -2230,6 +2265,9 @@ pub(super) fn occupancy_path_could_be_under(path: &Path, root: &Path) -> bool {
     }
     if let Some(inside) = absent_root_contains(path, root) {
         return inside;
+    }
+    if root_is_absent(root) {
+        return absent_root_could_hold(path, root);
     }
     if !std::fs::metadata(root).is_ok_and(|metadata| metadata.is_dir()) {
         return true;

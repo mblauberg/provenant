@@ -4199,6 +4199,14 @@ fn composite_graph_output_uses_declared_roots_and_exports() -> Result {
         human_output.contains("findings: 1 (available)"),
         "{human_output}"
     );
+    let full_output = rig.command(&["output", "composite-output", "--full"])?;
+    let full_output = String::from_utf8_lossy(&full_output.stdout.bytes);
+    assert!(
+        full_output.contains(
+            "finding: [high] src/lib.rs:1 — The failing path is reachable (fix: Handle x)"
+        ),
+        "{full_output}"
+    );
 
     let status_output = rig.command(&["status", "composite-output/panel", "--json"])?;
     assert_eq!(code(&status_output), 0, "{status_output:?}");

@@ -682,6 +682,7 @@ fn account_evidence_reasons_carry_their_repair_text() {
         Reason::FreeTierRefused,
         Reason::ProviderRefused,
         Reason::InvalidAccountEvidence,
+        Reason::AccountDoesNotOffer,
     ];
 
     // Keep this match exhaustive until Slice A publishes the shared enum ALL list.
@@ -709,7 +710,8 @@ fn account_evidence_reasons_carry_their_repair_text() {
             | Reason::AccountMismatch
             | Reason::FreeTierRefused
             | Reason::ProviderRefused
-            | Reason::InvalidAccountEvidence => {}
+            | Reason::InvalidAccountEvidence
+            | Reason::AccountDoesNotOffer => {}
         }
     }
 

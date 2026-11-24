@@ -2263,12 +2263,13 @@ fn stale_observation_index(
 }
 
 /// The models a route's account reports when the requested model is not among
-/// them. Accounts that report no models place no restriction.
+/// them, with the age of that recorded offer list. Accounts that report no
+/// models place no restriction.
 fn unoffered_model(
     availability: &[provenant_providers::AvailabilityRecord],
     route: &ResolvedRoute,
     now: i64,
-) -> Option<Vec<String>> {
+) -> Option<(Vec<String>, u64)> {
     let key = route.account_key.as_deref()?;
     if !AdapterSpec::get(&route.adapter).is_some_and(|spec| spec.offered_models) {
         return None;
@@ -2279,8 +2280,34 @@ fn unoffered_model(
             && record.expires_unix_seconds > now
             && !record.observed_models.is_empty()
     })?;
-    (!provenant_providers::model_matches_offered(&route.model, &record.observed_models))
-        .then(|| record.observed_models.clone())
+    (!provenant_providers::model_matches_offered(&route.model, &record.observed_models)).then(
+        || {
+            let age_seconds = now.saturating_sub(record.observed_unix_seconds) as u64;
+            (record.observed_models.clone(), age_seconds)
+        },
+    )
+}
+
+/// The typed lane refusal for an account whose recorded offers exclude the
+/// route's model. The fact comes from resolve's own offer evidence, so resolve
+/// and preparation name the same account, offers and age.
+fn offer_mismatch_skip(
+    route: &ResolvedRoute,
+    mismatch: provenant_records::run::AccountOfferMismatch,
+) -> SkippedRoute {
+    let label = format!("{}/{}", route.adapter, route.model);
+    let mut skipped = skip(&label, SkipKind::Refused, "");
+    skipped.set_cause(provenant_records::RouteExclusionReason::AccountDoesNotOffer);
+    skipped.set_offer_mismatch(provenant_records::run::AccountOfferMismatch {
+        account: route
+            .account_key
+            .clone()
+            .unwrap_or_else(|| mismatch.account.clone()),
+        model: label,
+        offered_models: mismatch.offered_models,
+        age_seconds: mismatch.age_seconds,
+    });
+    skipped
 }
 
 fn retry_stale_selected(
@@ -2370,7 +2397,7 @@ mod stale_readiness_tests {
         };
         assert_eq!(
             unoffered_model(std::slice::from_ref(&record), &route, 20),
-            Some(record.observed_models.clone())
+            Some((record.observed_models.clone(), 10))
         );
         let mut flash = route.clone();
         flash.model = "gemini-9-flash".into();
@@ -2384,6 +2411,50 @@ mod stale_readiness_tests {
             ..record
         };
         assert_eq!(unoffered_model(&[unknown], &route, 20), None);
+    }
+
+    #[test]
+    // Spec: docs/specs/routing.md#provider-model-discovery
+    fn offer_mismatch_refusal_carries_the_typed_reason() {
+        let route: ResolvedRoute = serde_json::from_value(serde_json::json!({
+            "selection_context":{"workload":"general","writes":false},
+            "diagnostics":serde_json::to_value(provenant_records::route_selection::RouteDiagnostics::default()).unwrap(),
+            "adapter":"agy", "model":"gemini-4-hydrogen", "effort":null,
+            "catalogue_revision":"revision", "account_key":"agy-google-896bb719dc34", "host":"local",
+            "alternatives":[], "exclusions":[], "eligibility":"eligible",
+            "readiness":{"status":"unavailable","reason":"stale_availability"},
+            "confidentiality":{"evidence_ref":"evidence"}
+        }))
+        .unwrap();
+        let skipped = offer_mismatch_skip(
+            &route,
+            provenant_records::run::AccountOfferMismatch {
+                account: route.account_key.clone().unwrap_or_default(),
+                model: "agy/gemini-4-hydrogen".into(),
+                offered_models: vec!["Gemini 3.8 Flash".into(), "Claude Sonnet 4.6".into()],
+                age_seconds: 1800,
+            },
+        );
+        assert_eq!(skipped.kind, SkipKind::Refused);
+        assert_eq!(
+            skipped.cause,
+            Some(provenant_records::RouteExclusionReason::AccountDoesNotOffer)
+        );
+        let text = skipped.describe();
+        assert!(
+            text.contains("account agy-google-896bb719dc34 does not offer agy/gemini-4-hydrogen"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Gemini 3.8 Flash, Claude Sonnet 4.6"),
+            "{text}"
+        );
+        assert!(text.contains("1800s ago"), "{text}");
+        assert!(text.contains("provenant quota tick"), "{text}");
+        assert!(
+            !text.contains("inspect the request and access policy"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -3877,19 +3948,38 @@ pub(super) fn prepare_candidates_inner(
             reasons.push(skip(&label, SkipKind::Refused, "read-only model policy"));
             continue;
         }
-        if let Some(offered) = unoffered_model(&availability, &route, clock.unix_seconds()) {
+        // Resolve's own typed fact wins here: it names the offers and age from
+        // the source resolve judged, which may be a fresh snapshot when the
+        // availability probe has not run. The availability-only check below is
+        // for a route resolve did not classify as an offer mismatch.
+        if let provenant_records::RouteReadiness::Unavailable {
+            reason: provenant_records::RouteExclusionReason::AccountDoesNotOffer,
+            ..
+        } = &route.readiness
+            && let Some(mismatch) = route.diagnostics.offer_mismatch.clone()
+        {
             reason_boundaries.insert(
                 reasons.len(),
                 provenant_records::diagnostic::BoundaryClass::Authority,
             );
-            reasons.push(skip(
-                &label,
-                SkipKind::Refused,
-                format!(
-                    "model `{}` is not offered by this account; offered models: {}",
-                    route.model,
-                    offered.join(", ")
-                ),
+            reasons.push(offer_mismatch_skip(&route, mismatch));
+            continue;
+        }
+        if let Some((offered, age_seconds)) =
+            unoffered_model(&availability, &route, clock.unix_seconds())
+        {
+            reason_boundaries.insert(
+                reasons.len(),
+                provenant_records::diagnostic::BoundaryClass::Authority,
+            );
+            reasons.push(offer_mismatch_skip(
+                &route,
+                provenant_records::run::AccountOfferMismatch {
+                    account: route.account_key.clone().unwrap_or_default(),
+                    model: format!("{}/{}", route.adapter, route.model),
+                    offered_models: offered,
+                    age_seconds,
+                },
             ));
             continue;
         }

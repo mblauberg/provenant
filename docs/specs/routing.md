@@ -74,13 +74,22 @@ catalogue once, at launch selection: the provider is launched with the exact
 model and the launch receipt carries it, while the attempt's requested route
 keeps the alias. An unknown or ambiguous alias warns.
 
-For adapters that report per-account offered models, a catalogued
-`superseded_by` edge withholds an older shipped pool member on an account that
-offers a superseding model, and an unpinned selection never picks an account
-whose known offer list lacks the model. `route resolve` reports the exclusion
-with the recorded offers. With no observed offer list, shipped members stay and
-supersedence is not applied; owner-configured pools stay pinned regardless. An
-explicit `--account` pin is attempted with a warning rather than withheld.
+For adapters that report per-account offered models, one rule decides offer
+evidence for selection, resolve and launch preparation: a fresh keychain-stamped
+usage probe comes first, a fresh quota snapshot counts only when the probe has
+not run, and stale or expired availability is never offer evidence — it keeps
+its `StaleAvailability` re-probe path instead of refusing the account. A
+catalogued `superseded_by` edge withholds an older shipped pool member on an
+account that offers a superseding model, and an unpinned selection never picks
+an account whose known offer list lacks the model. `route resolve` reports the
+exclusion with the recorded offers. With no observed offer list, shipped members
+stay and supersedence is not applied; owner-configured pools stay pinned
+regardless. An explicit `--account` pin is judged by the same recorded offers:
+it is refused at resolve and at launch preparation with the same reason, which
+names the account and model, the recorded offers and their age, and names an
+offering account or `provenant quota tick` as the repair. The resolve selection
+line names the pinned account even when the account is refused, so another
+account of the same provider is never shown in its place.
 
 `quota tick` refreshes listings for installed adapters with a registered
 account and an enabled quota probe, concurrently within the tick's remaining

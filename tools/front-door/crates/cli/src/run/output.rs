@@ -223,6 +223,40 @@ pub(super) fn output_summary_default(data: &Value, text: &str, headed: bool) -> 
     summary(data, text, headed, false)
 }
 
+/// One typed review finding as a bounded, terminal-safe human line. Every field
+/// comes from the same structured finding the JSON envelope carries; a missing
+/// location or suggested fix leaves no placeholder behind. Control, format and
+/// bidi characters are stripped before the byte bound so one finding cannot
+/// forge or reorder human lines.
+/// Spec: docs/specs/cli.md#output-references-and-bounded-tails
+pub fn finding_human_line(finding: &Value) -> String {
+    const FIELD_BYTES: usize = 256;
+    let field = |key: &str| {
+        finding[key]
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| plain_text(value, usize::MAX))
+            .filter(|value| !value.is_empty())
+            .map(|value| crate::bounded_text(&value, FIELD_BYTES))
+    };
+    let severity = field("severity").unwrap_or_else(|| "unknown".into());
+    let mut line = format!("finding: [{severity}]");
+    match (field("file"), finding["line"].as_u64()) {
+        (Some(file), Some(number)) => line.push_str(&format!(" {file}:{number}")),
+        (Some(file), None) => line.push_str(&format!(" {file}")),
+        (None, Some(number)) => line.push_str(&format!(" line {number}")),
+        (None, None) => {}
+    }
+    if let Some(summary) = field("summary") {
+        line.push_str(&format!(" — {summary}"));
+    }
+    if let Some(fix) = field("proposed_fix") {
+        line.push_str(&format!(" (fix: {fix})"));
+    }
+    line
+}
+
 fn summary(data: &Value, text: &str, headed: bool, full: bool) -> crate::Summary {
     let mut lines = Vec::new();
     if headed && let Some(verdict) = data["selected"]["verdict"].as_str() {
@@ -238,6 +272,13 @@ fn summary(data: &Value, text: &str, headed: bool, full: bool) -> crate::Summary
             None => "availability unknown",
         };
         lines.push(format!("findings: {} ({availability})", findings.len()));
+        if full {
+            lines.extend(
+                findings
+                    .iter()
+                    .map(|finding| format!("  {}", finding_human_line(finding))),
+            );
+        }
     }
     if headed {
         let verify = data["handoff"]["Ok"]["verify"]
@@ -343,16 +384,33 @@ fn summary(data: &Value, text: &str, headed: bool, full: bool) -> crate::Summary
             }
         }
     }
-    if full && headed && data.get("writer_base").is_some() {
-        for (label, key) in [
-            ("base", "writer_base"),
-            ("committed head", "writer_head"),
-            ("publication", "publication"),
-            ("residual tree state", "residual_tree"),
+    if full && headed {
+        // A local read records writer-specific fields; a peer read projects the
+        // owning lane instead, where the committed head is `head` and a pushed
+        // publication is evidence in `delivery`. Read both shapes so a peer's
+        // real head and publication are not silently dropped. A missing or null
+        // value is absent evidence: never render a header saying "unavailable".
+        // Spec: docs/specs/lane-contracts.md#result-projection
+        let lane_publication = (data["delivery"]["state"]["state"].as_str() == Some("delivered")
+            && data["delivery"]["integration"]["remote"]
+                .as_str()
+                .is_some_and(|remote| !remote.is_empty()))
+        .then_some("pushed");
+        for (label, value) in [
+            ("base", data["writer_base"].as_str()),
+            (
+                "committed head",
+                data["writer_head"]
+                    .as_str()
+                    .or_else(|| data["head"].as_str()),
+            ),
+            (
+                "publication",
+                data["publication"].as_str().or(lane_publication),
+            ),
+            ("residual tree state", data["residual_tree"].as_str()),
         ] {
-            // A present key with a null value is absent evidence, not a line
-            // saying so: only real values render a header.
-            if let Some(value) = data[key].as_str() {
+            if let Some(value) = value {
                 lines.push(format!("{label}: {value}"));
             }
         }
@@ -1209,9 +1267,9 @@ mod tests {
     }
 
     use super::{
-        Status, add_planner_fallback, fallback_reason_for_graph, output_summary,
-        output_summary_default, provider_error_from_result, provider_error_from_stderr,
-        tail_start_bytes,
+        Status, add_planner_fallback, fallback_reason_for_graph, finding_human_line,
+        output_summary, output_summary_default, provider_error_from_result,
+        provider_error_from_stderr, tail_start_bytes,
     };
     use serde_json::json;
 
@@ -1405,6 +1463,163 @@ mod tests {
                 .lines
                 .iter()
                 .any(|line| line.starts_with("changed files (1):"))
+        );
+    }
+
+    // Spec: docs/specs/cli.md#output-references-and-bounded-tails
+    #[test]
+    fn output_summary_keeps_local_headers_without_unavailable_lines() {
+        // The local read path (`output_read_part`) always inserts the writer
+        // keys, as null on a read-only or unpublished lane. Drive that shape
+        // through `render_output`: non-applicable headers are omitted, and no
+        // line says "unavailable". This invariant already held before the gate
+        // removal; keep it as a regression guard for the local path.
+        let command = crate::Output {
+            target: "repair/writer#2".parse().unwrap(),
+            part: crate::Part::Result,
+            to: None,
+            path: false,
+            offset: 0,
+            tail: None,
+            max_bytes: 65536,
+        };
+        let local = json!({
+            "state":"succeeded", "part":"result",
+            "writer_base":null, "writer_head":null,
+            "residual_tree":null, "publication":null, "changed_files":null
+        });
+        let rendered = super::render_output(command, Ok((local, "answer".into())));
+        let summary = output_summary(&rendered.result.data, &rendered.human, true);
+        for label in [
+            "base",
+            "committed head",
+            "publication",
+            "residual tree state",
+        ] {
+            assert!(
+                !summary
+                    .lines
+                    .iter()
+                    .any(|line| line.starts_with(&format!("{label}:"))),
+                "null {label} rendered a header: {:?}",
+                summary.lines
+            );
+        }
+        assert!(
+            !summary
+                .lines
+                .iter()
+                .any(|line| line.contains("unavailable")),
+            "a local null writer field rendered as unavailable: {:?}",
+            summary.lines
+        );
+
+        // An unobserved base must not hide a real committed head or publication.
+        let with_real_values = json!({
+            "state":"succeeded", "writer_base":null,
+            "writer_head":"cccc", "publication":"pushed"
+        });
+        let summary = output_summary(&with_real_values, "", true);
+        for expected in ["committed head: cccc", "publication: pushed"] {
+            assert!(
+                summary.lines.iter().any(|line| line == expected),
+                "{expected} lost when base was unobserved: {:?}",
+                summary.lines
+            );
+        }
+        assert!(
+            !summary.lines.iter().any(|line| line.starts_with("base:")),
+            "absent base rendered a header: {:?}",
+            summary.lines
+        );
+    }
+
+    // Spec: docs/specs/cli.md#output-references-and-bounded-tails
+    #[test]
+    fn peer_output_renders_committed_head_and_publication_from_lane_projection() {
+        use provenant_fabric_runtime::coordination::facade::{
+            AttemptTarget, OutputBytes, OutputInput, OutputPart, OutputResult,
+        };
+        let attempt = provenant_core::AttemptId::from_bytes([2; 16]);
+        let host = provenant_core::HostId::from_bytes([3; 16]);
+        let command = crate::Output {
+            target: "repair/writer#2".parse().unwrap(),
+            part: crate::Part::Result,
+            to: None,
+            path: false,
+            offset: 0,
+            tail: None,
+            max_bytes: 65536,
+        };
+        // A peer chunk's forward evidence is the owning lane projection: it
+        // carries `head` and `delivery`, never `writer_*` fields. Feed that
+        // shape through the real peer read so the assertion pins the path a
+        // reader actually takes, not a hand-built summary.
+        let extra: provenant_records::ExtraFields = serde_json::from_value(json!({
+            "head": "cccc",
+            "delivery": {
+                "schema_version": 1,
+                "remote": "origin",
+                "branch": "lane",
+                "state": {"state": "delivered"},
+                "integration": {
+                    "remote": "origin", "target": "refs/heads/main",
+                    "previous": null, "integrated": "dddd"
+                }
+            }
+        }))
+        .unwrap();
+        let chunk = OutputResult::Chunk {
+            peer: Default::default(),
+            length: Some(2),
+            planner_fallback: None,
+            extra,
+            target: AttemptTarget {
+                extra: Default::default(),
+                attempt,
+                host: Some(host),
+            },
+            part: OutputPart::Result,
+            state: "succeeded".into(),
+            reason: None,
+            offset: 0,
+            next_offset: 2,
+            eof: true,
+            digest: provenant_core::Digest::from_bytes([6; 32]),
+            bytes: OutputBytes::Utf8("ok".into()),
+        };
+        let reply =
+            super::output_from_host(command, host, attempt, |_: OutputInput| Ok(chunk.clone()));
+        assert_eq!(reply.result.status, Status::Ok);
+        assert_eq!(reply.result.data["head"], json!("cccc"));
+        assert_eq!(
+            reply.result.data["delivery"]["state"]["state"],
+            json!("delivered")
+        );
+        let summary = output_summary(&reply.result.data, &reply.human, true);
+        assert!(
+            summary
+                .lines
+                .iter()
+                .any(|line| line == "committed head: cccc"),
+            "peer committed head was dropped: {:?}",
+            summary.lines
+        );
+        assert!(
+            summary
+                .lines
+                .iter()
+                .any(|line| line == "publication: pushed"),
+            "peer publication was dropped: {:?}",
+            summary.lines
+        );
+        assert!(
+            !summary
+                .lines
+                .iter()
+                .any(|line| line.contains("unavailable")),
+            "peer lane fields rendered as unavailable: {:?}",
+            summary.lines
         );
     }
 
@@ -1645,6 +1860,77 @@ mod tests {
             !lines.iter().any(|line| line.starts_with("base:")),
             "{lines:?}"
         );
+    }
+
+    // Spec: docs/specs/cli.md#output-references-and-bounded-tails
+    #[test]
+    fn result_full_renders_each_finding_summary_and_location() {
+        let data = json!({
+            "state": "succeeded",
+            "selected": {
+                "verdict": "VERDICT: FAIL",
+                "findings": [
+                    {"id":"F1","severity":"high","file":"src/a.rs","line":12,
+                     "summary":"critical bug","status":"open","proposed_fix":"handle x"},
+                    {"id":"F2","severity":"low","file":"src/b.rs","line":3,
+                     "summary":"style nit","status":"open","proposed_fix":"format y"}
+                ],
+                "findings_available": true
+            }
+        });
+        let summary = output_summary(&data, "", true);
+        let text = summary.lines.join("\n");
+        assert!(text.contains("src/a.rs:12"), "{text}");
+        assert!(text.contains("critical bug"), "{text}");
+        assert!(text.contains("handle x"), "{text}");
+        assert!(text.contains("src/b.rs:3"), "{text}");
+        assert!(text.contains("style nit"), "{text}");
+        assert!(text.contains("format y"), "{text}");
+        let compact = output_summary_default(&data, "", true);
+        assert!(
+            !compact
+                .lines
+                .iter()
+                .any(|line| line.contains("critical bug")),
+            "the compact view stays a count: {:?}",
+            compact.lines
+        );
+    }
+
+    // Spec: docs/specs/cli.md#output-references-and-bounded-tails
+    #[test]
+    fn findings_without_location_or_fix_render_no_placeholders() {
+        let line = finding_human_line(&json!({
+            "id":"F1","severity":"low","summary":"note","status":"open"
+        }));
+        assert_eq!(line, "finding: [low] — note", "{line}");
+        let with_file = finding_human_line(&json!({
+            "id":"F2","severity":"medium","file":"a.rs",
+            "summary":"defect","status":"open"
+        }));
+        assert_eq!(with_file, "finding: [medium] a.rs — defect", "{with_file}");
+        assert!(
+            !line.contains('?') && !with_file.contains('?'),
+            "no '?' placeholder: {line} / {with_file}"
+        );
+    }
+
+    // Spec: docs/specs/cli.md#one-bounded-envelope-clipped-with-a-warning
+    #[test]
+    fn finding_human_line_strips_control_and_bidi_characters() {
+        let line = finding_human_line(&json!({
+            "id":"F1","severity":"high","file":"src/a.rs","line":12,
+            "summary":"first\nsecond\u{1b}[2J\u{202e}reordered","status":"open",
+            "proposed_fix":"handle\u{200b}it\nnow"
+        }));
+        assert_eq!(line.lines().count(), 1, "one terminal line: {line:?}");
+        assert!(
+            line.chars()
+                .all(|c| !provenant_records::diagnostic::unsafe_display_character(c)),
+            "no control or bidi characters: {line:?}"
+        );
+        assert!(line.contains("firstsecond[2Jreordered"), "{line:?}");
+        assert!(line.contains("handleitnow"), "{line:?}");
     }
 
     // Spec: docs/specs/cli.md#output-references-and-bounded-tails

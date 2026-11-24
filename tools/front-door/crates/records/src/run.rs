@@ -1795,6 +1795,41 @@ impl SkipKind {
     }
 }
 
+/// A pinned account's recorded offer list excludes the requested model. The
+/// account, model, offers and observation age are safe owner-facing facts;
+/// provider output and paths never enter this projection.
+/// Spec: docs/specs/routing.md#provider-model-discovery
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountOfferMismatch {
+    pub account: String,
+    pub model: String,
+    pub offered_models: Vec<String>,
+    /// Whole seconds between the recorded observation and the refusal.
+    pub age_seconds: u64,
+}
+impl AccountOfferMismatch {
+    /// The one safe rendering of the fact, used by both resolve and launch.
+    pub fn detail(&self) -> String {
+        use crate::diagnostic::safe_text;
+        let offers = self
+            .offered_models
+            .iter()
+            .map(|model| safe_text(model))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "account {} does not offer {} (recorded offers: {}; recorded {}s ago)",
+            safe_text(&self.account),
+            safe_text(&self.model),
+            offers,
+            self.age_seconds
+        )
+    }
+    /// The repair shared by resolve and preparation.
+    pub const NEXT: &'static str =
+        "select an account that offers the model, or refresh discovery with `provenant quota tick`";
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkippedRoute {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1817,6 +1852,9 @@ pub struct SkippedRoute {
     /// Typed readiness cause, when the router supplied one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cause: Option<crate::RouteExclusionReason>,
+    /// Typed offer mismatch, when a pinned account does not offer the model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offer_mismatch: Option<AccountOfferMismatch>,
     pub detail: String,
 }
 impl SkippedRoute {
@@ -1833,6 +1871,18 @@ impl SkippedRoute {
     /// Attach a typed cause and persist only its bounded safe projection.
     pub fn set_cause(&mut self, cause: crate::RouteExclusionReason) {
         self.cause = Some(cause);
+        let diagnostic = self.diagnostic();
+        self.detail = format!(
+            "{}; {}",
+            diagnostic.detail.unwrap_or_default(),
+            diagnostic.next.unwrap_or_default()
+        );
+    }
+
+    /// Attach a typed offer mismatch and persist its safe projection. The
+    /// account, model, recorded offers and age replace the generic refusal.
+    pub fn set_offer_mismatch(&mut self, mismatch: AccountOfferMismatch) {
+        self.offer_mismatch = Some(mismatch);
         let diagnostic = self.diagnostic();
         self.detail = format!(
             "{}; {}",
@@ -1923,6 +1973,10 @@ impl SkippedRoute {
             .as_ref()
             .map(|cause| cause.diagnostic("REFUSED"))
             .unwrap_or_else(|| self.kind.diagnostic());
+        if let Some(mismatch) = &self.offer_mismatch {
+            diagnostic.detail = Some(mismatch.detail());
+            diagnostic.next = Some(AccountOfferMismatch::NEXT.into());
+        }
         if self.cause == Some(crate::RouteExclusionReason::ConfinementUnavailable)
             && let Some(guard) = self.confinement_guard
         {
@@ -1957,6 +2011,7 @@ impl Default for SkippedRoute {
             confinement_guard: None,
             continuation_guard: None,
             cause: None,
+            offer_mismatch: None,
             detail: String::new(),
         }
     }
@@ -3139,6 +3194,42 @@ mod tests {
         assert!(text.contains("window=thirty_day"), "{text}");
         assert!(text.contains("domains.routing.pacing.monthly"), "{text}");
         assert!(text.contains("source=configuration"), "{text}");
+    }
+
+    #[test]
+    // Spec: docs/specs/routing.md#provider-model-discovery
+    fn account_offer_mismatch_refusal_names_account_model_offers_age_and_repair() {
+        let mut skipped = SkippedRoute {
+            route: "agy/gemini-4-hydrogen".into(),
+            kind: SkipKind::Refused,
+            ..Default::default()
+        };
+        skipped.set_offer_mismatch(AccountOfferMismatch {
+            account: "agy-google-896bb719dc34".into(),
+            model: "agy/gemini-4-hydrogen".into(),
+            offered_models: vec!["Gemini 3.8 Flash".into(), "Claude Sonnet 4.6".into()],
+            age_seconds: 1800,
+        });
+
+        let text = skipped.describe();
+        assert!(
+            text.contains("account agy-google-896bb719dc34 does not offer agy/gemini-4-hydrogen"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Gemini 3.8 Flash, Claude Sonnet 4.6"),
+            "{text}"
+        );
+        assert!(text.contains("1800s ago"), "{text}");
+        assert!(
+            text.contains("select an account that offers the model"),
+            "{text}"
+        );
+        assert!(text.contains("provenant quota tick"), "{text}");
+        assert!(
+            !text.contains("inspect the request and access policy"),
+            "{text}"
+        );
     }
 
     #[test]

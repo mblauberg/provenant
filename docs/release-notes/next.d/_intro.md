@@ -1,1 +1,1 @@
-Provenant 2.9.3 lets `reconcile --abandon` settle a lane whose writer checkout was removed, while still refusing when a process remains inside the deleted tree. `run smoke` without a writer now skips its write node, and a stray remote-tracking ref no longer blocks a writer branch.
+Provenant 2.9.4 completes the 2.9.3 abandon fix: `reconcile --abandon` no longer refuses a removed writer checkout because a system process holds a file in a directory this user cannot read.

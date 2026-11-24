@@ -198,7 +198,10 @@ relayed rows use the same paced reread because the relay has no remote
 subscription. Every blocking forge operation inside a wait shares one request
 context (the wait's absolute deadline, capped per read by
 `domains.wait.pr_read_timeout_seconds`, and its cancellation), and a wait that
-settles cancels the forge transport of its other targets.
+settles cancels the forge transport of its other targets. Wait event lines,
+including `--follow` transitions and their digest lines, stay bounded to
+`SUMMARY_ROW_BYTES` with a clip marker: a wait is a stream of observations, not
+a detail view, even though `status NAME --full` prints whole rows.
 
 Wait settings resolve in one place for every waiter. Configuration a waiter
 cannot use warns and leaves the compiled defaults in force, and reports name
@@ -241,7 +244,10 @@ names the source (`output`, `started` or `queued`), so old output is not mistake
 for a heartbeat. `child_command` is set only for a command that went through the
 admission shim, and a lane waiting on a heavy-job lock reports the command it
 waits to run. The attempt directory and child command stay host-local and never
-cross a peer boundary.
+cross a peer boundary. `--full` prints each status row whole, including a long
+refusal reason naming its path; the default summary bounds each row to
+`SUMMARY_ROW_BYTES` with a clip marker, keeping the reason's leading clause (the
+text before the first `;`) inside that bound.
 
 `status` and `worktree list` report `stranded work` (`stranded_work` in
 `status --json`): a worktree with uncommitted edits or an interrupted Git
@@ -262,6 +268,11 @@ external action warns and can be retried by adoption.
 `result NAME[/NODE[#N]]` reads current lane evidence in one call, and for a
 review node projects the settled `verdict` and typed `findings[]` through the
 projection `status` and `wait` read, not by parsing the result artifact again.
+The human `--full` view prints each finding's severity, location (`file:line`
+when present), summary and suggested fix from those same typed fields, with no
+placeholder for a missing location or fix. Each field is terminal-safe: control,
+format and bidi characters are stripped before it is bounded, so one finding
+cannot forge or reorder human lines. The compact view keeps a severity count.
 Missing or unavailable evidence is not proof of a check.
 
 `output GRAPH` reads the newest settled attempt of a graph's one non-composite
@@ -450,6 +461,15 @@ GitHub's head, the wait warns and watches the local tip. The last line of output
 names every target's settle state (`settled ok`, `failed`, `needs input` or
 `still running at timeout`) and the one next command; the observation method
 shows only under `--full` and in JSON.
+
+A head does not settle on whichever checks happen to exist. `wait --pr` reads
+the base branch's required-check policy through the same CI observer as the
+head's checks, and stays pending until every required check has been created
+and passed on that head. A pending selector job, a required check that has not
+been created, or an unreadable policy means wait; a failed required check
+settles a failure. The names come from branch protection and rulesets, so a
+change to the required set needs no code change. An unsuccessful wait names the
+failed check in its output rather than returning exit 1 without a reason.
 
 `ci failures pr NUMBER` and `ci failures run ID` read each ended job's log from
 the Actions jobs endpoint, so evidence is available when that job ends, not when
