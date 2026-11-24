@@ -575,13 +575,18 @@ pub(crate) fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
                 let source = detail
                     .as_ref()
                     .and_then(|detail| detail.source.as_deref())
-                    .or(*cause)
-                    .map(|source| source as &dyn std::fmt::Display);
+                    .or(*cause);
                 let path = detail
                     .as_ref()
                     .and_then(|detail| detail.path.as_deref())
                     .map(std::path::Path::new);
-                return FacadeError::io_failure(*operation, path, source);
+                return FacadeError::io_failure(
+                    *operation,
+                    path,
+                    source
+                        .as_ref()
+                        .map(|source| source as &dyn std::fmt::Display),
+                );
             }
             Some(DiagnosticFact::DiskPressure {
                 available,
