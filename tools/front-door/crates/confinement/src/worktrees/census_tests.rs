@@ -5251,6 +5251,21 @@ fn worktree_owner_for_path_matches_removed_checkout_by_directory_identity()
         super::owner::worktree_owner_for_path(&common, &removed)?,
         Some(owner.clone())
     );
+    // The registration's birth survives the checkout's removal and is the
+    // creation floor an abandon uses (#3914).
+    let registered = super::owner::worktree_registration_for_path(&common, &removed)?;
+    assert_eq!(
+        registered,
+        Some((
+            owner.clone(),
+            super::census_excusal::birth_time(&registration)
+        ))
+    );
+    #[cfg(target_os = "macos")]
+    assert!(
+        registered.is_some_and(|(_, born)| born.is_some()),
+        "APFS reports a registration birth time"
+    );
     #[cfg(unix)]
     {
         let alias = canonical.join("alias");

@@ -479,9 +479,10 @@ start time (`CwdObserver::process_start_time`) must be readable, unchanged acros
 signing checks, and at least two seconds before the root floor: `"root"` takes
 the earliest `Metadata::created()` across all present scoped roots (any absent or
 unreadable root fails closed), while an `At` floor supplied through
-`CensusPolicyWorkers::with_creation_floor` allows explicit abandonment to use a
-proven attempt floor after a worktree removal. Each excusal raises a typed
-warning naming the pid and path.
+`CensusPolicyWorkers::with_creation_floor` allows explicit abandonment to use
+the removed checkout's registration floor (see run-settlement). `started_before`
+gates only the configured entry; it does not tighten the built-in system-image
+policy above. Each excusal raises a typed warning naming the pid and path.
 Unreadable root identity fails closed: a listed uid cannot be proven foreign to
 it, so the root stays `Unknown`. A listed uid the kernel will not reveal, such as
 `launchd` (pid 1), cannot be evaluated and is excused only by a configured entry

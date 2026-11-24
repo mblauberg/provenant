@@ -281,6 +281,15 @@ pub(super) fn apply_override_floor(
     }
 }
 
+/// The filesystem birth time of `path` (following symlinks), or `None` when
+/// the path is absent or the filesystem does not report one.
+pub(super) fn birth_time(path: &std::path::Path) -> Option<provenant_core::WallTime> {
+    let created = std::fs::metadata(path).ok()?.created().ok()?;
+    let duration = created.duration_since(std::time::UNIX_EPOCH).ok()?;
+    let micros = i64::try_from(duration.as_micros()).ok()?;
+    provenant_core::WallTime::from_micros(micros).ok()
+}
+
 /// Earliest filesystem birth time across every scoped root. Every root must
 /// exist and report `Metadata::created()`; any absent root or error yields
 /// `None` so `StartedBefore::Root` fails closed.
@@ -290,10 +299,7 @@ fn root_creation_floor(roots: &[PathBuf]) -> Option<provenant_core::WallTime> {
     }
     let mut earliest: Option<provenant_core::WallTime> = None;
     for root in roots {
-        let created = std::fs::metadata(root).ok()?.created().ok()?;
-        let duration = created.duration_since(std::time::UNIX_EPOCH).ok()?;
-        let micros = i64::try_from(duration.as_micros()).ok()?;
-        let floor = provenant_core::WallTime::from_micros(micros).ok()?;
+        let floor = birth_time(root)?;
         earliest = Some(match earliest {
             Some(current) => current.min(floor),
             None => floor,

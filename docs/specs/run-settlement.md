@@ -290,11 +290,17 @@ never qualify; and a configured `confinement.census_ignore_unreadable` entry
 (bundled default `/usr/bin/login`, `team_id = "platform"`,
 `started_before = "root"`), matched on canonical executable path, team id and an
 optional `started_before` floor (stable kernel start time at least two seconds
-before every scoped root's creation time, or before `record.queued_at` during
-`reconcile --abandon` on a removed checkout when `Service::abandon_writer_creation_floor`
-proves `retry_of.is_none()`, `writer_predecessor.is_none()` and `WorktreeOwner`
-for that attempt under `WorktreeOrigin::Lane`; retries, continuations and
-unproven trees fail closed), extends these defaults to every unreadable failure
+before every scoped root's creation time, or, during `reconcile --abandon` on a
+removed checkout, before the earlier of `record.queued_at` and the birth time of
+the checkout's Git registration directory (`<common>/worktrees/<id>`), which
+`git worktree add` creates before the checkout and a reused checkout keeps, when
+`Service::abandon_writer_creation_floor` proves `retry_of.is_none()`,
+`writer_predecessor.is_none()` and `WorktreeOwner` for that attempt under
+`WorktreeOrigin::Lane`; retries, continuations, unproven trees, a pruned
+registration and an unreported birth time fail closed and leave the attempt
+blocked. Both sides of the comparison are wall-clock times, so a backward clock
+step larger than the margin between the registration's creation and a process
+start inside the tree could excuse that process; this residual is accepted), extends these defaults to every unreadable failure
 class. Each excusal raises a typed warning naming the PID and path. Every other unreadable
 process remains Unknown/blocking with its PID named. Unreadable root identity fails closed, and
 a listed uid the kernel will not reveal (for example `launchd`, pid 1) cannot be evaluated, so

@@ -727,14 +727,22 @@ impl<'a> Service<'a> {
                 &fallback_common
             }
         };
-        let Ok(Some(owner)) =
-            provenant_confinement::worktrees::worktree_owner_for_path(common, &writer.worktree)
+        // The floor must precede every moment a process could have entered the
+        // checkout. The attempt's queue time does not (a lane may reuse a
+        // checkout created long before), so the floor is the Git registration's
+        // birth, which precedes the checkout's creation; an unreported birth
+        // time fails closed (#3914).
+        let Ok(Some((owner, Some(registered_at)))) =
+            provenant_confinement::worktrees::worktree_registration_for_path(
+                common,
+                &writer.worktree,
+            )
         else {
             return Ok(None);
         };
         let proven = owner.origin == provenant_confinement::worktrees::WorktreeOrigin::Lane
             && owner.attempt_id == Some(id);
-        Ok(proven.then_some(record.queued_at))
+        Ok(proven.then_some(registered_at.min(record.queued_at)))
     }
     pub fn abandon_settlement(
         &self,
