@@ -457,7 +457,8 @@ impl Drop for PreparedStart {
             // No attempt record survives for retention to find the alias by,
             // so unlink it before its scratch and attempt directories go.
             crate::short_temporary::remove(&self.temporary);
-            let name = std::ffi::OsStr::new(&self.attempt.to_string());
+            let name = self.attempt.to_string();
+            let name = std::ffi::OsStr::new(&name);
             let _ = crate::artifacts::remove_entry_tree(&self.scratch, name);
             let _ = crate::artifacts::remove_entry_tree(&self.attempts, name);
         }

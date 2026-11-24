@@ -4377,6 +4377,15 @@ impl RunStore {
                 }));
             }
         };
+        let attempt = match self.attempt_dir(id, false) {
+            Ok(attempt) => attempt,
+            Err(error) => {
+                return Ok(Some(Reconciled::TemporaryRetained {
+                    path,
+                    reason: error.to_string().into(),
+                }));
+            }
+        };
         // Released refused-import scratch is recovery evidence, launched or
         // not, even when settled after reboot. It is never cleanup debt.
         if crate::holder::object_import_refused(&attempt, scope)?.is_some() {

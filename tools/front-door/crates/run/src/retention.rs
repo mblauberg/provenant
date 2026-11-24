@@ -547,11 +547,13 @@ impl RunStore {
                         false
                     };
                     if scratch_eligible && effects_done && !uncertain_loss {
-                        let temporary =
-                            crate::plan::scratch_root(self.context.state_root.as_path(), id)
-                                .join("tmp");
+                        let temporary = crate::plan::scratch_root(
+                            self.context.state_root.as_path(),
+                            record.attempt_id,
+                        )
+                        .join("tmp");
                         let collection = (|| -> Result<()> {
-                            let scratch = match self.attempt_scratch_dir(id, false) {
+                            let scratch = match self.attempt_scratch_dir(record.attempt_id, false) {
                                 Ok(scratch) => scratch,
                                 Err(error) if missing_directory(&error) => return Ok(()),
                                 Err(error) => return Err(error),
