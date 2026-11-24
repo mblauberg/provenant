@@ -1,6 +1,6 @@
 [package]
 name = "provenant-routing"
-version = "2.9.1"
+version = "2.9.2"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
