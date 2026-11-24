@@ -130,6 +130,17 @@ fn verify_live_sealed_worktree(
     Ok(identity.path)
 }
 
+/// A row the scheduler settled as skipped takes no writer effect: no binding,
+/// no provisioning, no owner stamping. The checkpoint state is authoritative,
+/// so effect sites never re-read a plan's `when` predicate.
+fn skipped_row(checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint, id: &str) -> bool {
+    use provenant_fabric_runtime::graph::NodeState;
+    checkpoint
+        .nodes
+        .iter()
+        .any(|row| row.id == id && row.state == NodeState::Skipped)
+}
+
 /// Existing nested writer checkouts require the owning parent's exact sealed
 /// incarnation. New checkouts are provisioned independently. Bind the verified
 /// directory now so a later removal/recreation cannot substitute another tree
@@ -147,7 +158,11 @@ fn bind_shared_writers(
         .nodes
         .iter()
         .chain(expansion.patch.iter().flat_map(|patch| &patch.replaced))
-        .filter(|node| node.access == AccessMode::WorktreeWrite && !node.provision_worktree)
+        .filter(|node| {
+            node.access == AccessMode::WorktreeWrite
+                && !node.provision_worktree
+                && !skipped_row(checkpoint, &node.id)
+        })
         .cloned()
         .collect::<Vec<_>>();
     for node in writers {
@@ -251,7 +266,7 @@ fn provisioning_owner_digest(
 fn bind_admitted_provisioning_owners(
     checkpoint: &mut provenant_fabric_runtime::graph::GraphCheckpoint,
 ) -> Result<(), ServiceError> {
-    use provenant_fabric_runtime::graph::AccessMode;
+    use provenant_fabric_runtime::graph::{AccessMode, NodeState};
     let writers = checkpoint
         .expansions
         .last()
@@ -262,7 +277,11 @@ fn bind_admitted_provisioning_owners(
                 .iter()
                 .chain(expansion.patch.iter().flat_map(|patch| &patch.replaced))
         })
-        .filter(|node| node.access == AccessMode::WorktreeWrite && node.provision_worktree)
+        .filter(|node| {
+            node.access == AccessMode::WorktreeWrite
+                && node.provision_worktree
+                && !skipped_row(checkpoint, &node.id)
+        })
         .filter_map(|node| {
             node.worktree
                 .as_ref()
@@ -281,6 +300,9 @@ fn bind_admitted_provisioning_owners(
             }
         };
         for row in &mut checkpoint.nodes {
+            if row.state == NodeState::Skipped {
+                continue;
+            }
             if row.id == id || row.id == logical || row.worktree.as_deref() == Some(path.as_str()) {
                 if row.provisioned_owner.is_some_and(|prior| prior != owner) {
                     return Err(refused(
@@ -827,6 +849,7 @@ fn serve_authorised(
                 bind_admitted_provisioning_owners(&mut checkpoint)?;
             }
             if request.needs_worktree_provisioning()
+                && !skipped_row(&*checkpoint, &receipt.node)
                 && let Some(path) = receipt.worktree.as_deref()
             {
                 let source = relay::child_source(
@@ -1232,6 +1255,12 @@ fn recover_provisioning(
     }
     let mut refusal = None;
     for (node, path, source) in pending {
+        if skipped_row(checkpoint, &node) {
+            // A skipped node takes no writer effect. Drop a fence left by an
+            // earlier admission so recovery cannot create its worktree.
+            relay::clear_provisioning(checkpoint, &node);
+            continue;
+        }
         // Older fences predate the durable child-spec creation marker.
         relay::fence_provisioning(checkpoint, &node, &path, &source);
         let clock = provenant_os::clock::SystemClock;

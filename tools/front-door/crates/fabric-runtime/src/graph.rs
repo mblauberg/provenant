@@ -1783,9 +1783,10 @@ fn bind_expanded_writer<R: AttemptOwner, J: GraphJournal>(
     resume: &mut bool,
 ) -> Result<LoopStep, GraphError<R::Error, J::Error>> {
     let node = &plan.nodes[node_index];
-    // A node whose launch condition is false is already settled as skipped;
-    // binding its worktree would fail a node that never runs (#3899).
-    if !when::holds(&node.when) {
+    // A row settled as skipped by the scheduler takes no writer effect. The
+    // checkpoint state is authoritative: re-reading the plan predicate would
+    // let a replaced, false-`when` writer launch unbound (#3899).
+    if checkpoint.nodes[node_index].state == NodeState::Skipped {
         return Ok(LoopStep::Proceed);
     }
     if plans::writer(node)
@@ -3892,10 +3893,10 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 }
                 let node = &plan.nodes[index];
                 // A loop round's worktree is advanced by earlier rounds; its
-                // starting head becomes known only at that round. A node whose
-                // launch condition is false never runs, so it takes no writer
-                // binding and stays skipped (#3899).
-                if when::holds(&node.when)
+                // starting head becomes known only at that round. A row the
+                // scheduler settled as skipped never runs and takes no writer
+                // binding (#3899).
+                if checkpoint.nodes[index].state != NodeState::Skipped
                     && plans::writer(node)
                     && !node.provision_worktree
                     && node.round.is_none()

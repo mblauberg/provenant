@@ -3101,6 +3101,34 @@ fn admit_patch_skips_and_replaces_only_unstarted_nodes() {
 }
 
 #[test]
+fn replacing_an_unstarted_writer_with_a_false_condition_settles_it_as_skipped()
+{
+    let (document, mut checkpoint) = running_graph();
+    let replacement = json!({"schema_version":1, "replace":[{
+        "id":"b", "access":"worktree_write", "worktree":"lane",
+        "prompt":"Write", "route":{"alias":"senior"},
+        "when":[{"name":"flag","expected":"true","actual":"false"}]
+    }]});
+    admit(&document, &mut checkpoint, replacement).unwrap();
+    let row = checkpoint.nodes.iter().find(|row| row.id == "b").unwrap();
+    assert_eq!(row.state, NodeState::Skipped, "{row:?}");
+    assert!(row.attempts.is_empty(), "{row:?}");
+    assert!(row.writer_binding.is_none(), "{row:?}");
+
+    // The settled row survives a reload: validation no longer wedges the graph
+    // and neither binding nor attempt is created for the skipped writer.
+    let mut owner = FakeOwner::default();
+    owner
+        .observations
+        .push_back(terminal(AttemptOutcome::Succeeded));
+    let run = advance(&document, &mut owner, &mut MemoryJournal(Some(checkpoint))).unwrap();
+    let row = run.checkpoint.nodes.iter().find(|row| row.id == "b").unwrap();
+    assert_eq!(row.state, NodeState::Skipped, "{row:?}");
+    assert!(row.attempts.is_empty(), "{row:?}");
+    assert!(row.writer_binding.is_none(), "{row:?}");
+}
+
+#[test]
 fn admit_patch_confines_lane_edits_but_allows_owner_and_planner_edits() {
     let (document, checkpoint) = running_graph();
     for edit in [
