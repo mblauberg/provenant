@@ -2363,16 +2363,9 @@ fn record_live_path_with_audit_scoped(
     });
     let mut placed = Vec::new();
     for (root, state) in states {
-        let root_metadata = std::fs::metadata(root);
-        // A root that no longer exists holds nothing; only a root whose
-        // identity cannot be read leaves placement undecidable.
-        let root_missing = root_metadata
-            .as_ref()
-            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
-        let root_metadata = root_metadata.ok().filter(|meta| meta.is_dir());
+        let root_metadata = std::fs::metadata(root).ok().filter(|meta| meta.is_dir());
         let inside = match (&ancestors, &root_metadata) {
             (Some(ids), Some(metadata)) => Some(ids.contains(&(metadata.dev(), metadata.ino()))),
-            _ if root_missing => Some(false),
             _ => None,
         };
         match inside {
