@@ -343,15 +343,17 @@ fn summary(data: &Value, text: &str, headed: bool, full: bool) -> crate::Summary
             }
         }
     }
-    if full && headed && data.get("writer_base").is_some() {
+    if full && headed {
         for (label, key) in [
             ("base", "writer_base"),
             ("committed head", "writer_head"),
             ("publication", "publication"),
             ("residual tree state", "residual_tree"),
         ] {
-            // A present key with a null value is absent evidence, not a line
-            // saying so: only real values render a header.
+            // A missing or null key is absent evidence, not a line saying so:
+            // only real values render a header. Do not gate the whole group on
+            // `writer_base`: a lane whose base was not observed may still carry
+            // a real committed head or publication.
             if let Some(value) = data[key].as_str() {
                 lines.push(format!("{label}: {value}"));
             }
@@ -1406,6 +1408,44 @@ mod tests {
                 .iter()
                 .any(|line| line.starts_with("changed files (1):"))
         );
+    }
+
+    // Spec: docs/specs/cli.md#output-references-and-bounded-tails
+    #[test]
+    fn output_summary_prints_real_writer_headers_when_base_is_unobserved() {
+        // The header group must not be gated on `writer_base`: `is_some()` is
+        // true for JSON null and false for an absent key, neither of which may
+        // hide a real value in another writer field or print "unavailable".
+        let cases = [
+            json!({"state":"succeeded", "writer_head":"cccc", "publication":"pushed"}),
+            json!({"state":"succeeded", "writer_base":null, "writer_head":"cccc", "publication":"pushed"}),
+        ];
+        for data in cases {
+            let summary = output_summary(&data, "", true);
+            assert!(
+                summary.lines.contains(&"committed head: cccc".to_owned()),
+                "real committed head lost when base was unobserved: {:?}",
+                summary.lines
+            );
+            assert!(
+                summary.lines.contains(&"publication: pushed".to_owned()),
+                "real publication lost when base was unobserved: {:?}",
+                summary.lines
+            );
+            assert!(
+                !summary
+                    .lines
+                    .iter()
+                    .any(|line| line.contains("unavailable")),
+                "absent writer fields rendered as unavailable: {:?}",
+                summary.lines
+            );
+            assert!(
+                !summary.lines.iter().any(|line| line.starts_with("base:")),
+                "absent base rendered a header: {:?}",
+                summary.lines
+            );
+        }
     }
 
     #[test]
