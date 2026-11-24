@@ -77,6 +77,8 @@ impl RunStore {
             return Ok(provenant_records::handoff::HandoffParse {
                 trailing_verdict_tolerated: parsed.trailing_verdict_tolerated
                     && handoff.as_ref().is_ok_and(Option::is_some),
+                trailing_prose_tolerated: parsed.trailing_prose_tolerated
+                    && handoff.as_ref().is_ok_and(Option::is_some),
                 handoff,
             });
         }
@@ -106,11 +108,13 @@ impl RunStore {
                 HANDOFF_RECORD_BYTES as u64,
             )?;
         }
-        let trailing_verdict_tolerated =
-            parsed.trailing_verdict_tolerated && handoff.as_ref().is_ok_and(Option::is_some);
+        let settled = handoff.as_ref().is_ok_and(Option::is_some);
+        let trailing_verdict_tolerated = parsed.trailing_verdict_tolerated && settled;
+        let trailing_prose_tolerated = parsed.trailing_prose_tolerated && settled;
         Ok(provenant_records::handoff::HandoffParse {
             handoff,
             trailing_verdict_tolerated,
+            trailing_prose_tolerated,
         })
     }
 
@@ -1611,6 +1615,35 @@ mod tests {
 
         let captured = store.capture_handoff(&attempt, &record, &result)?;
         assert!(captured.trailing_verdict_tolerated);
+        assert!(!captured.trailing_prose_tolerated);
+        assert!(captured.handoff.as_ref().is_ok_and(Option::is_some));
+        assert_eq!(store.handoff(&record)?, captured.handoff);
+        Ok(())
+    }
+
+    // Spec: docs/specs/run-settlement.md#settlement
+    #[test]
+    fn final_handoff_records_the_trailing_prose_tolerance() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let clock = clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let input = input();
+        store.create(&input, &call)?;
+        let record = store.record(input.attempt_id, &call)?;
+        let attempt = store.attempt_dir(record.attempt_id, false)?;
+        let mut result = decoded();
+        result.complete = true;
+        result.outcome = Outcome::Succeeded;
+        result.result = format!(
+            "{}\nCommit pushed. Now updating the PR body ...\n",
+            Handoff::from_json(&snapshot("done"))?.fenced()
+        );
+
+        let captured = store.capture_handoff(&attempt, &record, &result)?;
+        assert!(captured.trailing_prose_tolerated);
+        assert!(!captured.trailing_verdict_tolerated);
         assert!(captured.handoff.as_ref().is_ok_and(Option::is_some));
         assert_eq!(store.handoff(&record)?, captured.handoff);
         Ok(())

@@ -182,11 +182,17 @@ handoffs and never count as negative provider-quality evidence.
 The handoff is the closed `handoff` fence of the final answer, which always wins. Without one, a
 `json` fence that ends the answer and decodes as a handoff is accepted with a warning naming the
 fallback. Adjacent repeated blocks are one declaration (identical copies accepted, differing
-copies settle on the last), each with a warning; prose between blocks or after the last still
-fails. A review's final handoff may be followed by exactly one recognised standalone verdict and
-nothing else; an accepted order tolerance is recorded in the terminal reason.
-- Why: providers drift to `json` fences and repeat blocks, and refusing a complete declaration
-  for its label loses finished work while the warning keeps the drift visible.
+copies settle on the last), each with a warning. When exactly one block closes and only ordinary
+prose follows it (#3928), the declaration still settles and the output-order tolerance is recorded
+in the terminal reason; prose between blocks, after a repeated block, or after a further (even
+partial) `handoff` opener still fails, as does a truncated or invalid block. A review's final
+handoff may be followed by exactly one recognised standalone verdict and nothing else; a prose
+line on either side of that verdict keeps the strict rule, and an accepted order tolerance is
+recorded in the terminal reason. The two tolerances are mutually exclusive and diagnostic only:
+neither changes the handoff's fields or authority.
+- Why: providers drift to `json` fences and repeat blocks, and a finished writer that keeps
+  explaining its work after one complete declaration must not be failed; refusing a complete
+  declaration for its trailing prose loses finished work while the warning keeps the drift visible.
 - Owner: `crates/records/src/handoff.rs`, `crates/run/src/completion.rs`
 
 `crates/records/src/handoff.rs` owns the fields, decoding and bounds. A valid JSON object keeps
