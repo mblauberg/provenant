@@ -279,8 +279,6 @@ pub(super) fn writer_settlement_merges_upstream_advance() -> Result {
         |exists| *exists,
     )?;
 
-    let scratch =
-        provenant_run::scratch_root(context.state_root.as_path(), attempt).join("tmp/candidate-0");
     let lane = |args: &[&str]| lane_git(&rig, &context, attempt, &path, args);
     fs::write(path.join("writer.txt"), b"writer change")?;
     lane(&["add", "writer.txt"])?;

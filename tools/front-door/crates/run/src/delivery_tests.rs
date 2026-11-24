@@ -859,9 +859,8 @@ fn stopped_merge_stays_private(
     // attempt's imported conflict stages and merge metadata available to the host.
     let first_state = fixture.root.join("first-state");
     std::fs::rename(fixture.root.join("state"), &first_state)?;
-    let first_scratch =
-        provenant_run::scratch_root(&first_state, crate::tests::exit().scope.attempt)
-            .join("tmp/candidate-0");
+    let first_scratch = crate::scratch_root(&first_state, crate::tests::exit().scope.attempt)
+        .join("tmp/candidate-0");
     fixture.terminal(|| {
         let scratch = prepare_private()?;
         let run = |args: &[&str]| -> std::result::Result<std::process::Output, Box<dyn std::error::Error>> {
