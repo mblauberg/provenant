@@ -195,6 +195,9 @@ pub struct GraphConfig {
     /// General command launch and read/wait allowance.
     pub launch_wait_seconds: u64,
     /// Allowance for one writer provisioning, independent of a reader wait.
+    /// This also bounds launch contention: a concurrent launch holds writer
+    /// custody across its whole worktree setup, so the wait must cover a full
+    /// provisioning rather than only the reader's shorter launch allowance.
     pub writer_provision_seconds: u64,
     pub limits: GraphLimits,
     pub budget: GraphBudget,
@@ -217,7 +220,7 @@ impl Default for GraphConfig {
         Self {
             decide_timeout_seconds: DEFAULT_DECIDE_TIMEOUT_SECONDS,
             launch_wait_seconds: 55,
-            writer_provision_seconds: 55,
+            writer_provision_seconds: 120,
             limits: Default::default(),
             budget: Default::default(),
             ci_poll_backoff: Default::default(),

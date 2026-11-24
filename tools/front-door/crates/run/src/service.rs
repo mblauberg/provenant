@@ -954,7 +954,7 @@ impl From<&RunError> for ErrorKind {
             RunError::WorktreeUnregistered(_) => Self::WorktreeUnregistered,
             RunError::WriterProjectMismatch { .. } => Self::WriterProjectMismatch,
             RunError::Writer(
-                provenant_confinement::worktrees::WorktreeError::RegistryLockTimeout,
+                provenant_confinement::worktrees::WorktreeError::RegistryLockTimeout { .. },
             ) => Self::WriterLockBusy,
             RunError::Writer(
                 provenant_confinement::worktrees::WorktreeError::LockBusy
@@ -1130,7 +1130,9 @@ mod target_tests {
             ErrorKind::WriterBusy
         );
         assert_eq!(
-            ErrorKind::from(&RunError::Writer(WorktreeError::RegistryLockTimeout)),
+            ErrorKind::from(&RunError::Writer(WorktreeError::RegistryLockTimeout {
+                holder: None
+            })),
             ErrorKind::WriterLockBusy
         );
         assert_eq!(

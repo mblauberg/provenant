@@ -264,8 +264,8 @@ pub enum WorktreeError {
     GitOperationInProgress,
     #[error("worktree writer lock busy")]
     LockBusy,
-    #[error("worktree registry reservation timed out")]
-    RegistryLockTimeout,
+    #[error("worktree registry reservation timed out{}", .holder.as_ref().map_or_else(String::new, |attempt| format!(", held by attempt {attempt}")))]
+    RegistryLockTimeout { holder: Option<AttemptId> },
     #[error("worktree writer is live")]
     LiveWriter,
     #[error(
@@ -413,7 +413,7 @@ impl WorktreeError {
     /// by itself. The caller still owns deadlines and transition policy.
     pub fn admission_cause(&self) -> Option<AdmissionCause> {
         match self {
-            Self::RegistryLockTimeout => Some(AdmissionCause::RegistryLockTimeout),
+            Self::RegistryLockTimeout { .. } => Some(AdmissionCause::RegistryLockTimeout),
             Self::IncompleteCensus { .. } => Some(AdmissionCause::CensusIncomplete),
             Self::CensusUnknown { .. } => Some(AdmissionCause::CensusIncomplete),
             Self::UnknownWriter
@@ -463,7 +463,7 @@ impl WorktreeError {
             Self::LiveProcess(_) => {
                 "stop that process or change its directory out of the tree, then run `provenant worktree list` and retry"
             }
-            Self::RegistryLockTimeout => {
+            Self::RegistryLockTimeout { .. } => {
                 "wait for the worktree registry lock holder to finish, then retry"
             }
             Self::LockBusy | Self::LiveWriter | Self::WriterBusy { .. } => {
@@ -1207,11 +1207,11 @@ mod tests {
     #[test]
     fn admission_causes_keep_transient_observation_distinct_from_custody() {
         assert_eq!(
-            lifecycle::retain_reason(&WorktreeError::RegistryLockTimeout),
+            lifecycle::retain_reason(&WorktreeError::RegistryLockTimeout { holder: None }),
             RetainReason::LockBusy
         );
         assert_eq!(
-            WorktreeError::RegistryLockTimeout.admission_cause(),
+            WorktreeError::RegistryLockTimeout { holder: None }.admission_cause(),
             Some(AdmissionCause::RegistryLockTimeout)
         );
         assert_eq!(

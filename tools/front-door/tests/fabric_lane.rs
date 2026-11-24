@@ -565,7 +565,7 @@ fn child_relay_preserves_a_configured_allowance_above_default() -> Result {
                     "{within:?}"
                 );
                 Err(provenant_fabric_runtime::relay::ServiceError::Facade(
-                    provenant_fabric_runtime::relay::FacadeError::WriterLockBusy,
+                    provenant_fabric_runtime::relay::FacadeError::WriterLockBusy { holder: None },
                 ))
             }
             _ => unreachable!("unexpected graph operation"),

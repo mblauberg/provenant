@@ -554,8 +554,14 @@ pub enum FacadeError {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         holder: Option<AttemptId>,
     },
-    #[error("writer registry lock is still held after the bounded wait expired")]
-    WriterLockBusy,
+    /// A registry-lock refusal. The file lock itself carries no attempt
+    /// identity, but callers that resolved one name it so the blocked
+    /// diagnostic says which writer kept custody.
+    #[error("writer registry lock is still held after the bounded wait expired{}", .holder.map_or_else(String::new, |attempt| format!(", held by attempt {attempt}")))]
+    WriterLockBusy {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        holder: Option<AttemptId>,
+    },
     #[error("writer custody is unknown")]
     WriterUnknown,
     #[error("a requested credential-root grant was refused")]
@@ -1071,7 +1077,14 @@ impl FacadeError {
                 }
                 projected = projected.next("wait for the current writer or lock holder to finish");
             }
-            Self::WriterLockBusy => projected = projected.detail(self.to_string()).next("wait for the writer lock holder to finish, then retry"),
+            Self::WriterLockBusy { holder } => {
+                projected = projected
+                    .detail(holder.map_or_else(
+                        || "writer registry lock held; holder unknown".to_owned(),
+                        |holder| format!("writer registry lock held by attempt {holder}"),
+                    ))
+                    .next("wait for the writer lock holder to finish, then retry")
+            }
             Self::WriterUnknown | Self::WorktreeUnregistered { .. } => projected = projected.next("inspect worktree registration and custody before selecting a checkout with --worktree"),
             Self::WorktreeMissing { path, node } => {
                 projected = projected
@@ -1171,7 +1184,7 @@ impl FacadeError {
             Self::ConfinementRefused { .. } => "confinement_refused",
             Self::RunKind { .. } => "run_refused",
             Self::WriterBusy { .. } => "writer_busy",
-            Self::WriterLockBusy => "writer_lock_busy",
+            Self::WriterLockBusy { .. } => "writer_lock_busy",
             Self::WriterUnknown => "writer_unknown",
             Self::WriterLeaseHeld { .. } => "writer_lease_held",
             Self::CredentialRoot { .. } => "credential_root",

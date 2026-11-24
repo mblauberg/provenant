@@ -317,7 +317,14 @@ pub fn update_owner_when_unchanged(
             context.clock,
         )
         .map_err(|error| match error {
-            FsError::LockTimeout { .. } => WorktreeError::RegistryLockTimeout,
+            FsError::LockTimeout { .. } => WorktreeError::RegistryLockTimeout {
+                // The owner record is the registry's recorded holder while the
+                // lock serialises its update.
+                holder: load_owner(worktree)
+                    .ok()
+                    .flatten()
+                    .and_then(|owner| owner.attempt_id),
+            },
             other => other.into(),
         })?;
     let tree = verify_worktree(context.repo, worktree.path())?;
@@ -434,7 +441,14 @@ pub fn save_lane_owner_when_free(
             context.clock,
         )
         .map_err(|error| match error {
-            FsError::LockTimeout { .. } => WorktreeError::RegistryLockTimeout,
+            FsError::LockTimeout { .. } => WorktreeError::RegistryLockTimeout {
+                // The owner record is the registry's recorded holder while the
+                // lock serialises its update.
+                holder: load_owner(worktree)
+                    .ok()
+                    .flatten()
+                    .and_then(|owner| owner.attempt_id),
+            },
             other => other.into(),
         })?;
     let tree = verify_worktree(context.repo, worktree.path())?;

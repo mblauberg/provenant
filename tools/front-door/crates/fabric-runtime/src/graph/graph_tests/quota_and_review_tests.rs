@@ -473,7 +473,7 @@ fn writer_binding_and_provisioning_contention_wait_for_the_same_launch() {
             // Initial admission probes an existing writer before the launch
             // loop. A held lock stays busy across both probes until release.
             if self.phase == phase && self.now < at(5) {
-                return Err(FacadeError::WriterLockBusy);
+                return Err(FacadeError::WriterLockBusy { holder: None });
             }
             Ok(())
         }

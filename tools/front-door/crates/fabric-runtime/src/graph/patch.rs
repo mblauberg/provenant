@@ -973,18 +973,34 @@ fn container_brief_refusal(
 // An explicit host-proven refusal leaves a Starting row but no process to
 // stop. Apply the same proof to the selected node and every reset descendant;
 // stale launch flags alone never establish that a handoff was not accepted.
+// Pre-host writer contention is the same safe case, and the disposition that
+// blocked the node recorded that fact from the typed error. This gate reads
+// that recorded fact and the shared contention classifier, not a third copy
+// of the owner-code list: generic `busy` also covers post-acceptance lock
+// timeouts, where a guardian may already be live.
 fn refused_before_launch(progress: &NodeProgress) -> bool {
-    progress.state == NodeState::Blocked
-        && progress.advance_error_code.as_deref() == Some("launch_refused")
+    if progress.state != NodeState::Blocked {
+        return false;
+    }
+    // An exhausted retry is safe only when it was a writer-custody wait, not
+    // a transport retry that may have left a live guardian. Use the same
+    // classifier the disposition used to record the fact, never a third copy
+    // of the contention list and never generic `busy`.
+    let settled = match progress.advance_error_code.as_deref() {
+        Some("launch_refused") => true,
+        Some("launch_retry_exhausted") => progress
+            .advance_owner_code
+            .as_deref()
+            .is_some_and(super::next_attempt::pre_host_contention),
+        _ => return false,
+    };
+    settled
+        && super::next_attempt::all_attempts_refused_before_acceptance(progress)
         && progress
             .attempts
             .iter()
             .filter(|attempt| attempt.state != AttemptState::Terminal)
-            .all(|attempt| {
-                attempt.host_refused_before_acceptance
-                    && attempt.attempt_ref.is_none()
-                    && attempt.state == AttemptState::Starting
-            })
+            .all(|attempt| attempt.attempt_ref.is_none() && attempt.state == AttemptState::Starting)
 }
 
 fn reset_progress(old: &NodeProgress, container: bool) -> Result<NodeProgress, PatchError> {

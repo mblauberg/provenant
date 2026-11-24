@@ -1756,10 +1756,10 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                         && progress.writer_binding_pending
                         && progress.outputs.is_none()
                         && progress.advance_error.is_none()
-                        && matches!(
-                            progress.advance_owner_code.as_deref(),
-                            Some("busy" | "writer_lock_busy" | "writer_unknown" | "writer_busy")
-                        )
+                        && progress
+                            .advance_owner_code
+                            .as_deref()
+                            .is_some_and(super::next_attempt::launch_contention_code)
                         && progress.launch_retry.as_ref().is_some_and(|retry| {
                             retry.failures > 0
                                 && matches!((retry.wake_at, retry.deadline),

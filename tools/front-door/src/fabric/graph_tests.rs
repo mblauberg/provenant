@@ -155,9 +155,15 @@ mod graph_writer_admission_tests {
                 timeout: Duration::from_secs(5),
             })
         };
+        let registry_holder = provenant_core::AttemptId::from_bytes([8; 16]);
         assert!(matches!(
-            graph_writer_initialisation_error("head", WorktreeError::RegistryLockTimeout),
-            FacadeError::WriterLockBusy
+            graph_writer_initialisation_error(
+                "head",
+                WorktreeError::RegistryLockTimeout {
+                    holder: Some(registry_holder)
+                }
+            ),
+            FacadeError::WriterLockBusy { holder: Some(actual) } if actual == registry_holder
         ));
         assert!(matches!(
             graph_writer_initialisation_error("head", WorktreeError::LockBusy),
@@ -320,7 +326,7 @@ mod graph_writer_admission_tests {
         }))
         .unwrap();
 
-        let lock_timeout = WorktreeError::RegistryLockTimeout;
+        let lock_timeout = WorktreeError::RegistryLockTimeout { holder: None };
 
         let mut owner = MockWriterOwner {
             errors: std::collections::VecDeque::from([lock_timeout]),
@@ -407,10 +413,10 @@ mod graph_writer_admission_tests {
             let admission_seconds = 30;
             let budget = WaitBudget::cli(clock.mono_now(), admission_seconds + 1).unwrap();
             let errors = match scenario {
-                "release" => std::iter::repeat_with(|| WorktreeError::RegistryLockTimeout)
+                "release" => std::iter::repeat_with(|| WorktreeError::RegistryLockTimeout { holder: None })
                     .take(2)
                     .collect(),
-                "held" => std::iter::repeat_with(|| WorktreeError::RegistryLockTimeout)
+                "held" => std::iter::repeat_with(|| WorktreeError::RegistryLockTimeout { holder: None })
                     .take(10)
                     .collect(),
                 _ => vec![WorktreeError::LiveWriter],
@@ -734,7 +740,7 @@ mod graph_writer_admission_tests {
         }))
         .unwrap();
         let mut owner = MockWriterOwner {
-            errors: std::iter::repeat_with(|| WorktreeError::RegistryLockTimeout)
+            errors: std::iter::repeat_with(|| WorktreeError::RegistryLockTimeout { holder: None })
                 .take(8)
                 .collect(),
             calls: 0,
