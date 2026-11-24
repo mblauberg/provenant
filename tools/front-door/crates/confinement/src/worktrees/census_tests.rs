@@ -9,6 +9,100 @@ use std::error::Error;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 
+struct AbsentPathObserver;
+impl WorkerObserver for AbsentPathObserver {
+    fn observe_roots(&self, _: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
+        panic!("an absent writer tree must not consult the census")
+    }
+    fn observe_roots_with_details(&self, _: &[PathBuf]) -> WorkerObservations {
+        panic!("an absent writer tree must not consult the census")
+    }
+}
+
+struct DelegatingWriterObserver(Occupancy, bool);
+impl WorkerObserver for DelegatingWriterObserver {
+    fn observe_roots(&self, _: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
+        panic!("delegation must use observe_roots_with_details")
+    }
+    fn observe_roots_with_details(&self, roots: &[PathBuf]) -> WorkerObservations {
+        (
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, self.0.clone()))
+                .collect(),
+            if self.1 {
+                roots
+                    .iter()
+                    .cloned()
+                    .map(|root| (root, "census detail".into()))
+                    .collect()
+            } else {
+                BTreeMap::new()
+            },
+        )
+    }
+}
+
+#[test]
+fn observe_writer_tree_absent_path_is_free_without_the_census() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let missing = temp.path().join("absent-writer-tree");
+    assert_eq!(
+        super::census::observe_writer_tree(&AbsentPathObserver, &missing),
+        (
+            Occupancy::Available,
+            Some("writer worktree no longer exists".into())
+        )
+    );
+    Ok(())
+}
+
+#[test]
+fn observe_writer_tree_existing_path_delegates_to_the_census() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let present = temp.path().join("present-writer-tree");
+    fs::create_dir(&present)?;
+    assert_eq!(
+        super::census::observe_writer_tree(
+            &DelegatingWriterObserver(Occupancy::Held, true),
+            &present
+        ),
+        (Occupancy::Held, Some("census detail".into()))
+    );
+    Ok(())
+}
+
+#[test]
+fn observe_writer_tree_dangling_symlink_delegates_to_the_census() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let link = temp.path().join("dangling-writer-tree");
+    std::os::unix::fs::symlink(temp.path().join("missing-target"), &link)?;
+    assert_eq!(
+        super::census::observe_writer_tree(&DelegatingWriterObserver(Occupancy::Held, true), &link),
+        (Occupancy::Held, Some("census detail".into()))
+    );
+    Ok(())
+}
+
+#[test]
+fn observe_writer_tree_missing_census_entry_is_unknown() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let present = temp.path().join("present-writer-tree");
+    fs::create_dir(&present)?;
+    assert_eq!(
+        super::census::observe_writer_tree(
+            &DelegatingWriterObserver(Occupancy::Available, false),
+            &present
+        ),
+        (
+            Occupancy::census_unknown(present, "worker census did not return the requested tree"),
+            None
+        )
+    );
+    Ok(())
+}
+
 #[test]
 fn session_reuses_evidence_and_refreshes_at_epoch_boundaries() -> Result<(), Box<dyn Error>> {
     use std::sync::atomic::{AtomicBool, Ordering};

@@ -481,6 +481,32 @@ impl WorkerObserver for CensusSession<'_> {
     }
 }
 
+/// Decide whether one writer checkout is free. A path absent on disk holds
+/// nothing, so it is free without consulting the census. Every other metadata
+/// outcome, including a dangling symlink, keeps today's census semantics.
+pub fn observe_writer_tree(
+    workers: &dyn WorkerObserver,
+    path: &Path,
+) -> (Occupancy, Option<String>) {
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (
+            Occupancy::Available,
+            Some("writer worktree no longer exists".into()),
+        ),
+        _ => {
+            let path = path.to_path_buf();
+            let (states, details) = workers.observe_roots_with_details(std::slice::from_ref(&path));
+            let state = states.get(&path).cloned().unwrap_or_else(|| {
+                Occupancy::census_unknown(
+                    path.clone(),
+                    "worker census did not return the requested tree",
+                )
+            });
+            (state, details.get(&path).cloned())
+        }
+    }
+}
+
 /// Injectable native observation seam. Implementations return one conservative
 /// state per canonical candidate root; they never grant signal authority.
 pub trait WorkerObserver: Send + Sync {

@@ -2367,10 +2367,12 @@ impl RunStore {
                     return Ok(true);
                 };
                 workers.invalidate();
-                Ok(workers
-                    .observe_roots(std::slice::from_ref(&writer.worktree))
-                    .get(&writer.worktree)
-                    .is_some_and(|state| state.is_available()))
+                Ok(provenant_confinement::worktrees::observe_writer_tree(
+                    &workers,
+                    &writer.worktree,
+                )
+                .0
+                .is_available())
             })
             .map_err(|error| RunError::Io(std::io::Error::other(error)))?;
         let Ok(proof) = proof else {
@@ -2491,10 +2493,12 @@ impl RunStore {
                         return Ok(true);
                     };
                     workers.invalidate();
-                    Ok(workers
-                        .observe_roots(std::slice::from_ref(&writer.worktree))
-                        .get(&writer.worktree)
-                        .is_some_and(|state| state.is_available()))
+                    Ok(provenant_confinement::worktrees::observe_writer_tree(
+                        workers,
+                        &writer.worktree,
+                    )
+                    .0
+                    .is_available())
                 })
                 .map_err(|error| RunError::Io(std::io::Error::other(error)))?;
             let Ok(proof) = proof else {
