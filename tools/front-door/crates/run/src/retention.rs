@@ -3430,7 +3430,12 @@ mod tests {
         withdraw(&store, &input, &call)?;
         let scratch_root = scratch_root_of(&attempt);
         let temporary = scratch_root.join("tmp");
-        fs::create_dir_all(temporary.join("candidate-0"))?;
+        // The run store refuses non-private scratch, as production creates it.
+        let private = |path: &std::path::Path| {
+            std::os::unix::fs::DirBuilderExt::mode(fs::DirBuilder::new().recursive(true), 0o700)
+                .create(path)
+        };
+        private(&temporary.join("candidate-0"))?;
         fs::write(temporary.join("candidate-0/payload"), "disposable")?;
         let mut report = ProviderStateGc::default();
         let mut sizes = provenant_os::disk::DiskReport::with_walk_budget(
@@ -3452,9 +3457,9 @@ mod tests {
         assert!(!scratch_root.exists(), "empty scratch root was not pruned");
 
         // A root still holding another entry belongs to its owner; keep it.
-        fs::create_dir_all(&scratch_root)?;
+        private(&scratch_root)?;
         fs::write(scratch_root.join("sentinel"), "keep")?;
-        fs::create_dir_all(&temporary)?;
+        private(&temporary)?;
         fs::write(temporary.join("payload"), "disposable")?;
         collect_temporary(
             &Directory::open_anchor(&scratch_root)?,

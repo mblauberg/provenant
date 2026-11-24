@@ -777,14 +777,9 @@ fn read_only_exceptions_are_recorded_and_temporary_paths_are_private_per_attempt
     let first_tmp = store.temporary_path(first, &call)?;
     let second_tmp = store.temporary_path(second, &call)?;
     assert_ne!(first_tmp, second_tmp);
-    assert!(
-        first_tmp.starts_with(
-            context
-                .state_root
-                .as_path()
-                .join("attempts")
-                .join(first.to_string())
-        )
+    assert_eq!(
+        first_tmp,
+        crate::scratch_root(context.state_root.as_path(), first).join("tmp")
     );
     assert_eq!(
         std::fs::metadata(&first_tmp)?.permissions().mode() & 0o777,

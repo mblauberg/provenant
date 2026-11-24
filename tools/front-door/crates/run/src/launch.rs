@@ -3331,8 +3331,9 @@ mod policy_reporting_tests {
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
         let store = RunStore::open(&context, &call)?;
+        // Launch preparation creates the attempt directory exclusively, as
+        // dispatch does before it records the attempt.
         let run = input();
-        store.create(&run, &call)?;
         let provider = Capture(std::cell::RefCell::new(None));
         let _ready = store.prepare_fresh_start(&run, &provider, &call)?;
         let borrowed = provider.0.borrow();
@@ -3343,10 +3344,6 @@ mod policy_reporting_tests {
             .join("attempts")
             .join(run.attempt_id.to_string());
         assert!(!paths.temporary.starts_with(&attempt));
-        assert_eq!(
-            store.temporary_path(run.attempt_id, &call)?,
-            paths.temporary
-        );
         assert_eq!(
             paths.temporary,
             crate::plan::scratch_root(context.state_root.as_path(), run.attempt_id).join("tmp")
