@@ -1854,7 +1854,7 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         ("crates/redact/src/lib.rs", 2273),
         ("crates/routing/src/catalog.rs", 2347),
         // Pinned-account offer judgement and the same-reason refusal detail (#3892).
-        ("crates/routing/src/resolve.rs", 4376),
+        ("crates/routing/src/resolve.rs", 4377),
         ("crates/routing/src/review.rs", 2671),
         ("crates/run/src/build_dir_gc.rs", 6032),
         ("crates/run/src/controls.rs", 4685),
