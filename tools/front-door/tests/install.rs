@@ -1087,30 +1087,52 @@ fi
             &curl,
             format!(
                 r#"#!/bin/sh
+out=
+format=
+url=
+resume=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -o) out=$2; shift 2 ;;
     -w) format=$2; shift 2 ;;
+    -C|-) resume=1; shift ;;
+    --proto|--retry|--retry-delay) shift 2 ;;
+    -*) shift ;;
     *) url=$1; shift ;;
   esac
 done
 case "$url" in
   */provenant-apps-aarch64-apple-darwin.tar.gz.sha256)
     [ "${{PROVENANT_TEST_APPS_AVAILABLE:-}}" = 1 ] || {{ printf '%s' 404; exit 0; }}
-    cp '{}/apps-checksum' "$out" ;;
+    cp '{fixtures}/apps-checksum' "$out" ;;
   */provenant-apps-aarch64-apple-darwin.tar.gz)
     [ "${{PROVENANT_TEST_APPS_AVAILABLE:-}}" = 1 ] || {{ printf '%s' 404; exit 0; }}
-    cp '{}/provenant-apps-aarch64-apple-darwin.tar.gz' "$out"
+    cp '{fixtures}/provenant-apps-aarch64-apple-darwin.tar.gz' "$out"
     [ -z "${{format:-}}" ] || printf '%s' 200 ;;
-  */provenant-aarch64-apple-darwin.tar.gz.sha256) cp '{}/checksum' "$out"; [ "${{format:-}}" != '%{{http_code}}' ] || printf '%s' 200 ;;
-  */provenant-aarch64-apple-darwin.tar.gz) cp '{}/package.tar.gz' "$out"; [ "${{format:-}}" != '%{{http_code}}' ] || printf '%s' 200 ;;
+  */provenant-aarch64-apple-darwin.tar.gz.sha256) cp '{fixtures}/checksum' "$out"; [ "${{format:-}}" != '%{{http_code}}' ] || printf '%s' 200 ;;
+  */provenant-aarch64-apple-darwin.tar.gz)
+    # A dropped stream leaves a partial file behind, as a cut HTTP/2 body does.
+    if [ -n "${{PROVENANT_TEST_DROP_PACKAGE:-}}" ] || {{ [ -n "${{PROVENANT_TEST_DROP_ONCE:-}}" ] && [ ! -f '{fixtures}/dropped' ]; }}; then
+      [ -z "${{PROVENANT_TEST_DROP_ONCE:-}}" ] || : > '{fixtures}/dropped'
+      head -c 64 '{fixtures}/package.tar.gz' > "$out"
+      tries=$(cat '{fixtures}/attempts' 2>/dev/null || printf 0)
+      printf '%s\n' "$((tries + 1))" > '{fixtures}/attempts'
+      exit 22
+    fi
+    size=0
+    [ -f "$out" ] && size=$(wc -c < "$out" | tr -d '[:space:]')
+    total=$(wc -c < '{fixtures}/package.tar.gz' | tr -d '[:space:]')
+    if [ "$resume" = 1 ] && [ "$size" -gt 0 ] && [ "$size" -lt "$total" ]; then
+      : > '{fixtures}/resumed'
+      tail -c +$((size + 1)) '{fixtures}/package.tar.gz' >> "$out"
+    else
+      cp '{fixtures}/package.tar.gz' "$out"
+    fi
+    [ "${{format:-}}" != '%{{http_code}}' ] || printf '%s' 200 ;;
   *) [ "${{format:-}}" != '%{{http_code}}' ] || printf '%s' 404 ;;
 esac
 "#,
-                fixtures.display(),
-                fixtures.display(),
-                fixtures.display(),
-                fixtures.display()
+                fixtures = fixtures.display(),
             ),
         )?;
         fs::set_permissions(curl, fs::Permissions::from_mode(0o755))?;
@@ -1139,6 +1161,64 @@ esac
             guided_args,
         })
     }
+}
+
+/// A dropped package stream must be resumed, not restarted: the fake curl
+/// leaves a partial file on the first call, then only completes it when the
+/// installer reissues the fetch with `-C -` and the partial file still present.
+#[test]
+fn installer_resumes_a_dropped_release_download() -> Result {
+    let BootstrapFixture {
+        mut rig,
+        args,
+        fixtures,
+        ..
+    } = BootstrapFixture::new()?;
+    rig.env
+        .push(("PROVENANT_TEST_DROP_ONCE".into(), "1".into()));
+    let result = rig.execute_os(Path::new("/bin/sh"), &args, None)?;
+    assert_eq!(
+        code(&result),
+        0,
+        "{}",
+        String::from_utf8_lossy(&result.stderr.bytes)
+    );
+    assert!(
+        fixtures.join("resumed").exists(),
+        "the partial package must be resumed with -C -, not restarted"
+    );
+    assert_eq!(fs::read_to_string(fixtures.join("attempts"))?.trim(), "1");
+    Ok(())
+}
+
+/// A permanently dropped package stream must fail in bounded time with a
+/// bytes/elapsed report, rather than looping forever or silently accepting a
+/// partial archive.
+#[test]
+fn installer_bounds_a_dropped_release_download_and_reports_bytes() -> Result {
+    let BootstrapFixture {
+        mut rig,
+        args,
+        fixtures,
+        ..
+    } = BootstrapFixture::new()?;
+    rig.env
+        .push(("PROVENANT_TEST_DROP_PACKAGE".into(), "1".into()));
+    let result = rig.execute_os(Path::new("/bin/sh"), &args, None)?;
+    assert_eq!(code(&result), 4, "{result:?}");
+    let error = String::from_utf8_lossy(&result.stderr.bytes);
+    assert!(
+        error.contains("Cannot download release package after 3 attempts"),
+        "{error}"
+    );
+    assert!(error.contains("received 64 bytes in"), "{error}");
+    assert_eq!(
+        fs::read_to_string(fixtures.join("attempts"))?.trim(),
+        "3",
+        "the bounded helper must stop after three attempts"
+    );
+    assert!(!fixtures.join("resumed").exists());
+    Ok(())
 }
 
 #[test]
@@ -1813,6 +1893,7 @@ impl UpgradeRig {
         )?;
         let curl = fake_bin.join("curl");
         let curl_log = rig.root.join("curl-log");
+        let checksum_marker = rig.root.join("checksum-dropped");
         fs::write(
             &curl,
             format!(
@@ -1840,14 +1921,21 @@ case "$url" in
     [ "${{PROVENANT_TEST_APPS_INCOMPLETE:-}}" != 1 ] || {{ cp '{incomplete_apps_archive_path}' "$out"; printf '%s' 200; exit 0; }}
     cp '{}' "$out"
     [ -z "${{format:-}}" ] || printf '%s' 200 ;;
-  */download/v9.8.7/*.sha256) printf '%s  package.tar.gz\n' "${{PROVENANT_TEST_CHECKSUM:-{digest}}}" > "$out" ;;
+  */download/v9.8.7/*.sha256)
+    if [ -n "${{PROVENANT_TEST_DROP_CHECKSUM_ONCE:-}}" ] && [ ! -f '{checksum_marker}' ]; then
+      : > '{checksum_marker}'
+      printf 'partial\n' > "$out"
+      exit 22
+    fi
+    printf '%s  package.tar.gz\n' "${{PROVENANT_TEST_CHECKSUM:-{digest}}}" > "$out" ;;
   */download/v9.8.7/*.tar.gz) cp '{}' "$out"; [ -z "${{format:-}}" ] || printf '%s' 200 ;;
   *) exit 99 ;;
 esac
 "#,
                 apps_archive.display(),
                 archive.display(),
-                curl_log.display()
+                curl_log.display(),
+                checksum_marker = checksum_marker.display()
             ),
         )?;
         fs::set_permissions(curl, fs::Permissions::from_mode(0o755))?;
@@ -1912,6 +2000,26 @@ esac
         assert!(self.installed_app.join("old-build").exists());
         assert!(!self.installed_app.join(MENU_EXECUTABLE).exists());
     }
+}
+
+/// The embedded upgrade script's checksum fetch must use the same bounded
+/// retry as its package fetch: one dropped stream cannot fail the peer upgrade.
+#[test]
+fn upgrade_retries_a_dropped_release_checksum() -> Result {
+    let mut rig = UpgradeRig::new()?;
+    rig.set_env("PROVENANT_TEST_DROP_CHECKSUM_ONCE", "1");
+    let (outcome, report) = rig.upgrade(&[])?;
+    // Local host upgrades; the configured Fabric peer still fails by design.
+    assert_eq!(report["data"][0]["success"], true, "{report}");
+    assert_ne!(code(&outcome), 0, "{report}");
+    let log = fs::read_to_string(&rig.curl_log)?;
+    let fetches = log
+        .lines()
+        .filter(|line| line.contains("/download/v9.8.7/") && line.ends_with(".sha256"))
+        .filter(|line| !line.contains("provenant-apps-"))
+        .count();
+    assert!(fetches >= 2, "the dropped checksum must be retried: {log}");
+    Ok(())
 }
 
 #[test]

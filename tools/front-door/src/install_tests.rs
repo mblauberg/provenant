@@ -1087,6 +1087,51 @@ fn envelope(
 }
 
 #[test]
+fn remote_upgrade_script_resumes_and_retries_before_verifying() {
+    let script = super::remote_upgrade_script("v2.9.4");
+    assert!(script.starts_with("release_tag='v2.9.4'\n"), "{script}");
+    assert!(script.contains("#!/bin/sh\n"), "{script}");
+
+    // A dropped HTTP/2 stream must not abort the peer upgrade: resume the
+    // partial file and retry inside a bounded budget.
+    for flag in ["-C -", "--retry 5", "--retry-all-errors"] {
+        assert!(script.contains(flag), "missing {flag} in {script}");
+    }
+
+    // Verification is downstream of the bounded download, and a checksum
+    // mismatch still refuses: a partial file is never verified as complete.
+    let download = script
+        .find("download_artefact \"$archive\" \"$scratch/$archive\" package")
+        .expect("bounded package download call");
+    let verify = script
+        .find("verify_artefact \"$archive\"")
+        .expect("verification call");
+    assert!(
+        download < verify,
+        "download {download} must precede verify {verify}"
+    );
+    // The checksum goes through the same bounded, resumable fetch rather than a
+    // second single-shot curl that a dropped stream could abort.
+    assert!(
+        script.contains("download_artefact \"$artefact.sha256\" \"$scratch/checksum\" checksum"),
+        "{script}"
+    );
+    // One helper body serves both artefacts: no copy of the retry loop remains.
+    assert_eq!(
+        script.matches("download_artefact() {").count(),
+        1,
+        "{script}"
+    );
+    assert!(script.contains("Release checksum mismatch"), "{script}");
+
+    // A final failure names the bytes received and the elapsed seconds.
+    assert!(
+        script.contains("received %s bytes in %s seconds"),
+        "{script}"
+    );
+}
+
+#[test]
 fn upgrade_refusal_names_each_failing_host_and_first_error_line() {
     let hosts = vec![
         fixture_upgrade_host("local", true, "install created 3 changes\n"),
