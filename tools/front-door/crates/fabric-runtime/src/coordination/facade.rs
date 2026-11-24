@@ -1063,7 +1063,7 @@ impl FacadeError {
             // arrive from a peer and the path is unanchored. Local failures put
             // their operation, path and source into this one field, so the
             // writer-binding diagnostic names them without trusting wire text.
-            Self::Io { cause: Some(cause), .. } => projected = projected.detail(cause.to_string()),
+            Self::Io { cause: Some(cause), .. } => projected = projected.detail(&**cause),
             Self::LaunchUnknown { operation_id } => projected = projected.next(format!("inspect the receipt for operation {operation_id} before retrying with the same operation ID")),
             Self::WriterBusy { holder } => {
                 if let Some(holder) = holder {
