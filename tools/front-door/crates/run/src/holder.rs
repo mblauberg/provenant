@@ -4446,14 +4446,15 @@ mod budget_result_tests {
             &provider_bytes,
         )?;
         let answer = "```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"sealed from output\",\"remaining\":[],\"decisions\":[],\"verify\":[]}\n```";
-        let mut observed = exit();
+        let mut observed = crate::tests::exit();
         observed.scope = RunStore::scope(&store.record(id, &request)?);
         seal_exit(&store, &observed)?;
         let fake = Fake::with_observed(Some(route()), Some(Outcome::Succeeded))
             .with_answer(Some(answer.to_owned()), Some(true));
         let (finished, warnings) = provenant_records::warning::capture(|| {
             store.finish(id, &attempt, &observed, &fake, &request)
-        })?;
+        });
+        let finished = finished?;
         assert!(
             matches!(
                 finished.state,
