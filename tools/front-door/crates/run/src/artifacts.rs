@@ -938,7 +938,7 @@ mod tests {
         crate::tests::seal_exit_fixture(&store, &run)?;
         let text = "password=\"secret\" end\n\nVERDICT: PASS\n";
         let mut done = crate::tests::publication();
-        done.result = &text;
+        done.result = text;
         let exit = crate::tests::exit();
         store.publish_terminal(attempt, 1, &done, &exit, &call)?;
 
