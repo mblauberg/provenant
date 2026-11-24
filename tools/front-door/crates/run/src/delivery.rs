@@ -577,6 +577,43 @@ impl HostDeliveryContext {
             self.environment.clone(),
         )
     }
+    /// Bind recorded destinations directly for the sealed-name boundary tests.
+    /// Production never uses this: its bindings come from `prepare`.
+    #[cfg(test)]
+    pub(crate) fn with_bound_remotes_for_test(
+        mut self,
+        delivery_remote: &str,
+        stop_publish_remote: Option<&str>,
+    ) -> Self {
+        let bound = |remote: &str, mode: crate::DeliveryMode| BoundDelivery {
+            base_head: GitOid::parse(&"1".repeat(40)).expect("a valid stand-in head"),
+            push_url: "https://example.invalid/lane.git".to_owned(),
+            lane_branch: "lane".to_owned(),
+            pull_request_repo: None,
+            git_dir: PathBuf::from("/nonexistent-sealed/.git"),
+            common_git_dir: PathBuf::from("/nonexistent-sealed/.git"),
+            host_cwd: PathBuf::from("/nonexistent-sealed"),
+            destination: WriterDeliveryRequest {
+                extra: Default::default(),
+                mode,
+                remote: remote.to_owned(),
+                branch: "lane".to_owned(),
+                open_pr: false,
+                fast_forward_only: false,
+            },
+        };
+        self.bound = Some(bound(
+            delivery_remote,
+            if delivery_remote.is_empty() {
+                crate::DeliveryMode::Integrate("main".into())
+            } else {
+                crate::DeliveryMode::Push
+            },
+        ));
+        self.stop_publish_bound =
+            stop_publish_remote.map(|remote| bound(remote, crate::DeliveryMode::Push));
+        self
+    }
     fn attach_stop_publish(&mut self, prepared: Self) {
         self.stop_publish_bound = prepared.bound;
         self.stop_publish_host = Some(StopPublishHost {
@@ -749,17 +786,28 @@ impl HostDeliveryContext {
         self.forge = Some(forge.clone());
         self
     }
+    /// A validated sealed remote: a malformed record refuses, naming its value.
+    /// An empty recorded remote is the deliberate local-integration sentinel,
+    /// not a corrupt name: it maps to the same absence as an unbound remote.
+    fn sealed_remote(name: Option<&str>) -> Result<Option<provenant_config::RemoteName>> {
+        name.filter(|name| !name.is_empty())
+            .map(|name| {
+                provenant_config::RemoteName::new(name)
+                    .map_err(|_| RunError::InvalidSealedRemote(name.to_owned()))
+            })
+            .transpose()
+    }
     /// The remote named by the sealed launch destination.
-    pub(crate) fn delivery_remote(&self) -> Option<&str> {
-        self.bound
-            .as_ref()
-            .map(|bound| bound.destination.remote.as_str())
+    pub(crate) fn delivery_remote(&self) -> Result<Option<provenant_config::RemoteName>> {
+        Self::sealed_remote(self.bound.as_ref().map(|b| b.destination.remote.as_str()))
     }
     /// The remote named by the sealed stop-publication destination.
-    pub(crate) fn stop_publish_remote(&self) -> Option<&str> {
-        self.stop_publish_bound
-            .as_ref()
-            .map(|bound| bound.destination.remote.as_str())
+    pub(crate) fn stop_publish_remote(&self) -> Result<Option<provenant_config::RemoteName>> {
+        Self::sealed_remote(
+            self.stop_publish_bound
+                .as_ref()
+                .map(|b| b.destination.remote.as_str()),
+        )
     }
     /// The explicit state root, else the captured PROVENANT_STATE_DIR, else
     /// the default root under the captured HOME.
@@ -1133,7 +1181,7 @@ impl HostDeliveryContext {
                 Stage::Head,
             )?
         } else {
-            host.refresh_target_and_resolve(&writer, branch, Stage::Head, &forge.remote.value)?
+            host.refresh_target_and_resolve(&writer, branch, Stage::Head, &forge.remote_name()?)?
         };
         let head = GitOid::parse(&head)
             .map_err(|error| RunError::delivery(Stage::Head, DeliveryCause::parse(error)))?;
@@ -1614,10 +1662,7 @@ impl HostDeliveryContext {
         });
         self.validate_transport_helpers(writer)?;
         if fetch && !matches!(request.mode, crate::DeliveryMode::Integrate(_)) {
-            // This all-branch fetch is the same shared refresh `refresh_origin`
-            // performs. Taking the fetch lock coalesces a refresh another
-            // launch just completed, and the concurrent-transaction tolerance
-            // keeps an unrelated forced ref update from failing the launch.
+            // The shared lock coalesces fetches and tolerates forced ref updates.
             let common = self.common_git_dir(&writer.project, stage)?;
             let common = Directory::open_anchor(&common)?;
             let requested = OriginRefreshRequest::capture()?;
@@ -1636,7 +1681,7 @@ impl HostDeliveryContext {
     /// `target` is the private Git directory and the one remote to refresh.
     pub(crate) fn refresh_origin(
         writer: &WriterRequest,
-        target: (&Path, Option<&str>),
+        target: (&Path, Option<provenant_config::RemoteName>),
         host_state: &Path,
         cancel: &provenant_core::CancelToken,
         facts: &provenant_confinement::worktrees::RepoFacts,
@@ -1654,7 +1699,7 @@ impl HostDeliveryContext {
             .with_repo_facts(facts)
             .with_host_state(host_state);
         host.cancellation = Some(cancel.clone());
-        host.refresh_origin_with(writer, git_dir, remote)
+        host.refresh_origin_with(writer, git_dir, remote.as_str())
     }
     pub(super) fn refresh_origin_with(
         self,
@@ -1840,14 +1885,13 @@ impl HostDeliveryContext {
         Ok(())
     }
 
-    /// Refresh and use the remote-advertised OID. Git serialises each ref
-    /// transaction; a later integration publishes with an explicit lease.
+    /// Refresh and use the remote-advertised OID under Git's serialised ref transaction.
     fn refresh_target_and_resolve(
         &self,
         writer: &WriterRequest,
         branch: &str,
         stage: Stage,
-        remote: &str,
+        remote: &provenant_config::RemoteName,
     ) -> Result<String> {
         let branch_ref = GitRefName::branch(branch)
             .map_err(|error| RunError::delivery(stage, DeliveryCause::parse(error)))?;
@@ -1855,10 +1899,8 @@ impl HostDeliveryContext {
         crate::writer::verify_writer_git_paths(&common, &branch_ref, Some(remote))?;
         self.validate_transport_helpers(writer)?;
         let source = format!("refs/heads/{branch}");
-        // Read and fetch the same sealed destination used for the later push.
-        // A configured remote may have different fetch and push URLs: use the
-        // URL for transport, but keep the remote's name for the tracking ref
-        // and its hardened config key. A URL is not a valid ref namespace.
+        // The URL is transport-only; the remote name owns the tracking ref and
+        // its hardened config key, since a URL is not a valid ref namespace.
         let push_url = &self
             .bound
             .as_ref()
@@ -2173,9 +2215,8 @@ impl HostDeliveryContext {
     ) -> Result<String> {
         self.command_with_input(cwd, tool, args, stage, b"")
     }
-    /// A config mutation against the shared `.git/config` can lose a lock race
-    /// with a sibling settlement. Run it with the same bounded, shared-deadline
-    /// lock retry as core Git mutations; ordinary host commands run once.
+    /// A config mutation can lose a lock race with a sibling settlement, so run
+    /// it with the shared lock retry; ordinary host commands run once.
     pub(super) fn command_with_config_lock_retry(
         &self,
         cwd: &Path,
@@ -2185,9 +2226,8 @@ impl HostDeliveryContext {
     ) -> Result<String> {
         self.command_with_input_uncached(cwd, tool, args, stage, b"", CommandMode::CONFIG_WRITE)
     }
-    /// A named config read keeps its failure's leaf cause. Ordinary commands
-    /// report only the stage; the config error needs the cause to render a
-    /// refusal that names the read once and carries what actually failed.
+    /// A named config read keeps its failure's leaf cause so the refusal names
+    /// what actually failed; ordinary commands report only the stage.
     fn command_for_config(
         &self,
         cwd: &Path,
@@ -2831,6 +2871,8 @@ impl HostDeliveryContext {
         let destination = format!("refs/heads/{}", request.branch);
         let remote = !request.remote.is_empty();
         let resolved_remote = forge.is_some_and(|forge| request.remote == forge.remote.value);
+        let remote_name =
+            Self::sealed_remote((!request.remote.is_empty()).then_some(request.remote.as_str()))?;
         let target = if remote {
             let tracking = format!("refs/remotes/{}/{}", request.remote, request.branch);
             if !resolved_remote {
@@ -2853,8 +2895,8 @@ impl HostDeliveryContext {
         } else {
             destination.clone()
         };
-        let expected = if remote && resolved_remote {
-            self.refresh_target_and_resolve(writer, &request.branch, stage, &request.remote)?
+        let expected = if let Some(remote) = remote_name.as_ref().filter(|_| resolved_remote) {
+            self.refresh_target_and_resolve(writer, &request.branch, stage, remote)?
         } else {
             self.command(
                 &writer.worktree,
@@ -3022,13 +3064,8 @@ impl HostDeliveryContext {
                 ],
                 stage,
             )?;
-            let verified = if resolved_remote {
-                self.refresh_target_and_resolve(
-                    writer,
-                    &request.branch,
-                    Stage::Verify,
-                    &request.remote,
-                )?
+            let verified = if let Some(remote) = remote_name.as_ref().filter(|_| resolved_remote) {
+                self.refresh_target_and_resolve(writer, &request.branch, Stage::Verify, remote)?
             } else {
                 self.refuse_symref_destination(&writer.worktree, &target, Stage::Verify)?;
                 self.command(

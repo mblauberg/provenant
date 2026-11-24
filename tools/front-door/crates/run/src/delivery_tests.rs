@@ -379,6 +379,7 @@ impl PrepareFixture {
                 merge_after_publish: true,
                 ..TerminalFixtureOptions::default()
             },
+            None,
             || {
                 write()?;
                 Ok(())
@@ -398,6 +399,7 @@ impl PrepareFixture {
                 foreign_merge_after_publish: Some(head_first),
                 ..TerminalFixtureOptions::default()
             },
+            None,
             write,
         )
     }
@@ -420,6 +422,7 @@ impl PrepareFixture {
                 merge_after_publish: false,
                 foreign_merge_after_publish: None,
             },
+            None,
             || {
                 write()?;
                 Ok(())
@@ -431,6 +434,7 @@ impl PrepareFixture {
         _remote: &str,
         base_ref: Option<&str>,
         options: TerminalFixtureOptions,
+        work: Option<crate::writer::StopWorkPolicy<'_>>,
         write: impl FnOnce() -> std::result::Result<(), Box<dyn std::error::Error>>,
     ) -> std::result::Result<bool, Box<dyn std::error::Error>> {
         let TerminalFixtureOptions {
@@ -706,7 +710,7 @@ impl PrepareFixture {
                 history: provenant_config::LaneHistory::default(),
                 budget_stop,
                 preservation_stop: None,
-                work: None,
+                work,
             },
         )?;
         let archive = attempt.open_verified_directory(OsStr::new("quarantine"))?;

@@ -1,6 +1,6 @@
 //! The GC worktree selection, shared by merged removal and declared output.
 use super::*;
-use provenant_config::RetentionIssue;
+use provenant_config::{RemoteName, RetentionIssue};
 use provenant_os::fs::{FileKind, PayloadTree, entry_names, temporary_name};
 use provenant_records::custody::{
     LandedEvidence, LandingPredicate, LandingSource, RefEndpointIdentity, RemovalEvidence,
@@ -245,9 +245,10 @@ impl ForgeContextFailure {
                 "run `git remote set-head {remote} --auto` for the reported remote, \
                  or declare `git.default_branch` {declaration}; then rerun `provenant gc`"
             ),
-            Self::Refusal(provenant_config::ForgeContextError::NoRemote { .. }) => {
-                format!("declare `git.remote` {declaration}, then rerun `provenant gc`")
-            }
+            Self::Refusal(
+                provenant_config::ForgeContextError::NoRemote { .. }
+                | provenant_config::ForgeContextError::InvalidRemote { .. },
+            ) => format!("declare a valid `git.remote` {declaration}, then rerun `provenant gc`"),
             Self::Refusal(provenant_config::ForgeContextError::Io { .. })
             | Self::Unavailable(_) => format!(
                 "make the checkout's Git metadata and port table readable {declaration}, \
@@ -402,7 +403,7 @@ pub fn forge_context(
 /// remote `origin`: an absent remote is an absence, not a guessed identity, and
 /// an ambiguous remote stays a refusal that names what was seen.
 /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
-pub fn forge_remote(context: &WorktreeContext<'_>) -> Result<Option<String>, WorktreeError> {
+pub fn forge_remote(context: &WorktreeContext<'_>) -> Result<Option<RemoteName>, WorktreeError> {
     // A bound bare repository has no primary checkout by design. Its layout is
     // host-only, so there is no checkout whose remote could supply a default
     // creation base; absence is not a failed layout. Local HEAD remains the
@@ -419,7 +420,7 @@ pub fn forge_remote(context: &WorktreeContext<'_>) -> Result<Option<String>, Wor
     let git = provenant_config::ForgeGit::new(project)
         .map_err(|error| WorktreeError::PortConfiguration(std::io::Error::other(error)))?;
     match provenant_config::ForgeContext::remote_if_any(&config, &git) {
-        Ok(remote) => Ok(remote.map(|remote| remote.value)),
+        Ok(remote) => Ok(remote),
         Err(error) => Err(WorktreeError::PortConfiguration(std::io::Error::other(
             error,
         ))),

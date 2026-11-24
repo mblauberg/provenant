@@ -115,7 +115,8 @@ fn remote_only_writer_branch_is_fetched_even_outside_fetch_refspec() -> Result<(
     )?;
     let test = TestContext::new(&fixture)?;
     let context = test.context();
-    let tip = fetch_remote_branch_tip(&context, "remote-only", &cancel(), Some("origin"))?
+    let origin = provenant_config::RemoteName::new("origin").expect("fixture remote");
+    let tip = fetch_remote_branch_tip(&context, "remote-only", &cancel(), Some(&origin))?
         .ok_or("remote branch tip was not fetched")?;
     assert_eq!(tip, source.head()?);
     let tracking = fixture.run(&[
@@ -137,7 +138,7 @@ fn remote_only_writer_branch_is_fetched_even_outside_fetch_refspec() -> Result<(
     source.run(&["branch", "-f", "remote-only", "HEAD"])?;
     assert_ne!(source.head()?, tip);
     assert_eq!(
-        fetch_remote_branch_tip(&context, "remote-only", &cancel(), Some("origin"))?,
+        fetch_remote_branch_tip(&context, "remote-only", &cancel(), Some(&origin))?,
         None
     );
     let local_tip = fixture.run(&["rev-parse", "refs/heads/remote-only"])?;

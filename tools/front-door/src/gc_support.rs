@@ -217,7 +217,9 @@ fn host_git_with_tail(
 /// A checkout with no remote at all is normal for local-only GC and yields
 /// `None`; an ambiguous remote, malformed port table or unreadable metadata is
 /// a real resolution failure and stays an error.
-fn forge_remote(context: &WorktreeContext<'_>) -> Result<Option<String>, Error> {
+fn forge_remote(
+    context: &WorktreeContext<'_>,
+) -> Result<Option<provenant_config::RemoteName>, Error> {
     let invalid = || Error::GcObservation("cannot resolve forge context");
     let state = context.host_state().map_err(|_| invalid())?;
     let project = context.layout.project();
@@ -239,7 +241,6 @@ fn forge_remote(context: &WorktreeContext<'_>) -> Result<Option<String>, Error> 
     // warning and its repair, instead of the circular collection message.
     // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
     provenant_config::ForgeContext::remote_if_any(&config, &git)
-        .map(|remote| remote.map(|remote| remote.value))
         .map_err(Error::ForgeContextUnresolved)
 }
 
@@ -251,8 +252,13 @@ pub(crate) fn refresh_writer_tracking_ref(
     let Some(remote) = forge_remote(context)? else {
         return Ok(());
     };
-    refresh_branch(context.repo.root_path(), context.executor, &remote, branch)
-        .map_err(|_| Error::GcObservation("cannot refresh writer tracking ref"))
+    refresh_branch(
+        context.repo.root_path(),
+        context.executor,
+        remote.as_str(),
+        branch,
+    )
+    .map_err(|_| Error::GcObservation("cannot refresh writer tracking ref"))
 }
 
 fn refresh_branch(

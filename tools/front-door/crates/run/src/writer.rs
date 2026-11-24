@@ -351,19 +351,50 @@ pub(crate) struct StopWorkPolicy<'a> {
     pub publish_granted: bool,
 }
 
+/// The remote bound for stop publication wins over the launch destination: a
+/// local-integration launch deliberately records no remote, while its
+/// stop-publication binding names the real remote the stopped head must use.
+/// The launch binding is read only when the stop binding has no remote, and an
+/// empty recorded launch remote is an absence, not a corrupt name.
+pub(super) fn bound_stop_remote(
+    publish: Option<&crate::HostDeliveryContext>,
+) -> Result<Option<provenant_config::RemoteName>> {
+    let Some(host) = publish else {
+        return Ok(None);
+    };
+    match host.stop_publish_remote()? {
+        Some(remote) => Ok(Some(remote)),
+        None => host.delivery_remote(),
+    }
+}
+
 /// The remote a stopped writer's summary and stop-publication recovery must
 /// use. A checkout without a remote has no tracking branch, so it yields
 /// `None` rather than an empty remote name.
 /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
-pub(super) fn terminal_forge_remote(state: &Path, project: &Path) -> Option<String> {
+pub(super) fn terminal_forge_remote(
+    state: &Path,
+    project: &Path,
+) -> Option<provenant_config::RemoteName> {
     let ports = provenant_config::PortTable::read_for(Some(project), state).ok()?;
     let policy = provenant_config::operation_policy(state, project, &ports);
     let config = provenant_config::ForgeConfig::new(&ports, (*policy).clone());
     let git = provenant_config::ForgeGit::new(project).ok()?;
-    provenant_config::ForgeContext::remote_if_any(&config, &git)
-        .ok()
-        .flatten()
-        .map(|remote| remote.value)
+    match provenant_config::ForgeContext::remote_if_any(&config, &git) {
+        Ok(remote) => remote,
+        Err(provenant_config::ForgeContextError::InvalidRemote { remote }) => {
+            use provenant_records::warning::{FORGE_CONTEXT_UNRESOLVED, Warning, warn};
+            warn(
+                Warning::new(
+                    FORGE_CONTEXT_UNRESOLVED,
+                    format!("configured remote {remote:?} is not a usable Git remote name; keeping the local remote behaviour"),
+                )
+                .once_per_change(),
+            );
+            None
+        }
+        Err(_) => None,
+    }
 }
 
 /// The result of comparing a retry's worktree head with its pinned commit.
@@ -672,7 +703,7 @@ impl WriterLaunch {
         &self,
         git: &Path,
         head: GitOid,
-        remote: Option<&str>,
+        remote: Option<provenant_config::RemoteName>,
     ) -> Result<Option<u64>> {
         let Some(remote) = remote else {
             return Ok(None);
@@ -1992,12 +2023,12 @@ pub(super) fn prepare_writer_git(
         kind: crate::ErrorKind::Invalid,
         message: error.to_string(),
     })?;
-    let remote = provenant_config::ForgeContext::remote_if_any(&config, &git)
-        .map_err(|error| RunError::Input {
+    let remote = provenant_config::ForgeContext::remote_if_any(&config, &git).map_err(|error| {
+        RunError::Input {
             kind: crate::ErrorKind::Invalid,
             message: error.to_string(),
-        })?
-        .map(|remote| remote.value);
+        }
+    })?;
     let path = writer.worktree.path().to_path_buf();
     // Git replaces config atomically. Open a verified snapshot and reopen after
     // fetch so a sibling's completed config update is observed coherently.
@@ -2031,7 +2062,7 @@ pub(super) fn prepare_writer_git(
     verify_writer_git_paths(
         writer.worktree.repo().common_git_dir(),
         &writer.branch,
-        remote.as_deref(),
+        remote.as_ref(),
     )?;
     if let Some((authority, credentials)) = authority {
         prepare_writer_directories(
@@ -2054,7 +2085,7 @@ pub(super) fn prepare_writer_git(
             project: project.clone(),
             worktree: path.clone(),
         },
-        (repo.private_git_dir(), remote.as_deref()),
+        (repo.private_git_dir(), remote),
         state,
         cancel,
         &writer.facts,
@@ -2224,7 +2255,7 @@ pub(super) fn prepare_writer_git(
 pub(super) fn verify_writer_git_paths(
     common: &Path,
     branch: &GitRefName,
-    remote: Option<&str>,
+    remote: Option<&provenant_config::RemoteName>,
 ) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
     let suffix = branch
@@ -3363,17 +3394,10 @@ impl WriterLaunch {
         // The sealed stop binding carries the resolved remote; recovery has no
         // binding yet, so resolve the same identity from the port table.
         // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
-        let stop_remote = work
-            .as_ref()
-            .and_then(|policy| policy.publish)
-            .and_then(|host| {
-                // A local integration destination records no remote; that is an
-                // absence, not a name to pass to Git.
-                host.stop_publish_remote()
-                    .or_else(|| host.delivery_remote())
-                    .filter(|remote| !remote.is_empty())
-                    .map(str::to_owned)
-            })
+        // A local integration destination records no remote; the typed boundary
+        // returns an absence rather than a name to pass to Git.
+        let bound_stop_remote = bound_stop_remote(work.as_ref().and_then(|policy| policy.publish))?;
+        let stop_remote = bound_stop_remote
             .or_else(|| terminal_forge_remote(state, self.worktree.repo().root_path()));
         let stop_work = work.map(|policy| {
             use provenant_records::run::StopWorkPush;
@@ -3382,10 +3406,10 @@ impl WriterLaunch {
                 .ok()
                 .and_then(|paths| u64::try_from(paths.len()).ok());
             let ahead = self
-                .ahead_of_remote(&git_executable, verified_tip, stop_remote.as_deref())
+                .ahead_of_remote(&git_executable, verified_tip, stop_remote.clone())
                 .ok()
                 .flatten();
-            let recovered = match stop_remote.as_deref() {
+            let recovered = match stop_remote.as_ref() {
                 Some(remote) if policy.publish.is_none() && policy.publish_granted => {
                     (|| -> Result<crate::HostDeliveryContext> {
                         let branch = self
@@ -3396,7 +3420,7 @@ impl WriterLaunch {
                         let request = crate::HostDeliveryContext::destination_for_remote(
                             crate::DeliveryMode::Push,
                             branch,
-                            remote,
+                            remote.as_str(),
                         )?
                         .ok_or(RunError::Validation("stop publication destination missing"))?;
                         crate::HostDeliveryContext::capture()

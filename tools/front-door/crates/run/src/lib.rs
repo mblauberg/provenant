@@ -655,6 +655,8 @@ pub enum RunError {
     AttemptReservationRetained,
     #[error("invalid run record: {0}")]
     Validation(&'static str),
+    #[error("a sealed delivery bound to remote {0:?} is invalid; its record is corrupt")]
+    InvalidSealedRemote(String),
     #[error(transparent)]
     Handoff(#[from] provenant_records::handoff::HandoffError),
     #[error("invalid run record: {0}")]
@@ -810,6 +812,14 @@ pub enum RunError {
     },
     #[error("run record path is invalid")]
     Path(#[from] provenant_records::PathWireError),
+}
+impl From<provenant_config::ForgeContextError> for RunError {
+    fn from(error: provenant_config::ForgeContextError) -> Self {
+        Self::Input {
+            kind: ErrorKind::Config,
+            message: error.to_string(),
+        }
+    }
 }
 impl From<provenant_confinement::worktrees::WorktreeError> for RunError {
     fn from(error: provenant_confinement::worktrees::WorktreeError) -> Self {

@@ -150,6 +150,119 @@ fn launch_and_stop_publication_share_one_remote_refresh()
     Ok(())
 }
 
+// Regression for #3888 F1: a local-integration launch deliberately records an
+// empty remote. Stop publication must still name its own real remote, and the
+// writer's stop-work evidence must be gathered against that remote rather than
+// treating the sealed sentinel as a corrupt name.
+#[test]
+fn local_integration_stop_publication_uses_the_stop_remote()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = PrepareFixture::new()?;
+    fixture.request = WriterDeliveryRequest {
+        extra: Default::default(),
+        mode: DeliveryMode::Integrate("main".into()),
+        remote: String::new(),
+        branch: "main".into(),
+        open_pr: false,
+        fast_forward_only: false,
+    };
+    let launch = fixture.prepare()?;
+    let stop_request = HostDeliveryContext::destination(
+        DeliveryMode::Push,
+        "lane",
+        &crate::forge_for("origin", "", &[]),
+    )?
+    .ok_or("stop-publish destination")?;
+    let host = launch.prepare_stop_publish(&fixture.writer, &stop_request)?;
+    assert_eq!(host.delivery_remote()?, None);
+    assert_eq!(
+        host.stop_publish_remote()?,
+        Some(provenant_config::RemoteName::new("origin")?)
+    );
+
+    // A tracking ref at the verified head makes the ahead count zero, so the
+    // summary's evidence comes from the stop remote without needing a push.
+    fixture.git(&["update-ref", "refs/remotes/origin/lane", "HEAD"])?;
+    fixture.terminal_via_with(
+        "origin",
+        None,
+        TerminalFixtureOptions::default(),
+        Some(crate::writer::StopWorkPolicy {
+            trigger: provenant_records::run::StopWorkTrigger::ExplicitCancellation,
+            publish: Some(&host),
+            writer: &fixture.writer,
+            route: None,
+            publish_granted: false,
+        }),
+        || Ok(()),
+    )?;
+    let attempt = provenant_os::fs::Directory::open_anchor(&fixture.root.join("attempt"))?;
+    let terminal: writer::WriterTerminal = db::decode(
+        &artifacts::read_sealed(&attempt, "writer-terminal.json", RECORD_LIMIT)?
+            .ok_or("writer terminal")?,
+    )?;
+    let summary = terminal.stop_work.as_ref().ok_or("stop-work summary")?;
+    assert_eq!(
+        summary.ahead,
+        Some(0),
+        "the stop-publish remote must name the ahead count: {summary:?}"
+    );
+    assert_eq!(
+        summary.push,
+        provenant_records::run::StopWorkPush::NotGranted
+    );
+    Ok(())
+}
+
+// The same local-integration delivery with no stop-publish binding has no
+// remote at all: settlement seals a stop-work summary with no ahead evidence,
+// without refusing the empty sealed sentinel.
+#[test]
+fn local_integration_without_stop_publish_leaves_the_stop_remote_absent()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = PrepareFixture::new()?;
+    fixture.git(&["remote", "remove", "origin"])?;
+    fixture.request = WriterDeliveryRequest {
+        extra: Default::default(),
+        mode: DeliveryMode::Integrate("main".into()),
+        remote: String::new(),
+        branch: "main".into(),
+        open_pr: false,
+        fast_forward_only: false,
+    };
+    let launch = fixture.prepare()?;
+    assert_eq!(launch.delivery_remote()?, None);
+    assert_eq!(launch.stop_publish_remote()?, None);
+
+    fixture.terminal_via_with(
+        "origin",
+        None,
+        TerminalFixtureOptions::default(),
+        Some(crate::writer::StopWorkPolicy {
+            trigger: provenant_records::run::StopWorkTrigger::ExplicitCancellation,
+            publish: None,
+            writer: &fixture.writer,
+            route: None,
+            publish_granted: false,
+        }),
+        || Ok(()),
+    )?;
+    let attempt = provenant_os::fs::Directory::open_anchor(&fixture.root.join("attempt"))?;
+    let terminal: writer::WriterTerminal = db::decode(
+        &artifacts::read_sealed(&attempt, "writer-terminal.json", RECORD_LIMIT)?
+            .ok_or("writer terminal")?,
+    )?;
+    assert_eq!(
+        terminal
+            .stop_work
+            .as_ref()
+            .ok_or("stop-work summary")?
+            .ahead,
+        None
+    );
+    Ok(())
+}
+
 #[test]
 fn integration_refuses_default_fallbacks_remote_head_and_primary_branch()
 -> std::result::Result<(), Box<dyn std::error::Error>> {

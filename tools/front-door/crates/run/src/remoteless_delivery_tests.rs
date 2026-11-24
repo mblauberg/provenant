@@ -65,6 +65,59 @@ fn destination_for_remote_keeps_local_integration_remote_empty() {
     assert_eq!(made.branch, "main");
 }
 
+/// A sealed local-integration destination records `""` as the deliberate
+/// sentinel for "no remote". At the typed boundary that is an absence, while a
+/// stop-publication binding on a real remote still yields that remote.
+#[test]
+fn sealed_local_integration_remote_is_absent_and_stop_publish_is_named() -> FixtureResult<()> {
+    let host =
+        crate::HostDeliveryContext::new(Vec::new()).with_bound_remotes_for_test("", Some("origin"));
+    assert_eq!(host.delivery_remote()?, None);
+    let origin = provenant_config::RemoteName::new("origin")?;
+    assert_eq!(host.stop_publish_remote()?, Some(origin.clone()));
+    assert_eq!(crate::writer::bound_stop_remote(Some(&host))?, Some(origin));
+    Ok(())
+}
+
+/// A non-empty malformed record is corrupt, not the local-integration
+/// sentinel: it must still refuse and name the recorded value.
+#[test]
+fn sealed_non_empty_malformed_remote_refuses_naming_the_value() -> FixtureResult<()> {
+    for bad in ["-origin", " origin", "origin ", "or igin"] {
+        let host =
+            crate::HostDeliveryContext::new(Vec::new()).with_bound_remotes_for_test(bad, None);
+        let error = host
+            .delivery_remote()
+            .expect_err("a malformed sealed remote must be refused");
+        match error {
+            crate::RunError::InvalidSealedRemote(name) => assert_eq!(name, bad),
+            other => return Err(format!("unexpected refusal for {bad:?}: {other:?}").into()),
+        }
+    }
+    Ok(())
+}
+
+/// The launch destination is read only when the stop binding has no remote. A
+/// malformed launch record must not be inspected when stop publication already
+/// named its remote; a local-only binding with no stop publication is absence.
+#[test]
+fn bound_stop_remote_reads_the_launch_binding_only_when_needed() -> FixtureResult<()> {
+    let host = crate::HostDeliveryContext::new(Vec::new())
+        .with_bound_remotes_for_test("-malformed", Some("origin"));
+    assert_eq!(
+        crate::writer::bound_stop_remote(Some(&host))?,
+        Some(provenant_config::RemoteName::new("origin")?)
+    );
+    assert!(
+        matches!(host.delivery_remote(), Err(crate::RunError::InvalidSealedRemote(name)) if name == "-malformed")
+    );
+    let local_only =
+        crate::HostDeliveryContext::new(Vec::new()).with_bound_remotes_for_test("", None);
+    assert_eq!(crate::writer::bound_stop_remote(Some(&local_only))?, None);
+    assert_eq!(crate::writer::bound_stop_remote(None)?, None);
+    Ok(())
+}
+
 /// `prepare` validates the request before any Git work. With no remote a push
 /// must be refused explicitly, not bound as if `""` were a remote name.
 #[test]

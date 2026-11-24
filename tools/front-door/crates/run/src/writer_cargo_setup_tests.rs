@@ -190,7 +190,7 @@ fn terminal_forge_remote_follows_the_checkout_not_a_compiled_origin() {
         .unwrap();
     assert_eq!(
         terminal_forge_remote(&fixture.state, &fixture.project),
-        Some("upstream".to_owned())
+        Some(provenant_config::RemoteName::new("upstream").unwrap())
     );
 }
 

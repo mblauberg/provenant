@@ -4,6 +4,10 @@ fn test_forge(remote: &str) -> provenant_config::ForgeContext {
     provenant_run::forge_for(remote, "trunk", &[])
 }
 
+fn remote(name: &str) -> provenant_config::RemoteName {
+    provenant_config::RemoteName::new(name).expect("fixture remote")
+}
+
 #[test]
 fn git_refuses_stdout_past_its_bound() {
     let temp = tempfile::tempdir().unwrap();
@@ -199,7 +203,7 @@ fn wip_holds_the_writer_lease_during_git_mutation() -> Result<(), Box<dyn std::e
         &project,
         GIT_TIMEOUT,
         &Free,
-        |context, cancel| inspect_context(context, &facts, cancel, Some("origin")),
+        |context, cancel| inspect_context(context, &facts, cancel, Some(&remote("origin"))),
     )?;
     let primary_path = std::fs::canonicalize(&project)?;
     let listed_paths: Vec<_> = inspected
@@ -233,7 +237,7 @@ fn wip_holds_the_writer_lease_during_git_mutation() -> Result<(), Box<dyn std::e
         &project,
         GIT_TIMEOUT,
         &Bystander,
-        |context, cancel| inspect_context(context, &facts, cancel, Some("origin")),
+        |context, cancel| inspect_context(context, &facts, cancel, Some(&remote("origin"))),
     )?;
     let observed = observed
         .iter()
@@ -251,7 +255,7 @@ fn wip_holds_the_writer_lease_during_git_mutation() -> Result<(), Box<dyn std::e
         &project,
         GIT_TIMEOUT,
         &Free,
-        |context, cancel| inspect_context(context, &limited, cancel, Some("origin")),
+        |context, cancel| inspect_context(context, &limited, cancel, Some(&remote("origin"))),
     );
     assert!(matches!(
         overflow,
@@ -297,7 +301,7 @@ fn wip_holds_the_writer_lease_during_git_mutation() -> Result<(), Box<dyn std::e
         &project,
         GIT_TIMEOUT,
         &Free,
-        |context, cancel| inspect_context(context, &facts, cancel, Some("origin")),
+        |context, cancel| inspect_context(context, &facts, cancel, Some(&remote("origin"))),
     )?;
     let row = refreshed
         .iter()
@@ -397,10 +401,10 @@ fn reused_worktrees_name_a_differing_head_or_dirty_tree() {
         base: None,
         reused: false,
     };
-    assert_eq!(worktree_warning(&info, &base, "origin"), None);
+    assert_eq!(worktree_warning(&info, &base, &remote("origin")), None);
     info.head = provenant_core::GitOid::parse(&"b".repeat(40)).unwrap();
     info.dirty = WorktreeCondition::Dirty;
-    let warning = worktree_warning(&info, &base, "origin").unwrap();
+    let warning = worktree_warning(&info, &base, &remote("origin")).unwrap();
     assert!(
         warning.contains("local branch differs from origin"),
         "{warning}"
@@ -582,7 +586,7 @@ fn wip_push_and_recreation_follow_the_upstream_context() -> Result<(), Box<dyn s
     };
     let forge = test_forge("upstream");
     assert!(forge.is_protected("trunk"));
-    wip_git(&tree, &forge.remote.value).map_err(|refusal| format!("{refusal:?}"))?;
+    wip_git(&tree, &remote(&forge.remote.value)).map_err(|refusal| format!("{refusal:?}"))?;
     let pushed = provenant_os::fixture::run_git(&bare, &["rev-parse", "refs/heads/lane"])?;
     assert_eq!(pushed.trim_ascii(), head.trim_ascii());
     assert!(!forge.is_protected("lane"));
