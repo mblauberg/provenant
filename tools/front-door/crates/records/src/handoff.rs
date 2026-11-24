@@ -1056,7 +1056,7 @@ mod tests {
         let text = format!("{block}\n{}\n{block}", "x".repeat(28_000));
         let mut capture = HandoffCapture::default();
         capture.push(text.as_bytes());
-        let parsed = capture.finish().unwrap();
+        let parsed = capture.finish().unwrap().expect("the later handoff");
         assert_eq!(parsed.note, "Continue");
         let repeated = Handoff::repeated_blocks(&text).expect("a repeat is noted");
         assert_eq!(repeated.extra, 1);
