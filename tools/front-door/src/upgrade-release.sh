@@ -25,9 +25,32 @@ verify_artefact() {
     actual=${actual%% *}
     [ "$actual" = "$expected" ] || { printf '%s\n' 'Release checksum mismatch' >&2; exit 4; }
 }
-curl -fLsS --proto '=https' --tlsv1.2 "$base/$archive" -o "$scratch/$archive" </dev/null || {
-    printf '%s\n' 'Cannot download release package' >&2; exit 4;
+download_package() {
+    artefact=$1
+    dest=$scratch/$artefact
+    # A dropped HTTP/2 stream must not abort the whole peer upgrade. Resume the
+    # partial file and retry within a bounded budget. Verification runs only
+    # after this function returns, so a partial file is never accepted.
+    attempts=0
+    max_attempts=3
+    : > "$dest"
+    start=$(date +%s)
+    while [ "$attempts" -lt "$max_attempts" ]; do
+        attempts=$((attempts + 1))
+        if curl -fLsS --proto '=https' --tlsv1.2 -C - \
+            --retry 5 --retry-all-errors --retry-delay 1 \
+            "$base/$artefact" -o "$dest" </dev/null; then
+            return 0
+        fi
+    done
+    bytes=$(wc -c < "$dest" 2>/dev/null | tr -d '[:space:]') || bytes=0
+    [ -n "$bytes" ] || bytes=0
+    elapsed=$(( $(date +%s) - start ))
+    printf 'Cannot download release package after %s attempts: received %s bytes in %s seconds\n' \
+        "$attempts" "$bytes" "$elapsed" >&2
+    exit 4
 }
+download_package "$archive"
 verify_artefact "$archive"
 mkdir "$scratch/package"
 tar -xzpf "$scratch/$archive" -C "$scratch/package" </dev/null || {

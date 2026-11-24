@@ -2733,6 +2733,16 @@ fn render_upgrade_hosts(hosts: &[HostUpgrade], full: bool) -> String {
     human
 }
 
+/// The `sh -c` payload sent to the local host and every Fabric peer. The tag is
+/// resolved once by the caller so all hosts fetch the same release; the embedded
+/// script owns the bounded resume/retry download and verifies it before unpacking.
+fn remote_upgrade_script(tag: &str) -> String {
+    format!(
+        "release_tag='{tag}'\n{}",
+        include_str!("upgrade-release.sh")
+    )
+}
+
 pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
     let (environment, targets) = match selected_targets(globals, &[]) {
         Ok(value) => value,
@@ -2901,11 +2911,7 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
                 .ok_or("Latest release has no valid tag")?;
             upgrade_version = Some(tag.trim_start_matches('v').to_owned());
             install_args.extend(["--tag".into(), tag.into()]);
-            script = format!(
-                "release_tag='{tag}'\n{}",
-                include_str!("upgrade-release.sh")
-            )
-            .into_bytes();
+            script = remote_upgrade_script(tag).into_bytes();
         }
         let ssh = if fabric.peers.is_empty() {
             None
