@@ -19,7 +19,7 @@ impl WorkerObserver for AbsentPathObserver {
     }
 }
 
-struct DelegatingWriterObserver(Occupancy, bool);
+struct DelegatingWriterObserver(Occupancy);
 impl WorkerObserver for DelegatingWriterObserver {
     fn observe_roots(&self, _: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
         panic!("delegation must use observe_roots_with_details")
@@ -64,10 +64,7 @@ fn observe_writer_tree_existing_path_delegates_to_the_census() -> Result<(), Box
     let present = temp.path().join("present-writer-tree");
     fs::create_dir(&present)?;
     assert_eq!(
-        super::census::observe_writer_tree(
-            &DelegatingWriterObserver(Occupancy::Held, true),
-            &present
-        ),
+        super::census::observe_writer_tree(&DelegatingWriterObserver(Occupancy::Held), &present),
         (Occupancy::Held, Some("census detail".into()))
     );
     Ok(())
@@ -79,10 +76,20 @@ fn observe_writer_tree_dangling_symlink_delegates_to_the_census() -> Result<(), 
     let link = temp.path().join("dangling-writer-tree");
     std::os::unix::fs::symlink(temp.path().join("missing-target"), &link)?;
     assert_eq!(
-        super::census::observe_writer_tree(&DelegatingWriterObserver(Occupancy::Held, true), &link),
+        super::census::observe_writer_tree(&DelegatingWriterObserver(Occupancy::Held), &link),
         (Occupancy::Held, Some("census detail".into()))
     );
     Ok(())
+}
+
+struct EmptyWriterObserver;
+impl WorkerObserver for EmptyWriterObserver {
+    fn observe_roots(&self, _: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
+        BTreeMap::new()
+    }
+    fn observe_roots_with_details(&self, _: &[PathBuf]) -> WorkerObservations {
+        (BTreeMap::new(), BTreeMap::new())
+    }
 }
 
 #[test]
@@ -91,10 +98,7 @@ fn observe_writer_tree_missing_census_entry_is_unknown() -> Result<(), Box<dyn E
     let present = temp.path().join("present-writer-tree");
     fs::create_dir(&present)?;
     assert_eq!(
-        super::census::observe_writer_tree(
-            &DelegatingWriterObserver(Occupancy::Available, false),
-            &present
-        ),
+        super::census::observe_writer_tree(&EmptyWriterObserver, &present),
         (
             Occupancy::census_unknown(present, "worker census did not return the requested tree"),
             None
