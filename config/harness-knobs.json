@@ -757,11 +757,17 @@
     },
     "confinement.census_ignore_unreadable": {
         "type": "census_ignore_list",
-        "default": [],
+        "default": [
+            {
+                "path": "/usr/bin/login",
+                "team_id": "platform",
+                "started_before": "root"
+            }
+        ],
         "strict": true, "safe": [],
         "host_only": true,
         "status": "wired",
-        "effect": "Host-owned exact executable path and signing team_id (or platform) exceptions for actual cwd EPERM. All real/effective/saved uids must be system accounts foreign to every root owner; platform entries also require a root-owned chain with no group/other write permission. Listed executables may occupy a worktree. Invalid/unreadable signing state never qualifies. Host layer only: a launch override or Fabric override is not accepted."
+        "effect": "Host-owned exact executable path and signing team_id (or platform) exceptions for actual cwd EPERM, optionally conditioned on started_before = \"root\" (kernel start at least 2s before the root's creation floor). All real/effective/saved uids must be system accounts foreign to every root owner; platform entries also require a root-owned chain with no group/other write permission. Defaults to /usr/bin/login (team_id=platform, started_before=root). Invalid/unreadable signing or start state never qualifies. Host layer only: a launch override or Fabric override is not accepted."
     },
     "routing.allow_unknown_partial_headroom": {
       "type": "bool", "default": false, "strict": true, "safe": false, "host_only": true, "status": "wired",

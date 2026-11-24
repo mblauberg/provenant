@@ -682,6 +682,60 @@ impl<'a> Service<'a> {
     ) -> Result<Vec<RunEvent>> {
         self.store.events(after, limit, attempt, call)
     }
+    pub fn abandon_writer_creation_floor(
+        &self,
+        id: AttemptId,
+        resolved_common: Option<&Path>,
+        call: &Request<'_>,
+    ) -> Result<Option<provenant_core::WallTime>> {
+        let record = self.store.record(id, call)?;
+        if record.retry_of.is_some() {
+            return Ok(None);
+        }
+        let request = match self.store.request(id, call) {
+            Ok(request) => request,
+            Err(RunError::NotFound) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        if request
+            .task
+            .context
+            .as_ref()
+            .and_then(|context| context.writer_predecessor)
+            .is_some()
+        {
+            return Ok(None);
+        }
+        let Some(writer) = request.task.writer.as_ref() else {
+            return Ok(None);
+        };
+        if !std::fs::symlink_metadata(&writer.worktree)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+        {
+            return Ok(None);
+        }
+        let fallback_common;
+        let common = match resolved_common {
+            Some(path) => path,
+            None => {
+                let Some(found) = provenant_os::git::repository_marker(&writer.project)
+                    .and_then(|marker| marker.common_dir)
+                else {
+                    return Ok(None);
+                };
+                fallback_common = found;
+                &fallback_common
+            }
+        };
+        let Ok(Some(owner)) =
+            provenant_confinement::worktrees::worktree_owner_for_path(common, &writer.worktree)
+        else {
+            return Ok(None);
+        };
+        let proven = owner.origin == provenant_confinement::worktrees::WorktreeOrigin::Lane
+            && owner.attempt_id == Some(id);
+        Ok(proven.then_some(record.queued_at))
+    }
     pub fn abandon_settlement(
         &self,
         id: AttemptId,

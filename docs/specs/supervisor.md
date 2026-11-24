@@ -471,8 +471,17 @@ executable under `/usr/libexec/`, `/System/Library/` or `/usr/sbin/`, and
 readable cwd outside every root all agree — all three credentials must be owner
 uids, so a setuid binary launched by the owner is not excused, and shells under
 `/bin` or `/usr/bin` are not; and a configured `census_ignore_unreadable` entry
-matched on the canonical executable path and team id extends the defaults to
-every failure class. Each excusal raises a typed warning naming the pid and path.
+matched on canonical executable path and team id (with bundled default
+`[{path = "/usr/bin/login", team_id = "platform", started_before = "root"}]`,
+overridable, never listing shells or interpreters) extends these defaults to
+every failure class. When an entry sets `started_before`, the process's kernel
+start time (`CwdObserver::process_start_time`) must be readable, unchanged across
+signing checks, and at least two seconds before the root floor: `"root"` takes
+the earliest `Metadata::created()` across all present scoped roots (any absent or
+unreadable root fails closed), while an `At` floor supplied through
+`CensusPolicyWorkers::with_creation_floor` allows explicit abandonment to use a
+proven attempt floor after a worktree removal. Each excusal raises a typed
+warning naming the pid and path.
 Unreadable root identity fails closed: a listed uid cannot be proven foreign to
 it, so the root stays `Unknown`. A listed uid the kernel will not reveal, such as
 `launchd` (pid 1), cannot be evaluated and is excused only by a configured entry

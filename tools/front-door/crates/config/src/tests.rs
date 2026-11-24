@@ -78,8 +78,20 @@ fn census_exclude_ancestors_defaults_true_and_can_be_disabled() {
 #[test]
 fn census_ignore_knob_round_trips_and_refuses_task_overrides_or_recovers_malformed_authority() {
     let name = "confinement.census_ignore_unreadable";
+    let default_login = [provenant_os::pid::CensusIgnoreEntry {
+        path: std::path::PathBuf::from("/usr/bin/login"),
+        team_id: "platform".into(),
+        started_before: Some(provenant_os::pid::StartedBefore::Root),
+    }];
     let defaults = load::<&[u8]>(&roots(), None).unwrap();
-    assert!(defaults.census_ignore_unreadable().unwrap().is_empty());
+    assert_eq!(defaults.census_ignore_unreadable().unwrap(), default_login);
+    let schema_default = schema(&defaults, &domains::NO_DOMAINS, "rev".into()).unwrap();
+    let default_field = schema_default
+        .fields
+        .iter()
+        .find(|field| field.path == name)
+        .unwrap();
+    assert_eq!(default_field.source, Layer::Default);
     let value = r#"[{"path":"/Library/Daemon","team_id":"TEAM123"},{"path":"/usr/bin/login","team_id":"platform"}]"#;
     let mut doc = toml_edit::DocumentMut::new();
     doc["schema_version"] = toml_edit::value(1);
@@ -89,6 +101,32 @@ fn census_ignore_knob_round_trips_and_refuses_task_overrides_or_recovers_malform
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].path, Path::new("/Library/Daemon"));
     assert_eq!(entries[1].team_id, "platform");
+    assert_eq!(
+        schema(&config, &domains::NO_DOMAINS, "rev".into())
+            .unwrap()
+            .fields
+            .iter()
+            .find(|field| field.path == name)
+            .unwrap()
+            .source,
+        Layer::Host
+    );
+    let empty_override = r#"[]"#;
+    let mut empty_doc = doc.clone();
+    KnobEdit::Set {
+        name,
+        value: empty_override,
+    }
+    .apply(&mut empty_doc)
+    .unwrap();
+    assert!(
+        load(&roots(), Some(empty_doc.to_string().as_bytes()))
+            .unwrap()
+            .census_ignore_unreadable()
+            .unwrap()
+            .is_empty(),
+        "default login entry must be overridable to []"
+    );
     for value in ["[]", value] {
         assert!(
             config
@@ -104,6 +142,8 @@ fn census_ignore_knob_round_trips_and_refuses_task_overrides_or_recovers_malform
         r#"[{"path":"/a","team_id":""}]"#,
         r#"[{"path":"/a","team_id":"TEAM123","extra":true}]"#,
         r#"[{"path":"/a","team_id":"A"},{"path":"/a","team_id":"B"}]"#,
+        r#"[{"path":"/a","team_id":"platform","started_before":"bogus"}]"#,
+        r#"[{"path":"/a","team_id":"platform","started_before":{"at":"2026-01-01T00:00:00.000000Z"}}]"#,
     ] {
         assert!(
             KnobEdit::Set { name, value }.apply(&mut doc).is_err(),
@@ -122,12 +162,12 @@ fn census_ignore_knob_round_trips_and_refuses_task_overrides_or_recovers_malform
         );
     }
     KnobEdit::Unset(name).apply(&mut doc).unwrap();
-    assert!(
+    assert_eq!(
         load(&roots(), Some(doc.to_string().as_bytes()))
             .unwrap()
             .census_ignore_unreadable()
-            .unwrap()
-            .is_empty()
+            .unwrap(),
+        default_login
     );
 }
 #[test]
@@ -1864,7 +1904,14 @@ fn read_knobs_ignores_domain_sections_it_does_not_know() {
         loud.warnings
     );
     let quiet = read_knobs(&fixture.roots).unwrap();
-    assert!(quiet.census_ignore_unreadable().unwrap().is_empty());
+    assert_eq!(
+        quiet.census_ignore_unreadable().unwrap(),
+        vec![provenant_os::pid::CensusIgnoreEntry {
+            path: std::path::PathBuf::from("/usr/bin/login"),
+            team_id: "platform".into(),
+            started_before: Some(provenant_os::pid::StartedBefore::Root),
+        }]
+    );
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]

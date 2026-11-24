@@ -210,6 +210,29 @@ pub fn worktree_owner_index(common: &Path) -> Result<Vec<(PathBuf, WorktreeOwner
     Ok(index)
 }
 
+/// Resolve the ownership record registered in `common` for `worktree` even if
+/// the checkout directory itself was already removed. Uses
+/// `split_at_extant_directory` so symlink/firmlink aliases match by directory
+/// identity and removed suffix; ambiguous matches fail closed (`Ok(None)`).
+pub fn worktree_owner_for_path(
+    common: &Path,
+    worktree: &Path,
+) -> Result<Option<WorktreeOwner>, WorktreeError> {
+    let Some(target) = super::census::split_at_extant_directory(worktree) else {
+        return Ok(None);
+    };
+    let mut matched = None;
+    for (path, owner) in worktree_owner_index(common)? {
+        if super::census::split_at_extant_directory(&path).as_ref() == Some(&target) {
+            if matched.is_some() {
+                return Ok(None);
+            }
+            matched = Some(owner);
+        }
+    }
+    Ok(matched)
+}
+
 pub fn save_owner(worktree: &VerifiedWorktree, owner: &WorktreeOwner) -> Result<(), WorktreeError> {
     validate(owner)?;
     worktree.repo().revalidate()?;
