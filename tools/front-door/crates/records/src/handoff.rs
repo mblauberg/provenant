@@ -770,7 +770,13 @@ impl HandoffCapture {
                 return;
             }
             if self.declaration.is_some() || self.json_final.is_some() {
-                if self.trailing_verdict || self.repeated.is_some() || self.json_repeated {
+                if self.declaration.is_none() && self.json_repeated {
+                    // Only a repeated ```json candidate remains: an oversized
+                    // line ends it as ordinary content, matching the
+                    // short-line path (#3941). There is no declaration for
+                    // the strict rule to protect.
+                    self.json_final = None;
+                } else if self.trailing_verdict || self.repeated.is_some() || self.json_repeated {
                     // A verdict, a repeated last block and a verdict after
                     // prose keep the strict rule (#3941).
                     self.error = Some(HandoffError::new("$", MUST_END));
@@ -805,6 +811,9 @@ impl HandoffCapture {
                 self.earlier = self.declaration.take();
                 self.trailing_prose = false;
                 self.trailing_structural = false;
+                // The superseding block is authoritative, so any json
+                // candidate and its second fence are ordinary content.
+                self.json_repeated = false;
                 self.json = Some(Vec::new());
             } else if self.trailing_verdict {
                 // A verdict after a handoff is the only tolerated suffix.
@@ -872,8 +881,11 @@ impl HandoffCapture {
         } else if marker == OPEN {
             self.json_final = None;
             // Prose before a later declaration is ordinary answer text, not
-            // trailing prose after the one that settles.
+            // trailing prose after the one that settles. The later block
+            // supersedes any json candidate, so its repeated-fence flag is
+            // scoped away with it (#3941).
             self.trailing_prose = false;
+            self.json_repeated = false;
             self.json = Some(Vec::new());
         } else if let Some((delimiter, length, info)) = fence(marker)
             && (delimiter != b'`' || !info.contains('`'))
@@ -1474,6 +1486,52 @@ mod tests {
             Handoff::from_turns(&with_turns, &ends).is_err(),
             "tool work"
         );
+    }
+
+    // Issue #3941 F1: a handoff-shaped ```json example followed by a second
+    // fence must not latch "repeated" onto the later, single ```handoff
+    // block. Oversized prose after that block is still ordinary prose.
+    #[test]
+    fn a_superseded_json_candidate_does_not_fail_oversized_trailing_prose() {
+        let stopped = Handoff::from_result(STOP).unwrap().unwrap();
+        let json = STOP.replacen("```handoff", "```json", 1);
+        let long = "x".repeat(20_000);
+        let prefix = format!("Example:\n{json}\n```bash\necho hi\n```\n");
+        for suffix in ["Noted.\n".to_owned(), format!("{long}\n")] {
+            let result = format!("{prefix}{STOP}\n{suffix}");
+            let parsed = Handoff::from_result_report(&result);
+            assert_eq!(parsed.handoff, Ok(Some(stopped.clone())), "{suffix}");
+            assert!(parsed.trailing_prose_tolerated, "{suffix}");
+            assert!(!parsed.trailing_verdict_tolerated, "{suffix}");
+            assert!(Handoff::json_fence_fallback(&result, &[]).is_none());
+            // Streaming any chunk size reaches the same result.
+            let mut capture = HandoffCapture::default();
+            for chunk in result.as_bytes().chunks(8192) {
+                capture.push(chunk);
+            }
+            assert_eq!(capture.finish_report(), parsed);
+        }
+    }
+
+    // Issue #3941 F1: repeated ```json candidates end as ordinary content on
+    // a short prose line, and now do the same on an oversized line. Neither
+    // settles a declaration, with or without the fallback warning.
+    #[test]
+    fn repeated_json_candidates_then_oversized_prose_match_the_short_line_path() {
+        let json = STOP
+            .replacen("```handoff", "```json", 1)
+            .replace("stopped_early", "done");
+        let prefix = format!("{json}\n```bash\necho hi\n```\n{json}\n");
+        for suffix in ["Noted.\n".to_owned(), "x".repeat(20_000)] {
+            let result = format!("{prefix}{suffix}\n");
+            assert_eq!(Handoff::from_result(&result), Ok(None), "{suffix}");
+            assert!(Handoff::json_fence_fallback(&result, &[]).is_none());
+            let mut capture = HandoffCapture::default();
+            for chunk in result.as_bytes().chunks(8192) {
+                capture.push(chunk);
+            }
+            assert_eq!(capture.finish(), Ok(None), "{suffix}");
+        }
     }
 
     #[test]
