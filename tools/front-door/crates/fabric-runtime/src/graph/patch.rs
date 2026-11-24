@@ -1729,6 +1729,19 @@ pub(super) fn prepare(
                 format!("node {id}: replace swaps one unstarted leaf for another"),
             ));
         }
+        // A bound writer's checkout is already chosen. Moving it would launch
+        // the writer in one worktree while the plan names another.
+        if node.worktree != target.worktree
+            && checkpoint.nodes.iter().any(|progress| {
+                progress.id == id
+                    && (progress.writer_binding.is_some() || progress.writer_binding_pending)
+            })
+        {
+            return Err(PatchError::new(
+                "started",
+                format!("node {id}: replace cannot move a bound writer to another worktree"),
+            ));
+        }
         if let Some((planner, spec)) = planner {
             plans::prepare(&mut node, planner, spec, source, false)?;
         }

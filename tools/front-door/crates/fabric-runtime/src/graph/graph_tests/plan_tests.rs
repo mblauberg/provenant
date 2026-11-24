@@ -3101,6 +3101,26 @@ fn admit_patch_skips_and_replaces_only_unstarted_nodes() {
 }
 
 #[test]
+fn replacing_a_bound_writer_cannot_move_its_worktree() {
+    let (document, mut checkpoint) = running_graph();
+    let writer = |worktree: &str| {
+        json!({"schema_version":1, "replace":[{
+            "id":"b", "access":"worktree_write", "worktree":worktree,
+            "prompt":"Write", "route":{"alias":"senior"}
+        }]})
+    };
+    admit(&document, &mut checkpoint, writer("lane")).unwrap();
+    let row = checkpoint.nodes.iter_mut().find(|row| row.id == "b").unwrap();
+    row.writer_binding = Some(
+        serde_json::from_value(json!({"worktree":"/bound/lane", "head":"0".repeat(40)})).unwrap(),
+    );
+    let error = admit(&document, &mut checkpoint, writer("other")).unwrap_err();
+    assert_eq!(error.code, "started", "{error:?}");
+    let row = checkpoint.nodes.iter().find(|row| row.id == "b").unwrap();
+    assert_eq!(row.worktree.as_deref(), Some("lane"), "{row:?}");
+}
+
+#[test]
 fn replacing_an_unstarted_writer_with_a_false_condition_settles_it_as_skipped()
 {
     let (document, mut checkpoint) = running_graph();
