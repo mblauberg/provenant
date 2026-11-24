@@ -442,6 +442,10 @@ pub struct WriterLaunch {
     pub(crate) facts: worktrees::RepoFacts,
 }
 impl WriterLaunch {
+    /// The commit this writer launch was prepared from.
+    pub fn base(&self) -> GitOid {
+        self.base.clone()
+    }
     /// Lanes that hold or retain this worktree's occupancy: every recorded
     /// reservation, plus an unnamed entry when a live holder has none. Empty
     /// means no other lane is attached. Observation only; it never locks.

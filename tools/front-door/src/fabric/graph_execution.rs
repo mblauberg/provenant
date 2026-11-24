@@ -2139,7 +2139,7 @@ mod tests {
             prepared.worktree.repo().root_dir(),
             prepared.worktree.repo().private_dir(),
             prepared.branch.as_str(),
-            prepared.base,
+            prepared.base(),
         )
         .map_err(|error| std::io::Error::other(error.to_string()))?;
         let slot = rig
