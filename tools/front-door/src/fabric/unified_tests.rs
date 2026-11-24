@@ -1615,6 +1615,7 @@ fn compact_row_keeps_the_reason_leading_clause_with_a_long_path()
     // A node with no attempt keeps the compact row's prefix short, as on a
     // graph whose advance was refused before the writer launched.
     let node = &mut checkpoint.nodes[1];
+    let node_id = node.id.clone();
     node.state = NodeState::Failed;
     let path = format!("/private/var/folders/xy/{}", "long-segment/".repeat(5));
     let first_clause = format!("node parent--child: local worktree {path} does not exist");
@@ -1626,8 +1627,12 @@ fn compact_row_keeps_the_reason_leading_clause_with_a_long_path()
         attempt: None,
     };
     let rows = status_rows(&graph_snapshot(checkpoint), &target);
+    let node_row = rows
+        .iter()
+        .find(|row| row["kind"] == "node" && row["node_id"] == node_id.as_str())
+        .expect("the failed node's row");
     assert_eq!(
-        rows[1]["reason"], reason,
+        node_row["reason"], reason,
         "the row builder clipped the reason"
     );
 
