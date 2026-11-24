@@ -65,6 +65,17 @@ pub(crate) fn run(
         provenant_core::RootInputs::new(settled.roots.home.clone(), settled.roots.checkout.clone());
     inputs.state_dir = Some(settled.roots.state_root.clone());
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    // Settlement is a natural checkpoint. Below gc.free_floor, start one
+    // bounded sweep from the state root; no daemon or extra schedule needed.
+    if let Err(error) = crate::gc_support::collect_below_floor(&settled.roots.state_root, workers) {
+        provenant_records::warning::warn(
+            provenant_records::warning::Warning::new(
+                provenant_records::warning::GC_SCHEDULE_FAILED,
+                format!("settlement free-floor sweep failed: {error}"),
+            )
+            .once_per_change(),
+        );
+    }
     let cancel = CancelToken::new();
     collect_owned_worktree(&settled, &roots, workers, delivery.as_ref(), &cancel)
 }

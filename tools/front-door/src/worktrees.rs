@@ -647,6 +647,9 @@ struct GcData {
     provider_state: provenant_run::ProviderStateGc,
     sweep_budget_seconds: u64,
     sweep_budget_source: String,
+    /// Resolved `gc.free_floor` and the layer or config file that set it.
+    free_floor_bytes: u64,
+    free_floor_source: String,
     sweep_cursor: Option<crate::gc_sweep::Cursor>,
     sweep_warning: Option<String>,
     sweep_stopped: bool,
@@ -697,6 +700,10 @@ struct GcData {
     /// their common directory has been gone past the idle lifetime.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     retired_projects: Vec<RetiredProject>,
+    /// Candidates deliberately kept, with their bytes and the reason that
+    /// protected them. A low-space pass reports these so an operator can act.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    uncollected: Vec<crate::gc_support::UncollectedItem>,
     #[serde(skip_serializing_if = "Option::is_none")]
     notice: Option<String>,
 }
@@ -906,6 +913,83 @@ fn gc_removal_records(data: &GcData) -> Vec<RemovalRecord> {
         .collect()
 }
 
+/// Every class that deliberately kept a candidate, with bytes and reason.
+/// Observations that carry no byte census say so instead of claiming zero.
+fn gc_uncollected(data: &GcData) -> Vec<crate::gc_support::UncollectedItem> {
+    use crate::gc_support::UncollectedItem;
+    let mut rows = Vec::new();
+    for entry in &data.report.kept {
+        rows.push(UncollectedItem {
+            path: entry.path.clone(),
+            bytes: Some(entry.bytes),
+            class: "cargo_cache",
+            reason: entry.reason.as_str().to_owned(),
+        });
+    }
+    for path in &data.build_dirs.busy {
+        rows.push(UncollectedItem {
+            path: path.clone(),
+            bytes: None,
+            class: "cargo_target",
+            reason: "live holder or held Cargo lock".to_owned(),
+        });
+    }
+    for path in &data.build_dirs.recent {
+        rows.push(UncollectedItem {
+            path: path.clone(),
+            bytes: None,
+            class: "cargo_target",
+            reason: "recent write within the grace period".to_owned(),
+        });
+    }
+    for issue in &data.provider_state.kept {
+        rows.push(UncollectedItem {
+            path: issue.path.clone(),
+            bytes: None,
+            class: "provider_state",
+            reason: issue.reason.clone(),
+        });
+    }
+    for path in &data.discard_archives.busy {
+        rows.push(UncollectedItem {
+            path: path.clone(),
+            bytes: None,
+            class: "discard_archive",
+            reason: "live holder".to_owned(),
+        });
+    }
+    for issue in &data.retention_errors {
+        rows.push(UncollectedItem {
+            path: issue.path.clone(),
+            bytes: None,
+            class: "retention",
+            reason: format!("{}: {}", issue.operation, issue.cause),
+        });
+    }
+    for process in &data.held_processes {
+        rows.push(UncollectedItem {
+            path: process.root.to_path_buf().unwrap_or_default(),
+            bytes: None,
+            class: "held_process",
+            reason: format!("live holder: {}", process.advisory()),
+        });
+    }
+    for work in &data.stranded_work {
+        rows.push(UncollectedItem {
+            path: work.path.clone(),
+            bytes: None,
+            class: "stranded_work",
+            reason: format!(
+                "unmerged work: {} ({} file(s), newest edit {})",
+                work.branch.as_deref().unwrap_or("no branch"),
+                work.files,
+                work.age
+            ),
+        });
+    }
+    rows
+}
+
 const GC_REPAIR: &str =
     "Run `provenant gc --apply --json` to inspect failed paths and retry incomplete collection.";
 
@@ -1073,7 +1157,7 @@ fn gc_compact_summary(data: &GcData) -> String {
         .map(|entry| entry.worktrees.removed.len())
         .sum();
     let mut summary = format!(
-        "{}: {trees} worktrees, {} attempt scratch directories, {} known bytes; {} retention errors\nGC sweep budget: {}s (source: {})\n",
+        "{}: {trees} worktrees, {} attempt scratch directories, {} known bytes; {} retention errors\nGC sweep budget: {}s (source: {}); free-space floor: {} bytes (source: {})\n",
         if data.report.dry_run {
             "would collect"
         } else {
@@ -1083,7 +1167,9 @@ fn gc_compact_summary(data: &GcData) -> String {
         gc_known_reclaimed_bytes(data),
         data.retention_errors.len() + data.provider_state.errors.len(),
         data.sweep_budget_seconds,
-        data.sweep_budget_source
+        data.sweep_budget_source,
+        data.free_floor_bytes,
+        data.free_floor_source
     );
     if let Some(notice) = &data.notice {
         summary.push_str(notice);
@@ -1114,6 +1200,10 @@ fn gc_compact_summary(data: &GcData) -> String {
     }
     if data.held_incomplete {
         summary.push_str(worktrees::HELD_CENSUS_INCOMPLETE_WARNING);
+        summary.push('\n');
+    }
+    for item in gc_uncollected(data) {
+        summary.push_str(&item.human_line());
         summary.push('\n');
     }
     summary
@@ -1499,6 +1589,10 @@ fn gc_data_summary(data: &GcData) -> String {
     if let Some(notice) = &data.notice {
         human.push_str(&format!("{notice}\n"));
     }
+    for item in gc_uncollected(data) {
+        human.push_str(&item.human_line());
+        human.push('\n');
+    }
     human
 }
 
@@ -1556,6 +1650,10 @@ enum GcOutput<'a> {
         discard_archive_retention_source: &'a str,
         sweep_budget_seconds: u64,
         sweep_budget_source: &'a str,
+        free_floor_bytes: u64,
+        free_floor_source: &'a str,
+        #[serde(skip_serializing_if = "<[_]>::is_empty")]
+        uncollected: &'a [crate::gc_support::UncollectedItem],
         sweep_cursor: &'a Option<crate::gc_sweep::Cursor>,
         sweep_warning: &'a Option<String>,
         sweep_stopped: bool,
@@ -1600,6 +1698,7 @@ fn append_gc_removal_records(report: &mut worktrees::WorktreeGcReport) {
 }
 
 fn gc_result_data(data: &GcData, detailed: bool) -> GcOutput<'_> {
+    let uncollected = gc_uncollected(data);
     if detailed {
         return GcOutput::Detailed {
             data,
@@ -1641,6 +1740,9 @@ fn gc_result_data(data: &GcData, detailed: bool) -> GcOutput<'_> {
         discard_archive_retention_source: &data.discard_archive_retention_source,
         sweep_budget_seconds: data.sweep_budget_seconds,
         sweep_budget_source: &data.sweep_budget_source,
+        free_floor_bytes: data.free_floor_bytes,
+        free_floor_source: &data.free_floor_source,
+        uncollected: &uncollected,
         sweep_cursor: &data.sweep_cursor,
         sweep_warning: &data.sweep_warning,
         sweep_stopped: data.sweep_stopped,
@@ -2321,6 +2423,23 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         .get("gc.sweep_budget")
         .map(gc_origin_source)
         .unwrap_or_else(|| "compiled default".into());
+    // One resolution of the floor and its source for admission, pressure and
+    // reporting. An explicit `--free-floor` override names itself as the source.
+    let (free_floor, free_floor_source) = match command.free_floor {
+        Some(bytes) => (bytes, "command --free-floor".to_owned()),
+        None => {
+            let limits = config
+                .gc
+                .disk_limits(roots.state.as_path())
+                .map_err(Error::DiskSpace)?;
+            let source = config
+                .origins
+                .get("gc.free_floor")
+                .map(gc_origin_source)
+                .unwrap_or_else(|| limits.free_floor_source.description().to_owned());
+            (limits.free_floor, source)
+        }
+    };
     if (command.scheduled || command.pressure) && !config.gc.schedule {
         return Ok(GcData {
             report: provenant_confinement::cache::CacheGcReport {
@@ -2330,6 +2449,8 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             idle_seconds: command.idle.unwrap_or(6 * 3600),
             sweep_budget_seconds,
             sweep_budget_source,
+            free_floor_bytes: free_floor,
+            free_floor_source: free_floor_source.clone(),
             provider_state: Default::default(),
             unobserved_projects,
             skipped_transient,
@@ -2341,17 +2462,39 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
     }
     let clock = SystemClock::new();
     let deadline = crate::gc_sweep::Deadline::start(sweep_budget);
+    // An explicit floor request joins an in-flight sweep instead of reporting
+    // an empty skip. The wait is bounded; on expiry it is an error, never a
+    // successful collection of zero bytes.
+    const HELD_SWEEP_WAIT: Duration = Duration::from_secs(20);
+    let joins_held_sweep = command.free_floor.is_some() && !command.dry_run;
     let mut lease = if command.dry_run {
         None
     } else {
-        match crate::gc_sweep::acquire(roots.state.as_path(), sweep_budget, &clock)
-            .map_err(|error| Error::RetentionCollection(error.to_string()))?
-        {
+        let acquired = if joins_held_sweep {
+            crate::gc_sweep::acquire_waiting(
+                roots.state.as_path(),
+                sweep_budget,
+                HELD_SWEEP_WAIT,
+                &clock,
+            )
+        } else {
+            crate::gc_sweep::acquire(roots.state.as_path(), sweep_budget, &clock)
+        }
+        .map_err(|error| Error::RetentionCollection(error.to_string()))?;
+        match acquired {
             crate::gc_sweep::Acquire::Held(lease) => Some(lease),
+            crate::gc_sweep::Acquire::Busy(warning) if joins_held_sweep => {
+                return Err(Error::RetentionCollection(format!(
+                    "GC sweep still running after a {HELD_SWEEP_WAIT:?} bounded wait; {}; this invocation collected nothing",
+                    warning.unwrap_or_else(|| "sweep already running".into())
+                )));
+            }
             crate::gc_sweep::Acquire::Busy(warning) => {
                 return Ok(GcData {
                     sweep_budget_seconds,
                     sweep_budget_source,
+                    free_floor_bytes: free_floor,
+                    free_floor_source: free_floor_source.clone(),
                     sweep_warning: warning.clone(),
                     notice: Some(
                         warning.unwrap_or_else(|| "sweep already running; skipped".into()),
@@ -2460,11 +2603,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         });
     }
     if command.scheduled {
-        let floor = command
-            .free_floor
-            .map(Ok)
-            .unwrap_or_else(|| config.gc.free_floor_bytes(roots.state.as_path()))
-            .map_err(Error::DiskSpace)?;
+        let floor = free_floor;
         if provenant_confinement::disk::lane_available_bytes(roots.state.as_path(), &home, &project)
             .map_err(Error::DiskSpace)?
             >= floor
@@ -2487,6 +2626,8 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                 },
                 sweep_budget_seconds,
                 sweep_budget_source,
+                free_floor_bytes: free_floor,
+                free_floor_source: free_floor_source.clone(),
                 sweep_cursor: initial_cursor,
                 sweep_warning,
                 retired_projects: retired_projects.clone(),
@@ -2803,11 +2944,6 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             .map(|project| project.binding.project_id())
             .collect()
     };
-    let free_floor = command
-        .free_floor
-        .map(Ok)
-        .unwrap_or_else(|| config.gc.free_floor_bytes(roots.state.as_path()))
-        .map_err(Error::DiskSpace)?;
     let output_idle_seconds = idle_seconds;
     let lanes: Vec<_> = projects.iter().flat_map(|project| &project.lanes).collect();
     let now_ns = SystemClock
@@ -2883,6 +3019,8 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             import_pins,
             sweep_budget_seconds,
             sweep_budget_source: sweep_budget_source.clone(),
+            free_floor_bytes: free_floor,
+            free_floor_source: free_floor_source.clone(),
             sweep_warning,
             held_processes,
             stranded_work,
@@ -4656,6 +4794,69 @@ mod gc_preview_tests {
         let summary = serde_json::to_value(gc_result_data(&data, false)).unwrap();
         assert_eq!(summary["known_reclaimed_bytes"], 60);
         assert!(gc_data_summary(&data).contains("60 known allocated bytes reclaimable"));
+    }
+
+    #[test]
+    fn gc_reports_uncollected_candidates_with_reasons_sizes_and_floor_source() {
+        let mut data = GcData::default();
+        data.free_floor_bytes = 4096;
+        data.free_floor_source = "host config.toml".into();
+        data.report
+            .kept
+            .push(provenant_confinement::cache::CacheGcEntry {
+                path: PathBuf::from("/cache/live"),
+                bytes: 8192,
+                reason: provenant_confinement::cache::CacheGcReason::Live,
+            });
+        data.report
+            .kept
+            .push(provenant_confinement::cache::CacheGcEntry {
+                path: PathBuf::from("/cache/unknown"),
+                bytes: 1024,
+                reason: provenant_confinement::cache::CacheGcReason::Unobservable,
+            });
+        data.provider_state
+            .kept
+            .push(provenant_run::ProviderStateIssue {
+                path: PathBuf::from("/attempts/1/scratch"),
+                reason: "live holder".into(),
+            });
+        data.retention_errors
+            .push(provenant_config::RetentionIssue {
+                path: PathBuf::from("/state/gc/archive"),
+                operation: "archive".into(),
+                cause: "retained evidence".into(),
+            });
+        data.stranded_work.push(crate::stranded_work::StrandedWork {
+            path: PathBuf::from("/worktrees/unmerged"),
+            branch: Some("fix/3950".into()),
+            issue: None,
+            operation: None,
+            files: 2,
+            lines: 9,
+            age: "1d".into(),
+            newest_edit_micros: None,
+        });
+        let rows = gc_uncollected(&data);
+        assert!(rows.iter().any(|row| row.bytes == Some(8192)
+            && row.class == "cargo_cache"
+            && row.reason == "live holder"));
+        assert!(rows.iter().any(|row| row.reason == "uncertain custody"));
+        assert!(
+            rows.iter()
+                .any(|row| row.reason.contains("retained evidence"))
+        );
+        assert!(rows.iter().any(|row| row.reason.contains("unmerged work")));
+        let json = serde_json::to_value(gc_result_data(&data, false)).unwrap();
+        assert_eq!(json["free_floor_bytes"], 4096);
+        assert_eq!(json["free_floor_source"], "host config.toml");
+        assert_eq!(json["uncollected"].as_array().unwrap().len(), rows.len());
+        let human = gc_compact_summary(&data);
+        assert!(
+            human.contains("uncollected cargo_cache /cache/live: 8192 bytes; kept: live holder"),
+            "{human}"
+        );
+        assert!(human.contains("free-space floor: 4096 bytes (source: host config.toml)"));
     }
 
     #[test]

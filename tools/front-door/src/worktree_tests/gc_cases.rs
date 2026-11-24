@@ -9,6 +9,33 @@ fn stranded_worktree_path(value: &Value) -> Result<PathBuf> {
     Ok(Path::new(root).join(relative))
 }
 
+/// Spec: docs/specs/disk.md#dispatch-and-new-build-pressure
+/// A natural checkpoint starts a bounded sweep only below the floor.
+pub(super) fn gc_floor_checkpoint_fires_below_floor_only() -> Result {
+    let rig = repository()?;
+    let workers = provenant_confinement::worktrees::SystemWorkerObserver;
+    let checkpoint = || crate::gc_support::collect_below_floor(&rig.state, &workers);
+    fs::write(
+        rig.state.join("config.toml"),
+        b"schema_version=1\n[gc]\nfree_floor='1B'\n",
+    )?;
+    assert!(
+        !checkpoint()?,
+        "a healthy free-space reading must not sweep"
+    );
+    fs::write(
+        rig.state.join("config.toml"),
+        b"schema_version=1\n[gc]\nfree_floor='18446744073709551615B'\n",
+    )?;
+    assert!(checkpoint()?, "a below-floor reading must start a sweep");
+    fs::write(
+        rig.state.join("config.toml"),
+        b"schema_version=1\n[gc]\nfree_floor='18446744073709551615B'\nschedule=false\n",
+    )?;
+    assert!(!checkpoint()?, "disabled scheduling must not start a sweep");
+    Ok(())
+}
+
 pub(super) fn gc_keeps_and_names_stranded_work() -> Result {
     let rig = repository()?;
     let created = ok(

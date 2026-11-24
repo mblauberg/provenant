@@ -141,6 +141,35 @@ restarts its scope from the beginning rather than skipping work.
 Collection belongs to [worktrees](supervisor.md#worktrees) and
 [state retention](state.md#retention-keeps-evidence).
 
+## Floor-triggered and joined sweeps
+
+`gc.free_floor` is overridable and its effective value and source (compiled
+default, host setting or config file) are reported by `provenant gc` in both
+human and JSON output. Lane launch already starts a bounded sweep when free
+space on the state volume is below the floor; settlement does the same through
+the cleanup worker, so no daemon is needed. Above the floor, or with
+`gc.schedule = false`, a checkpoint starts nothing.
+- Why: a host that fills up between daily ticks still recovers space, while a
+  healthy host is never swept merely because a lane started.
+
+An explicit `provenant gc --free-floor SIZE` that finds the single-flight
+lease held waits for that sweep within a bounded window, then runs its own
+collection on the freed lock. It never turns a busy lease into a successful
+empty skip: if the bound expires it fails with the wait, the holder and the
+fact that this invocation collected nothing.
+- Why: the operator who asks for space back must see either a real result or a
+  failure, not "sweep already running; skipped" with zero bytes.
+
+## What was not collected
+
+Every gc report lists the candidates it deliberately kept: path, class,
+observed bytes (or an explicit unknown), and the reason — live holder,
+uncertain custody, retained evidence, unmerged work, held Cargo lock, recent
+write and similar. A measurement that cannot report bytes says so rather than
+claiming zero. The same list appears in human and JSON output.
+- Why: collection must preserve evidence and live data; naming what stayed is
+  what lets an operator act on it.
+
 ## Dispatch and new-build pressure
 
 Submission, admission and new builds take one decision, `DiskGate::decide`: the
