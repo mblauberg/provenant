@@ -849,7 +849,7 @@ fn serve_authorised(
                 bind_admitted_provisioning_owners(&mut checkpoint)?;
             }
             if request.needs_worktree_provisioning()
-                && !skipped_row(&*checkpoint, &receipt.node)
+                && !skipped_row(&checkpoint, &receipt.node)
                 && let Some(path) = receipt.worktree.as_deref()
             {
                 let source = relay::child_source(
