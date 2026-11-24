@@ -669,11 +669,10 @@ fn agy_repeated_answer_is_captured_once() {
     }
     // Since #3910 a later handoff that ends the answer wins, so only prose
     // after the final handoff stays malformed.
-    for response in [format!("{answer}\nextra")] {
-        let decoded = decode("", &response);
-        assert_eq!(decoded.result, response);
-        assert!(provenant_records::handoff::Handoff::from_turns(&decoded.result, &[]).is_err());
-    }
+    let response = format!("{answer}\nextra");
+    let decoded = decode("", &response);
+    assert_eq!(decoded.result, response);
+    assert!(provenant_records::handoff::Handoff::from_turns(&decoded.result, &[]).is_err());
 }
 #[test]
 fn repeated_answer_from_non_agy_adapter_is_unchanged() {
