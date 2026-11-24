@@ -1086,8 +1086,8 @@ fn refused_planner_fragment_retries_after_file_journal_reopen() {
 fn malformed_handoff_is_a_typed_failure_and_prevents_delivery() {
     for output in [
         "```handoff\n{}\n```".to_owned(),
-        // Adjacent repeats are one declaration since #3341; prose between them is not.
-        format!("{STOP}\nMore text\n{STOP}"),
+        // The handoff that ends the answer wins (#3910); prose after the last one does not.
+        format!("{STOP}\nMore text"),
         STOP.replace("stopped_early", "TOKEN_SENTINEL/private"),
         STOP.trim_end_matches("\n```").to_owned(),
         format!(
