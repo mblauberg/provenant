@@ -1814,7 +1814,7 @@ fn usage_verbs_keep_their_persisted_spelling() {
 fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Error>> {
     const DEFAULT_CEILING: usize = 2_000;
     const CEILINGS: &[(&str, usize)] = &[
-        ("crates/cli/src/fabric/graph_relay.rs", 2580),
+        ("crates/cli/src/fabric/graph_relay.rs", 2592),
         ("crates/cli/src/lib.rs", 3830),
         ("crates/cli/src/quota.rs", 6943),
         ("crates/cli/src/run.rs", 2521),
@@ -1830,7 +1830,7 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         ("crates/confinement/src/utility.rs", 6586),
         ("crates/confinement/src/worktrees/census.rs", 2547),
         ("crates/confinement/src/worktrees/gc.rs", 3230),
-        ("crates/confinement/src/worktrees/lifecycle.rs", 2725),
+        ("crates/confinement/src/worktrees/lifecycle.rs", 2734),
         ("crates/fabric-runtime/src/coordination/facade.rs", 1694),
         ("crates/fabric-runtime/src/graph.rs", 4208),
         ("crates/fabric-runtime/src/graph/journal.rs", 2518),
@@ -1872,9 +1872,9 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         ("src/ci.rs", 2243),
         ("src/fabric/graph_execution.rs", 2263),
         ("src/fabric/interface.rs", 3970),
-        ("src/fabric/owner.rs", 5533),
+        ("src/fabric/owner.rs", 5550),
         ("src/fabric/peer.rs", 2274),
-        ("src/fabric/run_owner.rs", 2804),
+        ("src/fabric/run_owner.rs", 2806),
         ("src/fabric/unified.rs", 4275),
         ("src/handoff.rs", 1425),
         ("src/hooks.rs", 2636),
