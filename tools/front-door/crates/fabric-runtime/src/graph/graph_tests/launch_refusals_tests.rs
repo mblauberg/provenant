@@ -139,7 +139,7 @@ fn confinement_refusal_carries_rule_and_path_into_the_node_result() {
     use provenant_records::diagnostic::{ConfinementRule, ResourceFact};
     let error = FacadeError::ConfinementRefused {
         resource: Some(ResourceFact::ConfinementRule(Box::new(ConfinementRule {
-            rule: "peer_project_outside_home".into(),
+            rule: "peer_project_unprojectable".into(),
             path: "/fixture/scratch/project/.git".into(),
         }))),
     };
@@ -162,7 +162,7 @@ fn confinement_refusal_carries_rule_and_path_into_the_node_result() {
     );
     let reason = node.advance_error.as_deref().unwrap();
     assert!(reason.contains("confinement rule"), "{reason}");
-    assert!(reason.contains("peer_project_outside_home"), "{reason}");
+    assert!(reason.contains("peer_project_unprojectable"), "{reason}");
     assert!(reason.contains("/fixture/scratch/project/.git"), "{reason}");
 }
 

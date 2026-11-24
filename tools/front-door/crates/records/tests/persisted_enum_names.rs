@@ -676,7 +676,7 @@ fn attempt_record_enum_names_are_a_deliberate_contract() -> TestResult {
             ),
             (
                 "confinement_rule",
-                json!({"kind": "confinement_rule", "rule": "peer_project_outside_home", "path": "/fixture/project/.git"}),
+                json!({"kind": "confinement_rule", "rule": "peer_project_unprojectable", "path": "/fixture/project/.git"}),
             ),
         ],
     )?;

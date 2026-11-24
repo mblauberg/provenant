@@ -27,7 +27,7 @@ pub(crate) fn bind_reader_source(
     network: Option<NetworkAccess>,
 ) -> Result<LaneAccessRequest, FacadeError> {
     let source = provenant_run::resolve_reader_source(state, cwd, cwd)
-        .map_err(|_| refusal("peer_source_resolve", cwd))?;
+        .map_err(super::run_owner::run_error)?;
     let directory = provenant_os::fs::Directory::open_anchor(&source)
         .map_err(|_| refusal("peer_source_anchor", &source))?;
     let metadata = directory
@@ -59,19 +59,14 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let dir = tempfile::tempdir()?;
         let cwd = dir.path();
-        // A directory with no Git project cannot yield a reader source, so the
-        // real resolution path must refuse with the named rule and refused path.
+        // A directory with no Git project cannot yield a reader source. That is
+        // not a confinement violation: the resolver's typed cause must survive.
         let error = bind_reader_source(cwd, cwd, None)
             .expect_err("a non-Git directory must not resolve a reader source");
-        match error {
-            FacadeError::ConfinementRefused {
-                resource: Some(ResourceFact::ConfinementRule(rule)),
-            } => {
-                assert_eq!(rule.rule, "peer_source_resolve");
-                assert_eq!(rule.path, cwd.display().to_string());
-            }
-            other => panic!("expected a named confinement refusal, got {other:?}"),
-        }
+        assert!(
+            !matches!(error, FacadeError::ConfinementRefused { .. }),
+            "a resolve failure must keep its own cause, got {error:?}"
+        );
         for rule in ["peer_source_anchor", "peer_source_identity"] {
             let named = refusal(rule, cwd);
             match named {

@@ -495,7 +495,7 @@ fn confinement_rule_refusal_preserves_rule_and_path_over_transport() {
     use provenant_records::diagnostic::{ConfinementRule, ResourceFact};
     let error = FacadeError::ConfinementRefused {
         resource: Some(ResourceFact::ConfinementRule(Box::new(ConfinementRule {
-            rule: "peer_project_outside_home".into(),
+            rule: "peer_project_unprojectable".into(),
             path: "/fixture/scratch/project/.git".into(),
         }))),
     };
@@ -504,7 +504,7 @@ fn confinement_rule_refusal_preserves_rule_and_path_over_transport() {
     let diagnostic = received.diagnostic();
     assert_eq!(diagnostic.code, "confinement_refused");
     let detail = diagnostic.detail.unwrap();
-    assert!(detail.contains("peer_project_outside_home"), "{detail}");
+    assert!(detail.contains("peer_project_unprojectable"), "{detail}");
     assert!(detail.contains("/fixture/scratch/project/.git"), "{detail}");
     assert!(
         diagnostic

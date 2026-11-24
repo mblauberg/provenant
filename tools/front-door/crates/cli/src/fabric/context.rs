@@ -948,16 +948,12 @@ impl Context {
             .ok_or_else(|| {
                 PeerFailure::new(FacadeError::HomeUnavailable, "peer host is not configured")
             })?;
-        let project = ProjectLocator::new(&self.identity, &self.home).map_err(|error| {
+        let project = ProjectLocator::new(&self.identity, &self.home).map_err(|_| {
             // A peer call needs a home-relative project identity. A scratch
             // project (for example the upgrade verify fixture) has none; name
             // the rule and the path that could not be projected instead of
             // collapsing every locator failure into a bare confinement refusal.
-            let rule = if matches!(error, PeerError::Project) {
-                "peer_project_outside_home"
-            } else {
-                "peer_project_locator"
-            };
+            let rule = "peer_project_unprojectable";
             let path = self
                 .identity
                 .common_dir
@@ -1345,7 +1341,7 @@ mod tests {
             super::FacadeError::ConfinementRefused {
                 resource: Some(ResourceFact::ConfinementRule(rule)),
             } => {
-                assert_eq!(rule.rule, "peer_project_outside_home");
+                assert_eq!(rule.rule, "peer_project_unprojectable");
                 assert_eq!(rule.path, outside.display().to_string());
             }
             other => panic!("expected a named confinement refusal, got {other:?}"),
