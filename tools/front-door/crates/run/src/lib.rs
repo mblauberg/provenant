@@ -1182,10 +1182,12 @@ impl RunError {
                 diagnostic = diagnostic
                     .fact(DiagnosticFact::Filesystem {
                         operation,
-                        path: path
-                            .as_ref()
-                            .map(|path| path.to_string_lossy().into_owned()),
-                        source: Some(source.to_string()),
+                        detail: Some(Box::new(provenant_records::diagnostic::FilesystemDetail {
+                            path: path
+                                .as_ref()
+                                .map(|path| path.to_string_lossy().into_owned()),
+                            source: Some(source.to_string()),
+                        })),
                         cause: CausedSource::cause(source),
                     })
                     .next("inspect the host I/O failure before retrying");
@@ -1238,8 +1240,9 @@ impl RunError {
                 };
                 diagnostic = diagnostic.fact(DiagnosticFact::Filesystem {
                     operation,
-                    path,
-                    source,
+                    detail: (path.is_some() || source.is_some()).then(|| {
+                        Box::new(provenant_records::diagnostic::FilesystemDetail { path, source })
+                    }),
                     cause: None,
                 });
             }
@@ -1575,9 +1578,9 @@ mod diagnostic_projection_tests {
                         Some(DiagnosticFact::Filesystem {
                             operation: "read file",
                             cause: None,
-                            path: Some(path),
-                            source: Some(source),
-                        }) if path == "/private/host" && source == "TOKEN_SENTINEL"
+                            detail: Some(detail),
+                        }) if detail.path.as_deref() == Some("/private/host")
+                            && detail.source.as_deref() == Some("TOKEN_SENTINEL")
                     ));
                 }
             }

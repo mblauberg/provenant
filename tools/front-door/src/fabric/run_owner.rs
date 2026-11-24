@@ -569,15 +569,18 @@ pub(crate) fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
             }
             Some(DiagnosticFact::Filesystem {
                 operation,
-                path,
-                source,
+                detail,
                 cause,
             }) => {
-                let source = source
-                    .as_deref()
+                let source = detail
+                    .as_ref()
+                    .and_then(|detail| detail.source.as_deref())
                     .or(*cause)
                     .unwrap_or("I/O operation failed");
-                let path = path.as_deref().map(std::path::Path::new);
+                let path = detail
+                    .as_ref()
+                    .and_then(|detail| detail.path.as_deref())
+                    .map(std::path::Path::new);
                 return FacadeError::io_failure(*operation, path, source);
             }
             Some(DiagnosticFact::DiskPressure {
