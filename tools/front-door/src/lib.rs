@@ -49,6 +49,8 @@ mod pr_land_tests;
 mod process_tree;
 mod provider_retention;
 mod release_smoke;
+#[cfg(test)]
+mod remoteless_handoff_tests;
 mod retention_owner;
 mod roots;
 mod scratch_dir;

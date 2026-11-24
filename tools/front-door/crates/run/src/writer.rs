@@ -355,7 +355,7 @@ pub(crate) struct StopWorkPolicy<'a> {
 /// use. A checkout without a remote has no tracking branch, so it yields
 /// `None` rather than an empty remote name.
 /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
-fn terminal_forge_remote(state: &Path, project: &Path) -> Option<String> {
+pub(super) fn terminal_forge_remote(state: &Path, project: &Path) -> Option<String> {
     let ports = provenant_config::PortTable::read_for(Some(project), state).ok()?;
     let policy = provenant_config::operation_policy(state, project, &ports);
     let config = provenant_config::ForgeConfig::new(&ports, (*policy).clone());
@@ -668,7 +668,7 @@ impl WriterLaunch {
         status_paths(&output)
     }
 
-    fn ahead_of_remote(
+    pub(super) fn ahead_of_remote(
         &self,
         git: &Path,
         head: GitOid,
@@ -1946,7 +1946,7 @@ impl LaunchConfinement {
     }
 }
 
-fn isolated_lane_access_receipt() -> provenant_records::LaneAccessReceipt {
+pub(super) fn isolated_lane_access_receipt() -> provenant_records::LaneAccessReceipt {
     provenant_records::LaneAccessReceipt {
         access: provenant_records::LaneAccess::Isolated,
         source: provenant_records::Layer::Default,
@@ -1956,7 +1956,7 @@ fn isolated_lane_access_receipt() -> provenant_records::LaneAccessReceipt {
 }
 
 #[allow(clippy::too_many_arguments)] // Writer custody, access and policy stay explicit at this boundary.
-fn prepare_writer_git(
+pub(super) fn prepare_writer_git(
     writer: &mut WriterLaunch,
     state: &Path,
     home: &Path,
