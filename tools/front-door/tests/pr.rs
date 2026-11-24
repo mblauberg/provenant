@@ -1286,6 +1286,32 @@ fn fake_gh(args: &[String]) -> Result<u8> {
             let body = serde_json::json!({"state":if merged {"closed"} else {"open"}, "head":{"sha":next,"ref":"feature","repo":{"full_name":"owner/repo"}}, "base":{"sha":base,"ref":"main","repo":{"full_name":"owner/repo"}}, "mergeable":mergeable,"mergeable_state":"clean","merged_at":if merged {Some("2020-01-01T00:00:00Z")} else {None},"merge_commit_sha":null,"title":"fixture","user":{"login":"fixture-author"},"draft":draft,"html_url":"https://github.com/owner/repo/pull/1668"});
             io::stdout().write_all(&serde_json::to_vec(&body)?)?;
         }
+        value if value.contains("repos/{owner}/{repo}/rules/branches/main") => {
+            // No ruleset: an empty page of rules (array of pages when slurped).
+            let body = if value.contains("--slurp") {
+                "[[]]"
+            } else {
+                "[]"
+            };
+            io::stdout().write_all(body.as_bytes())?;
+        }
+        value if value.contains("repos/{owner}/{repo}/branches/main") => {
+            let checks = fs::read_to_string("required-checks").unwrap_or_default();
+            let contexts: Vec<&str> = checks.lines().filter(|line| !line.is_empty()).collect();
+            let body = serde_json::json!({
+                "name": "main",
+                "protected": !contexts.is_empty(),
+                "protection": {
+                    "enabled": !contexts.is_empty(),
+                    "required_status_checks": {
+                        "enforcement_level": if contexts.is_empty() { "off" } else { "everyone" },
+                        "contexts": contexts,
+                        "checks": [],
+                    },
+                },
+            });
+            io::stdout().write_all(&serde_json::to_vec(&body)?)?;
+        }
         "pr view 1668 --json headRefOid" | "pr view 1668 --json headRefOid,mergeable" => {
             if Path::new("head-seq").exists() {
                 // One head per read, the last one repeating: scripted head movement.

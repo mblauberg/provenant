@@ -957,10 +957,12 @@ fn observed_policy<F: provenant_config::Forge, C: super::observer::Clock>(
     let Some(protected) = info.get("protected").and_then(serde_json::Value::as_bool) else {
         return Requirement::Unreadable;
     };
+    // The branch read carries its classic protection's required checks, so no
+    // admin-only `/protection` read is needed; an unprotected branch has none.
     let protection = if protected {
-        match observer.resource(&format!("branches/{branch}/protection"), max_age, request) {
-            Ok(value) => Some(value),
-            Err(_) => return Requirement::Unreadable,
+        match info.get("protection") {
+            Some(value) => Some(value.clone()),
+            None => return Requirement::Unreadable,
         }
     } else {
         None
