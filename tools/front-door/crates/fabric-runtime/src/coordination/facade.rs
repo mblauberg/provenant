@@ -1353,7 +1353,7 @@ impl FacadeError {
             .map(|path| anchor.map_or_else(|| path.clone(), |anchor| anchor.join(&path)))
             .filter(|path| path.is_absolute());
         let source = source
-            .as_deref()
+            .as_ref()
             .map(|source| source as &dyn std::fmt::Display);
         Self::io_failure(operation, path.as_deref(), source)
     }
