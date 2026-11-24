@@ -582,10 +582,10 @@ fn snapshot_offered_models<'a>(
 /// unknown or unaccounted availability is never offer evidence: it keeps its
 /// re-probe path instead of refusing the account. An empty list means the
 /// offers are unknown, never that the account serves every model.
-fn recorded_offer_models<'a>(
-    availability: &'a AvailabilityRecord,
+fn recorded_offer_models(
+    availability: &AvailabilityRecord,
     context: &RoutingContext<'_>,
-) -> Option<(&'a [String], i64)> {
+) -> Option<(Vec<String>, i64)> {
     if !provenant_records::AdapterSpec::get(&availability.adapter)
         .is_some_and(|spec| spec.offered_models)
     {
@@ -599,7 +599,7 @@ fn recorded_offer_models<'a>(
     let key = availability.account_key.as_deref()?;
     if !availability.observed_models.is_empty() {
         return Some((
-            availability.observed_models.as_slice(),
+            availability.observed_models.clone(),
             availability.observed_unix_seconds,
         ));
     }
@@ -619,7 +619,7 @@ fn recorded_offer_models<'a>(
         return None;
     }
     let offered = snapshot_offered_models(context.accounts, &availability.adapter, Some(key))?;
-    Some((offered, snapshot.observed_unix_seconds))
+    Some((offered.to_vec(), snapshot.observed_unix_seconds))
 }
 
 /// Give every selection the account's recorded offer list under the same rule
@@ -639,7 +639,7 @@ fn availability_with_known_offers(
                 return record.clone();
             };
             AvailabilityRecord {
-                observed_models: offered.to_vec(),
+                observed_models: offered,
                 ..record.clone()
             }
         })
@@ -1883,7 +1883,7 @@ fn recorded_offers(
     Some(provenant_records::run::AccountOfferMismatch {
         account: key.to_owned(),
         model: model.as_str().to_owned(),
-        offered_models: offered.to_vec(),
+        offered_models: offered,
         age_seconds: context.now_seconds().saturating_sub(observed_at) as u64,
     })
 }
