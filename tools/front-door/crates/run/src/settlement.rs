@@ -1094,33 +1094,17 @@ mod tests {
                     .collect()
             }
         }
-        for (live, occupancy, held, absent, allowed) in [
-            (true, Occupancy::Available, false, false, false),
-            (false, Occupancy::Available, false, false, true),
-            (
-                false,
-                Occupancy::Observed { process: None },
-                false,
-                false,
-                false,
-            ),
+        for (live, occupancy, held, allowed) in [
+            (true, Occupancy::Available, false, false),
+            (false, Occupancy::Available, false, true),
+            (false, Occupancy::Observed { process: None }, false, false),
             (
                 false,
                 Occupancy::census_unknown("/fixture".into(), "incomplete census"),
                 false,
                 false,
-                false,
             ),
-            (false, Occupancy::Available, true, false, false),
-            // A removed checkout holds nothing: abandon even though the
-            // observer would leave its root Unknown.
-            (
-                false,
-                Occupancy::census_unknown("/fixture".into(), "incomplete census"),
-                false,
-                true,
-                true,
-            ),
+            (false, Occupancy::Available, true, false),
         ] {
             let temp = tempfile::tempdir()?;
             let clock = clock();
@@ -1128,17 +1112,13 @@ mod tests {
             let call = crate::tests::call(&clock, &cancel);
             let context = crate::tests::context(temp.path())?;
             let store = crate::RunStore::open(&context, &call)?;
-            let worktree = temp.path().join("checkout/.worktrees/abandon");
-            if !absent {
-                std::fs::create_dir_all(&worktree)?;
-            }
             let mut run = crate::tests::input();
             run.created_at = clock.wall_now()?;
             run.request.task.writer = Some(crate::WriterRequest {
                 extra: Default::default(),
                 custody_project: Some(context.project_id),
                 project: temp.path().join("checkout"),
-                worktree,
+                worktree: temp.path().join("checkout/.worktrees/abandon"),
             });
             store.create(&run, &call)?;
             let id = run.attempt_id;

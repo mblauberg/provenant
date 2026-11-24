@@ -166,13 +166,56 @@ pub struct CensusEpochPolicy {
     pub exclude_ancestors: bool,
 }
 
-type RootIdentity = (u64, u64, u32);
+/// A scoped root's own identity. An absent root is decidable: nothing is held
+/// at a path that does not exist, and a process inside a deleted tree is placed
+/// against it lexically. `None` from [`root_identity`] means the root cannot be
+/// read, including a dangling symlink, and keeps placement undecidable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RootIdentity {
+    Directory(u64, u64, u32),
+    Absent,
+}
 
 fn root_identity(root: &Path) -> Option<RootIdentity> {
+    match std::fs::symlink_metadata(root) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Some(RootIdentity::Absent);
+        }
+        Err(_) => return None,
+        Ok(_) => {}
+    }
     let metadata = std::fs::metadata(root).ok()?;
     metadata
         .is_dir()
-        .then(|| (metadata.dev(), metadata.ino(), metadata.uid()))
+        .then(|| RootIdentity::Directory(metadata.dev(), metadata.ino(), metadata.uid()))
+}
+
+/// True when a scoped root does not exist, as opposed to being unreadable.
+pub(super) fn root_is_absent(root: &Path) -> bool {
+    root_identity(root) == Some(RootIdentity::Absent)
+}
+
+/// True when a scoped root's own identity cannot be read. Placement against it
+/// is undecidable.
+pub(super) fn root_is_undecidable(root: &Path) -> bool {
+    root_identity(root).is_none()
+}
+
+/// Place a path against a root that no longer exists. With no directory
+/// identity left, the path is inside exactly when its canonical form, deleted
+/// components re-appended, lies under the root's canonical form. `None` when
+/// the root exists or is unreadable, or either path cannot be resolved.
+pub(super) fn absent_root_contains(path: &Path, root: &Path) -> Option<bool> {
+    if !root_is_absent(root)
+        || path
+            .components()
+            .any(|component| component == std::path::Component::ParentDir)
+    {
+        return None;
+    }
+    let root = canonical_cwd(root)?;
+    let path = canonical_cwd(path)?;
+    (root.is_absolute() && path.is_absolute()).then(|| path.starts_with(&root))
 }
 
 fn root_identities(roots: &[PathBuf]) -> Option<BTreeMap<PathBuf, RootIdentity>> {
@@ -481,30 +524,22 @@ impl WorkerObserver for CensusSession<'_> {
     }
 }
 
-/// Decide whether one writer checkout is free. A path absent on disk holds
-/// nothing, so it is free without consulting the census. Every other metadata
-/// outcome, including a dangling symlink, keeps today's census semantics.
+/// Census one writer checkout with its detail. A tree the census does not
+/// return is Unknown, never free. A removed checkout is censused like any other
+/// root: it is free only when no process path lies under it.
 pub fn observe_writer_tree(
     workers: &dyn WorkerObserver,
     path: &Path,
 ) -> (Occupancy, Option<String>) {
-    match std::fs::symlink_metadata(path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (
-            Occupancy::Available,
-            Some("writer worktree no longer exists".into()),
-        ),
-        _ => {
-            let path = path.to_path_buf();
-            let (states, details) = workers.observe_roots_with_details(std::slice::from_ref(&path));
-            let state = states.get(&path).cloned().unwrap_or_else(|| {
-                Occupancy::census_unknown(
-                    path.clone(),
-                    "worker census did not return the requested tree",
-                )
-            });
-            (state, details.get(&path).cloned())
-        }
-    }
+    let path = path.to_path_buf();
+    let (states, details) = workers.observe_roots_with_details(std::slice::from_ref(&path));
+    let state = states.get(&path).cloned().unwrap_or_else(|| {
+        Occupancy::census_unknown(
+            path.clone(),
+            "worker census did not return the requested tree",
+        )
+    });
+    (state, details.get(&path).cloned())
 }
 
 /// Injectable native observation seam. Implementations return one conservative
@@ -2145,6 +2180,9 @@ pub(super) fn occupancy_path_could_be_under(path: &Path, root: &Path) -> bool {
     {
         return true;
     }
+    if let Some(inside) = absent_root_contains(path, root) {
+        return inside;
+    }
     if !std::fs::metadata(root).is_ok_and(|metadata| metadata.is_dir()) {
         return true;
     }
@@ -2392,7 +2430,8 @@ fn record_live_path_with_audit_scoped(
         let root_metadata = std::fs::metadata(root).ok().filter(|meta| meta.is_dir());
         let inside = match (&ancestors, &root_metadata) {
             (Some(ids), Some(metadata)) => Some(ids.contains(&(metadata.dev(), metadata.ino()))),
-            _ => None,
+            (_, None) => absent_root_contains(cwd, root),
+            (None, Some(_)) => None,
         };
         match inside {
             Some(true) => {

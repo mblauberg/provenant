@@ -158,9 +158,15 @@ impl PlacementEvidence {
                         evidence.inside.insert(root.clone());
                     }
                 }
-                _ => {
-                    evidence.uncertain.insert(root.clone());
-                }
+                _ => match super::census::absent_root_contains(&canonical, root) {
+                    Some(true) => {
+                        evidence.inside.insert(root.clone());
+                    }
+                    Some(false) => {}
+                    None => {
+                        evidence.uncertain.insert(root.clone());
+                    }
+                },
             }
         }
         evidence
@@ -181,16 +187,18 @@ impl PlacementEvidence {
 }
 
 /// An excusal holds when all three credentials are system accounts foreign to
-/// every candidate root's owner. An unreadable root identity cannot be proven
-/// foreign, so it fails closed rather than claiming an excusal that cannot fire.
+/// every candidate root's owner. An absent root has no owner to share. An
+/// unreadable root identity cannot be proven foreign, so it fails closed rather
+/// than claiming an excusal that cannot fire.
 pub(super) fn excusal_applies(
     excusal: &provenant_os::pid::UnreadablePolicyExcusal,
     roots: &[PathBuf],
 ) -> bool {
     excusal.uids.all_system()
         && roots.iter().all(|root| {
-            std::fs::metadata(root)
-                .is_ok_and(|metadata| excusal.uids.all_differ_from(metadata.uid()))
+            super::census::root_is_absent(root)
+                || std::fs::metadata(root)
+                    .is_ok_and(|metadata| excusal.uids.all_differ_from(metadata.uid()))
         })
 }
 
@@ -273,15 +281,13 @@ fn owner_platform_daemon(cwd_observer: &dyn CwdObserver, pid: i64, roots: &[Path
     PlacementEvidence::from_path(&cwd, roots).outside_every_root()
 }
 
-/// True when any scoped root's own metadata cannot be read for a reason other
-/// than absence. Placement against such a root is undecidable, so no unreadable
-/// process may be excused. A missing root is left to placement, where a process
-/// path that could lie under it keeps that root unknown; counting it here would
-/// let one removed root block excusals for every other root.
+/// True when any scoped root's own identity cannot be read. Placement against
+/// such a root is undecidable, so no unreadable process may be excused. An
+/// absent root is decidable: placement compares paths against it lexically.
 pub(super) fn any_root_identity_unreadable(roots: &[PathBuf]) -> bool {
-    roots.iter().any(|root| {
-        std::fs::metadata(root).is_err_and(|error| error.kind() != std::io::ErrorKind::NotFound)
-    })
+    roots
+        .iter()
+        .any(|root| super::census::root_is_undecidable(root))
 }
 
 /// The placement evidence gathered for one unreadable process before any
