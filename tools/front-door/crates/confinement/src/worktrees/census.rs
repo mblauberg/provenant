@@ -1,7 +1,8 @@
 //! Process census and worker observation.
 use super::census_excusal::{
-    ExcusalEvidence, PlacementEvidence, PolicyCwdObserver, UnreadableFailure, excusal_applies,
-    excuse_unreadable, listed_uid_excusal, warn_unreadable_processes,
+    ExcusalEvidence, PlacementEvidence, PolicyCwdObserver, UnreadableFailure,
+    any_root_identity_unreadable, excusal_applies, excuse_unreadable, listed_uid_excusal,
+    warn_unreadable_processes,
 };
 use super::*;
 
@@ -1582,7 +1583,9 @@ pub(super) fn observe_worker_holders_while(
             );
             let mut under_candidate = false;
             let mut path_unreadable = false;
-            let mut root_undecidable = false;
+            // A root whose own identity cannot be read is undecidable for every
+            // unreadable process, however its paths resolve: fail closed.
+            let mut root_undecidable = any_root_identity_unreadable(roots);
             if let Ok(CwdObservation::Path(path)) = &cwd {
                 let (inside, unreadable, undecidable) = record_unreadable_path(
                     &mut states,
@@ -1892,7 +1895,7 @@ pub(super) fn observe_worker_holders_while(
                     failure: UnreadableFailure::DescriptorsDenied,
                     listed: false,
                     placed_inside: placed,
-                    root_undecidable: false,
+                    root_undecidable: any_root_identity_unreadable(roots),
                 },
                 entries,
                 unplaceable,
@@ -1913,7 +1916,7 @@ pub(super) fn observe_worker_holders_while(
                     failure: UnreadableFailure::CwdDenied,
                     listed: false,
                     placed_inside: placed,
-                    root_undecidable: false,
+                    root_undecidable: any_root_identity_unreadable(roots),
                 },
                 entries,
                 unplaceable,

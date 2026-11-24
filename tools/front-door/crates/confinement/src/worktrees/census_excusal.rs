@@ -273,6 +273,15 @@ fn owner_platform_daemon(cwd_observer: &dyn CwdObserver, pid: i64, roots: &[Path
     PlacementEvidence::from_path(&cwd, roots).outside_every_root()
 }
 
+/// True when any scoped root's own metadata cannot be read. Placement against
+/// such a root is undecidable, so no unreadable process may be excused. A root
+/// that no longer exists is decidable: nothing can hold a path under it.
+pub(super) fn any_root_identity_unreadable(roots: &[PathBuf]) -> bool {
+    roots.iter().any(|root| {
+        std::fs::metadata(root).is_err_and(|error| error.kind() != std::io::ErrorKind::NotFound)
+    })
+}
+
 /// The placement evidence gathered for one unreadable process before any
 /// excusal policy runs.
 #[derive(Clone, Copy, Debug)]
