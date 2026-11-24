@@ -1893,6 +1893,7 @@ fn fallback_cause_uses_only_unanimous_typed_facts() {
         confinement_guard: None,
         continuation_guard: None,
         cause,
+        offer_mismatch: None,
         detail: "prompt token \u{1b} /private/secret".into(),
     };
     let first = route(Some(Cause::StaleAvailability));

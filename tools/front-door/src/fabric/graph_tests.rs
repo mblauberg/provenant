@@ -1052,6 +1052,7 @@ mod graph_writer_admission_tests {
                 confinement_guard: None,
                 continuation_guard: None,
                 cause: Some(provenant_records::RouteExclusionReason::PacingReserve),
+                offer_mismatch: None,
                 detail: "pacing reserve".into(),
             });
         pacing.skipped_routes[0].detail = "monthly policy=Pace source=configuration knob=domains.routing.pacing.monthly; window=thirty_day".into();
