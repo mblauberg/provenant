@@ -46,6 +46,10 @@ pub(crate) fn bind_reader_source(
 }
 
 #[cfg(test)]
+#[allow(
+    unused_imports,
+    reason = "the custom worktree driver omits libtest functions"
+)]
 mod tests {
     use super::*;
 
