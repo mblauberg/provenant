@@ -1,5 +1,6 @@
 //! Worker census and native observation tests.
 use super::census::{unreadable_cohort_pids, worker_evidence_from_census};
+use super::census_excusal::PolicyCwdObserver;
 use super::lifecycle_tests::*;
 use super::*;
 use crate::test_support::Fixture;
@@ -809,6 +810,7 @@ fn unreadable_process_without_candidate_paths_only_blocks_the_root_it_occupies()
         &current,
         false,
         &mut |pid, condition| warnings.push((pid, condition)),
+        &[],
     );
     assert!(states.values().all(Occupancy::is_available));
     assert_eq!(
@@ -817,6 +819,834 @@ fn unreadable_process_without_candidate_paths_only_blocks_the_root_it_occupies()
     );
     assert!(mark_unreadable_process_warning("eperm-test", 200));
     assert!(!mark_unreadable_process_warning("eperm-test", 200));
+    Ok(())
+}
+
+/// A real configured-entry matcher: canonical executable path, exact team id
+/// and the live signing signal. A similar-looking path or wrong team never
+/// matches, so a test cannot pass on a stubbed boolean.
+fn match_configured_entry(
+    executable: &Path,
+    entries: &[CensusIgnoreEntry],
+    platform_signed: bool,
+    team_id: Option<&str>,
+) -> Option<CensusIgnoreEntry> {
+    let canonical = std::fs::canonicalize(executable).unwrap_or_else(|_| executable.to_path_buf());
+    entries
+        .iter()
+        .find(|entry| {
+            entry.is_valid()
+                && std::fs::canonicalize(&entry.path).unwrap_or_else(|_| entry.path.clone())
+                    == canonical
+                && if entry.team_id == "platform" {
+                    platform_signed
+                } else {
+                    team_id == Some(entry.team_id.as_str())
+                }
+        })
+        .cloned()
+}
+
+/// Typed signals for one unreadable process. Only typed observer evidence is
+/// consulted: the `process_details` diagnostic string is never parsed.
+struct UnreadableSignals {
+    uids: Option<ProcessUids>,
+    platform_signed: bool,
+    /// The real configured entries the census must thread to the matcher.
+    entries: Vec<CensusIgnoreEntry>,
+    /// The live kernel team id used by non-`platform` entries.
+    team_id: Option<String>,
+    executable: Option<PathBuf>,
+    cwd: CwdObservation,
+    occupancy_paths: Vec<PathBuf>,
+}
+
+impl CwdObserver for UnreadableSignals {
+    fn cwd(&self, _: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
+        Ok(self.cwd.clone())
+    }
+    fn occupancy(&self, _: i64) -> provenant_os::pid::OccupancyObservation {
+        provenant_os::pid::OccupancyObservation {
+            paths: self.occupancy_paths.clone(),
+            complete: false,
+            gap: Some(provenant_os::pid::OccupancyGap::DescriptorsDenied),
+        }
+    }
+    fn process_uids(&self, _: i64) -> Option<ProcessUids> {
+        self.uids
+    }
+    fn platform_signed_image(&self, _: i64) -> Option<provenant_os::pid::PlatformSignedImage> {
+        self.platform_signed
+            .then_some(provenant_os::pid::PlatformSignedImage)
+    }
+    /// Match the entries the census actually threaded, on the canonical
+    /// executable path plus team id and live signing signal, exactly as the
+    /// host matcher does. A similar-looking path or wrong team never matches.
+    fn configured_unreadable_image(
+        &self,
+        _: i64,
+        entries: &[CensusIgnoreEntry],
+    ) -> Option<CensusIgnoreEntry> {
+        match_configured_entry(
+            self.executable.as_deref()?,
+            entries,
+            self.platform_signed,
+            self.team_id.as_deref(),
+        )
+    }
+    fn unreadable_policy_uids(
+        &self,
+        _: i64,
+        _: &[CensusIgnoreEntry],
+    ) -> Result<
+        provenant_os::pid::UnreadablePolicyExcusal,
+        provenant_os::pid::UnreadablePolicyFailure,
+    > {
+        self.uids
+            .filter(|uids| uids.all_system())
+            .map(|uids| provenant_os::pid::UnreadablePolicyExcusal { uids })
+            .ok_or_else(|| "image policy evidence unavailable".into())
+    }
+    fn executable(&self, _: i64) -> Option<PathBuf> {
+        self.executable.clone()
+    }
+    fn process_details(&self, _: i64) -> Option<String> {
+        Some("path=/usr/libexec/UserEventAgent, ruid=0, team_id=platform".into())
+    }
+}
+
+/// One census outcome: the root state and detail, the unplaceable audit
+/// conditions and the typed warnings raised while observing it.
+struct UnreadableOutcome {
+    state: Occupancy,
+    detail: String,
+    audit: Vec<(Option<i64>, Option<&'static str>)>,
+    warnings: Vec<provenant_records::warning::Warning>,
+}
+
+/// Run one census with pid 200 unreadable beside `root`.
+fn observe_unreadable(
+    root: &Path,
+    signals: &UnreadableSignals,
+) -> Result<UnreadableOutcome, Box<dyn Error>> {
+    use provenant_supervisor::census::{Census, ObservationIssue};
+    let current = refused_fact(100);
+    let processes = InjectedCensus {
+        census: Census::from_observations(
+            [current.clone()],
+            [(200, ObservationIssue::PermissionDenied)],
+            [],
+            true,
+            false,
+            32,
+        )?,
+        cwds: BTreeMap::new(),
+        current: current.clone(),
+        platform_uids: BTreeMap::new(),
+    };
+    let roots = [root.to_path_buf()];
+    let (observed, warnings) = provenant_records::warning::capture(|| {
+        let mut audit = Vec::new();
+        let (states, _, details, _) = observe_worker_holders_with_taints_and_audit(
+            &roots,
+            &processes,
+            signals,
+            &current,
+            false,
+            &mut |pid, condition| audit.push((pid, condition)),
+            &signals.entries,
+        );
+        (
+            states[&roots[0]].clone(),
+            details.get(&roots[0]).cloned().unwrap_or_default(),
+            audit,
+        )
+    });
+    Ok(UnreadableOutcome {
+        state: observed.0,
+        detail: observed.1,
+        audit: observed.2,
+        warnings,
+    })
+}
+
+fn warning_names_process(warnings: &[provenant_records::warning::Warning], pid: i64) -> bool {
+    warnings
+        .iter()
+        .any(|warning| warning.subject.as_deref() == Some(format!("process {pid}").as_str()))
+}
+
+fn warning_names_path(warnings: &[provenant_records::warning::Warning], path: &str) -> bool {
+    warnings
+        .iter()
+        .any(|warning| warning.message.contains(path))
+}
+
+/// The listed-uid policy excuses an unplaceable occupancy path when every
+/// credential is a service uid foreign to the root owner. This pins the path
+/// placement failure only: a root whose own metadata is unreadable fails closed
+/// (see `unreadable_root_metadata_keeps_the_root_unknown`). The warning names
+/// the pid and the executable path.
+#[test]
+fn listed_unplaceable_descriptor_process_frees_the_root_with_a_warning()
+-> Result<(), Box<dyn Error>> {
+    use provenant_os::fs::effective_uid;
+    let fixture = Fixture::new()?;
+    let root = fixture.root.join("unreadable-launchd");
+    fs::create_dir(&root)?;
+    let blocker = root.join("blocker");
+    fs::write(&blocker, b"x")?;
+    let service = if effective_uid() == 0 { 1 } else { 0 };
+    let signals = UnreadableSignals {
+        uids: Some(ProcessUids {
+            real: service,
+            effective: service,
+            saved: service,
+        }),
+        platform_signed: false,
+        entries: Vec::new(),
+        team_id: None,
+        executable: Some(PathBuf::from("/sbin/launchd")),
+        cwd: CwdObservation::PermissionDenied,
+        occupancy_paths: vec![blocker.join("descriptor")],
+    };
+    let UnreadableOutcome {
+        state,
+        detail,
+        audit,
+        warnings,
+    } = observe_unreadable(&root, &signals)?;
+    assert!(state.is_available(), "{state:?}: {detail}");
+    assert!(
+        audit.iter().any(|(pid, condition)| *pid == Some(200)
+            && condition == &Some("listed service uid cannot write a lane checkout")),
+        "{audit:?}"
+    );
+    assert!(warning_names_process(&warnings, 200), "{warnings:?}");
+    assert!(
+        warning_names_path(&warnings, "/sbin/launchd"),
+        "{warnings:?}"
+    );
+    Ok(())
+}
+
+/// The configured knob extends the built-in defaults to every failure class.
+/// An owner-uid process with a configured canonical path and team id is excused
+/// even though the listed-uid policy alone would not apply. The matcher below
+/// exercises the real entries threaded through the census, not a stubbed flag.
+#[test]
+fn configured_entry_excuses_unplaceable_descriptor_process() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let root = fixture.root.join("unreadable-configured-path");
+    fs::create_dir(&root)?;
+    let blocker = root.join("blocker");
+    fs::write(&blocker, b"x")?;
+    let owner = provenant_os::fs::effective_uid();
+    let signals = UnreadableSignals {
+        uids: Some(ProcessUids {
+            real: owner,
+            effective: owner,
+            saved: owner,
+        }),
+        platform_signed: true,
+        entries: vec![CensusIgnoreEntry {
+            path: PathBuf::from("/usr/libexec/UserEventAgent"),
+            team_id: "platform".into(),
+        }],
+        team_id: None,
+        executable: Some(PathBuf::from("/usr/libexec/UserEventAgent")),
+        cwd: CwdObservation::PermissionDenied,
+        occupancy_paths: vec![blocker.join("descriptor")],
+    };
+    let UnreadableOutcome {
+        state,
+        detail,
+        warnings,
+        ..
+    } = observe_unreadable(&root, &signals)?;
+    assert!(state.is_available(), "{state:?}: {detail}");
+    assert!(warning_names_process(&warnings, 200), "{warnings:?}");
+    assert!(
+        warning_names_path(&warnings, "/usr/libexec/UserEventAgent"),
+        "{warnings:?}"
+    );
+    Ok(())
+}
+
+/// The counterpart to `configured_entry_with_unreadable_root_metadata_keeps_root_unknown`:
+/// with every root readable, a configured entry does excuse a process whose own
+/// occupancy path cannot be placed. The two causes must not be folded together.
+#[test]
+fn configured_entry_excuses_unplaceable_process_path_with_readable_roots()
+-> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let root = fixture.root.join("configured-unplaceable-readable-root");
+    fs::create_dir(&root)?;
+    let blocker = root.join("blocker");
+    fs::write(&blocker, b"x")?;
+    let owner = provenant_os::fs::effective_uid();
+    let signals = UnreadableSignals {
+        uids: Some(ProcessUids {
+            real: owner,
+            effective: owner,
+            saved: owner,
+        }),
+        platform_signed: true,
+        entries: vec![CensusIgnoreEntry {
+            path: PathBuf::from("/usr/libexec/UserEventAgent"),
+            team_id: "platform".into(),
+        }],
+        team_id: None,
+        executable: Some(PathBuf::from("/usr/libexec/UserEventAgent")),
+        cwd: CwdObservation::PermissionDenied,
+        // A descriptor beneath a regular file cannot be placed by directory
+        // identity, while the root's own metadata stays readable.
+        occupancy_paths: vec![blocker.join("descriptor")],
+    };
+    let outcome = observe_unreadable(&root, &signals)?;
+    assert!(
+        outcome.state.is_available(),
+        "{:?}: {}",
+        outcome.state,
+        outcome.detail
+    );
+    assert!(
+        outcome
+            .audit
+            .iter()
+            .any(|(pid, condition)| *pid == Some(200)
+                && condition == &Some("configured unreadable image exception")),
+        "{:?}",
+        outcome.audit
+    );
+    Ok(())
+}
+
+/// A configured entry whose canonical path does not match the executable must
+/// not excuse: the matcher exercises the real entries threaded by the census.
+#[test]
+fn mismatched_configured_entry_does_not_excuse() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let root = fixture.root.join("unreadable-wrong-configured-entry");
+    fs::create_dir(&root)?;
+    let blocker = root.join("blocker");
+    fs::write(&blocker, b"x")?;
+    let owner = provenant_os::fs::effective_uid();
+    let signals = UnreadableSignals {
+        uids: Some(ProcessUids {
+            real: owner,
+            effective: owner,
+            saved: owner,
+        }),
+        platform_signed: true,
+        entries: vec![CensusIgnoreEntry {
+            path: PathBuf::from("/usr/libexec/UserEventAgent"),
+            team_id: "platform".into(),
+        }],
+        team_id: None,
+        executable: Some(PathBuf::from("/usr/bin/true")),
+        cwd: CwdObservation::PermissionDenied,
+        occupancy_paths: vec![blocker.join("descriptor")],
+    };
+    let outcome = observe_unreadable(&root, &signals)?;
+    assert!(
+        outcome.state.is_unknown(),
+        "{:?}: {}",
+        outcome.state,
+        outcome.detail
+    );
+    assert!(
+        !warning_names_process(&outcome.warnings, 200),
+        "{:?}",
+        outcome.warnings
+    );
+    Ok(())
+}
+
+/// A setuid-root platform binary launched by the owner has a real owner uid but
+/// elevated effective and saved uids. All three must be owner uids, so it is
+/// not an owner daemon and must still block.
+#[test]
+fn setuid_owner_platform_daemon_with_denied_descriptors_blocks() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let root = fixture.root.join("unreadable-setuid-daemon");
+    fs::create_dir(&root)?;
+    let owner = provenant_os::fs::effective_uid();
+    let elevated = if owner == 0 { 1 } else { 0 };
+    let signals = UnreadableSignals {
+        uids: Some(ProcessUids {
+            real: owner,
+            effective: elevated,
+            saved: elevated,
+        }),
+        platform_signed: true,
+        entries: Vec::new(),
+        team_id: None,
+        executable: Some(PathBuf::from("/usr/libexec/UserEventAgent")),
+        cwd: CwdObservation::Path(PathBuf::from("/")),
+        occupancy_paths: Vec::new(),
+    };
+    let outcome = observe_unreadable(&root, &signals)?;
+    assert!(
+        outcome.state.is_unknown(),
+        "{:?}: {}",
+        outcome.state,
+        outcome.detail
+    );
+    assert!(
+        !warning_names_process(&outcome.warnings, 200),
+        "{:?}",
+        outcome.warnings
+    );
+    Ok(())
+}
+
+/// A root whose own metadata cannot be read cannot be proven foreign to a
+/// listed service uid. The excusal fails closed and the root stays Unknown.
+#[test]
+fn unreadable_root_metadata_keeps_the_root_unknown() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let not_a_dir = fixture.root.join("root-metadata-not-a-dir");
+    fs::write(&not_a_dir, b"x")?;
+    let root = not_a_dir.join("child");
+    let service = if provenant_os::fs::effective_uid() == 0 {
+        1
+    } else {
+        0
+    };
+    let signals = UnreadableSignals {
+        uids: Some(ProcessUids {
+            real: service,
+            effective: service,
+            saved: service,
+        }),
+        platform_signed: false,
+        entries: Vec::new(),
+        team_id: None,
+        executable: Some(PathBuf::from("/sbin/launchd")),
+        cwd: CwdObservation::PermissionDenied,
+        occupancy_paths: vec![root.join("descriptor")],
+    };
+    let outcome = observe_unreadable(&root, &signals)?;
+    assert!(
+        outcome.state.is_unknown(),
+        "{:?}: {}",
+        outcome.state,
+        outcome.detail
+    );
+    assert!(
+        !warning_names_process(&outcome.warnings, 200),
+        "{:?}",
+        outcome.warnings
+    );
+    Ok(())
+}
+
+/// A configured entry must not excuse a process when a root's own metadata is
+/// unreadable: placement for that root is undecidable, so it fails closed for
+/// every arm, configured included, and the root stays Unknown.
+#[test]
+fn configured_entry_with_unreadable_root_metadata_keeps_root_unknown() -> Result<(), Box<dyn Error>>
+{
+    let fixture = Fixture::new()?;
+    let not_a_dir = fixture.root.join("configured-root-metadata-not-a-dir");
+    fs::write(&not_a_dir, b"x")?;
+    let root = not_a_dir.join("child");
+    let owner = provenant_os::fs::effective_uid();
+    let signals = UnreadableSignals {
+        uids: Some(ProcessUids {
+            real: owner,
+            effective: owner,
+            saved: owner,
+        }),
+        platform_signed: true,
+        entries: vec![CensusIgnoreEntry {
+            path: PathBuf::from("/usr/libexec/UserEventAgent"),
+            team_id: "platform".into(),
+        }],
+        team_id: None,
+        executable: Some(PathBuf::from("/usr/libexec/UserEventAgent")),
+        cwd: CwdObservation::PermissionDenied,
+        occupancy_paths: vec![root.join("descriptor")],
+    };
+    let outcome = observe_unreadable(&root, &signals)?;
+    assert!(
+        outcome.state.is_unknown(),
+        "{:?}: {}",
+        outcome.state,
+        outcome.detail
+    );
+    assert!(
+        !warning_names_process(&outcome.warnings, 200),
+        "{:?}",
+        outcome.warnings
+    );
+    Ok(())
+}
+
+/// A configured process whose readable cwd is inside the root is positive
+/// placement and must not be excused when its descriptors are EPERM. This
+/// drives the facts loop (a listed fact, not an unknown pid) so it pins the
+/// placement-before-excusal structure: the configured arm never `continue`s.
+#[test]
+fn configured_entry_with_cwd_inside_root_and_denied_descriptors_blocks()
+-> Result<(), Box<dyn Error>> {
+    use provenant_supervisor::census::Census;
+    let fixture = Fixture::new()?;
+    let root = fixture.root.join("unreadable-configured-inside");
+    fs::create_dir(&root)?;
+    let current = refused_fact(100);
+    let processes = InjectedCensus {
+        census: Census::from_observations(
+            [current.clone(), refused_fact(200)],
+            [],
+            [],
+            true,
+            false,
+            32,
+        )?,
+        cwds: BTreeMap::from([(200, CwdObservation::Path(root.clone()))]),
+        current: current.clone(),
+        platform_uids: BTreeMap::new(),
+    };
+    let executable = PathBuf::from("/usr/libexec/UserEventAgent");
+    let entries = [CensusIgnoreEntry {
+        path: executable.clone(),
+        team_id: "platform".into(),
+    }];
+    struct ConfiguredInside<'a> {
+        inner: &'a InjectedCensus,
+        executable: &'a Path,
+    }
+    impl ProcessObserver for ConfiguredInside<'_> {
+        fn boot_identity(&self) -> Result<String, provenant_supervisor::census::CensusError> {
+            self.inner.boot_identity()
+        }
+        fn observe(&self, pid: i64) -> ProcessObservation {
+            self.inner.observe(pid)
+        }
+        fn census(
+            &self,
+            limit: usize,
+        ) -> Result<provenant_supervisor::census::Census, provenant_supervisor::census::CensusError>
+        {
+            self.inner.census(limit)
+        }
+    }
+    impl CwdObserver for ConfiguredInside<'_> {
+        fn cwd(&self, pid: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
+            self.inner.cwd(pid)
+        }
+        fn process_uids(&self, pid: i64) -> Option<ProcessUids> {
+            self.inner.process_uids(pid)
+        }
+        fn occupancy(&self, _: i64) -> provenant_os::pid::OccupancyObservation {
+            provenant_os::pid::OccupancyObservation {
+                paths: Vec::new(),
+                complete: false,
+                gap: Some(provenant_os::pid::OccupancyGap::DescriptorsDenied),
+            }
+        }
+        fn configured_unreadable_image(
+            &self,
+            _: i64,
+            entries: &[CensusIgnoreEntry],
+        ) -> Option<CensusIgnoreEntry> {
+            match_configured_entry(self.executable, entries, true, None)
+        }
+    }
+    let observer = ConfiguredInside {
+        inner: &processes,
+        executable: &executable,
+    };
+    let roots = [root.clone()];
+    let (states, _, details, _) = observe_worker_holders_with_taints_and_audit(
+        &roots,
+        &observer,
+        &observer,
+        &current,
+        false,
+        &mut |_, _| {},
+        &entries,
+    );
+    assert!(
+        states[&root].is_observed(),
+        "{:?}: {:?}",
+        states[&root],
+        details.get(&root)
+    );
+    Ok(())
+}
+
+/// An owner-uid process with EPERM-unreadable descriptors is excused only when
+/// it is platform-signed, lives in an approved daemon directory and has a
+/// readable cwd placed outside every scoped root by directory identity. A cwd
+/// of `/` is outside a root under `/Users`: textual ancestry of an ancestor is
+/// not occupancy evidence.
+#[test]
+fn owner_platform_daemon_with_root_cwd_is_excused() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let root = fixture.root.join("unreadable-platform-daemon");
+    fs::create_dir(&root)?;
+    let owner = provenant_os::fs::effective_uid();
+    let signals = UnreadableSignals {
+        uids: Some(ProcessUids {
+            real: owner,
+            effective: owner,
+            saved: owner,
+        }),
+        platform_signed: true,
+        entries: Vec::new(),
+        team_id: None,
+        executable: Some(PathBuf::from("/usr/libexec/UserEventAgent")),
+        cwd: CwdObservation::Path(PathBuf::from("/")),
+        occupancy_paths: Vec::new(),
+    };
+    let UnreadableOutcome {
+        state,
+        detail,
+        warnings,
+        ..
+    } = observe_unreadable(&root, &signals)?;
+    assert!(state.is_available(), "{state:?}: {detail}");
+    assert!(warning_names_process(&warnings, 200), "{warnings:?}");
+    assert!(
+        warning_names_path(&warnings, "/usr/libexec/UserEventAgent"),
+        "{warnings:?}"
+    );
+    Ok(())
+}
+
+/// The same platform daemon shape under /bin is a user tool, never excused.
+#[test]
+fn owner_platform_daemon_under_bin_still_blocks() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let root = fixture.root.join("unreadable-bin-tool");
+    fs::create_dir(&root)?;
+    let owner = provenant_os::fs::effective_uid();
+    let signals = UnreadableSignals {
+        uids: Some(ProcessUids {
+            real: owner,
+            effective: owner,
+            saved: owner,
+        }),
+        platform_signed: true,
+        entries: Vec::new(),
+        team_id: None,
+        executable: Some(PathBuf::from("/bin/zsh")),
+        cwd: CwdObservation::Path(PathBuf::from("/tmp")),
+        occupancy_paths: Vec::new(),
+    };
+    let UnreadableOutcome {
+        state,
+        detail,
+        warnings,
+        ..
+    } = observe_unreadable(&root, &signals)?;
+    assert!(state.is_unknown(), "{state:?}: {detail}");
+    assert!(detail.contains("process 200"), "{detail}");
+    assert!(!warning_names_process(&warnings, 200), "{warnings:?}");
+    Ok(())
+}
+
+/// A platform daemon whose cwd the kernel refuses cannot prove it is outside
+/// the root, so it still blocks.
+#[test]
+fn owner_platform_daemon_with_unreadable_cwd_still_blocks() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let root = fixture.root.join("unreadable-daemon-cwd");
+    fs::create_dir(&root)?;
+    let owner = provenant_os::fs::effective_uid();
+    let signals = UnreadableSignals {
+        uids: Some(ProcessUids {
+            real: owner,
+            effective: owner,
+            saved: owner,
+        }),
+        platform_signed: true,
+        entries: Vec::new(),
+        team_id: None,
+        executable: Some(PathBuf::from("/usr/libexec/UserEventAgent")),
+        cwd: CwdObservation::PermissionDenied,
+        occupancy_paths: Vec::new(),
+    };
+    let UnreadableOutcome {
+        state,
+        detail,
+        warnings,
+        ..
+    } = observe_unreadable(&root, &signals)?;
+    assert!(state.is_unknown(), "{state:?}: {detail}");
+    assert!(detail.contains("process 200"), "{detail}");
+    assert!(!warning_names_process(&warnings, 200), "{warnings:?}");
+    Ok(())
+}
+
+/// A readable cwd inside the root is positive occupancy evidence and always
+/// wins over a platform-signed image.
+#[test]
+fn owner_platform_daemon_with_cwd_inside_root_still_blocks() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let root = fixture.root.join("unreadable-daemon-inside");
+    fs::create_dir(&root)?;
+    let owner = provenant_os::fs::effective_uid();
+    let signals = UnreadableSignals {
+        uids: Some(ProcessUids {
+            real: owner,
+            effective: owner,
+            saved: owner,
+        }),
+        platform_signed: true,
+        entries: Vec::new(),
+        team_id: None,
+        executable: Some(PathBuf::from("/usr/libexec/UserEventAgent")),
+        cwd: CwdObservation::Path(root.clone()),
+        occupancy_paths: Vec::new(),
+    };
+    let UnreadableOutcome {
+        state,
+        detail,
+        warnings,
+        ..
+    } = observe_unreadable(&root, &signals)?;
+    assert!(state.is_observed(), "{state:?}: {detail}");
+    assert!(detail.contains("process 200"), "{detail}");
+    assert!(!warning_names_process(&warnings, 200), "{warnings:?}");
+    Ok(())
+}
+
+/// A human uid is never excused through the listed-uid policy, even when the
+/// image and cwd signals match the built-in platform-daemon default.
+#[test]
+fn human_uid_platform_process_still_blocks() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let root = fixture.root.join("unreadable-human-uid");
+    fs::create_dir(&root)?;
+    let signals = UnreadableSignals {
+        uids: Some(ProcessUids {
+            real: 500,
+            effective: 500,
+            saved: 500,
+        }),
+        platform_signed: true,
+        entries: Vec::new(),
+        team_id: None,
+        executable: Some(PathBuf::from("/usr/libexec/UserEventAgent")),
+        cwd: CwdObservation::Path(PathBuf::from("/tmp")),
+        occupancy_paths: Vec::new(),
+    };
+    let UnreadableOutcome {
+        state,
+        detail,
+        warnings,
+        ..
+    } = observe_unreadable(&root, &signals)?;
+    assert!(state.is_unknown(), "{state:?}: {detail}");
+    assert!(detail.contains("process 200"), "{detail}");
+    assert!(!warning_names_process(&warnings, 200), "{warnings:?}");
+    Ok(())
+}
+
+/// A same-user process whose readable executable is inside the worktree could
+/// still be its writer. The executable is injected as an occupancy path so this
+/// pins real executable placement, not just an unused signal.
+#[test]
+fn unreadable_same_user_process_inside_the_worktree_still_blocks() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let root = fixture.root.join("unreadable-inside-process");
+    fs::create_dir(&root)?;
+    let own = provenant_os::fs::effective_uid();
+    let executable = root.join("writer");
+    let signals = UnreadableSignals {
+        uids: Some(ProcessUids {
+            real: own,
+            effective: own,
+            saved: own,
+        }),
+        platform_signed: false,
+        entries: Vec::new(),
+        team_id: None,
+        executable: Some(executable.clone()),
+        cwd: CwdObservation::PermissionDenied,
+        occupancy_paths: vec![executable],
+    };
+    let UnreadableOutcome {
+        state,
+        detail,
+        warnings,
+        ..
+    } = observe_unreadable(&root, &signals)?;
+    assert!(state.is_observed(), "{state:?}: {detail}");
+    assert!(detail.contains("process 200"), "{detail}");
+    assert!(!warning_names_process(&warnings, 200), "{warnings:?}");
+    Ok(())
+}
+
+/// A readable executable and cwd outside the root are not enough on their own:
+/// the broad "different ruid" and "outside paths" excusals were removed, so an
+/// unsigned user tool with EPERM descriptors still blocks.
+#[test]
+fn unreadable_unsigned_user_tool_outside_root_still_blocks() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let root = fixture.root.join("unreadable-outside-process");
+    fs::create_dir(&root)?;
+    let own = provenant_os::fs::effective_uid();
+    let signals = UnreadableSignals {
+        uids: Some(ProcessUids {
+            real: own,
+            effective: own,
+            saved: own,
+        }),
+        platform_signed: false,
+        entries: Vec::new(),
+        team_id: None,
+        executable: Some(PathBuf::from("/usr/bin/true")),
+        cwd: CwdObservation::Path(PathBuf::from("/tmp")),
+        occupancy_paths: Vec::new(),
+    };
+    let UnreadableOutcome {
+        state,
+        detail,
+        warnings,
+        ..
+    } = observe_unreadable(&root, &signals)?;
+    assert!(state.is_unknown(), "{state:?}: {detail}");
+    assert!(detail.contains("process 200"), "{detail}");
+    assert!(!warning_names_process(&warnings, 200), "{warnings:?}");
+    Ok(())
+}
+
+/// With neither a readable executable nor a readable cwd, a same-user process
+/// could be inside, so the census keeps the root unknown and names its PID.
+#[test]
+fn unreadable_same_user_process_without_readable_paths_still_blocks() -> Result<(), Box<dyn Error>>
+{
+    let fixture = Fixture::new()?;
+    let root = fixture.root.join("unreadable-no-paths-process");
+    fs::create_dir(&root)?;
+    let own = provenant_os::fs::effective_uid();
+    let signals = UnreadableSignals {
+        uids: Some(ProcessUids {
+            real: own,
+            effective: own,
+            saved: own,
+        }),
+        platform_signed: false,
+        entries: Vec::new(),
+        team_id: None,
+        executable: None,
+        cwd: CwdObservation::PermissionDenied,
+        occupancy_paths: Vec::new(),
+    };
+    let UnreadableOutcome {
+        state,
+        detail,
+        warnings,
+        ..
+    } = observe_unreadable(&root, &signals)?;
+    assert!(state.is_unknown(), "{state:?}: {detail}");
+    assert!(detail.contains("process 200"), "{detail}");
+    assert!(!warning_names_process(&warnings, 200), "{warnings:?}");
     Ok(())
 }
 
@@ -1721,6 +2551,42 @@ fn host_policy_is_scoped_to_config_roots_and_preserves_injected_refusal()
     Ok(())
 }
 
+/// The production configured-image matcher reads live macOS signing state and
+/// cannot be driven positively in a unit test, so exercise the wiring instead:
+/// `PolicyCwdObserver` must hand its non-empty configured entries to the matcher
+/// it delegates to. A regression that drops those entries fails here.
+#[test]
+fn policy_cwd_observer_forwards_configured_entries_to_the_matcher() -> Result<(), Box<dyn Error>> {
+    struct Recording(std::sync::Mutex<Vec<CensusIgnoreEntry>>);
+    impl CwdObserver for Recording {
+        fn cwd(&self, _: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
+            Ok(CwdObservation::PermissionDenied)
+        }
+        fn configured_unreadable_image(
+            &self,
+            _: i64,
+            entries: &[CensusIgnoreEntry],
+        ) -> Option<CensusIgnoreEntry> {
+            *self.0.lock().unwrap() = entries.to_vec();
+            entries.first().cloned()
+        }
+    }
+    let entries = [CensusIgnoreEntry {
+        path: PathBuf::from("/usr/libexec/UserEventAgent"),
+        team_id: "TEAM123".into(),
+    }];
+    let recorder = Recording(std::sync::Mutex::new(Vec::new()));
+    let policy = PolicyCwdObserver::with_inner(&entries, &recorder);
+    // Call the real trait method with an empty caller argument: the policy must
+    // still hand its own non-empty entries to the matcher.
+    assert_eq!(
+        CwdObserver::configured_unreadable_image(&policy, 200, &[]),
+        Some(entries[0].clone())
+    );
+    assert_eq!(*recorder.0.lock().unwrap(), entries.to_vec());
+    Ok(())
+}
+
 #[test]
 fn listed_process_is_excluded_only_after_eperm_and_never_for_the_owner()
 -> Result<(), Box<dyn Error>> {
@@ -2414,6 +3280,7 @@ mod writer_cohort {
                     &mut |_, _| {},
                     &mut held_processes,
                     Some(&|| true),
+                    &[],
                 );
                 assert_eq!(states[&root].is_observed(), held, "{gap:?}");
                 assert_eq!(observation.attempts.load(Ordering::SeqCst), 2);
@@ -2604,6 +3471,7 @@ mod narrowing {
             &mut |pid, condition| audit.push((pid, condition)),
             &mut held_processes,
             None,
+            &[],
         );
         Ok((
             states[&root].clone(),
@@ -3438,6 +4306,7 @@ fn census_keeps_holder_and_evidence_together_across_processes() -> Result<(), Bo
         &current,
         false,
         &mut |_, _| {},
+        &[],
     );
     let holder = &holders[&root];
     assert!(matches!(
@@ -3629,7 +4498,15 @@ fn failed_process_listing_makes_held_report_incomplete() {
                 command: None,
             };
             keep_going().then(|| {
-                worker_evidence_from_census(roots, true, self, self, &current, Some(keep_going))
+                worker_evidence_from_census(
+                    roots,
+                    true,
+                    self,
+                    self,
+                    &current,
+                    Some(keep_going),
+                    &[],
+                )
             })
         }
     }
@@ -3708,6 +4585,7 @@ fn held_report_names_every_foreign_dweller_and_excludes_the_callers_session()
         &partial_observer,
         &current,
         Some(&|| true),
+        &[],
     );
     assert!(evidence.held_incomplete);
     assert!(
@@ -3725,6 +4603,7 @@ fn held_report_names_every_foreign_dweller_and_excludes_the_callers_session()
         &mut |_, _| {},
         &mut held,
         Some(&|| true),
+        &[],
     );
     assert!(states[&root].is_observed());
     let rows = &held[&root];
@@ -3796,6 +4675,7 @@ fn held_report_aggregates_eperm_dwellers_and_excludes_the_caller() -> Result<(),
         &mut |_, _| {},
         &mut held,
         None,
+        &[],
     );
     let rows = &held[&root];
     let pids: BTreeSet<_> = rows.iter().map(|row| row.pid).collect();

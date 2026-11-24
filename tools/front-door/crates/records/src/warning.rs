@@ -120,6 +120,9 @@ pub const CREDENTIAL_INVENTORY_INCOMPLETE: WarningCode =
 pub const HOST_INVENTORY_INCOMPLETE: WarningCode = WarningCode("HOST_INVENTORY_INCOMPLETE");
 /// A process could not be inspected (EPERM); its custody is unknown.
 pub const UNREADABLE_PROCESS_CENSUS: WarningCode = WarningCode("UNREADABLE_PROCESS_CENSUS");
+/// An unreadable process was judged non-occupying and did not block a census.
+pub const UNREADABLE_PROCESS_NON_OCCUPYING: WarningCode =
+    WarningCode("UNREADABLE_PROCESS_NON_OCCUPYING");
 /// The origin default branch was unavailable, so local HEAD was used.
 pub const DEFAULT_BASE_FALLBACK: WarningCode = WarningCode("DEFAULT_BASE_FALLBACK");
 /// A post-create check failed; the worktree remains usable at its path.

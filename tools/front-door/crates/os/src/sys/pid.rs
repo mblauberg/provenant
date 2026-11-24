@@ -1259,6 +1259,74 @@ pub(crate) fn sealed_system_image(pid: i32) -> Option<crate::pid::SealedSystemIm
     }
 }
 
+/// The process image's live platform signature (`team_id=platform`). Neither a
+/// signature path bit nor a sealed-volume location is signing evidence.
+pub(crate) fn platform_signed_image(pid: i32) -> Option<crate::pid::PlatformSignedImage> {
+    #[cfg(target_os = "macos")]
+    {
+        let flags = darwin_signing_status(pid)?;
+        darwin_platform_signature(flags).then_some(crate::pid::PlatformSignedImage)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+/// The configured unreadable-image entry matching the process's canonical
+/// executable and team identifier. Signing evidence and a stable image are
+/// required; a textual path match alone never grants an exception.
+pub(crate) fn configured_unreadable_image(
+    pid: i32,
+    entries: &[crate::pid::CensusIgnoreEntry],
+) -> Option<crate::pid::CensusIgnoreEntry> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let path = darwin_executable_path(pid)?;
+        let canonical = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        let flags = darwin_signing_status(pid)?;
+        let team = entries
+            .iter()
+            .any(|entry| entry.team_id != "platform")
+            .then(|| darwin_team_id(pid))
+            .flatten();
+        let executable = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&canonical)
+            .ok()?;
+        let matched = entries.iter().find(|entry| {
+            if !entry.is_valid() {
+                return false;
+            }
+            let configured =
+                std::fs::canonicalize(&entry.path).unwrap_or_else(|_| entry.path.clone());
+            if configured != canonical {
+                return false;
+            }
+            if entry.team_id == "platform" {
+                darwin_platform_signature(flags)
+                    && root_owned_executable_chain(&canonical, &executable)
+            } else {
+                team.as_deref() == Some(entry.team_id.as_str())
+            }
+        })?;
+        if darwin_executable_path(pid)?.as_os_str() != path.as_os_str()
+            || darwin_signing_status(pid)? != flags
+        {
+            return None;
+        }
+        Some((*matched).clone())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (pid, entries);
+        None
+    }
+}
+
 #[cfg(test)]
 #[test]
 fn sealed_system_images_are_system_directories_and_setuid_needs_a_transition() {
