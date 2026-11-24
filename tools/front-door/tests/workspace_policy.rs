@@ -1875,7 +1875,7 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         ("src/fabric/unified.rs", 4272),
         ("src/handoff.rs", 1425),
         ("src/hooks.rs", 2636),
-        ("src/install.rs", 3986),
+        ("src/install.rs", 3159),
         ("src/lane_cleanup.rs", 3148),
         ("src/pr/landing/adapters.rs", 2984),
         ("src/pr/landing/driver.rs", 3967),

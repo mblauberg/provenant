@@ -159,7 +159,15 @@ branch of that fixture. A manual `run smoke` with no `diff_base` leaves the
 review nodes unbound, so the usual no-base refusal applies. The scratch
 project's host binding is removed when the verification ends, including on
 failure, so the deleted fixture never
-becomes a registered project. `provenant run smoke` by hand, from any checkout,
+becomes a registered project. The human view leads with one status line per host
+(`upgraded`, `verified` or `failed - reason`), the smoke host prints its graph
+verdict instead of `run`/`wait`/`status` envelopes, and repeated
+`native_capability_unavailable` notices collapse to a count; `--full` restores
+every captured line. A failed `UPGRADE_FAILED` message names each failing host
+once with its bounded reason. The renderer drops human text when an error is
+set, so run `provenant upgrade --verify --json` for the full per-host detail.
+The smoke builds its own scratch checkout, so a verification run from outside a
+Git checkout is not refused just for that reason. `provenant run smoke` by hand, from any checkout,
 runs only the read-only
 nodes (the receipt names the skipped write node); add `--branch B --base REF` or
 `--worktree PATH` to run the write node too.
