@@ -3367,13 +3367,11 @@ impl WriterLaunch {
         // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
         // A local integration destination records no remote; the typed boundary
         // returns an absence rather than a name to pass to Git.
-        let stop_remote = work
-            .as_ref()
-            .and_then(|policy| policy.publish)
-            .and_then(|host| {
-                host.stop_publish_remote()
-                    .or_else(|| host.delivery_remote())
-            })
+        let bound_stop_remote = match work.as_ref().and_then(|policy| policy.publish) {
+            Some(host) => host.stop_publish_remote()?.or(host.delivery_remote()?),
+            None => None,
+        };
+        let stop_remote = bound_stop_remote
             .or_else(|| terminal_forge_remote(state, self.worktree.repo().root_path()));
         let stop_work = work.map(|policy| {
             use provenant_records::run::StopWorkPush;

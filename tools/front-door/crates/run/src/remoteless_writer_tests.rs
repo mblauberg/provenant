@@ -1,8 +1,8 @@
 //! Regression tests for #3869 outcome 3: a checkout with no Git remote must
 //! carry the absence as `None` through every writer Git-path consumer, never
-//! as an empty name. These tests pin each consumer's `None` handling and the
-//! resolved absence; a caller that turns that `None` into `Some("")` is not
-//! caught here, and #3888 makes it unrepresentable.
+//! as an empty name. The consumers now take `Option<RemoteName>`, so `Some("")`
+//! is unrepresentable at the type level; these tests pin the remaining `None`
+//! handling and the resolved absence from a real remote-less checkout.
 //! Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
 
 use std::{

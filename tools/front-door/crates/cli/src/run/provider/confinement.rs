@@ -1900,7 +1900,7 @@ pub(in crate::run) fn read_only_checkout_warning(
 /// Run a bounded host-side fetch so a fetch-first source resolves a ref that
 /// the checkout's last fetch did not yet have. This runs on the host at launch,
 /// never inside a lane, and uses the host's own Git and credential settings.
-fn fetch_read_source(remote: &str, repo: &Path) -> bool {
+fn fetch_read_source(remote: &provenant_config::RemoteName, repo: &Path) -> bool {
     use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
 
     let Some(git) = provenant_os::git::git_executable() else {
@@ -1915,7 +1915,7 @@ fn fetch_read_source(remote: &str, repo: &Path) -> bool {
         std::ffi::OsString::from("fetch"),
         std::ffi::OsString::from("--no-tags"),
         std::ffi::OsString::from("--quiet"),
-        std::ffi::OsString::from(remote),
+        std::ffi::OsString::from(remote.as_str()),
     ];
     let env: Vec<(std::ffi::OsString, std::ffi::OsString)> = std::env::vars_os()
         .filter(|(key, _)| {
@@ -1935,11 +1935,10 @@ fn fetch_read_source(remote: &str, repo: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// The one resolver for a read-only lane's source. The compiled default still
-/// pins only a checkout behind its fetched upstream; `checkout` keeps the
-/// local tree, `default_branch` pins the fetched default and any other value is
-/// an explicit ref. `fetch_first` fetches from the resolved remote before the
-/// ref is read. Missing or unusable Git evidence is advisory, never a refusal.
+/// The one resolver for a read-only lane's source. The compiled default pins
+/// only a checkout behind its fetched upstream; `checkout` keeps the local tree,
+/// `default_branch` the fetched default, and any other value an explicit ref.
+/// `fetch_first` fetches first; unusable Git evidence is advisory, never fatal.
 pub(in crate::run) fn read_only_source_ref(
     state: &Path,
     source: &Path,
@@ -2191,18 +2190,18 @@ fn configured_upstream(
 
 /// The one remote for an advisory read-only source pin, from the full port
 /// table (host and project declarations together). A fork's `origin` is never
-/// assumed: when no remote is declared or inferred, the caller keeps its local
-/// source behaviour instead of pinning to a guessed remote.
+/// assumed: resolution yields a typed name, or absence, never a blank `""` Git
+/// could fetch; callers without a remote keep their local source behaviour.
 ///
 /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
-fn resolved_forge_remote(state: &Path, project: &Path) -> Option<String> {
+fn resolved_forge_remote(state: &Path, project: &Path) -> Option<provenant_config::RemoteName> {
     let ports = provenant_config::PortTable::read_for(Some(project), state).ok()?;
     let policy = provenant_config::operation_policy(state, project, &ports);
     let config = provenant_config::ForgeConfig::new(&ports, (*policy).clone());
     let git = provenant_config::ForgeGit::new(project).ok()?;
-    provenant_config::ForgeContext::remote(&config, &git)
+    provenant_config::ForgeContext::remote_if_any(&config, &git)
         .ok()
-        .map(|remote| remote.value)
+        .flatten()
 }
 
 /// The remote's default branch as last fetched, with the exact ref that named
@@ -2217,7 +2216,7 @@ fn default_upstream(
     utility: &provenant_confinement::UtilityRuntime,
     budget: provenant_confinement::UtilityBudget,
     cancel: &provenant_core::CancelToken,
-    remote: &str,
+    remote: &provenant_config::RemoteName,
 ) -> Option<(provenant_core::GitOid, String)> {
     use provenant_confinement::utility::advertised_default_branch;
 
@@ -2231,7 +2230,8 @@ fn default_upstream(
     )
     .or_else(|| {
         let branch =
-            advertised_default_branch(executor, repo, utility, remote, budget, cancel).ok()??;
+            advertised_default_branch(executor, repo, utility, remote.as_str(), budget, cancel)
+                .ok()??;
         resolve_upstream_ref(
             executor,
             repo,

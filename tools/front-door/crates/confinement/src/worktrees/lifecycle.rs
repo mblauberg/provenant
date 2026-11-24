@@ -474,7 +474,7 @@ pub fn fetch_remote_branch_tip(
     context: &WorktreeContext<'_>,
     name: &str,
     cancel: &CancelToken,
-    remote: Option<&str>,
+    remote: Option<&provenant_config::RemoteName>,
 ) -> Result<Option<GitOid>, WorktreeError> {
     let branch = GitRefName::branch(name).map_err(|_| WorktreeError::InvalidRequest)?;
     if read_branch_tips(context, cancel)?.contains_key(&branch) {

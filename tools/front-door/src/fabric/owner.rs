@@ -1636,7 +1636,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     context,
                     branch,
                     self.cancel,
-                    forge_remote.as_ref().map(|name| name.as_str()),
+                    forge_remote.as_ref(),
                 )
             },
         )

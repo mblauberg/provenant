@@ -25,24 +25,43 @@ use thiserror::Error;
 /// The project root, as seen by the owner resolving the context.
 pub type Project = Path;
 
-/// A Git remote name that is known to be present and non-blank.
+/// A Git remote name that is known to be present and usable as a ref namespace.
 ///
 /// The forge boundary creates this once; every consumer below it receives the
 /// typed value, so an absent remote cannot be flattened into `Some("")` and
-/// reach Git as a push destination or a `refs/remotes/` namespace.
+/// reach Git as a push destination or a `refs/remotes/` namespace. The grammar
+/// is the one `git check-ref-format` applies to `refs/remotes/<name>/x`: each
+/// slash-separated component must be usable as a ref component, and '/' is
+/// allowed between components.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct RemoteName(String);
 
-/// The supplied remote name was empty or whitespace-only.
+/// The supplied remote name cannot name a `refs/remotes/` namespace.
 #[derive(Debug, Error, PartialEq, Eq)]
-#[error("a Git remote name cannot be empty or whitespace-only")]
+#[error("a Git remote name must be a valid, non-blank ref namespace component")]
 pub struct RemoteNameError;
 
 impl RemoteName {
-    /// Build a remote name, refusing an empty or whitespace-only value.
+    /// Build a remote name, refusing blank, padded, option-like or otherwise
+    /// invalid values that Git could not use as a `refs/remotes/<name>/x` ref.
     pub fn new(name: impl AsRef<str>) -> Result<Self, RemoteNameError> {
         let name = name.as_ref();
-        if name.trim().is_empty() {
+        let valid = !name.is_empty()
+            && name.trim() == name
+            && !name.starts_with('-')
+            && !name.ends_with('/')
+            && !name.ends_with('.')
+            && !name.contains("..")
+            && !name.contains("@{")
+            && !name.chars().any(|character| {
+                character.is_ascii_control()
+                    || character.is_whitespace()
+                    || "~^:?*[\\".contains(character)
+            })
+            && name
+                .split('/')
+                .all(|part| !part.is_empty() && !part.starts_with('.') && !part.ends_with(".lock"));
+        if !valid {
             return Err(RemoteNameError);
         }
         Ok(Self(name.to_owned()))
@@ -115,6 +134,8 @@ pub enum ForgeContextError {
         branches: Vec<String>,
         close: Vec<String>,
     },
+    #[error("remote {remote:?} is configured but is not a usable Git remote name")]
+    InvalidRemote { remote: String },
 }
 
 fn close_hint(close: &[String]) -> String {
@@ -188,6 +209,7 @@ impl ForgeContext {
     /// refusal listing the remotes or branches it saw, with close matches.
     pub fn resolve(config: &Config<'_>, git: &Git) -> Result<Self, ForgeContextError> {
         let remote = Self::remote(config, git)?;
+        Self::checked_remote(&remote.value)?;
         let default_branch = Self::resolve_default_branch(config, git, &remote.value)?;
         let protected = Self::resolve_protected(config, &default_branch.value);
         Ok(Self {
@@ -254,19 +276,32 @@ impl ForgeContext {
     /// The remote, or `None` when the checkout has no remote at all. A
     /// remote-less checkout is an absence, never an empty name: Git crashes on
     /// an empty `branch.<name>.remote`, and `refs/remotes//` names nothing.
-    /// An ambiguous set of remotes is still a refusal.
+    /// A configured name that is not usable is a refusal naming it, never an
+    /// absence; an ambiguous set of remotes is a refusal too.
     /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
     pub fn remote_if_any(
         config: &Config<'_>,
         git: &Git,
     ) -> Result<Option<RemoteName>, ForgeContextError> {
         match Self::remote(config, git) {
-            // A blank name names no remote, so it is the same absence as a
-            // checkout with none; the constructor keeps it out of consumers.
-            Ok(remote) => Ok(RemoteName::new(&remote.value).ok()),
+            Ok(remote) => Self::checked_remote(&remote.value).map(Some),
             Err(ForgeContextError::NoRemote { remotes, .. }) if remotes.is_empty() => Ok(None),
             Err(error) => Err(error),
         }
+    }
+
+    /// Reject a configured or inferred name that cannot name a remote, naming
+    /// the bad value instead of silently treating it as no remote.
+    fn checked_remote(name: &str) -> Result<RemoteName, ForgeContextError> {
+        RemoteName::new(name).map_err(|_| ForgeContextError::InvalidRemote {
+            remote: name.to_owned(),
+        })
+    }
+
+    /// The typed name for a resolved context. Produced here at the resolution
+    /// boundary so consumers never rebuild one from a bare string.
+    pub fn remote_name(&self) -> Result<RemoteName, ForgeContextError> {
+        Self::checked_remote(&self.remote.value)
     }
 
     fn resolve_default_branch(
@@ -898,14 +933,45 @@ mod tests {
     }
 
     #[test]
-    fn remote_name_refuses_an_empty_or_whitespace_name() {
-        assert_eq!(RemoteName::new(""), Err(RemoteNameError));
-        assert_eq!(RemoteName::new("   "), Err(RemoteNameError));
-        assert_eq!(RemoteName::new("\t\n"), Err(RemoteNameError));
+    fn remote_name_refuses_names_git_cannot_use_as_a_namespace() {
+        for bad in [
+            "",
+            "   ",
+            "\t\n",
+            " origin ",
+            "-x",
+            "bad..name",
+            "bad@{name",
+            "bad/../name",
+            "bad.lock",
+            "bad/name.lock",
+            "bad name",
+            "bad~name",
+            "bad\\name",
+            "bad/",
+            "bad.",
+        ] {
+            assert_eq!(RemoteName::new(bad), Err(RemoteNameError), "{bad:?}");
+        }
         assert_eq!(
             RemoteName::new("upstream").expect("name").as_str(),
             "upstream"
         );
+        assert_eq!(
+            RemoteName::new("team/upstream").expect("slash").as_str(),
+            "team/upstream"
+        );
+    }
+
+    #[test]
+    fn an_invalid_configured_remote_is_a_refusal_naming_it() {
+        let fixture = Fixture::new("[remote \"-x\"]\n");
+        let ports = PortTable::builtin();
+        let config = Config::new(&ports, Policy::default());
+        match ForgeContext::remote_if_any(&config, &fixture.git()).expect_err("refusal") {
+            ForgeContextError::InvalidRemote { remote } => assert_eq!(remote, "-x"),
+            other => panic!("unexpected error: {other}"),
+        }
     }
 
     /// A checkout with no remote at all is an absence, never an empty name.
