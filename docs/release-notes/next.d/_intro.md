@@ -1,1 +1,1 @@
-Provenant 2.9.1 fixes a 2.9.0 regression that refused fresh `--branch` writer launches in a repository holding a stray remote-tracking ref, and stops a checkout with no remote from ever passing an empty remote name to Git.
+Provenant 2.9.2 lets `reconcile --abandon` settle a lane past unreadable system processes without freeing a worktree a process may still hold. `upgrade --verify` failures are now readable, smoke and verify launches use exact model routes, and an empty or malformed Git remote name can no longer reach Git.
