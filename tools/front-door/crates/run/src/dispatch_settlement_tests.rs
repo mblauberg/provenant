@@ -1301,5 +1301,29 @@ fn abandon_writer_creation_floor_requires_proven_removed_lane_worktree() -> Test
         service.abandon_writer_creation_floor(cont.attempt_id, Some(&common), &call)?,
         None
     );
+
+    // A registration older than the queue sets the floor: a reused checkout
+    // can predate queued_at, and the floor must not move past its creation.
+    let mut late = input();
+    late.attempt_id = AttemptId::from_bytes([6; 16]);
+    late.operation_id = "run-late".parse()?;
+    late.created_at = WallTime::from_micros(4_000_000_000_000_000)?;
+    late.request.task.writer = cont.request.task.writer.clone();
+    tests::rekey(&mut late);
+    store.create(&late, &call)?;
+    setup_registration(
+        &common,
+        &worktree,
+        Some(late.attempt_id),
+        WorktreeOrigin::Lane,
+    )?;
+    let registered =
+        provenant_confinement::worktrees::worktree_registration_for_path(&common, &worktree)?
+            .and_then(|(_, birth)| birth);
+    let floor = service.abandon_writer_creation_floor(late.attempt_id, Some(&common), &call)?;
+    assert_eq!(floor, registered, "the floor is the registration's birth");
+    if let Some(floor) = floor {
+        assert!(floor < late.created_at);
+    }
     Ok(())
 }

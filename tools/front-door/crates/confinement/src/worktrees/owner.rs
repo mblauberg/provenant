@@ -236,11 +236,15 @@ pub fn worktree_owner_for_path(
 /// The owner registered for `worktree` with the birth time of its Git
 /// registration directory, a lower bound on the checkout's creation that
 /// survives the checkout's removal. `git worktree add` creates
-/// `<common>/worktrees/<id>` before the checkout directory, worktree creation
-/// refuses a target path that already exists, and reuse keeps the original
-/// registration, so no process can have entered the checkout before this
-/// time (#3914). The birth time is `None` when the filesystem does not
-/// report it; callers fail closed.
+/// `<common>/worktrees/<id>` before it populates the checkout, refuses a
+/// non-empty target, and `git worktree repair` or reuse keeps the original
+/// registration, so no process can have entered the checkout's contents
+/// before this time (#3914). Git does accept an existing empty directory as
+/// the target, so a process already sitting in such a directory predates the
+/// registration; lane checkouts are created at paths Provenant allocates, and
+/// that residual is accepted. Removal and prune delete the registration. The
+/// birth time is `None` when the filesystem does not report it or the
+/// registration is gone; callers fail closed.
 pub fn worktree_registration_for_path(
     common: &Path,
     worktree: &Path,

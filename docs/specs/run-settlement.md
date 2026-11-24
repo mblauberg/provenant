@@ -293,14 +293,18 @@ optional `started_before` floor (stable kernel start time at least two seconds
 before every scoped root's creation time, or, during `reconcile --abandon` on a
 removed checkout, before the earlier of `record.queued_at` and the birth time of
 the checkout's Git registration directory (`<common>/worktrees/<id>`), which
-`git worktree add` creates before the checkout and a reused checkout keeps, when
+`git worktree add` creates before it populates the checkout and a reused or repaired checkout keeps, when
 `Service::abandon_writer_creation_floor` proves `retry_of.is_none()`,
 `writer_predecessor.is_none()` and `WorktreeOwner` for that attempt under
 `WorktreeOrigin::Lane`; retries, continuations, unproven trees, a pruned
 registration and an unreported birth time fail closed and leave the attempt
-blocked. Both sides of the comparison are wall-clock times, so a backward clock
-step larger than the margin between the registration's creation and a process
-start inside the tree could excuse that process; this residual is accepted), extends these defaults to every unreadable failure
+blocked. Two residuals are accepted: both sides of the comparison are
+wall-clock times, so a backward clock step larger than the interval between the
+registration's creation and a process start inside the tree, plus the two-second
+margin, could excuse that process; and Git accepts an existing empty directory
+as the target, so a process already inside such a directory before
+`git worktree add` predates the registration. Lane checkouts are created at
+paths Provenant allocates), extends these defaults to every unreadable failure
 class. Each excusal raises a typed warning naming the PID and path. Every other unreadable
 process remains Unknown/blocking with its PID named. Unreadable root identity fails closed, and
 a listed uid the kernel will not reveal (for example `launchd`, pid 1) cannot be evaluated, so
