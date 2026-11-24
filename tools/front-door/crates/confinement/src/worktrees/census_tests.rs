@@ -79,17 +79,33 @@ fn an_absent_root_places_paths_lexically() -> Result<(), Box<dyn Error>> {
 #[allow(clippy::disallowed_methods)] // A real child keeps the kernel's view of a deleted cwd.
 fn a_process_left_in_a_removed_tree_is_placed_inside_it() -> Result<(), Box<dyn Error>> {
     use provenant_os::pid::{CwdObservation, CwdObserver, SystemCwdObserver};
+    struct Child(std::process::Child);
+    impl Drop for Child {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
     let temp = tempfile::tempdir()?;
     let root = temp.path().join("removed-writer-tree");
-    let inside = root.join("src");
-    fs::create_dir_all(&inside)?;
-    let mut child = std::process::Command::new("sleep")
-        .arg("30")
-        .current_dir(&inside)
-        .spawn()?;
-    let placed = (|| -> Result<(), Box<dyn Error>> {
-        fs::remove_dir_all(&root)?;
-        let CwdObservation::Path(cwd) = SystemCwdObserver.cwd(i64::from(child.id()))? else {
+    fs::create_dir_all(root.join("src"))?;
+    // A cwd at the removed root itself carries Linux's " (deleted)" marker; one
+    // below it keeps a removed suffix either way.
+    let children = [root.clone(), root.join("src")]
+        .iter()
+        .map(|cwd| {
+            Ok(Child(
+                std::process::Command::new("/bin/sh")
+                    .args(["-c", "read line"])
+                    .current_dir(cwd)
+                    .stdin(std::process::Stdio::piped())
+                    .spawn()?,
+            ))
+        })
+        .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
+    fs::remove_dir_all(&root)?;
+    for child in &children {
+        let CwdObservation::Path(cwd) = SystemCwdObserver.cwd(i64::from(child.0.id()))? else {
             return Err("the child's cwd was not observable".into());
         };
         assert_eq!(
@@ -97,11 +113,8 @@ fn a_process_left_in_a_removed_tree_is_placed_inside_it() -> Result<(), Box<dyn 
             Some(true),
             "{cwd:?}"
         );
-        Ok(())
-    })();
-    child.kill()?;
-    child.wait()?;
-    placed
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]

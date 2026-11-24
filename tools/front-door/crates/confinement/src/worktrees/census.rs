@@ -239,6 +239,10 @@ pub(super) fn absent_root_contains(path: &Path, root: &Path) -> Option<bool> {
     }
     let (root_directory, root_removed) = split_at_extant_directory(root)?;
     let (path_directory, path_removed) = split_at_extant_directory(path)?;
+    // A removal between the two splits moves the anchor; undecidable, not outside.
+    if split_at_extant_directory(root)? != (root_directory, root_removed.clone()) {
+        return None;
+    }
     if path_removed.as_os_str().is_empty() {
         return Some(false);
     }
