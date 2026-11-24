@@ -197,6 +197,20 @@ pub(crate) fn node_digests(rows: &[Value]) -> Vec<NodeDigest> {
             } else {
                 format!("{key} {current_state} outcome={outcome}")
             };
+            // The reason leads the evidence fields. The compact renderer bounds
+            // a row from its front, so a failure's reason (which names a path on
+            // a `worktree_missing` refusal) must come before the longer evidence
+            // fields or its leading clause would be clipped away (#3835).
+            let result =
+                whole_text(&attempt["result_summary"]).filter(|summary| !summary.is_empty());
+            let note = if result.is_some() {
+                None
+            } else {
+                whole_text(&node["reason"]).or_else(|| whole_text(&node["waiting_for"]))
+            };
+            if let Some(reason) = note.as_deref() {
+                line.push_str(&format!(" note={reason}"));
+            }
             line.push_str(&format!(
                 " cause={} branch={} pr={} ci={} result_path={}",
                 cause.as_deref().unwrap_or("-"),
@@ -264,14 +278,8 @@ pub(crate) fn node_digests(rows: &[Value]) -> Vec<NodeDigest> {
             if let Some(error) = &evidence_error {
                 line.push_str(&format!(" evidence_unavailable={error}"));
             }
-            if let Some(summary) =
-                whole_text(&attempt["result_summary"]).filter(|summary| !summary.is_empty())
-            {
+            if let Some(summary) = result {
                 line.push_str(&format!(" result={summary}"));
-            } else if let Some(reason) =
-                whole_text(&node["reason"]).or_else(|| whole_text(&node["waiting_for"]))
-            {
-                line.push_str(&format!(" note={reason}"));
             }
             // Identity, outcome and all evidence fields stay in the structured
             // digest; the whole human line is kept and bounded only by the

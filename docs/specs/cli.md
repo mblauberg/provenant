@@ -246,7 +246,8 @@ admission shim, and a lane waiting on a heavy-job lock reports the command it
 waits to run. The attempt directory and child command stay host-local and never
 cross a peer boundary. `--full` prints each status row whole, including a long
 refusal reason naming its path; the default summary bounds each row to
-`SUMMARY_ROW_BYTES` with a clip marker.
+`SUMMARY_ROW_BYTES` with a clip marker, keeping the reason's leading clause (the
+text before the first `;`) inside that bound.
 
 `status` and `worktree list` report `stranded work` (`stranded_work` in
 `status --json`): a worktree with uncommitted edits or an interrupted Git

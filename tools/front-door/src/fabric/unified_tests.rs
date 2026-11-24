@@ -1606,6 +1606,65 @@ fn graph_status_full_reading_keeps_the_reason_and_compact_bounds_it() {
 }
 
 #[test]
+fn compact_row_keeps_the_reason_leading_clause_with_a_long_path()
+-> Result<(), Box<dyn std::error::Error>> {
+    // A `worktree_missing` refusal names its path before the first ';'. The
+    // compact renderer bounds a row from its front, so the digest carries that
+    // clause ahead of the longer evidence fields (#3835).
+    let mut checkpoint = checkpoint("g");
+    // A node with no attempt keeps the compact row's prefix short, as on a
+    // graph whose advance was refused before the writer launched.
+    let node = &mut checkpoint.nodes[1];
+    node.state = NodeState::Failed;
+    let path = format!("/private/var/folders/xy/{}", "long-segment/".repeat(5));
+    let first_clause = format!("node parent--child: local worktree {path} does not exist");
+    let reason = format!("{first_clause}; create it with `provenant worktree create`");
+    node.advance_error = Some(reason.clone());
+    let target = GraphTarget {
+        graph: "g".into(),
+        node: None,
+        attempt: None,
+    };
+    let rows = status_rows(&graph_snapshot(checkpoint), &target);
+    assert_eq!(
+        rows[1]["reason"], reason,
+        "the row builder clipped the reason"
+    );
+
+    let summary = status_summary(&rows);
+    let result = provenant_records::CommandResult::new(
+        "status",
+        provenant_records::Outcome::Ok,
+        json!({"rows": rows}),
+    );
+    let mut out = Vec::new();
+    provenant_cli::render(
+        &result,
+        provenant_cli::RenderMode::Compact {
+            text: "",
+            read_only: true,
+            summary: Some(&summary),
+        },
+        &mut out,
+    )?;
+    let compact = String::from_utf8(out)?;
+    let row = compact
+        .lines()
+        .find(|line| line.contains("note="))
+        .expect("a compact node row carrying the reason");
+    assert!(
+        row.contains(&first_clause),
+        "compact row lost the reason's leading clause: {row}"
+    );
+    assert!(row.ends_with("..."), "no clip marker: {row}");
+    assert!(
+        row.len() <= provenant_cli::limits::SUMMARY_ROW_BYTES,
+        "compact row exceeded the bound: {row}"
+    );
+    Ok(())
+}
+
+#[test]
 fn graph_failure_rows_prefer_owner_code_and_fall_back_for_old_checkpoints() {
     let mut checkpoint = checkpoint("g");
     checkpoint.nodes[0].state = NodeState::Blocked;
