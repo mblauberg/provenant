@@ -1455,6 +1455,11 @@ pub enum TerminalCause {
     WriteGrantsRefused,
     WorktreeBusy,
     HandoffRefused,
+    /// A local launch preparation step refused the attempt before custody.
+    /// The attempt's `preparation_failure` names the step; its note carries the
+    /// host's bounded reason and the correction that reason implies. A real
+    /// host handoff refusal keeps [`Self::HandoffRefused`] and its reconcile remedy.
+    PreparationRefused,
     /// A retry's writer head does not match the graph's pinned source commit.
     /// It is a pin problem, not a failed launch handoff.
     WriterPinMismatch {
@@ -1516,6 +1521,7 @@ impl TerminalCause {
             Self::WriteGrantsRefused => "write grants refused; provenant output ID",
             Self::WorktreeBusy => "worktree busy; provenant output ID",
             Self::HandoffRefused => "launch handoff refused; provenant output ID",
+            Self::PreparationRefused => "launch preparation refused; provenant output ID",
             Self::WriterPinMismatch { .. } => "writer source pin mismatch; provenant output ID",
             Self::RetainedWriterImport => "writer import retained; provenant output ID",
             Self::UnsupportedPlatform => "sandbox unavailable; provenant output ID",
@@ -1598,6 +1604,9 @@ impl TerminalCause {
             Self::HandoffRefused => {
                 "the host refused the launch handoff; run `provenant reconcile` before retrying"
             }
+            Self::PreparationRefused => {
+                "launch preparation refused; correct the named local setup before retrying"
+            }
             Self::WriterPinMismatch { .. } => {
                 "the writer worktree head does not match the commit pinned for this continuation; retry re-pins when the head descends from the pinned commit, otherwise restore that lineage"
             }
@@ -1664,6 +1673,19 @@ impl TerminalCause {
                 "the lane was refused and its record names no cause; inspect the attempt's local launch evidence and request before retrying"
             }
         }
+    }
+
+    /// The safe note for a preparation refusal: the correction implied by the
+    /// host's reason, followed by the reason's salient clause. Fixed text and
+    /// bounded host facts only; provider output never reaches a typed note.
+    pub fn preparation_note(reason: &str) -> String {
+        let salient = reason.split(';').next().unwrap_or(reason).trim();
+        let remedy = if salient.contains("no Git remote is declared") {
+            "declare `ports.git.remote` or set the branch's upstream, then retry"
+        } else {
+            "correct the local launch preparation failure and retry"
+        };
+        crate::diagnostic::safe_text(&format!("{remedy}; {salient}"))
     }
 }
 
@@ -1744,6 +1766,9 @@ pub enum PreparationFailure {
     AuthRequired,
     UsageLimited,
     AdapterUnavailable,
+    /// Local Git setup refused before custody. Not an adapter failure: route
+    /// fallback cannot declare a remote or set an upstream.
+    GitSetup,
 }
 
 /// Why a fallback candidate did not launch. Typed so `lanes` and `output` can

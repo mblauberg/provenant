@@ -76,6 +76,22 @@ fn typed_local(
     }
 }
 
+/// A local preparation step refused the launch before custody. Upgrade only
+/// an untyped local refusal: a boundary or resource fact keeps its own cause.
+fn typed_preparation(
+    policy: &provenant_records::policy::Policy,
+    phase: &str,
+    error: &RunError,
+) -> HandOff {
+    match typed_local(policy, phase, error) {
+        HandOff::Local(message) => HandOff::TypedLocal {
+            message,
+            cause: TerminalCause::PreparationRefused,
+        },
+        other => other,
+    }
+}
+
 fn boundary_handoff(
     policy: &provenant_records::policy::Policy,
     code: &str,
@@ -456,7 +472,7 @@ impl RunStore {
                 lease.withdraw_unlaunched().map_err(|release| {
                     HandOff::Protected(format!("Git setup: {error}; custody withdrawal: {release}"))
                 })?;
-                return Err(typed_local(&policy, "Git setup", &error));
+                return Err(typed_preparation(&policy, "Git setup", &error));
             }
             // Create the host-derived data roots while occupancy is held, before
             // shared Git state is initialised and permission anchors are captured.
@@ -830,6 +846,37 @@ mod tests {
 
     fn test_policy() -> provenant_records::policy::Policy {
         provenant_records::policy::Policy::default()
+    }
+
+    /// The Git-setup refusal reaches hand_off as a RunError::Input produced by
+    /// the production ForgeContextError conversion. Its typed classification
+    /// must be chosen here, not inferred later from the host's message (#3931).
+    #[test]
+    fn git_setup_input_is_classified_as_a_typed_preparation_refusal() {
+        let error = RunError::from(provenant_config::ForgeContextError::NoRemote {
+            remotes: vec!["origin".into(), "pr".into()],
+            close: vec!["origin".into()],
+        });
+        let HandOff::TypedLocal { cause, message } =
+            super::typed_preparation(&test_policy(), "Git setup", &error)
+        else {
+            panic!("expected a typed local preparation refusal");
+        };
+        assert_eq!(cause, TerminalCause::PreparationRefused);
+        assert!(
+            message.starts_with("Git setup: no Git remote is declared"),
+            "{message}"
+        );
+        // A hard boundary fact keeps its own cause: only an untyped local
+        // refusal is upgraded to a preparation refusal.
+        let boundary = RunError::Input {
+            kind: crate::ErrorKind::WriterProjectMismatch,
+            message: "writer project mismatch".into(),
+        };
+        assert!(matches!(
+            super::typed_preparation(&test_policy(), "Git setup", &boundary),
+            HandOff::Boundary { .. }
+        ));
     }
 
     #[test]

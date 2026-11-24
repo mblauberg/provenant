@@ -705,6 +705,7 @@ impl crate::run::TerminalCause {
         Self::WriteGrantsRefused,
         Self::WorktreeBusy,
         Self::HandoffRefused,
+        Self::PreparationRefused,
         Self::WriterPinMismatch {
             pinned: provenant_core::GitOid::Sha1([0; 20]),
             head: provenant_core::GitOid::Sha1([1; 20]),
@@ -753,6 +754,7 @@ mod terminal_cause_tests {
             | TerminalCause::WriteGrantsRefused
             | TerminalCause::WorktreeBusy
             | TerminalCause::HandoffRefused
+            | TerminalCause::PreparationRefused
             | TerminalCause::WriterPinMismatch { .. }
             | TerminalCause::RetainedWriterImport
             | TerminalCause::UnsupportedPlatform

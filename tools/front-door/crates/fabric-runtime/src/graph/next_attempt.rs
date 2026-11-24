@@ -384,6 +384,10 @@ fn routing_outcome(outcome: AttemptOutcome) -> provenant_routing::FallbackOutcom
         AttemptOutcome::UsageLimited => provenant_routing::FallbackOutcome::UsageLimited,
         // Keep the pre-launch refusal's existing route policy. Its graph
         // outcome carries the real cause; this is only fallback eligibility.
+        // A local preparation failure needs a local repair, not another route.
+        AttemptOutcome::PreparationRefused(
+            provenant_records::run::TerminalCause::PreparationRefused,
+        ) => provenant_routing::FallbackOutcome::Other,
         AttemptOutcome::AdapterUnavailable | AttemptOutcome::PreparationRefused(_) => {
             provenant_routing::FallbackOutcome::AdapterUnavailable
         }
@@ -413,6 +417,9 @@ fn fallback_cause(outcome: AttemptOutcome) -> Option<provenant_records::StopCaus
         AttemptOutcome::PreparationRefused(provenant_records::run::TerminalCause::SpawnFailure) => {
             Some(StopCause::SpawnFailure)
         }
+        AttemptOutcome::PreparationRefused(
+            provenant_records::run::TerminalCause::PreparationRefused,
+        ) => Some(StopCause::PreparationRefused),
         AttemptOutcome::AdapterUnavailable | AttemptOutcome::PreparationRefused(_) => {
             Some(StopCause::AdapterUnavailable)
         }
@@ -468,6 +475,9 @@ pub(crate) fn live_fallback_allowed(
         PreparationFailure::AdapterUnavailable => {
             provenant_routing::FallbackOutcome::AdapterUnavailable
         }
+        // A local Git setup refusal needs a declaration or an upstream, which
+        // another route cannot supply. Leave it with the chair.
+        PreparationFailure::GitSetup => provenant_routing::FallbackOutcome::Other,
     };
     expected == routing_outcome(outcome)
         && provenant_routing::FallbackPolicy {

@@ -4036,6 +4036,9 @@ impl BoundGraphOwner<'_> {
                             provenant_records::run::PreparationFailure::AdapterUnavailable => {
                                 provenant_records::StopCause::AdapterUnavailable
                             }
+                            provenant_records::run::PreparationFailure::GitSetup => {
+                                provenant_records::StopCause::PreparationRefused
+                            }
                         })
                     })
                     .or_else(|| preparation_cause.map(provenant_records::StopCause::from))
@@ -4129,6 +4132,13 @@ impl BoundGraphOwner<'_> {
                             }
                             provenant_records::run::PreparationFailure::AdapterUnavailable => {
                                 AttemptOutcome::AdapterUnavailable
+                            }
+                            provenant_records::run::PreparationFailure::GitSetup => {
+                                AttemptOutcome::PreparationRefused(
+                                    preparation_cause.unwrap_or(
+                                        provenant_records::run::TerminalCause::PreparationRefused,
+                                    ),
+                                )
                             }
                         }
                     } else {

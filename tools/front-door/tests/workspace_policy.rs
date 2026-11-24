@@ -1850,7 +1850,7 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         ("crates/quota/src/schedule.rs", 2812),
         ("crates/records/src/adapters.rs", 2273),
         // The persisted offer-mismatch fact and its owner-facing detail (#3892).
-        ("crates/records/src/run.rs", 4164),
+        ("crates/records/src/run.rs", 4189),
         ("crates/redact/src/lib.rs", 2273),
         ("crates/routing/src/catalog.rs", 2347),
         // Pinned-account offer judgement and the same-reason refusal detail (#3892).
@@ -1861,7 +1861,7 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         ("crates/run/src/delivery.rs", 4580),
         ("crates/run/src/git_context.rs", 2841),
         ("crates/run/src/holder.rs", 9281),
-        ("crates/run/src/launch.rs", 3886),
+        ("crates/run/src/launch.rs", 3903),
         ("crates/run/src/retention.rs", 4898),
         ("crates/run/src/settlement.rs", 4183),
         ("crates/run/src/store.rs", 2504),
