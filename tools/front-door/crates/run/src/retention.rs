@@ -1615,7 +1615,7 @@ fn collect_logs(
 /// Dispose of the per-attempt scratch root once its `tmp` has been collected.
 /// The short alias is unlinked with `tmp`; this only removes the empty `<id>`
 /// directory so terminal attempts do not leave one directory each behind.
-fn collect_empty_scratch_root(scratch: &Directory) -> Result<()> {
+pub(crate) fn collect_empty_scratch_root(scratch: &Directory) -> Result<()> {
     if !scratch
         .metadata_at(OsStr::new("tmp"), false)
         .is_err_and(|error| error.is_not_found())

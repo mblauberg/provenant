@@ -618,7 +618,12 @@ mod tests {
         let mut fixture = Fixture::new()?;
         fixture.register()?;
         fixture.settle()?;
-        let candidate = fixture.attempt.current_path()?.join("tmp/candidate-0");
+        let attempt = fixture.attempt.current_path()?;
+        let candidate = attempt
+            .parent()
+            .and_then(std::path::Path::parent)
+            .ok_or("state root")?
+            .join("attempt-scratch/attempt/tmp/candidate-0");
         let refs = candidate.join("git-common");
         fs::rename(&refs, candidate.join("git-common-original"))?;
         fs::create_dir(&refs)?;

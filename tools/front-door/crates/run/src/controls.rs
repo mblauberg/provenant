@@ -4362,8 +4362,15 @@ impl RunStore {
             return Ok(None);
         }
         let scratch = match self.attempt_scratch_dir(id, false).and_then(|scratch| {
-            scratch.metadata_at(std::ffi::OsStr::new("tmp"), false)?;
-            Ok(scratch)
+            match scratch.metadata_at(std::ffi::OsStr::new("tmp"), false) {
+                // Already collected: prune the emptied per-attempt root too.
+                Err(error) if error.is_not_found() => {
+                    crate::retention::collect_empty_scratch_root(&scratch)?;
+                    Err(error.into())
+                }
+                Err(error) => Err(error.into()),
+                Ok(_) => Ok(scratch),
+            }
         }) {
             Ok(scratch) => scratch,
             Err(RunError::Filesystem(error)) if error.is_not_found() => {
@@ -4430,7 +4437,7 @@ impl RunStore {
                 &|| !call.cancel.is_cancelled(),
                 &mut 0,
             )?;
-            Ok(())
+            crate::retention::collect_empty_scratch_root(&scratch)
         };
         Ok(Some(match remove() {
             Ok(()) => {
