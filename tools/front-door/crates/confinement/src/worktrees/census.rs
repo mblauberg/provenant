@@ -249,6 +249,32 @@ pub(super) fn absent_root_contains(path: &Path, root: &Path) -> Option<bool> {
     Some(path_directory == root_directory && path_removed.starts_with(&root_removed))
 }
 
+/// Rule out a removed root for a path that cannot be split, such as one
+/// through a directory this user cannot read. Kernel-reported paths carry no
+/// symlinks, so a path under the removed root passes through every existing
+/// ancestor of that root: when the path's nearest readable directory is none
+/// of them, by identity, the path cannot lie under it. Anything unresolved
+/// could.
+fn absent_root_could_hold(path: &Path, root: &Path) -> bool {
+    let directory = |candidate: &Path| {
+        std::fs::metadata(candidate)
+            .ok()
+            .filter(std::fs::Metadata::is_dir)
+            .map(|metadata| (metadata.dev(), metadata.ino()))
+    };
+    let root_ancestors = root
+        .ancestors()
+        .skip(1)
+        .filter_map(directory)
+        .collect::<Vec<_>>();
+    if root_ancestors.is_empty() {
+        return true;
+    }
+    path.ancestors()
+        .find_map(directory)
+        .is_none_or(|nearest| root_ancestors.contains(&nearest))
+}
+
 /// The owner of a scoped root. A removed root is owned as its nearest existing
 /// directory is; an unreadable root has no provable owner.
 pub(super) fn root_owner(root: &Path) -> Option<u32> {
@@ -2230,6 +2256,9 @@ pub(super) fn occupancy_path_could_be_under(path: &Path, root: &Path) -> bool {
     }
     if let Some(inside) = absent_root_contains(path, root) {
         return inside;
+    }
+    if root_is_absent(root) {
+        return absent_root_could_hold(path, root);
     }
     if !std::fs::metadata(root).is_ok_and(|metadata| metadata.is_dir()) {
         return true;
