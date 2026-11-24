@@ -166,6 +166,12 @@ pub struct SealedSystemImage {
     pub setuid_transition: bool,
 }
 
+/// A process image whose live signature is the platform signature (team
+/// identifier `platform`). This is typed evidence, not prose from
+/// `process_details`; missing evidence never grants an exception.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlatformSignedImage;
+
 /// Host-owner acceptance of the risk that this signed executable occupies a
 /// worktree despite an unreadable cwd. Paths and signers are exact matches.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -302,6 +308,23 @@ pub trait CwdObserver: Send + Sync {
         None
     }
 
+    /// The process's live platform signature (`team_id=platform`), or None
+    /// when any signing evidence is missing.
+    fn platform_signed_image(&self, _pid: i64) -> Option<PlatformSignedImage> {
+        None
+    }
+
+    /// A host-configured `census_ignore_unreadable` entry that matches this
+    /// process's canonical executable and team identifier. The caller's
+    /// entries are passed here so the policy cannot leak across roots.
+    fn configured_unreadable_image(
+        &self,
+        _pid: i64,
+        _entries: &[CensusIgnoreEntry],
+    ) -> Option<CensusIgnoreEntry> {
+        None
+    }
+
     /// A Linux kernel thread, which holds no files or cwd in any worktree.
     fn kernel_thread(&self, _pid: i64) -> bool {
         false
@@ -352,6 +375,20 @@ impl CwdObserver for SystemCwdObserver {
     fn sealed_system_image(&self, pid: i64) -> Option<SealedSystemImage> {
         let pid = i32::try_from(pid).ok().filter(|pid| *pid > 0)?;
         crate::sys::pid::sealed_system_image(pid)
+    }
+
+    fn platform_signed_image(&self, pid: i64) -> Option<PlatformSignedImage> {
+        let pid = i32::try_from(pid).ok().filter(|pid| *pid > 0)?;
+        crate::sys::pid::platform_signed_image(pid)
+    }
+
+    fn configured_unreadable_image(
+        &self,
+        pid: i64,
+        entries: &[CensusIgnoreEntry],
+    ) -> Option<CensusIgnoreEntry> {
+        let pid = i32::try_from(pid).ok().filter(|pid| *pid > 0)?;
+        crate::sys::pid::configured_unreadable_image(pid, entries)
     }
 
     fn kernel_thread(&self, pid: i64) -> bool {

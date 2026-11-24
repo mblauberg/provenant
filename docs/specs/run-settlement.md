@@ -261,18 +261,24 @@ cleanup, first tries the same proof from a fresh census. A proof makes custody q
 abandonment proceeds; otherwise it refuses and names the blocker, including any live or
 unidentifiable PID or omitted descendants.
 
-An unreadable process alone is not an occupant. The census leaves a root free when typed
-evidence proves the process cannot be a lane writer: it runs as another user (a different real
-uid), it is a sealed platform-signed system binary (`team_id=platform`), or its readable
-executable lies outside every candidate root and its cwd, if readable, is outside too. The
-census raises a typed warning naming the process instead of blocking settlement. A same-user
-process whose readable executable is inside the worktree still keeps the root unknown and the
-refusal names its PID. Credentials, signature and paths are typed observer signals; the
-`process_details` diagnostic string is never parsed to decide custody. Positive cwd or
-descriptor evidence always wins: a process placed inside a root is live regardless of these
-exceptions.
+An unreadable process alone is not an occupant, but only an explicit host policy may free a
+root. For an occupancy path or root identity that cannot be placed, the existing listed-uid
+excusal applies: a service uid accepted by `unreadable_policy_uids` and foreign to every root
+owner, such as `launchd`, is excused. For EPERM-unreadable descriptors, an owner-uid process is
+excused only when it is platform-signed (`team_id=platform`) AND its executable is under
+`/usr/libexec/`, `/System/Library/` or `/usr/sbin/` AND its cwd was read and lies outside every
+scoped root; `/bin`, `/usr/bin` and unreadable cwd never qualify. A configured
+`confinement.census_ignore_unreadable` entry, matched on the canonical executable path and
+team id, extends these defaults to every unreadable failure class (descriptors EPERM, occupancy
+path or root identity unreadable, cwd unreadable). Each excusal raises a typed warning naming
+the PID and path instead of blocking settlement. Every other unreadable process remains
+Unknown/blocking with its PID named; a human uid and the owner are never excused through the
+uid listing, and positive cwd or descriptor evidence inside a root always wins. Credentials,
+signature, configuration and paths are typed observer signals; the `process_details`
+diagnostic string is never parsed to decide custody.
 - Why: host daemons such as `launchd` and `UserEventAgent` cannot occupy a lane worktree, and
-  an unreadable EPERM process must not deadlock every blocked settlement.
+  an unreadable EPERM process must not deadlock every blocked settlement, but a plausible image
+  alone must not excuse a process that could be the lane's writer.
 - Owner: `crates/confinement/src/worktrees/census.rs`,
   `crates/confinement/src/worktrees/census_excusal.rs`, `crates/run/src/settlement.rs`
 
