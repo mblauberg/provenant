@@ -262,6 +262,11 @@ external action warns and can be retried by adoption.
 `result NAME[/NODE[#N]]` reads current lane evidence in one call, and for a
 review node projects the settled `verdict` and typed `findings[]` through the
 projection `status` and `wait` read, not by parsing the result artifact again.
+The human `--full` view prints each finding's severity, location (`file:line`
+when present), summary and suggested fix from those same typed fields, with no
+placeholder for a missing location or fix. Each field is terminal-safe: control,
+format and bidi characters are stripped before it is bounded, so one finding
+cannot forge or reorder human lines. The compact view keeps a severity count.
 Missing or unavailable evidence is not proof of a check.
 
 `output GRAPH` reads the newest settled attempt of a graph's one non-composite

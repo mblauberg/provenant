@@ -3322,16 +3322,9 @@ fn result_reply(target: &provenant_cli::Target, rows: &[Value]) -> provenant_cli
                 review_availability(row)
             ));
             for finding in items {
-                let severity = finding["severity"].as_str().unwrap_or("unknown");
-                let file = finding["file"].as_str().unwrap_or("?");
-                let line = finding["line"]
-                    .as_u64()
-                    .map(|line| format!(":{line}"))
-                    .unwrap_or_default();
-                let summary = finding["summary"].as_str().unwrap_or("");
                 human.push_str(&format!(
-                    "  finding: [{severity}] {file}{line} — {}\n",
-                    provenant_fabric_runtime::hosts::plain_text(summary, 256)
+                    "  {}\n",
+                    provenant_cli::run::finding_human_line(finding)
                 ));
             }
         }

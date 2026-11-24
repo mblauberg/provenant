@@ -223,6 +223,40 @@ pub(super) fn output_summary_default(data: &Value, text: &str, headed: bool) -> 
     summary(data, text, headed, false)
 }
 
+/// One typed review finding as a bounded, terminal-safe human line. Every field
+/// comes from the same structured finding the JSON envelope carries; a missing
+/// location or suggested fix leaves no placeholder behind. Control, format and
+/// bidi characters are stripped before the byte bound so one finding cannot
+/// forge or reorder human lines.
+/// Spec: docs/specs/cli.md#output-references-and-bounded-tails
+pub fn finding_human_line(finding: &Value) -> String {
+    const FIELD_BYTES: usize = 256;
+    let field = |key: &str| {
+        finding[key]
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| plain_text(value, usize::MAX))
+            .filter(|value| !value.is_empty())
+            .map(|value| crate::bounded_text(&value, FIELD_BYTES))
+    };
+    let severity = field("severity").unwrap_or_else(|| "unknown".into());
+    let mut line = format!("finding: [{severity}]");
+    match (field("file"), finding["line"].as_u64()) {
+        (Some(file), Some(number)) => line.push_str(&format!(" {file}:{number}")),
+        (Some(file), None) => line.push_str(&format!(" {file}")),
+        (None, Some(number)) => line.push_str(&format!(" line {number}")),
+        (None, None) => {}
+    }
+    if let Some(summary) = field("summary") {
+        line.push_str(&format!(" — {summary}"));
+    }
+    if let Some(fix) = field("proposed_fix") {
+        line.push_str(&format!(" (fix: {fix})"));
+    }
+    line
+}
+
 fn summary(data: &Value, text: &str, headed: bool, full: bool) -> crate::Summary {
     let mut lines = Vec::new();
     if headed && let Some(verdict) = data["selected"]["verdict"].as_str() {
@@ -238,6 +272,13 @@ fn summary(data: &Value, text: &str, headed: bool, full: bool) -> crate::Summary
             None => "availability unknown",
         };
         lines.push(format!("findings: {} ({availability})", findings.len()));
+        if full {
+            lines.extend(
+                findings
+                    .iter()
+                    .map(|finding| format!("  {}", finding_human_line(finding))),
+            );
+        }
     }
     if headed {
         let verify = data["handoff"]["Ok"]["verify"]
@@ -1226,9 +1267,9 @@ mod tests {
     }
 
     use super::{
-        Status, add_planner_fallback, fallback_reason_for_graph, output_summary,
-        output_summary_default, provider_error_from_result, provider_error_from_stderr,
-        tail_start_bytes,
+        Status, add_planner_fallback, fallback_reason_for_graph, finding_human_line,
+        output_summary, output_summary_default, provider_error_from_result,
+        provider_error_from_stderr, tail_start_bytes,
     };
     use serde_json::json;
 
@@ -1819,6 +1860,77 @@ mod tests {
             !lines.iter().any(|line| line.starts_with("base:")),
             "{lines:?}"
         );
+    }
+
+    // Spec: docs/specs/cli.md#output-references-and-bounded-tails
+    #[test]
+    fn result_full_renders_each_finding_summary_and_location() {
+        let data = json!({
+            "state": "succeeded",
+            "selected": {
+                "verdict": "VERDICT: FAIL",
+                "findings": [
+                    {"id":"F1","severity":"high","file":"src/a.rs","line":12,
+                     "summary":"critical bug","status":"open","proposed_fix":"handle x"},
+                    {"id":"F2","severity":"low","file":"src/b.rs","line":3,
+                     "summary":"style nit","status":"open","proposed_fix":"format y"}
+                ],
+                "findings_available": true
+            }
+        });
+        let summary = output_summary(&data, "", true);
+        let text = summary.lines.join("\n");
+        assert!(text.contains("src/a.rs:12"), "{text}");
+        assert!(text.contains("critical bug"), "{text}");
+        assert!(text.contains("handle x"), "{text}");
+        assert!(text.contains("src/b.rs:3"), "{text}");
+        assert!(text.contains("style nit"), "{text}");
+        assert!(text.contains("format y"), "{text}");
+        let compact = output_summary_default(&data, "", true);
+        assert!(
+            !compact
+                .lines
+                .iter()
+                .any(|line| line.contains("critical bug")),
+            "the compact view stays a count: {:?}",
+            compact.lines
+        );
+    }
+
+    // Spec: docs/specs/cli.md#output-references-and-bounded-tails
+    #[test]
+    fn findings_without_location_or_fix_render_no_placeholders() {
+        let line = finding_human_line(&json!({
+            "id":"F1","severity":"low","summary":"note","status":"open"
+        }));
+        assert_eq!(line, "finding: [low] — note", "{line}");
+        let with_file = finding_human_line(&json!({
+            "id":"F2","severity":"medium","file":"a.rs",
+            "summary":"defect","status":"open"
+        }));
+        assert_eq!(with_file, "finding: [medium] a.rs — defect", "{with_file}");
+        assert!(
+            !line.contains('?') && !with_file.contains('?'),
+            "no '?' placeholder: {line} / {with_file}"
+        );
+    }
+
+    // Spec: docs/specs/cli.md#one-bounded-envelope-clipped-with-a-warning
+    #[test]
+    fn finding_human_line_strips_control_and_bidi_characters() {
+        let line = finding_human_line(&json!({
+            "id":"F1","severity":"high","file":"src/a.rs","line":12,
+            "summary":"first\nsecond\u{1b}[2J\u{202e}reordered","status":"open",
+            "proposed_fix":"handle\u{200b}it\nnow"
+        }));
+        assert_eq!(line.lines().count(), 1, "one terminal line: {line:?}");
+        assert!(
+            line.chars()
+                .all(|c| !provenant_records::diagnostic::unsafe_display_character(c)),
+            "no control or bidi characters: {line:?}"
+        );
+        assert!(line.contains("firstsecond[2Jreordered"), "{line:?}");
+        assert!(line.contains("handleitnow"), "{line:?}");
     }
 
     // Spec: docs/specs/cli.md#output-references-and-bounded-tails
