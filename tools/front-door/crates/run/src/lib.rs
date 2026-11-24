@@ -1055,10 +1055,25 @@ impl RunError {
                     diagnostic = diagnostic
                         .detail(format!("writer occupancy is unknown for {scope}: {detail}"));
                 }
-                if matches!(error, WorktreeError::BranchCollision { .. }) {
+                if let WorktreeError::BranchCollision { existing } = error {
+                    // A ref Git listed may be named, but only once it is free of
+                    // display-control characters. The same shared projection
+                    // keeps every named fact bounded and escaped.
+                    // Spec: docs/specs/run-git.md#worktrees-and-refs
+                    let detail = if existing
+                        .chars()
+                        .any(provenant_records::diagnostic::unsafe_display_character)
+                    {
+                        "branch name collides with an existing ref".to_owned()
+                    } else {
+                        format!(
+                            "branch name collides with existing ref {}",
+                            provenant_records::diagnostic::safe_text(existing)
+                        )
+                    };
                     diagnostic = diagnostic
-                        .detail("branch name collides with an existing ref")
-                        .next("inspect existing Git refs and choose a different branch name");
+                        .detail(detail)
+                        .next("inspect the named ref and choose a different branch name");
                 }
                 if let WorktreeError::WriterLeaseHeld { .. } = error {
                     diagnostic = diagnostic
@@ -1517,6 +1532,23 @@ mod diagnostic_projection_tests {
                     ));
                 }
             }
+        }
+    }
+
+    #[test]
+    fn branch_collision_diagnostic_names_the_ref() {
+        use provenant_confinement::worktrees::WorktreeError;
+        let error = RunError::Writer(WorktreeError::BranchCollision {
+            existing: "refs/remotes/origin/team/smoke".into(),
+        });
+        for destination in [Destination::Local, Destination::Remote] {
+            let diagnostic = error.diagnostic(destination);
+            let detail = diagnostic.detail.expect("collision names the ref");
+            assert!(
+                detail.contains("refs/remotes/origin/team/smoke"),
+                "missing ref: {detail}"
+            );
+            assert!(!detail.chars().any(char::is_control));
         }
     }
 

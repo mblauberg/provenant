@@ -52,6 +52,13 @@ branch is the declared `git.default_branch`, else `refs/remotes/<remote>/HEAD`, 
 protected branches are declared, else the default branch plus forge-reported protection.
 - Why: a hidden guess can retire the wrong branch or push to the wrong repository.
 
+A new branch name collides with an existing ref when their NFC-lowercased components match or one is
+a path prefix of the other. A remote-tracking ref is split into a remote and a branch only at a
+configured remote name, longest name first; an intermediate slash never invents a remote, but a
+configured remote that contains `/` is still a valid boundary.
+- Why: treating every slash as a remote boundary invents remotes that do not exist and refuses names
+  that collide with nothing.
+
 The owner resolves the context when a delivery or target check first needs it (`ForgeOnce`), so a
 command that delivers nothing, such as a read-only graph, runs in a checkout with no remote.
 - Why: an eager resolution refused read-only work for a remote it never used.
