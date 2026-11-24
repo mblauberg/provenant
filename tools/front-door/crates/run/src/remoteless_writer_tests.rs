@@ -222,9 +222,12 @@ fn prepare_writer_git_never_passes_an_empty_remote_to_git() -> FixtureResult<()>
         return child_prepare_writer_git();
     }
     let temp = tempfile::tempdir()?;
-    let bin = temp.path().join("bin");
-    let log = temp.path().join("git.log");
-    let ran = temp.path().join("child.ran");
+    // The writer pins Git by opening each ancestor without following links,
+    // so the wrapper must sit under a canonical root (macOS /var is a link).
+    let root = temp.path().canonicalize()?;
+    let bin = root.join("bin");
+    let log = root.join("git.log");
+    let ran = root.join("child.ran");
     std::fs::create_dir(&bin)?;
     let wrapper = bin.join("git");
     let git = provenant_os::git::git_executable().ok_or("git unavailable")?;
@@ -271,7 +274,7 @@ fn prepare_writer_git_never_passes_an_empty_remote_to_git() -> FixtureResult<()>
     let status = std::process::Command::new(std::env::current_exe()?)
         .args(["--exact", test_path.as_str(), "--nocapture"])
         .env_clear()
-        .env("HOME", temp.path())
+        .env("HOME", &root)
         .env("PATH", "/usr/bin:/bin")
         .env(provenant_core::consumer_env::GIT, &wrapper)
         .env(WRITER_CHILD, "1")
