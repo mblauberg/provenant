@@ -1157,6 +1157,17 @@ fn result_rows(reply: &provenant_cli::run::Reply) -> Vec<Value> {
         .clone()
 }
 
+fn render_result_full(reply: &provenant_cli::run::Reply) -> String {
+    let globals = provenant_cli::Globals {
+        full: true,
+        ..Default::default()
+    };
+    let mode = globals.render_mode(&reply.human, reply.read_only, reply.summary.as_ref());
+    let mut output = Vec::new();
+    provenant_cli::render(&reply.result, mode, &mut output).unwrap();
+    String::from_utf8(output).unwrap()
+}
+
 // Spec: docs/specs/cli.md#output-references-and-bounded-tails
 #[test]
 fn result_json_reports_accepted_and_findings_required_reviews() {
@@ -1234,6 +1245,37 @@ fn result_compact_shows_verdict_and_counts_findings_by_severity() {
     assert!(compact.contains("VERDICT: FAIL"), "{compact}");
     assert!(compact.contains("2 high"), "{compact}");
     assert!(compact.contains("1 low"), "{compact}");
+}
+
+// Spec: docs/specs/cli.md#output-references-and-bounded-tails
+#[test]
+fn result_full_shows_each_finding_summary_location_and_fix() {
+    let findings = json!([
+        {"id":"F1","severity":"high","file":"src/a.rs","line":12,
+         "summary":"critical bug","status":"open","evidence":"seen at x",
+         "proposed_fix":"handle x"},
+        {"id":"F2","severity":"low","file":"src/b.rs",
+         "summary":"style nit","status":"open"}
+    ]);
+    let reply = result_reply(
+        &"g/parent".parse().unwrap(),
+        &status_rows(
+            &graph_snapshot(review_checkpoint("VERDICT: FAIL", findings)),
+            &GraphTarget {
+                graph: "g".into(),
+                node: Some("parent".into()),
+                attempt: None,
+            },
+        ),
+    );
+    let full = render_result_full(&reply);
+    assert!(full.contains("critical bug"), "{full}");
+    assert!(full.contains("src/a.rs:12"), "{full}");
+    assert!(full.contains("handle x"), "{full}");
+    assert!(full.contains("style nit"), "{full}");
+    assert!(full.contains("src/b.rs"), "{full}");
+    assert!(!full.contains("finding: [low] ?"), "{full}");
+    assert!(!full.contains("(fix: )"), "{full}");
 }
 
 // Spec: docs/specs/cli.md#output-references-and-bounded-tails
