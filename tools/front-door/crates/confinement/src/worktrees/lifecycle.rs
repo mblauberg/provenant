@@ -632,6 +632,38 @@ fn reuse_existing_worktree(
     .with_owner_identity())
 }
 
+/// The repository's remotes, longest name first. Git itself names the configured
+/// remotes so includes, section case and quoted names follow Git's own view; a
+/// store with no configured remote falls back to tracking directories that hold
+/// a ref. Only one of those names may split a `refs/remotes/` ref into a remote
+/// and a branch: a name containing `/` is a valid remote, so every slash is not a
+/// possible boundary. A longer name is tried first so `a/b` wins over `a`.
+/// Spec: docs/specs/run-git.md#worktrees-and-refs
+fn configured_remote_names(
+    context: &WorktreeContext<'_>,
+    cancel: &CancelToken,
+) -> Result<Vec<String>, WorktreeError> {
+    let read = GitRead::RemoteNames;
+    let command = read.command_label();
+    let outcome = run_git(context, context.repo, read, cancel)?;
+    require_exit(&command, &outcome, &[0])?;
+    let mut remotes: Vec<String> = String::from_utf8_lossy(&outcome.stdout.bytes)
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if remotes.is_empty() {
+        let git = match context.layout.project() {
+            Some(project) => provenant_config::ForgeGit::new(project),
+            None => provenant_config::ForgeGit::bare(context.layout.root()),
+        }
+        .map_err(|error| WorktreeError::PortConfiguration(std::io::Error::other(error)))?;
+        remotes = git.remotes();
+    }
+    remotes.sort_by_key(|name| std::cmp::Reverse(name.len()));
+    Ok(remotes)
+}
+
 fn create_with_default(
     context: &WorktreeContext<'_>,
     request: WorktreeCreate,
@@ -813,17 +845,25 @@ fn create_with_default(
 
     if create_branch {
         let remote_tips = read_ref_tips(context, context.repo, GitRead::RemoteBranchTips, cancel)?;
+        let remotes = configured_remote_names(context, cancel)?;
         for name in branch_tips.keys().chain(remote_tips.keys()) {
             let text = name.as_str();
             let local_collision = text
                 .strip_prefix("refs/heads/")
                 .is_some_and(|candidate| provenant_core::refs_collide(&request.branch, candidate));
-            // Remote names can themselves contain slashes. Consider every
-            // possible remote/branch boundary to avoid missing an alias.
+            // Only a configured remote defines a remote/branch boundary; an
+            // invented alias from an intermediate slash is not a remote. Remotes
+            // are longest first, so the first match is the one Git would use.
             let remote_collision = text.strip_prefix("refs/remotes/").is_some_and(|rest| {
-                rest.match_indices('/').any(|(index, _)| {
-                    provenant_core::refs_collide(&request.branch, &rest[index + 1..])
-                })
+                remotes
+                    .iter()
+                    .find_map(|remote| {
+                        rest.strip_prefix(remote.as_str())
+                            .and_then(|rest| rest.strip_prefix('/'))
+                    })
+                    .is_some_and(|candidate| {
+                        provenant_core::refs_collide(&request.branch, candidate)
+                    })
             });
             if local_collision || remote_collision {
                 return Err(WorktreeError::BranchCollision {

@@ -419,6 +419,157 @@ fn create_refuses_aliases_of_local_and_remote_branches() -> Result<(), Box<dyn E
     Ok(())
 }
 
+/// Only a configured remote defines a `refs/remotes/` boundary. `origin` has a
+/// branch `team/smoke`, but no remote `origin/team`, so `smoke/x` is free.
+#[test]
+fn create_allows_branch_below_an_invented_remote_alias() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let url = fixture.root.to_str().ok_or("non-UTF8 fixture root")?;
+    fixture.run(&["remote", "add", "origin", url])?;
+    fixture.run(&["update-ref", "refs/remotes/origin/team/smoke", "HEAD"])?;
+    let test_context = TestContext::new(&fixture)?;
+    let context = test_context.context();
+    let created = create(
+        &context,
+        WorktreeCreate {
+            branch: "smoke/x".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    assert_eq!(created.branch.as_deref(), Some("refs/heads/smoke/x"));
+    Ok(())
+}
+
+/// A configured remote may itself contain `/`; its branch still collides.
+#[test]
+fn create_refuses_branch_colliding_with_slashed_remote() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let url = fixture.root.to_str().ok_or("non-UTF8 fixture root")?;
+    fixture.run(&["remote", "add", "a/b", url])?;
+    fixture.run(&["update-ref", "refs/remotes/a/b/smoke", "HEAD"])?;
+    let test_context = TestContext::new(&fixture)?;
+    let context = test_context.context();
+    let error = create(
+        &context,
+        WorktreeCreate {
+            branch: "smoke/x".into(),
+            base: None,
+        },
+        &cancel(),
+    );
+    assert!(
+        matches!(
+            error,
+            Err(WorktreeError::BranchCollision { ref existing })
+                if existing.as_str() == "refs/remotes/a/b/smoke"
+        ),
+        "unexpected result: {error:?}"
+    );
+    Ok(())
+}
+
+/// Overlapping names are not accepted by `git remote add`, so configure them
+/// directly. The longest name owns the ref: `a/b` splits `a/b/smoke` into branch
+/// `smoke`, so `b/smoke/x` is free while `smoke/x` collides.
+#[test]
+fn create_splits_at_the_longest_matching_remote() -> Result<(), Box<dyn Error>> {
+    let mut fixture = Fixture::new()?;
+    let url = fixture
+        .root
+        .to_str()
+        .ok_or("non-UTF8 fixture root")?
+        .to_owned();
+    fixture.run(&["config", "remote.a.url", &url])?;
+    fixture.run(&["config", "remote.a/b.url", &url])?;
+    fixture.run(&["update-ref", "refs/remotes/a/b/smoke", "HEAD"])?;
+    // Config edits change the digested repository view; re-anchor the handle.
+    fixture.repo = fixture.runtime.open_repo(
+        &fixture.executor,
+        &fixture.root,
+        fixture.budget()?,
+        &cancel(),
+    )?;
+    let test_context = TestContext::new(&fixture)?;
+    let context = test_context.context();
+    let base = Some(fixture.head()?.to_string());
+
+    let created = create(
+        &context,
+        WorktreeCreate {
+            branch: "b/smoke/x".into(),
+            base: base.clone(),
+        },
+        &cancel(),
+    )?;
+    assert_eq!(created.branch.as_deref(), Some("refs/heads/b/smoke/x"));
+
+    let error = create(
+        &context,
+        WorktreeCreate {
+            branch: "smoke/x".into(),
+            base,
+        },
+        &cancel(),
+    );
+    assert!(
+        matches!(
+            error,
+            Err(WorktreeError::BranchCollision { ref existing })
+                if existing == "refs/remotes/a/b/smoke"
+        ),
+        "unexpected result: {error:?}"
+    );
+    Ok(())
+}
+
+/// Git sees remotes from included config. A directly configured remote keeps the
+/// tracking-directory fallback off, so an included `origin` must still define a
+/// boundary for `refs/remotes/origin/smoke`.
+#[test]
+fn create_refuses_collision_with_an_included_remote() -> Result<(), Box<dyn Error>> {
+    let mut fixture = Fixture::new()?;
+    let url = fixture
+        .root
+        .to_str()
+        .ok_or("non-UTF8 fixture root")?
+        .to_owned();
+    fixture.run(&["config", "remote.backup.url", &url])?;
+    std::fs::write(
+        fixture.root.join(".git/remotes.inc"),
+        "[remote \"origin\"]\n\turl = /origin.invalid\n",
+    )?;
+    fixture.run(&["config", "include.path", "remotes.inc"])?;
+    fixture.run(&["update-ref", "refs/remotes/origin/smoke", "HEAD"])?;
+    // Config edits change the digested repository view; re-anchor the handle.
+    fixture.repo = fixture.runtime.open_repo(
+        &fixture.executor,
+        &fixture.root,
+        fixture.budget()?,
+        &cancel(),
+    )?;
+    let test_context = TestContext::new(&fixture)?;
+    let context = test_context.context();
+
+    let error = create(
+        &context,
+        WorktreeCreate {
+            branch: "smoke/v2".into(),
+            base: Some(fixture.head()?.to_string()),
+        },
+        &cancel(),
+    );
+    assert!(
+        matches!(
+            error,
+            Err(WorktreeError::BranchCollision { ref existing })
+                if existing == "refs/remotes/origin/smoke"
+        ),
+        "unexpected result: {error:?}"
+    );
+    Ok(())
+}
+
 #[test]
 fn create_list_remove_deletes_landed_branch_and_refuses_primary() -> Result<(), Box<dyn Error>> {
     // Spec: docs/specs/supervisor.md#shared-occupancy-removal-never-forces
