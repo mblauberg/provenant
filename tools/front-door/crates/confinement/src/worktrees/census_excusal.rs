@@ -2,25 +2,108 @@
 //!
 //! An unreadable process is not, by itself, proof that a lane worktree is
 //! occupied. Three typed policies may excuse one: the listed service-uid
-//! policy for a path that cannot be placed, an owner-uid platform daemon with
-//! an approved executable and a readable cwd outside every scoped root, and a
-//! configured image entry that extends both to every unreadable failure class.
-//! Placement evidence for the cwd and every descriptor is computed for every
-//! root before any excusal; a positive placement always wins. Root identity
-//! that cannot be read, and a listed uid the kernel will not reveal, fail
-//! closed and keep the root unknown. Nothing here parses the `process_details`
-//! diagnostic string.
+//! policy, an owner-uid platform daemon with an approved executable and a
+//! readable cwd outside every scoped root, and a configured image entry that
+//! extends both to every unreadable failure class. The listed policy is
+//! consulted for every failure class, never for a human uid or the owner.
+//!
+//! Two causes kept separate: a process whose own occupancy path cannot be
+//! placed (for example launchd's descriptors) may be excused by a listed uid or
+//! a configured entry; a root whose own identity or metadata cannot be read
+//! makes placement undecidable for that root, fails closed for every arm, and
+//! keeps the root unknown. Positive placement and an undecidable root both
+//! block every excusal. A listed uid the kernel will not reveal fails closed
+//! too. Nothing here parses the `process_details` diagnostic string.
 
 use super::*;
 
+static SYSTEM_CWD_OBSERVER: SystemCwdObserver = SystemCwdObserver;
+
+/// Wraps a host observer with a policy's configured entries. Every method
+/// delegates to `inner`; the two policy methods forward `entries` (not the
+/// caller's argument) so a policy cannot leak across roots. `inner` is a seam:
+/// a test injects a recording observer with `with_inner` and proves the trait
+/// method itself forwards non-empty entries to the matcher it calls.
+pub(super) struct PolicyCwdObserver<'a> {
+    entries: &'a [CensusIgnoreEntry],
+    inner: &'a dyn CwdObserver,
+}
+
+impl<'a> PolicyCwdObserver<'a> {
+    pub(super) fn new(entries: &'a [CensusIgnoreEntry]) -> Self {
+        Self {
+            entries,
+            inner: &SYSTEM_CWD_OBSERVER,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_inner(entries: &'a [CensusIgnoreEntry], inner: &'a dyn CwdObserver) -> Self {
+        Self { entries, inner }
+    }
+}
+
+impl CwdObserver for PolicyCwdObserver<'_> {
+    fn process_uids(&self, pid: i64) -> Option<provenant_os::pid::ProcessUids> {
+        self.inner.process_uids(pid)
+    }
+    fn occupancy(&self, pid: i64) -> provenant_os::pid::OccupancyObservation {
+        self.inner.occupancy(pid)
+    }
+    fn occupancy_while(
+        &self,
+        pid: i64,
+        keep_going: &dyn Fn() -> bool,
+    ) -> provenant_os::pid::OccupancyObservation {
+        self.inner.occupancy_while(pid, keep_going)
+    }
+    fn executable(&self, pid: i64) -> Option<PathBuf> {
+        self.inner.executable(pid)
+    }
+    fn sealed_system_image(&self, pid: i64) -> Option<provenant_os::pid::SealedSystemImage> {
+        self.inner.sealed_system_image(pid)
+    }
+    fn platform_signed_image(&self, pid: i64) -> Option<provenant_os::pid::PlatformSignedImage> {
+        self.inner.platform_signed_image(pid)
+    }
+    fn configured_unreadable_image(
+        &self,
+        pid: i64,
+        _: &[CensusIgnoreEntry],
+    ) -> Option<CensusIgnoreEntry> {
+        self.inner.configured_unreadable_image(pid, self.entries)
+    }
+    fn kernel_thread(&self, pid: i64) -> bool {
+        self.inner.kernel_thread(pid)
+    }
+    fn unreadable_policy_uids(
+        &self,
+        pid: i64,
+        _: &[CensusIgnoreEntry],
+    ) -> Result<
+        provenant_os::pid::UnreadablePolicyExcusal,
+        provenant_os::pid::UnreadablePolicyFailure,
+    > {
+        self.inner.unreadable_policy_uids(pid, self.entries)
+    }
+    fn cwd(&self, pid: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
+        self.inner.cwd(pid)
+    }
+    fn process_details(&self, pid: i64) -> Option<String> {
+        self.inner.process_details(pid)
+    }
+}
+
 /// The observation that left a process's custody unproven. The failure decides
-/// which host policy, if any, may excuse it.
+/// which host policy, if any, may excuse it. An undecidable root is not a
+/// failure here: it is a separate blocking signal, so it can never be traded
+/// for an excusal and the root keeps its Unknown state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum UnreadableFailure {
-    /// A cwd or descriptor path could not be placed under a root by directory
-    /// identity. `listed` is the already-checked service-uid policy decision;
-    /// it is false when a root's own identity cannot be read (fail closed).
-    PathOrRootIdentityUnreadable { listed: bool },
+    /// The process's own cwd or descriptor path could not be placed under a
+    /// root by directory identity (for example a path beneath a non-directory
+    /// ancestor). A listed uid or a configured entry may excuse this cause.
+    ProcessPathUnplaceable,
     /// The descriptor table was refused with EPERM.
     DescriptorsDenied,
     /// The kernel refused the cwd query.
@@ -191,30 +274,38 @@ fn owner_platform_daemon(cwd_observer: &dyn CwdObserver, pid: i64, roots: &[Path
 }
 
 /// Excuse one unreadable process from blocking the census, or return false
-/// when it could still occupy a root. Positive placement always wins.
+/// when it could still occupy a root. Positive placement and an undecidable
+/// root both block every arm. `listed` is the already-checked service-uid
+/// decision, consulted for every failure class but never for a human uid or
+/// the owner.
 pub(super) fn excuse_unreadable(
     cwd_observer: &dyn CwdObserver,
     pid: i64,
     roots: &[PathBuf],
     failure: UnreadableFailure,
+    listed: bool,
     placed_inside: bool,
+    root_undecidable: bool,
     entries: &[CensusIgnoreEntry],
     unplaceable: &mut dyn FnMut(Option<i64>, Option<&'static str>),
 ) -> bool {
-    if placed_inside {
+    if placed_inside || root_undecidable {
         return false;
     }
-    let reason = match failure {
-        UnreadableFailure::PathOrRootIdentityUnreadable { listed: true } => {
-            "listed service uid cannot write a lane checkout"
+    let reason = if listed {
+        "listed service uid cannot write a lane checkout"
+    } else {
+        match failure {
+            UnreadableFailure::DescriptorsDenied
+                if owner_platform_daemon(cwd_observer, pid, roots) =>
+            {
+                "platform daemon with cwd outside every root"
+            }
+            _ if configured_excusal(cwd_observer, pid, entries) => {
+                "configured unreadable image exception"
+            }
+            _ => return false,
         }
-        UnreadableFailure::DescriptorsDenied if owner_platform_daemon(cwd_observer, pid, roots) => {
-            "platform daemon with cwd outside every root"
-        }
-        _ if configured_excusal(cwd_observer, pid, entries) => {
-            "configured unreadable image exception"
-        }
-        _ => return false,
     };
     let path = cwd_observer
         .executable(pid)

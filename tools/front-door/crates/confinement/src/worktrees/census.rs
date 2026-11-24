@@ -1,7 +1,7 @@
 //! Process census and worker observation.
 use super::census_excusal::{
-    PlacementEvidence, UnreadableFailure, excusal_applies, excuse_unreadable, listed_uid_excusal,
-    warn_unreadable_processes,
+    PlacementEvidence, PolicyCwdObserver, UnreadableFailure, excusal_applies, excuse_unreadable,
+    listed_uid_excusal, warn_unreadable_processes,
 };
 use super::*;
 
@@ -1169,7 +1169,7 @@ pub(super) fn system_live_process_with_policy(
     observe_worker_holders(
         &roots,
         &SystemProcessObserver,
-        &PolicyCwdObserver(entries),
+        &PolicyCwdObserver::new(entries),
         &current,
         ancestors,
     )
@@ -1186,58 +1186,6 @@ pub(super) fn system_worker_roots_with_taints(
     ancestors: bool,
 ) -> WorkerTaintObservations {
     system_worker_roots_with_policy_taints(roots, ancestors, &[])
-}
-
-pub(super) struct PolicyCwdObserver<'a>(pub(super) &'a [CensusIgnoreEntry]);
-impl CwdObserver for PolicyCwdObserver<'_> {
-    fn process_uids(&self, pid: i64) -> Option<provenant_os::pid::ProcessUids> {
-        SystemCwdObserver.process_uids(pid)
-    }
-    fn occupancy(&self, pid: i64) -> provenant_os::pid::OccupancyObservation {
-        SystemCwdObserver.occupancy(pid)
-    }
-    fn occupancy_while(
-        &self,
-        pid: i64,
-        keep_going: &dyn Fn() -> bool,
-    ) -> provenant_os::pid::OccupancyObservation {
-        SystemCwdObserver.occupancy_while(pid, keep_going)
-    }
-    fn executable(&self, pid: i64) -> Option<PathBuf> {
-        SystemCwdObserver.executable(pid)
-    }
-    fn sealed_system_image(&self, pid: i64) -> Option<provenant_os::pid::SealedSystemImage> {
-        SystemCwdObserver.sealed_system_image(pid)
-    }
-    fn platform_signed_image(&self, pid: i64) -> Option<provenant_os::pid::PlatformSignedImage> {
-        SystemCwdObserver.platform_signed_image(pid)
-    }
-    fn configured_unreadable_image(
-        &self,
-        pid: i64,
-        _: &[CensusIgnoreEntry],
-    ) -> Option<CensusIgnoreEntry> {
-        SystemCwdObserver.configured_unreadable_image(pid, self.0)
-    }
-    fn kernel_thread(&self, pid: i64) -> bool {
-        SystemCwdObserver.kernel_thread(pid)
-    }
-    fn unreadable_policy_uids(
-        &self,
-        pid: i64,
-        _: &[CensusIgnoreEntry],
-    ) -> Result<
-        provenant_os::pid::UnreadablePolicyExcusal,
-        provenant_os::pid::UnreadablePolicyFailure,
-    > {
-        SystemCwdObserver.unreadable_policy_uids(pid, self.0)
-    }
-    fn cwd(&self, pid: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
-        SystemCwdObserver.cwd(pid)
-    }
-    fn process_details(&self, pid: i64) -> Option<String> {
-        SystemCwdObserver.process_details(pid)
-    }
 }
 
 pub(super) fn system_worker_roots_with_policy(
@@ -1265,7 +1213,7 @@ fn system_worker_evidence_while(
 ) -> WorkerEvidence {
     let ProcessObservation::Present(current) = current_process() else {
         let detail = process_detail(
-            &PolicyCwdObserver(entries),
+            &PolicyCwdObserver::new(entries),
             i64::from(std::process::id()),
             "current process unavailable",
         );
@@ -1304,7 +1252,7 @@ fn system_worker_evidence_while(
         roots,
         ancestors,
         &SystemProcessObserver,
-        &PolicyCwdObserver(entries),
+        &PolicyCwdObserver::new(entries),
         &current,
         keep_going,
         entries,
@@ -1390,7 +1338,7 @@ pub(super) fn system_worker_roots_with_policy_taints(
     observe_worker_root_taints(
         roots,
         &SystemProcessObserver,
-        &PolicyCwdObserver(entries),
+        &PolicyCwdObserver::new(entries),
         &current,
         ancestors,
     )
@@ -1634,8 +1582,9 @@ pub(super) fn observe_worker_holders_while(
             );
             let mut under_candidate = false;
             let mut path_unreadable = false;
+            let mut root_undecidable = false;
             if let Ok(CwdObservation::Path(path)) = &cwd {
-                let (inside, unreadable) = record_unreadable_path(
+                let (inside, unreadable, undecidable) = record_unreadable_path(
                     &mut states,
                     &mut holders,
                     held,
@@ -1651,12 +1600,13 @@ pub(super) fn observe_worker_holders_while(
                 );
                 under_candidate |= inside;
                 path_unreadable |= unreadable;
+                root_undecidable |= undecidable;
             }
             for path in occupancy.paths {
                 if !within_budget() {
                     return (states, holders, details, taints);
                 }
-                let (inside, unreadable) = record_unreadable_path(
+                let (inside, unreadable, undecidable) = record_unreadable_path(
                     &mut states,
                     &mut holders,
                     held,
@@ -1672,9 +1622,13 @@ pub(super) fn observe_worker_holders_while(
                 );
                 under_candidate |= inside;
                 path_unreadable |= unreadable;
+                root_undecidable |= undecidable;
             }
+            // A process path that cannot be placed is one excusable failure;
+            // an undecidable root is a separate blocking signal, never a
+            // failure that a listed uid or configured entry could trade away.
             let failure = path_unreadable
-                .then_some(UnreadableFailure::PathOrRootIdentityUnreadable { listed })
+                .then_some(UnreadableFailure::ProcessPathUnplaceable)
                 .or_else(|| descriptors_denied.then_some(UnreadableFailure::DescriptorsDenied))
                 .or_else(|| {
                     matches!(&cwd, Ok(CwdObservation::PermissionDenied))
@@ -1686,7 +1640,9 @@ pub(super) fn observe_worker_holders_while(
                     pid,
                     roots,
                     failure,
+                    listed,
                     under_candidate,
+                    root_undecidable,
                     entries,
                     unplaceable,
                 )
@@ -1922,13 +1878,18 @@ pub(super) fn observe_worker_holders_while(
         let placed = cwd_placement.blocks_excusal()
             || !descriptor_roots.is_empty()
             || !descriptor_uncertain_roots.is_empty();
+        // These processes were listed, so the listed-uid policy never applies;
+        // `placed` already folds in undecidable roots, so no second blocking
+        // signal is needed here.
         if occupancy_gap == Some(provenant_os::pid::OccupancyGap::DescriptorsDenied)
             && excuse_unreadable(
                 cwd_observer,
                 pid,
                 roots,
                 UnreadableFailure::DescriptorsDenied,
+                false,
                 placed,
+                false,
                 entries,
                 unplaceable,
             )
@@ -1945,7 +1906,9 @@ pub(super) fn observe_worker_holders_while(
                 pid,
                 roots,
                 UnreadableFailure::CwdDenied,
+                false,
                 placed,
+                false,
                 entries,
                 unplaceable,
             )
@@ -2175,6 +2138,9 @@ pub(super) enum NativeCwd {
 
 /// Place positive cwd/descriptor evidence from an EPERM process. Unreadable
 /// process metadata is scoped to roots that its known paths could occupy.
+/// Returns `(inside, path_unplaceable, root_undecidable)`: only the middle signal
+/// is excusable, while an undecidable root keeps its Unknown state and blocks
+/// every arm.
 #[allow(clippy::too_many_arguments)] // The census owns these five correlated evidence maps.
 fn record_unreadable_path(
     states: &mut BTreeMap<PathBuf, Occupancy>,
@@ -2189,7 +2155,7 @@ fn record_unreadable_path(
     reportable: bool,
     unplaceable: &mut dyn FnMut(Option<i64>, Option<&'static str>),
     scope_unreadable: bool,
-) -> (bool, bool) {
+) -> (bool, bool, bool) {
     let Some(canonical) = canonical_cwd(path) else {
         unplaceable(Some(pid), Some("occupancy path placement required"));
         if !scope_unreadable {
@@ -2213,18 +2179,20 @@ fn record_unreadable_path(
                 }
             }
         }
-        return (false, true);
+        return (false, true, false);
     };
     let location = match std::fs::metadata(&canonical) {
         Ok(metadata) if !metadata.is_dir() => canonical.parent().unwrap_or(&canonical),
         _ => &canonical,
     };
     let mut placement_failed = false;
+    let mut undecidable_roots = Vec::new();
     let placed = record_live_path_with_audit_scoped(
         states,
         location,
         &mut || placement_failed = true,
         !scope_unreadable,
+        &mut undecidable_roots,
     );
     let inside = !placed.is_empty();
     if placement_failed {
@@ -2266,7 +2234,7 @@ fn record_unreadable_path(
         }
         holders.entry(root).or_insert(holder);
     }
-    (inside, placement_failed)
+    (inside, placement_failed, !undecidable_roots.is_empty())
 }
 
 pub(super) fn process_detail(observer: &dyn CwdObserver, pid: i64, category: &str) -> String {
@@ -2344,16 +2312,21 @@ pub(super) fn record_live_path_with_audit(
     cwd: &Path,
     unplaceable: &mut dyn FnMut(),
 ) -> Vec<PathBuf> {
-    record_live_path_with_audit_scoped(states, cwd, unplaceable, true)
+    record_live_path_with_audit_scoped(states, cwd, unplaceable, true, &mut Vec::new())
 }
 
-/// A scoped unreadable process may have its missing path evidence discarded by
-/// host policy, but a positively placed path is always live occupancy.
+/// A scoped unreadable process may have its missing *process path* evidence
+/// discarded by host policy, but a positively placed path is always live
+/// occupancy. A root whose own identity cannot be read is different: placement
+/// for it is undecidable, so it always stays Unknown even when the process's
+/// own path may be excused. `undecidable_roots` reports those roots to the
+/// caller, which uses them to block every excusal arm.
 fn record_live_path_with_audit_scoped(
     states: &mut BTreeMap<PathBuf, Occupancy>,
     cwd: &Path,
     unplaceable: &mut dyn FnMut(),
     mark_unplaceable: bool,
+    undecidable_roots: &mut Vec<PathBuf>,
 ) -> Vec<PathBuf> {
     if !cwd.is_absolute() {
         unplaceable();
@@ -2381,12 +2354,11 @@ fn record_live_path_with_audit_scoped(
     });
     let mut placed = Vec::new();
     for (root, state) in states {
-        let inside = ancestors.as_ref().and_then(|ids| {
-            let metadata = std::fs::metadata(root).ok()?;
-            metadata
-                .is_dir()
-                .then(|| ids.contains(&(metadata.dev(), metadata.ino())))
-        });
+        let root_metadata = std::fs::metadata(root).ok().filter(|meta| meta.is_dir());
+        let inside = match (&ancestors, &root_metadata) {
+            (Some(ids), Some(metadata)) => Some(ids.contains(&(metadata.dev(), metadata.ino()))),
+            _ => None,
+        };
         match inside {
             Some(true) => {
                 *state = Occupancy::Observed { process: None };
@@ -2395,7 +2367,11 @@ fn record_live_path_with_audit_scoped(
             Some(false) => {}
             None => {
                 unplaceable();
-                if mark_unplaceable
+                let undecidable = root_metadata.is_none();
+                if undecidable {
+                    undecidable_roots.push(root.clone());
+                }
+                if (mark_unplaceable || undecidable)
                     && occupancy_path_could_be_under(cwd, root)
                     && !state.is_observed()
                 {

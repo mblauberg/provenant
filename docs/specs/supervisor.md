@@ -453,23 +453,31 @@ query leaves it `Unknown`, never empty. For each unreadable process the census
 first computes placement evidence for *every* root from its readable cwd and its
 descriptor paths by directory identity, the same `(dev, ino)` ancestor test used
 to place a live path. A cwd equal to or beneath a root is inside it; a cwd of
-`/` or any other ancestor, and a cwd outside every root, are outside. Only then
-may a typed policy excuse the process, and only when no root was placed inside
-or left undecided; positive cwd or descriptor placement wins for every arm,
-including a configured entry. Three policies exist: a listed service uid whose
+`/` or any other ancestor, and a cwd outside every root, are outside. Two causes
+stay distinct. A process whose own occupancy path cannot be placed (for example
+a descriptor beneath a non-directory, such as launchd's) is one excusable
+failure, but positive cwd or descriptor placement still wins for every arm. A
+root whose own identity or metadata cannot be read makes placement undecidable
+for that root: it fails closed for every arm including a configured entry,
+blocks every excusal, and keeps that root `Unknown`. Only then may a typed
+policy excuse the process. Three policies exist: a listed service uid whose
 real, effective and saved uids are all stable system uids foreign to every root
-owner is excused for an unplaceable path; an owner-uid process with EPERM
-descriptors is excused only when its platform signature, executable under
-`/usr/libexec/`, `/System/Library/` or `/usr/sbin/`, and readable cwd outside
-every root all agree — all three credentials must be owner uids, so a setuid
-binary launched by the owner is not excused, and shells under `/bin` or
-`/usr/bin` are not; and a configured `census_ignore_unreadable` entry matched on
-the canonical executable path and team id extends the defaults to every failure
-class. Each excusal raises a typed warning naming the pid and path. Unreadable
-root identity fails closed: a listed uid cannot be proven foreign to it, so the
-root stays `Unknown`. A listed uid the kernel will not reveal, such as `launchd`
-(pid 1), cannot be evaluated and is excused only by a configured entry, never by
-the listed-uid default.
+owner is consulted for every failure class (descriptors EPERM, unplaceable
+process path, cwd unreadable), never for a human uid or the owner; an owner-uid
+process with EPERM descriptors is excused only when its platform signature,
+executable under `/usr/libexec/`, `/System/Library/` or `/usr/sbin/`, and
+readable cwd outside every root all agree — all three credentials must be owner
+uids, so a setuid binary launched by the owner is not excused, and shells under
+`/bin` or `/usr/bin` are not; and a configured `census_ignore_unreadable` entry
+matched on the canonical executable path and team id extends the defaults to
+every failure class. Each excusal raises a typed warning naming the pid and path.
+Unreadable root identity fails closed: a listed uid cannot be proven foreign to
+it, so the root stays `Unknown`. A listed uid the kernel will not reveal, such as
+`launchd` (pid 1), cannot be evaluated and is excused only by a configured entry
+or a listed uid whose credentials the code can actually read, never by the
+listed-uid default. The production configured matcher reads live macOS signing
+state; a unit test instead pins that the policy observer forwards its non-empty
+configured entries to the matcher it calls.
 ([exceptions](../runbooks/configuration.md#unreadable-process-census-exceptions)).
 Landing and collection require `Free`; the census grants no signal authority.
 - Why: a retained cwd or descriptor survives permission changes, so current

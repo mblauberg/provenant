@@ -1,5 +1,6 @@
 //! Worker census and native observation tests.
 use super::census::{unreadable_cohort_pids, worker_evidence_from_census};
+use super::census_excusal::PolicyCwdObserver;
 use super::lifecycle_tests::*;
 use super::*;
 use crate::test_support::Fixture;
@@ -1072,6 +1073,55 @@ fn configured_entry_excuses_unplaceable_descriptor_process() -> Result<(), Box<d
     Ok(())
 }
 
+/// The counterpart to `configured_entry_with_unreadable_root_metadata_keeps_root_unknown`:
+/// with every root readable, a configured entry does excuse a process whose own
+/// occupancy path cannot be placed. The two causes must not be folded together.
+#[test]
+fn configured_entry_excuses_unplaceable_process_path_with_readable_roots()
+-> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let root = fixture.root.join("configured-unplaceable-readable-root");
+    fs::create_dir(&root)?;
+    let blocker = root.join("blocker");
+    fs::write(&blocker, b"x")?;
+    let owner = provenant_os::fs::effective_uid();
+    let signals = UnreadableSignals {
+        uids: Some(ProcessUids {
+            real: owner,
+            effective: owner,
+            saved: owner,
+        }),
+        platform_signed: true,
+        entries: vec![CensusIgnoreEntry {
+            path: PathBuf::from("/usr/libexec/UserEventAgent"),
+            team_id: "platform".into(),
+        }],
+        team_id: None,
+        executable: Some(PathBuf::from("/usr/libexec/UserEventAgent")),
+        cwd: CwdObservation::PermissionDenied,
+        // A descriptor beneath a regular file cannot be placed by directory
+        // identity, while the root's own metadata stays readable.
+        occupancy_paths: vec![blocker.join("descriptor")],
+    };
+    let outcome = observe_unreadable(&root, &signals)?;
+    assert!(
+        outcome.state.is_available(),
+        "{:?}: {}",
+        outcome.state,
+        outcome.detail
+    );
+    assert!(
+        outcome
+            .audit
+            .iter()
+            .any(|(pid, condition)| *pid == Some(200)
+                && condition == &Some("configured unreadable image exception")),
+        "{:?}",
+        outcome.audit
+    );
+    Ok(())
+}
+
 /// A configured entry whose canonical path does not match the executable must
 /// not excuse: the matcher exercises the real entries threaded by the census.
 #[test]
@@ -1174,6 +1224,48 @@ fn unreadable_root_metadata_keeps_the_root_unknown() -> Result<(), Box<dyn Error
         entries: Vec::new(),
         team_id: None,
         executable: Some(PathBuf::from("/sbin/launchd")),
+        cwd: CwdObservation::PermissionDenied,
+        occupancy_paths: vec![root.join("descriptor")],
+    };
+    let outcome = observe_unreadable(&root, &signals)?;
+    assert!(
+        outcome.state.is_unknown(),
+        "{:?}: {}",
+        outcome.state,
+        outcome.detail
+    );
+    assert!(
+        !warning_names_process(&outcome.warnings, 200),
+        "{:?}",
+        outcome.warnings
+    );
+    Ok(())
+}
+
+/// A configured entry must not excuse a process when a root's own metadata is
+/// unreadable: placement for that root is undecidable, so it fails closed for
+/// every arm, configured included, and the root stays Unknown.
+#[test]
+fn configured_entry_with_unreadable_root_metadata_keeps_root_unknown() -> Result<(), Box<dyn Error>>
+{
+    let fixture = Fixture::new()?;
+    let not_a_dir = fixture.root.join("configured-root-metadata-not-a-dir");
+    fs::write(&not_a_dir, b"x")?;
+    let root = not_a_dir.join("child");
+    let owner = provenant_os::fs::effective_uid();
+    let signals = UnreadableSignals {
+        uids: Some(ProcessUids {
+            real: owner,
+            effective: owner,
+            saved: owner,
+        }),
+        platform_signed: true,
+        entries: vec![CensusIgnoreEntry {
+            path: PathBuf::from("/usr/libexec/UserEventAgent"),
+            team_id: "platform".into(),
+        }],
+        team_id: None,
+        executable: Some(PathBuf::from("/usr/libexec/UserEventAgent")),
         cwd: CwdObservation::PermissionDenied,
         occupancy_paths: vec![root.join("descriptor")],
     };
@@ -2456,6 +2548,42 @@ fn host_policy_is_scoped_to_config_roots_and_preserves_injected_refusal()
         seen[1].is_empty(),
         "policy must not leak across roots or wrappers"
     );
+    Ok(())
+}
+
+/// The production configured-image matcher reads live macOS signing state and
+/// cannot be driven positively in a unit test, so exercise the wiring instead:
+/// `PolicyCwdObserver` must hand its non-empty configured entries to the matcher
+/// it delegates to. A regression that drops those entries fails here.
+#[test]
+fn policy_cwd_observer_forwards_configured_entries_to_the_matcher() -> Result<(), Box<dyn Error>> {
+    struct Recording(std::sync::Mutex<Vec<CensusIgnoreEntry>>);
+    impl CwdObserver for Recording {
+        fn cwd(&self, _: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
+            Ok(CwdObservation::PermissionDenied)
+        }
+        fn configured_unreadable_image(
+            &self,
+            _: i64,
+            entries: &[CensusIgnoreEntry],
+        ) -> Option<CensusIgnoreEntry> {
+            *self.0.lock().unwrap() = entries.to_vec();
+            entries.first().cloned()
+        }
+    }
+    let entries = [CensusIgnoreEntry {
+        path: PathBuf::from("/usr/libexec/UserEventAgent"),
+        team_id: "TEAM123".into(),
+    }];
+    let recorder = Recording(std::sync::Mutex::new(Vec::new()));
+    let policy = PolicyCwdObserver::with_inner(&entries, &recorder);
+    // Call the real trait method with an empty caller argument: the policy must
+    // still hand its own non-empty entries to the matcher.
+    assert_eq!(
+        CwdObserver::configured_unreadable_image(&policy, 200, &[]),
+        Some(entries[0].clone())
+    );
+    assert_eq!(*recorder.0.lock().unwrap(), entries.to_vec());
     Ok(())
 }
 
