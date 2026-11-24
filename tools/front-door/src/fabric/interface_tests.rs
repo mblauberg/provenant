@@ -911,6 +911,94 @@ fn branch_without_base_uses_the_remote_default_branch() -> Result {
     Ok(())
 }
 
+/// `--branch` and the branch resolved by `run implement --pr N` must land in
+/// the branch's existing linked checkout rather than provisioning a second
+/// one. Spec: docs/specs/run-launch.md#writer-binding
+#[test]
+fn branch_named_launch_binds_an_existing_linked_checkout() -> Result {
+    let rig = crate::worktree_tests::repository()?;
+    let factory = factory(&rig)?;
+    git(
+        &rig,
+        &[
+            "worktree",
+            "add",
+            "-qb",
+            "reuse-free",
+            ".worktrees/reuse-free",
+        ],
+    )?;
+    fn writer_leaf(node: &Value) -> Option<&Value> {
+        match node.pointer("/composite/nodes").and_then(Value::as_array) {
+            Some(children) => children.iter().find_map(writer_leaf),
+            None => (node["access"] == "worktree_write").then_some(node),
+        }
+    }
+    let bound = factory.child_request(&json!({
+        "op":"run", "template":"implement", "brief":"Repair",
+        "branch":"reuse-free", "base":"HEAD"
+    }))?;
+    let node = writer_leaf(&bound.launch.as_ref().ok_or("launch")?.node).ok_or("writer")?;
+    assert_eq!(
+        node["worktree"],
+        json!(rig.project.join(".worktrees/reuse-free")),
+        "the existing checkout must be the target: {node}"
+    );
+    assert!(
+        node["attempt"]["new_worktree"].is_null(),
+        "an existing checkout must not be provisioned again: {node}"
+    );
+
+    // The PR repair lowers to the same branch control, so it takes the same
+    // target as an explicit --branch.
+    let repaired = factory.apply_pr_repair_with(
+        json!({"op":"run", "template":"implement", "brief":"Repair", "pr":7}),
+        |_| {
+            Ok(super::PrRepairFact {
+                branch: "reuse-free".into(),
+                base: "HEAD".into(),
+                failures: String::new(),
+            })
+        },
+    )?;
+    let from_pr = factory.child_request(&repaired)?;
+    let node = writer_leaf(&from_pr.launch.as_ref().ok_or("launch")?.node).ok_or("writer")?;
+    assert_eq!(
+        node["worktree"],
+        json!(rig.project.join(".worktrees/reuse-free")),
+        "the PR repair must reuse the checkout: {node}"
+    );
+    assert!(
+        node["attempt"]["new_worktree"].is_null(),
+        "the PR repair must not provision the checkout again: {node}"
+    );
+    Ok(())
+}
+
+/// A held checkout still refuses, and the remedy names the holder and the
+/// exact command that settles it.
+#[test]
+fn held_writer_refusal_names_holder_and_exact_reconcile_command() -> Result {
+    let holder = provenant_core::AttemptId::from_bytes([53; 16]);
+    let lease = FacadeError::WriterLeaseHeld {
+        holder: Some(holder),
+        branch: Some("refs/heads/holder".into()),
+        worktree: Some("/fixture/holder".into()),
+        age: Some("1h".into()),
+        live: Some(true),
+    };
+    let next = lease.diagnostic().next.ok_or("lease remedy")?;
+    assert!(next.contains(&holder.to_string()), "{next}");
+    assert!(next.contains("provenant reconcile"), "{next}");
+    let busy = FacadeError::WriterBusy {
+        holder: Some(holder),
+    };
+    let next = busy.diagnostic().next.ok_or("busy remedy")?;
+    assert!(next.contains(&holder.to_string()), "{next}");
+    assert!(next.contains("provenant reconcile"), "{next}");
+    Ok(())
+}
+
 #[test]
 fn a_named_child_replays_by_name_and_input() -> Result {
     let rig = TestRig::new()?;

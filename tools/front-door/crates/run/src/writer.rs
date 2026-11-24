@@ -442,6 +442,10 @@ pub struct WriterLaunch {
     pub(crate) facts: worktrees::RepoFacts,
 }
 impl WriterLaunch {
+    /// The commit this writer launch was prepared from.
+    pub fn base(&self) -> GitOid {
+        self.base
+    }
     /// Lanes that hold or retain this worktree's occupancy: every recorded
     /// reservation, plus an unnamed entry when a live holder has none. Empty
     /// means no other lane is attached. Observation only; it never locks.
@@ -466,6 +470,23 @@ impl WriterLaunch {
             lanes.push("a live lane".to_owned());
         }
         Ok(lanes)
+    }
+
+    /// The single reservation attempt attached to this worktree, when one is
+    /// recorded. A live holder with no reservation, or several reservations,
+    /// has no unambiguous attempt to name in a refusal. Observation only.
+    pub fn attached_holder(&self) -> Result<Option<provenant_core::AttemptId>> {
+        let Some((slot, _)) = &self.custody else {
+            return Ok(None);
+        };
+        let listing = provenant_supervisor::custody::list_writer_reservations_in_slot(slot)
+            .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?;
+        let mut attempts = listing
+            .reservations
+            .iter()
+            .map(|reservation| reservation.scope.attempt);
+        let holder = attempts.next();
+        Ok(holder.filter(|_| attempts.next().is_none()))
     }
 
     pub(crate) fn other_holders_live(&self, attempt: Option<&Directory>) -> Result<bool> {

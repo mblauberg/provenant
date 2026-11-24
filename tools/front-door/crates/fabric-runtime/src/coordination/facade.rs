@@ -1074,8 +1074,15 @@ impl FacadeError {
             Self::WriterBusy { holder } => {
                 if let Some(holder) = holder {
                     projected = projected.detail(format!("writer is held by attempt {holder}"));
+                    // A facade projection has no store to resolve the work key:
+                    // the shared formatter advises the bare sweep and still
+                    // names the holder. Spec: docs/specs/run-launch.md#writer-binding
+                    projected = projected.next(
+                        provenant_records::work_key::held_writer_next(Some(*holder), None),
+                    );
+                } else {
+                    projected = projected.next("wait for the current writer or lock holder to finish");
                 }
-                projected = projected.next("wait for the current writer or lock holder to finish");
             }
             Self::WriterLockBusy { holder } => {
                 projected = projected
@@ -1119,7 +1126,13 @@ impl FacadeError {
                 if !facts.is_empty() {
                     projected = projected.detail(facts.join(", "));
                 }
-                projected = projected.next("reconcile the holding attempt before retrying writer binding");
+                // The shared formatter already names the holder and prints a
+                // valid reconcile command, whether or not a work key was
+                // resolved. Spec: docs/specs/run-launch.md#writer-binding
+                projected = projected.next(provenant_records::work_key::held_writer_next(
+                    *holder,
+                    None,
+                ));
             }
             Self::RunKind { resource: Some(fact), .. } => projected = fact.project(projected),
             Self::RunKind { next, detail, resource: None, .. } => {

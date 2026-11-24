@@ -125,11 +125,23 @@ superseded and print the newer handle as the next step; they never redirect sile
 `--branch B --base REF` allocates a managed writer worktree under the project layout, not under
 the invoking checkout. The launch owner resolves and checkpoints `REF` before any Git effect,
 creates the worktree from that commit and binds it by source identity and head, identically from
-a primary checkout, a linked worktree, a separate Git directory or a bare linked checkout. An
-existing clean worktree at the exact checkpointed head, including one a chair pre-created with
-`provenant worktree create`, is rebound; a different branch, head or unclean tree is refused with
-the named cause. Relative `--worktree` and graph writer paths resolve from the project's primary
-root, so a launch from a linked worktree of the same repository selects the same managed
+a primary checkout, a linked worktree, a separate Git directory or a bare linked checkout. During
+provisioning and recovery, an existing clean worktree at the exact checkpointed head, including
+one a chair pre-created with `provenant worktree create`, is rebound; a different branch, head or
+unclean tree is refused with the named cause. When the managed path already holds a registered
+linked checkout on the named branch, `--branch` and the branch resolved by `run implement --pr N`
+bind that checkout in place as `--worktree` would, and report its path on an info line rather than
+provisioning it again. Reuse takes the checkout's own head: `--base` is advisory only. An unheld
+dirty checkout follows `lanes.writer_dirty` (`wip_commit` by default), not the provisioning
+refusal. A live writer or an unsettled attempt on that checkout still refuses, naming the holder
+and the exact command that settles it (or a wait-for-holder step when no attempt is named); that
+refusal protects another lane's uncommitted work and never advises committing or preserving it.
+The target grammar never accepts a raw attempt id, so a holder resolved to its work key is advised
+as `provenant reconcile <graph>/<node>#<attempt>`; where no store can resolve the key, the remedy
+names the attempt separately and advises the bare `provenant reconcile` sweep. One shared formatter
+owns all four emissions (submission preflight, facade `writer_busy` and `writer_lease_held`, and the
+run diagnostic) so the copies cannot drift. Relative `--worktree` and graph writer paths resolve
+from the project's primary root, so a launch from a linked worktree of the same repository selects the same managed
 checkouts as the primary checkout. A host-planned writer (`provision_worktree` with no attempt
 `new_worktree`) is skipped by the pre-attempt integration-target check: it has no branch until
 provisioning, and provisioning verifies the exact branch and head.

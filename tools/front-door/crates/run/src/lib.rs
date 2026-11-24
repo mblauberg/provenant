@@ -1082,10 +1082,14 @@ impl RunError {
                     };
                     diagnostic = diagnostic.detail(detail).next(next);
                 }
-                if let WorktreeError::WriterLeaseHeld { .. } = error {
+                if let WorktreeError::WriterLeaseHeld { holder, .. } = error {
+                    // A diagnostic has no store to resolve the holder's work key:
+                    // the shared formatter advises the bare sweep and names the
+                    // attempt. The submission preflight resolves the key and
+                    // prints a target that names the holder directly.
                     diagnostic = diagnostic
                         .detail(error.to_string())
-                        .next("reconcile the holding attempt before retrying writer binding");
+                        .next(crate::writer_dirty::held_writer_next(Some(*holder), None));
                 }
                 if let WorktreeError::WriterBusy {
                     holder: Some(holder),
@@ -1366,6 +1370,27 @@ mod diagnostic_projection_tests {
             "{detail}"
         );
         assert!(detail.contains("utility command timed out"), "{detail}");
+    }
+
+    #[test]
+    fn writer_lease_held_diagnostic_names_holder_and_exact_reconcile_command() {
+        let holder = provenant_core::AttemptId::from_bytes([53; 16]);
+        let error = RunError::Writer(
+            provenant_confinement::worktrees::WorktreeError::WriterLeaseHeld {
+                holder,
+                branch: "refs/heads/holder".into(),
+                worktree: PathBuf::from("/fixture/holder"),
+                age: "4d 1h".into(),
+                live: Some(false),
+            },
+        );
+        let diagnostic = error.diagnostic(Destination::Local);
+        let detail = diagnostic.detail.unwrap();
+        let next = diagnostic.next.unwrap();
+        assert!(detail.contains(&holder.to_string()), "{detail}");
+        assert!(next.contains(&holder.to_string()), "{next}");
+        assert!(next.contains("provenant reconcile"), "{next}");
+        assert!(!next.contains("commit or preserve"), "{next}");
     }
 
     #[test]
