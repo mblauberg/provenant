@@ -644,6 +644,67 @@ fn stale_owner_update_cannot_overwrite_a_successor_claim() -> Result<(), Box<dyn
     Ok(())
 }
 
+// Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
+#[test]
+fn owner_lock_timeout_names_the_recorded_owner() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let mut test = TestContext::new(&fixture)?;
+    let info = create(
+        &test.context(),
+        WorktreeCreate {
+            branch: "owner-lock-holder".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    let tree = verify_worktree(&fixture.repo, &info.path)?;
+    let attempt = provenant_core::AttemptId::from_bytes([11; 16]);
+    let owner = WorktreeOwner {
+        attempt_id: Some(attempt),
+        operation_id: Some("owner-lock-holder".parse()?),
+        branch: "owner-lock-holder".into(),
+        base: info.head.to_string(),
+        host: provenant_core::HostId::from_bytes([3; 16]),
+        created_at: test.clock.wall_now()?,
+        origin: WorktreeOrigin::Lane,
+        label: None,
+        reference: None,
+    };
+    save_lane_owner_when_free(
+        &test.context(),
+        &tree,
+        &owner,
+        info.head,
+        None,
+        false,
+        &cancel(),
+    )?;
+    // Refuse the wait so the contention path runs without sleeping in the test.
+    test.lock_budget = WaitBudget::nonblocking(test.clock.mono_now());
+    let context = test.context();
+    let next = WorktreeOwner {
+        attempt_id: Some(provenant_core::AttemptId::from_bytes([12; 16])),
+        ..owner.clone()
+    };
+    let slot = writer_directory(context.project_state, &info.path)?;
+    let _held = slot.try_lock(
+        std::ffi::OsStr::new("owner.lock"),
+        provenant_os::fs::LockMode::Exclusive,
+    )?;
+    let error = update_owner_when_unchanged(&context, &tree, &owner, &next, &cancel())
+        .expect_err("a held owner lock refuses the update");
+    assert!(
+        matches!(
+            &error,
+            WorktreeError::RegistryLockTimeout {
+                holder: Some(recorded)
+            } if *recorded == attempt
+        ),
+        "{error}"
+    );
+    Ok(())
+}
+
 #[test]
 fn lane_owner_reassignment_holds_custody_and_preserves_adopted_owners() -> Result<(), Box<dyn Error>>
 {

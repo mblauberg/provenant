@@ -217,7 +217,15 @@ impl BoundGraphOwner<'_> {
     ) -> Result<(), provenant_confinement::worktrees::WorktreeError> {
         let budget = self.writer_launch_budget.unwrap_or(self.budget);
         if budget.remaining(self.factory.clock.mono_now()).as_micros() == 0 {
-            return Err(provenant_confinement::worktrees::WorktreeError::RegistryLockTimeout);
+            return Err(
+                provenant_confinement::worktrees::WorktreeError::RegistryLockTimeout {
+                    holder: provenant_confinement::worktrees::recorded_writer_holder(
+                        self.factory.context.roots.state.as_path(),
+                        self.factory.context.identity.project,
+                        path,
+                    ),
+                },
+            );
         }
         provenant_confinement::worktrees::with_context_using_facts(
             &self.factory.context.roots,
@@ -229,7 +237,12 @@ impl BoundGraphOwner<'_> {
             |context| {
                 if budget.remaining(self.factory.clock.mono_now()).as_micros() == 0 {
                     return Err(
-                        provenant_confinement::worktrees::WorktreeError::RegistryLockTimeout,
+                        provenant_confinement::worktrees::WorktreeError::RegistryLockTimeout {
+                            holder: provenant_confinement::worktrees::writer_holder(
+                                context.project_state,
+                                path,
+                            ),
+                        },
                     );
                 }
                 let context = provenant_confinement::worktrees::WorktreeContext {
@@ -4819,6 +4832,15 @@ mod journal_error_tests {
         let deadline = owner
             .begin_launch(AccessMode::WorktreeWrite, None)?
             .ok_or("deadline")?;
+        // Writer admission must derive its wait from writer_provision_seconds,
+        // not from the reader/settlement allowance passed in above.
+        let remaining = deadline
+            .as_micros()
+            .saturating_sub(factory.clock.wall_now()?.as_micros());
+        assert!(
+            remaining > 10_000_000,
+            "writer launch wait must outlast the 1 s reader budget: {remaining}us"
+        );
         owner.provision_writer_worktree(".worktrees/later", "later", source.trim(), None)?;
         let budget = owner.writer_launch_budget.ok_or("budget")?;
         owner.fast_forward_writer(

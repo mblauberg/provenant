@@ -1231,6 +1231,24 @@ pub fn writer_holder(project_state: &Directory, path: &Path) -> Option<provenant
     matches.next().is_none().then_some(holder)
 }
 
+/// Identify the writer slot holder when only the host state root and project
+/// are available, such as a launch budget that expired outside a
+/// `WorktreeContext`.
+pub fn recorded_writer_holder(
+    state_root: &Path,
+    project: provenant_core::ProjectId,
+    path: &Path,
+) -> Option<provenant_core::AttemptId> {
+    let state = Directory::open_anchor(state_root).ok()?;
+    let registry = state
+        .open_verified_directory(OsStr::new("worktrees"))
+        .ok()?;
+    let project = registry
+        .open_verified_directory(OsStr::new(&project.to_string()))
+        .ok()?;
+    writer_holder(&project, path)
+}
+
 /// Observe exclusion under the short probe gate. Writer acquisition waits for
 /// this gate rather than mistaking the observer for a live writer.
 pub(crate) fn disk_writer_state(project_state: &Directory, path: &Path) -> Occupancy {

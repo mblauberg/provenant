@@ -821,9 +821,9 @@ fn launch_retry_kinds_are_decided_from_the_typed_error_only() {
 }
 
 // Issue #3923: a launch contending for a held writer lock must wait for the
-// full provisioning allowance. Drive the same `defer_launch_contention` path
-// the writer provisioning caller uses, rather than simulating graph-loop
-// turns: the registry lock wait is persisted here, before any attempt exists.
+// full provisioning allowance. This unit test pins the disposition and the
+// default allowance; the launch path against a real held writer guard is
+// pinned in `crates/cli/src/fabric/graph_relay_tests.rs`.
 #[test]
 fn concurrent_launch_waits_the_full_provisioning_allowance_for_a_held_writer_lock() {
     use crate::coordination::facade::FacadeError;

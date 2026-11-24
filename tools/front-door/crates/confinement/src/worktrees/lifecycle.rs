@@ -758,7 +758,16 @@ fn create_with_default(
     let worktree_parent =
         open_or_create_layout_directory(&allocation, &parent_relative, true, layout_device)?;
     let parent_identity = worktree_parent.metadata()?;
-    let _writer = cache_writer_guard(context.project_state, &target).map_err(custody_refusal)?;
+    let _writer = cache_writer_guard(context.project_state, &target).map_err(|occupancy| {
+        match occupancy {
+            // A live provider's reservation names the attempt holding custody;
+            // a bare held lock still refuses without guessing.
+            Occupancy::Held => WorktreeError::WriterBusy {
+                holder: writer_holder(context.project_state, &target),
+            },
+            other => custody_refusal(other),
+        }
+    })?;
     context.repo.revalidate()?;
     let named_parent =
         open_or_create_layout_directory(&allocation, &parent_relative, false, layout_device)?;

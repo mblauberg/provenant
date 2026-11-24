@@ -157,12 +157,13 @@ wait: a concurrent launch holds its per-worktree writer guard across the whole
 worktree add and post-create setup, so the wait must cover one full provisioning
 (default 120 s, matching the writer mutation budget). Only after that bounded
 wait expires does the node settle `blocked` with the contention cause, the
-lock holder when one is known, and a `provenant retry` remedy. Writer-custody
-contention proves the launch never reached the host; the disposition records
-that fact on the attempt from the typed error, and both the retry gate and the
-blocked remedy read the recorded fact rather than guessing from owner codes
-(a generic `busy` also covers post-acceptance lock timeouts, which may have a
-live guardian). An occupied concurrency
+lock holder when the worktree owner record or writer reservation names one,
+and a `provenant retry` remedy. Writer-custody contention proves the launch
+never reached the host; the disposition records that fact on the attempt from
+the typed error. The retry gate reads that recorded fact together with the
+shared pre-host classifier, and the blocked remedy reads the recorded fact,
+rather than guessing from owner codes (a generic `busy` also covers
+post-acceptance lock timeouts, which may have a live guardian). An occupied concurrency
 threshold warns and proceeds unless its declared policy refuses; writer custody
 remains a Git boundary. A launch blocked this way is settled for `retry`, which
 starts the next attempt on the same recorded worktree.
