@@ -1255,7 +1255,12 @@ fn result_full_shows_each_finding_summary_location_and_fix() {
          "summary":"critical bug","status":"open","evidence":"seen at x",
          "proposed_fix":"handle x"},
         {"id":"F2","severity":"low","file":"src/b.rs",
-         "summary":"style nit","status":"open"}
+         "summary":"style nit","status":"open"},
+        {"id":"F3","severity":"medium","file":"",
+         "summary":"no location or fix","status":"open"},
+        {"id":"F4","severity":"low","file":"src/c.rs",
+         "summary":"line one\nline two\u{1b}[2J","status":"open",
+         "proposed_fix":"handle\u{202e}it"}
     ]);
     let reply = result_reply(
         &"g/parent".parse().unwrap(),
@@ -1274,8 +1279,34 @@ fn result_full_shows_each_finding_summary_location_and_fix() {
     assert!(full.contains("handle x"), "{full}");
     assert!(full.contains("style nit"), "{full}");
     assert!(full.contains("src/b.rs"), "{full}");
-    assert!(!full.contains("finding: [low] ?"), "{full}");
-    assert!(!full.contains("(fix: )"), "{full}");
+    assert!(full.contains("no location or fix"), "{full}");
+    // The base renderer left a gap where the empty file and absent fix would
+    // sit, so the exact shape fails without the shared renderer; the old
+    // negative assertions could never fire on this fixture.
+    let bare = full
+        .lines()
+        .find(|line| line.contains("no location or fix"))
+        .expect("the finding is rendered in --full");
+    assert_eq!(
+        bare.trim(),
+        "finding: [medium] — no location or fix",
+        "no location or fix placeholder: {full}"
+    );
+    // A multi-line or bidi field stays on the one human line the finding owns.
+    assert!(full.contains("line oneline two[2J"), "{full}");
+    assert!(full.contains("handleit"), "{full}");
+    assert!(!full.contains('\u{1b}'), "raw ESC leaked: {full}");
+    assert!(
+        !full.contains('\u{202e}'),
+        "raw bidi override leaked: {full}"
+    );
+    assert_eq!(
+        full.lines()
+            .filter(|line| line.contains("line oneline two"))
+            .count(),
+        1,
+        "one human line per finding: {full}"
+    );
 }
 
 // Spec: docs/specs/cli.md#output-references-and-bounded-tails

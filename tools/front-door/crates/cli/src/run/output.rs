@@ -223,9 +223,11 @@ pub(super) fn output_summary_default(data: &Value, text: &str, headed: bool) -> 
     summary(data, text, headed, false)
 }
 
-/// One typed review finding as a bounded human line. Every field comes from the
-/// same structured finding the JSON envelope carries; a missing location or
-/// suggested fix leaves no placeholder behind.
+/// One typed review finding as a bounded, terminal-safe human line. Every field
+/// comes from the same structured finding the JSON envelope carries; a missing
+/// location or suggested fix leaves no placeholder behind. Control, format and
+/// bidi characters are stripped before the byte bound so one finding cannot
+/// forge or reorder human lines.
 /// Spec: docs/specs/cli.md#output-references-and-bounded-tails
 pub fn finding_human_line(finding: &Value) -> String {
     const FIELD_BYTES: usize = 256;
@@ -234,7 +236,9 @@ pub fn finding_human_line(finding: &Value) -> String {
             .as_str()
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .map(|value| crate::bounded_text(value, FIELD_BYTES))
+            .map(|value| plain_text(value, usize::MAX))
+            .filter(|value| !value.is_empty())
+            .map(|value| crate::bounded_text(&value, FIELD_BYTES))
     };
     let severity = field("severity").unwrap_or_else(|| "unknown".into());
     let mut line = format!("finding: [{severity}]");
@@ -1735,6 +1739,24 @@ mod tests {
             !line.contains('?') && !with_file.contains('?'),
             "no '?' placeholder: {line} / {with_file}"
         );
+    }
+
+    // Spec: docs/specs/cli.md#one-bounded-envelope-clipped-with-a-warning
+    #[test]
+    fn finding_human_line_strips_control_and_bidi_characters() {
+        let line = finding_human_line(&json!({
+            "id":"F1","severity":"high","file":"src/a.rs","line":12,
+            "summary":"first\nsecond\u{1b}[2J\u{202e}reordered","status":"open",
+            "proposed_fix":"handle\u{200b}it\nnow"
+        }));
+        assert_eq!(line.lines().count(), 1, "one terminal line: {line:?}");
+        assert!(
+            line.chars()
+                .all(|c| !provenant_records::diagnostic::unsafe_display_character(c)),
+            "no control or bidi characters: {line:?}"
+        );
+        assert!(line.contains("firstsecond[2Jreordered"), "{line:?}");
+        assert!(line.contains("handleitnow"), "{line:?}");
     }
 
     // Spec: docs/specs/cli.md#output-references-and-bounded-tails
