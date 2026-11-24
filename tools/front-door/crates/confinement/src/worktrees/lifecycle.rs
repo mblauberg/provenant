@@ -1506,7 +1506,8 @@ pub(super) fn remove_tree_when_before_delete_locked(
     )?;
     eligible(true)?;
     let submodules = verify_removal_submodules(context, locked.verified.repo(), cancel)?;
-    let cleanliness = worktree_cleanliness_at(context, locked.verified.repo(), cancel)?;
+    let cleanliness =
+        worktree_cleanliness_with_attempt_indexes_at(context, locked.verified.repo(), cancel)?;
     removal_verdict(&cleanliness, discard, false)?;
     // Explicit discard always has a durable archive before its retirement intent
     // and Git mutation; the archive id and exact tip become the S2 proof.
@@ -2157,7 +2158,7 @@ pub fn check_removal_preconditions(
     cancel: &CancelToken,
 ) -> Result<(), WorktreeError> {
     worktree.repo().revalidate()?;
-    match worktree_cleanliness_at(context, worktree.repo(), cancel)? {
+    match worktree_cleanliness_with_attempt_indexes_at(context, worktree.repo(), cancel)? {
         WorktreeCleanliness::Clean => Ok(()),
         WorktreeCleanliness::Ignored => gc::precheck_removal(
             context,

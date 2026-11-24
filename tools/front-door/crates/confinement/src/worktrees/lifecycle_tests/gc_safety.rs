@@ -313,6 +313,19 @@ fn removal_preserves_staged_attempt_index_when_native_index_is_clean() -> Result
             .is_ok()
     );
 
+    // Spec: docs/specs/run.md#writer-pin-and-re-pin
+    // A new writer observes the worktree fresh with one `git status --porcelain`
+    // reading. The retained private index is an earlier attempt's snapshot, not
+    // uncommitted work in this checkout, so it must not refuse the new launch.
+    let launch_cleanliness = worktree_cleanliness_at(&context, verified.repo(), &cancel())?;
+    assert!(
+        matches!(
+            launch_cleanliness,
+            WorktreeCleanliness::Clean | WorktreeCleanliness::Ignored
+        ),
+        "a stale private attempt index refused a fresh writer launch: {launch_cleanliness:?}"
+    );
+
     let entries = context.facts.fresh_inventory(&context, &cancel())?;
     let entry = entries
         .iter()

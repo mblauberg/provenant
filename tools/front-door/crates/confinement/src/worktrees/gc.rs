@@ -2145,7 +2145,8 @@ fn collect_impl(
                 }
             };
             let precheck = |verified: &VerifiedWorktree| {
-                let cleanliness = worktree_cleanliness_at(context, verified.repo(), cancel)?;
+                let cleanliness =
+                    worktree_cleanliness_with_attempt_indexes_at(context, verified.repo(), cancel)?;
                 super::lifecycle::removal_verdict(&cleanliness, false, true)?;
                 precheck_removal(
                     context,
