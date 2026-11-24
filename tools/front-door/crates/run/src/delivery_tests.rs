@@ -1367,7 +1367,7 @@ fn unpublished_lane_files_move_back_without_touching_foreign_edits()
 #[test]
 fn unpublish_is_noop_when_siblings_live() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let (fixture, attempt_path, scratch, git) =
-        lane_with_git_view(crate::tests::exit().scope.attempt)?;
+        lane_with_git_view(provenant_core::AttemptId::from_bytes([22; 16]))?;
     let wt = &fixture.writer.worktree;
     let base = worktree_git(&fixture, &git, &["rev-parse", "HEAD"])?;
     std::fs::write(wt.join("ours.txt"), "ours\n")?;
