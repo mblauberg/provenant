@@ -104,11 +104,7 @@ pub(super) fn unreadable_cohort_pids(
     roots: &[PathBuf],
 ) -> BTreeSet<i64> {
     let mut owners = vec![provenant_os::fs::effective_uid()];
-    owners.extend(
-        roots
-            .iter()
-            .filter_map(|root| std::fs::metadata(root).ok().map(|metadata| metadata.uid())),
-    );
+    owners.extend(roots.iter().filter_map(|root| root_owner(root)));
     pids.iter()
         .copied()
         .filter(|pid| {
@@ -166,13 +162,108 @@ pub struct CensusEpochPolicy {
     pub exclude_ancestors: bool,
 }
 
-type RootIdentity = (u64, u64, u32);
+/// A scoped root's own identity. An absent root is decidable: nothing is held
+/// at a path that does not exist, and a process inside a deleted tree is placed
+/// against it lexically. `None` from [`root_identity`] means the root cannot be
+/// read, including a dangling symlink, and keeps placement undecidable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RootIdentity {
+    Directory(u64, u64, u32),
+    Absent,
+}
 
 fn root_identity(root: &Path) -> Option<RootIdentity> {
+    match std::fs::symlink_metadata(root) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Some(RootIdentity::Absent);
+        }
+        Err(_) => return None,
+        Ok(_) => {}
+    }
     let metadata = std::fs::metadata(root).ok()?;
     metadata
         .is_dir()
-        .then(|| (metadata.dev(), metadata.ino(), metadata.uid()))
+        .then(|| RootIdentity::Directory(metadata.dev(), metadata.ino(), metadata.uid()))
+}
+
+/// True when a scoped root does not exist, as opposed to being unreadable.
+pub(super) fn root_is_absent(root: &Path) -> bool {
+    root_identity(root) == Some(RootIdentity::Absent)
+}
+
+/// True when a scoped root's own identity cannot be read. Placement against it
+/// is undecidable.
+pub(super) fn root_is_undecidable(root: &Path) -> bool {
+    root_identity(root).is_none()
+}
+
+/// Split an absolute path at its nearest existing directory: that directory's
+/// `(dev, ino)` and the removed components below it. Identity, not spelling,
+/// anchors the split, so a firmlink or symlink alias of the same directory
+/// splits the same way. `None` for a relative path, a parent traversal, a
+/// dangling symlink among the removed components or an unreadable ancestor.
+fn split_at_extant_directory(path: &Path) -> Option<((u64, u64), PathBuf)> {
+    use std::path::Component;
+    if !path.is_absolute() || path.components().any(|part| part == Component::ParentDir) {
+        return None;
+    }
+    let mut removed = Vec::new();
+    for ancestor in path.ancestors() {
+        match std::fs::metadata(ancestor) {
+            Ok(metadata) if metadata.is_dir() => {
+                let below = removed.iter().rev().collect::<PathBuf>();
+                return Some(((metadata.dev(), metadata.ino()), below));
+            }
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && std::fs::symlink_metadata(ancestor)
+                        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                removed.push(ancestor.file_name()?);
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// Place a path against a root that no longer exists. Nothing that still
+/// exists can lie under a removed root, so a fully existing path is outside.
+/// A path with removed components is inside exactly when it splits at the
+/// root's nearest existing directory, by identity, and its removed components
+/// start with the root's. `None` when the root exists or is unreadable, or
+/// either path cannot be split.
+pub(super) fn absent_root_contains(path: &Path, root: &Path) -> Option<bool> {
+    if !root_is_absent(root) {
+        return None;
+    }
+    let (root_directory, root_removed) = split_at_extant_directory(root)?;
+    let (path_directory, path_removed) = split_at_extant_directory(path)?;
+    // A removal between the two splits moves the anchor; undecidable, not outside.
+    if split_at_extant_directory(root)? != (root_directory, root_removed.clone()) {
+        return None;
+    }
+    if path_removed.as_os_str().is_empty() {
+        return Some(false);
+    }
+    Some(path_directory == root_directory && path_removed.starts_with(&root_removed))
+}
+
+/// The owner of a scoped root. A removed root is owned as its nearest existing
+/// directory is; an unreadable root has no provable owner.
+pub(super) fn root_owner(root: &Path) -> Option<u32> {
+    match root_identity(root)? {
+        RootIdentity::Directory(_, _, uid) => Some(uid),
+        RootIdentity::Absent => root
+            .ancestors()
+            .skip(1)
+            .find_map(|ancestor| {
+                std::fs::metadata(ancestor)
+                    .ok()
+                    .filter(|meta| meta.is_dir())
+            })
+            .map(|metadata| metadata.uid()),
+    }
 }
 
 fn root_identities(roots: &[PathBuf]) -> Option<BTreeMap<PathBuf, RootIdentity>> {
@@ -479,6 +570,24 @@ impl WorkerObserver for CensusSession<'_> {
     fn invalidate(&self) {
         CensusSession::invalidate(self)
     }
+}
+
+/// Census one writer checkout with its detail. A tree the census does not
+/// return is Unknown, never free. A removed checkout is censused like any other
+/// root: it is free only when no process path lies under it.
+pub fn observe_writer_tree(
+    workers: &dyn WorkerObserver,
+    path: &Path,
+) -> (Occupancy, Option<String>) {
+    let path = path.to_path_buf();
+    let (states, details) = workers.observe_roots_with_details(std::slice::from_ref(&path));
+    let state = states.get(&path).cloned().unwrap_or_else(|| {
+        Occupancy::census_unknown(
+            path.clone(),
+            "worker census did not return the requested tree",
+        )
+    });
+    (state, details.get(&path).cloned())
 }
 
 /// Injectable native observation seam. Implementations return one conservative
@@ -2119,6 +2228,9 @@ pub(super) fn occupancy_path_could_be_under(path: &Path, root: &Path) -> bool {
     {
         return true;
     }
+    if let Some(inside) = absent_root_contains(path, root) {
+        return inside;
+    }
     if !std::fs::metadata(root).is_ok_and(|metadata| metadata.is_dir()) {
         return true;
     }
@@ -2366,7 +2478,8 @@ fn record_live_path_with_audit_scoped(
         let root_metadata = std::fs::metadata(root).ok().filter(|meta| meta.is_dir());
         let inside = match (&ancestors, &root_metadata) {
             (Some(ids), Some(metadata)) => Some(ids.contains(&(metadata.dev(), metadata.ino()))),
-            _ => None,
+            (_, None) => absent_root_contains(cwd, root),
+            (None, Some(_)) => None,
         };
         match inside {
             Some(true) => {

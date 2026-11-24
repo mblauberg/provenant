@@ -242,7 +242,12 @@ unless the sandbox mark was in effect: a daemon that double-forks and calls sets
 census matches no pid, session or group, and only the mark finds it. An unsandboxed lane lost
 before that record is durable is refused, and `reconcile --abandon` is the explicit escape. The
 host must also prove worktree non-occupancy under exclusion; unknown or occupied is not free (a
-read-only attempt has no worktree).
+read-only attempt has no worktree). A writer checkout removed from disk is censused like any
+other root. Nothing that still exists lies under it, so a process in an existing directory is
+outside; a process path with removed components is inside when it splits at the same nearest
+existing directory, compared by identity, and its removed components start with the root's. An
+unreadable root or a dangling symlink stays undecidable, and the root's owner is its nearest
+existing directory's owner.
 
 Missing, replaced or unreadable lock evidence never proves loss. Identities are durable before any
 guardian can spawn and are rechecked after the worktree census and before release. The capability

@@ -94,7 +94,9 @@ journal, so status explains the pending settlement without stderr.
 
 `provenant reconcile --abandon` lets a chair abandon a nonterminal writer with a
 reason only when its presence is not live, its native writer lease is free and
-the worktree process census reports `Free`. Same-boot unknown presence needs
+the worktree process census reports `Free`. A removed worktree is a decidable
+census root: a process is inside it only when its path lies under the removed
+path, so system processes elsewhere no longer leave it unknown. Same-boot unknown presence needs
 both exclusion and positive non-occupancy evidence. Live presence, held
 exclusion and any non-free or incomplete occupancy refuse with typed blocking
 evidence. This does not change the proof automatic reconciliation needs.

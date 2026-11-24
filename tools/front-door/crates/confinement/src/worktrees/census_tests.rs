@@ -9,6 +9,191 @@ use std::error::Error;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 
+struct DelegatingWriterObserver(Occupancy);
+impl WorkerObserver for DelegatingWriterObserver {
+    fn observe_roots(&self, _: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
+        panic!("delegation must use observe_roots_with_details")
+    }
+    fn observe_roots_with_details(&self, roots: &[PathBuf]) -> WorkerObservations {
+        (
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, self.0.clone()))
+                .collect(),
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, "census detail".into()))
+                .collect(),
+        )
+    }
+}
+
+#[test]
+fn observe_writer_tree_censuses_present_and_removed_trees() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let present = temp.path().join("present-writer-tree");
+    fs::create_dir(&present)?;
+    for tree in [present, temp.path().join("removed-writer-tree")] {
+        assert_eq!(
+            super::census::observe_writer_tree(&DelegatingWriterObserver(Occupancy::Held), &tree),
+            (Occupancy::Held, Some("census detail".into()))
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn an_absent_root_places_paths_lexically() -> Result<(), Box<dyn Error>> {
+    use super::census::{absent_root_contains, occupancy_path_could_be_under};
+    use super::census_excusal::PlacementEvidence;
+    use std::path::Path;
+    let temp = tempfile::tempdir()?;
+    let removed = temp.path().join("removed-writer-tree");
+    // A process left in the removed tree keeps its deleted path.
+    let inside = removed.join("src");
+    let sibling = temp.path().join("removed-writer-tree-2");
+    assert_eq!(absent_root_contains(&inside, &removed), Some(true));
+    assert_eq!(absent_root_contains(&removed, &removed), Some(true));
+    assert_eq!(absent_root_contains(&sibling, &removed), Some(false));
+    assert_eq!(absent_root_contains(Path::new("/"), &removed), Some(false));
+    assert!(occupancy_path_could_be_under(&inside, &removed));
+    assert!(!occupancy_path_could_be_under(Path::new("/"), &removed));
+    let roots = [removed.clone()];
+    assert!(PlacementEvidence::from_path(&inside, &roots).blocks_excusal());
+    assert!(PlacementEvidence::from_path(Path::new("/"), &roots).outside_every_root());
+    // A present root is placed by identity, and a dangling symlink stays
+    // undecidable.
+    fs::create_dir(&removed)?;
+    assert_eq!(absent_root_contains(&inside, &removed), None);
+    let link = temp.path().join("dangling-writer-tree");
+    std::os::unix::fs::symlink(temp.path().join("missing-target"), &link)?;
+    assert_eq!(absent_root_contains(&link.join("src"), &link), None);
+    assert!(occupancy_path_could_be_under(Path::new("/"), &link));
+    assert!(PlacementEvidence::from_path(Path::new("/"), &[link]).blocks_excusal());
+    Ok(())
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)] // A real child keeps the kernel's view of a deleted cwd.
+fn a_process_left_in_a_removed_tree_is_placed_inside_it() -> Result<(), Box<dyn Error>> {
+    use provenant_os::pid::{CwdObservation, CwdObserver, SystemCwdObserver};
+    struct Child(std::process::Child);
+    impl Drop for Child {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().join("removed-writer-tree");
+    fs::create_dir_all(root.join("src"))?;
+    // A cwd at the removed root itself carries Linux's " (deleted)" marker; one
+    // below it keeps a removed suffix either way.
+    let children = [root.clone(), root.join("src")]
+        .iter()
+        .map(|cwd| {
+            Ok(Child(
+                std::process::Command::new("/bin/sh")
+                    .args(["-c", "read line"])
+                    .current_dir(cwd)
+                    .stdin(std::process::Stdio::piped())
+                    .spawn()?,
+            ))
+        })
+        .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
+    fs::remove_dir_all(&root)?;
+    for child in &children {
+        let CwdObservation::Path(cwd) = SystemCwdObserver.cwd(i64::from(child.0.id()))? else {
+            return Err("the child's cwd was not observable".into());
+        };
+        assert_eq!(
+            super::census::absent_root_contains(&cwd, &root),
+            Some(true),
+            "{cwd:?}"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_removed_root_spelled_through_the_data_firmlink_places_by_identity()
+-> Result<(), Box<dyn Error>> {
+    use super::census::absent_root_contains;
+    let temp = tempfile::tempdir()?;
+    let canonical = fs::canonicalize(temp.path())?;
+    let data = std::path::Path::new("/System/Volumes/Data").join(canonical.strip_prefix("/")?);
+    if !data.is_dir() {
+        return Ok(());
+    }
+    let root = data.join("removed-writer-tree");
+    for spelling in [canonical.as_path(), temp.path()] {
+        let inside = spelling.join("removed-writer-tree/src");
+        assert_eq!(
+            absent_root_contains(&inside, &root),
+            Some(true),
+            "{inside:?}"
+        );
+    }
+    assert_eq!(
+        absent_root_contains(&canonical.join("other/src"), &root),
+        Some(false)
+    );
+    Ok(())
+}
+
+#[test]
+fn session_root_that_appears_during_the_census_is_unknown() -> Result<(), Box<dyn Error>> {
+    struct Creating(PathBuf);
+    impl WorkerObserver for Creating {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
+            fs::create_dir(&self.0).expect("create the root mid-census");
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, Occupancy::Available))
+                .collect()
+        }
+    }
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().join("appears");
+    let clock = provenant_core::TestClock::new(
+        provenant_core::WallTime::from_unix_seconds(0)?,
+        provenant_core::MonoTime::from_micros(1),
+    );
+    let observer = Creating(root.clone());
+    let session = CensusSession::new(&observer, &clock);
+    assert!(session.observe_roots(std::slice::from_ref(&root))[&root].is_unknown());
+    Ok(())
+}
+
+struct EmptyWriterObserver;
+impl WorkerObserver for EmptyWriterObserver {
+    fn observe_roots(&self, _: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
+        BTreeMap::new()
+    }
+    fn observe_roots_with_details(&self, _: &[PathBuf]) -> WorkerObservations {
+        (BTreeMap::new(), BTreeMap::new())
+    }
+}
+
+#[test]
+fn observe_writer_tree_missing_census_entry_is_unknown() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let present = temp.path().join("present-writer-tree");
+    fs::create_dir(&present)?;
+    assert_eq!(
+        super::census::observe_writer_tree(&EmptyWriterObserver, &present),
+        (
+            Occupancy::census_unknown(present, "worker census did not return the requested tree"),
+            None
+        )
+    );
+    Ok(())
+}
+
 #[test]
 fn session_reuses_evidence_and_refreshes_at_epoch_boundaries() -> Result<(), Box<dyn Error>> {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -135,8 +320,8 @@ fn session_acquires_with_captured_policy_during_aba() -> Result<(), Box<dyn Erro
 }
 
 #[test]
-fn session_refusal_uses_decision_evidence_and_missing_root_is_unknown() -> Result<(), Box<dyn Error>>
-{
+fn session_refusal_uses_decision_evidence_and_a_stably_absent_root_keeps_its_verdict()
+-> Result<(), Box<dyn Error>> {
     use std::sync::atomic::{AtomicUsize, Ordering};
     struct Sequenced(AtomicUsize);
     impl WorkerObserver for Sequenced {
@@ -201,11 +386,11 @@ fn session_refusal_uses_decision_evidence_and_missing_root_is_unknown() -> Resul
     assert_eq!(session.live_process(&root).unwrap().pid, 123);
     let (_, taints) = session.observe_roots_with_taints(std::slice::from_ref(&root));
     assert!(matches!(&taints[&root], TaintCause::LiveWriter(p) if p.pid == 123));
+    // A root absent before and after the census keeps the census verdict;
+    // placement, not the session, decides what an absent root holds.
     let missing = root.join("missing");
-    assert!(session.observe_roots(std::slice::from_ref(&missing))[&missing].is_unknown());
-    let states = session.observe_roots(&[root.clone(), missing.clone()]);
-    assert!(states[&root].is_available());
-    assert!(states[&missing].is_unknown());
+    assert!(session.observe_roots(std::slice::from_ref(&missing))[&missing].is_available());
+    assert!(session.observe_roots(std::slice::from_ref(&root))[&root].is_available());
     Ok(())
 }
 
@@ -2213,9 +2398,19 @@ fn unreadable_platform_policy_rechecks_identity_and_preserves_other_unknowns()
         .cwds
         .insert(300, CwdObservation::Path(root.clone()));
     assert!(observer.observe_roots(std::slice::from_ref(&root))[&root].is_observed());
-    // Owner/identity lookup failure never licenses exclusion or placement.
-    let missing = root.join("missing-root");
-    assert!(observer.observe_roots(std::slice::from_ref(&missing))[&missing].is_unknown());
+    // Identity lookup failure never licenses exclusion or placement.
+    let unreadable = root.join("dangling-root");
+    std::os::unix::fs::symlink(root.join("missing-target"), &unreadable)?;
+    assert!(observer.observe_roots(std::slice::from_ref(&unreadable))[&unreadable].is_unknown());
+    // A removed root is decided: the system process is excused against this
+    // user's uid and the readable process lies outside it.
+    let removed = root.join("removed-root");
+    assert!(observer.observe_roots(std::slice::from_ref(&removed))[&removed].is_available());
+    // A process left inside the removed tree still holds it.
+    observer
+        .cwds
+        .insert(300, CwdObservation::Path(removed.join("src")));
+    assert!(!observer.observe_roots(std::slice::from_ref(&removed))[&removed].is_available());
     Ok(())
 }
 

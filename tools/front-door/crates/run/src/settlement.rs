@@ -3150,18 +3150,21 @@ impl crate::RunStore {
         observer: &dyn provenant_supervisor::census::ProcessObserver,
     ) -> Result<provenant_supervisor::custody::Recovery> {
         let request = self.request(record.attempt_id, call)?;
-        let proof = recovery
-            .after_guardian_loss(attempt, observer, || {
-                let Some(writer) = request.task.writer.as_ref() else {
-                    return Ok(true);
-                };
-                workers.invalidate();
-                Ok(workers
-                    .observe_roots(std::slice::from_ref(&writer.worktree))
-                    .get(&writer.worktree)
-                    .is_some_and(|state| state.is_available()))
-            })
-            .map_err(|error| RunError::Io(std::io::Error::other(error)))?;
+        let proof =
+            recovery
+                .after_guardian_loss(attempt, observer, || {
+                    let Some(writer) = request.task.writer.as_ref() else {
+                        return Ok(true);
+                    };
+                    workers.invalidate();
+                    Ok(provenant_confinement::worktrees::observe_writer_tree(
+                        workers,
+                        &writer.worktree,
+                    )
+                    .0
+                    .is_available())
+                })
+                .map_err(|error| RunError::Io(std::io::Error::other(error)))?;
         match proof {
             Ok(proof) => proof
                 .into_recovery()
@@ -3445,18 +3448,13 @@ impl crate::RunStore {
                 .map(|w| w.worktree.clone())
                 .unwrap_or(attempt.current_path()?);
             workers.invalidate();
-            let (states, details) = workers.observe_roots_with_details(std::slice::from_ref(&path));
-            let state = states.get(&path).cloned().unwrap_or_else(|| {
-                provenant_confinement::worktrees::Occupancy::census_unknown(
-                    path.clone(),
-                    "worker census did not return the requested tree",
-                )
-            });
+            let (state, detail) =
+                provenant_confinement::worktrees::observe_writer_tree(workers, &path);
             if writer.is_none() || !state.is_available() {
                 let evidence = if writer.is_none() {
                     "attempt has no recorded confinement worktree".into()
                 } else {
-                    details.get(&path).cloned().unwrap_or_else(|| match &state {
+                    detail.unwrap_or_else(|| match &state {
                         provenant_confinement::worktrees::Occupancy::Unknown {
                             evidence, ..
                         } => evidence.clone(),
