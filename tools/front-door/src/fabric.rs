@@ -90,7 +90,7 @@ pub(crate) fn scratch_prepare_error(
         delivery_stage: None,
         resource: None,
         input_failure: None,
-        cause: cause.map(str::to_owned),
+        cause: cause.map(Box::from),
         operation: format!("prepare project scratch: {error}"),
         path: Some(".provenant/scratch".into()),
     }
