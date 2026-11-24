@@ -92,6 +92,10 @@ pub enum StopCause {
     WriteGrantsRefused,
     WorktreeBusy,
     LaunchHandoffRefused,
+    /// A local preparation step refused the launch before custody. The attempt
+    /// names the step and carries its reason and remedy, so this is not a lost
+    /// or refused handoff to a guardian.
+    PreparationRefused,
     RetainedWriterImport,
     UnsupportedPlatform,
     UnknownPacingAccount,
@@ -295,6 +299,7 @@ pub const STOP_TABLE: &[StopRule] = {
         rule(WriteGrantsRefused, CHAIR, crate::run::CauseSource::Owner),
         rule(WorktreeBusy, CHAIR, crate::run::CauseSource::Host),
         rule(LaunchHandoffRefused, CHAIR, crate::run::CauseSource::Host),
+        rule(PreparationRefused, CHAIR, crate::run::CauseSource::Host),
         rule(RetainedWriterImport, CHAIR, crate::run::CauseSource::Host),
         rule(UnsupportedPlatform, CHAIR, crate::run::CauseSource::Host),
         rule(UnknownPacingAccount, CHAIR, crate::run::CauseSource::Host),
@@ -316,7 +321,7 @@ pub const STOP_TABLE: &[StopRule] = {
 impl StopCause {
     /// Every cause. `ordinal` matches exhaustively, so a new variant fails to
     /// compile there, and the assertion below keeps this list in step.
-    pub const ALL: [StopCause; 46] = {
+    pub const ALL: [StopCause; 47] = {
         use StopCause::*;
         [
             StoppedEarly,
@@ -365,6 +370,7 @@ impl StopCause {
             HandoffMalformed,
             Steered,
             Unclassified,
+            PreparationRefused,
         ]
     };
 
@@ -417,6 +423,7 @@ impl StopCause {
             HandoffMalformed => 43,
             Steered => 44,
             Unclassified => 45,
+            PreparationRefused => 46,
         }
     }
 
@@ -574,6 +581,7 @@ impl StopCause {
             WriteGrantsRefused => "write_grants_refused",
             WorktreeBusy => "worktree_busy",
             LaunchHandoffRefused => "launch_handoff_refused",
+            PreparationRefused => "preparation_refused",
             RetainedWriterImport => "retained_writer_import",
             UnsupportedPlatform => "unsupported_platform",
             UnknownPacingAccount => "unknown_pacing_account",
@@ -619,6 +627,7 @@ impl From<crate::run::TerminalCause> for StopCause {
             T::WriteGrantsRefused => Self::WriteGrantsRefused,
             T::WorktreeBusy => Self::WorktreeBusy,
             T::HandoffRefused => Self::LaunchHandoffRefused,
+            T::PreparationRefused => Self::PreparationRefused,
             T::WriterPinMismatch { .. } => Self::LaunchHandoffRefused,
             T::RetainedWriterImport => Self::RetainedWriterImport,
             T::UnsupportedPlatform => Self::UnsupportedPlatform,

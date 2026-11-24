@@ -850,6 +850,9 @@ pub(super) fn settlement_fallback_decision(
         AttemptOutcome::PreparationRefused(provenant_records::run::TerminalCause::SpawnFailure) => {
             Some(StopCause::SpawnFailure)
         }
+        AttemptOutcome::PreparationRefused(
+            provenant_records::run::TerminalCause::PreparationRefused,
+        ) => Some(StopCause::PreparationRefused),
         AttemptOutcome::AdapterUnavailable | AttemptOutcome::PreparationRefused(_) => {
             Some(StopCause::AdapterUnavailable)
         }

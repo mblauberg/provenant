@@ -2512,11 +2512,25 @@ impl RunStore {
                         // local lease has been withdrawn. Preserve that typed
                         // pre-provider failure for graph fallback; a boundary or
                         // retained import does not establish safe preparation.
-                        let preparation_failure =
-                            matches!(&error, HandOff::Local(_) | HandOff::TypedLocal { .. })
-                                .then_some(
-                                    provenant_records::run::PreparationFailure::AdapterUnavailable,
-                                );
+                        // A local preparation refusal is not an adapter failure:
+                        // its typed failure names the step to repair.
+                        let preparation_refused = matches!(
+                            &error,
+                            HandOff::TypedLocal {
+                                cause: TerminalCause::PreparationRefused,
+                                ..
+                            }
+                        );
+                        let preparation_failure = match &error {
+                            HandOff::TypedLocal {
+                                cause: TerminalCause::PreparationRefused,
+                                ..
+                            } => Some(provenant_records::run::PreparationFailure::GitSetup),
+                            HandOff::Local(_) | HandOff::TypedLocal { .. } => {
+                                Some(provenant_records::run::PreparationFailure::AdapterUnavailable)
+                            }
+                            _ => None,
+                        };
                         let terminal_cause = match &error {
                             HandOff::TypedLocal { cause, .. } => Some(*cause),
                             HandOff::Boundary { cause, .. } => {
@@ -2579,7 +2593,11 @@ impl RunStore {
                                 finished_at: now()?,
                                 failure: preparation_failure.filter(|_| !cancelled),
                                 terminal_cause,
-                                terminal_note: kind.terminal_note(),
+                                terminal_note: if preparation_refused {
+                                    Some(TerminalCause::preparation_note(&reason))
+                                } else {
+                                    kind.terminal_note()
+                                },
                             },
                             call,
                         ) {

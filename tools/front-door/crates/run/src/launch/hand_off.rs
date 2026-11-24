@@ -76,6 +76,22 @@ fn typed_local(
     }
 }
 
+/// A local preparation step refused the launch before custody. Upgrade only
+/// an untyped local refusal: a boundary or resource fact keeps its own cause.
+fn typed_preparation(
+    policy: &provenant_records::policy::Policy,
+    phase: &str,
+    error: &RunError,
+) -> HandOff {
+    match typed_local(policy, phase, error) {
+        HandOff::Local(message) => HandOff::TypedLocal {
+            message,
+            cause: TerminalCause::PreparationRefused,
+        },
+        other => other,
+    }
+}
+
 fn boundary_handoff(
     policy: &provenant_records::policy::Policy,
     code: &str,
@@ -456,7 +472,7 @@ impl RunStore {
                 lease.withdraw_unlaunched().map_err(|release| {
                     HandOff::Protected(format!("Git setup: {error}; custody withdrawal: {release}"))
                 })?;
-                return Err(typed_local(&policy, "Git setup", &error));
+                return Err(typed_preparation(&policy, "Git setup", &error));
             }
             // Create the host-derived data roots while occupancy is held, before
             // shared Git state is initialised and permission anchors are captured.

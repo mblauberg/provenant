@@ -93,6 +93,16 @@ recorded in `terminal-pending.json` and shown by `result` and `wait`. A refusal 
 names none reads `unrecorded`, never a cause the host did not observe. A pre-launch routing refusal
 keeps a bounded host-authored explanation; provider diagnostics never supply it.
 
+A refusal while preparing the local launch (for example Git setup with no declared or inferable
+remote) is `preparation_refused` with a typed `git_setup` preparation failure, never a lost or
+refused handoff to a guardian. Its note carries the host's bounded reason and the remedy that
+reason implies — declare `ports.git.remote` or set the branch's upstream — into `result.md` and
+`provenant status`. Only a real host handoff refusal reads `launch_handoff_refused` and tells the
+operator to run `provenant reconcile`. Remote inference still never guesses a remote.
+- Why: the remedy must repair the step that refused; sending an operator to reconcile a Git
+  setup failure hides the actual cause and strands the lane.
+- Owner: `crates/run/src/launch/hand_off.rs`, `crates/run/src/launch.rs`, `crates/records/src/run.rs`
+
 Terminal attempts are immutable. A retry is a new linked attempt, a terminal attempt has at most
 one successor, and a writer is never replayed over its edits.
 - Why: continuation must preserve both history and its attempt's custody.

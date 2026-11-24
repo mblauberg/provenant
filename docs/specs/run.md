@@ -312,6 +312,7 @@ chair as an environment problem; `blocked_dependency` pauses as a wait. Neither 
 | `write_grants_refused` | `chair` | no | 0 |
 | `worktree_busy` | `chair` | no | 0 |
 | `launch_handoff_refused` | `chair` | no | 0 |
+| `preparation_refused` | `chair` | no | 0 |
 | `retained_writer_import` | `chair` | no | 0 |
 | `unsupported_platform` | `chair` | no | 0 |
 | `unknown_pacing_account` | `chair` | no | 0 |

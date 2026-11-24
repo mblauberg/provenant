@@ -184,3 +184,72 @@ fn queued_proposal_refusal_does_not_invent_a_launch_preparation_cause()
     assert_eq!(reason.as_deref(), Some(TerminalCause::Unrecorded.detail()));
     Ok(())
 }
+
+#[test]
+fn git_setup_preparation_failure_projects_its_reason_and_remedy_to_status()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    const REASON: &str = "launch preparation failed: Git setup: no Git remote is declared and none can be inferred; remotes seen: [\"origin\", \"pr\"]; did you mean origin?";
+    let state = AttemptState::Terminal {
+        extra: Default::default(),
+        terminal_cause: Some(TerminalCause::PreparationRefused),
+        terminal_note: Some(TerminalCause::preparation_note(REASON)),
+        stop: None,
+        outcome: Outcome::Rejected,
+        exit_code: None,
+        finished_at: provenant_core::WallTime::from_micros(1).unwrap(),
+        reason: Some(REASON.into()),
+    };
+    // `provenant status` and `result.md` both read this projection.
+    let (_, status_reason) = LaneRow::state_and_reason(&state);
+    let status_reason = status_reason.ok_or("missing status reason")?;
+    assert!(
+        status_reason.starts_with(TerminalCause::PreparationRefused.detail()),
+        "{status_reason}"
+    );
+    assert!(
+        status_reason.contains("no Git remote is declared"),
+        "{status_reason}"
+    );
+    assert!(
+        status_reason.contains("declare `ports.git.remote` or set the branch's upstream"),
+        "{status_reason}"
+    );
+    assert!(
+        !status_reason.contains("host refused the launch handoff"),
+        "{status_reason}"
+    );
+    assert!(
+        !status_reason.contains("provenant reconcile"),
+        "{status_reason}"
+    );
+    let (_, label) = LaneRow::state_and_label(&state);
+    assert_eq!(
+        label.as_deref(),
+        Some(TerminalCause::PreparationRefused.reason())
+    );
+    // The typed failure and stop keep their own names; a real host handoff
+    // refusal keeps its reconcile remedy.
+    assert_eq!(
+        serde_json::to_value(provenant_records::run::PreparationFailure::GitSetup)?,
+        serde_json::json!("git_setup")
+    );
+    assert_eq!(
+        serde_json::to_value(TerminalCause::PreparationRefused)?,
+        serde_json::json!("preparation_refused")
+    );
+    assert_eq!(
+        provenant_records::StopCause::from(TerminalCause::PreparationRefused),
+        provenant_records::StopCause::PreparationRefused
+    );
+    assert!(
+        !TerminalCause::PreparationRefused
+            .detail()
+            .contains("reconcile")
+    );
+    assert!(
+        TerminalCause::HandoffRefused
+            .detail()
+            .contains("provenant reconcile")
+    );
+    Ok(())
+}
