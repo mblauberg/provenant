@@ -437,7 +437,7 @@ fn create_allows_branch_below_an_invented_remote_alias() -> Result<(), Box<dyn E
         },
         &cancel(),
     )?;
-    assert_eq!(created.branch.as_deref(), Some("smoke/x"));
+    assert_eq!(created.branch.as_deref(), Some("refs/heads/smoke/x"));
     Ok(())
 }
 
