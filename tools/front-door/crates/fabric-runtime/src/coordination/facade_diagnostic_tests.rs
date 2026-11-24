@@ -453,9 +453,10 @@ fn graph_admission_keeps_composite_schema_and_output_kind_reasons() {
         (
             AdmissionError::OutputKind {
                 field: GraphOutputField::Input,
-                reason: "node b: execution bindings require an agent node".into(),
+                reason: "node b: inputs[].outputs selects verdict, which review does not supply"
+                    .into(),
             },
-            "node b: execution bindings require an agent node",
+            "node b: inputs[].outputs selects verdict, which review does not supply",
         ),
     ] {
         let refusal = FacadeError::graph_admission(error);
