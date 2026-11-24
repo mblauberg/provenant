@@ -367,7 +367,7 @@ pub(crate) fn wip(
                     ));
                 }
             }
-            wip_git(tree, remote)
+            wip_git(tree, &remote)
         },
     )
 }
