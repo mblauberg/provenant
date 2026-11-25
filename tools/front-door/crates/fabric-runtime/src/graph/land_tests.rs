@@ -343,7 +343,9 @@ impl AttemptOwner for Owner {
         });
         let (result, branch, commit) = match key.node_id.as_str() {
             "write" => (None, self.writer_branch.clone(), Some(WRITE_HEAD)),
-            "rebase" => (None, replay.branch.map(str::to_owned), Some(REBASE_HEAD)),
+            "rebase" | "rebase--r1--fix" => {
+                (None, replay.branch.map(str::to_owned), Some(REBASE_HEAD))
+            }
             "repair" => (None, replay.branch.map(str::to_owned), Some(REPAIR_HEAD)),
             id if self.repair_fixture && id.ends_with("--fix") => {
                 let mut capture = crate::result_capture::ResultCapture::new(None);
@@ -647,36 +649,51 @@ fn queue_publish_document(tier: &str) -> GraphDocument {
             {"id":"conflict", "kind":"gate", "access":"read_only",
              "depends_on":["publish"], "on_fail":"rebase",
              "condition":{"type":"conflict","target":{"node":"publish"}}},
-            {"id":"rebase", "access":"worktree_write", "worktree":"/wt/feature",
-             "prompt":"rebase the published branch", "route":{"alias":"senior"},
-             "depends_on":["conflict"], "source":{"type":"head","node":"publish"}},
-            {"id":"hygiene_after_rebase", "kind":"hygiene", "access":"worktree_write",
-             "worktree":"/wt/feature", "depends_on":["rebase"],
-             "source":{"type":"node","node":"rebase"}},
-            {"id":"publish_after_rebase", "kind":"publish", "access":"worktree_write",
-             "worktree":"/wt/feature", "depends_on":["hygiene_after_rebase"],
-             "source":{"type":"node","node":"hygiene_after_rebase"}},
-            {"id":"rebase_checks", "kind":"loop", "access":"read_only",
-             "depends_on":["publish_after_rebase"],
-             "loop":{"max_rounds":1,"until":"ci_after_rebase","body":[
-                {"id":"conflict_after_rebase", "kind":"gate", "access":"read_only",
-                 "condition":{"type":"conflict","target":{"node":"publish_after_rebase"}}},
-                {"id":"ci_after_rebase", "kind":"gate", "access":"read_only",
-                 "depends_on":["conflict_after_rebase"],
-                 "condition":{"type":"ci","target":{"node":"publish_after_rebase"}}}
-             ]}},
             {"id":"ci", "kind":"gate", "access":"read_only",
-             "depends_on":["conflict"],
+             "depends_on":["conflict"], "on_fail":"rebase",
              "condition":{"type":"ci","target":{"node":"publish"}}},
+            {"id":"rebase", "kind":"loop", "access":"read_only",
+             "depends_on":["conflict","ci","publish","hygiene","accepted"],
+             "loop":{"max_rounds":2,"until":"accepted",
+              "retry_on":["verified_clean","fresh_conflict","fresh_ci","accepted"],
+              "selected_publication":"refresh","initial_publication":"publish",
+              "previous_bindings":{"refresh":"publish","verified_clean":"hygiene"},
+              "body":[
+                {"id":"fix", "access":"worktree_write", "worktree":"/wt/feature",
+                 "prompt":"rebase the published branch", "route":{"alias":"senior"},
+                 "source":{"type":"node","node":"previous.verified_clean"},
+                 "inputs":[{"node":"previous.refresh","outputs":["branch","commit"]}]},
+                {"id":"verified_clean", "kind":"hygiene", "access":"worktree_write",
+                 "worktree":"/wt/feature", "depends_on":["fix"],
+                 "source":{"type":"node","node":"fix"}},
+                {"id":"refresh", "kind":"publish", "access":"worktree_write",
+                 "worktree":"/wt/feature", "depends_on":["verified_clean"],
+                 "source":{"type":"node","node":"verified_clean"}},
+                {"id":"fresh_conflict", "kind":"gate", "access":"read_only",
+                 "depends_on":["refresh"],
+                 "condition":{"type":"conflict","target":{"node":"refresh"}}},
+                {"id":"fresh_ci", "kind":"gate", "access":"read_only",
+                 "depends_on":["fresh_conflict"],
+                 "condition":{"type":"ci","target":{"node":"refresh"}}},
+                {"id":"fresh_review", "access":"read_only",
+                 "prompt":"review the recovery publication",
+                 "source":{"type":"head","node":"refresh"},
+                 "depends_on":["refresh","fresh_conflict","fresh_ci"],
+                 "route":{"alias":"senior"}},
+                {"id":"accepted", "kind":"gate", "access":"read_only",
+                 "depends_on":["fresh_review","fresh_ci"],
+                 "inputs":[{"node":"fresh_review","outputs":["verdict"]}],
+                 "condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}}
+             ]}},
             {"id":"review", "access":"read_only", "prompt":"review the published head",
              "review_base":REVIEW_BASE, "source":{"type":"head","node":"publish"},
              "distinct_from":"writer",
              "depends_on":["ci","publish"], "route":{"alias":"senior"}},
             {"id":"accepted", "kind":"gate", "access":"read_only",
-             "depends_on":["review"], "inputs":[{"node":"review","outputs":["verdict"]}],
+             "depends_on":["review"], "on_fail":"rebase", "inputs":[{"node":"review","outputs":["verdict"]}],
              "condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}},
             {"id":"land", "kind":"land", "access":"read_only",
-             "depends_on":["accepted"], "land":{"node":"publish","tier":tier}}
+             "depends_on":["accepted","rebase"], "land":{"node":"rebase","tier":tier}}
         ]
     }))
     .unwrap();
@@ -851,6 +868,10 @@ fn queue_repair_writer_may_bind_the_published_head() {
         .iter_mut()
         .find(|node| node.id == "rebase")
         .unwrap()
+        .loop_body
+        .as_mut()
+        .unwrap()
+        .body[0]
         .worktree = Some("/wt/unretained".into());
     assert!(validate_plan(&wrong_worktree).is_err());
 
@@ -871,24 +892,38 @@ fn queue_conflict_recovery_requires_the_published_head_and_retained_worktree() {
     let recovery_loop = |worktree: &str| {
         json!({
             "id":"rebase", "kind":"loop", "access":"read_only",
-            "depends_on":["conflict"],
-            "loop":{"max_rounds":1,"until":"refresh_ci","body":[
+            "depends_on":["conflict","publish","hygiene"],
+            "loop":{"max_rounds":2,"until":"accepted",
+              "retry_on":["verified_clean","refresh_conflict","refresh_ci","accepted"],
+              "selected_publication":"refresh","initial_publication":"publish",
+              "previous_bindings":{"refresh":"publish","verified_clean":"hygiene"},
+              "body":[
                 {"id":"fix", "access":"worktree_write", "worktree":worktree,
                  "prompt":"rebase the retained published branch", "write_scope":["src"],
-                 "route":{"alias":"senior"}, "source":{"type":"head","node":"publish"}},
-                {"id":"hygiene", "kind":"hygiene", "access":"worktree_write",
+                 "route":{"alias":"senior"},
+                 "source":{"type":"node","node":"previous.verified_clean"},
+                 "inputs":[{"node":"previous.refresh","outputs":["branch","commit"]}]},
+                {"id":"verified_clean", "kind":"hygiene", "access":"worktree_write",
                  "worktree":worktree, "depends_on":["fix"],
                  "source":{"type":"node","node":"fix"}},
                 {"id":"refresh", "kind":"publish", "access":"worktree_write",
-                 "worktree":worktree, "depends_on":["hygiene"],
-                 "source":{"type":"node","node":"hygiene"}},
+                 "worktree":worktree, "depends_on":["verified_clean"],
+                 "source":{"type":"node","node":"verified_clean"}},
                 {"id":"refresh_conflict", "kind":"gate", "access":"read_only",
                  "depends_on":["refresh"],
                  "condition":{"type":"conflict","target":{"node":"refresh"}}},
                 {"id":"refresh_ci", "kind":"gate", "access":"read_only",
                  "depends_on":["refresh_conflict"],
-                 "condition":{"type":"ci","target":{"node":"refresh"}}}
-            ]}
+                 "condition":{"type":"ci","target":{"node":"refresh"}}},
+                {"id":"fresh_review", "access":"read_only", "prompt":"review recovery head",
+                 "source":{"type":"head","node":"refresh"},
+                 "depends_on":["refresh","refresh_conflict","refresh_ci"],
+                 "route":{"alias":"senior"}},
+                {"id":"accepted", "kind":"gate", "access":"read_only",
+                 "depends_on":["fresh_review","refresh_ci"],
+                 "inputs":[{"node":"fresh_review","outputs":["verdict"]}],
+                 "condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}}
+              ]}
         })
     };
 
@@ -897,39 +932,61 @@ fn queue_conflict_recovery_requires_the_published_head_and_retained_worktree() {
     let expanded = loops::expand(&valid, &[], &crate::config::GraphLimits::default()).unwrap();
     let (plan, positions) =
         validate_flat_plan(&expanded, &crate::config::GraphLimits::default()).unwrap();
+    let rebase_writer = &plan.nodes[positions["rebase--r1--fix"]];
     assert!(matches!(
-        &plan.nodes[positions["rebase--r1--fix"]].source,
-        Some(SourceBinding::Head { node }) if node == "publish"
+        &rebase_writer.source,
+        Some(SourceBinding::Node { node }) if node == "hygiene"
     ));
+    assert!(rebase_writer.inputs.iter().any(|input| {
+        input.node == "publish"
+            && input.outputs.contains(&OutputKind::Branch)
+            && input.outputs.contains(&OutputKind::Commit)
+    }));
 
     let different_worktree = queue_conflict_recovery_document(recovery_loop("/wt/unretained"));
     assert!(validate_plan(&different_worktree).is_err());
 
     let composite = queue_conflict_recovery_document(json!({
-        "id":"rebase", "kind":"composite", "access":"read_only",
-        "depends_on":["conflict"], "composite":{"nodes":[
-            {"id":"fix", "access":"worktree_write", "worktree":"/wt/feature",
-             "prompt":"rebase the retained published branch", "write_scope":["src"],
-             "route":{"alias":"senior"}, "source":{"type":"head","node":"publish"}},
-            {"id":"followup", "access":"worktree_write", "worktree":"/wt/feature",
-             "prompt":"finish the rebase", "write_scope":["src"],
-             "route":{"alias":"senior"}, "depends_on":["fix"],
-             "source":{"type":"node","node":"fix"}},
-            {"id":"hygiene", "kind":"hygiene", "access":"worktree_write",
-             "worktree":"/wt/feature", "depends_on":["followup"],
-             "source":{"type":"node","node":"followup"}},
+        "id":"rebase", "kind":"loop", "access":"read_only",
+        "depends_on":["conflict","publish","hygiene"],
+        "loop":{"max_rounds":2,"until":"accepted",
+          "retry_on":["verified_clean","refresh_conflict","refresh_ci","accepted"],
+          "selected_publication":"refresh","initial_publication":"publish",
+          "previous_bindings":{"refresh":"publish","verified_clean":"hygiene"},
+          "body":[
+            {"id":"writer_bundle", "kind":"composite", "access":"read_only",
+             "composite":{"nodes":[
+                {"id":"fix", "access":"worktree_write", "worktree":"/wt/feature",
+                 "prompt":"rebase the retained published branch", "write_scope":["src"],
+                 "route":{"alias":"senior"},
+                 "source":{"type":"node","node":"previous.verified_clean"},
+                 "inputs":[{"node":"previous.refresh","outputs":["branch","commit"]}]},
+                {"id":"followup", "access":"worktree_write", "worktree":"/wt/feature",
+                 "prompt":"finish the rebase", "write_scope":["src"],
+                 "route":{"alias":"senior"}, "depends_on":["fix"],
+                 "source":{"type":"node","node":"fix"}}
+             ], "exports":[{"node":"followup","outputs":["branch","commit","result"]}]}},
+            {"id":"verified_clean", "kind":"hygiene", "access":"worktree_write",
+             "worktree":"/wt/feature", "depends_on":["writer_bundle"],
+             "source":{"type":"node","node":"writer_bundle"}},
             {"id":"refresh", "kind":"publish", "access":"worktree_write",
-             "worktree":"/wt/feature", "depends_on":["hygiene"],
-             "source":{"type":"node","node":"hygiene"}},
-            {"id":"checks", "kind":"loop", "access":"read_only",
-             "depends_on":["refresh"], "loop":{"max_rounds":1,"until":"refresh_ci","body":[
-                {"id":"refresh_conflict", "kind":"gate", "access":"read_only",
-                 "condition":{"type":"conflict","target":{"node":"refresh"}}},
-                {"id":"refresh_ci", "kind":"gate", "access":"read_only",
-                 "depends_on":["refresh_conflict"],
-                 "condition":{"type":"ci","target":{"node":"refresh"}}}
-             ]}}
-        ], "exports":[{"node":"followup","outputs":["result"]}]}
+             "worktree":"/wt/feature", "depends_on":["verified_clean"],
+             "source":{"type":"node","node":"verified_clean"}},
+            {"id":"refresh_conflict", "kind":"gate", "access":"read_only",
+             "depends_on":["refresh"],
+             "condition":{"type":"conflict","target":{"node":"refresh"}}},
+            {"id":"refresh_ci", "kind":"gate", "access":"read_only",
+             "depends_on":["refresh_conflict"],
+             "condition":{"type":"ci","target":{"node":"refresh"}}},
+            {"id":"fresh_review", "access":"read_only", "prompt":"review recovery head",
+             "source":{"type":"head","node":"refresh"},
+             "depends_on":["refresh","refresh_conflict","refresh_ci"],
+             "route":{"alias":"senior"}},
+            {"id":"accepted", "kind":"gate", "access":"read_only",
+             "depends_on":["fresh_review","refresh_ci"],
+             "inputs":[{"node":"fresh_review","outputs":["verdict"]}],
+             "condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}}
+          ]}
     }));
     assert!(validate_plan(&composite).is_ok());
 
@@ -964,48 +1021,64 @@ fn queue_conflict_recovery_requires_the_published_head_and_retained_worktree() {
 fn queue_ci_repair_must_republish_and_recheck_the_repaired_head() {
     let ci_repair_document = |reenter: bool| {
         let mut document = queue_publish_document("routine");
+        document.nodes.retain(|node| node.id != "land");
         document
             .nodes
             .iter_mut()
             .find(|node| node.id == "ci")
             .unwrap()
             .on_fail = Some("ci_repair".into());
-        document.nodes.push(
-            serde_json::from_value(json!({
-                "id":"ci_repair", "access":"worktree_write", "worktree":"/wt/feature",
-                "prompt":"repair the published CI findings", "write_scope":["src"],
+        let recovery = if reenter {
+            json!({
+                "id":"ci_repair", "kind":"loop", "access":"read_only",
+                "depends_on":["ci","publish","hygiene"],
+                "loop":{"max_rounds":2,"until":"accepted",
+                  "retry_on":["verified_clean","fresh_conflict","fresh_ci","accepted"],
+                  "selected_publication":"refresh","initial_publication":"publish",
+                  "previous_bindings":{"refresh":"publish","verified_clean":"hygiene"},
+                  "body":[
+                    {"id":"fix", "access":"worktree_write", "worktree":"/wt/feature",
+                     "prompt":"repair the published CI findings", "write_scope":["src"],
+                     "source":{"type":"node","node":"previous.verified_clean"},
+                     "inputs":[{"node":"previous.refresh","outputs":["branch","commit"]}],
+                     "route":{"alias":"senior"}},
+                    {"id":"verified_clean", "kind":"hygiene", "access":"worktree_write",
+                     "worktree":"/wt/feature", "depends_on":["fix"],
+                     "source":{"type":"node","node":"fix"}},
+                    {"id":"refresh", "kind":"publish", "access":"worktree_write",
+                     "worktree":"/wt/feature", "depends_on":["verified_clean"],
+                     "source":{"type":"node","node":"verified_clean"}},
+                    {"id":"fresh_conflict", "kind":"gate", "access":"read_only",
+                     "depends_on":["refresh"],
+                     "condition":{"type":"conflict","target":{"node":"refresh"}}},
+                    {"id":"fresh_ci", "kind":"gate", "access":"read_only",
+                     "depends_on":["fresh_conflict"],
+                     "condition":{"type":"ci","target":{"node":"refresh"}}},
+                    {"id":"fresh_review", "access":"read_only", "prompt":"review recovery head",
+                     "source":{"type":"head","node":"refresh"},
+                     "depends_on":["refresh","fresh_conflict","fresh_ci"],
+                     "route":{"alias":"senior"}},
+                    {"id":"accepted", "kind":"gate", "access":"read_only",
+                     "depends_on":["fresh_review","fresh_ci"],
+                     "inputs":[{"node":"fresh_review","outputs":["verdict"]}],
+                     "condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}}
+                  ]}
+            })
+        } else {
+            json!({
+                "id":"ci_repair", "kind":"loop", "access":"read_only",
                 "depends_on":["ci","publish"],
-                "source":{"type":"head","node":"publish"}, "route":{"alias":"senior"}
-            }))
-            .unwrap(),
-        );
-        if reenter {
-            document.nodes.extend(
-                serde_json::from_value::<Vec<GraphNode>>(json!([
-                    {"id":"hygiene_after_ci_repair", "kind":"hygiene",
-                     "access":"worktree_write", "worktree":"/wt/feature",
-                     "depends_on":["ci_repair"],
-                     "source":{"type":"node","node":"ci_repair"}},
-                    {"id":"publish_after_ci_repair", "kind":"publish",
-                     "access":"worktree_write", "worktree":"/wt/feature",
-                     "depends_on":["hygiene_after_ci_repair"],
-                     "source":{"type":"node","node":"hygiene_after_ci_repair"}},
-                    {"id":"ci_repair_checks", "kind":"loop", "access":"read_only",
-                     "depends_on":["publish_after_ci_repair"],
-                     "loop":{"max_rounds":1,"until":"ci_after_ci_repair","body":[
-                        {"id":"conflict_after_ci_repair", "kind":"gate",
-                         "access":"read_only",
-                         "condition":{"type":"conflict",
-                           "target":{"node":"publish_after_ci_repair"}}},
-                        {"id":"ci_after_ci_repair", "kind":"gate", "access":"read_only",
-                         "depends_on":["conflict_after_ci_repair"],
-                         "condition":{"type":"ci",
-                           "target":{"node":"publish_after_ci_repair"}}}
-                     ]}}
-                ]))
-                .unwrap(),
-            );
-        }
+                "loop":{"max_rounds":1,"until":"accepted","body":[
+                    {"id":"fix", "access":"worktree_write", "worktree":"/wt/feature",
+                     "prompt":"repair the published CI findings", "write_scope":["src"],
+                     "source":{"type":"head","node":"publish"},
+                     "route":{"alias":"senior"}}
+                ]}
+            })
+        };
+        document
+            .nodes
+            .push(serde_json::from_value(recovery).unwrap());
         document
     };
 
@@ -1066,6 +1139,13 @@ fn queue_land_admission_requires_conflict_ci_and_verdict_after_publish() {
         .find(|node| node.id == "ci")
         .unwrap()
         .depends_on = vec!["publish".into()];
+    document
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "rebase")
+        .unwrap()
+        .depends_on
+        .retain(|dependency| dependency != "conflict");
 
     assert!(
         validate_plan(&document)
@@ -2007,97 +2087,7 @@ impl GraphJournal for ReplayJournal {
 #[test]
 fn queue_ci_conflict_after_clear_rebases_republishes_and_rechecks_after_replay() {
     let mut document = queue_publish_document("routine");
-    document
-        .nodes
-        .retain(|node| !matches!(node.id.as_str(), "review" | "accepted" | "land"));
-    document
-        .nodes
-        .iter_mut()
-        .find(|node| node.id == "ci")
-        .unwrap()
-        .on_fail = Some("ci_repair".into());
-    document.nodes.extend(
-        serde_json::from_value::<Vec<GraphNode>>(json!([
-            {"id":"ci_repair","kind":"loop","access":"read_only",
-             "depends_on":["ci","publish"],
-             "loop":{"max_rounds":1,"until":"refresh_ci","body":[
-                {"id":"fix","access":"worktree_write","worktree":"/wt/feature",
-                 "prompt":"Repair CI findings and sweep the whole defect class.",
-                 "source":{"type":"head","node":"publish"},"depends_on":["ci","publish"],
-                 "inputs":[{"node":"ci","outputs":["findings","commit"]}],
-                 "route":{"alias":"senior"}},
-                {"id":"hygiene","kind":"hygiene","access":"worktree_write",
-                 "worktree":"/wt/feature","depends_on":["fix"],
-                 "source":{"type":"node","node":"fix"}},
-                {"id":"refresh","kind":"publish","access":"worktree_write",
-                 "worktree":"/wt/feature","depends_on":["hygiene"],
-                 "source":{"type":"node","node":"hygiene"}},
-                {"id":"refresh_conflict","kind":"gate","access":"read_only",
-                 "depends_on":["refresh"],
-                 "condition":{"type":"conflict","target":{"node":"refresh"}}},
-                {"id":"refresh_ci","kind":"gate","access":"read_only",
-                 "depends_on":["refresh_conflict"],
-                 "condition":{"type":"ci","target":{"node":"refresh"}}}
-             ]}},
-            {"id":"hygiene_after_rebase","kind":"hygiene","access":"worktree_write",
-             "worktree":"/wt/feature","depends_on":["rebase"],
-             "source":{"type":"node","node":"rebase"}},
-            {"id":"publish_after_rebase","kind":"publish","access":"worktree_write",
-             "worktree":"/wt/feature","depends_on":["hygiene_after_rebase"],
-             "source":{"type":"node","node":"hygiene_after_rebase"}},
-            {"id":"conflict_after_rebase","kind":"gate","access":"read_only",
-             "depends_on":["publish_after_rebase"],"on_fail":"rebase_again",
-             "condition":{"type":"conflict","target":{"node":"publish_after_rebase"}}},
-            {"id":"rebase_again","kind":"loop","access":"read_only",
-             "depends_on":["conflict_after_rebase","publish_after_rebase"],
-             "loop":{"max_rounds":1,"until":"refresh_ci","body":[
-                {"id":"fix","access":"worktree_write","worktree":"/wt/feature",
-                 "prompt":"Rebase the republished branch.",
-                 "source":{"type":"head","node":"publish_after_rebase"},
-                 "depends_on":["conflict_after_rebase","publish_after_rebase"],
-                 "route":{"alias":"senior"}},
-                {"id":"hygiene","kind":"hygiene","access":"worktree_write",
-                 "worktree":"/wt/feature","depends_on":["fix"],
-                 "source":{"type":"node","node":"fix"}},
-                {"id":"refresh","kind":"publish","access":"worktree_write",
-                 "worktree":"/wt/feature","depends_on":["hygiene"],
-                 "source":{"type":"node","node":"hygiene"}},
-                {"id":"refresh_conflict","kind":"gate","access":"read_only",
-                 "depends_on":["refresh"],
-                 "condition":{"type":"conflict","target":{"node":"refresh"}}},
-                {"id":"refresh_ci","kind":"gate","access":"read_only",
-                 "depends_on":["refresh_conflict"],
-                 "condition":{"type":"ci","target":{"node":"refresh"}}}
-             ]}},
-            {"id":"ci_after_rebase","kind":"gate","access":"read_only",
-             "depends_on":["conflict_after_rebase","publish_after_rebase"],
-             "on_fail":"ci_repair_after_rebase",
-             "condition":{"type":"ci","target":{"node":"publish_after_rebase"}}},
-            {"id":"ci_repair_after_rebase","kind":"loop","access":"read_only",
-             "depends_on":["ci_after_rebase","publish_after_rebase"],
-             "loop":{"max_rounds":1,"until":"refresh_ci","body":[
-                {"id":"fix","access":"worktree_write","worktree":"/wt/feature",
-                 "prompt":"Repair CI findings and sweep the whole defect class.",
-                 "source":{"type":"head","node":"publish_after_rebase"},
-                 "depends_on":["ci_after_rebase","publish_after_rebase"],
-                 "inputs":[{"node":"ci_after_rebase","outputs":["findings","commit"]}],
-                 "route":{"alias":"senior"}},
-                {"id":"hygiene","kind":"hygiene","access":"worktree_write",
-                 "worktree":"/wt/feature","depends_on":["fix"],
-                 "source":{"type":"node","node":"fix"}},
-                {"id":"refresh","kind":"publish","access":"worktree_write",
-                 "worktree":"/wt/feature","depends_on":["hygiene"],
-                 "source":{"type":"node","node":"hygiene"}},
-                {"id":"refresh_conflict","kind":"gate","access":"read_only",
-                 "depends_on":["refresh"],
-                 "condition":{"type":"conflict","target":{"node":"refresh"}}},
-                {"id":"refresh_ci","kind":"gate","access":"read_only",
-                 "depends_on":["refresh_conflict"],
-                 "condition":{"type":"ci","target":{"node":"refresh"}}}
-             ]}}
-        ]))
-        .unwrap(),
-    );
+    document.nodes.retain(|node| node.id != "land");
     assert!(validate_plan(&document).is_ok());
 
     let mut first_owner = owner();
@@ -2139,7 +2129,8 @@ fn queue_ci_conflict_after_clear_rebases_republishes_and_rechecks_after_replay()
                     .and_then(|outputs| outputs.commit.as_deref())
                     == Some(REPAIR_HEAD)
                 && node(checkpoint, "rebase").state == NodeState::Pending
-                && node(checkpoint, "hygiene_after_rebase").state == NodeState::Pending
+                && node(checkpoint, "rebase--r1--fix").state == NodeState::Pending
+                && node(checkpoint, "rebase--r1--verified_clean").state == NodeState::Pending
         })
         .expect("CI conflict reset must be durable before retrying conflict observation");
     let replay_checkpoint: GraphCheckpoint =
@@ -2175,17 +2166,17 @@ fn queue_ci_conflict_after_clear_rebases_republishes_and_rechecks_after_replay()
         !replay_owner
             .launches
             .iter()
-            .any(|launch| launch.node == "ci_repair")
+            .any(|launch| launch.node == "rebase--r1--ci_repair")
     );
     assert_eq!(
-        node(&replayed.checkpoint, "hygiene_after_rebase").state,
+        node(&replayed.checkpoint, "rebase--r1--verified_clean").state,
         NodeState::Succeeded
     );
     assert_eq!(
-        node(&replayed.checkpoint, "publish_after_rebase").state,
+        node(&replayed.checkpoint, "rebase--r1--refresh").state,
         NodeState::Succeeded
     );
-    let receipt = node(&replayed.checkpoint, "publish_after_rebase")
+    let receipt = node(&replayed.checkpoint, "rebase--r1--refresh")
         .outputs
         .as_ref()
         .unwrap()
@@ -2193,13 +2184,13 @@ fn queue_ci_conflict_after_clear_rebases_republishes_and_rechecks_after_replay()
         .as_ref()
         .unwrap();
     assert_eq!(receipt.head, REPUBLISHED_HEAD);
-    let conflict = node(&replayed.checkpoint, "conflict_after_rebase")
+    let conflict = node(&replayed.checkpoint, "rebase--r1--fresh_conflict")
         .conflict
         .as_ref()
         .unwrap();
     assert_eq!(conflict.state, ConflictState::Clear);
     assert_eq!(conflict.head_sha.as_deref(), Some(REPUBLISHED_HEAD));
-    let ci = node(&replayed.checkpoint, "ci_after_rebase");
+    let ci = node(&replayed.checkpoint, "rebase--r1--fresh_ci");
     assert_eq!(ci.ci.as_ref().unwrap().state, CiState::Passed);
     assert_eq!(
         ci.ci.as_ref().unwrap().head_sha.as_deref(),
@@ -2209,14 +2200,14 @@ fn queue_ci_conflict_after_clear_rebases_republishes_and_rechecks_after_replay()
         replay_owner
             .launches
             .iter()
-            .filter(|launch| launch.node == "rebase")
+            .filter(|launch| launch.node == "rebase--r1--fix")
             .count(),
         1
     );
     assert_eq!(
         replay_owner.hygiene_observations,
         vec![(
-            "hygiene_after_rebase".into(),
+            "rebase--r1--verified_clean".into(),
             REBASE_HEAD.into(),
             REPUBLISHED_HEAD.into()
         )]
