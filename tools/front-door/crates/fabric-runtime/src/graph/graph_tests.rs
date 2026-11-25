@@ -574,6 +574,7 @@ fn node(id: &str, route: GraphRoute) -> GraphNode {
 
 fn graph(nodes: Vec<GraphNode>) -> GraphDocument {
     GraphDocument {
+        queue: None,
         review: None,
         review_subject_missing: false,
         exclude: Vec::new(),

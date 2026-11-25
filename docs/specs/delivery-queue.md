@@ -178,3 +178,39 @@ below are acceptance properties, not an instruction to run builds in this lane.
 
 Why: the slices have separate file owners and share declared types and typed
 outcomes, so parallel writers do not invent incompatible interfaces.
+
+
+## Shared types
+
+The wire additions require graph `schema_version: 2`; absent fields stay absent
+when an old sealed plan or checkpoint is decoded and encoded. Slice 0 admits no
+new delivery policy for execution: admission returns
+`AdmissionError::DeliveryQueueUnsupported` until the execution slices wire it.
+
+- `GraphNode.loop_body` is serialized as `loop`: its existing `max_rounds` is
+  required and positive, and the owning node `id` is the loop name. Optional
+  `LoopSpec.outcome_edge: LoopOutcomeEdge` has `outcome: LoopOutcome`
+  (`succeeded` or `exhausted`) and target `node: String`.
+  `NodeProgress.delivery_loop: Option<DeliveryLoopProgress>` persists `name`
+  and the number of admitted attempts in `round`.
+- `GraphNode.escalate: Option<EscalateSpec>` contains `ladder: Vec<String>`
+  (default `junior`, `senior`, `principal`) and `max_ci_rounds: usize` (default
+  3). `NodeProgress.escalation: Option<EscalationProgress>` contains zero-based
+  `rung` and `cause: EscalationCause` (`no_commit`, `uncommitted_edits`,
+  `review_repair`, `ci_red`). The ladder and CI bound must be nonempty and positive.
+- `GraphNode.delivery_review: Option<DeliveryReviewSpec>` contains
+  `shape: ReviewShape` (`single` by default, or `panel`) and
+  `accept_inconclusive_without_blocking: bool` (default `true`). The distinct
+  name avoids the existing graph review request and template review protocol.
+- `HygieneOutcome` contains `kind: HygieneOutcomeKind` (`clean`, `no_commit`,
+  `uncommitted_edits`, `error`), `before_head`, `after_head`, and `handoff`
+  (each optional). `ParkReason` has the eight snake-case values in the table
+  above. These record types live in `provenant_records::graph`.
+- `GraphDocument.queue: Option<QueueKnobs>` seals `max_parallel`, `ci_slots`,
+  and `prep_retries` as `Sourced<usize>` values, with `value`, `layer`, and
+  optional `origin`. Their keys are `domains.fabric.queue.max_parallel`,
+  `domains.fabric.queue.ci_slots`, and `domains.fabric.queue.prep_retries`.
+  Shipped defaults are respectively 4 (the existing batch default), 1 (the
+  existing custom admission-class default), and 2. `max_parallel` is positive;
+  zero `ci_slots` disables that cap. Later slices resolve overrides and seal
+  their sources; this slice only defines the contract.

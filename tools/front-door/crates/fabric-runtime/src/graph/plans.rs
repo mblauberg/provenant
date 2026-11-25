@@ -1435,6 +1435,7 @@ pub(super) fn flatten_fragment(
         local_nodes.push(stub);
     }
     let mut local = GraphDocument {
+        queue: None,
         review: None,
         review_subject_missing: false,
         exclude: Vec::new(),

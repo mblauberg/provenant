@@ -1228,6 +1228,7 @@ pub fn compile_submission(
         return Err(PatchError::invalid("patch adds no nodes"));
     }
     let mut document = GraphDocument {
+        queue: None,
         review: None,
         review_subject_missing: false,
         exclude: Vec::new(),

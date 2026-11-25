@@ -2371,6 +2371,7 @@ impl Factory {
             let mut compiled = encode(&document)?;
             for key in [
                 "limits",
+                "queue",
                 "delivery",
                 "review_base",
                 "context",
