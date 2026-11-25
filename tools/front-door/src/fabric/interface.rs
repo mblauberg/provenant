@@ -5,7 +5,8 @@ use super::writer_base::{
 };
 use super::*;
 use provenant_fabric_runtime::graph::{
-    FileJournal, GraphDocument, GraphJournal, GraphStatus, Layer, Template, TemplateLibrary,
+    FileJournal, GraphDocument, GraphJournal, GraphStatus, Layer, QueueKnobs, Template,
+    TemplateLibrary,
     patch::{self, LiveGraph, Patch, PatchContext},
 };
 use serde_json::{Value, json};
@@ -18,6 +19,73 @@ fn wait_seconds_invalid() -> FacadeError {
 
 fn graph_input_reason(reason: impl std::fmt::Display) -> FacadeError {
     FacadeError::invalid(InvalidInputDetail::graph_reason(reason))
+}
+
+fn seal_delivery_queue_knobs(
+    config: &provenant_fabric_runtime::config::QueueConfig,
+    origins: &BTreeMap<String, provenant_config::Origin>,
+    authored: Option<&QueueKnobs>,
+) -> Result<QueueKnobs, FacadeError> {
+    use provenant_fabric_runtime::graph::template::seal_queue_knobs;
+    use provenant_fabric_runtime::graph::{
+        QUEUE_CI_SLOTS_KEY, QUEUE_MAX_PARALLEL_KEY, QUEUE_PREP_RETRIES_KEY,
+    };
+    use provenant_records::{Layer, Sourced};
+
+    let mut candidates = BTreeMap::<&str, Vec<Sourced<usize>>>::new();
+    for (key, value) in [
+        (QUEUE_MAX_PARALLEL_KEY, config.max_parallel),
+        (QUEUE_CI_SLOTS_KEY, config.ci_slots),
+        (QUEUE_PREP_RETRIES_KEY, config.prep_retries),
+    ] {
+        let source = provenant_cli::config_reads::origin_source(origins.get(key), key);
+        if source.layer == Layer::Host {
+            candidates
+                .entry(key)
+                .or_default()
+                .push(Sourced { value, source });
+        }
+    }
+    if let Some(authored) = authored {
+        for (key, value) in [
+            (QUEUE_MAX_PARALLEL_KEY, authored.max_parallel.clone()),
+            (QUEUE_CI_SLOTS_KEY, authored.ci_slots.clone()),
+            (QUEUE_PREP_RETRIES_KEY, authored.prep_retries.clone()),
+        ] {
+            candidates.entry(key).or_default().push(value);
+        }
+    }
+    let knobs = seal_queue_knobs(&candidates);
+    knobs.validate().map_err(graph_input_reason)?;
+    Ok(knobs)
+}
+
+fn seal_document_queue(
+    document: &mut GraphDocument,
+    config: Option<(
+        &provenant_fabric_runtime::config::QueueConfig,
+        &BTreeMap<String, provenant_config::Origin>,
+    )>,
+    config_error: Option<&str>,
+) -> Result<(), FacadeError> {
+    let Some(authored) = document.queue.clone() else {
+        return Ok(());
+    };
+    let sealed = match config {
+        Some((queue_config, origins)) => {
+            seal_delivery_queue_knobs(queue_config, origins, Some(&authored))?
+        }
+        None => {
+            warn_operator(format!(
+                "delivery queue configuration unavailable; using compiled defaults: {}",
+                config_error.unwrap_or("unknown configuration error")
+            ));
+            seal_delivery_queue_knobs(&Default::default(), &BTreeMap::new(), Some(&authored))?
+        }
+    };
+    document.queue = Some(sealed);
+    document.schema_version = document.schema_version.max(2);
+    Ok(())
 }
 
 // Preserve the parser's field path and message for actionable diagnostics.
@@ -2191,7 +2259,9 @@ impl Factory {
         // layer and the host/project knob supplies the ref and fetch flag. An
         // unreadable configuration is advisory; the compiled default keeps the
         // stale-checkout pin.
-        let read_config = provenant_cli::config_reads::read_for(&self.context.roots, "run").ok();
+        let read_config_result = provenant_cli::config_reads::read_for(&self.context.roots, "run");
+        let read_config_error = read_config_result.as_ref().err().map(ToString::to_string);
+        let read_config = read_config_result.ok();
         let read_source = read_config
             .as_ref()
             .map(|config| read_source_choice(input, config))
@@ -2436,6 +2506,13 @@ impl Factory {
             }
             document = decode_input(compiled, "document")?;
         }
+        // NameDecision::Replay returns above. A graph_id in the raw document
+        // can still name a new full-document submission, so queue presence is
+        // the only selector here.
+        let queue_config = read_config
+            .as_ref()
+            .map(|config| (&config.domains.fabric.queue, &config.origins));
+        seal_document_queue(&mut document, queue_config, read_config_error.as_deref())?;
         // Template compilation selected a schema before document metadata was
         // applied; a retained review base requires the schema-2 representation.
         if raw.is_none()
@@ -3993,6 +4070,151 @@ use route::override_tier;
 
 fn add(row: &mut Value, key: &str, value: u64) {
     row[key] = json!(row[key].as_u64().unwrap_or(0).saturating_add(value));
+}
+
+#[cfg(test)]
+mod queue_config_tests {
+    use super::*;
+    use provenant_records::{Layer, Source, Sourced};
+
+    fn user_origin() -> provenant_config::Origin {
+        let path: provenant_records::PathWire = provenant_records::PathWire::from_relative(
+            &provenant_core::RelativePath::parse("config.toml").unwrap(),
+        )
+        .unwrap();
+        provenant_config::Origin::User { path }
+    }
+
+    fn sourced(value: usize, layer: Layer, origin: &str) -> Sourced<usize> {
+        Sourced {
+            value,
+            source: Source {
+                layer,
+                origin: Some(origin.into()),
+            },
+        }
+    }
+
+    fn document(graph_id: &str, queue: Option<QueueKnobs>) -> GraphDocument {
+        let mut value = json!({"schema_version": 1, "graph_id": graph_id, "nodes": []});
+        if let Some(queue) = queue {
+            value["queue"] = json!(queue);
+        }
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn queue_knobs_keep_shipped_defaults_and_resolve_config_and_authored_sources() {
+        use provenant_fabric_runtime::graph::{
+            QUEUE_CI_SLOTS_KEY, QUEUE_MAX_PARALLEL_KEY, QUEUE_PREP_RETRIES_KEY,
+        };
+
+        let defaults =
+            seal_delivery_queue_knobs(&Default::default(), &BTreeMap::new(), None).unwrap();
+        assert_eq!(defaults.max_parallel.value, 4);
+        assert_eq!(defaults.max_parallel.source.layer, Layer::Default);
+        assert_eq!(defaults.max_parallel.source.origin, None);
+        assert_eq!(defaults.ci_slots.value, 1);
+        assert_eq!(defaults.prep_retries.value, 2);
+
+        let origins = BTreeMap::from([
+            (QUEUE_MAX_PARALLEL_KEY.into(), user_origin()),
+            (QUEUE_CI_SLOTS_KEY.into(), user_origin()),
+            (QUEUE_PREP_RETRIES_KEY.into(), user_origin()),
+        ]);
+        let configured = seal_delivery_queue_knobs(
+            &provenant_fabric_runtime::config::QueueConfig {
+                max_parallel: 6,
+                ci_slots: 0,
+                prep_retries: 3,
+            },
+            &origins,
+            None,
+        )
+        .unwrap();
+        assert_eq!(configured.max_parallel.value, 6);
+        assert_eq!(configured.max_parallel.source.layer, Layer::Host);
+        assert_eq!(
+            configured.max_parallel.source.origin.as_deref(),
+            Some("config.toml#domains.fabric.queue.max_parallel")
+        );
+        assert_eq!(configured.ci_slots.value, 0);
+        assert_eq!(configured.ci_slots.source.layer, Layer::Host);
+        assert_eq!(configured.prep_retries.value, 3);
+        assert_eq!(configured.prep_retries.source.layer, Layer::Host);
+
+        let authored = QueueKnobs {
+            max_parallel: sourced(9, Layer::Project, ".provenant/config.toml"),
+            ci_slots: sourced(0, Layer::Launch, "--set queue.ci_slots=0"),
+            prep_retries: sourced(2, Layer::Default, "compiled"),
+        };
+        let overridden = seal_delivery_queue_knobs(
+            &provenant_fabric_runtime::config::QueueConfig {
+                max_parallel: 6,
+                ci_slots: 1,
+                prep_retries: 3,
+            },
+            &origins,
+            Some(&authored),
+        )
+        .unwrap();
+        assert_eq!(overridden.max_parallel.value, 9);
+        assert_eq!(overridden.max_parallel.source.layer, Layer::Project);
+        assert_eq!(overridden.ci_slots.value, 0);
+        assert_eq!(overridden.ci_slots.source.layer, Layer::Launch);
+        assert_eq!(
+            overridden.ci_slots.source.origin.as_deref(),
+            Some("--set queue.ci_slots=0")
+        );
+        assert_eq!(overridden.prep_retries.value, 3);
+        assert_eq!(overridden.prep_retries.source.layer, Layer::Host);
+    }
+
+    #[test]
+    fn legacy_deliver_without_queue_selection_keeps_its_graph_shape() {
+        let mut document = document("deliver-1", None);
+        seal_document_queue(&mut document, None, None).unwrap();
+        assert_eq!(document.queue, None);
+        assert_eq!(document.schema_version, 1);
+    }
+
+    #[test]
+    fn explicit_queue_on_named_full_document_is_sealed_with_config_sources() {
+        use provenant_fabric_runtime::graph::{
+            QUEUE_CI_SLOTS_KEY, QUEUE_MAX_PARALLEL_KEY, QUEUE_PREP_RETRIES_KEY,
+        };
+
+        let authored = QueueKnobs {
+            max_parallel: sourced(9, Layer::Project, ".provenant/config.toml"),
+            ci_slots: sourced(0, Layer::Launch, "--set queue.ci_slots=0"),
+            prep_retries: sourced(2, Layer::Default, "compiled"),
+        };
+        let mut document = document("named-queue", Some(authored));
+        let config = provenant_fabric_runtime::config::QueueConfig {
+            max_parallel: 6,
+            ci_slots: 1,
+            prep_retries: 3,
+        };
+        let origins = BTreeMap::from([
+            (QUEUE_MAX_PARALLEL_KEY.into(), user_origin()),
+            (QUEUE_CI_SLOTS_KEY.into(), user_origin()),
+            (QUEUE_PREP_RETRIES_KEY.into(), user_origin()),
+        ]);
+        seal_document_queue(&mut document, Some((&config, &origins)), None).unwrap();
+
+        let queue = document.queue.unwrap();
+        assert_eq!(document.schema_version, 2);
+        assert_eq!(queue.max_parallel.value, 9);
+        assert_eq!(queue.max_parallel.source.layer, Layer::Project);
+        assert_eq!(queue.ci_slots.value, 0);
+        assert_eq!(queue.ci_slots.source.layer, Layer::Launch);
+        assert_eq!(
+            queue.ci_slots.source.origin.as_deref(),
+            Some("--set queue.ci_slots=0")
+        );
+        assert_eq!(queue.prep_retries.value, 3);
+        assert_eq!(queue.prep_retries.source.layer, Layer::Host);
+    }
 }
 
 #[cfg(test)]
