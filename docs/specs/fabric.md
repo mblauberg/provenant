@@ -331,9 +331,24 @@ advertise `continuation` only when their run path can retain and resume the
 session; other routes are `unsupported` and start fresh. Concurrent restarts are
 spaced by `domains.fabric.steer.restart_spacing_ms`.
 
+A steer is accepted only where a turn can still read it. A running attempt
+accepts one only when it holds a validated, live session bound to its exact
+provider, model, effort, account and host-native lane; an accepted steer never
+cancels a running attempt that lacks that session. Instead the steer is refused
+up front with the typed cause `steer_session_unavailable`, the running attempt
+is left untouched, and the repair names the command that starts a new round on
+the same worktree (`provenant run implement --worktree ... --brief-file FILE`).
+A settled attempt can hold a note only while its graph can still run another
+attempt (`lanes.steer_settled=queue`); a completed graph, a cancelled graph, or
+a terminal attempt with no continuation refuses with `steer_graph_complete`,
+reported in both human and JSON output, with the same new-round command.
+
 A writer's continuation reuses the retained worktree, so admission waits for
 settlement to release the steered attempt's custody: steering stays queued and
-the reaction is retried, never dropped. Stopping a terminal steered attempt
+the reaction is retried, never dropped. A custody or writer-lineage check that
+fails while admitting a steer continuation is a typed continuation refusal, not
+an "invalid run record": the accepted text and the settled attempt stay intact.
+Stopping a terminal steered attempt
 resolves queued steering as not continued (`terminal_stop`). When placement or
 the run owner is temporarily unavailable, the graph journal persists a bounded
 steer intent for the work key and warns; tick replays the original inbox

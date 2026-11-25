@@ -1681,6 +1681,69 @@ fn steer_session_readiness_binds_scope_process_and_immutable_route_identity() ->
 
 // Spec: docs/specs/fabric.md#session-ready-steering
 #[test]
+fn steer_without_a_retained_session_leaves_the_running_attempt_untouched() -> TestResult {
+    use provenant_supervisor::census::ProcessObservation;
+
+    let temp = tempfile::tempdir()?;
+    let clock = crate::tests::clock();
+    let cancel = provenant_core::CancelToken::new();
+    let call = crate::tests::call(&clock, &cancel);
+    let context = crate::tests::context(temp.path())?;
+    let store = RunStore::open(&context, &call)?;
+    let run = crate::tests::input();
+    let id = run.attempt_id;
+    store.create(&run, &call)?;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &crate::tests::route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    let running = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+
+    // No validated provider session exists for this route yet. A steer on a
+    // running Claude lane must be refused up front; the owner writes neither
+    // an intent nor a stop, so the attempt is never cancelled.
+    assert!(!store.steer_session_available(id, &call)?);
+    assert!(matches!(
+        store.record(id, &call)?.state,
+        AttemptState::Running { .. }
+    ));
+    let attempt = store.attempt_dir(id, false)?;
+    assert!(
+        crate::artifacts::read_sealed(&attempt, "stop-intent.json", RECORD_LIMIT)?.is_none(),
+        "no session means no steer interrupt may be requested"
+    );
+    assert!(store.steer_intent(id, &call)?.is_empty());
+
+    // Once the live adapter validates a session for this exact route the turn
+    // becomes deliverable, so the same attempt accepts a steer.
+    let source = match SystemProcessObserver.observe(i64::from(std::process::id())) {
+        ProcessObservation::Present(fact) if !fact.zombie => {
+            provenant_os::capture::CaptureSourceIdentity {
+                attempt: id.to_string(),
+                generation: RunStore::scope(&running).generation,
+                boot: fact.identity.boot,
+                pid: fact.identity.pid,
+                native_start: fact.identity.native_start,
+            }
+        }
+        observation => {
+            return Err(format!("test process identity unavailable: {observation:?}").into());
+        }
+    };
+    let route = running
+        .applied_route
+        .as_ref()
+        .ok_or("applied route")?
+        .clone();
+    assert!(store.record_provider_session_ready(id, &route, "fixture-session", &source, &call,)?);
+    assert!(store.steer_session_available(id, &call)?);
+    Ok(())
+}
+
 fn explicit_cancel_after_delivered_steer_keeps_the_stop_and_blocks_successor() -> TestResult {
     use provenant_supervisor::census::ProcessObservation;
 

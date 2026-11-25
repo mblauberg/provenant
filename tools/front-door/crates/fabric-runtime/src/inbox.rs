@@ -514,6 +514,10 @@ pub enum InboxError {
     WorkLookup(String),
     #[error("steering could not be queued: {0}")]
     Steer(String),
+    #[error(
+        "this running attempt has no retained provider session for its route; the attempt was left running; start a new round on the same worktree with `provenant run implement --worktree WORKTREE --brief-file FILE`"
+    )]
+    SteerSessionUnavailable,
     #[error("work repository or head mismatch")]
     WorkMismatch,
     #[error(
@@ -652,6 +656,7 @@ impl InboxError {
             Self::RequestLimit => "request_limit",
             Self::WorkLookup(_) => "work_lookup_failed",
             Self::Steer(_) => "steer_failed",
+            Self::SteerSessionUnavailable => "steer_session_unavailable",
             Self::WorkMismatch => "work_mismatch",
             Self::Store(provenant_fabric_store::Error::NotFound) => "not_found",
             Self::Store(provenant_fabric_store::Error::Busy) => "busy",

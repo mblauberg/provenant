@@ -203,6 +203,20 @@ pub fn deliver_steer(
     };
     let store = provenant_run::RunStore::open(&context, &run_call)
         .map_err(|error| InboxError::Steer(error.to_string()))?;
+    // A steer reaches a running attempt only by continuing its retained
+    // provider session. Without one, interrupt would cancel the attempt and
+    // strand the accepted text, so refuse before writing an intent or a stop.
+    // A replay of an already accepted intent is still handled by `steer`.
+    let record = store
+        .record(attempt, &run_call)
+        .map_err(|error| InboxError::Steer(error.to_string()))?;
+    if matches!(&record.state, provenant_run::AttemptState::Running { .. })
+        && !store
+            .steer_session_available(attempt, &run_call)
+            .map_err(|error| InboxError::Steer(error.to_string()))?
+    {
+        return Err(InboxError::SteerSessionUnavailable);
+    }
     let notice = steer_restart_notice(edge.roots);
     let outcome = announce_before(notice.as_ref(), emit_notice, || {
         store.steer(attempt, operation_id.clone(), text, &run_call)

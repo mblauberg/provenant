@@ -2975,41 +2975,36 @@ fn steer_graph_and_node_refuse_an_unlaunched_attempt_before_reading_stdin() -> R
     journal.save(&checkpoint)?;
     drop(journal);
     // Spec: docs/specs/fabric.md#session-ready-steering
-    // The default `lanes.steer_settled=queue` keeps the note for the next
-    // follow-up and names it in the output instead of refusing.
+    // The node's graph is now complete: no future attempt can read the note.
+    // Steer refuses with a typed cause and a new-round command instead of
+    // reporting a queued follow-up that will never run.
     let (output, value) =
         rig.run(&["steer", "steer-ambiguous/accept", "--brief", "amended work"])?;
-    assert!(output.status.success(), "{value}");
-    assert_eq!(value["status"], "ok", "{value}");
-    assert_eq!(value["data"]["queued"], true, "{value}");
-    assert_eq!(
-        value["data"]["follow_up"], "steer-ambiguous/accept",
+    assert!(!output.status.success(), "{value}");
+    assert_eq!(value["status"], "refused", "{value}");
+    assert_eq!(value["error"]["code"], "steer_graph_complete", "{value}");
+    assert!(
+        value["error"]["repair"]
+            .as_str()
+            .is_some_and(|repair| repair.contains("provenant run implement --worktree")),
         "{value}"
     );
-    // The queued note reaches the follow-up as a scoped shared note.
-    let (output, notes) = rig.run(&[
-        "notes",
-        "read",
-        "--scope",
-        "steer-ambiguous/accept",
-        "--replay",
-    ])?;
-    assert!(output.status.success(), "{notes}");
-    let events = notes["data"]["events"].as_array().ok_or("notes events")?;
+    let human = rig
+        .human_command()
+        .args(["steer", "steer-ambiguous/accept", "--brief", "amended work"])
+        .output()?;
+    let text = String::from_utf8_lossy(&human.stdout);
     assert!(
-        events.iter().any(|event| {
-            event["detail"]["text"]
-                .as_str()
-                .is_some_and(|text| text.contains("amended work"))
-        }),
-        "{notes}"
+        text.contains("has no further attempt")
+            && text.contains("provenant run implement --worktree"),
+        "{text}"
     );
     Ok(())
 }
 
 // Spec: docs/specs/fabric.md#session-ready-steering
 #[test]
-fn steer_on_a_settled_lane_warns_without_effect_when_configured() -> Result {
+fn steer_on_a_complete_graph_refuses_even_when_warn_is_configured() -> Result {
     let rig = GraphProject::new()?;
     let path = rig.document(&json!({"schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":"steer-settled-warn","nodes":[{"id":"accept","kind":"gate","access":"read_only","condition":{"type":"budget"}}]}))?;
     let output = rig.command().args(["run", "--file"]).arg(path).output()?;
@@ -3062,24 +3057,24 @@ fn steer_on_a_settled_lane_warns_without_effect_when_configured() -> Result {
     journal.bind(execution)?;
     journal.save(&checkpoint)?;
     drop(journal);
+    // A completed graph has no follow-up to warn about: the steer is refused
+    // before either settled mode can accept text nothing will read.
     let (output, value) = rig.run(&[
         "steer",
         "steer-settled-warn/accept",
         "--brief",
         "ignored steer note",
     ])?;
-    assert!(output.status.success(), "{value}");
-    assert_eq!(value["status"], "ok", "{value}");
-    assert_eq!(value["data"]["queued"], false, "{value}");
+    assert!(!output.status.success(), "{value}");
+    assert_eq!(value["status"], "refused", "{value}");
+    assert_eq!(value["error"]["code"], "steer_graph_complete", "{value}");
     assert!(
-        value["warnings"].as_array().is_some_and(|warnings| {
-            warnings
-                .iter()
-                .any(|warning| warning["code"] == "STEER_TARGET_SETTLED")
-        }),
+        value["error"]["repair"]
+            .as_str()
+            .is_some_and(|repair| repair.contains("provenant run implement --worktree")),
         "{value}"
     );
-    // warn mode writes no note for the follow-up.
+    // No note is written for a follow-up that will never run.
     let (output, notes) = rig.run(&[
         "notes",
         "read",

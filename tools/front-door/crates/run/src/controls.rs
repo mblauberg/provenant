@@ -1739,7 +1739,12 @@ impl RunStore {
         })
     }
 
-    fn request_steer_stop_if_ready(&self, id: AttemptId, call: &Request<'_>) -> Result<bool> {
+    /// Whether this running attempt holds a validated, live provider session
+    /// bound to its exact route (provider, model, effort, account and
+    /// host-native lane). A steering turn can only be delivered by continuing
+    /// that session; without it the attempt must be left alone and the steer
+    /// refused up front rather than queued for a continuation that cannot run.
+    pub fn steer_session_available(&self, id: AttemptId, call: &Request<'_>) -> Result<bool> {
         let record = self.record(id, call)?;
         if !matches!(record.state, AttemptState::Running { .. }) {
             return Ok(false);
@@ -1750,7 +1755,14 @@ impl RunStore {
         let Some(ready) = self.steer_session_ready(id, call)? else {
             return Ok(false);
         };
+        if ready.conflict || ready.session.is_none() {
+            return Ok(false);
+        }
         let route_digest = steer_route_digest(route)?;
+        if ready.generation != Self::scope(&record).generation || ready.route_digest != route_digest
+        {
+            return Ok(false);
+        }
         let source = provenant_os::capture::CaptureSourceIdentity {
             attempt: id.to_string(),
             generation: ready.generation,
@@ -1758,13 +1770,14 @@ impl RunStore {
             pid: ready.provider_pid,
             native_start: ready.provider_start,
         };
-        if ready.conflict
-            || ready.generation != Self::scope(&record).generation
-            || ready.route_digest != route_digest
-            || !source_is_live(&source)
-        {
+        Ok(source_is_live(&source))
+    }
+
+    fn request_steer_stop_if_ready(&self, id: AttemptId, call: &Request<'_>) -> Result<bool> {
+        if !self.steer_session_available(id, call)? {
             return Ok(false);
         }
+        let record = self.record(id, call)?;
         let directory = self.attempt_dir(id, false)?;
         let stopped = match custody::reattach(directory.try_clone()?, Self::scope(&record)) {
             Ok(handle) => custody::stop(&handle, StopReason::Steered),

@@ -253,7 +253,16 @@ fn steer_refusal_cause(
         provenant_run::RunError::SteerSessionMismatch => Some(SteeringCause::SessionMismatch),
         provenant_run::RunError::ContinuationRefused { .. }
         | provenant_run::RunError::RecordedRefusal(_)
-        | provenant_run::RunError::WriterLineage(_) => Some(SteeringCause::ContinuationRefused),
+        | provenant_run::RunError::WriterLineage(_)
+        | provenant_run::RunError::WriterSourceMismatch { .. }
+        | provenant_run::RunError::WriterHeadNotLaneBranch
+        | provenant_run::RunError::AttemptReservationRetained => {
+            // A custody or writer-lineage check failing after a steer is not a
+            // corrupt record. Recording it as a typed continuation refusal
+            // keeps the accepted text and the settled attempt intact instead
+            // of propagating an "invalid run record" failure into the graph.
+            Some(SteeringCause::ContinuationRefused)
+        }
         _ => None,
     }
 }
