@@ -5,7 +5,9 @@ use super::{
 };
 use provenant_confinement::worktrees::WorkerObserver;
 use provenant_core::{CancelToken, Clock, WaitBudget, WallTime};
-use provenant_fabric_runtime::graph::{CiState, CiTarget, FileJournal, GateCondition, GraphStatus};
+use provenant_fabric_runtime::graph::{
+    CiState, CiTarget, FileJournal, GateCondition, GraphJournal, GraphStatus,
+};
 use provenant_os::{clock::SystemClock, exec::SystemExecutor};
 use std::{collections::BTreeSet, path::Path};
 
@@ -34,7 +36,10 @@ pub(super) fn reconcile_controls_before_tick(
         for item in queue.items.iter().filter(|item| {
             matches!(
                 item.state,
-                QueueItemState::Launching | QueueItemState::Active
+                QueueItemState::Launching
+                    | QueueItemState::Active
+                    | QueueItemState::Parked
+                    | QueueItemState::Resuming
             )
         }) {
             let project = match registered_project(resolved, &queue.project) {
@@ -118,10 +123,14 @@ pub(super) fn tick_queues(
             ));
             continue;
         };
+        let mut runnable_parked = BTreeSet::new();
         for item in queue.items.iter().filter(|item| {
             matches!(
                 item.state,
-                QueueItemState::Launching | QueueItemState::Active
+                QueueItemState::Launching
+                    | QueueItemState::Active
+                    | QueueItemState::Parked
+                    | QueueItemState::Resuming
             )
         }) {
             let (factory, budget) =
@@ -135,25 +144,34 @@ pub(super) fn tick_queues(
                         continue;
                     }
                 };
-            match observe_item(&factory, &registry, queue, item, budget, &cancel) {
-                Ok(()) => {}
+            match observe_item(&factory, &registry, queue, item, now, budget, &cancel) {
+                Ok(true) if item.state == QueueItemState::Parked => {
+                    runnable_parked.insert(item.identity.clone());
+                }
+                Ok(_) => {}
                 Err(error) => report.warnings.push(format!(
                     "queue {} item {} remains reserved after an inconclusive graph observation: {error}",
                     queue.queue_id, item.identity.item
                 )),
             }
         }
-        let schedule =
-            match registry.claim_queue(&queue.queue_id, now, lock_budget, &cancel, &clock) {
-                Ok(schedule) => schedule,
-                Err(error) => {
-                    report.warnings.push(format!(
-                        "queue {} could not claim pending items: {error}",
-                        queue.queue_id
-                    ));
-                    continue;
-                }
-            };
+        let schedule = match registry.claim_queue_with_parked(
+            &queue.queue_id,
+            &runnable_parked,
+            now,
+            lock_budget,
+            &cancel,
+            &clock,
+        ) {
+            Ok(schedule) => schedule,
+            Err(error) => {
+                report.warnings.push(format!(
+                    "queue {} could not claim pending items: {error}",
+                    queue.queue_id
+                ));
+                continue;
+            }
+        };
         for warning in &schedule.warnings {
             super::interface::warn_operator(warning);
         }
@@ -171,7 +189,10 @@ pub(super) fn tick_queues(
         report.warnings.extend(schedule.warnings);
         report.warnings.extend(schedule.waiting);
         for (queue_id, item) in schedule.launch {
-            if item.state != QueueItemState::Launching {
+            if !matches!(
+                item.state,
+                QueueItemState::Launching | QueueItemState::Resuming
+            ) {
                 continue;
             }
             let (item_factory, item_budget) =
@@ -291,61 +312,210 @@ pub(super) fn matches_item_execution(
         && execution.directory == Path::new(item.execution_directory.as_str()))
 }
 
-fn observe_item(
+/// Gate the generic graph tick before it dispatches pending steers or advances
+/// a resumed queue graph. Returns the durable queue wait details for the tick
+/// receipt; non-queue graphs pass through unchanged.
+pub(super) fn admit_graph_tick(
+    factory: &Factory,
+    graph_id: &str,
+    execution: &provenant_fabric_runtime::graph::GraphExecution,
+    checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
+) -> Result<(bool, Vec<String>, Vec<String>), String> {
+    let clock = &factory.clock;
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::nonblocking(clock.mono_now());
+    let registry = QueueRegistry::open(&factory.context.roots.state)?;
+    let queues = registry.queues(budget, &cancel, clock)?;
+    let project = factory.context.identity.project.to_string();
+    let owners: Vec<_> = queues
+        .into_iter()
+        .filter(|queue| queue.project == project)
+        .flat_map(|queue| {
+            let queue_id = queue.queue_id;
+            queue
+                .items
+                .into_iter()
+                .filter(|item| item.graph_id == graph_id)
+                .map(move |item| (queue_id.clone(), item))
+        })
+        .collect();
+    if owners.is_empty() {
+        if execution.document.queue.is_some() {
+            return Err("queue graph has no durable registry owner".into());
+        }
+        return Ok((true, Vec::new(), Vec::new()));
+    }
+    let [(queue_id, item)] = owners.as_slice() else {
+        return Err("graph has multiple durable queue owners".into());
+    };
+    if !matches_item_execution(queue_id, item, execution)? {
+        return Err("persisted graph does not match its durable queue identity".into());
+    }
+    if super::queue_controls::checkpoint_has_pending_control(checkpoint)
+        .map_err(|error| error.to_string())?
+    {
+        return Ok((false, Vec::new(), Vec::new()));
+    }
+    match item.state {
+        QueueItemState::Launching | QueueItemState::Active | QueueItemState::Resuming => {
+            Ok((true, Vec::new(), Vec::new()))
+        }
+        // Parked items are claimed only by tick_queues after it has observed
+        // every runnable row and can preserve queue order under the cap.
+        QueueItemState::Parked => Ok((false, Vec::new(), Vec::new())),
+        QueueItemState::Pending | QueueItemState::Terminal => Ok((false, Vec::new(), Vec::new())),
+    }
+}
+
+pub(super) fn observe_item(
     factory: &Factory,
     registry: &QueueRegistry,
     queue: &QueueRecord,
     item: &QueueItem,
+    now: WallTime,
     budget: WaitBudget,
     cancel: &CancelToken,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let project = factory.context.identity.project;
-    let snapshot =
-        FileJournal::read_status_snapshot(&factory.context.roots.state, project, &item.graph_id)
+    {
+        let mut journal = FileJournal::open(
+            &factory.context.roots.state,
+            project,
+            &item.graph_id,
+            budget,
+            cancel,
+            &factory.clock,
+        )
+        .map_err(|error| error.to_string())?;
+        let checkpoint = journal
+            .load(&item.graph_id)
             .map_err(|error| error.to_string())?;
-    let Some((execution, _)) = snapshot else {
-        if item.state == QueueItemState::Active {
-            return Err(
-                "active queue graph checkpoint is absent; ownership remains uncertain".into(),
-            );
+        let Some(checkpoint) = checkpoint else {
+            if matches!(
+                item.state,
+                QueueItemState::Active | QueueItemState::Parked | QueueItemState::Resuming
+            ) {
+                return Err(
+                    "owned queue graph checkpoint is absent; ownership remains uncertain".into(),
+                );
+            }
+            return Ok(false);
+        };
+        let execution =
+            FileJournal::execution(&factory.context.roots.state, project, &item.graph_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "owned queue graph execution is absent".to_owned())?;
+        if !matches_item_execution(&queue.queue_id, item, &execution)? {
+            return Err("persisted graph does not match its reserved queue identity".into());
         }
-        return Ok(());
-    };
-    if !matches_item_execution(&queue.queue_id, item, &execution)? {
-        return Err("persisted graph does not match its reserved queue identity".into());
+        if item.state == QueueItemState::Parked {
+            let status = super::graph_status::graph_snapshot(checkpoint.clone()).status;
+            let control_needs_slot =
+                super::queue_controls::checkpoint_has_pending_parallel_control(&checkpoint)
+                    .map_err(|error| error.to_string())?;
+            if control_needs_slot {
+                return Ok(true);
+            }
+            match status {
+                GraphStatus::Cancelled | GraphStatus::Complete => {
+                    mark_observed_terminal(
+                        registry,
+                        &queue.queue_id,
+                        item,
+                        status,
+                        budget,
+                        cancel,
+                        &factory.clock,
+                    )?;
+                    return Ok(false);
+                }
+                GraphStatus::Pending => {
+                    return Ok(super::graph_execution::graph_wake_due(&checkpoint, now));
+                }
+                GraphStatus::Paused => {
+                    return queue_paused_wake_due(factory, &checkpoint, now, cancel);
+                }
+            }
+        }
     }
     super::queue_controls::reconcile_pending(factory, &item.graph_id, budget, cancel)
         .map_err(|error| error.to_string())?;
-    let snapshot =
-        FileJournal::read_status_snapshot(&factory.context.roots.state, project, &item.graph_id)
-            .map_err(|error| error.to_string())?;
-    let Some((execution, checkpoint)) = snapshot else {
-        return Err("queue graph checkpoint disappeared during reconciliation".into());
-    };
+    // Re-read and hold graph custody through the queue state transition. A
+    // resumed graph cannot be overwritten by a stale Paused observation.
+    let mut journal = FileJournal::open(
+        &factory.context.roots.state,
+        project,
+        &item.graph_id,
+        budget,
+        cancel,
+        &factory.clock,
+    )
+    .map_err(|error| error.to_string())?;
+    let checkpoint = journal
+        .load(&item.graph_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "queue graph checkpoint disappeared during reconciliation".to_owned())?;
+    let execution = FileJournal::execution(&factory.context.roots.state, project, &item.graph_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "queue graph execution disappeared during reconciliation".to_owned())?;
     if !matches_item_execution(&queue.queue_id, item, &execution)? {
         return Err("persisted graph changed its reserved queue identity".into());
     }
-    match super::graph_status::graph_snapshot(checkpoint).status {
-        GraphStatus::Cancelled => registry.mark_terminal(
-            &queue.queue_id,
-            &item.identity,
-            &item.graph_id,
-            "cancelled",
-            budget,
-            cancel,
-            &factory.clock,
-        ),
-        GraphStatus::Complete => registry.mark_terminal(
-            &queue.queue_id,
-            &item.identity,
-            &item.graph_id,
-            "complete",
-            budget,
-            cancel,
-            &factory.clock,
-        ),
-        GraphStatus::Paused | GraphStatus::Pending => {
-            if item.state == QueueItemState::Launching {
+    let status = super::graph_status::graph_snapshot(checkpoint.clone()).status;
+    let control_needs_slot =
+        super::queue_controls::checkpoint_has_pending_parallel_control(&checkpoint)
+            .map_err(|error| error.to_string())?;
+    if control_needs_slot {
+        return Ok(item.state == QueueItemState::Parked);
+    }
+    match status {
+        GraphStatus::Cancelled | GraphStatus::Complete => {
+            mark_observed_terminal(
+                registry,
+                &queue.queue_id,
+                item,
+                status,
+                budget,
+                cancel,
+                &factory.clock,
+            )?;
+            Ok(false)
+        }
+        GraphStatus::Paused => {
+            if item.state == QueueItemState::Resuming {
+                if queue_paused_wake_due(factory, &checkpoint, now, cancel)? {
+                    // Keep the claim only while another graph advance can act.
+                    return Ok(true);
+                }
+                registry.mark_parked(
+                    &queue.queue_id,
+                    &item.identity,
+                    &item.graph_id,
+                    budget,
+                    cancel,
+                    &factory.clock,
+                )?;
+                return Ok(false);
+            }
+            registry.mark_parked(
+                &queue.queue_id,
+                &item.identity,
+                &item.graph_id,
+                budget,
+                cancel,
+                &factory.clock,
+            )?;
+            if item.state == QueueItemState::Parked {
+                queue_paused_wake_due(factory, &checkpoint, now, cancel)
+            } else {
+                Ok(false)
+            }
+        }
+        GraphStatus::Pending => {
+            if matches!(
+                item.state,
+                QueueItemState::Launching | QueueItemState::Resuming
+            ) {
                 registry.mark_active(
                     &queue.queue_id,
                     &item.identity,
@@ -355,10 +525,122 @@ fn observe_item(
                     &factory.clock,
                 )?;
             }
-            let _ = execution;
-            Ok(())
+            Ok(item.state == QueueItemState::Parked
+                && super::graph_execution::graph_wake_due(&checkpoint, now))
         }
     }
+}
+
+fn queue_paused_wake_due(
+    factory: &Factory,
+    checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
+    now: WallTime,
+    cancel: &CancelToken,
+) -> Result<bool, String> {
+    if queue_paused_scheduled_wake_due(checkpoint, now) {
+        return Ok(true);
+    }
+    if checkpoint.asks.is_empty() {
+        return Ok(false);
+    }
+    let actor = checkpoint
+        .ask_actor
+        .as_deref()
+        .ok_or_else(|| "graph has asks but no saved ask identity".to_owned())?;
+    super::owner::graph_asks_have_answer(factory, actor, &checkpoint.asks, cancel)
+        .map_err(|error| error.to_string())
+}
+
+fn queue_paused_scheduled_wake_due(
+    checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
+    now: WallTime,
+) -> bool {
+    checkpoint.pending_steers.has_pending()
+        || (checkpoint.cancelled
+            && checkpoint.nodes.iter().any(|node| {
+                matches!(
+                    node.state,
+                    provenant_fabric_runtime::graph::NodeState::Pending
+                        | provenant_fabric_runtime::graph::NodeState::Running
+                )
+            }))
+        || checkpoint.wake_at.is_some_and(|deadline| now >= deadline)
+        || checkpoint
+            .asks
+            .iter()
+            .any(|ask| ask.wake_at.is_some_and(|deadline| now >= deadline))
+        || checkpoint.nodes.iter().any(|node| {
+            node.state == provenant_fabric_runtime::graph::NodeState::Running
+                && !node.attempts.is_empty()
+                && node
+                    .launch_retry
+                    .as_ref()
+                    .is_some_and(|retry| retry.wake_at.is_none())
+        })
+}
+
+pub(super) fn mark_launch_unavailable_if_absent(
+    factory: &Factory,
+    registry: &QueueRegistry,
+    queue_id: &str,
+    item: &QueueItem,
+    reason: &str,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+) -> Result<bool, String> {
+    let mut journal = FileJournal::open(
+        &factory.context.roots.state,
+        factory.context.identity.project,
+        &item.graph_id,
+        budget,
+        cancel,
+        &factory.clock,
+    )
+    .map_err(|error| error.to_string())?;
+    if journal
+        .load(&item.graph_id)
+        .map_err(|error| error.to_string())?
+        .is_some()
+    {
+        return Ok(false);
+    }
+    registry.mark_launch_unavailable(
+        queue_id,
+        &item.identity,
+        &item.graph_id,
+        reason,
+        budget,
+        cancel,
+        &factory.clock,
+    )?;
+    Ok(true)
+}
+
+fn mark_observed_terminal(
+    registry: &QueueRegistry,
+    queue_id: &str,
+    item: &QueueItem,
+    status: GraphStatus,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+    clock: &dyn Clock,
+) -> Result<(), String> {
+    let outcome = match status {
+        GraphStatus::Cancelled => "cancelled",
+        GraphStatus::Complete => "complete",
+        GraphStatus::Paused | GraphStatus::Pending => {
+            return Err("non-terminal graph status cannot settle a queue item".into());
+        }
+    };
+    registry.mark_terminal(
+        queue_id,
+        &item.identity,
+        &item.graph_id,
+        outcome,
+        budget,
+        cancel,
+        clock,
+    )
 }
 
 enum QueueLaunchDisposition {
@@ -376,39 +658,108 @@ fn launch_item(
     cancel: &CancelToken,
 ) -> Result<QueueLaunchDisposition, String> {
     let project = factory.context.identity.project;
-    if let Some((execution, checkpoint)) =
-        FileJournal::read_status_snapshot(&factory.context.roots.state, project, &item.graph_id)
-            .map_err(|error| error.to_string())?
+    let mut journal = FileJournal::open(
+        &factory.context.roots.state,
+        project,
+        &item.graph_id,
+        budget,
+        cancel,
+        &factory.clock,
+    )
+    .map_err(|error| error.to_string())?;
+    if journal
+        .load(&item.graph_id)
+        .map_err(|error| error.to_string())?
+        .is_some()
     {
+        let execution =
+            FileJournal::execution(&factory.context.roots.state, project, &item.graph_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "persisted queue checkpoint has no execution".to_owned())?;
         if !matches_item_execution(queue_id, item, &execution)? {
             return Err("persisted graph does not match its reserved queue identity".into());
         }
-        let outcome = match super::graph_status::graph_snapshot(checkpoint).status {
-            GraphStatus::Cancelled => Some("cancelled"),
-            GraphStatus::Complete => Some("complete"),
-            GraphStatus::Paused | GraphStatus::Pending => None,
-        };
-        if let Some(outcome) = outcome {
-            registry.mark_terminal(
+        drop(journal);
+        super::queue_controls::reconcile_pending(factory, &item.graph_id, budget, cancel)
+            .map_err(|error| error.to_string())?;
+        journal = FileJournal::open(
+            &factory.context.roots.state,
+            project,
+            &item.graph_id,
+            budget,
+            cancel,
+            &factory.clock,
+        )
+        .map_err(|error| error.to_string())?;
+        let checkpoint = journal
+            .load(&item.graph_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "resuming queue graph checkpoint disappeared".to_owned())?;
+        let execution =
+            FileJournal::execution(&factory.context.roots.state, project, &item.graph_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "resuming queue graph execution disappeared".to_owned())?;
+        if !matches_item_execution(queue_id, item, &execution)? {
+            return Err("resumed graph changed its reserved queue identity".into());
+        }
+        let control_needs_slot =
+            super::queue_controls::checkpoint_has_pending_parallel_control(&checkpoint)
+                .map_err(|error| error.to_string())?;
+        let status = super::graph_status::graph_snapshot(checkpoint.clone()).status;
+        if control_needs_slot {
+            return Ok(QueueLaunchDisposition::Observed);
+        }
+        match status {
+            GraphStatus::Cancelled | GraphStatus::Complete => mark_observed_terminal(
+                registry,
                 queue_id,
-                &item.identity,
-                &item.graph_id,
-                outcome,
+                item,
+                status,
                 budget,
                 cancel,
                 &factory.clock,
-            )?;
-        } else {
-            registry.mark_active(
+            )?,
+            GraphStatus::Paused if item.state == QueueItemState::Resuming => {
+                let now = factory
+                    .clock
+                    .wall_now()
+                    .map_err(|error| error.to_string())?;
+                if !queue_paused_wake_due(factory, &checkpoint, now, cancel)? {
+                    registry.mark_parked(
+                        queue_id,
+                        &item.identity,
+                        &item.graph_id,
+                        budget,
+                        cancel,
+                        &factory.clock,
+                    )?;
+                }
+            }
+            GraphStatus::Paused => registry.mark_parked(
                 queue_id,
                 &item.identity,
                 &item.graph_id,
                 budget,
                 cancel,
                 &factory.clock,
-            )?;
+            )?,
+            GraphStatus::Pending => registry.mark_active(
+                queue_id,
+                &item.identity,
+                &item.graph_id,
+                budget,
+                cancel,
+                &factory.clock,
+            )?,
         }
         return Ok(QueueLaunchDisposition::Observed);
+    }
+    drop(journal);
+    if item.state == QueueItemState::Resuming {
+        return Err(
+            "parked queue graph lost its checkpoint after slot reacquisition; refusing fresh launch"
+                .into(),
+        );
     }
     let request = item_request(queue_id, item)?;
     let receipt = match factory.graph_document_announcing(request, budget, cancel, None) {
@@ -416,25 +767,19 @@ fn launch_item(
         Err(error) if super::queue_dispatch::deterministic_launch_refusal(&error).is_some() => {
             let reason = super::queue_dispatch::deterministic_launch_refusal(&error)
                 .ok_or_else(|| "static refusal could not be classified".to_owned())?;
-            match FileJournal::read_status_snapshot(
-                &factory.context.roots.state,
-                project,
-                &item.graph_id,
+            match mark_launch_unavailable_if_absent(
+                factory, registry, queue_id, item, reason, budget, cancel,
             ) {
-                Ok(None) => {
-                    registry.mark_launch_unavailable(
-                        queue_id,
-                        &item.identity,
-                        &item.graph_id,
-                        reason,
-                        budget,
-                        cancel,
-                        &factory.clock,
-                    )?;
+                Ok(true) => {
                     return Ok(QueueLaunchDisposition::Unavailable(reason.to_owned()));
                 }
-                _ => {
+                Ok(false) => {
                     return Err(format!("{reason}; checkpoint absence could not be proved"));
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "{reason}; checkpoint absence could not be proved: {error}"
+                    ));
                 }
             }
         }
@@ -443,14 +788,75 @@ fn launch_item(
     if receipt["named"]["graph"].as_str() != Some(item.graph_id.as_str()) {
         return Err("launch response did not confirm the reserved graph ID".into());
     }
-    registry.mark_active(
-        queue_id,
-        &item.identity,
+    let mut journal = FileJournal::open(
+        &factory.context.roots.state,
+        project,
         &item.graph_id,
         budget,
         cancel,
         &factory.clock,
-    )?;
+    )
+    .map_err(|error| error.to_string())?;
+    let checkpoint = journal
+        .load(&item.graph_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "launched queue graph checkpoint is absent".to_owned())?;
+    let execution = FileJournal::execution(&factory.context.roots.state, project, &item.graph_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "launched queue graph execution is absent".to_owned())?;
+    if !matches_item_execution(queue_id, item, &execution)? {
+        return Err("launched graph does not match its reserved queue identity".into());
+    }
+    let control_needs_slot =
+        super::queue_controls::checkpoint_has_pending_parallel_control(&checkpoint)
+            .map_err(|error| error.to_string())?;
+    if control_needs_slot {
+        return Ok(QueueLaunchDisposition::Observed);
+    }
+    let status = super::graph_status::graph_snapshot(checkpoint.clone()).status;
+    match status {
+        GraphStatus::Cancelled | GraphStatus::Complete => mark_observed_terminal(
+            registry,
+            queue_id,
+            item,
+            status,
+            budget,
+            cancel,
+            &factory.clock,
+        )?,
+        GraphStatus::Paused if item.state == QueueItemState::Resuming => {
+            let now = factory
+                .clock
+                .wall_now()
+                .map_err(|error| error.to_string())?;
+            if !queue_paused_wake_due(factory, &checkpoint, now, cancel)? {
+                registry.mark_parked(
+                    queue_id,
+                    &item.identity,
+                    &item.graph_id,
+                    budget,
+                    cancel,
+                    &factory.clock,
+                )?;
+            }
+        }
+        GraphStatus::Paused => registry.mark_parked(
+            queue_id,
+            &item.identity,
+            &item.graph_id,
+            budget,
+            cancel,
+            &factory.clock,
+        )?,
+        GraphStatus::Pending => registry.mark_active(
+            queue_id,
+            &item.identity,
+            &item.graph_id,
+            budget,
+            cancel,
+            &factory.clock,
+        )?,
+    }
     Ok(QueueLaunchDisposition::Launched)
 }
 
@@ -630,6 +1036,26 @@ fn exact_ci_result(
 #[cfg(test)]
 mod tests {
     use super::{BTreeSet, lease_owner, mark_superseded_lease};
+
+    #[test]
+    fn unanswered_paused_queue_item_without_a_timer_is_not_wakeable() {
+        use super::*;
+        use serde_json::json;
+
+        let mut checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
+            serde_json::from_value(json!({
+                "schema_version": 2,
+                "graph_id": "queue-1",
+                "plan_digest": "digest",
+                "nodes": []
+            }))
+            .unwrap();
+        let now = WallTime::from_micros(10).unwrap();
+
+        assert!(!queue_paused_scheduled_wake_due(&checkpoint, now));
+        checkpoint.wake_at = Some(WallTime::from_micros(9).unwrap());
+        assert!(queue_paused_scheduled_wake_due(&checkpoint, now));
+    }
 
     #[test]
     fn scheduler_requires_the_reserved_item_replay_identity() {

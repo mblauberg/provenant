@@ -794,11 +794,23 @@ pub(crate) fn tick_graphs(
                     backoff: ThreadPause,
                     executor: SystemExecutor::new(4)?,
                     home: resolved.home.clone(),
-                    cwd: execution.directory,
+                    cwd: execution.directory.clone(),
                     assets: resolved.assets.clone(),
                     host_launch: None,
                     workers,
                 };
+                let (admitted, warnings, waiting) = super::queue_scheduler::admit_graph_tick(
+                    &factory,
+                    &id,
+                    &execution,
+                    &checkpoint,
+                )
+                .map_err(std::io::Error::other)?;
+                report.warnings.extend(warnings);
+                report.warnings.extend(waiting);
+                if !admitted {
+                    return Ok(false);
+                }
                 report
                     .warnings
                     .extend(super::steer::dispatch_pending_steers(
@@ -1101,6 +1113,7 @@ impl Factory {
             announce,
             None,
             None,
+            None,
         )
     }
 
@@ -1121,12 +1134,13 @@ impl Factory {
             None,
             None,
             Some((target, request)),
+            None,
         )
     }
 
     #[allow(
         clippy::too_many_arguments,
-        reason = "submission replay disposition is separate from graph advancement"
+        reason = "submission replay disposition and queue launch custody are separate from advancement"
     )]
     pub(crate) fn graph_launch_result(
         &self,
@@ -1138,6 +1152,7 @@ impl Factory {
         announce: Option<Announce<'_>>,
         replayed: Option<&mut bool>,
         retry: Option<(&mut super::unified::GraphTarget, &Value)>,
+        queue_launch: Option<&super::queue_registry::AuthorizedQueueLaunch>,
     ) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError> {
         let facts = provenant_confinement::worktrees::RepoFacts::default();
         use provenant_fabric_runtime::coordination::input::ValidateInput;
@@ -1546,13 +1561,33 @@ impl Factory {
             .map_err(|_| FacadeError::io("access graph journal"))?
         };
         if let Some(document) = &document {
+            let mut checkpoint = journal.load(id).map_err(graph_journal_error)?;
+            if let Some(authorized) = queue_launch {
+                if authorized.item.graph_id.as_str() != id {
+                    return Err(FacadeError::Conflict);
+                }
+                let execution_directory = self.cwd.to_string_lossy();
+                let registry =
+                    super::queue_registry::QueueRegistry::open(&self.context.roots.state)
+                        .map_err(|_| FacadeError::Conflict)?;
+                registry
+                    .revalidate_launch(
+                        authorized,
+                        &self.context.identity.project.to_string(),
+                        execution_directory.as_ref(),
+                        checkpoint.is_some(),
+                        budget,
+                        cancel,
+                        &self.clock,
+                    )
+                    .map_err(|_| FacadeError::Conflict)?;
+            }
             // GC and admission hold this graph's lock. If collection removed
             // the source after it was read, restore the exact bytes before
             // publishing a new pending checkpoint or launching a node.
             if let Some((directory, name, bytes)) = &scratch_source {
                 restore_scratch_source(directory, name, bytes)?;
             }
-            let mut checkpoint = journal.load(id).map_err(graph_journal_error)?;
             let existing = checkpoint.is_some();
             let bound_execution = if existing {
                 Some(
@@ -1577,6 +1612,28 @@ impl Factory {
             } else {
                 document
             };
+            if resume
+                && bound_execution
+                    .as_ref()
+                    .is_some_and(|bound| bound.document.queue.is_some())
+            {
+                let pending_control = checkpoint
+                    .as_ref()
+                    .map(super::queue_controls::checkpoint_has_pending_control)
+                    .transpose()?
+                    .unwrap_or(false);
+                if pending_control
+                    && !retry.as_ref().is_some_and(|(_, request)| {
+                        request.get("queue_control").is_some()
+                            || request.get("queue_accept_retry").is_some()
+                    })
+                {
+                    return Err(FacadeError::Busy);
+                }
+                if !super::queue_controls::reserve_control_capacity(self, id, budget, cancel)? {
+                    return Err(FacadeError::Busy);
+                }
+            }
             let extensions = match &input {
                 GraphInput::Resume { extend, .. } => extend.as_slice(),
                 _ => &[],

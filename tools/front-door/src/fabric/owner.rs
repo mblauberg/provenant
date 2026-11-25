@@ -917,6 +917,37 @@ fn graph_ask_item(
     Ok(Some(*item))
 }
 
+/// Check whether a linked ask has an answer without acknowledging or applying
+/// it. Queue admission uses this read-only probe to wake answered parked graphs
+/// without reserving capacity for unanswered owner waits.
+pub(crate) fn graph_asks_have_answer(
+    factory: &Factory,
+    actor: &str,
+    asks: &[provenant_fabric_runtime::graph::AskLink],
+    cancel: &CancelToken,
+) -> Result<bool, FacadeError> {
+    let Some(first) = asks.first() else {
+        return Ok(false);
+    };
+    graph_ask_with(factory, cancel, actor, &first.ask_id, |service| {
+        use provenant_records::inbox::RequestState;
+        for ask in asks {
+            let scope = provenant_fabric_runtime::graph::AskScope { actor, ask };
+            let Some(item) = graph_ask_item(service, &scope, cancel)? else {
+                continue;
+            };
+            if !matches!(
+                item.request.state,
+                RequestState::Withdrawn | RequestState::Superseded | RequestState::Expired
+            ) && item.answer.is_some()
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    })
+}
+
 /// Read the answer to the linked request, whichever channel gave it.
 pub(crate) fn graph_ask_poll(
     service: &provenant_fabric_runtime::inbox::InboxService<'_>,

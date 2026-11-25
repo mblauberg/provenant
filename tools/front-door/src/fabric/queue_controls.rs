@@ -2,7 +2,7 @@
 use super::{BoundFacade, FacadeError, Factory};
 use crate::fabric::owner::graph_journal_error;
 use provenant_core::{
-    CancelToken, CanonicalV1, GitOid, HumanAnswerId, HumanRequestId, OperationId, WaitBudget,
+    CancelToken, CanonicalV1, Clock, GitOid, HumanAnswerId, HumanRequestId, OperationId, WaitBudget,
 };
 use provenant_fabric_runtime::{
     graph::{
@@ -44,6 +44,14 @@ pub(super) struct Metadata {
     pub review_head: Option<GitOid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graph_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AcceptGateRetry {
+    operation_id: OperationId,
+    gate: String,
+    baseline_generation: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -986,6 +994,218 @@ fn control_receipt(intent: &Intent, replayed: bool) -> Value {
     })
 }
 
+fn intent_requires_parallel_slot(intent: &Intent) -> bool {
+    !intent.phase.terminal() && intent.metadata.action != Action::Drop
+}
+
+pub(super) fn checkpoint_has_pending_parallel_control(
+    checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
+) -> Result<bool, FacadeError> {
+    Ok(ledger(checkpoint)?
+        .intents
+        .values()
+        .any(intent_requires_parallel_slot))
+}
+
+pub(super) fn checkpoint_has_pending_control(
+    checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
+) -> Result<bool, FacadeError> {
+    Ok(ledger(checkpoint)?
+        .intents
+        .values()
+        .any(|intent| !intent.phase.terminal()))
+}
+
+/// Validate the internal retry marker emitted only by the durable Accept
+/// workflow. The Accept ledger entry and matching exact-head disposition are
+/// the authority; the marker itself carries no authority.
+pub(super) fn authorize_accept_gate_retry(
+    checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
+    graph_id: &str,
+    node_id: &str,
+    value: &Value,
+) -> Result<(String, String), FacadeError> {
+    let marker: AcceptGateRetry = serde_json::from_value(value.clone())
+        .map_err(|_| refusal("accept gate retry marker is malformed"))?;
+    if marker.gate != node_id || marker.gate.is_empty() {
+        return Err(refusal(
+            "accept gate retry target does not match its marker",
+        ));
+    }
+    let ledger = ledger(checkpoint)?;
+    let operation_key = marker.operation_id.to_string();
+    if ledger_has_drop_fence(&ledger) {
+        return Err(refusal("dropped queue items cannot be retried"));
+    }
+    let intent = ledger
+        .intents
+        .get(&operation_key)
+        .ok_or_else(|| refusal("accept gate retry has no saved Accept operation"))?;
+    if intent.metadata.action != Action::Accept
+        || !matches!(intent.phase, Phase::DispositionAdmitted | Phase::Applied)
+        || intent.graph_id != graph_id
+        || intent.metadata.graph_id.as_deref() != Some(graph_id)
+        || intent.target_node.as_deref() != intent.metadata.review_node.as_deref()
+        || intent.request_id.is_none()
+        || intent.answer_id.is_none()
+        || intent.metadata.review_head.is_none()
+        || intent.applied_revision.is_none()
+        || intent.gate_generations.get(node_id).copied() != Some(marker.baseline_generation)
+        || ledger
+            .intents
+            .iter()
+            .any(|(key, other)| key != &operation_key && !other.phase.terminal())
+    {
+        return Err(refusal(
+            "accept gate retry does not match its saved operation",
+        ));
+    }
+    let request_id = intent.request_id.ok_or(FacadeError::StateCorrupt)?;
+    let answer_id = intent.answer_id.ok_or(FacadeError::StateCorrupt)?;
+    let head = intent
+        .metadata
+        .review_head
+        .ok_or(FacadeError::StateCorrupt)?;
+    let review_node = intent
+        .metadata
+        .review_node
+        .as_deref()
+        .ok_or(FacadeError::StateCorrupt)?;
+    let answer: InboxInput =
+        serde_json::from_value(intent.payload.clone()).map_err(|_| FacadeError::StateCorrupt)?;
+    let InboxInput::Answer {
+        id,
+        action: AnswerAction::Reply,
+        option_id: None,
+        text: Some(reason),
+        operation_id: Some(answer_operation),
+        ..
+    } = answer
+    else {
+        return Err(FacadeError::StateCorrupt);
+    };
+    if id != request_id || answer_operation != marker.operation_id {
+        return Err(FacadeError::StateCorrupt);
+    }
+    let disposition = checkpoint
+        .nodes
+        .iter()
+        .find(|progress| progress.id == review_node)
+        .and_then(|progress| progress.delivery_review_disposition())
+        .ok_or_else(|| refusal("accept gate retry has no saved review disposition"))?;
+    if disposition.operation_id != marker.operation_id
+        || disposition.request_id != request_id
+        || disposition.answer_id != answer_id
+        || disposition.head != head
+        || disposition.reason != reason
+    {
+        return Err(refusal(
+            "accept gate retry disposition does not match its answer",
+        ));
+    }
+    let digest = CanonicalV1::record_digest(
+        "delivery-queue-accept-gate-retry",
+        1,
+        &(
+            graph_id,
+            &intent.digest,
+            &disposition,
+            node_id,
+            marker.baseline_generation,
+        ),
+    )
+    .map_err(|_| FacadeError::StateCorrupt)?
+    .to_string();
+    let digest_suffix = digest
+        .strip_prefix("sha256:")
+        .ok_or(FacadeError::StateCorrupt)?;
+    let retry_key = format!("accept-gate-{digest_suffix}");
+    let receipt_reason = format!("queue control {retry_key} retry node {node_id} intent {digest}");
+    let has_retry_receipt = checkpoint
+        .expansions
+        .iter()
+        .filter_map(|expansion| expansion.patch.as_ref())
+        .any(|record| {
+            record.key.as_deref() == Some(retry_key.as_str())
+                && record.reason.as_deref() == Some(receipt_reason.as_str())
+        });
+    let progress = checkpoint
+        .nodes
+        .iter()
+        .find(|progress| progress.id == node_id)
+        .ok_or_else(|| refusal("accept gate retry target is absent"))?;
+    let current_generation = progress.retry_generation.unwrap_or_default();
+    if !has_retry_receipt
+        && (current_generation != marker.baseline_generation
+            || !matches!(progress.state, NodeState::Failed | NodeState::Blocked))
+    {
+        return Err(refusal(
+            "accept gate retry no longer matches the failed gate",
+        ));
+    }
+    Ok((retry_key, digest))
+}
+
+pub(super) fn reserve_control_capacity(
+    factory: &Factory,
+    graph_id: &str,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+) -> Result<bool, FacadeError> {
+    let project = factory.context.identity.project;
+    let execution = FileJournal::execution(&factory.context.roots.state, project, graph_id)
+        .map_err(graph_journal_error)?
+        .ok_or(FacadeError::NotFound)?;
+    if execution.document.queue.is_none() {
+        return Err(refusal("queue control requires a persisted queue owner"));
+    }
+    let registry = super::queue_registry::QueueRegistry::open(&factory.context.roots.state)
+        .map_err(|_| FacadeError::OwnerUnavailable)?;
+    let queues = registry
+        .queues(budget, cancel, &factory.clock)
+        .map_err(|_| FacadeError::OwnerUnavailable)?;
+    let project = project.to_string();
+    let owners: Vec<_> = queues
+        .into_iter()
+        .filter(|queue| queue.project == project)
+        .flat_map(|queue| {
+            let queue_id = queue.queue_id;
+            queue
+                .items
+                .into_iter()
+                .filter(|item| item.graph_id == graph_id)
+                .map(move |item| (queue_id.clone(), item))
+        })
+        .collect();
+    let [(queue_id, item)] = owners.as_slice() else {
+        return Err(refusal(
+            "queue control graph does not have exactly one durable queue owner",
+        ));
+    };
+    if !super::queue_scheduler::matches_item_execution(queue_id, item, &execution)
+        .map_err(|_| FacadeError::StateCorrupt)?
+    {
+        return Err(refusal(
+            "queue control graph does not match its durable queue identity",
+        ));
+    }
+    let now = factory
+        .clock
+        .wall_now()
+        .map_err(|_| FacadeError::OwnerUnavailable)?;
+    registry
+        .reserve_parked_for_control(
+            queue_id,
+            &item.identity,
+            graph_id,
+            now,
+            budget,
+            cancel,
+            &factory.clock,
+        )
+        .map_err(refusal)
+}
+
 fn attach_receipt(mut result: Value, intent: &Intent, replayed: bool) -> Value {
     if let Some(object) = result.as_object_mut() {
         object.insert("queue_control".into(), control_receipt(intent, replayed));
@@ -1108,18 +1328,38 @@ pub(super) fn handle_graph_operation(
             if target.node.is_none() {
                 return Err(refusal("queue retry requires one exact node target"));
             }
+            let (intent, _) = begin(
+                factory,
+                &target.graph,
+                target.node.as_deref(),
+                None,
+                &metadata,
+                &payload,
+                budget,
+                cancel,
+            )?;
+            if intent.phase.terminal() {
+                return Err(refusal("this queue retry operation was already refused"));
+            }
+            if !reserve_control_capacity(factory, &target.graph, budget, cancel)? {
+                return Err(refusal(
+                    "parked queue item is waiting for max_parallel capacity",
+                ));
+            }
             payload["queue_control"] =
                 serde_json::to_value(&metadata).map_err(|_| FacadeError::StateCorrupt)?;
             let operation_result = match factory.retry_document(&payload, budget, cancel) {
                 Ok(result) => result,
                 Err(error) => {
-                    refuse_unadmitted_retry(
-                        factory,
-                        &target.graph,
-                        &metadata.operation_id,
-                        budget,
-                        cancel,
-                    )?;
+                    if super::queue_dispatch::deterministic_launch_refusal(&error).is_some() {
+                        refuse_unadmitted_retry(
+                            factory,
+                            &target.graph,
+                            &metadata.operation_id,
+                            budget,
+                            cancel,
+                        )?;
+                    }
                     return Err(error);
                 }
             };
@@ -1280,6 +1520,13 @@ fn accept_request(
         budget,
         cancel,
     )?;
+    if intent_requires_parallel_slot(&intent)
+        && !reserve_control_capacity(factory, &graph_id, budget, cancel)?
+    {
+        return Err(refusal(
+            "parked queue item is waiting for max_parallel capacity",
+        ));
+    }
     let mut journal = FileJournal::open(
         &factory.context.roots.state,
         project,
@@ -1497,11 +1744,10 @@ fn retry_failed_gates(
             .intents
             .get(operation_key)
             .ok_or(FacadeError::StateCorrupt)?;
-        let baseline = intent
-            .gate_generations
-            .get(gate)
-            .copied()
-            .unwrap_or_default();
+        let Some(baseline) = intent.gate_generations.get(gate).copied() else {
+            continue;
+        };
+        let accept_operation_id = intent.metadata.operation_id.to_string();
         let progress = checkpoint
             .nodes
             .iter()
@@ -1514,7 +1760,15 @@ fn retry_failed_gates(
         }
         drop(journal);
         factory.graph_document(
-            json!({"op":"retry", "id":format!("{graph_id}/{gate}")}),
+            json!({
+                "op":"retry",
+                "id":format!("{graph_id}/{gate}"),
+                "queue_accept_retry": {
+                    "operation_id": accept_operation_id,
+                    "gate": gate,
+                    "baseline_generation": baseline,
+                }
+            }),
             budget,
             cancel,
         )?;
@@ -1556,12 +1810,29 @@ pub(super) fn reconcile_pending(
         .load(graph_id)
         .map_err(graph_journal_error)?
         .ok_or(FacadeError::NotFound)?;
-    let intents: Vec<_> = ledger(&checkpoint)?
+    let mut intents: Vec<_> = ledger(&checkpoint)?
         .intents
         .into_values()
         .filter(|intent| !intent.phase.terminal())
         .collect();
     drop(journal);
+    intents.sort_by_key(|intent| intent.metadata.action != Action::Drop);
+    if intents.iter().any(intent_requires_parallel_slot)
+        && !reserve_control_capacity(factory, graph_id, budget, cancel)?
+    {
+        // Keep the durable control intent for the scheduler to replay after it
+        // can atomically reacquire this item's parallel slot.
+        for intent in intents
+            .iter()
+            .filter(|intent| intent.metadata.action == Action::Drop)
+        {
+            let mut input = intent.payload.clone();
+            input["queue_control"] =
+                serde_json::to_value(&intent.metadata).map_err(|_| FacadeError::StateCorrupt)?;
+            handle_graph_operation(factory, input, budget, cancel)?;
+        }
+        return Ok(());
+    }
     for intent in intents {
         match intent.metadata.action {
             Action::Accept => {
@@ -1738,6 +2009,148 @@ mod tests {
             control_digest(&control, "queue-1", Some("other-node"), None, &payload).unwrap();
         assert_eq!(first, replay);
         assert_ne!(first, changed);
+    }
+
+    #[test]
+    fn accept_gate_retry_is_bound_to_saved_answer_and_failed_gate_generation() {
+        let operation_id = operation(8);
+        let request_id = HumanRequestId::from_bytes([1; 16]);
+        let answer_id = HumanAnswerId::from_bytes([2; 16]);
+        let head = GitOid::parse(&"a".repeat(40)).unwrap();
+        let reason = "accept this exact reviewed head";
+        let control = Metadata {
+            action: Action::Accept,
+            expected_revision: 4,
+            operation_id: operation_id.clone(),
+            review_node: Some("review".into()),
+            review_head: Some(head),
+            graph_id: Some("queue-1".into()),
+        };
+        let payload = serde_json::to_value(InboxInput::Answer {
+            extra: Default::default(),
+            id: request_id,
+            action: AnswerAction::Reply,
+            option_id: None,
+            text: Some(reason.into()),
+            expect_revision: 4,
+            channel: None,
+            operation_id: Some(operation_id.clone()),
+        })
+        .unwrap();
+        let intent = Intent {
+            digest: "saved-accept-intent".into(),
+            metadata: control,
+            graph_id: "queue-1".into(),
+            target_node: Some("review".into()),
+            retry_generations: BTreeMap::new(),
+            gate_generations: BTreeMap::from([("gate".into(), 2)]),
+            request_id: Some(request_id),
+            payload,
+            phase: Phase::DispositionAdmitted,
+            answer_id: Some(answer_id),
+            applied_revision: Some(5),
+        };
+        let disposition = DeliveryReviewDisposition {
+            operation_id: operation_id.clone(),
+            request_id,
+            answer_id,
+            head,
+            reason: reason.into(),
+        };
+        let mut checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
+            serde_json::from_value(json!({
+                "schema_version": 2,
+                "graph_id": "queue-1",
+                "plan_digest": "digest",
+                "nodes": [
+                    {
+                        "id":"review", "state":"failed", "worktree":null, "attempts":[],
+                        "delivery_review_disposition": disposition
+                    },
+                    {
+                        "id":"gate", "state":"failed", "worktree":null, "attempts":[],
+                        "retry_generation":2
+                    }
+                ]
+            }))
+            .unwrap();
+        let mut saved = Ledger::default();
+        saved
+            .intents
+            .insert(operation_id.to_string(), intent.clone());
+        save_ledger(&mut checkpoint, &saved).unwrap();
+
+        let marker = json!({
+            "operation_id":operation_id,
+            "gate":"gate",
+            "baseline_generation":2
+        });
+        let (key, digest) =
+            authorize_accept_gate_retry(&checkpoint, "queue-1", "gate", &marker).unwrap();
+        assert!(key.starts_with("accept-gate-"));
+        assert!(digest.starts_with("sha256:"));
+        assert!(authorize_accept_gate_retry(&checkpoint, "queue-1", "other", &marker).is_err());
+        assert!(authorize_accept_gate_retry(&checkpoint, "other-graph", "gate", &marker).is_err());
+
+        let mut stale = marker.clone();
+        stale["baseline_generation"] = json!(3);
+        assert!(authorize_accept_gate_retry(&checkpoint, "queue-1", "gate", &stale).is_err());
+
+        let mut dropping = saved;
+        let mut drop_intent = intent;
+        drop_intent.metadata.action = Action::Drop;
+        drop_intent.phase = Phase::DropAdmitted;
+        dropping.intents.insert("drop-op".into(), drop_intent);
+        let mut fenced = checkpoint;
+        save_ledger(&mut fenced, &dropping).unwrap();
+        assert!(authorize_accept_gate_retry(&fenced, "queue-1", "gate", &marker).is_err());
+    }
+
+    #[test]
+    fn only_pending_controls_that_can_wake_a_writer_need_a_parallel_slot() {
+        let retry = metadata(4, operation(4));
+        let retry = Intent {
+            digest: "retry".into(),
+            metadata: retry,
+            graph_id: "queue-1".into(),
+            target_node: Some("node".into()),
+            retry_generations: BTreeMap::new(),
+            gate_generations: BTreeMap::new(),
+            request_id: None,
+            payload: json!({"op":"retry"}),
+            phase: Phase::Pending,
+            answer_id: None,
+            applied_revision: None,
+        };
+        let mut drop_intent = retry.clone();
+        drop_intent.metadata.action = Action::Drop;
+        drop_intent.phase = Phase::DropAdmitted;
+        let mut accept = retry.clone();
+        accept.metadata.action = Action::Accept;
+        accept.phase = Phase::Answered;
+        let mut applied = retry.clone();
+        applied.phase = Phase::Applied;
+
+        assert!(intent_requires_parallel_slot(&retry));
+        assert!(intent_requires_parallel_slot(&accept));
+        assert!(!intent_requires_parallel_slot(&drop_intent));
+        assert!(!intent_requires_parallel_slot(&applied));
+
+        let mut checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
+            serde_json::from_value(json!({
+                "schema_version": 2,
+                "graph_id": "queue-1",
+                "plan_digest": "digest",
+                "nodes": []
+            }))
+            .unwrap();
+        let mut saved = Ledger::default();
+        saved
+            .intents
+            .insert(retry.metadata.operation_id.to_string(), drop_intent);
+        save_ledger(&mut checkpoint, &saved).unwrap();
+        assert!(checkpoint_has_pending_control(&checkpoint).unwrap());
+        assert!(!checkpoint_has_pending_parallel_control(&checkpoint).unwrap());
     }
 
     #[test]

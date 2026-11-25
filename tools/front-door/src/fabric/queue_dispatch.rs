@@ -370,6 +370,13 @@ fn launch_and_receipt(
     }
     warnings.extend(schedule.warnings);
     for (queue_id, item) in schedule.launch {
+        if item.state == QueueItemState::Resuming {
+            warnings.push(format!(
+                "queue item {} keeps its resumed checkpoint reservation for the graph scheduler",
+                item.identity.item
+            ));
+            continue;
+        }
         let marker = QueueItemMarker {
             queue_id,
             identity: item.identity.clone(),
@@ -381,16 +388,15 @@ fn launch_and_receipt(
             serde_json::to_value(marker).map_err(|_| FacadeError::StateCorrupt)?;
         match factory.graph_document_announcing(request, budget, cancel, announce) {
             Ok(receipt) if receipt["named"]["graph"].as_str() == Some(item.graph_id.as_str()) => {
-                registry
-                    .mark_active(
-                        &queue.queue_id,
-                        &item.identity,
-                        &item.graph_id,
-                        budget,
-                        cancel,
-                        &factory.clock,
-                    )
-                    .map_err(super::interface::graph_input_reason)?;
+                match super::queue_scheduler::observe_item(
+                    factory, registry, &queue, &item, now, budget, cancel,
+                ) {
+                    Ok(_) => {}
+                    Err(error) => warnings.push(format!(
+                        "queue item {} remains reserved for fixed graph {} after an inconclusive status observation: {error}",
+                        item.identity.item, item.graph_id
+                    )),
+                }
             }
             Ok(_) => warnings.push(format!(
                 "queue item {} remains reserved for fixed graph {} because launch did not confirm that identity",
@@ -398,30 +404,27 @@ fn launch_and_receipt(
             )),
             Err(error) if deterministic_launch_refusal(&error).is_some() => {
                 let reason = deterministic_launch_refusal(&error).ok_or(FacadeError::StateCorrupt)?;
-                match provenant_fabric_runtime::graph::FileJournal::read_status_snapshot(
-                    &factory.context.roots.state,
-                    factory.context.identity.project,
-                    &item.graph_id,
+                match super::queue_scheduler::mark_launch_unavailable_if_absent(
+                    factory,
+                    registry,
+                    &queue.queue_id,
+                    &item,
+                    reason,
+                    budget,
+                    cancel,
                 ) {
-                    Ok(None) => {
-                        registry
-                            .mark_launch_unavailable(
-                                &queue.queue_id,
-                                &item.identity,
-                                &item.graph_id,
-                                reason,
-                                budget,
-                                cancel,
-                                &factory.clock,
-                            )
-                            .map_err(super::interface::graph_input_reason)?;
+                    Ok(true) => {
                         warnings.push(format!(
                             "queue item {} is unavailable: {reason}",
                             item.identity.item
                         ));
                     }
-                    _ => warnings.push(format!(
+                    Ok(false) => warnings.push(format!(
                         "queue item {} remains reserved for fixed graph {} because static refusal could not prove that no graph was persisted",
+                        item.identity.item, item.graph_id
+                    )),
+                    Err(proof_error) => warnings.push(format!(
+                        "queue item {} remains reserved for fixed graph {} because checkpoint absence could not be proved under graph custody: {proof_error}",
                         item.identity.item, item.graph_id
                     )),
                 }
@@ -734,7 +737,7 @@ fn queue_receipt(
     } else if queue.items.iter().any(|item| {
         matches!(
             item.state,
-            QueueItemState::Launching | QueueItemState::Active
+            QueueItemState::Launching | QueueItemState::Active | QueueItemState::Resuming
         )
     }) {
         "active"
@@ -744,6 +747,12 @@ fn queue_receipt(
         .any(|item| item.state == QueueItemState::Pending && item.unavailable_reason.is_none())
     {
         "pending"
+    } else if queue
+        .items
+        .iter()
+        .any(|item| item.state == QueueItemState::Parked)
+    {
+        "parked"
     } else if queue
         .items
         .iter()

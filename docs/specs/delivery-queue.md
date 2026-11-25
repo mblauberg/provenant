@@ -102,8 +102,11 @@ settlement. An explicitly adopted open PR binds its repository, issue, branch, w
 current head to the same item graph, starts at the conflict gate, and validates
 existing custody before any mutation. Each item has its own graph, worktree and
 outcome; one parked item
-does not stop others. `max_parallel` is the active-item concurrency target, not just a launch-rate
-limit; a bounded wait warns before advisory overflow and records that overflow.
+does not stop others. A parked item retains its graph identity without consuming
+an active slot; before a control resumes work, it must reacquire capacity under
+the same bounded, advisory admission policy. `max_parallel` is the active-item
+concurrency target, not just a launch-rate limit; a bounded wait warns before
+advisory overflow and records that overflow.
 Admission of CI work uses `admit` class `ci` across queues in the same host admission domain, from publication through a conclusive CI observation; persist
 the lease identity and reconcile it on restart. Waiting items retain their place
 and show why they wait. `src/tick.rs` advances due graphs and retries pending
@@ -214,13 +217,17 @@ admission checks the resulting typed graph before execution.
   (`succeeded` or `exhausted`) and target `node: String`. Optional
   `previous_bindings` maps a body node name used as `previous.<name>` to its
   explicit outer node for round one; later rounds resolve the same name to the
-  preceding round's node. Queue conflict recovery uses this binding for both
-  the rebase head and its conflict/CI checks, so every retry checks the latest
-  published head. Each initial node must be a direct loop dependency, and
-  published-head bindings must name a publication node. A general recovery loop
-  may name typed CI, conflict and verdict body gates in `retry_on`; only a
-  failed named gate admits another bounded round, and the failed evidence stays
-  in the checkpoint. Its optional `selected_publication` names a body publication:
+  preceding round's node. Each initial node must be a direct loop dependency,
+  and published-head bindings must name a publication node. A general recovery
+  loop may name a typed hygiene outcome or a CI, conflict or verdict body gate
+  in `retry_on`; only a failed named node admits another bounded round, and its evidence
+  stays in the checkpoint. Hygiene retries apply to `no_commit` and
+  `uncommitted_edits`; an `error` parks. A retained hygiene output can carry the
+  exact committed head into the next writer even when no new publication exists.
+  The writer retains its checkout and any uncommitted edits; it must not replace
+  them or accept a different head. After any successful publication, conflict,
+  CI and review each check its exact head again. Its optional `selected_publication`
+  names a body publication:
   success exports the receipt from the successful round, including its exact
   head. Optional `initial_publication` names the directly bound initial seed:
   if the entry gates all pass and every recovery round is skipped, the owner
