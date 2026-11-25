@@ -1487,13 +1487,50 @@ fn escalation_transition_attempt(
             .then_some(key);
     }
 
-    let writer_index = loops::nearest_writer_ancestor(node_index, plan)?;
-    checkpoint
-        .nodes
-        .get(writer_index)?
-        .recorded_attempts()
-        .next_back()
-        .map(|attempt| attempt.key.clone())
+    if let Some(writer_index) = loops::nearest_writer_ancestor(node_index, plan)
+        && let Some(attempt) = checkpoint
+            .nodes
+            .get(writer_index)?
+            .recorded_attempts()
+            .next_back()
+    {
+        return Some(attempt.key.clone());
+    }
+    // An adopted publication has no writer attempt in this graph. A completed
+    // entry review still has real, replayable attempt keys; use one of those
+    // as the transition identity rather than fabricating an adopted writer.
+    if !matches!(node.condition, Some(GateCondition::Verdict { .. })) {
+        return None;
+    }
+    let mut pending: Vec<_> = node
+        .inputs
+        .iter()
+        .filter_map(|input| {
+            plan.nodes
+                .iter()
+                .position(|candidate| candidate.id == input.node)
+        })
+        .collect();
+    let mut seen = std::collections::BTreeSet::new();
+    while let Some(index) = pending.pop() {
+        if !seen.insert(index) {
+            continue;
+        }
+        if let Some(attempt) = checkpoint.nodes.get(index)?.recorded_attempts().next_back() {
+            return Some(attempt.key.clone());
+        }
+        pending.extend(
+            plan.nodes[index]
+                .composite_members
+                .iter()
+                .filter_map(|member| {
+                    plan.nodes
+                        .iter()
+                        .position(|candidate| candidate.id == *member)
+                }),
+        );
+    }
+    None
 }
 
 /// Persist one unsuccessful delivery outcome. CI red spends the per-rung
