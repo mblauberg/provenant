@@ -965,6 +965,19 @@ mod tests {
             id,
             LandingId::of("repo", "main", &request(members.clone(), 1), "plan-a")?
         );
+        let mut queue = first.clone();
+        queue.delivery_queue = true;
+        assert_ne!(
+            id.request,
+            LandingId::of("repo", "main", &queue, "plan-a")?.request
+        );
+        assert!(
+            serde_json::to_value(&first)?
+                .get("delivery_queue")
+                .is_none()
+        );
+        let restored: LandRequest = serde_json::from_value(serde_json::to_value(&queue)?)?;
+        assert!(restored.delivery_queue);
         let changed_plan = LandingId::of("repo", "main", &first, "plan-b")?;
         assert_ne!(id, changed_plan);
         assert_eq!(id.request, changed_plan.request);
