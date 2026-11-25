@@ -119,11 +119,11 @@ fn observe_conflict_with(
     if after != before {
         return ConflictObservation {
             state: ConflictState::Pending,
-            head_sha: Some(after.sha),
             summary: format!(
                 "head superseded {} -> {}; waiting for mergeability",
                 before.sha, after.sha
             ),
+            head_sha: Some(after.sha),
         };
     }
     let (state, summary) = match mergeability.as_str() {
@@ -791,7 +791,10 @@ mod tests {
                     .any(|call| call.contains("check-runs"))
             );
         }
+    }
 
+    #[test]
+    fn conflict_probe_waits_for_mergeability_on_a_moved_head() {
         let heads = Cell::new(0);
         let read = |args: &[&str]| {
             let value =
@@ -809,6 +812,7 @@ mod tests {
         let moved = observe_conflict_with("123", &read);
         assert_eq!(moved.state, ConflictState::Pending);
         assert_eq!(moved.head_sha.as_deref(), Some(NEW));
+        assert!(moved.summary.contains(OLD) && moved.summary.contains(NEW));
     }
 
     #[test]

@@ -1325,8 +1325,8 @@ pub(super) fn advance<R: AttemptOwner, J: GraphJournal>(
                 journal,
             );
         };
-        if !publish_target {
-            if let Some(reason) = acceptance_error(
+        if !publish_target
+            && let Some(reason) = acceptance_error(
                 plan,
                 checkpoint,
                 positions,
@@ -1336,9 +1336,8 @@ pub(super) fn advance<R: AttemptOwner, J: GraphJournal>(
                 (branch.as_str(), head.as_str()),
             )
             .map_err(GraphError::Run)?
-            {
-                return fail::<R, J>(index, "land_review_required", reason, checkpoint, journal);
-            }
+        {
+            return fail::<R, J>(index, "land_review_required", reason, checkpoint, journal);
         }
         let LandChoice { policy, source } = owner.land_policy(spec.tier);
         let progress = &mut checkpoint.nodes[index];

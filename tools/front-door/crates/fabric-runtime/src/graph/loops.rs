@@ -83,10 +83,10 @@ pub(super) fn nearest_writer_ancestor(node_index: usize, plan: &PlannedGraph) ->
     None
 }
 
-pub(super) fn escalation_owner<'a>(
+pub(super) fn escalation_owner(
     node_index: usize,
-    plan: &'a PlannedGraph,
-) -> Option<(usize, &'a EscalateSpec)> {
+    plan: &PlannedGraph,
+) -> Option<(usize, &EscalateSpec)> {
     let node = plan.nodes.get(node_index)?;
     if let Some(round) = &node.round
         && let Some((index, owner)) = plan
@@ -1104,6 +1104,10 @@ pub(super) fn validate_progress(
     if valid { Ok(()) } else { Err(()) }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "loop settlement coordinates graph state and journal"
+)]
 pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
     document: &GraphDocument,
     index: usize,

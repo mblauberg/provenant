@@ -1865,9 +1865,7 @@ fn queue_conflict_recheck(
         state: ConflictState::Pending,
         head_sha: Some(head),
         summary: "rechecking mergeability after CI reported conflict".into(),
-        wake_at: Some(wall_now.unwrap_or_else(|| {
-            provenant_core::WallTime::from_micros(0).expect("epoch is a representable wall time")
-        })),
+        wake_at: wall_now.or_else(|| provenant_core::WallTime::from_micros(0).ok()),
         pending_observations,
         ci_rechecks,
     });
@@ -1881,6 +1879,10 @@ fn queue_conflict_recheck(
     Ok((conflict_index, rebase))
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "gate advancement coordinates graph state and journal"
+)]
 fn advance_gate<R: AttemptOwner, J: GraphJournal>(
     document: &GraphDocument,
     owner: &mut R,
@@ -4158,7 +4160,7 @@ fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
                         break;
                     }
                     NextAttempt::Fail { code, message } => {
-                        if code.as_deref() == Some("prep_retries_exhausted") {
+                        if code == Some("prep_retries_exhausted") {
                             let attempt = checkpoint.nodes[node_index]
                                 .attempts
                                 .last()
@@ -4620,6 +4622,10 @@ fn delivery_operation(
 
 /// Persist the parking identity before opening the inbox, then replay the same
 /// immutable operation until a receipt is recorded.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "parking records the complete delivery transition"
+)]
 pub(super) fn park_delivery_transition<R: AttemptOwner, J: GraphJournal>(
     document: &GraphDocument,
     node_index: usize,
@@ -4780,8 +4786,7 @@ fn advance_hygiene<R: AttemptOwner, J: GraphJournal>(
     let source_progress = &checkpoint.nodes[source_index];
     let source_attempt = source_progress
         .recorded_attempts()
-        .filter(|attempt| attempt.state == AttemptState::Terminal)
-        .next_back()
+        .rfind(|attempt| attempt.state == AttemptState::Terminal)
         .ok_or_else(|| GraphError::BadCheckpoint {
             node: node.id.clone(),
             invariant: "hygiene requires a terminal writer attempt",
@@ -5157,8 +5162,7 @@ fn advance_publish<R: AttemptOwner, J: GraphJournal>(
     let writer_identity = writer_binding.source_directory_identity.clone();
     let writer_attempt = writer_progress
         .recorded_attempts()
-        .filter(|attempt| attempt.state == AttemptState::Terminal)
-        .next_back()
+        .rfind(|attempt| attempt.state == AttemptState::Terminal)
         .ok_or_else(|| GraphError::BadCheckpoint {
             node: node.id.clone(),
             invariant: "publish writer must retain a terminal attempt",

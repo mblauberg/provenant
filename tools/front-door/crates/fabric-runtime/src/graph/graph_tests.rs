@@ -347,7 +347,7 @@ impl AttemptOwner for FakeOwner {
         request: DeliveryParkRequest<'_>,
     ) -> Result<Option<provenant_core::HumanRequestId>, Self::Error> {
         self.park_calls.push(request.operation_id.to_owned());
-        Ok(self.park_receipt.clone())
+        Ok(self.park_receipt)
     }
     fn file_ask(&mut self, filing: AskFiling<'_>) -> Result<AskFiled, Self::Error> {
         let id = &filing.ask.ask_id;

@@ -304,7 +304,7 @@ fn node_bound(
             }),
         });
     let publication_writer = (node.kind == Some(NodeKind::Publish))
-        .then(|| node.source.as_ref())
+        .then_some(node.source.as_ref())
         .flatten()
         .and_then(|source| match source {
             SourceBinding::Node { node: hygiene } => plan
@@ -774,7 +774,7 @@ fn node_bound(
                 .flat_map(|policy| policy.ladder.iter())
                 .map(|alias| loops::tier_route(Some(route), alias))
                 .chain(std::iter::once(route.clone()))
-                .max_by_key(|candidate| canonical_len(candidate))
+                .max_by_key(canonical_len)
                 .unwrap_or_else(|| route.clone())
         } else {
             route.clone()

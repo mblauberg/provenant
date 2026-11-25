@@ -259,17 +259,18 @@ pub(super) fn evaluate<O: AttemptOwner>(
         observation.head_sha = None;
         observation.failed_checks.clear();
         observation.check_names.clear();
-    } else if delivery_queue && let Some(expected_head) = expected_published_head {
-        if observation.head_sha.as_deref() != Some(expected_head) {
-            let observed_head = observation.head_sha.as_deref().unwrap_or("unavailable");
-            observation.state = CiState::Pending;
-            observation.summary = format!(
-                "published head {expected_head} is not the observed branch head {observed_head}; waiting for publication reconciliation"
-            );
-            observation.head_sha = Some(expected_head.to_owned());
-            observation.failed_checks.clear();
-            observation.check_names.clear();
-        }
+    } else if delivery_queue
+        && let Some(expected_head) = expected_published_head
+        && observation.head_sha.as_deref() != Some(expected_head)
+    {
+        let observed_head = observation.head_sha.as_deref().unwrap_or("unavailable");
+        observation.state = CiState::Pending;
+        observation.summary = format!(
+            "published head {expected_head} is not the observed branch head {observed_head}; waiting for publication reconciliation"
+        );
+        observation.head_sha = Some(expected_head.to_owned());
+        observation.failed_checks.clear();
+        observation.check_names.clear();
     }
     // Inspect raw CI text before applying caps so warnings see the complete
     // source; the checkpoint and repair input retain the original bytes.
@@ -490,10 +491,10 @@ pub(super) fn evaluate_conflict<O: AttemptOwner>(
             _ => ConflictState::Pending,
         }
     };
-    if let Some(expected_head) = expected_head {
-        if observed_head.as_deref() != Some(expected_head) {
-            observed_head = Some(expected_head.to_owned());
-        }
+    if let Some(expected_head) = expected_head
+        && observed_head.as_deref() != Some(expected_head)
+    {
+        observed_head = Some(expected_head.to_owned());
     }
     let prior = checkpoint.nodes[index].conflict.as_ref();
     let ci_rechecks = prior
