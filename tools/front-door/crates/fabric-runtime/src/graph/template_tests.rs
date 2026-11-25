@@ -519,7 +519,8 @@ fn repeat_lowers_a_composite_template_to_a_loop() {
         .compile(&json!({
             "id":"fix", "use":"repair",
             "repeat":{"until":"accepted", "max_rounds":2,
-                "previous_bindings":{"synthesis":"initial-synthesis"}},
+                "previous_bindings":{"synthesis":"initial-synthesis"},
+                "retry_on":["accepted"], "selected_publication":"publication"},
             "with":{"worktree":"/fixture/writer", "write_scope":["src"],
                 "lenses":["security"]}
         }))
@@ -532,6 +533,9 @@ fn repeat_lowers_a_composite_template_to_a_loop() {
             .previous_bindings["synthesis"],
         "initial-synthesis"
     );
+    let spec = explicitly_bound.loop_body.as_ref().unwrap();
+    assert_eq!(spec.retry_on, ["accepted"]);
+    assert_eq!(spec.selected_publication.as_deref(), Some("publication"));
 }
 
 #[test]
