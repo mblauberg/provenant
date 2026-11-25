@@ -784,10 +784,9 @@ fn queue_receipt(
 
 #[cfg(test)]
 mod admission_tests {
-    use super::*;
-
     #[test]
     fn static_refusals_park_but_transient_owner_failures_retry() {
+        use super::*;
         let invalid = super::super::interface::graph_input_reason("invalid item plan");
         assert!(deterministic_launch_refusal(&invalid).is_some());
         assert!(deterministic_launch_refusal(&FacadeError::OwnerUnavailable).is_none());

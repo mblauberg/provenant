@@ -1,8 +1,6 @@
 //! Revisioned compositions for controls on durable delivery queue items.
 use super::{BoundFacade, FacadeError, Factory};
 use crate::fabric::owner::graph_journal_error;
-#[cfg(test)]
-use provenant_core::GitOid;
 use provenant_core::{CancelToken, Clock, HumanAnswerId, HumanRequestId, OperationId, WaitBudget};
 pub(super) use provenant_fabric_runtime::graph::queue_control::{Action, Metadata};
 use provenant_fabric_runtime::graph::queue_control::{Intent, Phase, QueueControlLedger as Ledger};
@@ -1838,6 +1836,10 @@ fn close_owned_park(
 mod tests {
     use super::*;
 
+    #[allow(
+        dead_code,
+        reason = "the custom worktree driver omits libtest functions"
+    )]
     fn operation(value: u8) -> OperationId {
         OperationId::parse(&format!("{value:02x}").repeat(16)).unwrap()
     }
@@ -1848,6 +1850,10 @@ mod tests {
         assert_ne!(operation(1), operation(2));
     }
 
+    #[allow(
+        dead_code,
+        reason = "the custom worktree driver omits libtest functions"
+    )]
     fn metadata(revision: u64, operation_id: OperationId) -> Metadata {
         Metadata {
             action: Action::Retry,
@@ -1952,6 +1958,7 @@ mod tests {
 
     #[test]
     fn accept_gate_retry_is_bound_to_saved_answer_and_failed_gate_generation() {
+        use provenant_core::GitOid;
         let operation_id = operation(8);
         let request_id = HumanRequestId::from_bytes([1; 16]);
         let answer_id = HumanAnswerId::from_bytes([2; 16]);

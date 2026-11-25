@@ -811,7 +811,7 @@ fn tightened_retry_limit_preserves_the_checkpoint_envelope() -> Result {
     let mut target = factory
         .graph_target("g-test/reader")?
         .ok_or("retry target")?;
-    factory.prepare_retry(&mut target, &request, &document, &mut staged)?;
+    factory.prepare_retry_inner(&mut target, &request, &document, &mut staged, None)?;
     provenant_fabric_runtime::graph::admit_candidate(
         &document,
         Some(&staged),

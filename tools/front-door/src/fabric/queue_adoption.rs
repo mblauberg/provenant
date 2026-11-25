@@ -708,11 +708,10 @@ fn request(cancel: &CancelToken, budget: Duration) -> provenant_config::ports::R
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use serde_json::json;
-
     #[test]
     fn mixed_case_snapshot_repository_matches_canonical_tracker_identity() {
+        use super::*;
+        use serde_json::json;
         let item = QueueSnapshotItem {
             identity: super::super::queue_registry::QueueIdentity {
                 project: "project".into(),

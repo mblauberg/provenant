@@ -1396,10 +1396,18 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[allow(
+        dead_code,
+        reason = "the custom worktree driver omits libtest functions"
+    )]
     fn identity(item: &str) -> QueueIdentity {
         QueueIdentity::new("project", "github", item).unwrap()
     }
 
+    #[allow(
+        dead_code,
+        reason = "the custom worktree driver omits libtest functions"
+    )]
     fn item(identity: QueueIdentity, index: usize, state: QueueItemState) -> QueueItem {
         QueueItem {
             graph_id: format!("graph-{index}"),
@@ -1416,6 +1424,10 @@ mod tests {
         }
     }
 
+    #[allow(
+        dead_code,
+        reason = "the custom worktree driver omits libtest functions"
+    )]
     fn queue(items: Vec<QueueItem>) -> QueueRecord {
         let admitted_at = WallTime::from_micros(0).unwrap();
         let mut knobs = QueueKnobs::default();

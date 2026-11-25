@@ -367,11 +367,10 @@ fn valid_repository(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use serde_json::json;
-
     #[test]
     fn checked_issue_accepts_repository_case_variation_and_preserves_selected_name() {
+        use super::*;
+        use serde_json::json;
         let issue = json!({
             "id": "issue-node-id",
             "number": 42,
@@ -389,6 +388,8 @@ mod tests {
 
     #[test]
     fn checked_issue_rejects_a_different_repository() {
+        use super::*;
+        use serde_json::json;
         let issue = json!({
             "id": "issue-node-id",
             "number": 42,

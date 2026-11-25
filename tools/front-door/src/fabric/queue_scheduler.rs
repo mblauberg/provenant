@@ -1032,8 +1032,6 @@ fn exact_ci_result(
 
 #[cfg(test)]
 mod tests {
-    use super::{BTreeSet, lease_owner, mark_superseded_lease};
-
     #[test]
     fn unanswered_paused_queue_item_without_a_timer_is_not_wakeable() {
         use super::*;
@@ -1105,6 +1103,7 @@ mod tests {
 
     #[test]
     fn exact_supersession_overrides_active_lease_classification() {
+        use super::{BTreeSet, lease_owner, mark_superseded_lease};
         let owner = lease_owner("project", "graph", "publish", "0123456789abcdef");
         let mut active = BTreeSet::new();
         active.insert(owner.clone());

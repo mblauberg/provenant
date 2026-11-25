@@ -3610,17 +3610,6 @@ impl Factory {
         self.control_receipt(run, &target, input, budget, cancel, false)
     }
 
-    #[cfg(test)]
-    pub(super) fn prepare_retry(
-        &self,
-        target: &mut super::unified::GraphTarget,
-        input: &Value,
-        document: &GraphDocument,
-        checkpoint: &mut provenant_fabric_runtime::graph::GraphCheckpoint,
-    ) -> Result<(), FacadeError> {
-        self.prepare_retry_inner(target, input, document, checkpoint, None)
-    }
-
     pub(super) fn prepare_retry_with_journal(
         &self,
         target: &mut super::unified::GraphTarget,
