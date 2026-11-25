@@ -21,6 +21,7 @@ pub(super) fn observe(
     project: &Path,
     target: &str,
     names: &[String],
+    delivery_queue: bool,
     failed_checks_max_bytes: usize,
     max_failed_checks: usize,
 ) -> CiObservation {
@@ -44,7 +45,7 @@ pub(super) fn observe(
         let max_age = observer.fast_interval();
         observer.checks(&head.sha, max_age, &request).ok()
     };
-    let mut result = observe_with(target, names, &read, evidence, |head| {
+    let mut result = observe_with(target, names, delivery_queue, &read, evidence, |head| {
         required_checks(state, project, &policy_target(target, head, &read)?)
     });
     result.bound_failed_checks(failed_checks_max_bytes, max_failed_checks);
@@ -186,6 +187,7 @@ fn policy_target(
 fn observe_with(
     target: &str,
     names: &[String],
+    delivery_queue: bool,
     read: &dyn Fn(&[&str]) -> Option<Vec<u8>>,
     evidence: impl FnOnce(&Head) -> Option<Vec<Observed>>,
     policy: impl FnOnce(&Head) -> Option<Vec<String>>,
@@ -193,8 +195,14 @@ fn observe_with(
     let Some(before) = resolve_head(target, read) else {
         return summarise_ci(None, None);
     };
+    let resolved = names.is_empty().then(|| policy(&before));
+    let policy_unavailable =
+        delivery_queue && names.is_empty() && resolved.as_ref().is_some_and(Option::is_none);
     let required = if names.is_empty() {
-        policy(&before).map(|names| ("branch-required", names))
+        resolved
+            .flatten()
+            .filter(|names| !names.is_empty())
+            .map(|names| ("branch-required", names))
     } else {
         Some(("configured", names.to_vec()))
     };
@@ -213,6 +221,11 @@ fn observe_with(
             .as_ref()
             .map(|(policy, names)| (*policy, names.as_slice())),
     );
+    if policy_unavailable {
+        result.state = CiState::Pending;
+        result.summary = "policy=required-unavailable; waiting for the branch check policy".into();
+        result.failed_checks.clear();
+    }
     // A fresh head may not have registered its checks yet. Wait for them;
     // the gate timeout reports a head whose checks never registered.
     if matches!(result.state, CiState::Unavailable | CiState::NotScheduled)
@@ -246,7 +259,7 @@ fn observe_with(
         result.summary.push_str(&next);
     }
     result.head_sha = Some(before.sha.clone());
-    if let Some(evidence) = evidence {
+    if let Some(evidence) = evidence.filter(|_| !policy_unavailable) {
         result.failed_checks = evidence
             .into_iter()
             .filter(|evidence| {
@@ -423,6 +436,7 @@ mod tests {
         let observation = observe_with(
             "feature",
             &["build".into()],
+            false,
             &read,
             |head| evidence(&read, head),
             |_| None,
@@ -477,6 +491,7 @@ mod tests {
         let observation = observe_with(
             "feature",
             &["build".into()],
+            false,
             &read,
             |head| evidence(&read, head),
             |_| None,
@@ -508,6 +523,7 @@ mod tests {
             let observation = observe_with(
                 "feature",
                 &["build".into()],
+                false,
                 &read,
                 |head| evidence(&read, head),
                 |_| None,
@@ -539,6 +555,7 @@ mod tests {
         let observation = observe_with(
             "feature/repair",
             &["build".into()],
+            false,
             &read,
             |head| evidence(&read, head),
             |_| None,
@@ -551,6 +568,44 @@ mod tests {
                 .iter()
                 .any(|call| call.contains("branches/feature%2Frepair"))
         );
+    }
+
+    #[test]
+    fn queue_ci_waits_when_required_policy_is_unreadable_but_accepts_known_empty_policy() {
+        let read = |args: &[&str]| {
+            let value = if args[1] == "pr" {
+                pull(OLD)
+            } else if args.last()?.contains("check-runs") {
+                checks(OLD, "completed", Some("success"))
+            } else {
+                json!([[]])
+            };
+            serde_json::to_vec(&value).ok()
+        };
+        let unavailable = observe_with(
+            "feature",
+            &[],
+            true,
+            &read,
+            |head| evidence(&read, head),
+            |_| None,
+        );
+        assert_eq!(unavailable.state, CiState::Pending);
+        assert_eq!(unavailable.head_sha.as_deref(), Some(OLD));
+        assert!(unavailable.failed_checks.is_empty());
+        assert!(unavailable.summary.contains("policy=required-unavailable"));
+
+        let known_empty = observe_with(
+            "feature",
+            &[],
+            true,
+            &read,
+            |head| evidence(&read, head),
+            |_| Some(Vec::new()),
+        );
+        assert_eq!(known_empty.state, CiState::Passed);
+        assert_eq!(known_empty.head_sha.as_deref(), Some(OLD));
+        assert!(known_empty.summary.contains("policy=all-reported"));
     }
 
     #[test]
@@ -574,6 +629,7 @@ mod tests {
         let observation = observe_with(
             "refs/heads/123",
             &["build".into()],
+            false,
             &read,
             |head| evidence(&read, head),
             |_| None,
@@ -618,6 +674,7 @@ mod tests {
             let observation = observe_with(
                 "feature",
                 &["build".into(), "lint".into()],
+                false,
                 &read,
                 |head| evidence(&read, head),
                 |_| None,
@@ -655,6 +712,7 @@ mod tests {
             let observation = observe_with(
                 "feature",
                 &[],
+                false,
                 &read,
                 |head| evidence(&read, head),
                 |_| None,

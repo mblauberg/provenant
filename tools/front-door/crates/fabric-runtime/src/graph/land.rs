@@ -2,10 +2,11 @@
 //!
 //! A node that `continues` an upstream writer reuses its worktree and delivery
 //! branch: the host fast-forward pushes the new commits to that branch only,
-//! so a repair updates the same pull request. A `land` node merges a writer's
-//! pull request once a verdict gate and a CI gate downstream of the writer have
-//! passed. The host's risk-tier policy decides whether it lands at once or
-//! asks the chair, who lands by hand; the record keeps who or what authorised it.
+//! so a repair updates the same pull request. A `land` node accepts either a
+//! legacy PR writer or a queue publication receipt, then verifies the required
+//! gates against the pinned head. The host's risk-tier policy decides whether it
+//! lands at once or asks the chair, who lands by hand; the record keeps who or
+//! what authorised it.
 use super::*;
 use crate::config::{LandChoice, LandPolicy};
 use provenant_core::review_cover::Reviewed;
@@ -13,7 +14,7 @@ use provenant_records::run::DeliveryMode;
 use provenant_records::workflow::{ReviewVerdict, RiskTier};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Land the pull request of `node`, a writer that delivers `pr`.
+/// Land the pull request delivered by `node`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LandSpec {
     #[serde(flatten)]
@@ -161,6 +162,61 @@ fn ancestors(
     seen
 }
 
+fn delivery_root_writer(
+    nodes: &[PlannedNode],
+    positions: &BTreeMap<String, usize>,
+    mut writer: usize,
+) -> Option<usize> {
+    for _ in 0..nodes.len() {
+        let node = &nodes[writer];
+        let Some(parent) = node.continues.as_deref() else {
+            return (plans::writer(node)
+                && matches!(node.delivery, Some(DeliveryMode::Pr | DeliveryMode::Push)))
+            .then_some(writer);
+        };
+        let parent_index = *positions.get(parent)?;
+        let parent_node = &nodes[parent_index];
+        if !plans::writer(parent_node) || parent_node.worktree != node.worktree {
+            return None;
+        }
+        writer = parent_index;
+    }
+    None
+}
+
+fn publish_source_writer(
+    nodes: &[PlannedNode],
+    positions: &BTreeMap<String, usize>,
+    publish_index: usize,
+) -> Option<usize> {
+    let publish = nodes.get(publish_index)?;
+    if publish.kind != Some(NodeKind::Publish) {
+        return None;
+    }
+    let upstream = ancestors(nodes, positions, &publish.id);
+    let hygiene_id = match publish.source.as_ref()? {
+        SourceBinding::Node { node } => node,
+        _ => return None,
+    };
+    let hygiene_index = *positions.get(hygiene_id)?;
+    let hygiene = &nodes[hygiene_index];
+    if hygiene.kind != Some(NodeKind::Hygiene) || !upstream.contains(&hygiene_index) {
+        return None;
+    }
+    let writer_id = match hygiene.source.as_ref()? {
+        SourceBinding::Node { node } => node,
+        _ => return None,
+    };
+    let writer_index = *positions.get(writer_id)?;
+    if !upstream.contains(&writer_index)
+        || !plans::writer(&nodes[writer_index])
+        || delivery_root_writer(nodes, positions, writer_index).is_none()
+    {
+        return None;
+    }
+    Some(writer_index)
+}
+
 /// Checks that need the whole acyclic plan.
 pub(super) fn validate_relations(
     nodes: &[PlannedNode],
@@ -170,15 +226,26 @@ pub(super) fn validate_relations(
         if let Some(SourceBinding::Head { node: target }) = &node.source {
             let upstream = ancestors(nodes, positions, &node.id);
             let valid = positions.get(target).is_some_and(|index| {
-                let writer = &nodes[*index];
+                let source = &nodes[*index];
                 upstream.contains(index)
-                    && plans::writer(writer)
-                    && matches!(writer.delivery, Some(DeliveryMode::Pr | DeliveryMode::Push))
-                    && writer.continues.is_none()
+                    && if source.kind == Some(NodeKind::Publish) {
+                        publish_source_writer(nodes, positions, *index).is_some_and(|writer| {
+                            !plans::writer(node)
+                                || (node.worktree.is_some()
+                                    && node.worktree == nodes[writer].worktree)
+                        })
+                    } else {
+                        plans::writer(source)
+                            && matches!(
+                                source.delivery,
+                                Some(DeliveryMode::Pr | DeliveryMode::Push)
+                            )
+                            && source.continues.is_none()
+                    }
             });
             if !valid {
                 return Err(format!(
-                    "node {}: head source must name an upstream writer that delivers pr or push",
+                    "node {}: head source must name an upstream delivery writer or queue publication",
                     node.id
                 ));
             }
@@ -202,18 +269,20 @@ pub(super) fn validate_relations(
         }
         if let Some(spec) = &node.land {
             let upstream = ancestors(nodes, positions, &node.id);
-            let Some(writer) = positions.get(&spec.node).copied().filter(|index| {
-                let writer = &nodes[*index];
+            let Some(target) = positions.get(&spec.node).copied().filter(|index| {
+                let target = &nodes[*index];
                 upstream.contains(index)
-                    && plans::writer(writer)
-                    && writer.delivery == Some(DeliveryMode::Pr)
-                    && writer.continues.is_none()
+                    && target.continues.is_none()
+                    && (target.kind == Some(NodeKind::Publish)
+                        || (plans::writer(target) && target.delivery == Some(DeliveryMode::Pr)))
             }) else {
                 return Err(format!(
-                    "node {}: land must follow a writer that delivers pr",
+                    "node {}: land must follow a PR writer or queue publication node",
                     node.id
                 ));
             };
+            let after_target =
+                |gate: usize| ancestors(nodes, positions, &nodes[gate].id).contains(&target);
             let gate_after_writer = |ci: bool| {
                 upstream.iter().any(|index| {
                     let gate = &nodes[*index];
@@ -222,10 +291,47 @@ pub(super) fn validate_relations(
                         Some(GateCondition::Verdict { .. }) => false,
                         _ => return false,
                     };
-                    kind == ci && ancestors(nodes, positions, &gate.id).contains(&writer)
+                    kind == ci && after_target(*index)
                 })
             };
-            if !gate_after_writer(true) || !gate_after_writer(false) {
+            if nodes[target].kind == Some(NodeKind::Publish) {
+                let conflicts: Vec<_> = upstream
+                    .iter()
+                    .copied()
+                    .filter(|index| {
+                        gate_targets_node(&nodes[*index].condition, &spec.node)
+                            && matches!(
+                                &nodes[*index].condition,
+                                Some(GateCondition::Conflict { .. })
+                            )
+                            && after_target(*index)
+                    })
+                    .collect();
+                let ci_after_conflict = upstream.iter().any(|index| {
+                    gate_targets_node(&nodes[*index].condition, &spec.node)
+                        && matches!(&nodes[*index].condition, Some(GateCondition::Ci { .. }))
+                        && after_target(*index)
+                        && conflicts.iter().any(|conflict| {
+                            ancestors(nodes, positions, &nodes[*index].id).contains(conflict)
+                        })
+                });
+                let verdict_after_ci = upstream.iter().any(|index| {
+                    matches!(
+                        &nodes[*index].condition,
+                        Some(GateCondition::Verdict { .. })
+                    ) && after_target(*index)
+                        && upstream.iter().any(|ci| {
+                            matches!(&nodes[*ci].condition, Some(GateCondition::Ci { .. }))
+                                && ancestors(nodes, positions, &nodes[*index].id).contains(ci)
+                        })
+                });
+                if conflicts.is_empty() || !ci_after_conflict || !verdict_after_ci {
+                    return Err(format!(
+                        "node {}: land must follow conflict, CI and verdict gates after its publication node",
+                        node.id
+                    ));
+                }
+            } else if !gate_after_writer(true) || !gate_after_writer(false) {
                 return Err(format!(
                     "node {}: land must follow a verdict gate and a CI gate after its writer",
                     node.id
@@ -254,6 +360,165 @@ pub(super) fn delivered_head(
     writer: &str,
 ) -> Option<(String, String)> {
     delivered_within(plan, checkpoint, writer, |_| true).map(|(branch, head, _)| (branch, head))
+}
+
+/// A queue land pins the exact branch and head the publication owner returned.
+/// Its PR reference is opaque (it may be a URL), so the landing owner resolves
+/// and persists its native PR number using this exact branch/head pair.
+fn land_subject(
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &BTreeMap<String, usize>,
+    target: &str,
+) -> Option<(String, String)> {
+    let index = *positions.get(target)?;
+    if plan.nodes[index].kind != Some(NodeKind::Publish) {
+        return delivered_head(plan, checkpoint, target);
+    }
+    let progress = checkpoint.nodes.get(index)?;
+    if progress.state != NodeState::Succeeded {
+        return None;
+    }
+    let outputs = progress.outputs.as_ref()?;
+    let publication = outputs.publication.as_ref()?;
+    let receipt = progress.delivery_publication.as_ref()?.receipt.as_ref()?;
+    if publication != receipt
+        || publication.branch.trim().is_empty()
+        || publication.pull_request.trim().is_empty()
+        || publication.head.parse::<provenant_core::GitOid>().is_err()
+        || outputs.branch.as_deref() != Some(publication.branch.as_str())
+        || outputs.commit.as_deref() != Some(publication.head.as_str())
+        || checkpoint.pull_request.as_deref() != Some(publication.pull_request.as_str())
+    {
+        return None;
+    }
+    Some((publication.branch.clone(), publication.head.clone()))
+}
+
+fn verified_publication_writer<'a>(
+    plan: &'a PlannedGraph,
+    checkpoint: &'a GraphCheckpoint,
+    positions: &BTreeMap<String, usize>,
+    target: &str,
+) -> Option<(
+    &'a PlannedNode,
+    &'a NodeProgress,
+    &'a DeliveryPublicationProgress,
+)> {
+    let index = *positions.get(target)?;
+    if plan.nodes[index].kind != Some(NodeKind::Publish) {
+        return None;
+    }
+    let (_, published_head) = land_subject(plan, checkpoint, positions, target)?;
+    let publication = checkpoint.nodes[index].delivery_publication.as_ref()?;
+    if publication.input_head != published_head {
+        return None;
+    }
+    let expected_writer = publish_source_writer(&plan.nodes, positions, index)?;
+    let writer_index = *positions.get(&publication.source_node)?;
+    if writer_index != expected_writer {
+        return None;
+    }
+    let writer = &plan.nodes[writer_index];
+    let progress = &checkpoint.nodes[writer_index];
+    if !plans::writer(writer)
+        || progress.state != NodeState::Succeeded
+        || progress.writer_binding.is_none()
+        || !progress.recorded_attempts().any(|attempt| {
+            attempt.key == publication.source_key
+                && attempt.state == AttemptState::Terminal
+                && attempt.attempt_ref.as_deref() == Some(publication.source_attempt.as_str())
+        })
+    {
+        return None;
+    }
+    Some((writer, progress, publication))
+}
+
+/// The writer retained by a completed queue publication, if its receipt and
+/// exact source attempt still agree with the checkpoint.
+pub(super) fn published_source_writer<'a>(
+    plan: &'a PlannedGraph,
+    checkpoint: &'a GraphCheckpoint,
+    positions: &BTreeMap<String, usize>,
+    target: &str,
+) -> Option<&'a str> {
+    verified_publication_writer(plan, checkpoint, positions, target)
+        .map(|(writer, _, _)| writer.id.as_str())
+}
+
+fn gate_targets_node(condition: &Option<GateCondition>, target: &str) -> bool {
+    match condition {
+        Some(GateCondition::Conflict {
+            target: CiTarget::Node { node, .. },
+            ..
+        })
+        | Some(GateCondition::Ci {
+            target: CiTarget::Node { node, .. },
+            ..
+        }) => node == target,
+        _ => false,
+    }
+}
+
+/// Queue publication evidence must still be the evidence that allowed the
+/// graph to reach land. The landing owner independently re-reads the live PR,
+/// its mergeability, required checks and current review before merging.
+fn queue_landing_gate_error(
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &BTreeMap<String, usize>,
+    land_node: &str,
+    publication_node: &str,
+    head: &str,
+) -> Option<String> {
+    let upstream = ancestors(&plan.nodes, positions, land_node);
+    let publication_index = positions.get(publication_node).copied()?;
+    let conflict_index = upstream.iter().rev().copied().find(|index| {
+        let progress = &checkpoint.nodes[*index];
+        plan.nodes[*index].id != publication_node
+            && gate_targets_node(&plan.nodes[*index].condition, publication_node)
+            && matches!(
+                &plan.nodes[*index].condition,
+                Some(GateCondition::Conflict { .. })
+            )
+            && ancestors(&plan.nodes, positions, &plan.nodes[*index].id)
+                .contains(&publication_index)
+            && progress.state == NodeState::Succeeded
+            && progress.gate.as_ref().is_some_and(|gate| gate.passed)
+            && progress.conflict.as_ref().is_some_and(|evidence| {
+                evidence.state == ConflictState::Clear && evidence.head_sha.as_deref() == Some(head)
+            })
+    });
+    let Some(conflict_index) = conflict_index else {
+        return Some(format!(
+            "node {land_node}: the published PR lacks a clear conflict observation for head {head}; return it through the conflict gate"
+        ));
+    };
+    let ci_passed = upstream.iter().any(|index| {
+        let progress = &checkpoint.nodes[*index];
+        gate_targets_node(&plan.nodes[*index].condition, publication_node)
+            && matches!(
+                &plan.nodes[*index].condition,
+                Some(GateCondition::Ci { .. })
+            )
+            && ancestors(&plan.nodes, positions, &plan.nodes[*index].id).contains(&conflict_index)
+            && progress.state == NodeState::Succeeded
+            && progress.gate.as_ref().is_some_and(|gate| gate.passed)
+            && progress.ci.as_ref().is_some_and(|evidence| {
+                evidence.state == CiState::Passed && evidence.head_sha.as_deref() == Some(head)
+            })
+            && progress
+                .outputs
+                .as_ref()
+                .and_then(|outputs| outputs.commit.as_deref())
+                == Some(head)
+    });
+    (!ci_passed).then(|| {
+        format!(
+            "node {land_node}: the published PR lacks green required CI for head {head}; return it through CI"
+        )
+    })
 }
 
 /// As [`delivered_head`], counting only the chain nodes `include` accepts.
@@ -407,6 +672,16 @@ pub(super) fn chain_head(
     writer: &str,
 ) -> Option<String> {
     let upstream = ancestors(&plan.nodes, positions, node);
+    if let Some(index) = positions.get(writer)
+        && plan.nodes[*index].kind == Some(NodeKind::Publish)
+    {
+        if !upstream.contains(index) {
+            return None;
+        }
+        return verified_publication_writer(plan, checkpoint, positions, writer)
+            .and_then(|_| land_subject(plan, checkpoint, positions, writer))
+            .map(|(_, head)| head);
+    }
     delivered_within(plan, checkpoint, writer, |index| upstream.contains(&index))
         .map(|(_, head, _)| head)
 }
@@ -420,6 +695,15 @@ pub(super) fn chain_source_attempt(
     writer: &str,
 ) -> Option<AttemptKey> {
     let upstream = ancestors(&plan.nodes, positions, node);
+    if let Some(index) = positions.get(writer)
+        && plan.nodes[*index].kind == Some(NodeKind::Publish)
+    {
+        if !upstream.contains(index) {
+            return None;
+        }
+        return verified_publication_writer(plan, checkpoint, positions, writer)
+            .map(|(_, _, publication)| publication.source_key.clone());
+    }
     delivered_within(plan, checkpoint, writer, |index| upstream.contains(&index))
         .and_then(|(_, _, attempt)| attempt)
 }
@@ -434,6 +718,40 @@ pub(super) fn chain_attempts(
     writer: &str,
 ) -> Vec<String> {
     let upstream = ancestors(&plan.nodes, positions, node);
+    if let Some(publish_index) = positions.get(writer)
+        && plan.nodes[*publish_index].kind == Some(NodeKind::Publish)
+    {
+        if !upstream.contains(publish_index) {
+            return Vec::new();
+        }
+        let Some((published_writer, _, _)) =
+            verified_publication_writer(plan, checkpoint, positions, writer)
+        else {
+            return Vec::new();
+        };
+        let Some(writer_index) = positions.get(&published_writer.id).copied() else {
+            return Vec::new();
+        };
+        let Some(root_index) = delivery_root_writer(&plan.nodes, positions, writer_index) else {
+            return Vec::new();
+        };
+        let published_ancestors = ancestors(&plan.nodes, positions, writer);
+        let mut attempts: Vec<String> = plan
+            .nodes
+            .iter()
+            .zip(&checkpoint.nodes)
+            .enumerate()
+            .filter(|(index, _)| {
+                published_ancestors.contains(index)
+                    && continues_from(&plan.nodes, positions, *index, root_index)
+            })
+            .flat_map(|(_, (_, progress))| progress.recorded_attempts())
+            .filter_map(|attempt| attempt.attempt_ref.clone())
+            .collect();
+        attempts.sort();
+        attempts.dedup();
+        return attempts;
+    }
     let mut attempts: Vec<String> = plan
         .nodes
         .iter()
@@ -449,6 +767,27 @@ pub(super) fn chain_attempts(
     attempts.sort();
     attempts.dedup();
     attempts
+}
+
+fn continues_from(
+    nodes: &[PlannedNode],
+    positions: &BTreeMap<String, usize>,
+    mut node: usize,
+    root: usize,
+) -> bool {
+    for _ in 0..nodes.len() {
+        if node == root {
+            return true;
+        }
+        let Some(parent) = nodes[node].continues.as_deref() else {
+            return false;
+        };
+        let Some(index) = positions.get(parent).copied() else {
+            return false;
+        };
+        node = index;
+    }
+    false
 }
 
 /// Why no passing verdict gate after `writer` accepted `head`, if none did.
@@ -664,6 +1003,7 @@ fn outputs(record: &LandRecord) -> NodeOutputs {
         full_disposition_findings: None,
         verdict_error: None,
         hygiene: None,
+        publication: None,
         schema_version: 2,
         decide_outcome: None,
         result: Some(ResultOutput {
@@ -700,19 +1040,42 @@ pub(super) fn advance<R: AttemptOwner, J: GraphJournal>(
     if checkpoint.nodes[index].state.settled() {
         return Ok(());
     }
-    if checkpoint.nodes[index].land.is_none() {
-        let Some((branch, head)) = delivered_head(plan, checkpoint, &spec.node) else {
-            return fail::<R, J>(
-                index,
-                "land_delivery_missing",
-                format!(
-                    "node {}: writer {} delivered no branch and commit to land",
-                    node.id, spec.node
-                ),
-                checkpoint,
-                journal,
-            );
-        };
+    let publish_target = positions
+        .get(&spec.node)
+        .is_some_and(|target| plan.nodes[*target].kind == Some(NodeKind::Publish));
+    let published_subject = if publish_target {
+        land_subject(plan, checkpoint, positions, &spec.node)
+    } else {
+        None
+    };
+    if publish_target && published_subject.is_none() {
+        return fail::<R, J>(
+            index,
+            "land_publication_missing",
+            format!(
+                "node {}: publication {} has no consistent exact-head receipt to land",
+                node.id, spec.node
+            ),
+            checkpoint,
+            journal,
+        );
+    }
+    if let Some((branch, head)) = published_subject.as_ref() {
+        if checkpoint.nodes[index]
+            .land
+            .as_ref()
+            .is_some_and(|record| record.branch != branch.as_str() || record.head != head.as_str())
+        {
+            return Err(GraphError::BadCheckpoint {
+                node: node.id.clone(),
+                invariant: "land record must match its queue publication receipt",
+            });
+        }
+        if let Some(reason) =
+            queue_landing_gate_error(plan, checkpoint, positions, &node.id, &spec.node, head)
+        {
+            return fail::<R, J>(index, "land_gate_stale", reason, checkpoint, journal);
+        }
         if let Some(reason) = acceptance_error(
             plan,
             checkpoint,
@@ -725,6 +1088,35 @@ pub(super) fn advance<R: AttemptOwner, J: GraphJournal>(
         .map_err(GraphError::Run)?
         {
             return fail::<R, J>(index, "land_review_required", reason, checkpoint, journal);
+        }
+    }
+    if checkpoint.nodes[index].land.is_none() {
+        let Some((branch, head)) = land_subject(plan, checkpoint, positions, &spec.node) else {
+            return fail::<R, J>(
+                index,
+                "land_delivery_missing",
+                format!(
+                    "node {}: target {} delivered no branch and commit to land",
+                    node.id, spec.node
+                ),
+                checkpoint,
+                journal,
+            );
+        };
+        if !publish_target {
+            if let Some(reason) = acceptance_error(
+                plan,
+                checkpoint,
+                positions,
+                owner,
+                &node.id,
+                &spec.node,
+                (branch.as_str(), head.as_str()),
+            )
+            .map_err(GraphError::Run)?
+            {
+                return fail::<R, J>(index, "land_review_required", reason, checkpoint, journal);
+            }
         }
         let LandChoice { policy, source } = owner.land_policy(spec.tier);
         let progress = &mut checkpoint.nodes[index];

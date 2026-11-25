@@ -426,6 +426,7 @@ pub(crate) fn observe_ci(
     project: &Path,
     target: &str,
     names: &[String],
+    delivery_queue: bool,
     failed_checks_max_bytes: usize,
     max_failed_checks: usize,
 ) -> provenant_fabric_runtime::graph::CiObservation {
@@ -434,6 +435,7 @@ pub(crate) fn observe_ci(
         project,
         target,
         names,
+        delivery_queue,
         failed_checks_max_bytes,
         max_failed_checks,
     )
@@ -492,12 +494,19 @@ fn mark_conflict(
 #[allow(dead_code)] // The worktree driver includes this module without libtest.
 fn observe_ci_with(
     names: &[String],
+    delivery_queue: bool,
     resolve: impl FnOnce() -> Option<Vec<String>>,
     read_checks: impl FnOnce() -> Option<Vec<Check>>,
     read_mergeable: impl FnOnce() -> Option<String>,
 ) -> provenant_fabric_runtime::graph::CiObservation {
+    let resolved = names.is_empty().then(resolve);
+    let policy_unavailable =
+        delivery_queue && names.is_empty() && resolved.as_ref().is_some_and(Option::is_none);
     let required = if names.is_empty() {
-        resolve().map(|names| ("branch-required", names))
+        resolved
+            .flatten()
+            .filter(|names| !names.is_empty())
+            .map(|names| ("branch-required", names))
     } else {
         Some(("configured", names.to_vec()))
     };
@@ -507,6 +516,12 @@ fn observe_ci_with(
             .as_ref()
             .map(|(policy, names)| (*policy, names.as_slice())),
     );
+    if policy_unavailable {
+        observation.state = provenant_fabric_runtime::graph::CiState::Pending;
+        observation.summary =
+            "policy=required-unavailable; waiting for the branch check policy".into();
+        observation.failed_checks.clear();
+    }
     mark_conflict(&mut observation, read_mergeable);
     observation
 }
@@ -526,7 +541,6 @@ pub(super) fn required_checks(state: &Path, project: &Path, target: &str) -> Opt
         .ok()
     })
     .map(|policy| policy.checks.into_iter().map(|check| check.name).collect())
-    .filter(|names: &Vec<String>| !names.is_empty())
 }
 
 /// A required check, optionally pinned to the GitHub App that must report it.

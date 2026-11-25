@@ -118,6 +118,9 @@ struct FakeOwner {
     hygiene_outcomes: VecDeque<provenant_records::graph::HygieneOutcome>,
     hygiene_calls: usize,
     hygiene_requests: Vec<(String, String, String)>,
+    publication_receipts: VecDeque<DeliveryPublication>,
+    publication_calls: usize,
+    publication_requests: Vec<(String, String, String, Option<String>)>,
     park_calls: Vec<String>,
     park_receipt: Option<provenant_core::HumanRequestId>,
 }
@@ -322,6 +325,22 @@ impl AttemptOwner for FakeOwner {
             formatter_source: Some("repository".into()),
             diagnostic: None,
         })
+    }
+    fn publish_delivery(
+        &mut self,
+        request: PublicationRequest<'_>,
+    ) -> Result<Option<DeliveryPublication>, Self::Error> {
+        self.publication_calls += 1;
+        self.publication_requests.push((
+            request.operation_id.to_owned(),
+            request.expected_head.to_owned(),
+            request.source_branch.to_owned(),
+            request.expected_remote_head.map(str::to_owned),
+        ));
+        self.publication_receipts
+            .pop_front()
+            .map(Some)
+            .ok_or(NoObservation)
     }
     fn park_delivery(
         &mut self,

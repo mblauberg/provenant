@@ -100,6 +100,7 @@ pub(super) fn apply_gate_result(
     reason: Option<String>,
     on_fail: Option<String>,
     is_ci: bool,
+    delivery_queue: bool,
 ) {
     let passed = reason.is_none();
     progress.state = if passed {
@@ -114,7 +115,7 @@ pub(super) fn apply_gate_result(
         on_fail,
     });
     progress.outputs = Some(if is_ci {
-        ci::outputs(passed, progress.ci.as_ref())
+        ci::outputs(passed, progress.ci.as_ref(), delivery_queue)
     } else {
         gate_outputs(passed)
     });
@@ -905,6 +906,7 @@ pub(super) fn initial_checkpoint(
                 delivery_loop: None,
                 escalation: None,
                 delivery_hygiene: None,
+                delivery_publication: None,
                 delivery_park: None,
                 conflict: None,
                 extra: Default::default(),
@@ -1752,6 +1754,7 @@ pub(super) enum NodeAction<'a> {
     Decide(&'a DecideSpec),
     Land(&'a LandSpec),
     Hygiene,
+    Publish,
     Gate(&'a GateCondition),
     Attempt,
 }
@@ -1824,6 +1827,9 @@ pub(super) fn node_action<'a>(
     }
     if node.kind == Some(NodeKind::Hygiene) {
         return NodeAction::Hygiene;
+    }
+    if node.kind == Some(NodeKind::Publish) {
+        return NodeAction::Publish;
     }
     if let Some(condition) = &node.condition {
         return NodeAction::Gate(condition);
@@ -2896,23 +2902,23 @@ mod tests {
         });
         let mut observed = NextAttemptFacts::default();
         assert_eq!(
-            next_attempt_transition(node, progress, &limits, Some(at(1)), &observed),
+            next_attempt_transition(node, progress, &limits, Some(at(1)), None, &observed),
             NextAttemptDecision::Ready(NextAttempt::WaitRetryWake)
         );
         assert_eq!(
-            next_attempt_transition(node, progress, &limits, Some(at(10)), &observed),
+            next_attempt_transition(node, progress, &limits, Some(at(10)), None, &observed),
             NextAttemptDecision::ObserveLaunchAcceptance
         );
         observed.launch_accepted = Some(false);
         assert_eq!(
-            next_attempt_transition(node, progress, &limits, Some(at(10)), &observed),
+            next_attempt_transition(node, progress, &limits, Some(at(10)), None, &observed),
             NextAttemptDecision::Ready(NextAttempt::LaunchRetryExhausted {
                 reason: "busy".into()
             })
         );
         observed.launch_accepted = Some(true);
         assert_eq!(
-            next_attempt_transition(node, progress, &limits, Some(at(10)), &observed),
+            next_attempt_transition(node, progress, &limits, Some(at(10)), None, &observed),
             NextAttemptDecision::Ready(NextAttempt::Candidate {
                 route_index: 0,
                 settlement_retries: None
@@ -2925,7 +2931,7 @@ mod tests {
         attempt.outcome = Some(AttemptOutcome::AuthRequired);
         attempt.attempt_ref = Some("host/attempt".into());
         assert_eq!(
-            next_attempt_transition(node, progress, &limits, None, &observed),
+            next_attempt_transition(node, progress, &limits, None, None, &observed),
             NextAttemptDecision::ObservePreparationFallback
         );
         observed.fallback = Some(PreparationObservation {
@@ -2934,7 +2940,7 @@ mod tests {
             cause: None,
         });
         assert!(matches!(
-            next_attempt_transition(node, progress, &limits, None, &observed),
+            next_attempt_transition(node, progress, &limits, None, None, &observed),
             NextAttemptDecision::Ready(NextAttempt::Fail {
                 code: Some("fallback_evidence_unreadable"),
                 ..

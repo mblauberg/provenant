@@ -186,6 +186,119 @@ fn hygiene_error_park_replays_the_saved_transition_once() {
 }
 
 #[test]
+fn publication_requires_the_retained_hygiene_source() {
+    let mut document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version":2, "graph_id":"publication-binding", "integration_branch":"delivery/item",
+        "nodes":[
+            {"id":"writer", "prompt":"Write", "access":"worktree_write", "worktree":"retained", "route":{"alias":"junior"}},
+            {"id":"hygiene", "kind":"hygiene", "access":"worktree_write", "worktree":"retained", "depends_on":["writer"], "source":{"type":"node","node":"writer"}},
+            {"id":"publish", "kind":"publish", "access":"worktree_write", "worktree":"retained", "depends_on":["hygiene"], "source":{"type":"node","node":"hygiene"}}
+        ]
+    })).unwrap();
+    document.queue = Some(QueueKnobs::default());
+    assert!(validate_plan(&document).is_ok());
+    document.nodes[2].worktree = Some("other".into());
+    assert!(validate_plan(&document).is_err());
+}
+
+fn publication_graph() -> GraphDocument {
+    let mut document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version":2, "graph_id":"queue-publication", "integration_branch":"delivery/item",
+        "delivery":"pr", "nodes":[
+            {"id":"writer", "prompt":"Write", "access":"worktree_write", "worktree":"retained", "route":{"alias":"junior"}},
+            {"id":"hygiene", "kind":"hygiene", "access":"worktree_write", "worktree":"retained", "depends_on":["writer"], "source":{"type":"node","node":"writer"}},
+            {"id":"publish", "kind":"publish", "access":"worktree_write", "worktree":"retained", "depends_on":["hygiene"], "source":{"type":"node","node":"hygiene"}}
+        ]
+    })).unwrap();
+    document.queue = Some(QueueKnobs::default());
+    document
+}
+
+#[test]
+fn publication_persists_exact_hygiene_head_and_skips_legacy_final_delivery() {
+    let document = publication_graph();
+    let url = "https://example.invalid/pr/queue";
+    let mut owner = FakeOwner {
+        observations: VecDeque::from([hygiene_writer_observation()]),
+        hygiene_outcomes: VecDeque::from([provenant_records::graph::HygieneOutcome {
+            kind: provenant_records::graph::HygieneOutcomeKind::Clean,
+            before_head: Some("b".repeat(40)),
+            after_head: Some("c".repeat(40)),
+            handoff: Some("The clean worktree is ready".into()),
+        }]),
+        publication_receipts: VecDeque::from([DeliveryPublication {
+            branch: format!("provenant/graph/{}", "a".repeat(64)),
+            head: "c".repeat(40),
+            pull_request: url.into(),
+        }]),
+        graph_bases: (None, Some("d".repeat(40).parse().unwrap())),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    let publication = &run.checkpoint.nodes[2];
+    let receipt = publication
+        .delivery_publication
+        .as_ref()
+        .unwrap()
+        .receipt
+        .as_ref()
+        .unwrap();
+    assert_eq!(publication.state, NodeState::Succeeded);
+    assert_eq!(receipt.head, "c".repeat(40));
+    assert_eq!(receipt.pull_request, url);
+    assert_eq!(publication.outputs.as_ref().unwrap().commit.as_deref(), Some("c".repeat(40).as_str()));
+    assert_eq!(run.checkpoint.pull_request.as_deref(), Some(url));
+    assert!(run.checkpoint.delivered);
+    assert_eq!(owner.publication_calls, 1);
+    assert_eq!(owner.publication_requests[0].1, "c".repeat(40));
+    assert_eq!(owner.publication_requests[0].2, "delivery/item");
+    assert_eq!(owner.publication_requests[0].3, None);
+    assert_eq!(owner.deliveries, 0);
+
+    let replay = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(replay.checkpoint, run.checkpoint);
+    assert_eq!(owner.publication_calls, 1);
+    assert_eq!(owner.deliveries, 0);
+}
+
+#[test]
+fn publication_replay_rejects_a_changed_expected_remote_head() {
+    let document = publication_graph();
+    let mut owner = FakeOwner {
+        observations: VecDeque::from([hygiene_writer_observation()]),
+        hygiene_outcomes: VecDeque::from([provenant_records::graph::HygieneOutcome {
+            kind: provenant_records::graph::HygieneOutcomeKind::Clean,
+            before_head: Some("b".repeat(40)),
+            after_head: Some("c".repeat(40)),
+            handoff: None,
+        }]),
+        publication_receipts: VecDeque::from([DeliveryPublication {
+            branch: format!("provenant/graph/{}", "a".repeat(64)),
+            head: "c".repeat(40),
+            pull_request: "https://example.invalid/pr/queue".into(),
+        }]),
+        graph_bases: (None, Some("d".repeat(40).parse().unwrap())),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    let mut changed = run.checkpoint;
+    changed.nodes[2]
+        .delivery_publication
+        .as_mut()
+        .unwrap()
+        .expected_remote_head = Some("e".repeat(40));
+    journal.0 = Some(changed);
+
+    assert!(matches!(
+        advance(&document, &mut owner, &mut journal),
+        Err(GraphError::BadCheckpoint { .. })
+    ));
+    assert_eq!(owner.publication_calls, 1);
+}
+
+#[test]
 fn gate_verdict_fixture_is_attempt_less_and_replays() {
     let document: GraphDocument = serde_json::from_value(serde_json::json!({
         "schema_version": 1, "graph_id": "g-test", "nodes": [

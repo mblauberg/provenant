@@ -4,7 +4,7 @@ pub(super) fn nodes_have_v2(nodes: &[GraphNode]) -> bool {
     nodes.iter().any(|node| {
         node.escalate.is_some()
             || node.delivery_review.is_some()
-            || node.kind == Some(NodeKind::Hygiene)
+            || matches!(node.kind, Some(NodeKind::Hygiene | NodeKind::Publish))
             || matches!(node.condition, Some(GateCondition::Conflict { .. }))
             || node
                 .loop_body
@@ -56,7 +56,10 @@ fn value_has_v2(value: &serde_json::Value) -> bool {
         serde_json::Value::Object(map) => {
             map.contains_key("escalate")
                 || map.contains_key("delivery_review")
-                || map.get("kind").and_then(serde_json::Value::as_str) == Some("hygiene")
+                || matches!(
+                    map.get("kind").and_then(serde_json::Value::as_str),
+                    Some("hygiene" | "publish")
+                )
                 || map.get("type").and_then(serde_json::Value::as_str) == Some("conflict")
                 || map.contains_key("outcome_edge")
                 || map.contains_key("family_group")
@@ -117,7 +120,11 @@ pub(super) fn supplied_kinds(node: &GraphNode) -> Vec<OutputKind> {
         kinds.push(OutputKind::Branch);
     }
     let pinned = node.source.is_some();
-    if write || pinned || node.kind == Some(NodeKind::Land) {
+    if write
+        || pinned
+        || node.kind == Some(NodeKind::Land)
+        || matches!(node.condition, Some(GateCondition::Ci { .. }))
+    {
         kinds.push(OutputKind::Commit);
     }
     kinds
@@ -469,6 +476,36 @@ pub(super) fn validate_flat_plan(
                 ));
             }
         }
+        let is_publish = node.kind == Some(NodeKind::Publish);
+        if is_publish {
+            let hygiene = match &node.source {
+                Some(SourceBinding::Node { node: source }) if node.depends_on.contains(source) => {
+                    positions.get(source).map(|index| &document.nodes[*index])
+                }
+                _ => None,
+            };
+            if document.queue.is_none()
+                || document.integration_branch.is_none()
+                || node.access != AccessMode::WorktreeWrite
+                || node.route.is_some()
+                || node.routes.is_some()
+                || node.attempt.is_some()
+                || !node.prompt.is_empty()
+                || node.delivery.is_some()
+                || node.required_verdict.is_some()
+                || node.on_fail.is_some()
+                || hygiene.is_none_or(|source| {
+                    source.kind != Some(NodeKind::Hygiene)
+                        || source.worktree.is_none()
+                        || source.worktree != node.worktree
+                })
+            {
+                return Err(node_plan_error(
+                    node,
+                    "publish requires a direct hygiene source, retained worktree and sealed integration branch, with no agent configuration",
+                ));
+            }
+        }
         let is_gate = node.kind == Some(NodeKind::Gate);
         if is_gate != node.condition.is_some()
             || !is_gate && !is_hygiene && node.loop_body.is_none() && node.on_fail.is_some()
@@ -663,6 +700,7 @@ pub(super) fn validate_flat_plan(
             && !is_decide
             && !is_land
             && !is_hygiene
+            && !is_publish
             && node.prompt.is_empty()
             || plans::prompt(node).len() > limits.node_prompt_bytes
         {
@@ -683,7 +721,13 @@ pub(super) fn validate_flat_plan(
 
         let routes = match (&node.route, &node.routes) {
             (None, None)
-                if is_gate || is_loop || is_composite || is_decide || is_land || is_hygiene =>
+                if is_gate
+                    || is_loop
+                    || is_composite
+                    || is_decide
+                    || is_land
+                    || is_hygiene
+                    || is_publish =>
             {
                 Vec::new()
             }
@@ -856,7 +900,8 @@ pub(super) fn validate_flat_plan(
                     | NodeKind::Composite
                     | NodeKind::Decide
                     | NodeKind::Land
-                    | NodeKind::Hygiene,
+                    | NodeKind::Hygiene
+                    | NodeKind::Publish,
                 ) => node.kind,
                 _ => None,
             },
@@ -1553,7 +1598,7 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
             }
         }
         let parked = if let Some(park) = &progress.delivery_park {
-            let valid = plan.queue.is_some()
+            let valid = (plan.queue.is_some() || node.kind == Some(NodeKind::Hygiene))
                 && !park.operation_id.is_empty()
                 && park.operation_id == park.transition_id
                 && park.operation_id.len() <= 256
@@ -1583,16 +1628,25 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
         };
         if let Some(condition) = &node.condition {
             let valid = match (&progress.gate, progress.state) {
-                (None, NodeState::Pending | NodeState::Blocked | NodeState::Skipped) => {
+                (None, NodeState::Pending | NodeState::Skipped) => {
                     progress.outputs.is_none()
                         && progress.ci.is_none()
                         && progress.conflict.is_none()
+                }
+                (None, NodeState::Blocked) => {
+                    progress.outputs.is_none()
+                        && ((progress.ci.is_none() && progress.conflict.is_none())
+                            || (parked
+                                && progress
+                                    .ci
+                                    .as_ref()
+                                    .is_some_and(|ci| ci.state == CiState::Pending)))
                 }
                 (None, NodeState::Running) => {
                     ((matches!(node.condition, Some(GateCondition::Ci { .. }))
                         && progress.ci.as_ref().is_some_and(|ci| {
                             ci.state == CiState::Pending
-                                && ci.wake_at.is_some()
+                                && (ci.wake_at.is_some() || parked)
                                 && ci.pending_observations > 0
                         }))
                         || (matches!(node.condition, Some(GateCondition::Conflict { .. }))
@@ -1614,7 +1668,7 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                     || parked =>
                 {
                     let mut expected = if matches!(condition, GateCondition::Ci { .. }) {
-                        ci::outputs(result.passed, progress.ci.as_ref())
+                        ci::outputs(result.passed, progress.ci.as_ref(), plan.queue.is_some())
                     } else {
                         gate_outputs(result.passed)
                     };
@@ -1825,6 +1879,68 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
             {
                 return Err(bad("resolved source commit must match its binding"));
             }
+        }
+        if node.kind == Some(NodeKind::Publish) {
+            let intent = progress.delivery_publication.as_ref();
+            let receipt = intent.and_then(|intent| intent.receipt.as_ref());
+            let valid_intent = intent.is_none_or(|intent| {
+                !intent.operation_id.is_empty()
+                    && intent.operation_id.len() <= 256
+                    && match &node.source {
+                        Some(SourceBinding::Node { node: hygiene }) => positions.get(hygiene)
+                            .is_some_and(|hygiene_index| {
+                                let hygiene_node = &plan.nodes[*hygiene_index];
+                                let hygiene_outcome = checkpoint.nodes[*hygiene_index].outputs.as_ref()
+                                    .and_then(|outputs| outputs.hygiene.as_ref());
+                                matches!(&hygiene_node.source, Some(SourceBinding::Node { node }) if node == &intent.source_node)
+                                    && hygiene_outcome.is_some_and(|outcome| outcome.kind == provenant_records::graph::HygieneOutcomeKind::Clean
+                                        && outcome.after_head.as_deref() == Some(intent.input_head.as_str()))
+                            }),
+                        _ => false,
+                    }
+                    && intent.source_key.graph_id == plan.graph_id
+                    && intent.source_key.node_id == intent.source_node
+                    && !intent.source_attempt.is_empty()
+                    && intent.input_head.parse::<provenant_core::GitOid>().is_ok()
+                    && intent.integration_base.parse::<provenant_core::GitOid>().is_ok()
+                    && checkpoint.bases.and_then(|bases| bases.integration).is_some_and(|base| base.to_string() == intent.integration_base)
+                    && intent.expected_remote_head.as_deref().is_none_or(|head| head.parse::<provenant_core::GitOid>().is_ok())
+                    && intent.expected_remote_head.as_ref() == plan.nodes[..index].iter().zip(&checkpoint.nodes[..index])
+                        .filter(|(prior, _)| prior.kind == Some(NodeKind::Publish))
+                        .filter_map(|(_, prior)| prior.delivery_publication.as_ref())
+                        .filter(|prior| prior.source_branch == intent.source_branch)
+                        .filter_map(|prior| prior.receipt.as_ref().map(|receipt| &receipt.head))
+                        .next_back()
+                    && !intent.writer_branch.is_empty()
+                    && document.integration_branch.as_deref() == Some(intent.source_branch.as_str())
+                    && intent.receipt.as_ref().is_none_or(|receipt| {
+                        receipt.head == intent.input_head
+                            && !receipt.branch.is_empty()
+                            && !receipt.pull_request.is_empty()
+                    })
+            });
+            let valid_output = match (receipt, progress.outputs.as_ref()) {
+                (Some(receipt), Some(outputs)) => {
+                    outputs.publication.as_ref() == Some(receipt)
+                        && outputs.branch.as_ref() == Some(&receipt.branch)
+                        && outputs.commit.as_ref() == Some(&receipt.head)
+                }
+                (None, None) => true,
+                _ => false,
+            };
+            let valid_state = match progress.state {
+                NodeState::Pending | NodeState::Skipped => intent.is_none(),
+                NodeState::Running => intent.is_some() && receipt.is_none(),
+                NodeState::Succeeded => receipt.is_some(),
+                NodeState::Blocked => (intent.is_none() && progress.outputs.is_none()) || parked,
+                NodeState::Failed => false,
+            };
+            if !progress.attempts.is_empty() || !valid_intent || !valid_output || !valid_state {
+                return Err(bad(
+                    "publication intent, exact-head receipt and park must match its state",
+                ));
+            }
+            continue;
         }
         if node.kind == Some(NodeKind::Hygiene) {
             let intent = progress.delivery_hygiene.as_ref();
