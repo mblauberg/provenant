@@ -696,6 +696,49 @@ fn ci_timeout_without_registered_checks_reports_not_scheduled() {
 }
 
 #[test]
+fn queue_quota_reset_defers_timeout_across_restart() {
+    let mut doc = queue_published_document();
+    let ci_index = doc.nodes.iter().position(|node| node.id == "ci").unwrap();
+    let Some(GateCondition::Ci {
+        timeout_seconds, ..
+    }) = &mut doc.nodes[ci_index].condition
+    else {
+        unreachable!()
+    };
+    *timeout_seconds = 1;
+    let head = "a".repeat(40);
+    let mut limited = observation(CiState::Pending, "forge quota");
+    limited.set_quota_reset(provenant_core::WallTime::from_micros(10_000_000).unwrap());
+    let mut owner = Owner {
+        branch: Some("delivered/topic".into()),
+        commit: Some(head.clone()),
+        integration_base: Some("f".repeat(40).parse().unwrap()),
+        conflict_observations: VecDeque::from([ConflictObservation {
+            state: ConflictState::Clear,
+            head_sha: Some(head),
+            summary: "clear".into(),
+        }]),
+        observations: VecDeque::from([limited.clone(), limited]),
+        tick: true,
+        ..Default::default()
+    };
+    let mut journal = Journal::default();
+    let first = advance(&doc, &mut owner, &mut journal).unwrap();
+    assert_eq!(first.checkpoint.wake_at.unwrap().as_micros(), 10_000_000);
+    journal.0 =
+        Some(serde_json::from_slice(&serde_json::to_vec(&first.checkpoint).unwrap()).unwrap());
+    owner.wall_seconds = 9;
+    owner.monotonic_micros = 9_000_000;
+    let early = advance(&doc, &mut owner, &mut journal).unwrap();
+    assert!(early.checkpoint.nodes[ci_index].delivery_park.is_none());
+    assert_eq!(early.checkpoint.wake_at.unwrap().as_micros(), 10_000_000);
+    owner.wall_seconds = 10;
+    owner.monotonic_micros = 10_000_000;
+    let expired = advance(&doc, &mut owner, &mut journal).unwrap();
+    assert!(expired.checkpoint.nodes[ci_index].delivery_park.is_some());
+}
+
+#[test]
 fn queue_ci_timeout_parks_pending_checks_without_red_or_green_and_replays() {
     let mut doc = queue_published_document();
     let ci_index = doc.nodes.iter().position(|node| node.id == "ci").unwrap();

@@ -68,6 +68,9 @@ pub(super) fn observe(
 fn wait_for_rate_limit(result: &mut CiObservation, reset: jiff::Timestamp) {
     result.state = CiState::Pending;
     result.summary = format!("forge rate limit; waiting until {reset}");
+    if let Ok(reset) = provenant_core::WallTime::from_micros(reset.as_microsecond()) {
+        result.set_quota_reset(reset);
+    }
     result.failed_checks.clear();
 }
 
@@ -445,6 +448,12 @@ mod tests {
         assert_eq!(observation.state, CiState::Pending);
         assert_eq!(observation.head_sha.as_deref(), Some(OLD));
         assert!(observation.summary.contains(&reset.to_string()));
+        assert_eq!(
+            observation.extra.get("quota_reset_at"),
+            Some(&serde_json::json!(
+                provenant_core::WallTime::from_micros(reset.as_microsecond()).unwrap()
+            ))
+        );
         assert!(observation.failed_checks.is_empty());
     }
 
