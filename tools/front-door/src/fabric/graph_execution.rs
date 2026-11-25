@@ -37,6 +37,66 @@ impl super::Factory {
 use super::*;
 use serde_json::Value;
 
+/// The host must hold exclusive writer custody for this entire transaction.
+/// TODO(#3972-s1): connect this transaction to the persisted hygiene node and
+/// supply its retained writer, formatter and replay-safe operation receipt.
+#[allow(
+    dead_code,
+    reason = "the delivery graph owner is wired by the integration slice"
+)]
+pub(super) trait HygieneTransaction {
+    fn head(&mut self) -> Result<String, String>;
+    /// Includes staged, unstaged and untracked paths, without touching them.
+    fn has_edits(&mut self) -> Result<bool, String>;
+    fn format(&mut self) -> Result<(), String>;
+    /// Commit only the formatter's changes, checking the head and custody again.
+    fn commit_format(&mut self, expected_head: &str) -> Result<(), String>;
+}
+
+/// Run hygiene while preserving the attempt's input head and its handoff.
+/// The diagnostic is separate from the handoff so an operational failure
+/// cannot erase the writer's retained instructions.
+#[allow(
+    dead_code,
+    reason = "the delivery graph owner is wired by the integration slice"
+)]
+pub(super) fn run_hygiene(
+    transaction: &mut impl HygieneTransaction,
+    input_head: &str,
+    handoff: Option<String>,
+) -> (provenant_records::graph::HygieneOutcome, Option<String>) {
+    use provenant_records::graph::{HygieneOutcome, HygieneOutcomeKind};
+
+    let mut outcome = HygieneOutcome {
+        kind: HygieneOutcomeKind::Error,
+        before_head: Some(input_head.to_owned()),
+        after_head: None,
+        handoff,
+    };
+    let result = (|| {
+        let writer_head = transaction.head()?;
+        outcome.after_head = Some(writer_head.clone());
+        if transaction.has_edits()? {
+            outcome.kind = HygieneOutcomeKind::UncommittedEdits;
+        } else if writer_head == input_head {
+            outcome.kind = HygieneOutcomeKind::NoCommit;
+        } else {
+            transaction.format()?;
+            if transaction.has_edits()? {
+                transaction.commit_format(&writer_head)?;
+                let formatted_head = transaction.head()?;
+                outcome.after_head = Some(formatted_head.clone());
+                if formatted_head == writer_head || transaction.has_edits()? {
+                    return Err("formatter commit did not leave a clean new head".into());
+                }
+            }
+            outcome.kind = HygieneOutcomeKind::Clean;
+        }
+        Ok::<(), String>(())
+    })();
+    (outcome, result.err())
+}
+
 /// The effective writer-dirty setting and the layer that set it, read once at
 /// graph submission. An unreadable host config is advisory: warn and use the
 /// compiled default (`wip_commit`) rather than refusing to observe the setting.
@@ -2112,6 +2172,107 @@ pub(super) fn graph_operation(
 )]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct HygieneFixture {
+        head: String,
+        tracked: bool,
+        untracked: bool,
+        format_changes: bool,
+        format_fails: bool,
+        commit_fails: bool,
+        formats: usize,
+        commits: usize,
+    }
+
+    impl HygieneTransaction for HygieneFixture {
+        fn head(&mut self) -> Result<String, String> {
+            Ok(self.head.clone())
+        }
+
+        fn has_edits(&mut self) -> Result<bool, String> {
+            Ok(self.tracked || self.untracked)
+        }
+
+        fn format(&mut self) -> Result<(), String> {
+            self.formats += 1;
+            if self.format_fails {
+                return Err("formatter failed".into());
+            }
+            self.tracked = self.format_changes;
+            Ok(())
+        }
+
+        fn commit_format(&mut self, expected_head: &str) -> Result<(), String> {
+            assert_eq!(self.head, expected_head);
+            self.commits += 1;
+            if self.commit_fails {
+                return Err("commit failed".into());
+            }
+            self.tracked = false;
+            self.head = "formatted".into();
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn hygiene_preserves_the_attempt_handoff_and_commits_formatter_changes() {
+        use provenant_records::graph::HygieneOutcomeKind;
+        let mut fixture = HygieneFixture {
+            head: "writer".into(),
+            format_changes: true,
+            ..Default::default()
+        };
+        let (outcome, diagnostic) = run_hygiene(&mut fixture, "input", Some("handoff".into()));
+        assert_eq!(outcome.kind, HygieneOutcomeKind::Clean);
+        assert_eq!(outcome.before_head.as_deref(), Some("input"));
+        assert_eq!(outcome.after_head.as_deref(), Some("formatted"));
+        assert_eq!(outcome.handoff.as_deref(), Some("handoff"));
+        assert_eq!((fixture.formats, fixture.commits), (1, 1));
+        assert!(diagnostic.is_none());
+    }
+
+    #[test]
+    fn hygiene_refuses_writer_edits_and_compares_the_attempt_heads() {
+        use provenant_records::graph::HygieneOutcomeKind;
+        for (tracked, untracked) in [(true, false), (false, true)] {
+            let mut fixture = HygieneFixture {
+                head: "input".into(),
+                tracked,
+                untracked,
+                ..Default::default()
+            };
+            let (outcome, _) = run_hygiene(&mut fixture, "input", None);
+            assert_eq!(outcome.kind, HygieneOutcomeKind::UncommittedEdits);
+            assert_eq!((fixture.formats, fixture.commits), (0, 0));
+        }
+        let mut fixture = HygieneFixture {
+            head: "input".into(),
+            ..Default::default()
+        };
+        let (outcome, _) = run_hygiene(&mut fixture, "input", None);
+        assert_eq!(outcome.kind, HygieneOutcomeKind::NoCommit);
+        assert_eq!((fixture.formats, fixture.commits), (0, 0));
+    }
+
+    #[test]
+    fn hygiene_reports_formatter_and_commit_failures_without_losing_handoff() {
+        use provenant_records::graph::HygieneOutcomeKind;
+        for format_fails in [true, false] {
+            let mut fixture = HygieneFixture {
+                head: "writer".into(),
+                format_changes: true,
+                format_fails,
+                commit_fails: !format_fails,
+                ..Default::default()
+            };
+            let (outcome, diagnostic) = run_hygiene(&mut fixture, "input", Some("retain".into()));
+            assert_eq!(outcome.kind, HygieneOutcomeKind::Error);
+            assert_eq!(outcome.after_head.as_deref(), Some("writer"));
+            assert_eq!(outcome.handoff.as_deref(), Some("retain"));
+            assert!(diagnostic.is_some());
+        }
+    }
 
     // A real launch-time submission preflight, not just target lowering: the
     // reused checkout is held by an unsettled attempt's writer reservation, so
