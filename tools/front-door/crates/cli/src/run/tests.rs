@@ -955,8 +955,10 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                 };
                 let attempt_path = edge.roots.state.as_path().join(format!("attempts/{id}"));
                 let attempt = Directory::open_anchor(&attempt_path)?;
-                let temporary =
-                    provenant_run::scratch_root(edge.roots.state.as_path(), id).join("tmp");
+                // Create the scratch tmp the way production does: private and
+                // outside the attempt record dir. A world-readable tmp makes
+                // the private-Git reader refuse the binding (#3947).
+                let temporary = session.store.temporary_path(id, &call)?;
                 let slot_path = edge.roots.state.as_path().join(format!(
                     "worktrees/{}/abandon-fixture",
                     session.context.project_id

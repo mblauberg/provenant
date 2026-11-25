@@ -17,9 +17,8 @@ pub fn scratch_root(state: &Path, id: AttemptId) -> PathBuf {
     state.join(ATTEMPT_SCRATCH).join(id.to_string())
 }
 
-/// Open the held temporary directory from an attempt's record directory.
-/// Settlement and diagnostics use this instead of resolving `attempts/<id>/tmp`.
-pub(crate) fn temporary_dir(attempt: &Directory) -> Result<Directory> {
+/// Resolve the sibling scratch coordinates from an attempt record directory.
+fn attempt_coordinates(attempt: &Directory) -> Result<(PathBuf, AttemptId)> {
     let path = attempt.current_path()?;
     let name = path
         .file_name()
@@ -29,11 +28,31 @@ pub(crate) fn temporary_dir(attempt: &Directory) -> Result<Directory> {
     let state = path
         .parent()
         .and_then(Path::parent)
-        .ok_or(RunError::Validation("attempt directory parent"))?;
-    let root = Directory::open_anchor(state)?;
+        .ok_or(RunError::Validation("attempt directory parent"))?
+        .to_path_buf();
+    Ok((state, id))
+}
+
+/// Open the held temporary directory from an attempt's record directory.
+/// Settlement and diagnostics use this instead of resolving `attempts/<id>/tmp`.
+pub(crate) fn temporary_dir(attempt: &Directory) -> Result<Directory> {
+    let (state, id) = attempt_coordinates(attempt)?;
+    let root = Directory::open_anchor(&state)?;
     let scratch = subdir(&root, OsStr::new(ATTEMPT_SCRATCH), false)?;
     let scratch = subdir(&scratch, OsStr::new(&id.to_string()), false)?;
     subdir(&scratch, OsStr::new("tmp"), false)
+}
+
+/// Non-following presence check for the held scratch `tmp`. Retention pins
+/// private Git with this instead of opening the directory: a link or a loose
+/// mode is GC's to report at the tmp path, not an unreadable census (#3947).
+pub(crate) fn temporary_exists(attempt: &Directory) -> Result<bool> {
+    let (state, id) = attempt_coordinates(attempt)?;
+    match std::fs::symlink_metadata(scratch_root(&state, id).join("tmp")) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
 }
 
 impl RunStore {

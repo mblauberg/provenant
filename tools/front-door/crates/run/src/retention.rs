@@ -1087,14 +1087,13 @@ fn pinned_payload(attempt: &Directory, record: &AttemptRecord) -> Result<bool> {
     ) && record.exit_evidence.is_none();
     // Private Git objects live in the sibling scratch's `tmp` until their
     // import settles (#3947). The old attempt-record path is never probed.
-    let private_git = match crate::plan::temporary_dir(attempt) {
-        Ok(_) => match attempt.metadata_at(OsStr::new("writer-objects.json"), false) {
-            Ok(_) => true,
-            Err(error) if error.is_not_found() => false,
-            Err(error) => return Err(error.into()),
-        },
-        Err(error) if missing_directory(&error) => false,
-        Err(error) => return Err(error),
+    // Check the binding first: without one there is nothing to pin, and a
+    // linked or loose-mode tmp must stay collectable so GC can report the
+    // refusal at its own path instead of aborting the whole census.
+    let private_git = match attempt.metadata_at(OsStr::new("writer-objects.json"), false) {
+        Ok(_) => crate::plan::temporary_exists(attempt)?,
+        Err(error) if error.is_not_found() => false,
+        Err(error) => return Err(error.into()),
     };
     Ok(uncertain_loss || private_git)
 }
