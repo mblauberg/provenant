@@ -193,9 +193,11 @@ impl std::fmt::Display for DetachedWorktreeRemedies {
 
 /// Facts for a refused branch with no merge base with its declared base.
 /// Boxed inside [`WorktreeError`] so a wide refusal cannot enlarge every CLI
-/// result that carries the error through `RunError`.
+/// result that carries the error through `RunError`. The type is public because
+/// it is the payload of a public [`WorktreeError`] variant; its fields stay
+/// private to this module, so the refusal is read only through that error.
 #[derive(Debug)]
-pub(super) struct UnrelatedBaseRefusal {
+pub struct UnrelatedBaseRefusal {
     pub(super) branch: String,
     pub(super) head: GitOid,
     pub(super) base: String,
