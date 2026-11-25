@@ -350,10 +350,6 @@ impl super::graph_execution::HygieneTransaction for DeliveryHygieneTransaction {
         Ok(head)
     }
 
-    fn branch(&mut self) -> Option<String> {
-        Some(self.branch.clone())
-    }
-
     fn has_edits(&mut self) -> Result<bool, String> {
         Ok(!self
             .checked_git(&["status", "--porcelain=v1", "-z", "--untracked-files=all"])?

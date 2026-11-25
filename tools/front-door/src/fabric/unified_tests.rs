@@ -656,33 +656,30 @@ fn the_listing_never_hides_active_work_and_counts_what_it_omits() {
 }
 
 fn digest(presence: Option<&str>) -> super::super::graph_status::NodeDigest {
-    super::super::graph_status::NodeDigest {
-        key: provenant_records::WorkKey::new(
-            provenant_core::ProjectId::from_bytes([7; 16]),
-            "g",
-            "n",
-            1,
-        )
-        .expect("valid work key"),
-        outcome: "running".into(),
-        cause: None,
-        branch: None,
-        pr: json!({"state":"unknown","reference":null}),
-        ci: json!({"state":"unavailable"}),
-        result_path: None,
-        provider_error: None,
-        review_verdict: None,
-        findings_count: None,
-        findings_available: None,
-        review_partial: None,
-        attempt_state: Some("running".into()),
-        attempt_presence: presence.map(str::to_owned),
-        line: "  n: running".into(),
-        state: "running".into(),
-        settled: false,
-        handoff_status: None,
-        open_asks: Vec::new(),
-        evidence_error: None,
+    let key = provenant_records::WorkKey::new(
+        provenant_core::ProjectId::from_bytes([7; 16]),
+        "g",
+        "n",
+        1,
+    )
+    .expect("valid work key");
+    let rows = vec![
+        json!({"kind":"node", "work_key":key, "state":"running"}),
+        json!({"kind":"attempt", "work_key":key, "state":"running", "presence":presence}),
+    ];
+    super::super::graph_status::node_digests(&rows)
+        .into_iter()
+        .next()
+        .expect("fixture projects a node digest")
+}
+
+#[test]
+fn listing_digest_fixture_projects_attempt_presence() {
+    for presence in ["live", "unattended"] {
+        let digest = digest(Some(presence));
+        assert_eq!(digest.attempt_presence.as_deref(), Some(presence));
+        assert!(digest.delivery_loop.is_null());
+        assert!(digest.delivery_park.is_null());
     }
 }
 
