@@ -3,9 +3,7 @@ use super::{BoundFacade, FacadeError, Factory};
 use crate::fabric::owner::graph_journal_error;
 #[cfg(test)]
 use provenant_core::GitOid;
-use provenant_core::{
-    CancelToken, CanonicalV1, Clock, HumanAnswerId, HumanRequestId, OperationId, WaitBudget,
-};
+use provenant_core::{CancelToken, Clock, HumanAnswerId, HumanRequestId, OperationId, WaitBudget};
 pub(super) use provenant_fabric_runtime::graph::queue_control::{Action, Metadata};
 use provenant_fabric_runtime::graph::queue_control::{Intent, Phase, QueueControlLedger as Ledger};
 use provenant_fabric_runtime::{
@@ -13,12 +11,13 @@ use provenant_fabric_runtime::{
         AttemptState, DeliveryReviewDisposition, FileJournal, GraphJournal, LiveGraph, NodeState,
         PendingGraphSteer, patch,
     },
-    inbox::{
-        AnswerAction, GraphSteerContext, InboxFilter, InboxInput, InboxItem, InboxResult,
-        QueueControlReceipt, RequestState,
-    },
+    inbox::{GraphSteerContext, InboxFilter, InboxInput, InboxResult, QueueControlReceipt},
 };
-use provenant_records::graph::ParkReason;
+use provenant_records::{
+    CanonicalV1,
+    graph::ParkReason,
+    inbox::{AnswerAction, InboxItem, RequestState},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -1082,8 +1081,9 @@ pub(super) fn reserve_control_capacity(
     if execution.document.queue.is_none() {
         return Err(refusal("queue control requires a persisted queue owner"));
     }
-    let registry = super::queue_registry::QueueRegistry::open(&factory.context.roots.state)
-        .map_err(|_| FacadeError::OwnerUnavailable)?;
+    let registry =
+        super::queue_registry::QueueRegistry::open(factory.context.roots.state.as_path())
+            .map_err(|_| FacadeError::OwnerUnavailable)?;
     let queues = registry
         .queues(budget, cancel, &factory.clock)
         .map_err(|_| FacadeError::OwnerUnavailable)?;
@@ -1820,19 +1820,21 @@ fn close_owned_park(
     if item.request.state != RequestState::Open {
         return Ok(());
     }
-    let result = BoundFacade { factory }.inbox_owner(
-        InboxInput::Close {
-            extra: Default::default(),
-            id: request_id,
-            state: RequestState::Withdrawn,
-            reason: "delivery queue item dropped".into(),
-            expect_revision: item.request.revision,
-            operation_id: Some(intent.metadata.operation_id.clone()),
-        },
-        Some(item.request.owner_host.to_string()),
-        budget,
-        cancel,
-    )?;
+    let result = BoundFacade { factory }
+        .inbox_owner(
+            InboxInput::Close {
+                extra: Default::default(),
+                id: request_id,
+                state: RequestState::Withdrawn,
+                reason: "delivery queue item dropped".into(),
+                expect_revision: item.request.revision,
+                operation_id: Some(intent.metadata.operation_id.clone()),
+            },
+            Some(item.request.owner_host.to_string()),
+            budget,
+            cancel,
+        )
+        .map_err(super::interface::relay_error)?;
     if matches!(result, InboxResult::Saved { .. }) {
         Ok(())
     } else {

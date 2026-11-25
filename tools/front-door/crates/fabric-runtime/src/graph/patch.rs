@@ -833,7 +833,16 @@ pub fn retry_node_and_dependants(
     brief: Option<&str>,
     context: &PatchContext<'_>,
 ) -> Result<Admitted, PatchError> {
-    retry_node_scope(graph, id, brief, context, true, None, None, None)
+    retry_node_scope(
+        graph,
+        id,
+        brief,
+        context,
+        RetryOptions {
+            dependants: true,
+            ..Default::default()
+        },
+    )
 }
 
 /// Redo a queue control's exact target, keyed by its durable operation ID.
@@ -872,10 +881,12 @@ pub fn retry_node_and_dependants_with_key(
         id,
         brief,
         context,
-        true,
-        Some((&reason, None)),
-        None,
-        Some(operation_id),
+        RetryOptions {
+            dependants: true,
+            reason: Some((&reason, None)),
+            idempotency_key: Some(operation_id),
+            ..Default::default()
+        },
     )
 }
 
@@ -887,7 +898,7 @@ pub fn retry_node(
     brief: Option<&str>,
     context: &PatchContext<'_>,
 ) -> Result<Admitted, PatchError> {
-    retry_node_scope(graph, id, brief, context, false, None, None, None)
+    retry_node_scope(graph, id, brief, context, RetryOptions::default())
 }
 
 /// A host restart after a stop uses the same checked, journalled reset as an
@@ -911,11 +922,20 @@ pub(super) fn restart_stopped(
         id,
         brief,
         context,
-        false,
-        Some((&reason, Some(restart))),
-        Some(routes),
-        None,
+        RetryOptions {
+            reason: Some((&reason, Some(restart))),
+            replacement_routes: Some(routes),
+            ..Default::default()
+        },
     )
+}
+
+#[derive(Default)]
+struct RetryOptions<'a> {
+    dependants: bool,
+    reason: Option<(&'a str, Option<Restart>)>,
+    replacement_routes: Option<&'a [GraphRoute]>,
+    idempotency_key: Option<&'a str>,
 }
 
 fn retry_node_scope(
@@ -923,11 +943,14 @@ fn retry_node_scope(
     id: &str,
     brief: Option<&str>,
     context: &PatchContext<'_>,
-    dependants: bool,
-    reason: Option<(&str, Option<Restart>)>,
-    replacement_routes: Option<&[GraphRoute]>,
-    idempotency_key: Option<&str>,
+    options: RetryOptions<'_>,
 ) -> Result<Admitted, PatchError> {
+    let RetryOptions {
+        dependants,
+        reason,
+        replacement_routes,
+        idempotency_key,
+    } = options;
     let normalised_brief = brief
         .map(prompt_text::normalise_prompt_text)
         .transpose()
@@ -2291,10 +2314,10 @@ pub(super) fn correct_review_verdict(
         id,
         Some(brief),
         context,
-        false,
-        Some((&format!("correct review verdict {id}"), None)),
-        None,
-        None,
+        RetryOptions {
+            reason: Some((&format!("correct review verdict {id}"), None)),
+            ..Default::default()
+        },
     )
 }
 

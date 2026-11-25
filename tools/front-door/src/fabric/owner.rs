@@ -2561,14 +2561,17 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
     }
     fn admit_delivery_ci(
         &mut self,
-        graph_id: &str,
-        node_id: &str,
-        head_sha: &str,
-        ci_slots: &provenant_records::Sourced<usize>,
-        wait_policy: &provenant_records::Sourced<u64>,
-        allow_overflow: bool,
-        waited_millis: u64,
+        request: provenant_fabric_runtime::graph::DeliveryCiRequest<'_>,
     ) -> Result<Option<provenant_fabric_runtime::graph::DeliveryCiAdmission>, Self::Error> {
+        let provenant_fabric_runtime::graph::DeliveryCiRequest {
+            graph_id,
+            node_id,
+            head_sha,
+            ci_slots,
+            wait_policy,
+            allow_overflow,
+            waited_millis,
+        } = request;
         let owner = provenant_run::build::queue::CiLeaseOwner {
             project: self.factory.context.identity.project.to_string(),
             graph_id: graph_id.to_owned(),

@@ -428,6 +428,17 @@ pub struct DeliveryParkRequest<'a> {
     pub evidence: &'a [String],
 }
 
+/// Parameters for one nonblocking delivery CI admission attempt.
+pub struct DeliveryCiRequest<'a> {
+    pub graph_id: &'a str,
+    pub node_id: &'a str,
+    pub head_sha: &'a str,
+    pub ci_slots: &'a provenant_records::Sourced<usize>,
+    pub wait_policy: &'a provenant_records::Sourced<u64>,
+    pub allow_overflow: bool,
+    pub waited_millis: u64,
+}
+
 /// `observe_or_start` must be idempotent by `AttemptKey`. It starts the run
 /// only when that key has no accepted operation, and otherwise observes it.
 /// A `stored_ref` from the checkpoint names an accepted attempt: observe it as
@@ -654,14 +665,9 @@ pub trait AttemptOwner {
     /// advisory unavailable result.
     fn admit_delivery_ci(
         &mut self,
-        _graph_id: &str,
-        _node_id: &str,
-        _head_sha: &str,
-        ci_slots: &provenant_records::Sourced<usize>,
-        _wait_policy: &provenant_records::Sourced<u64>,
-        _allow_overflow: bool,
-        _waited_millis: u64,
+        request: DeliveryCiRequest<'_>,
     ) -> Result<Option<DeliveryCiAdmission>, Self::Error> {
+        let ci_slots = request.ci_slots;
         Ok(Some(DeliveryCiAdmission::Unavailable {
             reason: format!(
                 "host delivery CI admission is unavailable; ci_slots={} from {:?}{}",
@@ -3505,9 +3511,15 @@ fn start_delivery_ci_wait<R: AttemptOwner, J: GraphJournal>(
             invariant: "queue CI admission wait must be bounded to 1..=14400 seconds",
         });
     }
-    let started_at = wall_now.unwrap_or_else(|| {
-        provenant_core::WallTime::from_micros(0).expect("Unix epoch is representable")
-    });
+    let started_at = wall_now.map_or_else(
+        || {
+            provenant_core::WallTime::from_micros(0).map_err(|_| GraphError::BadCheckpoint {
+                node: node_id.into(),
+                invariant: "Unix epoch must be representable",
+            })
+        },
+        Ok,
+    )?;
     let micros = policy.value * 1_000_000;
     let deadline = started_at
         .checked_add(DurationMicros::from_micros(micros))
@@ -3898,15 +3910,15 @@ fn advance_publish<R: AttemptOwner, J: GraphJournal>(
         let allow_overflow = delivery_ci_wait_expired(&wait, wall_now);
         let waited_millis = delivery_ci_wait_elapsed_millis(&wait, wall_now);
         match owner
-            .admit_delivery_ci(
-                &document.graph_id,
-                &node.id,
-                &expected_head,
-                &queue.ci_slots,
-                &wait.policy,
+            .admit_delivery_ci(DeliveryCiRequest {
+                graph_id: &document.graph_id,
+                node_id: &node.id,
+                head_sha: &expected_head,
+                ci_slots: &queue.ci_slots,
+                wait_policy: &wait.policy,
                 allow_overflow,
                 waited_millis,
-            )
+            })
             .map_err(GraphError::Run)?
         {
             Some(admission) => {
@@ -4252,15 +4264,15 @@ fn advance_adopted_publish<R: AttemptOwner, J: GraphJournal>(
         let allow_overflow = delivery_ci_wait_expired(&wait, wall_now);
         let waited_millis = delivery_ci_wait_elapsed_millis(&wait, wall_now);
         let admission = owner
-            .admit_delivery_ci(
-                &document.graph_id,
-                &node.id,
-                &receipt.head,
-                &queue.ci_slots,
-                &wait.policy,
+            .admit_delivery_ci(DeliveryCiRequest {
+                graph_id: &document.graph_id,
+                node_id: &node.id,
+                head_sha: &receipt.head,
+                ci_slots: &queue.ci_slots,
+                wait_policy: &wait.policy,
                 allow_overflow,
                 waited_millis,
-            )
+            })
             .map_err(GraphError::Run)?;
         let Some(admission) = admission else {
             if wall_now.is_some() {

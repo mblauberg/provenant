@@ -2171,8 +2171,9 @@ impl Factory {
         let submitted = input;
         let prepared = launch_input(input)?;
         let queue_launch = if prepared.get("queue_item").is_some() {
-            let registry = super::queue_registry::QueueRegistry::open(&self.context.roots.state)
-                .map_err(|_| FacadeError::StateCorrupt)?;
+            let registry =
+                super::queue_registry::QueueRegistry::open(self.context.roots.state.as_path())
+                    .map_err(|_| FacadeError::StateCorrupt)?;
             let project = self.context.identity.project.to_string();
             let execution_directory = self.cwd.to_string_lossy().into_owned();
             Some(

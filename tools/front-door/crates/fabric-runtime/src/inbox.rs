@@ -526,7 +526,7 @@ pub struct InboxPeerCoverage {
 pub enum InboxResult {
     Saved {
         #[serde(flatten)]
-        receipt: InboxReceipt,
+        receipt: Box<InboxReceipt>,
     },
     Item {
         #[serde(flatten)]
@@ -1610,7 +1610,7 @@ impl<'a> InboxService<'a> {
             }
         };
         Ok(InboxResult::Saved {
-            receipt: InboxReceipt {
+            receipt: Box::new(InboxReceipt {
                 extra: Default::default(),
                 queue_control: None,
                 operation_id: operation.clone(),
@@ -1620,7 +1620,7 @@ impl<'a> InboxService<'a> {
                 answer_id: value.answer_id,
                 work_coverage: value.work_coverage,
                 delivery,
-            },
+            }),
         })
     }
 }

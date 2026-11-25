@@ -90,7 +90,7 @@ pub(super) fn submit_queue(
         &operation_component[7..27]
     );
 
-    let registry = QueueRegistry::open(&factory.context.roots.state)
+    let registry = QueueRegistry::open(factory.context.roots.state.as_path())
         .map_err(super::interface::graph_input_reason)?;
     if let Some(existing) = registry
         .find_operation(
@@ -123,7 +123,7 @@ pub(super) fn submit_queue(
     );
     let snapshot = match super::queue_snapshot::resolve_snapshot(
         &factory.cwd,
-        &factory.context.roots.state,
+        factory.context.roots.state.as_path(),
         &project,
         &selector_values,
         cancel,

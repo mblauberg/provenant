@@ -1350,6 +1350,7 @@ impl Factory {
                     bases: None,
                     extra: Default::default(),
                     delivery_queue_controls: None,
+                    delivery_ci_superseded: Vec::new(),
                     expansions: Vec::new(),
                     remaining: None,
                     instance_id: None,
@@ -1569,7 +1570,7 @@ impl Factory {
                 }
                 let execution_directory = self.cwd.to_string_lossy();
                 let registry =
-                    super::queue_registry::QueueRegistry::open(&self.context.roots.state)
+                    super::queue_registry::QueueRegistry::open(self.context.roots.state.as_path())
                         .map_err(|_| FacadeError::Conflict)?;
                 registry
                     .revalidate_launch(

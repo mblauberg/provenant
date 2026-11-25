@@ -441,7 +441,7 @@ fn ask(kind: RequestKind, id: &str) -> InboxInput {
 }
 fn receipt(result: InboxResult) -> InboxReceipt {
     match result {
-        InboxResult::Saved { receipt } => receipt,
+        InboxResult::Saved { receipt } => *receipt,
         _ => panic!("expected receipt"),
     }
 }
@@ -2071,4 +2071,19 @@ fn queue_control_metadata_and_receipt_use_declared_inbox_fields() {
     let decoded: InboxReceipt = serde_json::from_value(receipt_value).unwrap();
     assert_eq!(decoded.queue_control, Some(receipt_control));
     assert!(decoded.extra.is_empty());
+}
+
+#[test]
+fn saved_receipt_preserves_flattened_wire_fields() {
+    let mut fixture = Fixture::new();
+    let saved = fixture
+        .call(ask(RequestKind::Decision, "receipt-wire"))
+        .unwrap();
+    let mut wire = serde_json::to_value(saved).unwrap();
+    assert_eq!(wire["result"], "saved");
+    assert!(wire.get("request_id").is_some());
+    assert!(wire.get("receipt").is_none());
+    wire["future_field"] = serde_json::json!("retained");
+    let decoded: InboxResult = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(serde_json::to_value(decoded).unwrap(), wire);
 }

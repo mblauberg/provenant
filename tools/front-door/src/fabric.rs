@@ -341,7 +341,7 @@ impl BoundFacade<'_> {
     ) -> Result<provenant_fabric_runtime::inbox::InboxResult, ServiceError> {
         use provenant_fabric_runtime::inbox::{InboxInput, InboxReply};
 
-        if let Some(result) = super::queue_controls::handle_inbox_control(
+        if let Some(result) = queue_controls::handle_inbox_control(
             self.factory,
             input.clone(),
             host.clone(),

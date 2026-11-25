@@ -142,7 +142,7 @@ pub(super) fn resolve_snapshot(
                 .collect::<Result<Vec<_>, _>>()?
         }
         Selector::Query(query_text) => {
-            query_snapshot(&mut forge, request, &repository, query_text)?
+            query_snapshot(&mut forge, &request, &repository, query_text)?
         }
     };
     if raw.is_empty() {

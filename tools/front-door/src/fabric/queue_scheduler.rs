@@ -19,7 +19,7 @@ pub(super) fn reconcile_controls_before_tick(
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let lock_budget = WaitBudget::nonblocking(clock.mono_now());
-    let registry = match QueueRegistry::open(&resolved.roots.state) {
+    let registry = match QueueRegistry::open(resolved.roots.state.as_path()) {
         Ok(registry) => registry,
         Err(_) => return report,
     };
@@ -84,7 +84,7 @@ pub(super) fn tick_queues(
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let lock_budget = WaitBudget::nonblocking(clock.mono_now());
-    let registry = match QueueRegistry::open(&resolved.roots.state) {
+    let registry = match QueueRegistry::open(resolved.roots.state.as_path()) {
         Ok(registry) => registry,
         Err(error) => {
             report
@@ -324,7 +324,7 @@ pub(super) fn admit_graph_tick(
     let clock = &factory.clock;
     let cancel = CancelToken::new();
     let budget = WaitBudget::nonblocking(clock.mono_now());
-    let registry = QueueRegistry::open(&factory.context.roots.state)?;
+    let registry = QueueRegistry::open(factory.context.roots.state.as_path())?;
     let queues = registry.queues(budget, &cancel, clock)?;
     let project = factory.context.identity.project.to_string();
     let owners: Vec<_> = queues

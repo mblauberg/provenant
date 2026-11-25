@@ -973,16 +973,11 @@ pub(super) fn validate_relations(
                         node.id
                     ));
                 }
-            } else if nodes[target]
+            } else if let Some(local) = nodes[target]
                 .loop_body
                 .as_ref()
-                .is_some_and(|body| body.selected_publication.is_some())
+                .and_then(|body| body.selected_publication.as_deref())
             {
-                let local = nodes[target]
-                    .loop_body
-                    .as_ref()
-                    .and_then(|body| body.selected_publication.as_deref())
-                    .expect("selected loop target was checked");
                 let publications: Vec<_> = upstream
                     .iter()
                     .copied()
