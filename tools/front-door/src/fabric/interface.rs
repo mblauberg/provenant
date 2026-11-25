@@ -4074,37 +4074,29 @@ fn add(row: &mut Value, key: &str, value: u64) {
 
 #[cfg(test)]
 mod queue_config_tests {
-    use super::*;
-    use provenant_records::{Layer, Source, Sourced};
-
-    fn user_origin() -> provenant_config::Origin {
-        let path: provenant_records::PathWire = provenant_records::PathWire::from_relative(
-            &provenant_core::RelativePath::parse("config.toml").unwrap(),
-        )
-        .unwrap();
-        provenant_config::Origin::User { path }
-    }
-
-    fn sourced(value: usize, layer: Layer, origin: &str) -> Sourced<usize> {
-        Sourced {
-            value,
-            source: Source {
-                layer,
-                origin: Some(origin.into()),
-            },
-        }
-    }
-
-    fn document(graph_id: &str, queue: Option<QueueKnobs>) -> GraphDocument {
-        let mut value = json!({"schema_version": 1, "graph_id": graph_id, "nodes": []});
-        if let Some(queue) = queue {
-            value["queue"] = json!(queue);
-        }
-        serde_json::from_value(value).unwrap()
-    }
-
     #[test]
     fn queue_knobs_keep_shipped_defaults_and_resolve_config_and_authored_sources() {
+        use super::*;
+        use provenant_records::{Layer, Source, Sourced};
+
+        fn user_origin() -> provenant_config::Origin {
+            let path: provenant_records::PathWire = provenant_records::PathWire::from_relative(
+                &provenant_core::RelativePath::parse("config.toml").unwrap(),
+            )
+            .unwrap();
+            provenant_config::Origin::User { path }
+        }
+
+        fn sourced(value: usize, layer: Layer, origin: &str) -> Sourced<usize> {
+            Sourced {
+                value,
+                source: Source {
+                    layer,
+                    origin: Some(origin.into()),
+                },
+            }
+        }
+
         use provenant_fabric_runtime::graph::{
             QUEUE_CI_SLOTS_KEY, QUEUE_MAX_PARALLEL_KEY, QUEUE_PREP_RETRIES_KEY,
         };
@@ -4172,6 +4164,16 @@ mod queue_config_tests {
 
     #[test]
     fn legacy_deliver_without_queue_selection_keeps_its_graph_shape() {
+        use super::*;
+
+        fn document(graph_id: &str, queue: Option<QueueKnobs>) -> GraphDocument {
+            let mut value = json!({"schema_version": 1, "graph_id": graph_id, "nodes": []});
+            if let Some(queue) = queue {
+                value["queue"] = json!(queue);
+            }
+            serde_json::from_value(value).unwrap()
+        }
+
         let mut document = document("deliver-1", None);
         seal_document_queue(&mut document, None, None).unwrap();
         assert_eq!(document.queue, None);
@@ -4180,6 +4182,35 @@ mod queue_config_tests {
 
     #[test]
     fn explicit_queue_on_named_full_document_is_sealed_with_config_sources() {
+        use super::*;
+        use provenant_records::{Layer, Source, Sourced};
+
+        fn user_origin() -> provenant_config::Origin {
+            let path: provenant_records::PathWire = provenant_records::PathWire::from_relative(
+                &provenant_core::RelativePath::parse("config.toml").unwrap(),
+            )
+            .unwrap();
+            provenant_config::Origin::User { path }
+        }
+
+        fn sourced(value: usize, layer: Layer, origin: &str) -> Sourced<usize> {
+            Sourced {
+                value,
+                source: Source {
+                    layer,
+                    origin: Some(origin.into()),
+                },
+            }
+        }
+
+        fn document(graph_id: &str, queue: Option<QueueKnobs>) -> GraphDocument {
+            let mut value = json!({"schema_version": 1, "graph_id": graph_id, "nodes": []});
+            if let Some(queue) = queue {
+                value["queue"] = json!(queue);
+            }
+            serde_json::from_value(value).unwrap()
+        }
+
         use provenant_fabric_runtime::graph::{
             QUEUE_CI_SLOTS_KEY, QUEUE_MAX_PARALLEL_KEY, QUEUE_PREP_RETRIES_KEY,
         };
