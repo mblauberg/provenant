@@ -99,9 +99,9 @@ pub(super) fn result_projection(
 }
 
 /// Render a host-owned read through the same CLI projection.
-pub fn render_output(command: Output, read: Result<(Value, String), Fail>) -> Reply {
+pub fn render_output(command: Output, read: Result<(Value, String), Fail>, full: bool) -> Reply {
     let receipt_tail = matches!(command.part, Part::Receipt)
-        .then_some(command.tail)
+        .then(|| command.tail_selection())
         .flatten();
     let headed = matches!(command.part, Part::Result);
     let warn_human = headed && !command.path && command.to.is_none();
@@ -128,9 +128,16 @@ pub fn render_output(command: Output, read: Result<(Value, String), Fail>) -> Re
                     text = format!("{state}\npartial result\n{text}");
                 }
             }
-            if let Some(bytes) = receipt_tail {
-                text = text[tail_start_bytes(text.as_bytes(), bytes)..].to_owned();
-                data["tail"] = json!(bytes);
+            if let Some(tail) = receipt_tail {
+                let start = match tail {
+                    crate::Tail::Bytes(bytes) => tail_start_bytes(text.as_bytes(), bytes),
+                    crate::Tail::Lines(lines) => tail_start_lines(text.as_bytes(), lines),
+                };
+                text = text[start..].to_owned();
+                match tail {
+                    crate::Tail::Bytes(bytes) => data["tail"] = json!(bytes),
+                    crate::Tail::Lines(lines) => data["tail_lines"] = json!(lines),
+                }
                 data["tail_text"] = json!(text);
             }
             if let Some(path) = &to {
@@ -154,7 +161,6 @@ pub fn render_output(command: Output, read: Result<(Value, String), Fail>) -> Re
     );
     out.read_only = true;
     if out.result.error.is_none() {
-        let full = std::env::args_os().any(|arg| arg == "--full");
         if full {
             // The full view renders the owner's human text, so the host-fact
             // headers and the whole result become that text; compact keeps the
@@ -191,9 +197,10 @@ pub fn output_from_session(
     session: &Session,
     attempt: AttemptId,
     call: &run::Request<'_>,
+    full: bool,
 ) -> Reply {
     let read = output_read(command.clone(), edge, session, attempt, call);
-    render_output(command, read)
+    render_output(command, read, full)
 }
 
 /// Read a peer attempt using the owning service's budget and cancellation.
@@ -204,9 +211,10 @@ pub fn output_from_host(
     read: impl FnMut(
         provenant_fabric_runtime::coordination::facade::OutputInput,
     ) -> Result<provenant_fabric_runtime::coordination::facade::OutputResult, Fail>,
+    full: bool,
 ) -> Reply {
     let result = remote::read_output_with(&command, host, attempt, read);
-    render_output(command, result)
+    render_output(command, result, full)
 }
 
 /// What an agent needs from a read: how the attempt settled, what it changed,
@@ -259,6 +267,35 @@ pub fn finding_human_line(finding: &Value) -> String {
 
 fn summary(data: &Value, text: &str, headed: bool, full: bool) -> crate::Summary {
     let mut lines = Vec::new();
+    // How the attempt settled leads: it is a host observation, not a lane
+    // claim, and it explains why the rest of the projection is present.
+    if headed && let Some(state) = data["state"].as_str() {
+        let reason = data["reason"].as_str();
+        lines.push(match reason {
+            Some(reason) => format!(
+                "settlement: {} ({})",
+                crate::bounded_text(state, 64),
+                crate::bounded_text(reason, 2048)
+            ),
+            None => format!("settlement: {}", crate::bounded_text(state, 64)),
+        });
+        if state == "failed" {
+            if let Some(error) = data["provider_error"].as_str() {
+                lines.push(format!(
+                    "provider error: {}",
+                    crate::bounded_text(error, PROVIDER_ERROR_BYTES)
+                ));
+            }
+            if let Some(path) = structured_path_text(&data["result_path"]) {
+                lines.push(format!("result: {}", crate::bounded_text(&path, 512)));
+            }
+        }
+    }
+    if headed && let Some(result) = data["result"].as_str() {
+        // An unsealed attempt has no prose yet; its typed state still belongs
+        // in the compact view instead of a head-and-tail of the raw text.
+        lines.push(format!("result: {}", crate::bounded_text(result, 64)));
+    }
     if headed && let Some(verdict) = data["selected"]["verdict"].as_str() {
         lines.push(format!(
             "review verdict: {}",
@@ -313,28 +350,6 @@ fn summary(data: &Value, text: &str, headed: bool, full: bool) -> crate::Summary
             line.push_str(&format!("; {dirty} dirty paths left uncommitted"));
         }
         lines.push(line);
-    }
-    if headed && let Some(state) = data["state"].as_str() {
-        let reason = data["reason"].as_str();
-        lines.push(match reason {
-            Some(reason) => format!(
-                "settlement: {} ({})",
-                crate::bounded_text(state, 64),
-                crate::bounded_text(reason, 2048)
-            ),
-            None => format!("settlement: {}", crate::bounded_text(state, 64)),
-        });
-        if state == "failed" {
-            if let Some(error) = data["provider_error"].as_str() {
-                lines.push(format!(
-                    "provider error: {}",
-                    crate::bounded_text(error, PROVIDER_ERROR_BYTES)
-                ));
-            }
-            if let Some(path) = structured_path_text(&data["result_path"]) {
-                lines.push(format!("result: {}", crate::bounded_text(&path, 512)));
-            }
-        }
     }
     if let Some(error) = data.get("handoff").and_then(|value| value.get("Err"))
         && let Ok(error) =
@@ -435,15 +450,20 @@ fn summary(data: &Value, text: &str, headed: bool, full: bool) -> crate::Summary
         };
         lines.push(format!("changed files ({total}): {listed}{more}"));
     }
-    // An empty result uses its safe diagnostic as human text. The settlement
-    // header already contains that detail, so render it only once.
-    if !headed || data["reason"].as_str() != Some(text.trim()) {
+    // Other parts are the requested bytes, not narration: a transcript or a
+    // stderr read still shows its text in the compact view. A result's prose
+    // is lane narration and belongs behind --full; the compact view keeps the
+    // structured facts above. An empty result repeats its diagnostic as text,
+    // already carried by the settlement line, so render it only once.
+    if !headed {
         let body = if full {
             text.to_owned()
         } else {
             crate::head_and_tail(text, limits::OUTPUT_BYTES)
         };
         lines.extend(body.lines().map(str::to_owned));
+    } else if full && data["reason"].as_str() != Some(text.trim()) {
+        lines.extend(text.lines().map(str::to_owned));
     }
     crate::Summary { lines, omitted: 0 }
 }
@@ -604,9 +624,6 @@ pub(super) fn reviewer_receipt(
     ))
 }
 
-/// The most lines `output --tail` returns; a larger request is clamped.
-pub(super) const TAIL_MAX: u64 = limits::TAIL_LINES;
-
 /// Read the selected part and attach the shared lane projection.
 fn output_read(
     command: Output,
@@ -711,7 +728,8 @@ fn output_read_part(
             let mut events = session
                 .service()
                 .events(command.offset, 64, Some(id), call)?;
-            if let Some(lines) = command.tail {
+            let tail = command.tail_selection();
+            if tail.is_some() {
                 let mut cursor = events.last().map_or(command.offset, |event| event.sequence);
                 let mut more = events.len() == 64;
                 while more {
@@ -727,18 +745,26 @@ fn output_read_part(
                     }
                     cursor = next;
                     events.extend(page);
-                    let excess = events.len().saturating_sub(lines.min(TAIL_MAX) as usize);
+                    if let Some(crate::Tail::Lines(lines)) = tail {
+                        let excess = events.len().saturating_sub(lines as usize);
+                        events.drain(..excess);
+                    }
+                }
+                if let Some(crate::Tail::Lines(lines)) = tail {
+                    let excess = events.len().saturating_sub(lines as usize);
                     events.drain(..excess);
                 }
-                let excess = events.len().saturating_sub(lines.min(TAIL_MAX) as usize);
-                events.drain(..excess);
+                let byte_bound = match tail {
+                    Some(crate::Tail::Bytes(bytes)) => command.max_bytes.min(bytes),
+                    _ => command.max_bytes,
+                };
                 while !events.is_empty()
                     && serde_json::to_vec(&events)
                         .map_err(|error| {
                             Fail::new(Status::Error, ErrorKind::Io, error.to_string())
                         })?
                         .len() as u64
-                        > command.max_bytes
+                        > byte_bound
                 {
                     events.remove(0);
                 }
@@ -761,7 +787,7 @@ fn output_read_part(
     if matches!(part, run::ArtifactPart::Result)
         && record.result.is_none()
         && command.offset == 0
-        && command.tail.is_none()
+        && command.tail_selection().is_none()
         && command.to.is_none()
         && let Some(reason) = &detail
     {
@@ -799,14 +825,17 @@ fn output_read_part(
         ));
     }
     let mut chunk = session.service().output(id, part, range, call)?;
-    let tail = command.tail;
-    if let Some(bytes) = tail {
+    let tail = command.tail_selection();
+    if let Some(tail) = tail {
         range.offset = chunk.len.saturating_sub(command.max_bytes);
         // A short transcript's first page already includes the requested tail.
         if !matches!(part, run::ArtifactPart::Transcript) || range.offset != chunk.offset {
             chunk = session.service().output(id, part, range, call)?;
         }
-        let start = tail_start_bytes(&chunk.bytes, bytes);
+        let start = match tail {
+            crate::Tail::Bytes(bytes) => tail_start_bytes(&chunk.bytes, bytes),
+            crate::Tail::Lines(lines) => tail_start_lines(&chunk.bytes, lines),
+        };
         chunk.offset += start as u64;
         chunk.bytes.drain(..start);
     }
@@ -826,7 +855,7 @@ fn output_read_part(
     if matches!(command.part, Part::Result)
         && text.is_empty()
         && command.offset == 0
-        && command.tail.is_none()
+        && command.tail_selection().is_none()
         && command.to.is_none()
         && let Some(reason) = &reason
     {
@@ -858,11 +887,17 @@ fn output_read_part(
             text = "payload evicted by retention; the retained capture tail is empty\n".into();
         }
     }
-    if let Some(bytes) = tail {
-        data["tail"] = json!(bytes);
-        data["tail_clamped"] = json!(false);
+    if let Some(tail) = tail {
+        match tail {
+            crate::Tail::Bytes(bytes) => data["tail"] = json!(bytes),
+            crate::Tail::Lines(lines) => data["tail_lines"] = json!(lines),
+        }
+        data["tail_clamped"] = json!(command.tail_clamped());
     }
-    if matches!(command.part, Part::Result) && command.tail.is_none() && command.offset == 0 {
+    if matches!(command.part, Part::Result)
+        && command.tail_selection().is_none()
+        && command.offset == 0
+    {
         let base = run::writer_base(session.context.state_root.as_path(), &record)
             .ok()
             .flatten();
@@ -1174,12 +1209,36 @@ fn changed_paths(
 
 /// Byte offset that leaves at most `max_bytes` of `bytes`, aligned forward to
 /// a UTF-8 boundary so the returned tail is whole text.
-pub(super) fn tail_start_bytes(bytes: &[u8], max_bytes: u64) -> usize {
+pub fn tail_start_bytes(bytes: &[u8], max_bytes: u64) -> usize {
     let mut start = bytes.len().saturating_sub(max_bytes as usize);
     while start < bytes.len() && std::str::from_utf8(&bytes[start..]).is_err() {
         start += 1;
     }
     start
+}
+
+/// Byte offset that leaves at most the last `lines` lines of `bytes`. A
+/// trailing newline ends the last line rather than starting an empty one, and
+/// a newline byte cannot occur inside UTF-8, so the offset is a text boundary.
+pub fn tail_start_lines(bytes: &[u8], lines: u64) -> usize {
+    if lines == 0 {
+        return bytes.len();
+    }
+    let mut end = bytes.len();
+    if bytes.last() == Some(&b'\n') {
+        end -= 1;
+    }
+    let mut seen = 0u64;
+    while end > 0 {
+        end -= 1;
+        if bytes[end] == b'\n' {
+            seen += 1;
+            if seen >= lines {
+                return end + 1;
+            }
+        }
+    }
+    0
 }
 
 /// A clipped page that ends inside a UTF-8 character stops before it, so the
@@ -1269,7 +1328,7 @@ mod tests {
     use super::{
         Status, add_planner_fallback, fallback_reason_for_graph, finding_human_line,
         output_summary, output_summary_default, provider_error_from_result,
-        provider_error_from_stderr, tail_start_bytes,
+        provider_error_from_stderr, tail_start_bytes, tail_start_lines,
     };
     use serde_json::json;
 
@@ -1291,9 +1350,11 @@ mod tests {
                 path: false,
                 offset: 0,
                 tail: None,
+                tail_lines: None,
                 max_bytes: 65536,
             };
-            let rendered = super::render_output(command.clone(), Ok((data.clone(), String::new())));
+            let rendered =
+                super::render_output(command.clone(), Ok((data.clone(), String::new())), false);
             assert_eq!(
                 rendered.result.next[0].argv,
                 [
@@ -1307,7 +1368,7 @@ mod tests {
                 ]
             );
             data["eof"] = json!(true);
-            let rendered = super::render_output(command, Ok((data, String::new())));
+            let rendered = super::render_output(command, Ok((data, String::new())), false);
             assert_eq!(
                 rendered.result.next[0].argv,
                 ["provenant", "wait", "repair/writer#2"]
@@ -1325,6 +1386,7 @@ mod tests {
             path: false,
             offset: 0,
             tail: None,
+            tail_lines: None,
             max_bytes: 65536,
         };
         // An unsealed result with no bytes is a typed pending page, never an
@@ -1339,7 +1401,7 @@ mod tests {
             "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
             "bytes": {"encoding": "utf8", "data": ""},
         });
-        let reply = super::render_output(command.clone(), Ok((pending, String::new())));
+        let reply = super::render_output(command.clone(), Ok((pending, String::new())), false);
         assert_eq!(reply.result.status, Status::Ok);
         assert_eq!(reply.result.data["status"], "running");
         assert_eq!(reply.result.data["state"], "running");
@@ -1364,7 +1426,11 @@ mod tests {
             "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
             "bytes": {"encoding": "utf8", "data": "half a result"},
         });
-        let reply = super::render_output(command.clone(), Ok((partial, "half a result".into())));
+        let reply = super::render_output(
+            command.clone(),
+            Ok((partial, "half a result".into())),
+            false,
+        );
         assert_eq!(reply.result.status, Status::Ok);
         assert_eq!(reply.result.data["result"], "partial");
         assert!(reply.human.starts_with("running\npartial result\n"));
@@ -1374,7 +1440,7 @@ mod tests {
             .expect("a headed result has a summary")
             .lines
             .join("\n");
-        assert!(summary.contains("partial result"), "{summary}");
+        assert!(summary.contains("result: partial"), "{summary}");
 
         let settled = json!({
             "attempt_id": "22222222222222222222222222222222",
@@ -1383,7 +1449,7 @@ mod tests {
             "eof": true, "complete": true,
             "bytes": {"encoding": "utf8", "data": "all of it"},
         });
-        let reply = super::render_output(command, Ok((settled, "all of it".into())));
+        let reply = super::render_output(command, Ok((settled, "all of it".into())), false);
         assert!(reply.result.data.get("status").is_none());
         assert!(reply.result.data.get("result").is_none());
         assert!(!reply.human.contains("partial result"));
@@ -1481,6 +1547,7 @@ mod tests {
             path: false,
             offset: 0,
             tail: None,
+            tail_lines: None,
             max_bytes: 65536,
         };
         let local = json!({
@@ -1488,7 +1555,7 @@ mod tests {
             "writer_base":null, "writer_head":null,
             "residual_tree":null, "publication":null, "changed_files":null
         });
-        let rendered = super::render_output(command, Ok((local, "answer".into())));
+        let rendered = super::render_output(command, Ok((local, "answer".into())), false);
         let summary = output_summary(&rendered.result.data, &rendered.human, true);
         for label in [
             "base",
@@ -1549,6 +1616,7 @@ mod tests {
             path: false,
             offset: 0,
             tail: None,
+            tail_lines: None,
             max_bytes: 65536,
         };
         // A peer chunk's forward evidence is the owning lane projection: it
@@ -1588,8 +1656,13 @@ mod tests {
             digest: provenant_core::Digest::from_bytes([6; 32]),
             bytes: OutputBytes::Utf8("ok".into()),
         };
-        let reply =
-            super::output_from_host(command, host, attempt, |_: OutputInput| Ok(chunk.clone()));
+        let reply = super::output_from_host(
+            command,
+            host,
+            attempt,
+            |_: OutputInput| Ok(chunk.clone()),
+            false,
+        );
         assert_eq!(reply.result.status, Status::Ok);
         assert_eq!(reply.result.data["head"], json!("cccc"));
         assert_eq!(
@@ -1828,7 +1901,7 @@ mod tests {
 
     // Spec: docs/specs/lane-contracts.md#result-projection
     #[test]
-    fn default_view_leads_with_verdict_findings_and_verify() {
+    fn default_view_leads_with_settlement_verdict_findings_and_verify() {
         let data = json!({
             "state": "succeeded",
             "selected": {
@@ -1843,22 +1916,67 @@ mod tests {
         });
         let summary = output_summary_default(&data, "narration", true);
         let lines = &summary.lines;
-        let verdict = lines
-            .iter()
-            .position(|line| line.starts_with("review verdict:"));
-        let findings = lines.iter().position(|line| line.starts_with("findings:"));
-        let verify = lines.iter().position(|line| line.starts_with("verify:"));
+        let position = |prefix: &str| lines.iter().position(|line| line.starts_with(prefix));
+        let settlement = position("settlement:");
+        let verdict = position("review verdict:");
+        let findings = position("findings:");
+        let verify = position("verify:");
         assert!(
-            verdict.is_some() && findings.is_some() && verify.is_some(),
+            [settlement, verdict, findings, verify]
+                .into_iter()
+                .all(|position| position.is_some()),
             "{lines:?}"
         );
+        let ordered = [
+            settlement.unwrap(),
+            verdict.unwrap(),
+            findings.unwrap(),
+            verify.unwrap(),
+        ];
         assert!(
-            verdict.unwrap() < findings.unwrap() && findings.unwrap() < verify.unwrap(),
+            ordered.windows(2).all(|pair| pair[0] < pair[1]),
             "{lines:?}"
         );
         assert!(
             !lines.iter().any(|line| line.starts_with("base:")),
             "{lines:?}"
+        );
+    }
+
+    // Spec: docs/specs/lane-contracts.md#result-projection
+    #[test]
+    fn compact_result_omits_lane_prose_and_keeps_non_result_parts() {
+        let data = json!({
+            "state": "succeeded",
+            "selected": {"verdict": "PASS", "findings": [], "findings_available": true}
+        });
+        let prose = "a long lane narrative the chair must not read by default";
+        let compact = output_summary_default(&data, prose, true);
+        assert!(
+            !compact.lines.iter().any(|line| line.contains(prose)),
+            "the compact result embedded narration: {:?}",
+            compact.lines
+        );
+        assert!(
+            compact
+                .lines
+                .iter()
+                .any(|line| line.starts_with("settlement:")),
+            "{:?}",
+            compact.lines
+        );
+        // A transcript or stderr read is the requested bytes, not narration.
+        let part = output_summary_default(&data, prose, false);
+        assert!(
+            part.lines.iter().any(|line| line.contains(prose)),
+            "a non-result part lost its text: {:?}",
+            part.lines
+        );
+        let full = output_summary(&data, prose, true);
+        assert!(
+            full.lines.iter().any(|line| line.contains(prose)),
+            "--full lost the prose: {:?}",
+            full.lines
         );
     }
 
@@ -1942,5 +2060,54 @@ mod tests {
             assert!(bytes.len() - start <= n as usize, "n={n}, start={start}");
             assert!(std::str::from_utf8(&bytes[start..]).is_ok(), "n={n}");
         }
+    }
+
+    // Spec: docs/specs/cli.md#output-references-and-bounded-tails
+    #[test]
+    fn tail_lines_returns_at_most_the_requested_lines_and_clamps() {
+        let text = "first\nsecond\nthird\nfourth\n";
+        let bytes = text.as_bytes();
+        assert_eq!(&text[tail_start_lines(bytes, 1)..], "fourth\n");
+        assert_eq!(&text[tail_start_lines(bytes, 2)..], "third\nfourth\n");
+        // A request beyond the available lines keeps the whole text; a
+        // trailing newline does not count as an extra empty line.
+        assert_eq!(tail_start_lines(bytes, 4), 0);
+        assert_eq!(tail_start_lines(bytes, 9), 0);
+        assert_eq!(tail_start_lines(b"one line", 5), 0);
+        assert_eq!(tail_start_lines(bytes, 0), bytes.len());
+        assert!(
+            std::str::from_utf8(&bytes[tail_start_lines(bytes, 3)..]).is_ok(),
+            "a line tail starts on a text boundary"
+        );
+        let selection = crate::Output {
+            target: "repair/writer#2".parse().unwrap(),
+            part: crate::Part::Result,
+            to: None,
+            path: false,
+            offset: 0,
+            tail: None,
+            tail_lines: Some(501),
+            max_bytes: 65536,
+        };
+        assert_eq!(
+            selection.tail_selection(),
+            Some(crate::Tail::Lines(crate::limits::TAIL_LINES))
+        );
+        assert!(selection.tail_clamped());
+        assert_eq!(
+            selection.tail_selection(),
+            Some(crate::Tail::Lines(500)),
+            "a line request is clamped once, for every reader"
+        );
+        assert_eq!(
+            crate::Output {
+                tail: Some(64),
+                tail_lines: None,
+                ..selection
+            }
+            .tail_selection(),
+            Some(crate::Tail::Bytes(64)),
+            "a byte request stays a byte request"
+        );
     }
 }

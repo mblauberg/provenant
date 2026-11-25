@@ -154,6 +154,7 @@ pub fn output_chunk_schema() -> Value {
         ],
         &[
             ("tail", unsigned()),
+            ("tail_lines", unsigned()),
             ("tail_clamped", boolean()),
             (
                 "changed_files",
@@ -187,6 +188,7 @@ pub fn composite_chunk_schema() -> Value {
         ],
         &[
             ("tail", unsigned()),
+            ("tail_lines", unsigned()),
             ("tail_clamped", boolean()),
             ("to", super::schema::worktree_path()),
             ("written", unsigned()),
@@ -223,6 +225,7 @@ fn with_lane(mut schema: Value) -> Value {
         properties.insert("written".into(), unsigned());
         properties.insert("tail_text".into(), string());
         properties.insert("tail".into(), unsigned());
+        properties.insert("tail_lines".into(), unsigned());
         properties.insert("tail_clamped".into(), boolean());
         properties.insert("selected".into(), any());
         properties.insert("planner_fallback".into(), any());

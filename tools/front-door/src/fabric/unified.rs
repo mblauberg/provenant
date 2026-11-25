@@ -3392,7 +3392,14 @@ pub(crate) fn unified_graph_output(
                 factory.clock.mono_now(),
                 factory.context.config.graph.launch_wait_seconds,
             )?;
-            host_graph_output(command, edge, &factory, budget, &CancelToken::new())
+            host_graph_output(
+                command,
+                edge,
+                &factory,
+                budget,
+                &CancelToken::new(),
+                globals.full,
+            )
         };
         return read().unwrap_or_else(|error| output_error(error.as_ref()));
     }
@@ -3409,7 +3416,8 @@ pub(crate) fn unified_graph_output(
             return Err("lane reads return content; omit --path".into());
         }
         let input = json!({"op":"output", "id":command.target.to_string(),
-            "render":true,"part":part,"offset":command.offset,"tail":command.tail,"max_bytes":command.max_bytes});
+            "render":true,"part":part,"offset":command.offset,"tail":command.tail,
+            "tail_lines":command.tail_lines,"full":globals.full,"max_bytes":command.max_bytes});
         let response = provenant_cli::fabric::graph_relay::from_lane(
             &provenant_fabric_runtime::graph::relay::RelayOp::Read { input },
             &CancelToken::new(),
@@ -3478,6 +3486,7 @@ fn host_graph_output(
     factory: &Factory,
     budget: WaitBudget,
     cancel: &CancelToken,
+    full: bool,
 ) -> Result<provenant_cli::run::Reply, Box<dyn std::error::Error>> {
     let (resolved, checkpoint) = match resolve_output_with_checkpoint(factory, &command.target) {
         Ok(found) => found,
@@ -3497,7 +3506,7 @@ fn host_graph_output(
         .find(|node| Some(node.id.as_str()) == resolved.node.as_deref())
         .ok_or(FacadeError::StateCorrupt)?;
     if !progress.children.is_empty() {
-        return composite_graph_output(command, &resolved.graph, progress);
+        return composite_graph_output(command, &resolved.graph, progress, full);
     }
     let Some(reference) = resolved.attempt_ref.clone() else {
         let fault = TargetFault {
@@ -3526,7 +3535,7 @@ fn host_graph_output(
     };
     let mut selected = command.clone();
     selected.target = resolved.target();
-    let reply = graph_attempt_output(selected, &reference, edge, factory, budget, cancel)?;
+    let reply = graph_attempt_output(selected, &reference, edge, factory, budget, cancel, full)?;
     Ok(with_graph_failures(reply, &failure_rows))
 }
 
@@ -3534,6 +3543,7 @@ fn composite_graph_output(
     command: &provenant_cli::Output,
     graph: &str,
     progress: &provenant_fabric_runtime::graph::NodeProgress,
+    full: bool,
 ) -> Result<provenant_cli::run::Reply, Box<dyn std::error::Error>> {
     if command.path {
         return Ok(output_fail(
@@ -3563,9 +3573,7 @@ fn composite_graph_output(
     let result = outputs.result.as_ref();
     let text = result.map_or("", |result| result.excerpt.as_str());
     let length = text.len();
-    let tail = command
-        .tail
-        .map(|lines| lines.min(provenant_cli::limits::TAIL_LINES));
+    let tail = command.tail_selection();
     let mut start = if tail.is_some() {
         length.saturating_sub(command.max_bytes as usize)
     } else {
@@ -3574,8 +3582,14 @@ fn composite_graph_output(
             .min(length)
     };
     let end = start.saturating_add(command.max_bytes as usize).min(length);
-    if let Some(lines) = tail {
-        let bounded_start = composite_tail_start(&text.as_bytes()[start..end], lines);
+    if let Some(tail) = tail {
+        let window = &text.as_bytes()[start..end];
+        let bounded_start = match tail {
+            provenant_cli::Tail::Bytes(bytes) => {
+                provenant_cli::run::tail_start_bytes(window, bytes)
+            }
+            provenant_cli::Tail::Lines(lines) => composite_tail_start(window, lines),
+        };
         start += bounded_start;
     }
     let selected_bytes = &text.as_bytes()[start..end];
@@ -3622,10 +3636,11 @@ fn composite_graph_output(
             digest: result.map(|result| result.digest.clone()),
             bytes,
             selected,
-            tail,
-            tail_clamped: command
-                .tail
-                .map(|lines| lines != lines.min(provenant_cli::limits::TAIL_LINES)),
+            tail: tail.map(|selection| match selection {
+                provenant_cli::Tail::Bytes(bytes) => bytes,
+                provenant_cli::Tail::Lines(lines) => lines,
+            }),
+            tail_clamped: tail.map(|_| command.tail_clamped()),
             to: None,
             written: None,
         },
@@ -3634,6 +3649,7 @@ fn composite_graph_output(
     Ok(provenant_cli::run::render_output(
         command.clone(),
         Ok((data, excerpt.to_owned())),
+        full,
     ))
 }
 
@@ -3718,6 +3734,7 @@ fn graph_attempt_output(
     factory: &Factory,
     budget: WaitBudget,
     cancel: &CancelToken,
+    full: bool,
 ) -> Result<provenant_cli::run::Reply, FacadeError> {
     if cancel.is_cancelled() || budget.remaining(factory.clock.mono_now()).as_micros() == 0 {
         return Err(FacadeError::Timeout);
@@ -3740,6 +3757,7 @@ fn graph_attempt_output(
             &session,
             attempt,
             &owner.call(cancel),
+            full,
         ));
     }
     let origin = provenant_records::WorkKey::new(
@@ -3773,6 +3791,7 @@ fn graph_attempt_output(
                     )
                 })
         },
+        full,
     ))
 }
 
@@ -4231,6 +4250,7 @@ pub(crate) fn read_lane_graph(
             path: false,
             offset: input["offset"].as_u64().unwrap_or(0),
             tail: input["tail"].as_u64(),
+            tail_lines: input["tail_lines"].as_u64(),
             max_bytes: input["max_bytes"].as_u64().unwrap_or(65536).clamp(1, 65536),
         };
         let edge = provenant_cli::run::Edge {
@@ -4239,7 +4259,14 @@ pub(crate) fn read_lane_graph(
             assets: &factory.assets,
             cwd: &factory.cwd,
         };
-        let reply = host_graph_output(&command, &edge, &factory, budget, cancel)?;
+        let reply = host_graph_output(
+            &command,
+            &edge,
+            &factory,
+            budget,
+            cancel,
+            input["full"].as_bool() == Some(true),
+        )?;
         if input["render"] == true {
             Ok(json!({"result":reply.result,"human":reply.human}))
         } else {

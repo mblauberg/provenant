@@ -157,9 +157,10 @@ fn composite_output_preserves_every_public_typed_export() {
         path: false,
         offset: 0,
         tail: None,
+        tail_lines: None,
         max_bytes: 64,
     };
-    let reply = composite_graph_output(&command, "typed-output", &progress).unwrap();
+    let reply = composite_graph_output(&command, "typed-output", &progress, false).unwrap();
     assert_eq!(reply.result.data["selected"]["branch"], "feature/output");
     assert_eq!(reply.result.data["selected"]["commit"], commit);
     assert_eq!(
@@ -190,6 +191,7 @@ fn composite_output_command(offset: u64, max_bytes: u64) -> provenant_cli::Outpu
         path: false,
         offset,
         tail: None,
+        tail_lines: None,
         max_bytes,
     }
 }
@@ -228,8 +230,13 @@ fn composite_output_paginates_multibyte_text_as_bounded_bytes() {
 
     // Starting inside the four-byte character returns its next raw byte,
     // losslessly, instead of slicing the Rust string at that offset.
-    let middle =
-        composite_graph_output(&composite_output_command(1, 1), "typed-output", &progress).unwrap();
+    let middle = composite_graph_output(
+        &composite_output_command(1, 1),
+        "typed-output",
+        &progress,
+        false,
+    )
+    .unwrap();
     assert_eq!(middle.result.status, provenant_records::Outcome::Ok);
     assert_eq!(middle.result.data["offset"], 1);
     assert_eq!(middle.result.data["next_offset"], 2);
@@ -243,6 +250,7 @@ fn composite_output_paginates_multibyte_text_as_bounded_bytes() {
             &composite_output_command(offset, 1),
             "typed-output",
             &progress,
+            false,
         )
         .unwrap();
         let data = &reply.result.data;
@@ -276,8 +284,13 @@ fn composite_output_returns_typed_exports_without_result_text() {
         "commit": commit,
         "remaining": ["finish the export test"]
     }));
-    let reply = composite_graph_output(&composite_output_command(0, 16), "typed-output", &progress)
-        .unwrap();
+    let reply = composite_graph_output(
+        &composite_output_command(0, 16),
+        "typed-output",
+        &progress,
+        false,
+    )
+    .unwrap();
 
     assert_eq!(reply.result.status, provenant_records::Outcome::Ok);
     let data = &reply.result.data;
