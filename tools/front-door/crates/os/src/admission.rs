@@ -497,6 +497,10 @@ fn slot_name(index: u64) -> OsString {
     format!("slot-{index}.lock").into()
 }
 
+fn durable_lease_name(index: u64) -> OsString {
+    format!("slot-{index}.lease.json").into()
+}
+
 /// An open admission slot directory, read-only for the lane.
 pub struct AdmissionSlots {
     dir: Directory,
@@ -605,6 +609,18 @@ impl AdmissionSlots {
                 .try_lock_existing(&slot_name(index), LockMode::Exclusive)
             {
                 Ok(guard) => {
+                    let leased = match self
+                        .dir
+                        .read_stable(&durable_lease_name(index), 64 * 1024)
+                    {
+                        Ok(_) => true,
+                        Err(error) if error.is_not_found() => false,
+                        Err(error) => return Err(error),
+                    };
+                    if leased {
+                        drop(guard);
+                        continue;
+                    }
                     return Ok(Some(SlotGuard {
                         guard,
                         index,
@@ -651,11 +667,14 @@ impl AdmissionSlots {
     pub fn held(&self, limit: u64) -> u64 {
         (0..limit)
             .filter(|index| {
-                matches!(
-                    self.dir
-                        .try_lock_existing(&slot_name(*index), LockMode::Shared),
-                    Err(FsError::LockTimeout { .. })
-                )
+                self.dir
+                    .read_stable(&durable_lease_name(*index), 64 * 1024)
+                    .is_ok()
+                    || matches!(
+                        self.dir
+                            .try_lock_existing(&slot_name(*index), LockMode::Shared),
+                        Err(FsError::LockTimeout { .. })
+                    )
             })
             .count() as u64
     }
@@ -687,6 +706,7 @@ impl SlotGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsStr;
     use std::os::unix::fs::PermissionsExt;
 
     static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -732,6 +752,31 @@ mod tests {
         drop(first);
         assert_eq!(slots.held(2), 1);
         assert!(slots.try_acquire(2).unwrap().is_some());
+    }
+
+    #[test]
+    fn durable_ci_reservation_blocks_direct_slot_users_until_removed() {
+        let _serial = serial();
+        let (state, slots) = provisioned("ci", 1);
+        let guard = slots.try_acquire(1).unwrap().unwrap();
+        let directory = Directory::open_anchor(&class_directory(state.path(), "ci")).unwrap();
+        directory
+            .atomic_write(
+                OsStr::new("slot-0.lease.json"),
+                ".test-lease-",
+                b"persisted owner",
+                crate::fs::PublishMode::NoReplace,
+            )
+            .unwrap()
+            .require_durable()
+            .unwrap();
+        drop(guard);
+
+        assert!(slots.try_acquire(1).unwrap().is_none());
+        assert_eq!(slots.held(1), 1);
+        directory.unlink(OsStr::new("slot-0.lease.json")).unwrap();
+        directory.sync().unwrap();
+        assert!(slots.try_acquire(1).unwrap().is_some());
     }
 
     #[test]
