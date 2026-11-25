@@ -569,14 +569,29 @@ pub(crate) fn recover_pending_with(
                             }
                             let retry = if valid_for_retry(forge, repo, approvals, &attempt, state)
                             {
-                                publish::merge_member(
-                                    forge,
-                                    step.pr.number,
-                                    &step.pr.head,
-                                    settings.method,
-                                    &attempt.policy.publication,
-                                    !step.pr.approval_evidence.is_empty(),
-                                )
+                                if attempt
+                                    .policy
+                                    .landing
+                                    .as_ref()
+                                    .is_some_and(|context| context.request.delivery_queue)
+                                {
+                                    publish::merge_delivery_member(
+                                        forge,
+                                        &step.pr,
+                                        settings.method,
+                                        &attempt.policy.publication,
+                                        !step.pr.approval_evidence.is_empty(),
+                                    )
+                                } else {
+                                    publish::merge_member(
+                                        forge,
+                                        step.pr.number,
+                                        &step.pr.head,
+                                        settings.method,
+                                        &attempt.policy.publication,
+                                        !step.pr.approval_evidence.is_empty(),
+                                    )
+                                }
                             } else {
                                 Err(LandingError::PublicationUnknown)
                             };
