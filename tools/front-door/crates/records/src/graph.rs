@@ -122,7 +122,9 @@ pub struct EscalationProgress {
     /// Zero-based index into the sealed ladder.
     pub rung: usize,
     pub cause: EscalationCause,
-    /// Repair identity that produced this cause; repeated observations are no-ops.
+    /// Attempt that identifies this transition; repeated observations are no-ops.
+    /// This is normally the writer, or the completed review for an adopted
+    /// publication that has no writer attempt in the current graph.
     pub transition_attempt: AttemptKey,
 }
 
