@@ -329,6 +329,7 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                 delivery_loop: None,
                 escalation: None,
                 delivery_hygiene: None,
+                delivery_publication: None,
                 delivery_park: None,
                 conflict: None,
                 children_cancelled: false,
@@ -1147,7 +1148,7 @@ fn ci_failed_checks_and_findings_fit_the_configured_envelope() {
                     observation.bound_failed_checks(cap, count);
                     ci.failed_checks = observation.failed_checks;
                     ci.truncated = observation.truncated;
-                    node.outputs = Some(ci::outputs(false, Some(ci)));
+                    node.outputs = Some(ci::outputs(false, Some(ci), false));
                 }
             }
             let execution = GraphExecution {

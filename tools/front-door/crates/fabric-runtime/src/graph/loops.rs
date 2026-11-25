@@ -139,7 +139,9 @@ pub(super) fn delivery_route(
     checkpoint: &GraphCheckpoint,
 ) -> Option<(GraphRoute, usize)> {
     let node = plan.nodes.get(node_index)?;
-    if node.access != AccessMode::WorktreeWrite || node.kind == Some(NodeKind::Hygiene) {
+    if node.access != AccessMode::WorktreeWrite
+        || matches!(node.kind, Some(NodeKind::Hygiene | NodeKind::Publish))
+    {
         return None;
     }
     let (_, spec) = escalation_owner(node_index, plan)?;
@@ -515,12 +517,20 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
             }
             if child.loop_body.is_some()
                 || child.kind == Some(NodeKind::Loop)
-                || child.on_fail.is_some()
                 || child.delivery.as_ref().is_some_and(|mode| {
                     !matches!(mode, provenant_records::run::DeliveryMode::Integrate(_))
                 })
             {
-                return Err("loop body cannot nest loops or route on_fail, and may only deliver by integrate:".into());
+                return Err(
+                    "loop body cannot nest loops and may only deliver by integrate:".into(),
+                );
+            }
+            if child
+                .on_fail
+                .as_ref()
+                .is_some_and(|target| !spec.body.iter().any(|member| &member.id == target))
+            {
+                return Err("loop on_fail target must name a node in the same round".into());
             }
             if let Some(provenant_records::run::DeliveryMode::Integrate(target)) = &child.delivery
                 && document.integration_branch.as_deref() != Some(target.as_str())
@@ -562,7 +572,8 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
             }
             // External CI subjects are checked against the expanded graph.
             // The isolated body check below has only the local namespace.
-            if let Some(GateCondition::Ci { target, .. }) = &mut child.condition
+            if let Some(GateCondition::Ci { target, .. } | GateCondition::Conflict { target, .. }) =
+                &mut child.condition
                 && let CiTarget::Node {
                     node: target_node, ..
                 } = target
@@ -572,6 +583,9 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
             }
         }
         let body_document = GraphDocument {
+            // Outer publication bindings are checked after expansion; the
+            // isolated body has only local names and uses temporary refs.
+            queue: None,
             review: None,
             review_subject_missing: false,
             nodes: body,
@@ -622,6 +636,10 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
                     .iter()
                     .map(|name| id(&node.id, round, name))
                     .collect();
+                child.on_fail = child
+                    .on_fail
+                    .as_deref()
+                    .map(|target| id(&node.id, round, target));
                 child.after_settled = child
                     .after_settled
                     .iter()
@@ -877,6 +895,7 @@ pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
                 delivery_loop: None,
                 escalation: None,
                 delivery_hygiene: None,
+                delivery_publication: None,
                 delivery_park: None,
                 conflict: None,
                 extra: Default::default(),

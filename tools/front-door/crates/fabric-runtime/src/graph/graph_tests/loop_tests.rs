@@ -72,6 +72,26 @@ fn extension(
     .unwrap()
 }
 
+#[test]
+fn queue_loop_can_bind_an_outer_publication_gate() {
+    for kind in ["ci", "conflict"] {
+        let mut document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":2, "graph_id":"outer-publication", "nodes":[
+                {"id":"writer", "access":"worktree_write", "worktree":"retained",
+                 "prompt":"Write", "route":{"alias":"junior"}},
+                {"id":"cycle", "kind":"loop", "access":"read_only", "depends_on":["writer"],
+                 "loop":{"max_rounds":1, "until":"check", "body":[
+                     {"id":"check", "kind":"gate", "access":"read_only",
+                      "condition":{"type":kind,"target":{"node":"writer"}}}
+                 ]}}
+            ]
+        })).unwrap();
+        document.queue = Some(QueueKnobs::default());
+        let expanded = loops::expand(&document, &[], &Default::default()).unwrap();
+        assert!(validate_plan(&expanded).is_ok());
+    }
+}
+
 // Spec: docs/specs/fabric.md#bounded-graphs-and-route-fallback
 #[test]
 fn settled_loop_dependency_does_not_inherit_entry_inputs() {
@@ -1667,7 +1687,7 @@ fn loop_simultaneous_exhaustion_keeps_both_reasons_and_resolves_individually() {
 }
 
 #[test]
-fn loop_rejects_nested_routing_worktree_prefix_and_identifier_ambiguities() {
+fn loop_rejects_nested_loops_invalid_recovery_targets_and_identifier_ambiguities() {
     for case in 0..5 {
         let mut document = fixture("extend");
         let nested = document.nodes[0].clone();
@@ -1687,9 +1707,8 @@ fn loop_rejects_nested_routing_worktree_prefix_and_identifier_ambiguities() {
             _ => document.nodes[0].id = "x".repeat(198),
         }
         let expected = match case {
-            0 | 1 => {
-                "loop body cannot nest loops or route on_fail, and may only deliver by integrate:"
-            }
+            0 => "loop body cannot nest loops and may only deliver by integrate:",
+            1 => "node approved: on_fail target must depend on its gate",
             2 => "loop writers must share one worktree",
             3 => "previous. is reserved for prior round inputs",
             _ => "expanded loop node id exceeds 200 bytes",
@@ -1700,6 +1719,87 @@ fn loop_rejects_nested_routing_worktree_prefix_and_identifier_ambiguities() {
             "case {case}"
         );
     }
+}
+
+#[test]
+fn loop_conflict_recovery_is_bounded_and_replays_the_namespaced_target() {
+    let mut document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version":2,"graph_id":"loop-conflict-recovery","nodes":[{
+            "id":"delivery","kind":"loop","access":"read_only",
+            "loop":{"max_rounds":2,"until":"done","body":[
+                {"id":"publish","access":"worktree_write","worktree":"/fixture/writer",
+                 "prompt":"publish the retained worktree","write_scope":["src"],
+                 "route":{"alias":"senior"}},
+                {"id":"conflict","kind":"gate","access":"read_only",
+                 "depends_on":["publish"],"on_fail":"rebase",
+                 "condition":{"type":"conflict","target":{"node":"publish"}}},
+                {"id":"rebase","access":"worktree_write","worktree":"/fixture/writer",
+                 "prompt":"rebase the retained worktree","write_scope":["src"],
+                 "route":{"alias":"senior"},"depends_on":["conflict"]},
+                {"id":"done","kind":"gate","access":"read_only",
+                 "depends_on":["rebase"],"condition":{"type":"budget"}}
+            ]}
+        }]
+    }))
+    .unwrap();
+    document.queue = Some(QueueKnobs::default());
+
+    let limits = crate::config::GraphLimits::default();
+    assert!(document.admit(&limits).is_ok());
+    let expanded = loops::expand(&document, &[], &limits).unwrap();
+    let (plan, positions) = validate_flat_plan(&expanded, &limits).unwrap();
+    for round in [1, 2] {
+        let conflict = &plan.nodes[positions[&format!("delivery--r{round}--conflict")]];
+        let rebase_id = format!("delivery--r{round}--rebase");
+        assert_eq!(
+            conflict.on_fail.as_deref(),
+            Some(rebase_id.as_str())
+        );
+    }
+
+    let gate_index = positions["delivery--r1--conflict"];
+    let rebase_index = positions["delivery--r1--rebase"];
+    let mut checkpoint = initial_checkpoint(&expanded, &plan, "digest".into(), None, None, None);
+    checkpoint.nodes[gate_index].state = NodeState::Failed;
+    checkpoint.nodes[gate_index].outputs = Some(NodeOutputs::default());
+    checkpoint.nodes[gate_index].gate = Some(GateResult {
+        extra: Default::default(),
+        passed: false,
+        reason: Some("CONFLICTING".into()),
+        on_fail: plan.nodes[gate_index].on_fail.clone(),
+    });
+    assert_eq!(
+        dependency_state(&plan.nodes[rebase_index], &plan, &checkpoint, &positions),
+        None,
+        "the failed conflict gate activates the same-round rebase writer"
+    );
+    let replay: GraphCheckpoint =
+        serde_json::from_value(serde_json::to_value(&checkpoint).unwrap()).unwrap();
+    assert_eq!(
+        dependency_state(&plan.nodes[rebase_index], &plan, &replay, &positions),
+        None,
+        "replay keeps the rebase edge active"
+    );
+
+    checkpoint.nodes[gate_index].state = NodeState::Succeeded;
+    checkpoint.nodes[gate_index].outputs = Some(NodeOutputs::default());
+    checkpoint.nodes[gate_index].gate.as_mut().unwrap().passed = true;
+    checkpoint.nodes[gate_index].gate.as_mut().unwrap().reason = None;
+    assert_eq!(
+        dependency_state(&plan.nodes[rebase_index], &plan, &checkpoint, &positions),
+        Some(NodeState::Skipped),
+        "the rebase writer is inactive when the conflict gate is clear"
+    );
+
+    let mut cyclic = document;
+    cyclic.nodes[0]
+        .loop_body
+        .as_mut()
+        .unwrap()
+        .body[1]
+        .depends_on
+        .push("rebase".into());
+    assert!(validate_plan(&cyclic).is_err(), "an in-loop dependency cycle stays rejected");
 }
 
 fn integrating_repair(delivery: Option<&str>) -> GraphDocument {
@@ -1772,7 +1872,7 @@ fn loop_body_delivers_only_by_integrate() {
     for refused in ["push", "pr"] {
         assert_eq!(
             validate_plan(&integrating_repair(Some(refused))).unwrap_err(),
-            "loop body cannot nest loops or route on_fail, and may only deliver by integrate:",
+            "loop body cannot nest loops and may only deliver by integrate:",
             "{refused}"
         );
     }

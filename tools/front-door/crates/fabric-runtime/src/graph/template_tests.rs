@@ -2013,7 +2013,9 @@ fn compiler_lowers_and_admits_a_queue_delivery_composite() {
                         "depends_on":["conflict"], "on_fail":"repair",
                         "condition":{"type":"ci", "target":{"node":"publish"}}},
                     {"id":"repair", "access":"worktree_write", "worktree":"/fixture/writer",
-                        "prompt":"repair the failed checks", "route":{"alias":"senior"},
+                        "prompt":"Repair the failed CI head. Sweep the whole defect class across related tests, help text and documentation that asserts the changed behaviour.",
+                        "route":{"alias":"senior"}, "source":{"type":"head","node":"publish"},
+                        "inputs":[{"node":"ci","outputs":["findings","commit"]}],
                         "depends_on":["ci"]},
                     {"id":"review", "kind":"composite", "access":"read_only",
                         "depends_on":["repair"], "source":{"type":"head", "node":"repair"},
@@ -2069,6 +2071,22 @@ fn compiler_lowers_and_admits_a_queue_delivery_composite() {
             .find(|node| node.id == "delivery--review")
             .is_some_and(|node| node.delivery_review.is_some())
     );
+    let repair = expanded
+        .nodes
+        .iter()
+        .find(|node| node.id == "delivery--repair")
+        .unwrap();
+    assert!(matches!(
+        &repair.source,
+        Some(SourceBinding::Head { node }) if node == "delivery--publish"
+    ));
+    assert!(repair.inputs.iter().any(|input| {
+        input.node == "delivery--ci"
+            && input.outputs.len() == 2
+            && input.outputs.contains(&OutputKind::Findings)
+            && input.outputs.contains(&OutputKind::Commit)
+    }));
+    assert!(repair.prompt.contains("whole defect class"));
 }
 
 #[test]

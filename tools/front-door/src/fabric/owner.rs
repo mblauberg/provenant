@@ -1371,6 +1371,7 @@ impl provenant_fabric_runtime::graph::CiStatus for BoundGraphOwner<'_> {
         &mut self,
         target: &str,
         checks: &[String],
+        delivery_queue: bool,
         failed_checks_max_bytes: usize,
         max_failed_checks: usize,
     ) -> provenant_fabric_runtime::graph::CiObservation {
@@ -1379,6 +1380,7 @@ impl provenant_fabric_runtime::graph::CiStatus for BoundGraphOwner<'_> {
             &self.factory.cwd,
             target,
             checks,
+            delivery_queue,
             failed_checks_max_bytes,
             max_failed_checks,
         )
@@ -2470,6 +2472,12 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             }),
         }
     }
+    fn publish_delivery(
+        &mut self,
+        request: provenant_fabric_runtime::graph::PublicationRequest<'_>,
+    ) -> Result<Option<provenant_fabric_runtime::graph::DeliveryPublication>, Self::Error> {
+        self.execute_delivery_publication_inner(&request).map(Some)
+    }
     fn park_delivery(
         &mut self,
         request: provenant_fabric_runtime::graph::DeliveryParkRequest<'_>,
@@ -3351,6 +3359,246 @@ impl BoundGraphOwner<'_> {
             branch: Some(transaction.branch.clone()),
             formatter_source: Some(formatter_source),
             diagnostic,
+        })
+    }
+
+    fn execute_delivery_publication_inner(
+        &mut self,
+        request: &provenant_fabric_runtime::graph::PublicationRequest<'_>,
+    ) -> Result<provenant_fabric_runtime::graph::DeliveryPublication, FacadeError> {
+        let (host, attempt) = request
+            .source_attempt
+            .split_once('/')
+            .ok_or(FacadeError::StateCorrupt)?;
+        if host
+            .parse::<provenant_core::HostId>()
+            .map_err(|_| FacadeError::StateCorrupt)?
+            != self.factory.context.identity.host
+        {
+            return Err(FacadeError::OwnerUnavailable);
+        }
+        let attempt_id = attempt
+            .parse::<provenant_core::AttemptId>()
+            .map_err(|_| FacadeError::StateCorrupt)?;
+        let owner = BinaryRunOwner {
+            factory: self.factory,
+            allow_remote: false,
+            actor: None,
+            chair: None,
+        };
+        let store = owner.store_with_facts(self.cancel, &self.repo_facts)?;
+        let call = owner.call(self.cancel);
+        let record = store.record(attempt_id, &call).map_err(run_error)?;
+        let operation = store
+            .attempt_operation(record.attempt_id, &call)
+            .map_err(run_error)?;
+        let expected_work = request
+            .source_key
+            .work_key(self.factory.context.identity.project)
+            .map_err(|_| FacadeError::StateCorrupt)?;
+        if record.key != expected_work
+            || operation.operation_id
+                != graph_operation("graph-attempt-operation", request.source_key)?
+            || record.context.as_ref().is_none_or(|context| {
+                context.graph_id.as_deref() != Some(request.graph_id)
+                    || context.node_id.as_deref() != Some(request.source_node)
+            })
+            || !matches!(
+                record.state,
+                provenant_records::run::AttemptState::Terminal { .. }
+            )
+            || !store.custody_released(&record, &call).map_err(run_error)?
+        {
+            return Err(FacadeError::Conflict);
+        }
+
+        let worktree = PathBuf::from(request.worktree);
+        if !worktree.is_absolute() {
+            return Err(FacadeError::StateCorrupt);
+        }
+        let expected_identity = request.worktree_identity.ok_or(FacadeError::StateCorrupt)?;
+        let (project_directory, _) = selected_writer_project(self.factory, request.worktree)?;
+        let expected_head = request
+            .expected_head
+            .parse::<provenant_core::GitOid>()
+            .map_err(|_| FacadeError::StateCorrupt)?;
+        let integration_base = request
+            .integration_base
+            .parse::<provenant_core::GitOid>()
+            .map_err(|_| FacadeError::StateCorrupt)?;
+        let expected_remote_head = request
+            .expected_remote_head
+            .map(|head| head.parse::<provenant_core::GitOid>())
+            .transpose()
+            .map_err(|_| FacadeError::StateCorrupt)?;
+        let scope_attempt = provenant_core::AttemptId::from_bytes(
+            provenant_os::fs::entropy_128().map_err(|_| FacadeError::StateCorrupt)?,
+        );
+        let forge = provenant_run::resolve_forge(
+            self.factory.context.roots.state.as_path(),
+            self.factory.cwd.as_path(),
+            &self.factory.context.port_table,
+        )
+        .map_err(run_error)?;
+        let body = format!(
+            "Delivery queue graph {}\n\nNode {} published clean head {}.",
+            request.graph_id, request.node_id, request.expected_head
+        );
+        let git = provenant_os::git::git_executable()
+            .and_then(|git| git.to_str().map(str::to_owned))
+            .ok_or_else(|| FacadeError::io("locate git for delivery publication"))?;
+        let host_delivery =
+            provenant_run::HostDeliveryContext::capture().with_repo_facts(&self.repo_facts);
+        let receipt = provenant_confinement::worktrees::with_context_using_workers_and_facts(
+            &self.factory.context.roots,
+            &self.factory.home,
+            &project_directory,
+            &self.factory.clock,
+            self.cancel,
+            self.factory.workers,
+            &self.repo_facts,
+            |context| {
+                let prepared = (|| -> Result<provenant_run::GraphPublicationReceipt, String> {
+                    let verified =
+                        provenant_confinement::repo::verify_worktree(context.repo, &worktree)
+                            .map_err(|error| error.to_string())?;
+                    let metadata = std::fs::metadata(&worktree)
+                        .map_err(|error| format!("inspect retained worktree: {error}"))?;
+                    use std::os::unix::fs::MetadataExt;
+                    if metadata.dev() != expected_identity.device
+                        || metadata.ino() != expected_identity.inode
+                    {
+                        return Err("retained writer worktree identity changed".into());
+                    }
+                    let branch = String::from_utf8(delivery_git_output(
+                        &worktree,
+                        &["symbolic-ref", "--short", "HEAD"],
+                    )?)
+                    .map_err(|_| "retained writer branch is not UTF-8".to_owned())?
+                    .trim()
+                    .to_owned();
+                    if branch != request.writer_branch || branch.is_empty() {
+                        return Err("retained writer branch differs from hygiene receipt".into());
+                    }
+                    let branch_ref = provenant_confinement::repo::GitRefName::branch(&branch)
+                        .map_err(|error| error.to_string())?;
+                    let head = String::from_utf8(delivery_git_output(
+                        &worktree,
+                        &["rev-parse", "--verify", "HEAD"],
+                    )?)
+                    .map_err(|_| "retained writer head is not UTF-8".to_owned())?
+                    .trim()
+                    .to_owned();
+                    let observed_head = head
+                        .parse::<provenant_core::GitOid>()
+                        .map_err(|_| "retained writer head is invalid".to_owned())?;
+                    if observed_head != expected_head {
+                        return Err("retained writer head differs from hygiene receipt".into());
+                    }
+                    let status = delivery_git_output(
+                        &worktree,
+                        &["status", "--porcelain=2", "--untracked-files=all"],
+                    )?;
+                    if !status.is_empty() {
+                        return Err("retained writer worktree changed after hygiene".into());
+                    }
+                    let inventory = context
+                        .facts
+                        .writer_inventory(
+                            context.repo,
+                            context.executor,
+                            context.utility,
+                            context.utility_budget,
+                            self.cancel,
+                        )
+                        .map_err(|error| error.to_string())?;
+                    let (slot, binding) = provenant_confinement::worktrees::writer_custody(
+                        context.project_state,
+                        &verified,
+                        &worktree,
+                        &branch_ref,
+                        observed_head,
+                        || Ok(inventory),
+                    )
+                    .map_err(|error| error.to_string())?;
+                    let _lease = provenant_supervisor::custody::acquire_writer(
+                        slot,
+                        provenant_records::custody::Scope {
+                            attempt: scope_attempt,
+                            generation: 1,
+                        },
+                        binding,
+                        self.budget,
+                        self.cancel,
+                        &self.factory.clock,
+                    )
+                    .map_err(|error| format!("writer custody unavailable: {error}"))?;
+                    let metadata = std::fs::metadata(&worktree)
+                        .map_err(|error| format!("recheck retained worktree: {error}"))?;
+                    if metadata.dev() != expected_identity.device
+                        || metadata.ino() != expected_identity.inode
+                    {
+                        return Err(
+                            "retained writer worktree identity changed under custody".into()
+                        );
+                    }
+                    let branch_after = String::from_utf8(delivery_git_output(
+                        &worktree,
+                        &["symbolic-ref", "--short", "HEAD"],
+                    )?)
+                    .map_err(|_| "retained writer branch is not UTF-8".to_owned())?
+                    .trim()
+                    .to_owned();
+                    let head_after = String::from_utf8(delivery_git_output(
+                        &worktree,
+                        &["rev-parse", "--verify", "HEAD"],
+                    )?)
+                    .map_err(|_| "retained writer head is not UTF-8".to_owned())?
+                    .trim()
+                    .to_owned();
+                    let status_after = delivery_git_output(
+                        &worktree,
+                        &["status", "--porcelain=2", "--untracked-files=all"],
+                    )?;
+                    if branch_after != branch
+                        || head_after != request.expected_head
+                        || !status_after.is_empty()
+                    {
+                        return Err(
+                            "retained writer changed while publication custody was acquired".into(),
+                        );
+                    }
+                    host_delivery
+                        .clone()
+                        .deliver_graph_pr_at_head(
+                            &project_directory,
+                            request.writer_branch,
+                            integration_base,
+                            expected_head,
+                            request.publication_identity,
+                            expected_remote_head,
+                            &body,
+                            &forge,
+                        )
+                        .map_err(|error| error.to_string())
+                })();
+                Ok(prepared)
+            },
+        )
+        .map_err(|error| FacadeError::DispatchRefused {
+            fact: None,
+            disk: None,
+            reason: format!("retained worktree could not be verified for publication: {error}"),
+        })?;
+        let receipt = receipt.map_err(|reason| FacadeError::DispatchRefused {
+            fact: None,
+            disk: None,
+            reason: delivery_hygiene_text(&reason, 1024),
+        })?;
+        Ok(provenant_fabric_runtime::graph::DeliveryPublication {
+            branch: receipt.branch,
+            head: receipt.head.to_string(),
+            pull_request: receipt.pull_request,
         })
     }
 

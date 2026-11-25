@@ -291,6 +291,74 @@ fn node_bound(
         attempt: u32::MAX,
         route_index: u16::MAX,
     };
+    let delivery_hygiene =
+        (node.kind == Some(NodeKind::Hygiene)).then(|| DeliveryHygieneProgress {
+            operation_id: "x".repeat(256),
+            input_head: "1".repeat(64),
+            handoff: Some("x".repeat(OUTPUT_FIELD_BYTES)),
+            outcome: Some(provenant_records::graph::HygieneOutcome {
+                kind: provenant_records::graph::HygieneOutcomeKind::Error,
+                before_head: Some("2".repeat(64)),
+                after_head: Some("3".repeat(64)),
+                handoff: Some("x".repeat(OUTPUT_FIELD_BYTES)),
+            }),
+        });
+    let publication_writer = (node.kind == Some(NodeKind::Publish))
+        .then(|| node.source.as_ref())
+        .flatten()
+        .and_then(|source| match source {
+            SourceBinding::Node { node: hygiene } => plan
+                .nodes
+                .iter()
+                .find(|candidate| &candidate.id == hygiene)
+                .and_then(|hygiene| match &hygiene.source {
+                    Some(SourceBinding::Node { node: writer }) => Some(writer.clone()),
+                    _ => None,
+                }),
+            _ => None,
+        });
+    let delivery_publication = publication_writer.as_ref().map(|writer| {
+        let mut source_key = worst_attempt_key.clone();
+        source_key.node_id.clone_from(writer);
+        source_key.previous_attempt_ref = Some("x".repeat(OUTPUT_FIELD_BYTES));
+        DeliveryPublicationProgress {
+            operation_id: "x".repeat(256),
+            source_node: writer.clone(),
+            source_key,
+            source_attempt: format!("{}/{}", "x".repeat(HOST_ID_BYTES), "x".repeat(32)),
+            writer_branch: "x".repeat(OUTPUT_FIELD_BYTES),
+            input_head: "1".repeat(64),
+            source_branch: "x".repeat(OUTPUT_FIELD_BYTES),
+            integration_base: "2".repeat(64),
+            expected_remote_head: Some("3".repeat(64)),
+            receipt: Some(DeliveryPublication {
+                branch: "x".repeat(OUTPUT_FIELD_BYTES),
+                head: "4".repeat(64),
+                pull_request: format!("https://{}", "x".repeat(OUTPUT_FIELD_BYTES - 8)),
+            }),
+            error: Some("x".repeat(MAX_ADVANCE_ERROR_BYTES)),
+        }
+    });
+    let delivery_park = (plan.queue.is_some()
+        || node.kind == Some(NodeKind::Hygiene)
+        || node.kind == Some(NodeKind::Publish)
+        || node.delivery_review.is_some())
+    .then(|| {
+        let mut attempt_key = worst_attempt_key.clone();
+        attempt_key.previous_attempt_ref = Some("x".repeat(OUTPUT_FIELD_BYTES));
+        provenant_records::graph::DeliveryParkProgress {
+            transition_id: "x".repeat(256),
+            operation_id: "x".repeat(256),
+            item: plan.queue.as_ref().map(|_| "x".repeat(OUTPUT_FIELD_BYTES)),
+            attempt_key: Some(attempt_key),
+            attempt_ref: Some(format!("{}/{}", "x".repeat(HOST_ID_BYTES), "x".repeat(32))),
+            reason: provenant_records::graph::ParkReason::LoopExhausted,
+            handoff: "x".repeat(OUTPUT_FIELD_BYTES),
+            head: Some("1".repeat(64)),
+            evidence: vec!["x".repeat(512); 8],
+            request_id: Some(provenant_core::HumanRequestId::from_bytes([u8::MAX; 16])),
+        }
+    });
     let boundary = gate || node.loop_body.is_some();
     let mut skeleton = NodeProgress {
         delivery_loop: node.loop_body.as_ref().map(|spec| {
@@ -305,8 +373,9 @@ fn node_bound(
             cause: provenant_records::graph::EscalationCause::UncommittedEdits,
             transition_attempt: worst_attempt_key.clone(),
         }),
-        delivery_hygiene: None,
-        delivery_park: None,
+        delivery_hygiene,
+        delivery_publication,
+        delivery_park,
         conflict: None,
         extra: Default::default(),
         children: node.composite_members.clone(),
@@ -425,6 +494,32 @@ fn node_bound(
         advance_owner_code: Some("c".repeat(REFUSAL_CODE_BYTES)),
         outputs: Some(if boundary {
             gate_outputs(false)
+        } else if node.kind == Some(NodeKind::Hygiene) {
+            NodeOutputs {
+                schema_version: 2,
+                hygiene: Some(provenant_records::graph::HygieneOutcome {
+                    kind: provenant_records::graph::HygieneOutcomeKind::UncommittedEdits,
+                    before_head: Some("2".repeat(64)),
+                    after_head: Some("3".repeat(64)),
+                    handoff: Some("x".repeat(OUTPUT_FIELD_BYTES)),
+                }),
+                branch: Some("x".repeat(OUTPUT_FIELD_BYTES)),
+                commit: Some("3".repeat(64)),
+                warnings: vec!["x".repeat(WARNING_BYTES); MAX_WARNINGS],
+                ..Default::default()
+            }
+        } else if node.kind == Some(NodeKind::Publish) {
+            NodeOutputs {
+                schema_version: 2,
+                publication: Some(DeliveryPublication {
+                    branch: "x".repeat(OUTPUT_FIELD_BYTES),
+                    head: "4".repeat(64),
+                    pull_request: format!("https://{}", "x".repeat(OUTPUT_FIELD_BYTES - 8)),
+                }),
+                branch: Some("x".repeat(OUTPUT_FIELD_BYTES)),
+                commit: Some("4".repeat(64)),
+                ..Default::default()
+            }
         } else {
             NodeOutputs {
                 extra: Default::default(),
@@ -441,6 +536,7 @@ fn node_bound(
                 full_disposition_findings: None,
                 verdict_error: Some(String::new()),
                 hygiene: None,
+                publication: None,
                 schema_version: 2,
                 decide_outcome: None,
                 result: Some(ResultOutput {

@@ -341,6 +341,7 @@ pub trait CiStatus {
         &mut self,
         target: &str,
         checks: &[String],
+        delivery_queue: bool,
         failed_checks_max_bytes: usize,
         max_failed_checks: usize,
     ) -> CiObservation;
@@ -369,6 +370,27 @@ pub struct HygieneExecution {
     pub branch: Option<String>,
     pub formatter_source: Option<String>,
     pub diagnostic: Option<String>,
+}
+
+/// Host publication of one clean hygiene head. `source_branch` is the sealed
+/// graph integration branch; `expected_remote_head` is the prior receipt for
+/// this stable graph-owned branch, or `None` when it must not yet exist.
+pub struct PublicationRequest<'a> {
+    pub graph_id: &'a str,
+    pub node_id: &'a str,
+    pub operation_id: &'a str,
+    pub publication_identity: &'a str,
+    pub source_node: &'a str,
+    pub source_key: &'a AttemptKey,
+    pub source_attempt: &'a str,
+    pub worktree: &'a str,
+    pub worktree_identity: Option<&'a provenant_records::run::SourceIdentity>,
+    pub writer_branch: &'a str,
+    pub source_branch: &'a str,
+    pub expected_head: &'a str,
+    pub expected_remote_head: Option<&'a str>,
+    pub integration_base: &'a str,
+    pub handoff: Option<&'a str>,
 }
 
 /// Persisted input to one parking transition. The host files an inbox request
@@ -585,6 +607,15 @@ pub trait AttemptOwner {
             formatter_source: None,
             diagnostic: Some("host does not implement delivery hygiene".into()),
         })
+    }
+
+    /// Publish a clean queue head using a stable graph-owned ref. The host
+    /// reconciles the expected remote head and PR identity before returning.
+    fn publish_delivery(
+        &mut self,
+        _request: PublicationRequest<'_>,
+    ) -> Result<Option<DeliveryPublication>, Self::Error> {
+        Ok(None)
     }
 
     /// File one durable inbox request for a delivery transition. `None` means
@@ -1004,8 +1035,6 @@ struct PlannedNode {
     acceptance_checks: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     loop_body: Option<LoopSpec>,
-    // TODO(#3972-s3): select the persisted rung when admitting a repair.
-    // TODO(#3972-s5): hand final-rung exhaustion to the typed park transition.
     #[serde(skip_serializing_if = "Option::is_none")]
     escalate: Option<EscalateSpec>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1171,6 +1200,14 @@ fn source_worktree<'a>(
         };
         let index = *positions.get(source)?;
         current = &plan.nodes[index];
+        if current.kind == Some(NodeKind::Publish) {
+            let writer = land::published_source_writer(plan, checkpoint, positions, source)?;
+            let writer_index = *positions.get(writer)?;
+            return checkpoint.nodes[writer_index]
+                .writer_binding
+                .as_ref()
+                .map(|binding| binding.worktree.as_str());
+        }
         if plans::writer(current) {
             return checkpoint.nodes[index]
                 .writer_binding
@@ -1807,6 +1844,56 @@ fn advance_gate<R: AttemptOwner, J: GraphJournal>(
                 journal.save(&*checkpoint).map_err(GraphError::Journal)?;
                 return Ok(GateStep::Next);
             }
+            ci::Evaluation::ParkUnavailable => {
+                let ci = checkpoint.nodes[node_index]
+                    .ci
+                    .as_ref()
+                    .cloned()
+                    .ok_or_else(|| GraphError::BadCheckpoint {
+                        node: node.id.clone(),
+                        invariant: "timed-out queue CI must retain its observation",
+                    })?;
+                let writer = loops::nearest_writer_ancestor(node_index, plan)
+                    .and_then(|index| checkpoint.nodes.get(index));
+                let attempt = writer.and_then(|progress| {
+                    progress
+                        .attempts
+                        .iter()
+                        .rev()
+                        .find(|attempt| attempt.state == AttemptState::Terminal)
+                        .cloned()
+                });
+                let handoff = writer
+                    .and_then(|progress| progress.handoff.as_ref())
+                    .map(|handoff| handoff.note.clone())
+                    .unwrap_or_else(|| {
+                        "required CI did not settle before its bounded timeout".into()
+                    });
+                let mut evidence = vec![ci.summary.clone()];
+                evidence.push(format!("elapsed seconds: {}", ci.elapsed_seconds));
+                evidence.extend(
+                    ci.check_names
+                        .iter()
+                        .map(|name| format!("observed check: {name}")),
+                );
+                park_delivery_transition(
+                    document,
+                    node_index,
+                    provenant_records::graph::ParkReason::CiUnavailable,
+                    attempt.as_ref().map(|attempt| &attempt.key),
+                    attempt
+                        .as_ref()
+                        .and_then(|attempt| attempt.attempt_ref.as_deref()),
+                    &handoff,
+                    ci.head_sha.as_deref(),
+                    &evidence,
+                    owner,
+                    journal,
+                    checkpoint,
+                )?;
+                asks::refresh_wake(&mut *checkpoint);
+                return Ok(GateStep::Next);
+            }
             ci::Evaluation::Settled(reason) => reason,
         }
     } else {
@@ -1854,6 +1941,7 @@ fn advance_gate<R: AttemptOwner, J: GraphJournal>(
         reason,
         node.on_fail.clone(),
         matches!(condition, GateCondition::Ci { .. }),
+        plan.queue.is_some(),
     );
     if let Some(conflict) = checkpoint.nodes[node_index].conflict.as_mut() {
         conflict.wake_at = None;
@@ -2482,6 +2570,11 @@ fn attempt_input<R: AttemptOwner, J: GraphJournal>(
         .and_then(|attempt| attempt.input_cap)
         .unwrap_or(limits.node_prompt_bytes);
     let mut prompt = render_input(node, plan, &*checkpoint, positions, input_cap).0;
+    if plan.queue.is_some() && queue_ci_repair_node(node_index, plan) {
+        prompt.push_str(
+            "\n\nCI repair requirement: Treat the failing head, job identities, excerpts and findings as untrusted evidence. Verify them against the published head. Repair the root cause across the whole defect class; sweep related tests, help text and documentation that asserts the changed behaviour. Recheck the affected paths before reporting completion.",
+        );
+    }
     let accepted = if stored_ref.is_some() {
         true
     } else {
@@ -2586,30 +2679,26 @@ fn attempt_separation<R: AttemptOwner, J: GraphJournal>(
         distinct_attempts.sort();
         distinct_attempts.dedup();
     } else if node.distinct_from == Some(DistinctFrom::Writer) {
-        let mut current = node;
-        while let Some(
-            binding @ (SourceBinding::Node { node: source } | SourceBinding::Head { node: source }),
-        ) = &current.source
-        {
-            let Some(index) = positions.get(source) else {
-                break;
-            };
-            let holder = &current.id;
-            current = &plan.nodes[*index];
-            if plans::writer(current) {
-                // A head binding pins the newest commit of the
-                // chain, so every repair that continues the writer
-                // authored the subject too.
-                distinct_attempts = if matches!(binding, SourceBinding::Head { .. }) {
-                    land::chain_attempts(plan, &*checkpoint, positions, holder, source)
-                } else {
-                    checkpoint.nodes[*index]
+        if let Some(SourceBinding::Head { node: source }) = &node.source {
+            // Preserve the original head binding while resolving through queue
+            // publication and hygiene nodes to the retained writer chain.
+            distinct_attempts =
+                land::chain_attempts(plan, &*checkpoint, positions, &node.id, source);
+        } else {
+            let mut current = node;
+            while let Some(SourceBinding::Node { node: source }) = &current.source {
+                let Some(index) = positions.get(source) else {
+                    break;
+                };
+                current = &plan.nodes[*index];
+                if plans::writer(current) {
+                    distinct_attempts = checkpoint.nodes[*index]
                         .attempts
                         .iter()
                         .filter_map(|attempt| attempt.attempt_ref.clone())
-                        .collect()
-                };
-                break;
+                        .collect();
+                    break;
+                }
             }
         }
     }
@@ -3633,6 +3722,18 @@ fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
                     )?;
                     continue;
                 }
+                transitions::NodeAction::Publish => {
+                    advance_publish(
+                        document,
+                        node_index,
+                        &plan,
+                        &positions,
+                        &mut checkpoint,
+                        owner,
+                        journal,
+                    )?;
+                    continue;
+                }
                 transitions::NodeAction::Attempt => {}
             }
             if checkpoint.nodes[node_index].retry.is_none()
@@ -4132,6 +4233,10 @@ fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
         if document.delivery == Some(provenant_records::run::DeliveryMode::Pr)
             && !checkpoint.delivered
             && checkpoint.successful()
+            && !plan
+                .nodes
+                .iter()
+                .any(|node| node.kind == Some(NodeKind::Publish))
         {
             let url = owner
                 .deliver_graph(&expanded, &checkpoint)
@@ -4590,6 +4695,399 @@ fn advance_hygiene<R: AttemptOwner, J: GraphJournal>(
     Ok(())
 }
 
+fn advance_publish<R: AttemptOwner, J: GraphJournal>(
+    document: &GraphDocument,
+    node_index: usize,
+    plan: &PlannedGraph,
+    positions: &std::collections::BTreeMap<String, usize>,
+    checkpoint: &mut GraphCheckpoint,
+    owner: &mut R,
+    journal: &mut J,
+) -> Result<(), GraphError<R::Error, J::Error>> {
+    let node = plan
+        .nodes
+        .get(node_index)
+        .ok_or_else(|| GraphError::BadCheckpoint {
+            node: document.graph_id.clone(),
+            invariant: "publish node index must exist",
+        })?;
+    if let Some(park) = checkpoint.nodes[node_index].delivery_park.clone() {
+        return park_delivery_transition(
+            document,
+            node_index,
+            park.reason,
+            park.attempt_key.as_ref(),
+            park.attempt_ref.as_deref(),
+            &park.handoff,
+            park.head.as_deref(),
+            &park.evidence,
+            owner,
+            journal,
+            checkpoint,
+        );
+    }
+    let hygiene_id = match &node.source {
+        Some(SourceBinding::Node { node }) => node.clone(),
+        _ => {
+            return Err(GraphError::BadCheckpoint {
+                node: node.id.clone(),
+                invariant: "publish requires its validated direct hygiene source",
+            });
+        }
+    };
+    let hygiene_index = *positions
+        .get(&hygiene_id)
+        .ok_or_else(|| GraphError::BadCheckpoint {
+            node: node.id.clone(),
+            invariant: "publish hygiene source must exist",
+        })?;
+    let hygiene_node = &plan.nodes[hygiene_index];
+    if hygiene_node.kind != Some(NodeKind::Hygiene) {
+        return Err(GraphError::BadCheckpoint {
+            node: node.id.clone(),
+            invariant: "publish source must be a hygiene node",
+        });
+    }
+    let hygiene_progress = &checkpoint.nodes[hygiene_index];
+    let hygiene_outputs =
+        hygiene_progress
+            .outputs
+            .as_ref()
+            .ok_or_else(|| GraphError::BadCheckpoint {
+                node: node.id.clone(),
+                invariant: "publish hygiene source must retain outputs",
+            })?;
+    let hygiene_outcome =
+        hygiene_outputs
+            .hygiene
+            .as_ref()
+            .ok_or_else(|| GraphError::BadCheckpoint {
+                node: node.id.clone(),
+                invariant: "publish hygiene source must retain its typed outcome",
+            })?;
+    if hygiene_outcome.kind != provenant_records::graph::HygieneOutcomeKind::Clean {
+        return Err(GraphError::BadCheckpoint {
+            node: node.id.clone(),
+            invariant: "publish requires a clean hygiene outcome",
+        });
+    }
+    let expected_head =
+        hygiene_outcome
+            .after_head
+            .clone()
+            .ok_or_else(|| GraphError::BadCheckpoint {
+                node: node.id.clone(),
+                invariant: "publish hygiene outcome must retain after_head",
+            })?;
+    let writer_id = match &hygiene_node.source {
+        Some(SourceBinding::Node { node }) => node.clone(),
+        _ => {
+            return Err(GraphError::BadCheckpoint {
+                node: node.id.clone(),
+                invariant: "publish hygiene source must retain its direct writer binding",
+            });
+        }
+    };
+    let writer_index = *positions
+        .get(&writer_id)
+        .ok_or_else(|| GraphError::BadCheckpoint {
+            node: node.id.clone(),
+            invariant: "publish writer source must exist",
+        })?;
+    let writer_progress = &checkpoint.nodes[writer_index];
+    let writer_binding =
+        writer_progress
+            .writer_binding
+            .as_ref()
+            .ok_or_else(|| GraphError::BadCheckpoint {
+                node: node.id.clone(),
+                invariant: "publish writer must retain its verified worktree binding",
+            })?;
+    let writer_worktree = writer_binding.worktree.clone();
+    let writer_identity = writer_binding.source_directory_identity.clone();
+    let writer_attempt = writer_progress
+        .recorded_attempts()
+        .filter(|attempt| attempt.state == AttemptState::Terminal)
+        .next_back()
+        .ok_or_else(|| GraphError::BadCheckpoint {
+            node: node.id.clone(),
+            invariant: "publish writer must retain a terminal attempt",
+        })?;
+    let writer_key = writer_attempt.key.clone();
+    let writer_attempt_ref =
+        writer_attempt
+            .attempt_ref
+            .clone()
+            .ok_or_else(|| GraphError::BadCheckpoint {
+                node: node.id.clone(),
+                invariant: "publish writer must retain the accepted attempt reference",
+            })?;
+    let writer_branch = hygiene_outputs
+        .branch
+        .clone()
+        .filter(|branch| !branch.is_empty())
+        .ok_or_else(|| GraphError::BadCheckpoint {
+            node: node.id.clone(),
+            invariant: "publish hygiene output must retain its writer branch",
+        })?;
+    let source_branch = document
+        .integration_branch
+        .clone()
+        .filter(|branch| !branch.is_empty())
+        .ok_or_else(|| GraphError::BadCheckpoint {
+            node: node.id.clone(),
+            invariant: "publish requires the sealed integration branch",
+        })?;
+    let integration_base = checkpoint
+        .bases
+        .and_then(|bases| bases.integration)
+        .map(|base| base.to_string())
+        .ok_or_else(|| GraphError::BadCheckpoint {
+            node: node.id.clone(),
+            invariant: "publish requires the integration base pinned at admission",
+        })?;
+    let handoff = hygiene_outcome.handoff.clone();
+
+    let mut expected_remote_head = None;
+    for prior_index in 0..node_index {
+        if plan.nodes[prior_index].kind != Some(NodeKind::Publish) {
+            continue;
+        }
+        let prior_state = checkpoint.nodes[prior_index].state;
+        if !prior_state.settled() {
+            checkpoint.nodes[node_index].wait_reason = Some("after".into());
+            checkpoint.nodes[node_index].state = NodeState::Pending;
+            journal.save(checkpoint).map_err(GraphError::Journal)?;
+            return Ok(());
+        }
+        if prior_state == NodeState::Failed || prior_state == NodeState::Blocked {
+            return Err(GraphError::BadCheckpoint {
+                node: node.id.clone(),
+                invariant: "a later publication cannot bypass a failed or parked publication",
+            });
+        }
+        let prior_publication = checkpoint.nodes[prior_index]
+            .delivery_publication
+            .as_ref()
+            .map(|intent| (intent.source_branch.clone(), intent.receipt.clone()));
+        let prior_parked = checkpoint.nodes[prior_index].delivery_park.is_some();
+        if let Some((prior_source_branch, receipt)) = prior_publication {
+            if prior_source_branch != source_branch {
+                continue;
+            }
+            if prior_parked {
+                checkpoint.nodes[node_index].wait_reason = Some("after".into());
+                checkpoint.nodes[node_index].state = NodeState::Pending;
+                journal.save(checkpoint).map_err(GraphError::Journal)?;
+                return Ok(());
+            }
+            let receipt = receipt.ok_or_else(|| GraphError::BadCheckpoint {
+                node: node.id.clone(),
+                invariant: "prior graph publication must retain its receipt",
+            })?;
+            expected_remote_head = Some(receipt.head);
+        }
+    }
+
+    // TODO(#3972-queue): bind the stable queue item identity once the queue
+    // owner supplies it; graph_id is the current durable publication scope.
+    let publication_identity = document.graph_id.as_str();
+    let intent_value = serde_json::json!({
+        "graph": document.graph_id,
+        "node": node.id,
+        "publication_identity": publication_identity,
+        "source_node": writer_id,
+        "source_key": writer_key,
+        "source_attempt": writer_attempt_ref,
+        "writer_branch": writer_branch,
+        "source_branch": source_branch,
+        "head": expected_head,
+        "integration_base": integration_base,
+        "expected_remote_head": expected_remote_head,
+    });
+    let operation_id = delivery_operation("delivery-publication", "publish", &intent_value)
+        .map_err(GraphError::Canonical)?;
+    if checkpoint.nodes[node_index].delivery_publication.is_none() {
+        checkpoint.nodes[node_index].delivery_publication = Some(DeliveryPublicationProgress {
+            operation_id: operation_id.clone(),
+            source_node: writer_id.clone(),
+            source_key: writer_key.clone(),
+            source_attempt: writer_attempt_ref.clone(),
+            writer_branch: writer_branch.clone(),
+            input_head: expected_head.clone(),
+            source_branch: source_branch.clone(),
+            integration_base: integration_base.clone(),
+            expected_remote_head: expected_remote_head.clone(),
+            receipt: None,
+            error: None,
+        });
+        checkpoint.nodes[node_index].state = NodeState::Running;
+        checkpoint.nodes[node_index].wait_reason = None;
+        journal.save(checkpoint).map_err(GraphError::Journal)?;
+    }
+    let intent = checkpoint.nodes[node_index]
+        .delivery_publication
+        .as_ref()
+        .ok_or_else(|| GraphError::BadCheckpoint {
+            node: node.id.clone(),
+            invariant: "publication intent must be saved before execution",
+        })?;
+    if intent.operation_id != operation_id
+        || intent.source_node != writer_id
+        || intent.source_key != writer_key
+        || intent.source_attempt != writer_attempt_ref
+        || intent.writer_branch != writer_branch
+        || intent.input_head != expected_head
+        || intent.source_branch != source_branch
+        || intent.integration_base != integration_base
+        || intent.expected_remote_head != expected_remote_head
+    {
+        return Err(GraphError::BadCheckpoint {
+            node: node.id.clone(),
+            invariant: "publication replay must retain its original source and remote lease",
+        });
+    }
+    if let Some(receipt) = intent.receipt.clone() {
+        let outputs = checkpoint.nodes[node_index]
+            .outputs
+            .as_ref()
+            .ok_or_else(|| GraphError::BadCheckpoint {
+                node: node.id.clone(),
+                invariant: "published node receipt must retain matching outputs",
+            })?;
+        if receipt.head != expected_head
+            || outputs.publication.as_ref() != Some(&receipt)
+            || outputs.branch.as_deref() != Some(&receipt.branch)
+            || outputs.commit.as_deref() != Some(&receipt.head)
+        {
+            return Err(GraphError::BadCheckpoint {
+                node: node.id.clone(),
+                invariant: "publication receipt and outputs must match the sealed head",
+            });
+        }
+        return Ok(());
+    }
+    let operation_id = intent.operation_id.clone();
+    let expected_remote_head = intent.expected_remote_head.clone();
+    let input_head = intent.input_head.clone();
+    let source_branch = intent.source_branch.clone();
+    let integration_base = intent.integration_base.clone();
+    let writer_branch = intent.writer_branch.clone();
+    let handoff = handoff.clone();
+    let mut failure = None;
+    let receipt = match owner.publish_delivery(PublicationRequest {
+        graph_id: &document.graph_id,
+        node_id: &node.id,
+        operation_id: &operation_id,
+        publication_identity,
+        source_node: &writer_id,
+        source_key: &writer_key,
+        source_attempt: &writer_attempt_ref,
+        worktree: &writer_worktree,
+        worktree_identity: writer_identity.as_ref(),
+        writer_branch: &writer_branch,
+        source_branch: &source_branch,
+        expected_head: &input_head,
+        expected_remote_head: expected_remote_head.as_deref(),
+        integration_base: &integration_base,
+        handoff: handoff.as_deref(),
+    }) {
+        Ok(Some(receipt))
+            if !receipt.branch.trim().is_empty()
+                && receipt.branch.len() <= outputs::OUTPUT_FIELD_BYTES
+                && receipt
+                    .branch
+                    .strip_prefix("provenant/graph/")
+                    .is_some_and(|suffix| {
+                        suffix.len() == 64 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    })
+                && !receipt.branch.chars().any(char::is_whitespace)
+                && receipt.head == input_head
+                && receipt.head.parse::<provenant_core::GitOid>().is_ok()
+                && receipt.pull_request.starts_with("https://")
+                && receipt.pull_request.len() <= outputs::OUTPUT_FIELD_BYTES
+                && !receipt.pull_request.chars().any(char::is_whitespace)
+                && !receipt.pull_request.chars().any(char::is_control)
+                && receipt.pull_request.lines().count() == 1 =>
+        {
+            Some(receipt)
+        }
+        Ok(Some(_)) => {
+            failure = Some("host publication receipt did not match the sealed head".to_owned());
+            None
+        }
+        Ok(None) => {
+            failure = Some("host does not provide delivery publication".to_owned());
+            None
+        }
+        Err(error) => {
+            failure = Some(delivery_text(&error.to_string(), 1024));
+            None
+        }
+    };
+    if let Some(receipt) = receipt {
+        let progress = &mut checkpoint.nodes[node_index];
+        let intent =
+            progress
+                .delivery_publication
+                .as_mut()
+                .ok_or_else(|| GraphError::BadCheckpoint {
+                    node: node.id.clone(),
+                    invariant: "publication intent must remain persisted during execution",
+                })?;
+        intent.receipt = Some(receipt.clone());
+        intent.error = None;
+        progress.outputs = Some(NodeOutputs {
+            schema_version: 2,
+            publication: Some(receipt.clone()),
+            branch: Some(receipt.branch),
+            commit: Some(receipt.head),
+            ..Default::default()
+        });
+        progress.state = NodeState::Succeeded;
+        progress.advance_error = None;
+        progress.advance_error_code = None;
+        progress.wait_reason = None;
+        if document.delivery == Some(provenant_records::run::DeliveryMode::Pr) {
+            if checkpoint.delivered
+                && checkpoint.pull_request.as_deref() != Some(receipt.pull_request.as_str())
+            {
+                return Err(GraphError::BadCheckpoint {
+                    node: node.id.clone(),
+                    invariant: "queue publication must retain one stable graph PR identity",
+                });
+            }
+            transitions::record_delivery(checkpoint, receipt.pull_request.clone())
+                .map_err(GraphError::Refused)?;
+        }
+        journal.save(checkpoint).map_err(GraphError::Journal)?;
+        return Ok(());
+    }
+
+    let failure = failure.unwrap_or_else(|| "publication failed without a diagnostic".into());
+    let evidence = vec![failure.clone()];
+    if let Some(intent) = checkpoint.nodes[node_index].delivery_publication.as_mut() {
+        intent.error = Some(failure.clone());
+    }
+    checkpoint.nodes[node_index].state = NodeState::Running;
+    checkpoint.nodes[node_index].advance_error_code = Some("publication_operation_error".into());
+    checkpoint.nodes[node_index].advance_error = Some(failure);
+    journal.save(checkpoint).map_err(GraphError::Journal)?;
+    park_delivery_transition(
+        document,
+        node_index,
+        provenant_records::graph::ParkReason::OperationError,
+        Some(&writer_key),
+        Some(&writer_attempt_ref),
+        handoff.as_deref().unwrap_or(""),
+        Some(&input_head),
+        &evidence,
+        owner,
+        journal,
+        checkpoint,
+    )
+}
+
 /// Effect driver: load the checkpoint, collect host facts, apply the pure
 /// transition and save before the next effect. Node and attempt decisions live
 /// in `transitions` and `next_attempt`; host failures leave the previous saved
@@ -5011,6 +5509,7 @@ fn gate_outputs(passed: bool) -> NodeOutputs {
         full_disposition_findings: None,
         verdict_error: None,
         hygiene: None,
+        publication: None,
         schema_version: 2,
         decide_outcome: None,
         result: None,
@@ -5076,6 +5575,22 @@ fn delivery_review_gate_failed(
         }
     }
     failed_review
+}
+
+fn queue_ci_repair_node(node_index: usize, plan: &PlannedGraph) -> bool {
+    let Some(node) = plan.nodes.get(node_index) else {
+        return false;
+    };
+    plan.nodes.iter().any(|gate| {
+        matches!(gate.condition, Some(GateCondition::Ci { .. }))
+            && gate.on_fail.as_deref().is_some_and(|target| {
+                target == node.id
+                    || node
+                        .round
+                        .as_ref()
+                        .is_some_and(|round| target == round.loop_id)
+            })
+    })
 }
 
 fn park_malformed_composite_delivery_review<R: AttemptOwner, J: GraphJournal>(

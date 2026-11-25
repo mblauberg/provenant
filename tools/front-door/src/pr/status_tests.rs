@@ -494,6 +494,7 @@ fn failed_policy_lookup_uses_all_reported_checks() {
     for (bucket, expected) in [("fail", CiState::Failed), ("pending", CiState::Pending)] {
         let observation = observe_ci_with(
             &[],
+            false,
             || None,
             || {
                 Some(vec![Check {
@@ -506,15 +507,22 @@ fn failed_policy_lookup_uses_all_reported_checks() {
         assert_eq!(observation.state, expected);
         assert!(observation.summary.contains("policy=all-reported"));
     }
-    let empty = observe_ci_with(&[], || None, || Some(vec![]), || None);
+    let empty = observe_ci_with(&[], false, || None, || Some(vec![]), || None);
     assert_eq!(empty.state, CiState::NotScheduled);
     assert!(empty.summary.contains("next:"));
-    let conflict = observe_ci_with(&[], || None, || Some(vec![]), || Some("CONFLICTING".into()));
+    let conflict = observe_ci_with(
+        &[],
+        false,
+        || None,
+        || Some(vec![]),
+        || Some("CONFLICTING".into()),
+    );
     assert_eq!(conflict.state, CiState::Conflict);
     assert!(conflict.summary.contains("next: rebase"));
     // A conflict gate runs before CI even if stale check evidence is present.
     let failed = observe_ci_with(
         &[],
+        false,
         || None,
         || {
             Some(vec![Check {
@@ -526,6 +534,26 @@ fn failed_policy_lookup_uses_all_reported_checks() {
     );
     assert_eq!(failed.state, CiState::Conflict);
     assert!(failed.summary.contains("next: rebase"));
+
+    let unreadable_queue_policy = observe_ci_with(
+        &[],
+        true,
+        || None,
+        || {
+            Some(vec![Check {
+                name: "build".into(),
+                bucket: "pass".into(),
+            }])
+        },
+        || None,
+    );
+    assert_eq!(unreadable_queue_policy.state, CiState::Pending);
+    assert!(unreadable_queue_policy.failed_checks.is_empty());
+    assert!(
+        unreadable_queue_policy
+            .summary
+            .contains("policy=required-unavailable")
+    );
 }
 
 #[test]

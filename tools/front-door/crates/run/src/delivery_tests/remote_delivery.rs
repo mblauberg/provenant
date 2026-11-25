@@ -830,6 +830,98 @@ fn graph_pr_body_uses_its_recorded_base_despite_primary_checkout_changes()
 }
 
 #[test]
+fn queue_publication_branch_is_stable_for_graph_identity()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    let host = HostDeliveryContext::new(fixture.environment.clone());
+    let first = host.graph_publication_branch_for(&fixture.writer.project, "queue-item-3972")?;
+    let replay = host.graph_publication_branch_for(&fixture.writer.project, "queue-item-3972")?;
+    let other = host.graph_publication_branch_for(&fixture.writer.project, "queue-item-3973")?;
+
+    assert_eq!(first, replay);
+    assert_ne!(first, other);
+    assert!(first.starts_with("provenant/graph/"));
+    Ok(())
+}
+
+#[test]
+fn queue_publication_pushes_the_formatter_head_without_moving_integration_branch()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    let base = fixture.prepare()?.head(&fixture.writer)?;
+    fixture.git(&["branch", "integration", "lane"])?;
+    let integration_before = fixture
+        .git_text(&["rev-parse", "refs/heads/integration"])?
+        .parse::<GitOid>()?;
+    fixture.commit(&fixture.writer.worktree, "formatter commit")?;
+    let writer_head = fixture
+        .git_text(&[
+            "-C",
+            fixture.writer.worktree.to_str().ok_or("writer worktree")?,
+            "rev-parse",
+            "HEAD",
+        ])?
+        .parse::<GitOid>()?;
+    assert_ne!(writer_head, integration_before);
+
+    fixture.git(&[
+        "config",
+        &format!(
+            "url.{}.insteadOf",
+            fixture.root.join("remote.git").display()
+        ),
+        "https://github.com/fixture/repo.git",
+    ])?;
+    let git = provenant_os::git::git_executable().ok_or("git")?;
+    let wrapper = fixture.root.join("git-wrapper");
+    fixture.executable(
+        &wrapper,
+        &format!(
+            "#!/bin/sh\nif [ \"$5\" = remote ] && [ \"$6\" = get-url ]; then printf 'https://github.com/fixture/repo.git\\n'; exit 0; fi\nexec '{}' \"$@\"\n",
+            git.display()
+        ),
+    )?;
+    fixture.executable(
+        &fixture.root.join("gh"),
+        "#!/bin/sh\nif [ \"$1\" = repo ]; then printf '{\"defaultBranchRef\":{\"name\":\"main\"}}\\n'; exit 0; fi\nif [ \"$2\" = list ]; then printf '[]\\n'; exit 0; fi\ncd \"$(dirname \"$0\")\" || exit 1\ncat > graph-body\nprintf 'https://github.com/fixture/repo/pull/1\\n'\n",
+    )?;
+    let mut environment = fixture.environment.clone();
+    environment.push(("PROVENANT_GIT".into(), wrapper.into_os_string()));
+    environment.retain(|(key, _)| key != "PATH");
+    environment.push((
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", fixture.root.display()).into(),
+    ));
+
+    let receipt = HostDeliveryContext::new(environment).deliver_graph_pr_at_head(
+        &fixture.writer.project,
+        "lane",
+        base,
+        writer_head,
+        "queue-item-3972",
+        None,
+        "Queue delivery after formatting",
+        &crate::forge_for("origin", "main", &[]),
+    )?;
+    let remote = fixture.root.join("remote.git");
+    let remote = remote.to_str().ok_or("bare remote")?;
+    let remote_head = fixture.git_text(&[
+        "--git-dir",
+        remote,
+        "rev-parse",
+        &format!("refs/heads/{}", receipt.branch),
+    ])?;
+    let integration_after = fixture
+        .git_text(&["rev-parse", "refs/heads/integration"])?
+        .parse::<GitOid>()?;
+
+    assert_eq!(receipt.head, writer_head);
+    assert_eq!(remote_head.parse::<GitOid>()?, writer_head);
+    assert_eq!(integration_after, integration_before);
+    Ok(())
+}
+
+#[test]
 fn graph_pr_refreshes_forged_target_and_refuses_failed_fetch()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let mut fixture = PrepareFixture::new()?;

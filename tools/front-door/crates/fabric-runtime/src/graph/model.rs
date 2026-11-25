@@ -1321,6 +1321,7 @@ pub enum NodeKind {
     Decide,
     Land,
     Hygiene,
+    Publish,
 }
 
 /// Immutable review subject or the commit a later writer must start from.
@@ -1588,6 +1589,8 @@ pub struct NodeOutputs {
     pub verdict_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hygiene: Option<provenant_records::graph::HygieneOutcome>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication: Option<DeliveryPublication>,
     pub schema_version: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decide_outcome: Option<DecideOutcome>,
@@ -1679,6 +1682,37 @@ pub struct DeliveryHygieneProgress {
     pub input_head: String,
     pub handoff: Option<String>,
     pub outcome: Option<provenant_records::graph::HygieneOutcome>,
+}
+
+/// Exact branch, commit and PR returned by the queue publication owner.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeliveryPublication {
+    pub branch: String,
+    pub head: String,
+    pub pull_request: String,
+}
+
+/// A durable publication intent and its reconciled receipt for one graph node.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeliveryPublicationProgress {
+    pub operation_id: String,
+    pub source_node: String,
+    pub source_key: provenant_records::graph::AttemptKey,
+    pub source_attempt: String,
+    /// The worktree branch verified under writer custody after hygiene.
+    pub writer_branch: String,
+    /// `integration_branch`, the branch whose source head is published.
+    pub input_head: String,
+    pub source_branch: String,
+    /// The integration base pinned at graph admission, used for PR contents.
+    pub integration_base: String,
+    /// Expected old graph-owned remote head; `None` means it must not exist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_remote_head: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt: Option<DeliveryPublication>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// A durable park intent, completed when the inbox returns its request ID.
@@ -2237,6 +2271,8 @@ pub struct NodeProgress {
     pub escalation: Option<provenant_records::graph::EscalationProgress>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery_hygiene: Option<DeliveryHygieneProgress>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_publication: Option<DeliveryPublicationProgress>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery_park: Option<DeliveryParkProgress>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

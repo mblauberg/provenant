@@ -1079,6 +1079,7 @@ fn prepare_nested(
                 | NodeKind::Composite
                 | NodeKind::Loop
                 | NodeKind::Hygiene
+                | NodeKind::Publish
         )
     ) {
         if child.prompt.trim().is_empty()
@@ -2156,7 +2157,11 @@ pub(super) fn fallback_expansion(
                     && !matches!(
                         child.kind,
                         Some(
-                            NodeKind::Gate | NodeKind::Decide | NodeKind::Land | NodeKind::Hygiene
+                            NodeKind::Gate
+                                | NodeKind::Decide
+                                | NodeKind::Land
+                                | NodeKind::Hygiene
+                                | NodeKind::Publish
                         )
                     )
                 {
