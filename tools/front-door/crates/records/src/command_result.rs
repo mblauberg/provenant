@@ -24,6 +24,9 @@ pub enum Outcome {
     /// A wait ended before the work settled. The work continues, so this is
     /// not a failure: the caller polls or waits again.
     Waiting,
+    /// A wait ended because a live attempt had been silent past its threshold.
+    /// The work is still running; this reports the stall, not a settlement.
+    Stalled,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -57,7 +60,7 @@ impl CommandError {
 }
 impl Outcome {
     /// Every status, in declaration order; the published schemas enumerate it.
-    pub const ALL: [Outcome; 10] = [
+    pub const ALL: [Outcome; 11] = [
         Self::Ok,
         Self::Failed,
         Self::Refused,
@@ -68,6 +71,7 @@ impl Outcome {
         Self::Cancelled,
         Self::Pending,
         Self::Waiting,
+        Self::Stalled,
     ];
     /// The process exit code of an envelope with this status: the stable
     /// tier of the consumer contract. It lives beside the status so a
@@ -82,6 +86,7 @@ impl Outcome {
             Self::Pending => 5,
             Self::Timeout => 124,
             Self::Cancelled => 130,
+            Self::Stalled => 6,
         }
     }
 }

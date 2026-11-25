@@ -46,6 +46,9 @@ pub(crate) enum Settle {
     NeedsInput,
     Succeeded,
     Unsuccessful,
+    /// A live attempt silent past its threshold. The wait ends, but the work
+    /// continues: this is a report, not a settlement verdict.
+    Stalled,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,6 +103,7 @@ fn settle_phrase(settle: Settle, done: bool) -> &'static str {
         Settle::Succeeded => "settled ok",
         Settle::Unsuccessful => "failed",
         Settle::NeedsInput => "needs input",
+        Settle::Stalled => "stalled",
         Settle::Pending if done => "still running",
         Settle::Pending => "still running at timeout",
     }
@@ -404,14 +408,36 @@ fn classify_rows(label: &str, rows: &[Value]) -> Reading {
             }
         }
         _ if state == "unreadable" => Settle::Unsuccessful,
+        _ if row["stalled"] == true => Settle::Stalled,
         _ => Settle::Pending,
     };
+    // A graph or node row stays running while its attempt is silent, so the
+    // stall fact lives on the attempt row even when a parent row was picked.
+    let settle = if settle == Settle::Pending
+        && rows
+            .iter()
+            .any(|row| row["kind"] == "attempt" && row["stalled"] == true)
+    {
+        Settle::Stalled
+    } else {
+        settle
+    };
+    let mut line = crate::fabric::status_line(label, row, None)
+        .trim_end()
+        .to_owned();
+    if settle == Settle::Stalled {
+        let last = rows
+            .iter()
+            .rfind(|row| row["kind"] == "attempt" && row["stalled"] == true)
+            .map(|row| &row["last_event_at"])
+            .unwrap_or(&row["last_event_at"]);
+        if let Some(at) = last.as_str() {
+            line.push_str(&format!(" last event {at}"));
+        }
+    }
     Reading {
         settle,
-        line: provenant_cli::bounded_text(
-            crate::fabric::status_line(label, row, None).trim_end(),
-            bound,
-        ),
+        line: provenant_cli::bounded_text(&line, bound),
         data,
     }
 }
@@ -1193,6 +1219,8 @@ fn outcome(latest: &[Option<Reading>], settled: &[usize], done: bool, mode: Wait
         .collect();
     if settles.contains(&Settle::Unsuccessful) {
         Outcome::Failed
+    } else if settles.contains(&Settle::Stalled) {
+        Outcome::Stalled
     } else if settles.contains(&Settle::NeedsInput) {
         Outcome::Pending
     } else {
@@ -3140,6 +3168,39 @@ mod tests {
             Settle::Succeeded
         );
         assert_eq!(settle(&[attempt("running", Value::Null)]), Settle::Pending);
+    }
+
+    #[test]
+    // Spec: docs/specs/cli.md#waits-are-readers
+    fn a_silent_attempt_ends_the_wait_without_claiming_settlement() {
+        let rows = [
+            json!({"kind":"graph","state":"running"}),
+            json!({
+                "kind":"attempt","state":"running","presence":"live","stalled":true,
+                "last_event_at":"2026-11-26T04:58:00Z"
+            }),
+        ];
+        let reading = classify_rows("quiet", &rows);
+        assert_eq!(reading.settle, Settle::Stalled);
+        assert!(reading.done(), "a stall must end the wait");
+        assert!(
+            reading.line.contains("2026-11-26T04:58:00Z"),
+            "stalled line names its last-event time: {}",
+            reading.line
+        );
+        assert_eq!(
+            outcome(&[Some(reading)], &[0], true, WaitMode::All),
+            Outcome::Stalled
+        );
+        // A settled graph still decides: a stale stall cannot win.
+        let settled = classify_rows(
+            "quiet",
+            &[
+                json!({"kind":"graph","state":"complete","outcome":"succeeded"}),
+                json!({"kind":"attempt","state":"running","stalled":true}),
+            ],
+        );
+        assert_eq!(settled.settle, Settle::Succeeded);
     }
 
     #[test]

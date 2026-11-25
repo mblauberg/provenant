@@ -2736,3 +2736,56 @@ fn steer_stop_conflict_preserves_each_durable_intent_and_receipt() -> TestResult
     assert_eq!(intents[1].text, "Keep this second instruction too.");
     Ok(())
 }
+
+#[test]
+// Spec: docs/specs/supervisor.md#attempt-silence-is-reported-action-is-opt-in
+fn stall_age_comes_only_from_output_and_live_presence() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let clock = crate::tests::clock();
+    let cancel = provenant_core::CancelToken::new();
+    let call = crate::tests::call(&clock, &cancel);
+    let context = crate::tests::context(temp.path())?;
+    let store = RunStore::open(&context, &call)?;
+    let run = crate::tests::input();
+    store.create(&run, &call)?;
+    let mut record = store.mark_starting(
+        &store.record(run.attempt_id, &call)?,
+        &crate::tests::route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    let last = WallTime::from_micros(1_000_000)?;
+    let now = WallTime::from_micros(32_000_000)?;
+    record.last_output_at = Some(last);
+    record.limits = Some(provenant_records::LaneLimits {
+        stall_after_seconds: Some(provenant_records::Limit::new(
+            30,
+            provenant_records::Layer::Host,
+            provenant_records::LimitStrength::Default,
+        )),
+        ..Default::default()
+    });
+    assert_eq!(stall_after_seconds(&record), 30);
+    assert_eq!(stall_fact(&record, now), Some((30, last)));
+    assert!(stalled_at(&record, now, true));
+    // An unobserved or absent writer is a custody problem, not silence.
+    assert!(!stalled_at(&record, now, false));
+    // No output means no stall, however old the queued/started fallback is.
+    record.last_output_at = None;
+    assert_eq!(stall_fact(&record, now), None);
+    assert!(!stalled_at(&record, now, true));
+    // Zero disables the report rather than stalling every live attempt.
+    record.last_output_at = Some(last);
+    record.limits = Some(provenant_records::LaneLimits {
+        stall_after_seconds: Some(provenant_records::Limit::new(
+            0,
+            provenant_records::Layer::Host,
+            provenant_records::LimitStrength::Default,
+        )),
+        ..Default::default()
+    });
+    assert!(!stalled_at(&record, now, true));
+    Ok(())
+}

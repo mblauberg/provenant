@@ -115,8 +115,8 @@ pub mod stop;
 pub mod work_key;
 pub use finding_decision::{FindingDecision, FindingDisposition};
 pub use limit::{
-    BudgetAction, BudgetGrace, BudgetPolicy, CeilingError, LIMIT_PRECEDENCE, LaneLimits, Limit,
-    LimitStrength, TokenBudgetUsage,
+    BudgetAction, BudgetGrace, BudgetPolicy, CeilingError, DEFAULT_STALL_AFTER_SECONDS,
+    LIMIT_PRECEDENCE, LaneLimits, Limit, LimitStrength, StallPolicy, TokenBudgetUsage,
 };
 pub use pause::{Pause, PauseCause};
 pub use stop::{Continuation, NextStep, OnStop, STOP_TABLE, Stop, StopCause, StopFacts, StopRule};

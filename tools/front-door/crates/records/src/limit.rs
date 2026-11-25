@@ -297,6 +297,46 @@ impl Limit {
     }
 }
 
+/// Seconds without provider output after which a running attempt is reported
+/// as stalled. Zero disables the report. This is a read-only projection: it
+/// never stops a provider and is never a reason to signal one.
+pub const DEFAULT_STALL_AFTER_SECONDS: u64 = 30 * 60;
+
+/// What an owner opts into when an attempt goes silent past its threshold.
+/// The default only warns; no action happens without an explicit choice.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StallPolicy {
+    /// Report the stall and nothing more.
+    #[default]
+    Report,
+    /// Warn, then queue a steering turn for this exact attempt.
+    Steer,
+    /// Warn, then stop the provider and settle with `provider_stalled` so the
+    /// graph can advance to the next route in the pool.
+    Retry,
+    /// Warn, then stop the provider and settle with `provider_stalled`.
+    Fail,
+}
+
+impl StallPolicy {
+    pub const ALL: [Self; 4] = [Self::Report, Self::Steer, Self::Retry, Self::Fail];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Report => "report",
+            Self::Steer => "steer",
+            Self::Retry => "retry",
+            Self::Fail => "fail",
+        }
+    }
+
+    /// The default is omitted from persisted limits; every action is explicit.
+    pub const fn is_report(&self) -> bool {
+        matches!(self, Self::Report)
+    }
+}
+
 /// Every limit of one lane, resolved once at admission. The enforcement, the
 /// lane preamble and `status` all read this one record, so what the agent is
 /// told is what the host enforces. A limit that is off or does not apply is
@@ -322,6 +362,13 @@ pub struct LaneLimits {
     /// advisory: it never stops the lane and is not an API request cap.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gh_invocations: Option<Limit>,
+    /// Seconds without output after which a running attempt reads as stalled.
+    /// The limit carries the layer that set it (`host` or the compiled default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stall_after_seconds: Option<Limit>,
+    /// Opt-in response to a stall. The compiled `report` default never acts.
+    #[serde(default, skip_serializing_if = "StallPolicy::is_report")]
+    pub stall_policy: StallPolicy,
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
 }
@@ -394,6 +441,7 @@ impl LaneLimits {
             ("deadline_seconds", &self.deadline_seconds),
             ("repair_cycles", &self.repair_cycles),
             ("gh_invocations", &self.gh_invocations),
+            ("stall_after_seconds", &self.stall_after_seconds),
         ]
         .into_iter()
         .filter_map(|(name, limit)| limit.as_ref().map(|limit| (name, limit)))
@@ -408,6 +456,7 @@ impl LaneLimits {
             "deadline_seconds" => &mut self.deadline_seconds,
             "repair_cycles" => &mut self.repair_cycles,
             "gh_invocations" => &mut self.gh_invocations,
+            "stall_after_seconds" => &mut self.stall_after_seconds,
             _ => return None,
         };
         let current = limit.as_ref()?;

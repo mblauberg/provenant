@@ -301,6 +301,42 @@ fn provider_update_settings_defaults_opt_out_commands_and_validation() {
 }
 
 #[test]
+// Spec: docs/specs/supervisor.md#attempt-silence-is-reported-action-is-opt-in
+fn provider_stall_threshold_and_policy_are_overridable_with_a_source() {
+    use crate::{Origin, StallPolicy};
+    let text = "schema_version=1\n[providers.fixture-provider]\nstall_after_seconds=45\nstall_policy='steer'";
+    let config = load(&roots(), Some(text.as_bytes())).unwrap();
+    let settings = &config.providers["fixture-provider"];
+    assert_eq!(settings.stall_after_seconds, 45);
+    assert_eq!(settings.stall_policy, StallPolicy::Steer);
+    assert!(matches!(
+        config.origins["providers.fixture-provider.stall_after_seconds"],
+        Origin::User { .. }
+    ));
+    assert!(crate::knobs::documented_field(
+        "providers.fixture-provider.stall_after_seconds"
+    ));
+    assert!(crate::knobs::documented_field(
+        "providers.fixture-provider.stall_policy"
+    ));
+
+    let defaults = load(&roots(), None).unwrap();
+    assert_eq!(
+        defaults.providers["codex"].stall_after_seconds,
+        provenant_records::DEFAULT_STALL_AFTER_SECONDS
+    );
+    assert_eq!(
+        defaults.providers["codex"].stall_policy,
+        StallPolicy::Report
+    );
+    assert!(matches!(
+        defaults.origins["providers.codex.stall_after_seconds"],
+        Origin::Compiled { .. }
+    ));
+    test_support::assert_leaf_origins(&defaults);
+}
+
+#[test]
 fn retention_defaults_overrides_and_invalid_values_are_named_cases() {
     let config_defaults = load::<&[u8]>(&roots(), None).unwrap();
     assert!(config_defaults.retention.validate().is_ok());

@@ -22,6 +22,10 @@ pub(crate) struct NodeDigest {
     pub attempt_state: Option<String>,
     /// This host's current liveness projection for the selected attempt.
     pub attempt_presence: Option<String>,
+    /// A live attempt silent past its configured output-sourced threshold.
+    pub stalled: bool,
+    /// The last output-sourced event time, rendered beside `stalled`.
+    pub last_event_at: Option<String>,
     pub line: String,
     pub state: String,
     pub settled: bool,
@@ -153,6 +157,8 @@ pub(crate) fn node_digests(rows: &[Value]) -> Vec<NodeDigest> {
                 matches!(attempt_state.as_deref(), Some("running" | "starting"))
                     .then(|| "unknown".to_owned())
             });
+            let stalled = attempt["stalled"] == true;
+            let last_event_at = text(&attempt["last_event_at"], 64);
             let settled = if node["kind"] == "node" {
                 matches!(
                     state.as_str(),
@@ -268,6 +274,12 @@ pub(crate) fn node_digests(rows: &[Value]) -> Vec<NodeDigest> {
             if let Some(presence) = &attempt_presence {
                 line.push_str(&format!(" attempt_presence={presence}"));
             }
+            if stalled {
+                line.push_str(&format!(
+                    " stalled last_event={}",
+                    last_event_at.as_deref().unwrap_or("unknown")
+                ));
+            }
             if let Some(verdict) = &review_verdict {
                 line.push_str(&format!(" verdict={verdict}"));
             }
@@ -329,6 +341,8 @@ pub(crate) fn node_digests(rows: &[Value]) -> Vec<NodeDigest> {
                 review_partial,
                 attempt_state,
                 attempt_presence,
+                stalled,
+                last_event_at,
                 line,
                 state,
                 settled,
@@ -504,6 +518,36 @@ mod tests {
             );
             assert!(!digest.settled);
         }
+    }
+
+    #[test]
+    // Spec: docs/specs/supervisor.md#attempt-silence-is-reported-action-is-opt-in
+    fn digest_reports_a_stall_with_its_last_event_time() {
+        use super::node_digests;
+        use provenant_core::ProjectId;
+        use provenant_records::WorkKey;
+        use serde_json::json;
+
+        let key = json!(WorkKey::new(ProjectId::from_bytes([8; 16]), "g", "n", 1).unwrap());
+        let rows = vec![
+            json!({"kind":"node","work_key":key,"state":"running"}),
+            json!({
+                "kind":"attempt","work_key":key,"state":"running","presence":"live",
+                "stalled":true,"last_event_at":"2026-11-26T04:58:00Z"
+            }),
+        ];
+        let digest = node_digests(&rows).remove(0);
+        assert!(digest.stalled);
+        assert_eq!(
+            digest.last_event_at.as_deref(),
+            Some("2026-11-26T04:58:00Z")
+        );
+        assert!(
+            digest
+                .line
+                .contains("stalled last_event=2026-11-26T04:58:00Z")
+        );
+        assert!(!digest.settled, "a stall is not a settlement");
     }
 
     #[test]

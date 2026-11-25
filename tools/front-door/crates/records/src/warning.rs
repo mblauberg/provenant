@@ -76,6 +76,9 @@ pub const FORGE_CONTEXT_UNRESOLVED: WarningCode = WarningCode("FORGE_CONTEXT_UNR
 pub const RESULT_TOO_LARGE: WarningCode = WarningCode("RESULT_TOO_LARGE");
 /// A lane's unfinished Git operation is retained while its committed tip settles.
 pub const GIT_OPERATION_RETAINED: WarningCode = WarningCode("GIT_OPERATION_RETAINED");
+/// A live provider emitted no output past its configured stall threshold.
+/// Reporting is read-only; an opt-in policy may act after this warning.
+pub const PROVIDER_STALLED: WarningCode = WarningCode("PROVIDER_STALLED");
 /// An invalid stored answer was skipped during local delivery.
 pub const ANSWER_DELIVERY_SKIPPED: WarningCode = WarningCode("ANSWER_DELIVERY_SKIPPED");
 /// An oversized stored answer was retained for Fabric mail during local delivery.

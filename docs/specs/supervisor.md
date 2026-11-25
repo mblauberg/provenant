@@ -19,7 +19,8 @@ The guardian does only what a provider cannot do for itself: start it with its
 environment, wait for its exit on events, end the lane's own process tree,
 record exit and settlement durably, and hold the writer, credential and
 authority boundaries. It never judges activity (CPU, output silence, progress),
-samples disk or matches command names.
+samples disk or matches command names. Attempt silence is read and reported
+outside the guardian, in the run and CLI projections described below.
 - Why: one guardian runs per lane, so every periodic read multiplies across
   parallel lanes.
 - Owner: `crates/supervisor/src/guardian.rs`
@@ -72,6 +73,31 @@ attempt state.
 - Why: a dead guardian or recycled PID cannot hide a surviving provider child,
   and uncertainty must not become a running writer or an unsafe retry.
 - Owner: `crates/supervisor/src/custody.rs`, `crates/run/src/controls.rs`
+
+### Attempt silence is reported; action is opt-in
+
+`providers.<id>.stall_after_seconds` (compiled default 1800, `0` disables) is
+the silence threshold for a running attempt on that route. The threshold counts
+only output-sourced activity: a lane that has emitted nothing is measured from
+its real last output, never from its queued or started fallback, so a slow start
+cannot be called stalled. A live attempt past the threshold is reported as
+stalled with its last-event time in `status --json`, in `wait` and in the chair's
+digest. The effective threshold and its source appear in `run --explain` and on
+the lane's recorded limits.
+
+Detection is read-only and warns with `PROVIDER_STALLED`; it never signals a
+provider. `providers.<id>.stall_policy` defaults to `report`. Only an explicit
+`steer`, `retry` or `fail` acts, and every action warns first: `steer` queues one
+steering turn for that attempt; `retry` and `fail` stop the provider through
+run-side custody (never from the guardian's silence branch) and settle the
+terminal record with the typed `provider_stalled` cause and its typed remedy.
+The action marker is sealed once per attempt, so repeated reconciles cannot act
+twice. Silence remains a report, not a stop reason, in the guardian's closed
+`StopReason` set.
+- Why: a quiet provider must be visible to a chair within a bounded time, but a
+  slow or thinking provider must not be killed on a guess.
+- Owner: `crates/run/src/controls.rs`, `crates/run/src/limits.rs`,
+  `crates/cli/src/run/status.rs`, `src/status_wait.rs`
 
 ### Tick-driven settlement
 

@@ -1166,6 +1166,7 @@ mod tests {
             (Outcome::Waiting, 0),
             (Outcome::Timeout, 124),
             (Outcome::Cancelled, 130),
+            (Outcome::Stalled, 6),
         ] {
             assert_eq!(exit_status(&outcome), code);
         }

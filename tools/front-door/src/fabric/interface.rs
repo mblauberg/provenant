@@ -2668,6 +2668,22 @@ impl Factory {
                 "credential_admission": if source_admission.is_empty() { "not_applicable" } else { "pending_route" },
                 "source_admission": source_admission, "warnings": warnings,
                 "read_source": read_source_report(default_source.as_ref(), &read_source),
+                // The silence threshold is a host default with a named source,
+                // just like the other settings an explanation reports.
+                "stall": {
+                    "default_threshold_seconds": provenant_records::DEFAULT_STALL_AFTER_SECONDS,
+                    "providers": config.providers.iter().map(|(id, settings)| {
+                        let field = format!("providers.{id}.stall_after_seconds");
+                        let source = config.origins.get(&field)
+                            .map(|origin| json!(origin))
+                            .unwrap_or(json!(format!("compiled defaults ({field})")));
+                        (id.clone(), json!({
+                            "threshold_seconds": settings.stall_after_seconds,
+                            "policy": settings.stall_policy.as_str(),
+                            "source": source,
+                        }))
+                    }).collect::<serde_json::Map<String, Value>>(),
+                },
                 "implement_plan": {
                     "value": input.pointer("/set/plan").or_else(|| input.pointer("/document/with/plan")).cloned().unwrap_or(json!(self.context.config.implement.plan)),
                     "source": if input.pointer("/set/plan").or_else(|| input.pointer("/document/with/plan")).is_some() { json!("parameter (--plan or --set)") } else {

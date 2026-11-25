@@ -639,6 +639,7 @@ impl From<crate::run::TerminalCause> for StopCause {
             T::TokenBudget => Self::TokenBudget,
             T::SettlementFailure => Self::SettlementFailed,
             T::ProviderEarlyStop => Self::ProviderStop,
+            T::ProviderStalled => Self::ProviderStop,
             T::FreePoolQuota => Self::UsageLimited,
             T::CommandUnavailable => Self::CommandUnavailable,
             T::HostNativeUnconfigured => Self::HostNativeUnconfigured,

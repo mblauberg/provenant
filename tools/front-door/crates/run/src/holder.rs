@@ -3783,6 +3783,16 @@ impl RunStore {
             &task,
         );
         apply_provider_identity(exit, &mut decoded, &policy);
+        // An opt-in stall policy sealed its action before the stop. The typed
+        // cause travels with the exit; provider text never supplies it.
+        if let Some(raw) = read_sealed(attempt, "stall-action.json", RECORD_LIMIT)?
+            && let Ok(marker) = serde_json::from_slice::<serde_json::Value>(&raw)
+            && matches!(marker["policy"].as_str(), Some("retry" | "fail"))
+        {
+            decoded.outcome = Outcome::Failed;
+            decoded.terminal_cause = Some(TerminalCause::ProviderStalled);
+            decoded.reason = Some(TerminalCause::ProviderStalled.detail().into());
+        }
         if matches!(
             decoded.outcome,
             Outcome::Cancelled | Outcome::Lost | Outcome::Unsettled
@@ -3792,6 +3802,7 @@ impl RunStore {
                 TerminalCause::Steered
                     | TerminalCause::IdentityMismatch
                     | TerminalCause::ProviderCaptureDefect { .. }
+                    | TerminalCause::ProviderStalled
             )
         ) {
             decoded.terminal_cause = None;

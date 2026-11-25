@@ -758,6 +758,8 @@ fn digest(presence: Option<&str>) -> super::super::graph_status::NodeDigest {
         review_partial: None,
         attempt_state: Some("running".into()),
         attempt_presence: presence.map(str::to_owned),
+        stalled: false,
+        last_event_at: None,
         line: "  n: running".into(),
         state: "running".into(),
         settled: false,

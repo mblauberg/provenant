@@ -775,6 +775,8 @@ fn inspect<T: DeserializeOwned + Serialize>(
             "update_interval_seconds",
             "update_timeout_seconds",
             "runtime_deadline_seconds",
+            "stall_after_seconds",
+            "stall_policy",
             "models",
             "clean_config",
             "profile",
