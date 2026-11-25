@@ -84,6 +84,7 @@ pub(super) fn park_delivery_transition<R: AttemptOwner, J: GraphJournal>(
         if existing.request_id.is_some() {
             if checkpoint.nodes[node_index].state != NodeState::Blocked {
                 checkpoint.nodes[node_index].state = NodeState::Blocked;
+                asks::refresh_wake(checkpoint);
                 journal.save(checkpoint).map_err(GraphError::Journal)?;
             }
             return Ok(());
@@ -102,6 +103,7 @@ pub(super) fn park_delivery_transition<R: AttemptOwner, J: GraphJournal>(
             request_id: None,
         });
         checkpoint.nodes[node_index].state = NodeState::Running;
+        asks::refresh_wake(checkpoint);
         journal.save(checkpoint).map_err(GraphError::Journal)?;
     }
 
@@ -132,6 +134,7 @@ pub(super) fn park_delivery_transition<R: AttemptOwner, J: GraphJournal>(
             })?;
         park.request_id = Some(request_id);
         checkpoint.nodes[node_index].state = NodeState::Blocked;
+        asks::refresh_wake(checkpoint);
         journal.save(checkpoint).map_err(GraphError::Journal)?;
     }
     Ok(())

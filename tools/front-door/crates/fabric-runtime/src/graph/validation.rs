@@ -352,18 +352,14 @@ fn node_plan_error(node: &GraphNode, reason: impl std::fmt::Display) -> Admissio
     AdmissionError::Plan(format!("node {}: {reason}", node.id))
 }
 
-fn retry_recovery_scope(
+pub(super) fn recovery_scope(
     target: &str,
     nodes: &[PlannedNode],
     positions: &std::collections::BTreeMap<String, usize>,
 ) -> Option<std::collections::BTreeSet<usize>> {
     let target_index = *positions.get(target)?;
     let owner = &nodes[target_index];
-    if !owner
-        .loop_body
-        .as_ref()
-        .is_some_and(|spec| !spec.retry_on.is_empty())
-    {
+    if owner.loop_body.is_none() && owner.composite.is_none() {
         return None;
     }
 
@@ -1151,7 +1147,7 @@ fn validate_flat_plan_inner(
         let Some(target) = &node.on_fail else {
             continue;
         };
-        let recovery_scope = retry_recovery_scope(target, &nodes, &positions);
+        let recovery_scope = recovery_scope(target, &nodes, &positions);
         let mut required = vec![None; nodes.len()];
         let mut pending: std::collections::VecDeque<_> = children[gate]
             .iter()
@@ -1174,9 +1170,8 @@ fn validate_flat_plan_inner(
             pending.extend(scope.iter().map(|index| (*index, false)));
         }
         while let Some((index, outcome)) = pending.pop_front() {
-            // Retry recovery owners collect several gate outcomes. Their
-            // round members are active only through the failure edge, even if
-            // an outer success dependency also reaches those nodes directly.
+            // Composite and loop recovery members inherit the owner's entry
+            // dependencies, but enter only through the owner's failure edge.
             if outcome
                 && recovery_scope
                     .as_ref()

@@ -224,8 +224,12 @@ pub fn try_admit_ci_lease(
         ensure_ci_waiter(request, &owner, &waiter_id)?;
     }
     let queue_path = ci_queue_path(request.state);
-    let queue_dir = Directory::open_anchor(&queue_path).map_err(unavailable)?;
-    let mut tickets = live_tickets(&queue_dir, &queue_path)?;
+    let mut tickets = if queue_path.is_dir() {
+        let queue_dir = Directory::open_anchor(&queue_path).map_err(unavailable)?;
+        live_tickets(&queue_dir, &queue_path)?
+    } else {
+        Vec::new()
+    };
     let now = provenant_os::clock::now_unix_millis();
     tickets.sort_by(|a, b| ticket_key(a, now).cmp(&ticket_key(b, now)));
     let at_head =
@@ -461,15 +465,12 @@ fn lock_ci_lease_registry(
 
 fn try_lock_ci_lease_registry(directory: &Directory) -> Result<Option<LockGuard>, BuildError> {
     let name = OsStr::new(CI_LEASE_REGISTRY_LOCK);
-    match directory.atomic_write(name, ".ci-lease-lock-", b"", PublishMode::NoReplace) {
-        Ok(receipt) => receipt.require_durable().map_err(unavailable)?,
-        Err(error) if error.is_exists() => {}
-        Err(error) => return Err(unavailable(error)),
-    }
-    match directory.try_lock_existing(name, LockMode::Exclusive) {
-        Ok(guard) => Ok(Some(guard)),
+    match directory.try_lock(name, LockMode::Exclusive) {
+        Ok(guard) => {
+            directory.sync().map_err(unavailable)?;
+            Ok(Some(guard))
+        }
         Err(FsError::LockTimeout { .. }) => Ok(None),
-        Err(error) if error.is_not_found() => Ok(None),
         Err(error) => Err(unavailable(error)),
     }
 }
@@ -1381,11 +1382,35 @@ mod tests {
                 .exists()
         );
         assert!(
-            state
-                .path()
-                .join(format!("build/ci/slot-{}.lease.json", lease.slot))
+            class_directory(state.path(), "ci")
+                .join(format!("slot-{}.lease.json", lease.slot))
                 .exists()
         );
+    }
+
+    #[test]
+    fn uncapped_delivery_lease_reuses_registry_without_a_queue_directory() {
+        let state = tempfile::tempdir().unwrap();
+        let cancel = CancelToken::new();
+        let mut admission = request(state.path(), "delivery", "graph", "digest", &cancel);
+        admission.class = "ci";
+        admission.limit = 0;
+        let owner = CiLeaseOwner {
+            project: "project-1".into(),
+            graph_id: "delivery".into(),
+            node_id: "publish".into(),
+            head_sha: "d".repeat(40),
+        };
+        let CiLeaseAttempt::Held { lease } =
+            try_admit_ci_lease(&admission, owner.clone(), false).unwrap()
+        else {
+            panic!("uncapped delivery should acquire without a waiter")
+        };
+        release_ci_lease(state.path(), &lease, 1, &cancel).unwrap();
+        assert!(matches!(
+            try_admit_ci_lease(&admission, owner, false).unwrap(),
+            CiLeaseAttempt::Held { .. }
+        ));
     }
 
     #[test]
@@ -1411,9 +1436,7 @@ mod tests {
             panic!("uncapped CI should bypass queued capped requests")
         };
         let holder = std::fs::read_to_string(
-            state
-                .path()
-                .join(format!("build/ci/slot-{}.holder.json", guard.index())),
+            class_directory(state.path(), "ci").join(format!("slot-{}.holder.json", guard.index())),
         )
         .unwrap();
         assert!(holder.contains("\"limit\":0"));

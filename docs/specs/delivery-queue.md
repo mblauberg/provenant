@@ -112,8 +112,11 @@ advisory overflow and records that overflow.
 Admission of CI work uses `admit` class `ci` across queues in the same host admission domain, from publication through a conclusive CI observation; persist
 the lease identity and reconcile it on restart. A zero CI slot cap is uncapped
 for that request, but its lease remains counted against capped requests. Dynamic
-slot locks are created under the CI domain lock and persisted before use. Waiting items retain their place
-and show why they wait. `src/tick.rs` advances due graphs and retries pending
+slot locks are created under the CI domain lock and persisted before use. The
+lease registry lock is a stable owner lock reused across acquisitions, including
+uncapped requests which need no waiter directory. Waiting items retain their place
+and show why they wait. A park transition persists the corresponding graph wake
+with its state, so an interrupted transition can be replayed. `src/tick.rs` advances due graphs and retries pending
 observations; `src/fabric/graph_status.rs` and the existing inbox show item,
 phase, head, round, rung, active lane, last event, source, wait and parked handoff as the board. The checkpoint retains the bounded full writer handoff, including completed reports; the inbox request may show a truncated summary.
 

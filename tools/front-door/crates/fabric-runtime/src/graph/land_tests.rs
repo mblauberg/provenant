@@ -1130,6 +1130,7 @@ fn queue_land_does_not_run_without_clear_conflict_and_green_ci_on_publish_head()
         let document = queue_publish_document("routine");
         let mut owner = owner();
         owner.repair_fixture = true;
+        owner.integration_base = Some(TARGET.parse().unwrap());
         if mismatch_conflict {
             owner.conflict_head = Some(WRITE_HEAD.into());
         } else {

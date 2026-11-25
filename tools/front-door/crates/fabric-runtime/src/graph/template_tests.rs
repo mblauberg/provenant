@@ -2313,9 +2313,10 @@ fn compiler_lowers_and_admits_a_queue_delivery_composite() {
     graph.schema_version = 2;
     graph.integration_branch = Some("delivery/item".into());
     graph.queue = Some(QueueKnobs::default());
-    graph.admit(&limits()).unwrap();
+    let limits = crate::config::GraphLimits::default();
+    graph.admit(&limits).unwrap();
 
-    let expanded = graph.expanded(&limits()).unwrap();
+    let expanded = graph.expanded(&limits).unwrap();
     let writer = expanded
         .nodes
         .iter()

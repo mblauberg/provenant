@@ -546,7 +546,9 @@ checkpoint missing launch evidence or its actor is refused.
 
 ### Checkpoint envelope
 
-Admission bounds the worst-case checkpoint before saving the plan. Graph text,
+Admission bounds the worst-case checkpoint before saving the plan. The fixed
+checkpoint envelope is 32 MiB, including the full handoff projections and
+pending-steer reserve for graphs at the default node limit. Graph text,
 identity fields and object keys keep their exact bytes in local state and
 execution context, through captured fragments, retries, template substitutions
 and expansions; heuristic content inspection warns with the field and rule

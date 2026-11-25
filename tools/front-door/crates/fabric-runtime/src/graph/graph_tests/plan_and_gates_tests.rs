@@ -345,6 +345,7 @@ fn publication_persists_exact_hygiene_head_and_skips_legacy_final_delivery() {
             pull_request: url.into(),
         }]),
         graph_bases: (None, Some("d".repeat(40).parse().unwrap())),
+        now: Some(provenant_core::WallTime::from_micros(0).unwrap()),
         ..Default::default()
     };
     let mut journal = MemoryJournal::default();
@@ -395,6 +396,7 @@ fn publication_replay_rejects_a_changed_expected_remote_head() {
             pull_request: "https://example.invalid/pr/queue".into(),
         }]),
         graph_bases: (None, Some("d".repeat(40).parse().unwrap())),
+        now: Some(provenant_core::WallTime::from_micros(0).unwrap()),
         ..Default::default()
     };
     let mut journal = MemoryJournal::default();

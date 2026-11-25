@@ -92,7 +92,7 @@ fn queue_loop_can_bind_an_outer_publication_gate() {
         })).unwrap();
     document.queue = Some(QueueKnobs::default());
     let expanded = loops::expand(&document, &[], &Default::default()).unwrap();
-    assert!(validate_plan(&expanded).is_ok());
+    assert!(validate_flat_plan(&expanded, &Default::default()).is_ok());
 }
 
 #[test]

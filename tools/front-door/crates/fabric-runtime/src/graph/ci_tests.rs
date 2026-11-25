@@ -740,8 +740,11 @@ fn queue_quota_reset_defers_timeout_across_restart() {
     let mut journal = Journal::default();
     let first = advance(&doc, &mut owner, &mut journal).unwrap();
     assert_eq!(first.checkpoint.wake_at.unwrap().as_micros(), 10_000_000);
-    journal.0 =
-        Some(serde_json::from_slice(&serde_json::to_vec(&first.checkpoint).unwrap()).unwrap());
+    let mut restored: GraphCheckpoint =
+        serde_json::from_slice(&serde_json::to_vec(&first.checkpoint).unwrap()).unwrap();
+    // The journal hydrates this projection from the separately stored execution.
+    restored.bases = first.checkpoint.bases;
+    journal.0 = Some(restored);
     owner.wall_seconds = 9;
     owner.monotonic_micros = 9_000_000;
     // An explicit advance can probe early and fail to retrieve a fresh reset.
@@ -1636,12 +1639,12 @@ fn queue_ci_without_a_published_head_does_not_reach_or_settle_the_gate() {
     assert!(ci.gate.is_none());
     assert!(ci.outputs.is_none());
     assert!(ci.ci.is_none());
-    let repair_index = doc
+    let repair = run
+        .checkpoint
         .nodes
         .iter()
-        .position(|node| node.id == "repair")
+        .find(|node| node.id == "repair")
         .unwrap();
-    let repair = &run.checkpoint.nodes[repair_index];
     assert_eq!(repair.state, NodeState::Pending);
     assert!(
         owner.targets.is_empty(),
@@ -2159,7 +2162,12 @@ fn queue_ci_repair_receives_failing_head_findings_and_sweep_instruction() {
         Some(head.as_str())
     );
     assert_eq!(ci.state, NodeState::Failed);
-    let repair = &run.checkpoint.nodes[repair_index];
+    let repair = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "repair")
+        .unwrap();
     assert_eq!(repair.state, NodeState::Succeeded);
     assert_eq!(repair.source_commit.as_deref(), Some(head.as_str()));
     assert_eq!(

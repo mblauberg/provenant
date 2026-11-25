@@ -1858,6 +1858,8 @@ pub(super) fn dependency_state(
                     .round
                     .as_ref()
                     .is_some_and(|round| &round.loop_id == target)
+                || validation::recovery_scope(target, &plan.nodes, positions)
+                    .is_some_and(|scope| scope.contains(&positions[&node.id]))
         });
         match checkpoint.nodes[index].state {
             NodeState::Failed | NodeState::Blocked
