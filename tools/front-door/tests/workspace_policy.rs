@@ -1872,7 +1872,8 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         ("crates/run/src/launch.rs", 4250),
         // Scratch-root pruning and its pinned-Git invariants (#3947).
         ("crates/run/src/retention.rs", 5250),
-        ("crates/run/src/settlement.rs", 4500),
+        // The #3906 abandoned-lane registration prune and its pinned test.
+        ("crates/run/src/settlement.rs", 4750),
         ("crates/run/src/store.rs", 2750),
         ("crates/run/src/writer.rs", 4250),
         ("crates/supervisor/src/custody.rs", 4000),

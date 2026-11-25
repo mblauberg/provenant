@@ -1421,8 +1421,14 @@ mod tests {
             call: &crate::Request<'_>,
             project: &std::path::Path,
             worktree: &std::path::Path,
+            seed: u8,
         ) -> std::result::Result<provenant_core::AttemptId, Box<dyn std::error::Error>> {
             let mut run = crate::tests::input();
+            // The shared fixture has one attempt identity and replay key; two
+            // distinct lanes need their own, including their own work key.
+            run.attempt_id = provenant_core::AttemptId::from_bytes([seed; 16]);
+            run.operation_id = format!("op-3906-{seed}").parse()?;
+            crate::tests::rekey(&mut run);
             run.created_at = clock.wall_now()?;
             run.request.task.writer = Some(crate::WriterRequest {
                 extra: Default::default(),
@@ -1473,8 +1479,8 @@ mod tests {
         std::fs::create_dir_all(common.join("worktrees"))?;
         let own_tree = project.join(".worktrees/lane");
         let foreign_tree = project.join(".worktrees/other");
-        let own = launched(&store, &clock, &call, &project, &own_tree)?;
-        let foreign = launched(&store, &clock, &call, &project, &foreign_tree)?;
+        let own = launched(&store, &clock, &call, &project, &own_tree, 7)?;
+        let foreign = launched(&store, &clock, &call, &project, &foreign_tree, 8)?;
         register(&common, "lane", &own_tree, own)?;
         register(&common, "other", &foreign_tree, own)?;
         // Only this attempt's registration points at its recorded checkout;
