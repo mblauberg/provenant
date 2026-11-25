@@ -8,9 +8,14 @@ Paths are relative to `tools/front-door/`.
 ## Admission and custody
 
 Admission commits the reservation and attempt together. A worktree's owning lane decides who
-else writes in it; active lanes share an occupancy lease. Resource probes run outside the
-admission transaction, and busy capacity is not a queue. Uncertain custody keeps its ownership
-until release is proved. Reconciliation reports released custody only after exclusion and native
+else writes in it; active lanes share an occupancy lease. A launch that finds `writer.lock` held
+checks the slot's reservations: a scoped stop intent for the inode-bound attempt or a reservation
+in the settling phase is a release already under way, so the launch waits on the store lock budget
+(the same sourced SQLite busy timeout that bounds the store's own locks) and wakes as soon as the
+lock is free. A live holder or any other occupancy without that evidence still refuses on the first
+probe, so a release wait never becomes a queue behind a foreign lane. Resource probes run outside
+the admission transaction, and busy capacity is not a
+queue. Uncertain custody keeps its ownership until release is proved. Reconciliation reports released custody only after exclusion and native
 absence evidence prove it safe; an unknown or live holder retains custody, and uncertain custody
 and unreadable reservations warn while reconciliation continues. Writer-bind refusals identify
 the durable lease holder, branch, worktree, reservation age (from its last durable update) and

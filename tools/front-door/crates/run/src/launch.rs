@@ -1258,7 +1258,7 @@ impl RunStore {
                     directory,
                     scope,
                     binding,
-                    provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
+                    call.lock_budget(),
                     call.cancel,
                     call.clock,
                 )
@@ -1284,7 +1284,7 @@ impl RunStore {
                     directory,
                     scope,
                     binding,
-                    provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
+                    call.lock_budget(),
                     call.cancel,
                     call.clock,
                 )
@@ -1294,7 +1294,8 @@ impl RunStore {
         )
     }
     /// Native observation seam for integration fixtures. The ordinary start
-    /// path always uses supervisor's system observer and nonblocking lease.
+    /// path always uses supervisor's system observer and the store lock budget;
+    /// that budget is spent only when the slot proves a release in progress.
     #[cfg(feature = "fixture")]
     #[allow(clippy::too_many_arguments)]
     pub fn start_with_writer_lease(

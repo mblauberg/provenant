@@ -167,6 +167,8 @@ fn current_attempt_reservation_preserves_uncommitted_work() -> TestResult {
         launch_state: LaunchState::Prepared,
         attempt_device: None,
         attempt_inode: None,
+        attempt_path: None,
+        requester: None,
         reservation_device: evidence_identity.device,
         reservation_inode: evidence_identity.inode,
         binding: StoredWriterBinding::Worktree {
@@ -570,6 +572,88 @@ fn acquire(root: &std::path::Path) -> Result<CustodyLease> {
         &CancelToken::new(),
         &clock,
     )
+}
+
+#[test]
+fn durable_stop_intent_allows_relaunch_to_wait_before_settling() -> TestResult {
+    use std::os::unix::fs::DirBuilderExt;
+
+    let root = tempfile::tempdir()?;
+    let slot_path = root.path().join("slot");
+    let attempt_path = root.path().join("attempt");
+    std::fs::DirBuilder::new().mode(0o700).create(&slot_path)?;
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&attempt_path)?;
+    let slot = Directory::open_anchor(&slot_path)?;
+    let attempt = Directory::open_anchor(&attempt_path)?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let lease = crate::fixture::acquire_writer(
+        slot.try_clone()?,
+        scope(),
+        WaitBudget::nonblocking(clock.mono_now()),
+        &cancel,
+        &clock,
+    )?;
+    let metadata = attempt.metadata()?;
+    let requester = ActorId::from_bytes([3; 16]);
+    let mut reservation = lease.reservation.clone();
+    reservation.launch_state = LaunchState::HandingOff;
+    reservation.attempt_device = Some(metadata.device);
+    reservation.attempt_inode = Some(metadata.inode);
+    reservation.attempt_path = Some(attempt.current_path()?);
+    reservation.requester = Some(requester);
+    write_record(
+        &lease.directory,
+        "reservation.json",
+        &reservation,
+        PublishMode::Replace,
+    )?
+    .require_durable()?;
+    let evidence = lease.directory.try_clone()?;
+    drop(lease);
+    let held = slot.try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)?;
+    let budget = || WaitBudget::cli(clock.mono_now(), 5);
+    assert!(matches!(
+        lock_writer_occupancy(&slot, budget()?, &cancel, &clock),
+        Err(CustodyError::Filesystem(FsError::LockTimeout { .. }))
+    ));
+    assert_eq!(
+        request_stop(
+            attempt,
+            scope(),
+            requester,
+            StopReason::ExplicitCancellation
+        )?,
+        StopReceipt::Requested
+    );
+    WRITER_LOCK_WAIT_HOOK.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            reservation.launch_state = LaunchState::Settling;
+            reservation.guardian = Some(ProcessIdentity {
+                boot: reservation.boot.clone(),
+                pid: 10,
+                native_start: 1,
+                group_id: 10,
+                session_id: 10,
+            });
+            reservation.unresolved_cleanup = false;
+            reservation.census_incomplete = false;
+            write_record(
+                &evidence,
+                "reservation.json",
+                &reservation,
+                PublishMode::Replace,
+            )
+            .expect("publish settling")
+            .require_durable()
+            .expect("durable settling");
+            drop(held);
+        }));
+    });
+    drop(lock_writer_occupancy(&slot, budget()?, &cancel, &clock)?);
+    Ok(())
 }
 
 #[test]

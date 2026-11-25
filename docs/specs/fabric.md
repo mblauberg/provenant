@@ -155,12 +155,18 @@ sourced allowances (`domains.fabric.graph.launch_wait_seconds`,
 writer's custody waits on the provisioning allowance, not the shorter reader
 wait: a concurrent launch holds its per-worktree writer guard across the whole
 worktree add and post-create setup, so the wait must cover one full provisioning
-(default 120 s, matching the writer mutation budget). Only after that bounded
-wait expires does the node settle `blocked` with the contention cause, the
-lock holder when the worktree owner record or writer reservation names one,
-and a `provenant retry` remedy. Writer-custody contention proves the launch
-never reached the host; the disposition records that fact on the attempt from
-the typed error. The retry gate reads that recorded fact together with the
+(default 120 s, matching the writer mutation budget). A writer lease with a
+matching durable stop intent or in its settling phase is the same kind of
+progress: `provenant stop` returns once the cancel is acknowledged, before the guardian publishes the terminal record
+and drops `writer.lock`, so a relaunch in that window waits for the release on
+the store lock budget and on the provisioning allowance rather than refusing a
+just-stopped worktree. A live holder is not that case: it still refuses on the
+first probe so another lane's uncommitted work is never adopted. Only after
+those bounded waits expire does the node settle `blocked` with the contention
+cause, the lock holder when the worktree owner record or writer reservation
+names one, and a `provenant retry` remedy. Writer-custody contention proves the
+launch never reached the host; the disposition records that fact on the attempt
+from the typed error. The retry gate reads that recorded fact together with the
 shared pre-host classifier, and the blocked remedy reads the recorded fact,
 rather than guessing from owner codes (a generic `busy` also covers
 post-acceptance lock timeouts, which may have a live guardian). An occupied concurrency

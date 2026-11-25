@@ -19,9 +19,13 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 
 mod indexes;
+mod writer_release;
 pub use indexes::{
     RecordedAttemptIndex, attempt_index_retired, recorded_attempt_indexes, register_attempt_index,
 };
+#[cfg(any(test, feature = "fixture"))]
+pub(crate) use writer_release::WRITER_LOCK_WAIT_HOOK;
+pub use writer_release::{lock_writer_exclusion, lock_writer_occupancy, release_in_progress};
 
 pub(crate) const RECORD_LIMIT: u64 = 1024 * 1024;
 pub(crate) const EXIT_LIMIT: u64 = 16 * 1024;
@@ -416,6 +420,10 @@ pub(crate) struct Reservation {
     pub launch_state: LaunchState,
     pub attempt_device: Option<u64>,
     pub attempt_inode: Option<u64>,
+    #[serde(default)]
+    pub attempt_path: Option<PathBuf>,
+    #[serde(default)]
+    pub requester: Option<ActorId>,
     pub reservation_device: u64,
     pub reservation_inode: u64,
     pub binding: StoredWriterBinding,
@@ -748,6 +756,8 @@ pub(crate) fn acquire_writer_with_observer(
         launch_state: LaunchState::Prepared,
         attempt_device: None,
         attempt_inode: None,
+        attempt_path: None,
+        requester: None,
         reservation_device: metadata.device,
         reservation_inode: metadata.inode,
         binding: binding.0,
@@ -1396,6 +1406,11 @@ pub fn launch(
     };
     owned.lease.reservation.attempt_device = Some(metadata.device);
     owned.lease.reservation.attempt_inode = Some(metadata.inode);
+    owned.lease.reservation.attempt_path = match publication.directory.current_path() {
+        Ok(path) => Some(path),
+        Err(error) => return Err(failure(error.into(), publication)),
+    };
+    owned.lease.reservation.requester = Some(requester);
     if owned.cancel.is_cancelled() || capture.validate().is_err() {
         owned.lease.reservation.launch_state = LaunchState::NeverSpawned;
         owned.lease.reservation.unresolved_cleanup = false;
@@ -2348,12 +2363,6 @@ fn observe_checkpoint(
     })
 }
 
-#[cfg(any(test, feature = "fixture"))]
-thread_local! {
-    pub(crate) static WRITER_LOCK_WAIT_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
-        const { std::cell::RefCell::new(None) };
-}
-
 /// Observe other live occupancy holders using the per-attempt proof retained
 /// through guardian settlement. The caller's own holder is excluded by name.
 pub fn other_holders_live(
@@ -2386,80 +2395,6 @@ pub fn other_holders_live(
         }
     }
     Ok(false)
-}
-
-/// Acquire shared worktree occupancy without keeping the observation gate
-/// while another holder owns the lease.
-#[allow(clippy::disallowed_methods)] // The bounded wait must expire even with a stopped caller clock.
-pub fn lock_writer_occupancy(
-    directory: &Directory,
-    budget: WaitBudget,
-    cancel: &CancelToken,
-    clock: &dyn Clock,
-) -> Result<LockGuard> {
-    lock_writer_mode(directory, LockMode::Shared, budget, cancel, clock)
-}
-
-/// Acquire exclusive worktree occupancy for removal and other operations that
-/// require every active holder to leave.
-#[allow(clippy::disallowed_methods)] // The bounded wait must expire even with a stopped caller clock.
-pub fn lock_writer_exclusion(
-    directory: &Directory,
-    budget: WaitBudget,
-    cancel: &CancelToken,
-    clock: &dyn Clock,
-) -> Result<LockGuard> {
-    lock_writer_mode(directory, LockMode::Exclusive, budget, cancel, clock)
-}
-
-#[allow(clippy::disallowed_methods)] // The bounded wait must expire even with a stopped caller clock.
-fn lock_writer_mode(
-    directory: &Directory,
-    mode: LockMode,
-    budget: WaitBudget,
-    cancel: &CancelToken,
-    clock: &dyn Clock,
-) -> Result<LockGuard> {
-    let timeout = Duration::from_micros(budget.remaining(clock.mono_now()).as_micros());
-    let path = directory.current_path()?.join("writer.lock");
-    let deadline = Instant::now()
-        .checked_add(timeout)
-        .ok_or_else(|| FsError::LockDeadlineOverflow { path: path.clone() })?;
-    loop {
-        if cancel.is_cancelled() {
-            return Err(FsError::Cancelled { path }.into());
-        }
-        // An observation is not writer custody: contention here is busy,
-        // regardless of the caller's permitted wait for the actual writer.
-        let observation = writer_admission_guard(directory)?;
-        // A nonblocking budget still probes the stable inode once. Keep the
-        // caller's cancellation checks before and after that acquisition.
-        let attempt = directory.lock(
-            OsStr::new("writer.lock"),
-            mode,
-            WaitBudget::nonblocking(clock.mono_now()),
-            cancel,
-            clock,
-        );
-        drop(observation);
-        match attempt {
-            Ok(lease) => return Ok(lease),
-            Err(FsError::LockTimeout { .. }) => {}
-            Err(error) => return Err(error.into()),
-        }
-        if cancel.is_cancelled() {
-            return Err(FsError::Cancelled { path }.into());
-        }
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(FsError::LockTimeout { path, timeout }.into());
-        }
-        #[cfg(any(test, feature = "fixture"))]
-        if let Some(hook) = WRITER_LOCK_WAIT_HOOK.with(|hook| hook.borrow_mut().take()) {
-            hook();
-        }
-        provenant_os::sys::wait_pause(remaining.min(Duration::from_millis(5)));
-    }
 }
 
 /// Initialise the short observer gate before publishing writer exclusion.
