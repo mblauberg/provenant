@@ -1,4 +1,7 @@
 //! Provenant-only provider customisation and writer publishing setup.
+mod pr_policy;
+
+use self::pr_policy::pr_policy_guard;
 use crate::launch::{exact, subtree};
 use crate::{ProviderError, SetupStep};
 use provenant_confinement::permissions::ProviderProfileSpec;
@@ -879,45 +882,6 @@ fn gh_wrapper(gh: &str, gh_config: Option<&str>, counter: &str, shim: &GhShim<'_
         .map(|config| format!("GH_CONFIG_DIR={config}\nexport GH_CONFIG_DIR\n"))
         .unwrap_or_default();
     format!("#!/bin/sh\n{guard}{config}exec {} \"$@\"\n", quote(gh))
-}
-
-/// Shell that enforces the lane's `lanes.pr` policy before the real `gh` runs.
-/// `never` refuses every PR mutation and forge API write; `draft` permits only
-/// draft creation and maintenance, but refuses promotion and other PR writes;
-/// `allowed` adds nothing. Messages name the knob and the layer that set it
-/// so a refusal is actionable.
-fn pr_policy_guard(policy: provenant_config::PrPolicy, source: &str) -> String {
-    use provenant_config::PrPolicy;
-    if policy == PrPolicy::Allowed {
-        return String::new();
-    }
-    // A mutating `gh api` call is a forge write. Reads (GET/HEAD, no field
-    // flags) continue to work so the lane can still inspect pull requests.
-    let mut guard = String::from(
-        "provenant_forge_write() {\n  [ \"$1\" = api ] || return 1\n  shift\n  while [ \"$#\" -gt 0 ]; do\n    case \"$1\" in\n      -f|-F|--field|--raw-field|--input|--field=*|--raw-field=*|--input=*) return 0 ;;\n      -X|--method) shift; [ \"$#\" -gt 0 ] || return 1\n        case \"$1\" in GET|HEAD|get|head) ;; *) return 0 ;; esac ;;\n      --method=*) case \"${1#--method=}\" in GET|HEAD|get|head) ;; *) return 0 ;; esac ;;\n      -X*) case \"${1#-X}\" in GET|HEAD|get|head) ;; *) return 0 ;; esac ;;\n    esac\n    shift\n  done\n  return 1\n}\n",
-    );
-    let (policy_name, message) = match policy {
-        PrPolicy::Never => (
-            "never",
-            format!(
-                "error: provenant: pull request and forge writes are refused (lanes.pr=never, source: {source}); the chair publishes after settlement"
-            ),
-        ),
-        PrPolicy::Draft => (
-            "draft",
-            format!(
-                "error: provenant: this lane may open only draft pull requests (lanes.pr=draft, source: {source}); this PR operation or forge write is refused"
-            ),
-        ),
-        PrPolicy::Allowed => unreachable!(),
-    };
-    let message = quote(&message);
-    // Classify the supported gh PR commands in one place. Unknown commands are
-    // refused until classified, so a new gh mutation cannot silently bypass policy.
-    guard.push_str(&format!(
-        "provenant_pr_action=$(\nprovenant_pr_action=read\nif [ \"$1\" = pr ]; then\n  shift\n  while [ \"$#\" -gt 0 ]; do\n    case \"$1\" in\n      -R|--repo) shift; [ \"$#\" -gt 0 ] || break; shift ;;\n      -R?*|--repo=*) shift ;;\n      *) break ;;\n    esac\n  done\n  case \"$1\" in\n    ''|--help|-h|checkout|checks|diff|list|status|view) ;;\n    create) provenant_pr_action=create ;;\n    edit|close|comment|review) provenant_pr_action=maintenance ;;\n    lock|unlock|update-branch|revert|ready|reopen|merge) provenant_pr_action=write ;;\n    *) provenant_pr_action=write ;;\n  esac\nfi\nprintf \"%s\" \"$provenant_pr_action\"\n)\ncase \"{policy_name}:$provenant_pr_action\" in\n  never:create|never:maintenance|never:write|draft:write)\n    printf '%s\\n' {message} >&2\n    exit 2 ;;\n  draft:create)\n    provenant_has_draft=false\n    for provenant_arg in \"$@\"; do\n      case $provenant_arg in --draft) provenant_has_draft=true ;; esac\n    done\n    if [ \"$provenant_has_draft\" = false ]; then set -- \"$@\" --draft; fi ;;\nesac\nif provenant_forge_write \"$@\"; then\n  printf '%s\\n' {message} >&2\n  exit 2\nfi\n"
-    ));
-    guard
 }
 
 /// Canonical runtime paths supplied by the composition edge.
