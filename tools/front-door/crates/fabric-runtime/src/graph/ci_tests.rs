@@ -26,6 +26,7 @@ struct Owner {
     targets: Vec<String>,
     checks: Vec<Vec<String>>,
     attempts: usize,
+    pending_writer: bool,
     deliveries: usize,
     wall_seconds: i64,
     wall_unavailable: bool,
@@ -153,12 +154,18 @@ impl AttemptOwner for Owner {
         input: NodeInput<'_>,
         _: &GraphRoute,
         _: AccessMode,
-        source_commit: Option<&str>,
+        _: Option<&str>,
         _: Replay<'_>,
     ) -> Result<AttemptObservation, Self::Error> {
         self.attempts += 1;
         self.prompts.push(input.prompt.into());
-        self.source_commits.push(source_commit.map(str::to_owned));
+        self.source_commits
+            .push(input.source_commit.map(str::to_owned));
+        if self.pending_writer {
+            return Ok(AttemptObservation::Pending {
+                attempt_ref: Some("fixture/pending".into()),
+            });
+        }
         Ok(AttemptObservation::Terminal {
             attempt_ref: Some(format!("fixture/{}/{}", key.node_id, self.attempts)),
             outcome: AttemptOutcome::Succeeded,
@@ -1628,6 +1635,7 @@ fn queue_ci_without_a_published_head_does_not_reach_or_settle_the_gate() {
     let mut owner = Owner {
         branch: Some("delivered/topic".into()),
         commit: None,
+        pending_writer: true,
         integration_base: Some("f".repeat(40).parse().unwrap()),
         ..Default::default()
     };
@@ -1777,6 +1785,7 @@ fn queue_conflict_without_a_published_head_waits_instead_of_rebasing() {
     let mut owner = Owner {
         branch: Some("delivered/topic".into()),
         commit: None,
+        pending_writer: true,
         integration_base: Some("f".repeat(40).parse().unwrap()),
         conflict_observations: VecDeque::from([ConflictObservation {
             state: ConflictState::Conflicting,

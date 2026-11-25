@@ -1060,6 +1060,9 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
                                 child.after_settled.push(source.clone());
                             }
                         } else {
+                            child
+                                .after_settled
+                                .retain(|parent| parent.as_str() != source.as_str());
                             child.depends_on.push(source.clone());
                         }
                     }
@@ -1073,6 +1076,9 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
                         writer.clone()
                     };
                     if !child.depends_on.contains(writer) {
+                        child
+                            .after_settled
+                            .retain(|parent| parent.as_str() != writer.as_str());
                         child.depends_on.push(writer.clone());
                     }
                 }
@@ -1135,6 +1141,7 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
                 ) = child.condition.as_ref()
                     && !child.depends_on.contains(target)
                 {
+                    child.after_settled.retain(|parent| parent != target);
                     child.depends_on.push(target.clone());
                 }
                 child.inputs.retain(|input| {

@@ -192,6 +192,24 @@ fn typed_hygiene_failures_retry_from_the_settled_prior_outcome() {
             .contains(&"recovery--r1--done".to_owned())
     );
 
+    // A source inherited as an ordering-only entry must become a single
+    // success dependency, while the failed prior hygiene remains settled-only.
+    let mut inherited = document.clone();
+    inherited.nodes[2]
+        .after_settled
+        .push("initial-write".into());
+    inherited.nodes[2].loop_body.as_mut().unwrap().body[0].source = Some(SourceBinding::Node {
+        node: "initial-write".into(),
+    });
+    let expanded = loops::expand(&inherited, &[], &Default::default()).unwrap();
+    let first = expanded
+        .nodes
+        .iter()
+        .find(|node| node.id == "recovery--r1--repair")
+        .unwrap();
+    assert!(first.depends_on.contains(&"initial-write".to_owned()));
+    assert!(!first.after_settled.contains(&"initial-write".to_owned()));
+
     let mut untyped_hygiene = document.clone();
     untyped_hygiene.nodes[2].loop_body.as_mut().unwrap().body[1].source = None;
     assert!(validate_plan(&untyped_hygiene).is_err());

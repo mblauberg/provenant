@@ -2105,7 +2105,11 @@ impl GraphJournal for ReplayJournal {
         let conflict = checkpoint.nodes.iter().find(|node| node.id == "conflict");
         let ci = checkpoint.nodes.iter().find(|node| node.id == "ci");
         let reset_checkpoint = conflict.is_some_and(|node| {
-            node.state == NodeState::Pending && node.gate.is_none() && node.conflict.is_none()
+            node.state == NodeState::Running
+                && node.gate.is_none()
+                && node.conflict.as_ref().is_some_and(|evidence| {
+                    evidence.state == ConflictState::Pending && evidence.ci_rechecks == 1
+                })
         }) && ci.is_some_and(|node| {
             node.state == NodeState::Pending && node.gate.is_none() && node.ci.is_none()
         }) && checkpoint
@@ -2163,9 +2167,13 @@ fn queue_ci_conflict_after_clear_rebases_republishes_and_rechecks_after_replay()
         .find(|checkpoint| {
             let conflict = node(checkpoint, "conflict");
             let ci = node(checkpoint, "ci");
-            conflict.state == NodeState::Pending
+            conflict.state == NodeState::Running
                 && conflict.gate.is_none()
-                && conflict.conflict.is_none()
+                && conflict.conflict.as_ref().is_some_and(|evidence| {
+                    evidence.state == ConflictState::Pending
+                        && evidence.ci_rechecks == 1
+                        && evidence.head_sha.as_deref() == Some(REPAIR_HEAD)
+                })
                 && ci.state == NodeState::Pending
                 && ci.gate.is_none()
                 && ci.ci.is_none()

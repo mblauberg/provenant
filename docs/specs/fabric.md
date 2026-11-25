@@ -219,7 +219,10 @@ admission. The CLI catalogue exposes those declarations.
 `after_settled` orders a node after its predecessors settle in any state without
 propagating their failure; they stay visible in the graph outcome. Inputs may
 select outputs from either kind of direct dependency; unavailable optional
-outputs stay absent and required outputs still gate admission.
+outputs stay absent and required outputs still gate admission. When loop
+expansion binds a source or gate target that was inherited as an ordering-only
+edge, the source's success requirement replaces that ordering edge; a retry of
+failed hygiene retains its settled-only source edge.
 
 ### Implementation planning
 

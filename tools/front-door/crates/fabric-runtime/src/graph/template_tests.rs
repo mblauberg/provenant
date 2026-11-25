@@ -2402,15 +2402,15 @@ fn compiler_lowers_and_admits_a_queue_delivery_composite() {
         expanded
             .nodes
             .iter()
-            .find(|node| node.id == "delivery--review")
-            .is_some_and(|node| {
-                node.delivery_review.is_some()
-                    && matches!(
-                        &node.source,
-                        Some(SourceBinding::Head { node }) if node == "delivery--publish"
-                    )
-            })
+            .any(|node| { node.id == "delivery--review" && node.delivery_review.is_some() })
     );
+    assert!(expanded.nodes.iter().any(|node| {
+        node.id == "delivery--review--lens"
+            && matches!(
+                &node.source,
+                Some(SourceBinding::Head { node }) if node == "delivery--publish"
+            )
+    }));
     let repair = expanded
         .nodes
         .iter()
