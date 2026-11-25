@@ -2230,6 +2230,28 @@ fn composite_expansion_namespaces_explicit_loop_initial_bindings() {
         ]
     }))
     .unwrap();
+    let mut with_seed = document.clone();
+    with_seed.nodes[0].composite.as_mut().unwrap().nodes[1]
+        .loop_body
+        .as_mut()
+        .unwrap()
+        .initial_publication = Some("writer".into());
+    let scoped = composites::expand(&with_seed, &crate::config::GraphLimits::default()).unwrap();
+    let scoped_loop = scoped
+        .nodes
+        .iter()
+        .find(|node| node.id == "flow--retry")
+        .unwrap();
+    assert_eq!(
+        scoped_loop
+            .loop_body
+            .as_ref()
+            .unwrap()
+            .initial_publication
+            .as_deref(),
+        Some("flow--writer")
+    );
+
     let expanded = loops::expand(&document, &[], &crate::config::GraphLimits::default()).unwrap();
     let loop_node = expanded
         .nodes
