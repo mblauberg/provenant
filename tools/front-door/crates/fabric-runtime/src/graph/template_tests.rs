@@ -1968,8 +1968,9 @@ fn template_precedence_ranks_each_declared_layer_once() {
 }
 
 #[test]
-fn delivery_contracts_round_trip_and_refuse_execution() {
+fn delivery_contracts_round_trip_and_admit_execution() {
     let raw = json!({"id":"repair", "access":"read_only", "prompt":"repair",
+        "route":{"alias":"junior"},
         "escalate":{"ladder":["junior","principal"],"max_ci_rounds":3},
         "delivery_review":{"shape":"panel","accept_inconclusive_without_blocking":false}});
     let compiled = Compiler::new(&library()).compile(&raw).unwrap();
@@ -1988,10 +1989,86 @@ fn delivery_contracts_round_trip_and_refuse_execution() {
         serde_json::from_value::<GraphDocument>(wire).unwrap(),
         graph
     );
+    assert!(graph.admit(&limits()).is_ok());
+}
+
+#[test]
+fn compiler_lowers_and_admits_a_queue_delivery_composite() {
+    let composite = Compiler::new(&library())
+        .compile(&json!({
+            "id": "delivery",
+            "kind": "composite",
+            "access": "read_only",
+            "composite": {
+                "nodes": [
+                    {"id":"publish", "access":"worktree_write", "worktree":"/fixture/writer",
+                        "prompt":"publish the change", "route":{"alias":"senior"}},
+                    {"id":"conflict", "kind":"gate", "access":"read_only",
+                        "depends_on":["publish"], "on_fail":"rebase",
+                        "condition":{"type":"conflict", "target":{"node":"publish"}}},
+                    {"id":"rebase", "access":"worktree_write", "worktree":"/fixture/writer",
+                        "prompt":"rebase the retained branch", "route":{"alias":"senior"},
+                        "depends_on":["conflict"]},
+                    {"id":"ci", "kind":"gate", "access":"read_only",
+                        "depends_on":["conflict"], "on_fail":"repair",
+                        "condition":{"type":"ci", "target":{"node":"publish"}}},
+                    {"id":"repair", "access":"worktree_write", "worktree":"/fixture/writer",
+                        "prompt":"repair the failed checks", "route":{"alias":"senior"},
+                        "depends_on":["ci"]},
+                    {"id":"review", "kind":"composite", "access":"read_only",
+                        "depends_on":["repair"], "source":{"type":"head", "node":"repair"},
+                        "delivery_review":{"shape":"single", "accept_inconclusive_without_blocking":false},
+                        "composite":{"nodes":[
+                            {"id":"lens", "access":"read_only", "prompt":"review the published head",
+                                "route":{"alias":"senior"}, "require_findings":true,
+                                "required_verdict":"VERDICT: PASS"}
+                        ], "exports":[{"node":"lens", "outputs":["result", "findings", "verdict"]}]}},
+                    {"id":"accept", "kind":"gate", "access":"read_only",
+                        "depends_on":["review"],
+                        "inputs":[{"node":"review", "outputs":["verdict"]}],
+                        "condition":{"type":"verdict", "expected":"VERDICT: PASS", "threshold":"all"}}
+                ],
+                "exports":[{"node":"accept", "outputs":["verdict"]}]
+            }
+        }))
+        .unwrap();
+    let mut graph = document(vec![composite]);
+    graph.schema_version = 2;
+    graph.queue = Some(QueueKnobs::default());
+    graph.admit(&limits()).unwrap();
+
+    let expanded = graph.expanded(&limits()).unwrap();
+    let conflict = expanded
+        .nodes
+        .iter()
+        .find(|node| node.id == "delivery--conflict")
+        .unwrap();
     assert!(matches!(
-        graph.admit(&limits()),
-        Err(AdmissionError::DeliveryQueueUnsupported)
+        &conflict.condition,
+        Some(GateCondition::Conflict {
+            target: CiTarget::Node { node, .. },
+            ..
+        }) if node == "delivery--publish"
     ));
+    let ci = expanded
+        .nodes
+        .iter()
+        .find(|node| node.id == "delivery--ci")
+        .unwrap();
+    assert!(matches!(
+        &ci.condition,
+        Some(GateCondition::Ci {
+            target: CiTarget::Node { node, .. },
+            ..
+        }) if node == "delivery--publish"
+    ));
+    assert!(
+        expanded
+            .nodes
+            .iter()
+            .find(|node| node.id == "delivery--review")
+            .is_some_and(|node| node.delivery_review.is_some())
+    );
 }
 
 #[test]
@@ -2025,6 +2102,45 @@ fn delivery_loop_must_be_bounded() {
     assert!(
         matches!(graph.admit(&limits()), Err(AdmissionError::Plan(reason)) if reason.contains("max_rounds"))
     );
+}
+
+#[test]
+fn bounded_loop_budget_covers_all_rounds_and_admission_rejects_unbounded_cycles() {
+    let loop_node = Compiler::new(&library())
+        .compile(&json!({
+            "id":"repair", "kind":"loop", "access":"read_only",
+            "loop":{"body":[
+                {"id":"writer", "access":"worktree_write", "prompt":"repair",
+                    "write_scope":["src"], "route":{"alias":"junior"}},
+                {"id":"ci", "kind":"gate", "access":"read_only",
+                    "depends_on":["writer"], "condition":{"type":"budget"}}
+            ], "until":"ci", "max_rounds":2}
+        }))
+        .unwrap();
+    let mut graph = document(vec![loop_node]);
+    graph.schema_version = 2;
+    graph.queue = Some(QueueKnobs::default());
+    let expanded = graph.admit_expanded(&limits()).unwrap();
+    assert_eq!(
+        expanded.nodes.len(),
+        5,
+        "two body nodes per repair round plus the loop boundary"
+    );
+
+    let mut unbounded = document(vec![
+        serde_json::from_value(json!({
+            "id":"first", "access":"read_only", "prompt":"first",
+            "route":{"alias":"junior"}, "depends_on":["second"]
+        }))
+        .unwrap(),
+        serde_json::from_value(json!({
+            "id":"second", "access":"read_only", "prompt":"second",
+            "route":{"alias":"junior"}, "depends_on":["first"]
+        }))
+        .unwrap(),
+    ]);
+    unbounded.schema_version = 2;
+    assert!(unbounded.admit(&limits()).is_err());
 }
 
 #[test]

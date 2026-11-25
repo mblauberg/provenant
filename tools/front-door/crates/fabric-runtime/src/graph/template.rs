@@ -796,7 +796,8 @@ pub(super) fn review_verifier(node: &PlannedNode) -> bool {
 }
 
 pub(super) fn review_node(node: &PlannedNode) -> bool {
-    review_behaviour(node).is_some()
+    node.delivery_review.is_some()
+        || review_behaviour(node).is_some()
         || node.role.as_deref().is_some_and(|role| {
             role == "lens" || role.starts_with("lens.") || role.starts_with("review.")
         })

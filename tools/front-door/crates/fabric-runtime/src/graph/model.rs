@@ -1095,8 +1095,6 @@ pub enum GraphOutputField {
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum AdmissionError {
-    #[error("delivery queue contracts are not yet supported")]
-    DeliveryQueueUnsupported,
     #[error("{0}")]
     Schema(String),
     #[error("{0}")]
@@ -1126,45 +1124,49 @@ pub(super) fn validate_delivery_contracts(document: &GraphDocument) -> Result<()
             .validate()
             .map_err(|reason| AdmissionError::Plan(reason.into()))?;
     }
-    fn check_nodes(nodes: &[GraphNode]) -> Result<bool, AdmissionError> {
-        let mut present = false;
+    fn check_nodes(nodes: &[GraphNode]) -> Result<(), AdmissionError> {
         for node in nodes {
             if let Some(escalate) = &node.escalate {
                 escalate
                     .validate()
                     .map_err(|reason| AdmissionError::Plan(reason.into()))?;
-                present = true;
+                let has_writer = node.access == AccessMode::WorktreeWrite
+                    || node.loop_body.as_ref().is_some_and(|spec| {
+                        spec.body
+                            .iter()
+                            .any(|member| member.access == AccessMode::WorktreeWrite)
+                    });
+                if !has_writer {
+                    return Err(AdmissionError::Plan(
+                        "escalate requires a writer node or loop body".into(),
+                    ));
+                }
             }
-            present |= node.delivery_review.is_some();
             if let Some(spec) = &node.loop_body {
+                if spec.max_rounds == 0 {
+                    return Err(AdmissionError::Plan(
+                        "loop.max_rounds must be positive".into(),
+                    ));
+                }
                 if let Some(edge) = &spec.outcome_edge {
-                    if spec.max_rounds == 0 {
-                        return Err(AdmissionError::Plan(
-                            "loop.max_rounds must be positive".into(),
-                        ));
-                    }
                     if edge.node.trim().is_empty() {
                         return Err(AdmissionError::Plan(
                             "loop outcome edge requires a node".into(),
                         ));
                     }
-                    present = true;
                 }
-                present |= check_nodes(&spec.body)?;
+                check_nodes(&spec.body)?;
             }
             if let Some(spec) = &node.composite {
-                present |= check_nodes(&spec.nodes)?;
+                check_nodes(&spec.nodes)?;
             }
             if let Some(fallback) = node.plan.as_ref().and_then(|plan| plan.fallback.as_ref()) {
-                present |= check_nodes(&fallback.nodes)?;
+                check_nodes(&fallback.nodes)?;
             }
         }
-        Ok(present)
+        Ok(())
     }
-    if check_nodes(&document.nodes)? || document.queue.is_some() {
-        return Err(AdmissionError::DeliveryQueueUnsupported);
-    }
-    Ok(())
+    check_nodes(&document.nodes)
 }
 
 impl GraphDocument {
@@ -1306,6 +1308,7 @@ pub enum NodeKind {
     Loop,
     Decide,
     Land,
+    Hygiene,
 }
 
 /// Immutable review subject or the commit a later writer must start from.
@@ -1352,6 +1355,11 @@ pub enum GateCondition {
         failed_checks_max_bytes: Option<usize>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_failed_checks: Option<usize>,
+    },
+    Conflict {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        target: CiTarget,
     },
 }
 
@@ -1566,6 +1574,8 @@ pub struct NodeOutputs {
     pub extra: provenant_records::ExtraFields,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verdict_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hygiene: Option<provenant_records::graph::HygieneOutcome>,
     pub schema_version: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decide_outcome: Option<DecideOutcome>,
@@ -1648,6 +1658,32 @@ impl DecideOutcome {
             Self::Unanswered => None,
         }
     }
+}
+
+/// A durable hygiene intent and its bounded result for one graph node.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeliveryHygieneProgress {
+    pub operation_id: String,
+    pub input_head: String,
+    pub handoff: Option<String>,
+    pub outcome: Option<provenant_records::graph::HygieneOutcome>,
+}
+
+/// A durable park intent, completed when the inbox returns its request ID.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeliveryParkProgress {
+    pub transition_id: String,
+    pub operation_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_key: Option<provenant_records::graph::AttemptKey>,
+    pub attempt_ref: Option<String>,
+    pub reason: provenant_records::graph::ParkReason,
+    pub handoff: String,
+    pub head: Option<String>,
+    pub evidence: Vec<String>,
+    pub request_id: Option<provenant_core::HumanRequestId>,
 }
 
 /// Typed review evidence retained when a read-only review lane settles.
@@ -2187,6 +2223,12 @@ pub struct NodeProgress {
     pub delivery_loop: Option<provenant_records::graph::DeliveryLoopProgress>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub escalation: Option<provenant_records::graph::EscalationProgress>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_hygiene: Option<DeliveryHygieneProgress>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_park: Option<DeliveryParkProgress>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict: Option<ci::ConflictEvidence>,
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
     /// Direct children of a composite, whose individual evidence stays available.
@@ -2374,6 +2416,9 @@ pub struct GraphAttempt {
     #[serde(default, skip_serializing_if = "not_delivered")]
     pub review_substitution: bool,
     pub key: AttemptKey,
+    /// Sealed tier rung used when this attempt's route was admitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escalation_rung: Option<usize>,
     pub route: GraphRoute,
     pub state: AttemptState,
     pub attempt_ref: Option<String>,

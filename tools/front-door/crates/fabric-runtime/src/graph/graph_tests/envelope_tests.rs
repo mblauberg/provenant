@@ -328,6 +328,9 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
             NodeProgress {
                 delivery_loop: None,
                 escalation: None,
+                delivery_hygiene: None,
+                delivery_park: None,
+                conflict: None,
                 children_cancelled: false,
                 detached_from_graph_cancel: false,
                 subtree_cancel: None,
@@ -474,6 +477,7 @@ host_refused_before_acceptance: false,
                             route_index: u16::MAX - index as u16,
                             attempt: index as u32 + 1,
                         },
+                        escalation_rung: None,
                         route: route.clone(),
                         state: AttemptState::Unresolved,
                         stop: Some(provenant_records::StopCause::HostNativeUnconfigured),
@@ -698,6 +702,53 @@ fn assert_fits_with_repair_metadata(document: GraphDocument, tier: &str, grew: b
         "filled checkpoint is {size} bytes, over its {bound}-byte bound"
     );
     assert!(bound < size * 2, "bound {bound} is loose against {size}");
+}
+
+#[test]
+fn queue_prep_retries_reserve_each_possible_attempt_row() {
+    let mut document: GraphDocument = serde_json::from_value(json!({
+        "schema_version": 2,
+        "graph_id": "queue-retry-envelope",
+        "nodes": [{
+            "id": "writer",
+            "access": "worktree_write",
+            "worktree": "/fixture/writer",
+            "prompt": "repair",
+            "route": {"alias": "senior"}
+        }]
+    }))
+    .unwrap();
+    let mut queue = QueueKnobs::default();
+    queue.prep_retries.value = 0;
+    document.queue = Some(queue);
+    let single_attempt_plan = planned(&document);
+    let single_attempt_bound = envelope::checkpoint_bound(
+        &document,
+        &[],
+        &[],
+        &single_attempt_plan,
+    );
+
+    let mut escalated = document.clone();
+    escalated.nodes[0].escalate = Some(EscalateSpec {
+        ladder: vec!["junior".into(), "principal-with-long-alias".into()],
+        max_ci_rounds: 3,
+    });
+    let escalated_plan = planned(&escalated);
+    let escalated_bound = envelope::checkpoint_bound(&escalated, &[], &[], &escalated_plan);
+    assert!(
+        escalated_bound > single_attempt_bound,
+        "escalation route and persisted rung evidence must fit the envelope"
+    );
+
+    document.queue.as_mut().unwrap().prep_retries.value = 2;
+    let retried_plan = planned(&document);
+    let retried_bound = envelope::checkpoint_bound(&document, &[], &[], &retried_plan);
+
+    assert!(
+        retried_bound > single_attempt_bound,
+        "prep retries must reserve extra persisted attempt rows: {retried_bound} <= {single_attempt_bound}"
+    );
 }
 
 #[test]
@@ -1085,6 +1136,7 @@ fn ci_failed_checks_and_findings_fit_the_configured_envelope() {
                         failed_checks: vec![
                             CiFailedCheck {
                                 extra: Default::default(),
+                                job_id: None,
                                 name: "build".into(),
                                 url: Some("https://ci/1".into()),
                                 excerpt: worst(cap)

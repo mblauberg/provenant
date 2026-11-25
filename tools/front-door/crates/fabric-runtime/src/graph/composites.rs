@@ -152,10 +152,16 @@ pub(super) fn resolve_writer_targets(document: &mut GraphDocument) {
             if let Some(land) = &mut node.land {
                 bind(&mut land.node, &writer_aliases);
             }
-            if let Some(GateCondition::Ci {
-                target: CiTarget::Node { node, .. },
-                ..
-            }) = &mut node.condition
+            if let Some(
+                GateCondition::Ci {
+                    target: CiTarget::Node { node, .. },
+                    ..
+                }
+                | GateCondition::Conflict {
+                    target: CiTarget::Node { node, .. },
+                    ..
+                },
+            ) = &mut node.condition
             {
                 bind(node, &writer_aliases);
             }
@@ -294,16 +300,32 @@ fn children(
                 .cloned()
                 .unwrap_or_else(|| writer.clone());
         }
-        if let Some(GateCondition::Ci {
-            target: CiTarget::Node { node: target, .. },
-            ..
-        }) = &mut node.condition
+        if let Some(
+            GateCondition::Ci {
+                target: CiTarget::Node { node: target, .. },
+                ..
+            }
+            | GateCondition::Conflict {
+                target: CiTarget::Node { node: target, .. },
+                ..
+            },
+        ) = &mut node.condition
             && !target.starts_with("previous.")
         {
             *target = visible_names
                 .get(target)
                 .cloned()
                 .unwrap_or_else(|| target.clone());
+        }
+        if let Some(edge) = node
+            .loop_body
+            .as_mut()
+            .and_then(|spec| spec.outcome_edge.as_mut())
+        {
+            let target = edge.node.clone();
+            edge.node = reference(prefix, &target, &locals, incoming)
+                .or_else(|| visible_names.get(&target).cloned())
+                .unwrap_or_else(|| scoped(prefix, &target));
         }
         // A continued or landed writer may sit inside or outside the composite.
         for writer in node
@@ -552,6 +574,7 @@ fn outputs(
         result: None,
         verdict: None,
         verdict_error: None,
+        hygiene: None,
         findings: Vec::new(),
         findings_available: None,
         branch: None,

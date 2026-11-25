@@ -320,6 +320,7 @@ pub(super) fn make_outputs_with_upstream(
         compact_disposition_findings: None,
         full_disposition_findings: None,
         verdict_error,
+        hygiene: None,
         schema_version: 2,
         decide_outcome: None,
         result,

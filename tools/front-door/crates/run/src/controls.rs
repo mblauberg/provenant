@@ -3210,12 +3210,26 @@ impl RunStore {
         {
             return Err(RunError::Nonterminal);
         }
-        if context.graph_id.is_none()
-            || context.node_id.is_none()
-            || previous.context.as_ref().is_none_or(|previous| {
-                previous.graph_id != context.graph_id || previous.node_id != context.node_id
-            })
-        {
+        let previous_context = previous.context.as_ref();
+        let same_node = context.graph_id.is_some()
+            && context.node_id.is_some()
+            && previous_context.is_some_and(|previous| {
+                previous.graph_id == context.graph_id && previous.node_id == context.node_id
+            });
+        // A queue graph may explicitly adopt a lane-owned retained worktree
+        // from an earlier graph. The submitting host stamps this bit only
+        // after checking the exact registered path, writer request, terminal
+        // record and released custody; launch repeats those checks under the
+        // new writer lease. Ordinary graph retries retain same-node fencing.
+        let adopted_prior_graph = context.delivery_queue_writer_adoption
+            && context.graph_id.is_some()
+            && context.node_id.is_some()
+            && previous_context.is_some_and(|previous| {
+                previous.graph_id.is_some()
+                    && previous.node_id.is_some()
+                    && previous.graph_id != context.graph_id
+            });
+        if !same_node && !adopted_prior_graph {
             return Err(RunError::WriterLineage("graph predecessor context"));
         }
         let request = self.request(previous.attempt_id, call)?;

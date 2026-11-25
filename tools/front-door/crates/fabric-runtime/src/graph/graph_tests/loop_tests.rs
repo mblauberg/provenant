@@ -109,6 +109,309 @@ fn settled_loop_dependency_does_not_inherit_entry_inputs() {
 }
 
 #[test]
+fn loop_outcome_edge_validates_target_and_replays_the_selected_branch() {
+    let make_document = |outcome: &str, target: &str| -> GraphDocument {
+        serde_json::from_value(serde_json::json!({
+            "schema_version":2,"graph_id":"loop-outcome-edge","nodes":[
+                {"id":"cycle","kind":"loop","access":"read_only",
+                 "loop":{"until":"finished","max_rounds":1,
+                         "outcome_edge":{"outcome":outcome,"node":target},
+                         "body":[{"id":"finished","kind":"gate","access":"read_only",
+                             "condition":{"type":"budget"}}]}},
+                {"id":"on_exhausted","access":"read_only","prompt":"handle exhaustion",
+                 "route":{"alias":"senior"}}
+            ]
+        }))
+        .unwrap()
+    };
+
+    assert!(loops::expand(&make_document("exhausted", "missing"), &[], &Default::default()).is_err());
+    assert!(loops::expand(&make_document("exhausted", "finished"), &[], &Default::default()).is_err());
+
+    let document = make_document("exhausted", "on_exhausted");
+    let expanded = loops::expand(&document, &[], &Default::default()).unwrap();
+    assert!(expanded.nodes.iter().any(|node| {
+        node.id == "on_exhausted" && node.depends_on.contains(&"cycle".to_owned())
+    }));
+    let (plan, positions) = validate_flat_plan(&expanded, &Default::default()).unwrap();
+    let mut checkpoint = initial_checkpoint(&expanded, &plan, "digest".into(), None, None, None);
+    let loop_index = positions["cycle"];
+    let target_index = positions["on_exhausted"];
+    checkpoint.nodes[loop_index].state = NodeState::Blocked;
+    checkpoint.nodes[loop_index].outputs = Some(NodeOutputs::default());
+    checkpoint.nodes[loop_index].delivery_park = Some(DeliveryParkProgress {
+        transition_id: "park-loop".into(),
+        operation_id: "park-loop".into(),
+        item: None,
+        attempt_key: None,
+        attempt_ref: None,
+        reason: provenant_records::graph::ParkReason::LoopExhausted,
+        handoff: "bounded loop exhausted".into(),
+        head: None,
+        evidence: Vec::new(),
+        request_id: Some(provenant_core::HumanRequestId::from_bytes([41; 16])),
+    });
+
+    assert_eq!(
+        dependency_state(&plan.nodes[target_index], &plan, &checkpoint, &positions),
+        None,
+        "the exhausted branch becomes runnable after its park receipt"
+    );
+    let replay: GraphCheckpoint =
+        serde_json::from_value(serde_json::to_value(&checkpoint).unwrap()).unwrap();
+    assert_eq!(
+        dependency_state(&plan.nodes[target_index], &plan, &replay, &positions),
+        None,
+        "replay selects the same exhausted branch"
+    );
+
+    checkpoint.nodes[loop_index].state = NodeState::Succeeded;
+    checkpoint.nodes[loop_index].delivery_park = None;
+    assert_eq!(
+        dependency_state(&plan.nodes[target_index], &plan, &checkpoint, &positions),
+        Some(NodeState::Skipped),
+        "a successful loop skips its exhausted-only target"
+    );
+    let replay: GraphCheckpoint =
+        serde_json::from_value(serde_json::to_value(&checkpoint).unwrap()).unwrap();
+    assert_eq!(
+        dependency_state(&plan.nodes[target_index], &plan, &replay, &positions),
+        Some(NodeState::Skipped),
+        "replay preserves the inactive branch"
+    );
+
+    let document = make_document("succeeded", "on_exhausted");
+    let expanded = loops::expand(&document, &[], &Default::default()).unwrap();
+    let (plan, positions) = validate_flat_plan(&expanded, &Default::default()).unwrap();
+    let mut checkpoint = initial_checkpoint(&expanded, &plan, "digest".into(), None, None, None);
+    let loop_index = positions["cycle"];
+    let target_index = positions["on_exhausted"];
+    checkpoint.nodes[loop_index].state = NodeState::Succeeded;
+    checkpoint.nodes[loop_index].outputs = Some(NodeOutputs::default());
+    assert_eq!(
+        dependency_state(&plan.nodes[target_index], &plan, &checkpoint, &positions),
+        None,
+        "the succeeded branch becomes runnable after success"
+    );
+    let replay: GraphCheckpoint =
+        serde_json::from_value(serde_json::to_value(&checkpoint).unwrap()).unwrap();
+    assert_eq!(
+        dependency_state(&plan.nodes[target_index], &plan, &replay, &positions),
+        None,
+        "replay selects the same succeeded branch"
+    );
+}
+
+#[test]
+fn delivery_loop_exhaustion_parks_once_and_replays_the_same_transition() {
+    struct ParkOwner {
+        calls: Vec<(String, String)>,
+        effects: std::collections::BTreeMap<String, provenant_core::HumanRequestId>,
+    }
+    impl AttemptOwner for ParkOwner {
+        type Error = Infallible;
+        fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+            provenant_config::PortTable::builtin().worktree_layout
+        }
+        fn actor(&self) -> String {
+            "chair".into()
+        }
+        fn observe_or_start(
+            &mut self,
+            _: &AttemptKey,
+            _: NodeInput<'_>,
+            _: &GraphRoute,
+            _: AccessMode,
+            _: Option<&str>,
+            _: Replay<'_>,
+        ) -> Result<AttemptObservation, Infallible> {
+            unreachable!("loop settlement does not launch an attempt")
+        }
+        fn park_delivery(
+            &mut self,
+            request: DeliveryParkRequest<'_>,
+        ) -> Result<Option<provenant_core::HumanRequestId>, Infallible> {
+            assert_eq!(request.reason, provenant_records::graph::ParkReason::LoopExhausted);
+            assert!(request.item.is_none());
+            self.calls.push((request.transition_id.into(), request.operation_id.into()));
+            let request_id = *self
+                .effects
+                .entry(request.operation_id.into())
+                .or_insert_with(|| provenant_core::HumanRequestId::from_bytes([37; 16]));
+            // Simulate a lost reply after the inbox created the request.
+            Ok((self.calls.len() > 1).then_some(request_id))
+        }
+    }
+
+    let mut document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 2, "graph_id": "delivery-loop-park",
+        "nodes": [{"id":"cycle", "kind":"loop", "access":"read_only",
+            "loop":{"until":"ci", "max_rounds":1, "body":[
+                {"id":"writer", "access":"worktree_write", "prompt":"repair",
+                    "write_scope":["src"], "route":{"alias":"junior"}},
+                {"id":"ci", "kind":"gate", "access":"read_only",
+                    "depends_on":["writer"], "condition":{"type":"budget"}}
+            ]}}
+        ]
+    }))
+    .unwrap();
+    document.queue = Some(QueueKnobs::default());
+    let limits = crate::config::GraphLimits::default();
+    let expanded = loops::expand(&document, &[], &limits).unwrap();
+    let (plan, positions) = validate_flat_plan(&expanded, &limits).unwrap();
+    let mut checkpoint = initial_checkpoint(&expanded, &plan, "digest".into(), None, None, None);
+    checkpoint.ask_actor = Some("chair".into());
+    let loop_index = positions["cycle"];
+    let writer_index = positions["cycle--r1--writer"];
+    let attempt_key = AttemptKey {
+        extra: Default::default(),
+        retry_generation: None,
+        previous_attempt_ref: None,
+        graph_id: plan.graph_id.clone(),
+        node_id: "cycle--r1--writer".into(),
+        attempt: 1,
+        route_index: 0,
+    };
+    checkpoint.nodes[loop_index].delivery_loop = Some(
+        provenant_records::graph::DeliveryLoopProgress {
+            name: "cycle".into(),
+            round: 1,
+            last_attempt: attempt_key.clone(),
+        },
+    );
+    checkpoint.nodes[writer_index].state = NodeState::Succeeded;
+    checkpoint.nodes[writer_index].advance_error = Some("repair did not satisfy CI".into());
+    let mut writer_outputs = NodeOutputs::default();
+    writer_outputs.commit = Some("a".repeat(40));
+    checkpoint.nodes[writer_index].outputs = Some(writer_outputs);
+    checkpoint.nodes[writer_index].attempts.push(GraphAttempt {
+        extra: Default::default(),
+        placement_host: None,
+        placement_host_id: None,
+        launched: true,
+        host_refused_before_acceptance: false,
+        review_substitution: false,
+        key: attempt_key,
+        escalation_rung: None,
+        route: serde_json::from_value(serde_json::json!({"alias":"junior"})).unwrap(),
+        state: AttemptState::Terminal,
+        attempt_ref: Some("attempt-1".into()),
+        outcome: Some(AttemptOutcome::Succeeded),
+        launch_actor: "chair".into(),
+        input_cap: None,
+        input_cap_source: None,
+        input_manifest: None,
+        usage: None,
+        settled: 1,
+        stop: None,
+    });
+    checkpoint.nodes[positions["cycle--r1--ci"]].state = NodeState::Failed;
+    let spec = plan.nodes[loop_index].loop_body.as_ref().unwrap().clone();
+    let mut owner = ParkOwner {
+        calls: Vec::new(),
+        effects: Default::default(),
+    };
+    let mut journal = MemoryJournal::default();
+
+    loops::settle(
+        &document,
+        loop_index,
+        &spec,
+        &plan,
+        &positions,
+        &mut checkpoint,
+        &mut owner,
+        &mut journal,
+    )
+    .unwrap();
+    let pending = checkpoint.nodes[loop_index].delivery_park.as_ref().unwrap();
+    assert_eq!(pending.reason, provenant_records::graph::ParkReason::LoopExhausted);
+    assert_eq!(pending.attempt_ref.as_deref(), Some("attempt-1"));
+    let expected_head = "a".repeat(40);
+    assert_eq!(pending.head.as_deref(), Some(expected_head.as_str()));
+    assert_eq!(pending.request_id, None);
+    let progress = checkpoint.nodes[loop_index].clone();
+    assert!(loops::validate_progress(
+        &progress,
+        &plan.nodes[loop_index],
+        &checkpoint,
+        &positions,
+        true,
+    )
+    .is_ok());
+    assert!(loops::validate_progress(
+        &progress,
+        &plan.nodes[loop_index],
+        &checkpoint,
+        &positions,
+        false,
+    )
+    .is_err());
+    let replay: GraphCheckpoint =
+        serde_json::from_value(serde_json::to_value(&checkpoint).unwrap()).unwrap();
+    let progress = replay.nodes[loop_index].clone();
+    assert!(loops::validate_progress(
+        &progress,
+        &plan.nodes[loop_index],
+        &replay,
+        &positions,
+        true,
+    )
+    .is_ok());
+
+    // A crash after filing but before the receipt replays the same operation.
+    loops::settle(
+        &document,
+        loop_index,
+        &spec,
+        &plan,
+        &positions,
+        &mut checkpoint,
+        &mut owner,
+        &mut journal,
+    )
+    .unwrap();
+    let completed = checkpoint.nodes[loop_index].delivery_park.as_ref().unwrap();
+    assert_eq!(completed.request_id, Some(provenant_core::HumanRequestId::from_bytes([37; 16])));
+    assert_eq!(owner.calls.len(), 2);
+    assert_eq!(owner.calls[0], owner.calls[1]);
+    assert_eq!(owner.effects.len(), 1);
+    let progress = checkpoint.nodes[loop_index].clone();
+    assert!(loops::validate_progress(
+        &progress,
+        &plan.nodes[loop_index],
+        &checkpoint,
+        &positions,
+        true,
+    )
+    .is_ok());
+    let replay: GraphCheckpoint =
+        serde_json::from_value(serde_json::to_value(&checkpoint).unwrap()).unwrap();
+    let progress = replay.nodes[loop_index].clone();
+    assert!(loops::validate_progress(
+        &progress,
+        &plan.nodes[loop_index],
+        &replay,
+        &positions,
+        true,
+    )
+    .is_ok());
+
+    loops::settle(
+        &document,
+        loop_index,
+        &spec,
+        &plan,
+        &positions,
+        &mut checkpoint,
+        &mut owner,
+        &mut journal,
+    )
+    .unwrap();
+    assert_eq!(owner.calls.len(), 2);
+}
+
+#[test]
 fn loop_composite_review_pins_each_repaired_commit() {
     let document: GraphDocument = serde_json::from_value(serde_json::json!({
         "schema_version":1,"graph_id":"repair-composite","nodes":[{

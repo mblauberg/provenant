@@ -663,6 +663,7 @@ fn outputs(record: &LandRecord) -> NodeOutputs {
         compact_disposition_findings: None,
         full_disposition_findings: None,
         verdict_error: None,
+        hygiene: None,
         schema_version: 2,
         decide_outcome: None,
         result: Some(ResultOutput {
