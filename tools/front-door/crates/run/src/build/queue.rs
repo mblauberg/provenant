@@ -633,10 +633,6 @@ pub fn admit(request: &AdmissionRequest<'_>) -> Result<Admitted, BuildError> {
             waited: Duration::ZERO,
         });
     }
-    if request.class == "ci" {
-        AdmissionSlots::provision(request.state, request.class, request.limit.max(1))
-            .map_err(unavailable)?;
-    }
     let slots = match AdmissionSlots::open(request.state, request.class) {
         Ok(slots) => slots,
         Err(provenant_os::admission::AdmissionError::Fs(error)) if error.is_not_found() => {
