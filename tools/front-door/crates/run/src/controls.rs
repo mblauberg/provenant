@@ -84,6 +84,10 @@ struct ResumeOptions<'a> {
     budget_remaining: Option<u64>,
     graph_context: Option<&'a provenant_records::run::WorkContext>,
     parent_publication_locked: bool,
+    /// Re-pinned head for a retained-writer graph continuation whose worktree
+    /// advanced through its own commits after the predecessor was sealed. The
+    /// original source pin is kept; only the successor's predecessor head moves.
+    retained_head: Option<provenant_core::GitOid>,
 }
 
 /// Digest of the session identity only; route-selection history (source,
@@ -3024,6 +3028,30 @@ impl RunStore {
         )
         .map(|(run, _)| run)
     }
+    /// Retained-writer graph continuation whose predecessor head was re-pinned
+    /// to a descendant produced by the same writer. `fresh` carries the reason
+    /// when no provider session survives a steering turn.
+    pub(crate) fn resume_repinned_with_parent_publication_lock(
+        &self,
+        input: &Resume,
+        context: &provenant_records::run::WorkContext,
+        head: provenant_core::GitOid,
+        fresh: Option<&str>,
+        call: &Request<'_>,
+    ) -> Result<AttemptRecord> {
+        self.resume_mode(
+            input,
+            call,
+            ResumeOptions {
+                fresh,
+                graph_context: Some(context),
+                parent_publication_locked: true,
+                retained_head: Some(head),
+                ..Default::default()
+            },
+        )
+        .map(|(run, _)| run)
+    }
     /// Same lineage, route, authority and writer, without provider continuation.
     pub fn resume_fresh(
         &self,
@@ -3165,6 +3193,32 @@ impl RunStore {
         )?;
         self.check_writer_lineage(&prior, &launch.worktree, call)
     }
+    /// Whether a successor head is the writer's own descendant of its pinned
+    /// head. Only a lane-owned writer may advance the pin this way; the git
+    /// probe is bounded to the verified worktree and reads no untrusted input.
+    fn repinned_head_descends(
+        tree: &provenant_confinement::VerifiedWorktree,
+        pinned: provenant_core::GitOid,
+        head: provenant_core::GitOid,
+    ) -> bool {
+        let Some(git) = provenant_os::git::git_executable() else {
+            return false;
+        };
+        let repo = tree.repo();
+        crate::objects::command(
+            &git,
+            repo.common_git_dir(),
+            repo.root_path(),
+            &[
+                "merge-base".into(),
+                "--is-ancestor".into(),
+                pinned.to_string().into(),
+                head.to_string().into(),
+            ],
+            None,
+        )
+        .is_ok()
+    }
     /// Called after writer custody is acquired. Graph retries are separate runs,
     /// so their sealed predecessor must be checked independently of `retry_of`.
     pub(crate) fn check_launch_writer_lineage(
@@ -3174,9 +3228,16 @@ impl RunStore {
         tree: &provenant_confinement::VerifiedWorktree,
         call: &Request<'_>,
     ) -> Result<()> {
-        if record.retry_of.is_some() {
-            // A manual continuation follows its immediate run predecessor,
-            // whose launch already checked any older graph predecessor.
+        if record.retry_of.is_some()
+            && task
+                .context
+                .as_ref()
+                .and_then(|context| context.writer_predecessor)
+                != record.retry_of
+        {
+            // Manual continuations without a graph predecessor follow the
+            // immediate run's owner chain. Graph continuations also recheck
+            // their sealed source and head below.
             return self.check_writer_lineage(record, tree, call).map(|_| ());
         }
         let Some(context) = task.context.as_ref() else {
@@ -3223,6 +3284,7 @@ impl RunStore {
             .head
             .map(|head| head.to_string())
             .or_else(|| previous_task.head.clone());
+        let owner = self.check_writer_lineage(&previous, tree, call)?;
         if !task
             .writer
             .as_ref()
@@ -3231,14 +3293,37 @@ impl RunStore {
             || (!adopted_prior_graph
                 && (task.source_head.is_none()
                     || task.source_head.as_ref() != source
-                    || task.head.is_none()
-                    || task.head != head))
+                    || task.head.is_none()))
         {
             return Err(RunError::WriterLineage(
                 "graph predecessor writer or source",
             ));
         }
-        self.check_writer_lineage(&previous, tree, call)?;
+        // A retained writer may commit after its predecessor was sealed. The
+        // continuation re-pins to that descendant under the verified custody of
+        // the same lane-owned writer; a moved head from anywhere else still
+        // fails this check. An adopted prior graph inherits the writer's own
+        // commits, not the earlier graph's pins, so it keeps its inherited head.
+        let head_matches = adopted_prior_graph
+            || task.head == head
+            || owner.is_some_and(|owner| {
+                owner.origin == provenant_confinement::worktrees::WorktreeOrigin::Lane
+            }) && head
+                .as_deref()
+                .and_then(|pinned| provenant_core::GitOid::parse(pinned).ok())
+                .zip(
+                    task.head
+                        .as_deref()
+                        .and_then(|current| provenant_core::GitOid::parse(current).ok()),
+                )
+                .is_some_and(|(pinned, current)| {
+                    Self::repinned_head_descends(tree, pinned, current)
+                });
+        if !head_matches {
+            return Err(RunError::WriterLineage(
+                "graph predecessor writer or source",
+            ));
+        }
         Ok(())
     }
     pub(crate) fn check_writer_lineage(
@@ -3340,6 +3425,7 @@ impl RunStore {
             budget_remaining,
             graph_context,
             parent_publication_locked,
+            retained_head,
         } = options;
         let prior = self.record(input.prior, call)?;
         if !matches!(prior.state, AttemptState::Terminal { .. }) {
@@ -3405,7 +3491,12 @@ impl RunStore {
         // the original source pin separately so launch preparation can prove
         // that this exact head descends from the authorised source. A fresh
         // replacement worktree keeps the caller's source/head fields.
-        let (head, source_head) = if writer.is_none() && task.writer.is_some() {
+        let (head, source_head) = if let Some(head) = retained_head {
+            (
+                Some(head.to_string()),
+                task.source_head.clone().or_else(|| task.head.clone()),
+            )
+        } else if writer.is_none() && task.writer.is_some() {
             (
                 prior
                     .head

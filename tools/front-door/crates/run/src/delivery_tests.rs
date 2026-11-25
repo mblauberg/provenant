@@ -1006,7 +1006,7 @@ pub(crate) fn private_git(
     Ok(String::from_utf8(output.stdout)?.trim().to_owned())
 }
 
-fn worktree_git(
+pub(crate) fn worktree_git(
     fixture: &PrepareFixture,
     git: &Path,
     args: &[&str],

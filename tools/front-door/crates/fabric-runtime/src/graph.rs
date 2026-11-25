@@ -363,6 +363,12 @@ pub trait AttemptOwner {
         Ok(None)
     }
 
+    /// Whether a terminal attempt's queued steer was refused before its
+    /// successor launched. The predecessor and its accepted text stay visible.
+    fn continuation_refused(&mut self, _reference: &str) -> Result<bool, Self::Error> {
+        Ok(false)
+    }
+
     /// Resolve the existing infrastructure allowance once, before admission.
     /// Hosts without routing policy retain the legacy explicit-route behavior.
     fn retry_allowance(
@@ -2839,6 +2845,17 @@ fn record_observed_attempt<R: AttemptOwner, J: GraphJournal>(
         }
         None
     };
+    let steer_refused = if let AttemptObservation::Terminal {
+        attempt_ref: Some(reference),
+        ..
+    } = &observation
+    {
+        owner
+            .continuation_refused(reference)
+            .map_err(GraphError::Run)?
+    } else {
+        false
+    };
     // A finished task has no follow-up: adopting a successor after success
     // would hide the successful attempt behind a second, never-launched task
     // and turn a preparation refusal into the graph's outcome (#3987).
@@ -2848,6 +2865,7 @@ fn record_observed_attempt<R: AttemptOwner, J: GraphJournal>(
         ..
     } = &observation
         && *outcome != AttemptOutcome::Succeeded
+        && !steer_refused
         && let Some(successor) = owner.continuation(reference).map_err(GraphError::Run)?
     {
         transitions::continue_attempt(&mut *checkpoint, node_index, observation, successor, usage)
@@ -2962,10 +2980,25 @@ fn record_observed_attempt<R: AttemptOwner, J: GraphJournal>(
             cost_error,
         },
     );
+    if steer_refused {
+        let reason = format!(
+            "node {}: steer successor preparation was refused; correct the cause and retry the node",
+            node.id
+        );
+        checkpoint.nodes[node_index].state = NodeState::Blocked;
+        checkpoint.nodes[node_index].advance_error_code = Some("steer_continuation_refused".into());
+        checkpoint.nodes[node_index].advance_error = Some(reason.clone());
+        checkpoint.set_pause(
+            provenant_records::pause::PauseCause::Stop(
+                provenant_records::StopCause::LaunchHandoffRefused,
+            ),
+            &reason,
+        );
+    }
     Ok(Observed::Applied {
         settled_result,
-        should_continue,
-        quota_redraw,
+        should_continue: should_continue && !steer_refused,
+        quota_redraw: quota_redraw && !steer_refused,
     })
 }
 

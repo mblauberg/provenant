@@ -1693,6 +1693,11 @@ fn recovery_pending(checkpoint: &GraphCheckpoint) -> bool {
         .nodes
         .iter()
         .any(|node| next_step::stop_cause(node, checkpoint).is_some())
+        || !checkpoint.cancelled
+            && checkpoint.nodes.iter().any(|node| {
+                node.state == NodeState::Blocked
+                    && node.advance_error_code.as_deref() == Some("steer_continuation_refused")
+            })
         || checkpoint.nodes.iter().any(|node| {
             node.state == NodeState::Failed
                 && node.advance_error_code.as_deref() == Some("review_verdict_invalid")

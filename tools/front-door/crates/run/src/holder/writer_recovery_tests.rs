@@ -741,11 +741,16 @@ fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
         ExplicitCancel,
         ExplicitAfterSteer,
         DeliveredSteerUnavailable,
+        DeliveredSteerDescendant,
+        DeliveredSteerAdopted,
         Deadline,
         // The outcome commits on the outcome-only pass; the worktree turns dirty before the quiet pass delivers.
         LateDirty,
     }
-    use Marker::{DeliveredSteer, DeliveredSteerUnavailable, ExplicitAfterSteer, ExplicitCancel};
+    use Marker::{
+        DeliveredSteer, DeliveredSteerAdopted, DeliveredSteerDescendant, DeliveredSteerUnavailable,
+        ExplicitAfterSteer, ExplicitCancel,
+    };
     for (changed, dirty, blocked, shared, budget, marker) in [
         (false, false, false, false, false, Marker::AdmissionSteer),
         (false, false, false, false, false, Marker::AdmissionCancel),
@@ -761,6 +766,8 @@ fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
         (false, false, false, false, false, Marker::LateDirty),
         (true, false, false, true, false, DeliveredSteer),
         (true, false, false, true, false, DeliveredSteerUnavailable),
+        (true, false, false, true, false, DeliveredSteerDescendant),
+        (true, false, false, true, false, DeliveredSteerAdopted),
         (true, false, false, true, false, ExplicitCancel),
         (true, false, false, true, false, ExplicitAfterSteer),
         (true, false, false, false, true, Marker::None),
@@ -768,7 +775,11 @@ fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
     ] {
         let steered = matches!(
             marker,
-            DeliveredSteer | ExplicitAfterSteer | DeliveredSteerUnavailable
+            DeliveredSteer
+                | ExplicitAfterSteer
+                | DeliveredSteerUnavailable
+                | DeliveredSteerDescendant
+                | DeliveredSteerAdopted
         );
         let explicit = matches!(marker, ExplicitCancel | ExplicitAfterSteer);
         let late = marker == Marker::LateDirty;
@@ -853,6 +864,14 @@ fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
             execution.state_root.as_path(),
             execution.project_id,
         )?;
+        if marker == DeliveredSteerDescendant {
+            let mut owner = provenant_confinement::worktrees::load_owner(&launch.worktree)?
+                .ok_or("writer owner")?;
+            owner.origin = provenant_confinement::worktrees::WorktreeOrigin::Lane;
+            owner.attempt_id = Some(id);
+            owner.operation_id = Some(run.operation_id.clone());
+            provenant_confinement::worktrees::save_owner(&launch.worktree, &owner)?;
+        }
         launch.snapshot(
             execution.state_root.as_path(),
             &attempt,
@@ -885,6 +904,8 @@ fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
             marker,
             DeliveredSteer
                 | DeliveredSteerUnavailable
+                | DeliveredSteerDescendant
+                | DeliveredSteerAdopted
                 | ExplicitCancel
                 | ExplicitAfterSteer
                 | Marker::Deadline
@@ -1194,6 +1215,21 @@ fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
             None
         };
         let finished = store.finish(id, &attempt, &observed, &fake, &call)?;
+        if matches!(marker, DeliveredSteerDescendant | DeliveredSteerAdopted) {
+            // The writer commits in its own worktree after the stop was
+            // sealed: the successor pin is now a strict ancestor of HEAD.
+            std::fs::write(
+                fixture.writer.worktree.join("post-steer.txt"),
+                "continued after the seal",
+            )?;
+            let native = provenant_os::git::resolve_git_executable(None).ok_or("native Git")?;
+            crate::delivery_tests::worktree_git(&fixture, &native, &["add", "post-steer.txt"])?;
+            crate::delivery_tests::worktree_git(
+                &fixture,
+                &native,
+                &["commit", "-m", "Post-seal writer commit"],
+            )?;
+        }
         if let Some(summary) = retry_summary {
             assert_eq!(
                 read_sealed(&attempt, "writer-terminal.json", RECORD_LIMIT)?,
@@ -1339,7 +1375,8 @@ fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
                     ..
                 } if terminal_cause == steered.then_some(TerminalCause::Steered)
             ));
-            let child = store.prepare_steer_continuation(id, &call);
+            let (child, warnings) =
+                provenant_records::warning::capture(|| store.prepare_steer_continuation(id, &call));
             if marker == DeliveredSteerUnavailable {
                 assert!(matches!(&child, Err(RunError::SteerSessionUnavailable)));
                 let child = store
@@ -1370,6 +1407,11 @@ fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
                 assert_eq!(store.record(id, &call)?.superseded_by, Some(child));
                 continue;
             }
+            if marker == DeliveredSteerAdopted {
+                assert!(matches!(child, Err(RunError::WriterLineage(_))));
+                assert_eq!(store.record(id, &call)?.superseded_by, None);
+                continue;
+            }
             let child = child?;
             if explicit {
                 assert_eq!(
@@ -1380,7 +1422,32 @@ fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
             } else {
                 let child = child.ok_or("delivered steer did not admit successor")?;
                 let task = store.request(child, &call)?.task;
-                assert_eq!(task.head, shared_head.map(|head| head.to_string()));
+                // The writer's own post-seal commit is a descendant of the
+                // sealed head. The successor must adopt it, keep the source
+                // pin and warn with both ids; any other head stays refused.
+                let current: provenant_core::GitOid =
+                    crate::delivery_tests::worktree_git(&fixture, &git, &["rev-parse", "HEAD"])?
+                        .parse()?;
+                if marker == DeliveredSteerDescendant {
+                    let sealed = shared_head.ok_or("sealed head")?;
+                    assert_ne!(current, sealed);
+                    assert_eq!(task.head, Some(current.to_string()));
+                    let warning = warnings
+                        .iter()
+                        .find(|warning| {
+                            warning.code.as_ref()
+                                == provenant_records::warning::BRANCH_BEHIND_BASE.as_str()
+                        })
+                        .ok_or("no re-pin warning")?;
+                    assert!(warning.message.contains(sealed.to_string().as_str()));
+                    assert!(warning.message.contains(current.to_string().as_str()));
+                    let prompt = String::from_utf8(
+                        store.artifact_bytes(&store.record(child, &call)?.prompt, RECORD_LIMIT)?,
+                    )?;
+                    assert!(prompt.contains(current.to_string().as_str()), "{prompt}");
+                } else {
+                    assert_eq!(task.head, shared_head.map(|head| head.to_string()));
+                }
                 assert_eq!(task.source_head.as_deref(), Some(source.as_str()));
                 assert_eq!(task.writer.as_ref(), Some(&fixture.writer));
                 let successor = crate::prepare_writer(
@@ -1391,7 +1458,7 @@ fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
                 successor.require_continuation_source(
                     &git,
                     source.parse()?,
-                    shared_head.ok_or("committed writer head")?,
+                    current,
                     &provenant_records::policy::Policy::default(),
                 )?;
                 store.check_launch_writer_lineage(

@@ -1757,6 +1757,12 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                     ) && last.is_some_and(|attempt| {
                         attempt.state != AttemptState::Terminal && attempt.attempt_ref.is_none()
                     }))
+                    || (progress.advance_error_code.as_deref()
+                        == Some("steer_continuation_refused")
+                        && progress.advance_error.is_some()
+                        && last.is_some_and(|attempt| {
+                            attempt.state == AttemptState::Terminal && attempt.attempt_ref.is_some()
+                        }))
             }
             NodeState::Running => match last {
                 Some(attempt) if attempt.state != AttemptState::Terminal => true,

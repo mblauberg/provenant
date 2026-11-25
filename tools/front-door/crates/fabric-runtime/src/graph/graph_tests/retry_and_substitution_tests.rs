@@ -554,3 +554,75 @@ fn graph_concurrency_cap_warns_and_admits_the_next_node() {
         .count();
     assert_eq!(warned, 1);
 }
+
+#[test]
+// Spec: docs/specs/fabric.md#session-ready-steering
+fn refused_steer_successor_pauses_the_graph_for_retry() {
+    let mut writer = node("writer", route("route"));
+    writer.access = AccessMode::WorktreeWrite;
+    writer.worktree = Some(".worktrees/writer".into());
+    let document = graph(vec![writer]);
+    let mut stopped = terminal(AttemptOutcome::OtherFailure);
+    if let AttemptObservation::Terminal {
+        attempt_ref,
+        stop,
+        settlement_reason,
+        ..
+    } = &mut stopped
+    {
+        *attempt_ref = Some("host/attempt".into());
+        *stop = Some(provenant_records::StopCause::Steered);
+        *settlement_reason = Some(provenant_records::run::SettlementReason::Steered);
+    }
+    let mut owner = FakeOwner {
+        observations: VecDeque::from([stopped]),
+        steer_refused: true,
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(run.status, GraphStatus::Paused);
+    assert_eq!(run.outcome, None);
+    assert_eq!(run.checkpoint.nodes[0].state, NodeState::Blocked);
+    assert_eq!(
+        run.checkpoint.nodes[0].advance_error_code.as_deref(),
+        Some("steer_continuation_refused")
+    );
+    assert_eq!(owner.calls.len(), 1);
+    assert_eq!(
+        advance(&document, &mut owner, &mut journal).unwrap().status,
+        GraphStatus::Paused
+    );
+    let saved = journal.0.clone();
+    journal.0.as_mut().unwrap().nodes[0].attempts[0].attempt_ref = None;
+    assert!(matches!(
+        advance(&document, &mut owner, &mut journal),
+        Err(GraphError::BadCheckpoint { .. })
+    ));
+    journal.0 = saved;
+    patch::retry_node(
+        &mut patch::LiveGraph {
+            document: &document,
+            checkpoint: journal.0.as_mut().unwrap(),
+        },
+        "writer",
+        None,
+        &patch::PatchContext {
+            catalogue: None,
+            library: &template::TemplateLibrary::bundled(),
+            resolvers: &Default::default(),
+            journal: None,
+            limits: &plans::generous(),
+            worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
+        },
+    )
+    .unwrap();
+    owner.steer_refused = false;
+    owner.observations.push_back(AttemptObservation::Pending {
+        attempt_ref: Some("host/retry".into()),
+    });
+    assert_eq!(
+        resume(&document, &mut owner, &mut journal).unwrap().status,
+        GraphStatus::Pending
+    );
+}

@@ -49,6 +49,7 @@ struct FakeOwner {
     delivery_modes: Vec<Option<provenant_records::run::DeliveryMode>>,
     fast_forward_only: Vec<bool>,
     observations: VecDeque<AttemptObservation>,
+    steer_refused: bool,
     calls: Vec<(AttemptKey, GraphRoute)>,
     attempt_numbers: Vec<Option<u32>>,
     titles: Vec<String>,
@@ -129,6 +130,9 @@ fn reply(option: Option<&str>, text: Option<&str>) -> AskReply {
 
 impl AttemptOwner for FakeOwner {
     type Error = NoObservation;
+    fn continuation_refused(&mut self, _reference: &str) -> Result<bool, Self::Error> {
+        Ok(self.steer_refused)
+    }
     fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
         provenant_config::PortTable::builtin().worktree_layout
     }

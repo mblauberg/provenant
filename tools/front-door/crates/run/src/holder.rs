@@ -1876,6 +1876,54 @@ impl RunStore {
             return Err(RunError::SteerAwaitingCustody);
         }
         context.writer_predecessor = request.task.writer.as_ref().map(|_| id);
+        // A steer successor reuses the predecessor's worktree. When that writer
+        // committed after the predecessor was sealed, adopt the descendant head
+        // instead of launching against a stale pin. The original source pin is
+        // kept; launch still rechecks that this head belongs to the same
+        // lane-owned writer and descends from the sealed predecessor.
+        let mut repin_head = None;
+        let mut repin_warning = None;
+        if let Some(writer) = request.task.writer.as_ref() {
+            let pinned = record
+                .head
+                .map(|head| head.to_string())
+                .or_else(|| request.task.head.clone())
+                .and_then(|head| provenant_core::GitOid::parse(&head).ok());
+            if let Some(pinned) = pinned {
+                let git = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
+                let launch = crate::prepare_writer_with_facts(
+                    writer,
+                    &self.writer_registry,
+                    record.project_id,
+                    &self.repo_facts,
+                )?;
+                match launch.repin_head(&git, pinned)? {
+                    crate::RepinOutcome::Unchanged { .. } => {}
+                    crate::RepinOutcome::Repinned { head, .. } => {
+                        let owner = self.check_writer_lineage(&record, &launch.worktree, call)?;
+                        if !owner.is_some_and(|owner| {
+                            owner.origin == provenant_confinement::worktrees::WorktreeOrigin::Lane
+                        }) {
+                            return Err(RunError::WriterLineage(
+                                "re-pin requires the predecessor's lane-owned writer",
+                            ));
+                        }
+                        let outcome = crate::RepinOutcome::Repinned { pinned, head };
+                        repin_warning = outcome.warning();
+                        repin_head = Some(head);
+                    }
+                    crate::RepinOutcome::NotDescendant { head, .. } => {
+                        // Leave the graph needing retry, not failed: a typed
+                        // continuation refusal records the instruction without
+                        // adopting a successor whose writer lineage moved.
+                        return Err(RunError::WriterSourceMismatch {
+                            expected: pinned,
+                            actual: head,
+                        });
+                    }
+                }
+            }
+        }
         let operation_id = OperationId::parse(&format!("graph-steer-{id}"))
             .map_err(|_| RunError::Validation("steer continuation operation"))?;
         let digest = provenant_records::CanonicalV1::record_digest("graph-steer-attempt", 1, &id)?;
@@ -1886,7 +1934,7 @@ impl RunStore {
             .map(|intent| intent.text.as_str())
             .collect::<Vec<_>>()
             .join(crate::controls::STEER_TEXT_SEPARATOR);
-        let prompt = if fresh_with_handoff {
+        let mut prompt = if fresh_with_handoff {
             let accepted_brief =
                 String::from_utf8(self.artifact_bytes(&record.prompt, RECORD_LIMIT)?)
                     .map_err(|_| RunError::Validation("steer fallback prompt encoding"))?;
@@ -1905,6 +1953,14 @@ impl RunStore {
         } else {
             format!("{}{steering}", crate::controls::STEER_PROMPT_PREFIX)
         };
+        if let Some(warning) = repin_warning.take() {
+            provenant_records::warning::warn(provenant_records::warning::Warning::new(
+                provenant_records::warning::BRANCH_BEHIND_BASE,
+                warning.clone(),
+            ));
+            prompt.push_str("\n\n");
+            prompt.push_str(&warning);
+        }
         let input = crate::Resume {
             prior: id,
             expected_generation: 0,
@@ -1914,7 +1970,16 @@ impl RunStore {
             created_at: finished_at,
             extend: Vec::new(),
         };
-        let successor = if fresh_with_handoff {
+        let successor = if let Some(head) = repin_head {
+            self.resume_repinned_with_parent_publication_lock(
+                &input,
+                &context,
+                head,
+                fresh_with_handoff
+                    .then_some("steer session unavailable; fresh_with_handoff fallback"),
+                call,
+            )?
+        } else if fresh_with_handoff {
             self.resume_graph_fresh_with_parent_publication_lock(
                 &input,
                 &context,
