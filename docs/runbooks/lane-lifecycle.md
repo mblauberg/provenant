@@ -105,9 +105,9 @@ uncertain or reset a worktree with edits.
   dispatched, run `provenant reconcile --abandon NAME/NODE#N --reason TEXT`; it
   refuses attempts with process evidence, a fence or worktree custody.
 - A lane whose guardian dies before publishing an exit can leave its recorded
-  process tree holding a heavy lock. `provenant reconcile TARGET` ends those
-  recorded descendants under writer exclusion after proving the guardian gone,
-  then settles the attempt; `status` names surviving PIDs and the lock paths
+  process tree holding a heavy lock. `provenant reconcile TARGET` ends the
+  recorded provider and descendants under writer exclusion after proving the
+  guardian gone, then settles the attempt; `status` names surviving PIDs and the lock paths
   observed at cleanup, marking a holder known only from its open descriptor as
   ownership unproven. It never signals on a bare PID, a process group or an
   open path.

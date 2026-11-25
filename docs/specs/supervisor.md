@@ -155,9 +155,9 @@ never authorises settlement or an unrelated signal.
 
 When a lane is killed before its guardian can publish an exit, `reconcile` ends
 its recorded process tree under writer exclusion once the guardian's published
-identity is proven absent. Candidates are only the identities the reservation
-recorded and live processes carrying the attempt's sandbox mark; each identity
-is revalidated before TERM and again before KILL. A live guardian fences the
+identity is proven absent. Candidates are the provider and descendant
+identities the reservation recorded and live processes carrying the attempt's
+sandbox mark; each identity is revalidated before TERM and again before KILL. A live guardian fences the
 reap, a survivor keeps the attempt fenced and is reported with its PID, and no
 exit is invented. Bare PIDs, process groups, sessions and descriptor paths grant
 no signal authority.

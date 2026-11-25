@@ -2,9 +2,9 @@
 //! names unresolved descendants.
 //!
 //! Nothing here signals by bare PID. Candidates are only what the attempt
-//! recorded or marked: the PIDs and identities its exit named, the descendants
-//! its reservation recorded, and live processes carrying the attempt's own
-//! sandbox mark. A candidate is ended only when it is proven to belong to the
+//! recorded or marked: the PIDs and identities its exit named, the provider and
+//! descendants its reservation recorded, and live processes carrying the
+//! attempt's own sandbox mark. A candidate is ended only when it is proven to belong to the
 //! attempt: its recorded identity (boot, PID and native start time) still
 //! matches the live process, or the platform reports it inside the attempt's
 //! sandbox. Process group, session, ancestry and working directory grant
@@ -252,7 +252,7 @@ impl Recovery {
 
     /// Proven attempt processes among the recorded and sandbox-marked
     /// candidates. Named PIDs that cannot be proven go to `unproven`. The
-    /// census and sandbox probe run only here, so only for an unresolved exit.
+    /// census and sandbox probe run only during recovery.
     fn candidates(
         &self,
         exit: &UnresolvedExit,
@@ -265,6 +265,7 @@ impl Recovery {
         named.extend(
             exit.unresolved_identities
                 .iter()
+                .chain(self.reservation.provider.iter())
                 .chain(self.reservation.descendants.iter())
                 .filter(|identity| identity.boot == self.reservation.boot)
                 .map(|identity| identity.pid),
@@ -305,6 +306,7 @@ impl Recovery {
         let recorded = exit
             .unresolved_identities
             .iter()
+            .chain(self.reservation.provider.iter())
             .chain(self.reservation.descendants.iter())
             .find(|identity| identity.pid == pid && identity.boot == self.reservation.boot);
         match (observer.observe(pid), recorded) {
@@ -352,7 +354,7 @@ fn bounded_exit(mut document: serde_json::Value, stopped: usize) -> Result<Vec<u
             .as_array_mut()
             .ok_or(CustodyError::InvalidRecord)?;
         if warnings.len() < 24 {
-            warnings.push(format!("killed {stopped} surviving descendants").into());
+            warnings.push(format!("killed {stopped} surviving processes").into());
             added = true;
         } else {
             omit(fields);
@@ -710,7 +712,7 @@ mod tests {
         assert_eq!(exit["settlement_evidence"], "orphans_ended");
         assert_eq!(
             exit["warnings"],
-            serde_json::json!(["kept", "killed 1 surviving descendants"])
+            serde_json::json!(["kept", "killed 1 surviving processes"])
         );
         Ok(())
     }
@@ -792,7 +794,7 @@ mod tests {
         let exit: serde_json::Value = serde_json::from_slice(&bytes)?;
         assert_eq!(
             exit["warnings"],
-            serde_json::json!(["kept", "killed 200 surviving descendants"])
+            serde_json::json!(["kept", "killed 200 surviving processes"])
         );
         Ok(())
     }
@@ -822,6 +824,30 @@ mod tests {
         // No exit is invented and the reservation stays for the normal proof.
         assert!(!f.path.join("process-exit.json").exists());
         assert_eq!(f.recovery.reservation.descendants, vec![tail]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_dead_lane_without_an_exit_reaps_its_recorded_provider() -> TestResult {
+        let mut f = recorded_fixture(&[])?;
+        let provider = f
+            .recovery
+            .reservation
+            .provider
+            .clone()
+            .ok_or("missing provider")?;
+        let world = World::default();
+        world
+            .live
+            .borrow_mut()
+            .insert(provider.pid, provider.clone());
+        let report = f
+            .recovery
+            .end_recorded_orphans_with(&world, &world, Duration::ZERO)?;
+        assert_eq!(report.stopped, vec![provider.clone()]);
+        assert!(report.unproven.is_empty() && report.survivors.is_empty());
+        assert_eq!(world.signals.borrow().as_slice(), [(provider.pid, false)]);
+        assert!(!f.path.join("process-exit.json").exists());
         Ok(())
     }
 
