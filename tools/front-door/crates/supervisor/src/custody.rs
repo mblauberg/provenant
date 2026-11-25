@@ -416,6 +416,10 @@ pub(crate) struct Reservation {
     pub launch_state: LaunchState,
     pub attempt_device: Option<u64>,
     pub attempt_inode: Option<u64>,
+    #[serde(default)]
+    pub attempt_path: Option<PathBuf>,
+    #[serde(default)]
+    pub requester: Option<ActorId>,
     pub reservation_device: u64,
     pub reservation_inode: u64,
     pub binding: StoredWriterBinding,
@@ -748,6 +752,8 @@ pub(crate) fn acquire_writer_with_observer(
         launch_state: LaunchState::Prepared,
         attempt_device: None,
         attempt_inode: None,
+        attempt_path: None,
+        requester: None,
         reservation_device: metadata.device,
         reservation_inode: metadata.inode,
         binding: binding.0,
@@ -1396,6 +1402,11 @@ pub fn launch(
     };
     owned.lease.reservation.attempt_device = Some(metadata.device);
     owned.lease.reservation.attempt_inode = Some(metadata.inode);
+    owned.lease.reservation.attempt_path = match publication.directory.current_path() {
+        Ok(path) => Some(path),
+        Err(error) => return Err(failure(error.into(), publication)),
+    };
+    owned.lease.reservation.requester = Some(requester);
     if owned.cancel.is_cancelled() || capture.validate().is_err() {
         owned.lease.reservation.launch_state = LaunchState::NeverSpawned;
         owned.lease.reservation.unresolved_cleanup = false;
@@ -2388,9 +2399,9 @@ pub fn other_holders_live(
     Ok(false)
 }
 
-/// Whether a writer slot has a reservation currently being released. A
-/// guardian publishes `Settling` before terminal publication and keeps
-/// `writer.lock` until settlement clears the reservation, so a relaunch in
+/// Whether a writer slot has a reservation currently being released. A scoped
+/// stop intent or the guardian's `Settling` publication marks release, and the
+/// guardian keeps `writer.lock` until settlement clears the reservation, so a relaunch in
 /// that window is waiting on a release that is already in progress. Unreadable
 /// evidence is not treated as a release: the ordinary bounded refusal still
 /// applies and no candidate gains custody from it.
@@ -2422,6 +2433,25 @@ pub fn release_in_progress(slot: &Directory) -> bool {
             continue;
         }
         if reservation.launch_state == LaunchState::Settling {
+            return true;
+        }
+        let (Some(path), Some(requester)) = (&reservation.attempt_path, reservation.requester)
+        else {
+            continue;
+        };
+        let Ok(attempt) = Directory::open_anchor(path) else {
+            continue;
+        };
+        let Ok(metadata) = attempt.metadata() else {
+            continue;
+        };
+        if reservation.attempt_device != Some(metadata.device)
+            || reservation.attempt_inode != Some(metadata.inode)
+        {
+            continue;
+        }
+        if matches!(read_stop_intent(&attempt, reservation.scope), Ok(StopIntentState::Requested(intent)) if intent.requester == requester)
+        {
             return true;
         }
     }

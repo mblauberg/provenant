@@ -155,9 +155,9 @@ sourced allowances (`domains.fabric.graph.launch_wait_seconds`,
 writer's custody waits on the provisioning allowance, not the shorter reader
 wait: a concurrent launch holds its per-worktree writer guard across the whole
 worktree add and post-create setup, so the wait must cover one full provisioning
-(default 120 s, matching the writer mutation budget). A writer lease still in
-its settling phase is the same kind of progress: `provenant stop` returns once
-the cancel is acknowledged, before the guardian publishes the terminal record
+(default 120 s, matching the writer mutation budget). A writer lease with a
+matching durable stop intent or in its settling phase is the same kind of
+progress: `provenant stop` returns once the cancel is acknowledged, before the guardian publishes the terminal record
 and drops `writer.lock`, so a relaunch in that window waits for the release on
 the store lock budget and on the provisioning allowance rather than refusing a
 just-stopped worktree. A live holder is not that case: it still refuses on the
