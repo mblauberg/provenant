@@ -44,9 +44,6 @@ pub(super) trait HygieneTransaction {
     fn reconcile_commit(&mut self) -> Result<Option<String>, String> {
         Ok(None)
     }
-    fn branch(&mut self) -> Option<String> {
-        None
-    }
     fn head(&mut self) -> Result<String, String>;
     /// Includes staged, unstaged and untracked paths, without touching them.
     fn has_edits(&mut self) -> Result<bool, String>;
