@@ -5846,6 +5846,17 @@ mod writer_recovery_tests {
                     &capture,
                     &call
                 )?);
+                if steered {
+                    // A steer never interrupts a running attempt. Model the
+                    // steered stop as an independent custody request so the
+                    // settlement arbitration cases below keep their coverage.
+                    provenant_supervisor::custody::request_stop(
+                        attempt.try_clone()?,
+                        scope,
+                        execution.actor_id,
+                        StopReason::Steered,
+                    )?;
+                }
                 if marker == DeliveredSteerUnavailable {
                     // The delivered stop remains durable while readiness can no
                     // longer prove that the prior provider session is resumable.

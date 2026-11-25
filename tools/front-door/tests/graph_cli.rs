@@ -3005,6 +3005,79 @@ fn steer_graph_and_node_refuse_an_unlaunched_attempt_before_reading_stdin() -> R
 }
 
 // Spec: docs/specs/fabric.md#session-ready-steering
+// Invariant: a node-scoped steer at a settled node refuses with a next step
+// even when a sibling is still running. A sibling's turn cannot read this
+// node's note, so graph-wide "unfinished" is not a follow-up for the target.
+#[test]
+fn steer_at_a_settled_node_refuses_even_while_a_sibling_is_running() -> Result {
+    let rig = GraphProject::new()?;
+    let document = json!({"schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":"steer-sibling","nodes":[
+        {"id":"done","kind":"gate","access":"read_only","condition":{"type":"budget"}},
+        {"id":"live","kind":"gate","access":"read_only","condition":{"type":"budget"}}
+    ]});
+    let path = rig.document(&document)?;
+    let output = rig.command().args(["run", "--file"]).arg(path).output()?;
+    assert!(output.status.success(), "{output:?}");
+    use provenant_core::{CancelToken, RootInputs, StateRoot, WaitBudget};
+    use provenant_fabric_runtime::graph::{AttemptState, FileJournal, GraphJournal, NodeState};
+    let checkpoint_path = graph_records(&rig.state())?
+        .into_iter()
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| name == "graph-steer-sibling.json")
+        })
+        .ok_or("checkpoint")?;
+    let mut inputs = RootInputs::new(rig.temp.path().to_path_buf(), rig.root.clone());
+    inputs.state_dir = Some(rig.state());
+    let state = StateRoot::resolve(&inputs, &provenant_os::fs::SystemPathResolver)?;
+    let project = checkpoint_path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .ok_or("project id")?
+        .parse()?;
+    let execution = FileJournal::execution(&state, project, "steer-sibling")?.ok_or("execution")?;
+    let mut checkpoint =
+        FileJournal::read_checkpoint(&state, project, "steer-sibling")?.ok_or("checkpoint")?;
+    let attempt = json!({"key":{"graph_id":"steer-sibling","node_id":"done","route_index":0,"attempt":1},
+        "launched":false,"route":{"alias":"senior"},"state":"starting","attempt_ref":null,
+        "outcome":null,"launch_actor":"fixture"});
+    checkpoint.nodes[0].state = NodeState::Succeeded;
+    checkpoint.nodes[0].attempts = serde_json::from_value(json!([attempt]))?;
+    checkpoint.nodes[0].attempts[0].state = AttemptState::Terminal;
+    checkpoint.nodes[0].attempts[0].outcome =
+        Some(provenant_fabric_runtime::graph::AttemptOutcome::Succeeded);
+    // A sibling still running keeps the graph unfinished, but cannot read the
+    // settled node's steering note.
+    checkpoint.nodes[1].state = NodeState::Running;
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = CancelToken::new();
+    let mut journal = FileJournal::open(
+        &state,
+        project,
+        "steer-sibling",
+        WaitBudget::cli(clock.mono_now(), 5)?,
+        &cancel,
+        &clock,
+    )?;
+    journal.bind(execution)?;
+    journal.save(&checkpoint)?;
+    drop(journal);
+
+    let (output, value) = rig.run(&["steer", "steer-sibling/done", "--brief", "amended work"])?;
+    assert!(!output.status.success(), "{value}");
+    assert_eq!(value["status"], "refused", "{value}");
+    assert_eq!(value["error"]["code"], "steer_graph_complete", "{value}");
+    assert!(
+        value["error"]["repair"]
+            .as_str()
+            .is_some_and(|repair| repair.contains("steer-sibling/done")),
+        "{value}"
+    );
+    Ok(())
+}
+
+// Spec: docs/specs/fabric.md#session-ready-steering
 #[test]
 fn steer_on_a_complete_graph_refuses_even_when_warn_is_configured() -> Result {
     let rig = GraphProject::new()?;

@@ -1680,67 +1680,90 @@ fn steer_session_readiness_binds_scope_process_and_immutable_route_identity() ->
 }
 
 // Spec: docs/specs/fabric.md#session-ready-steering
+// Invariant: a steer to a running lane is queued for the next turn and never
+// stops or cancels the attempt, with or without a retained provider session.
 #[test]
-fn steer_without_a_retained_session_leaves_the_running_attempt_untouched() -> TestResult {
+fn a_steer_to_a_running_lane_queues_the_turn_without_stopping_the_attempt() -> TestResult {
     use provenant_supervisor::census::ProcessObservation;
 
-    let temp = tempfile::tempdir()?;
-    let clock = crate::tests::clock();
-    let cancel = provenant_core::CancelToken::new();
-    let call = crate::tests::call(&clock, &cancel);
-    let context = crate::tests::context(temp.path())?;
-    let store = RunStore::open(&context, &call)?;
-    let run = crate::tests::input();
-    let id = run.attempt_id;
-    store.create(&run, &call)?;
-    store.mark_starting(
-        &store.record(id, &call)?,
-        &crate::tests::route(),
-        &[],
-        &Default::default(),
-        None,
-        &call,
-    )?;
-    let running = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+    for with_session in [false, true] {
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let context = crate::tests::context(temp.path())?;
+        let store = RunStore::open(&context, &call)?;
+        let run = crate::tests::input();
+        let id = run.attempt_id;
+        store.create(&run, &call)?;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        let running = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+        let route = running
+            .applied_route
+            .as_ref()
+            .ok_or("applied route")?
+            .clone();
 
-    // No validated provider session exists for this route yet. A steer on a
-    // running Claude lane must be refused up front; the owner writes neither
-    // an intent nor a stop, so the attempt is never cancelled.
-    assert!(!store.steer_session_available(id, &call)?);
-    assert!(matches!(
-        store.record(id, &call)?.state,
-        AttemptState::Running { .. }
-    ));
-    let attempt = store.attempt_dir(id, false)?;
-    assert!(
-        crate::artifacts::read_sealed(&attempt, "stop-intent.json", RECORD_LIMIT)?.is_none(),
-        "no session means no steer interrupt may be requested"
-    );
-    assert!(store.steer_intent(id, &call)?.is_empty());
+        if with_session {
+            // A validated live session is the case that used to request a
+            // `Steered` interrupt as soon as the steer was accepted.
+            let source = match SystemProcessObserver.observe(i64::from(std::process::id())) {
+                ProcessObservation::Present(fact) if !fact.zombie => {
+                    provenant_os::capture::CaptureSourceIdentity {
+                        attempt: id.to_string(),
+                        generation: RunStore::scope(&running).generation,
+                        boot: fact.identity.boot,
+                        pid: fact.identity.pid,
+                        native_start: fact.identity.native_start,
+                    }
+                }
+                observation => {
+                    return Err(
+                        format!("test process identity unavailable: {observation:?}").into(),
+                    );
+                }
+            };
+            assert!(store.record_provider_session_ready(
+                id,
+                &route,
+                "fixture-session",
+                &source,
+                &call
+            )?);
+            assert!(store.steer_session_available(id, &call)?);
+        } else {
+            // A Claude lane with no retained session still queues the turn;
+            // readiness is evidence for delivery, not a gate on acceptance.
+            assert!(!store.steer_session_available(id, &call)?);
+        }
 
-    // Once the live adapter validates a session for this exact route the turn
-    // becomes deliverable, so the same attempt accepts a steer.
-    let source = match SystemProcessObserver.observe(i64::from(std::process::id())) {
-        ProcessObservation::Present(fact) if !fact.zombie => {
-            provenant_os::capture::CaptureSourceIdentity {
-                attempt: id.to_string(),
-                generation: RunStore::scope(&running).generation,
-                boot: fact.identity.boot,
-                pid: fact.identity.pid,
-                native_start: fact.identity.native_start,
-            }
-        }
-        observation => {
-            return Err(format!("test process identity unavailable: {observation:?}").into());
-        }
-    };
-    let route = running
-        .applied_route
-        .as_ref()
-        .ok_or("applied route")?
-        .clone();
-    assert!(store.record_provider_session_ready(id, &route, "fixture-session", &source, &call,)?);
-    assert!(store.steer_session_available(id, &call)?);
+        let text = "Finish the scoped check at the next turn.";
+        let operation = OperationId::parse(&format!("steer-running-{with_session}"))?;
+        assert!(matches!(
+            store.steer(id, operation, text, &call)?,
+            SteerReceipt::Queued { .. }
+        ));
+
+        assert!(
+            matches!(store.record(id, &call)?.state, AttemptState::Running { .. }),
+            "a steer must leave the running attempt running"
+        );
+        let attempt = store.attempt_dir(id, false)?;
+        assert!(
+            crate::artifacts::read_sealed(&attempt, "stop-intent.json", RECORD_LIMIT)?.is_none(),
+            "a steer must never write a stop intent"
+        );
+        let intents = store.steer_intent(id, &call)?;
+        assert_eq!(intents.len(), 1);
+        assert_eq!(intents[0].text, text);
+    }
     Ok(())
 }
 
@@ -1798,9 +1821,22 @@ fn explicit_cancel_after_delivered_steer_keeps_the_stop_and_blocks_successor() -
     assert!(store.record_provider_session_ready(id, &route, "fixture-session", &source, &call,)?);
 
     let attempt = store.attempt_dir(id, false)?;
+    assert!(
+        crate::artifacts::read_sealed(&attempt, "stop-intent.json", RECORD_LIMIT)?.is_none(),
+        "a steer never interrupts the running attempt, even with a live session"
+    );
+    // Model a steered stop delivered independently of the steer (a legacy
+    // intent still awaiting settlement). What this test pins is that a later
+    // explicit cancel keeps the first delivery fact and blocks continuation.
+    provenant_supervisor::custody::request_stop(
+        attempt.try_clone()?,
+        RunStore::scope(&running),
+        context.actor_id,
+        StopReason::Steered,
+    )?;
     let steered: provenant_supervisor::custody::StopIntent = crate::db::decode(
         &crate::artifacts::read_sealed(&attempt, "stop-intent.json", RECORD_LIMIT)?
-            .ok_or("session readiness did not request the steer stop")?,
+            .ok_or("steered stop intent missing")?,
     )?;
     assert_eq!(steered.reason, StopReason::Steered);
     assert!(matches!(

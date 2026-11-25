@@ -315,41 +315,37 @@ steer covers session identity (provider, model, effort, account, host-native
 lane), not route-selection history, so a same-identity continuation always
 resumes.
 
-Delivery is a session-preserving restart, not live injection. The host's shared
+Delivery is a queued turn at the next boundary, not live injection and never an
+interrupt. A steer to a running lane is always accepted: its text is durable at
+once and the live attempt keeps running. The host's shared
 adapter stream decoder records the first validated session identity against the
-admitted route and spawned process, and the interrupt is requested through the
-attempt's custody owner only after that record is durable; until then the text
-stays queued while the provider continues. After settlement the graph resumes the
+admitted route and spawned process; after settlement the graph resumes the
 same provider, model, account and session with the saved text as the next user
-turn, keeping writer custody. Before interrupting, the owner prints one line
-naming `domains.fabric.steer.fallback` and the layer that set it. When the
+turn, keeping writer custody. When the
 session is unavailable the default `fresh_with_handoff` starts a fresh session
 with the accepted brief, previous bounded handoff and queued steer text;
 `refuse` keeps the steer without a successor. A route, account, session or
 process identity mismatch is fatal and never takes the fresh fallback. Adapters
 advertise `continuation` only when their run path can retain and resume the
-session; other routes are `unsupported` and start fresh. Concurrent restarts are
-spaced by `domains.fabric.steer.restart_spacing_ms`.
+session; other routes are `unsupported` and start fresh. Concurrent continuations
+are spaced by `domains.fabric.steer.restart_spacing_ms`.
 
-A steer is accepted only where a turn can still read it. A running attempt
-accepts one only when it holds a validated, live session bound to its exact
-provider, model, effort, account and host-native lane; an accepted steer never
-cancels a running attempt that lacks that session. Instead the steer is refused
-up front with the typed cause `steer_session_unavailable`, the running attempt
-is left untouched, and the repair names the command that starts a new round on
-the same worktree (`provenant run implement --worktree ... --brief-file FILE`).
-A settled attempt can hold a note only while its graph can still run another
-attempt (`lanes.steer_settled=queue`); a completed graph, a cancelled graph, or
-a terminal attempt with no continuation refuses with `steer_graph_complete`,
-reported in both human and JSON output, with the same new-round command.
+Session readiness is evidence for how the next turn is delivered, not a gate on
+accepting the text: a running attempt is never refused for lacking a session.
+A settled target can hold a note only while another attempt for that same target
+will run to read it (`lanes.steer_settled=queue`). A live sibling does not read a
+node's note, and a completed or cancelled graph, or a terminal attempt with no
+continuation for its node, refuses with `steer_graph_complete` in both human
+and JSON output. The repair names the command that starts a new round on the
+same worktree (`provenant run implement --worktree ... --brief-file FILE`).
 
 A writer's continuation reuses the retained worktree, so admission waits for
 settlement to release the steered attempt's custody: steering stays queued and
 the reaction is retried, never dropped. A custody or writer-lineage check that
 fails while admitting a steer continuation is a typed continuation refusal, not
 an "invalid run record": the accepted text and the settled attempt stay intact.
-Stopping a terminal steered attempt
-resolves queued steering as not continued (`terminal_stop`). When placement or
+An explicit stop of an attempt holding accepted steering resolves it as not
+continued (`terminal_stop`). When placement or
 the run owner is temporarily unavailable, the graph journal persists a bounded
 steer intent for the work key and warns; tick replays the original inbox
 operation under its original requester, a committed inbox receipt precedes queue

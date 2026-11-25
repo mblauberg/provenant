@@ -1224,11 +1224,10 @@ impl RunStore {
                 }
             });
         }
-        // The accepted text is durable before this best-effort wake. If the
-        // session is not ready yet, its decoder will perform the same check
-        // when it publishes readiness. If another stop already won, keep the
-        // earlier accepted text and let terminal settlement report that outcome.
-        let _ = self.request_steer_stop_if_ready(id, call);
+        // The accepted text is durable. A steer never interrupts the running
+        // attempt: settlement delivers the queued turn at the next turn
+        // boundary, continuing a retained session or using the configured
+        // fresh-with-handoff fallback. No stop intent is written here.
         Ok(if already_queued {
             SteerReceipt::AlreadyQueued {
                 message_id: intent.message_id,
@@ -1285,7 +1284,7 @@ impl RunStore {
         if !same_bound_process && !source_is_live(source) {
             return Ok(false);
         }
-        let (ready, pending) = self.write(call, |tx| {
+        let ready = self.write(call, |tx| {
             let raw: Vec<u8> = tx
                 .query_row(
                     "SELECT record FROM attempts WHERE id=?1 AND project=?2 AND refused=0",
@@ -1304,7 +1303,7 @@ impl RunStore {
                         steer_route_digest(applied).ok().as_deref() != Some(route_digest.as_str())
                     })
             {
-                return Ok((false, false));
+                return Ok(false);
             }
             let scope = Self::scope(&record);
             let saved: Option<ProviderSessionReadyRow> = tx
@@ -1341,18 +1340,10 @@ impl RunStore {
                     ],
                 )?;
             }
-            let pending: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM steer_intents WHERE attempt=?1 AND resolved=0)",
-                [id.to_string()],
-                |row| row.get(0),
-            )?;
-            Ok((true, pending))
+            Ok(true)
         })?;
         if ready {
             self.persist_live_steer_successor_evidence(id, call)?;
-        }
-        if ready && pending {
-            self.request_steer_stop_if_ready(id, call)?;
         }
         Ok(ready)
     }
@@ -1741,9 +1732,10 @@ impl RunStore {
 
     /// Whether this running attempt holds a validated, live provider session
     /// bound to its exact route (provider, model, effort, account and
-    /// host-native lane). A steering turn can only be delivered by continuing
-    /// that session; without it the attempt must be left alone and the steer
-    /// refused up front rather than queued for a continuation that cannot run.
+    /// host-native lane). When it does, settlement can deliver a queued steer
+    /// by continuing that session; otherwise it uses the configured
+    /// fresh-with-handoff fallback. Either way a steer is queued without
+    /// interrupting the attempt, so this is evidence, not a delivery gate.
     pub fn steer_session_available(&self, id: AttemptId, call: &Request<'_>) -> Result<bool> {
         let record = self.record(id, call)?;
         if !matches!(record.state, AttemptState::Running { .. }) {
@@ -1771,29 +1763,6 @@ impl RunStore {
             native_start: ready.provider_start,
         };
         Ok(source_is_live(&source))
-    }
-
-    fn request_steer_stop_if_ready(&self, id: AttemptId, call: &Request<'_>) -> Result<bool> {
-        if !self.steer_session_available(id, call)? {
-            return Ok(false);
-        }
-        let record = self.record(id, call)?;
-        let directory = self.attempt_dir(id, false)?;
-        let stopped = match custody::reattach(directory.try_clone()?, Self::scope(&record)) {
-            Ok(handle) => custody::stop(&handle, StopReason::Steered),
-            Err(CustodyError::Filesystem(error)) if error.is_not_found() => custody::request_stop(
-                directory,
-                Self::scope(&record),
-                record.verified_owner.unwrap_or(self.context.actor_id),
-                StopReason::Steered,
-            ),
-            Err(error) => Err(error),
-        };
-        match stopped {
-            Ok(StopReceipt::Requested | StopReceipt::AlreadyRequested)
-            | Err(CustodyError::StopConflict) => Ok(true),
-            Err(error) => Err(RunError::Io(std::io::Error::other(error.to_string()))),
-        }
     }
 
     /// Read and verify the complete private steering ledger. The caller may
