@@ -6,7 +6,7 @@
 
 use super::{Factory, queue_registry::QueueSnapshotItem};
 use provenant_config::{ForgeOperation, ForgePort};
-use provenant_core::{CancelToken, OperationId};
+use provenant_core::{CancelToken, WaitBudget};
 use provenant_confinement::{repo::GitRefName, worktrees};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -24,6 +24,8 @@ pub(super) struct AdoptedPullRequest {
     pub schema_version: u64,
     pub operation_id: String,
     pub project: String,
+    pub tracker: String,
+    pub item: String,
     pub repository: String,
     pub issue_identity: String,
     pub issue_number: u64,
@@ -54,11 +56,16 @@ struct AdoptionIdentity<'a> {
     item: &'a super::queue_registry::QueueIdentity,
     repository: &'a str,
     pull_request: u64,
+    pull_request_url: &'a str,
     issue_identity: &'a str,
+    issue_number: u64,
     branch: &'a str,
     worktree: &'a str,
     source_directory_identity: &'a provenant_records::run::SourceIdentity,
     head: &'a str,
+    base_repository: &'a str,
+    base_branch: &'a str,
+    base_head: &'a str,
     custody_host: &'a str,
     custody_attempt: &'a str,
     custody_operation: &'a str,
@@ -108,11 +115,16 @@ pub(super) fn resolve(
         item: &item.identity,
         repository: &repository,
         pull_request,
+        pull_request_url: &pull.url,
         issue_identity,
+        issue_number,
         branch: &pull.branch,
         worktree: &custody.path,
         source_directory_identity: &custody.identity,
         head: &pull.head,
+        base_repository: &pull.base_repository,
+        base_branch: &pull.base_branch,
+        base_head: &pull.base_head,
         custody_host: &custody.host,
         custody_attempt: &custody.attempt,
         custody_operation: &custody.operation,
@@ -122,6 +134,8 @@ pub(super) fn resolve(
         schema_version: 1,
         operation_id,
         project,
+        tracker: item.identity.tracker.clone(),
+        item: item.identity.item.clone(),
         repository,
         issue_identity: issue_identity.to_owned(),
         issue_number,
@@ -138,6 +152,159 @@ pub(super) fn resolve(
         custody_attempt: custody.attempt,
         custody_operation: custody.operation,
     })
+}
+
+/// Recheck a persisted queue adoption intent and return its host-authored
+/// publication receipt. The caller holds the graph journal lock while this
+/// function runs; the queue registry lock authenticates the item and operation.
+pub(super) fn revalidate(
+    factory: &Factory,
+    request: &provenant_fabric_runtime::graph::DeliveryAdoptionRequest<'_>,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+) -> Result<provenant_fabric_runtime::graph::DeliveryPublication, String> {
+    const SEED_NODE: &str = "adopted-publish";
+    let intent = request.intent;
+    if request.node_id != SEED_NODE || !valid_intent(intent) {
+        return Err("adoption seed request is invalid".into());
+    }
+    let identity = super::queue_registry::QueueIdentity::new(
+        &intent.project,
+        &intent.tracker,
+        &intent.item,
+    )?;
+    if identity.project != intent.project || identity.tracker != intent.tracker {
+        return Err("adoption tracker identity is not canonical".into());
+    }
+    let registry = super::queue_registry::QueueRegistry::open(
+        factory.context.roots.state.as_path(),
+    )?;
+    let persisted = registry.adoption_for(
+        request.graph_id,
+        &identity,
+        &intent.operation_id,
+        budget,
+        cancel,
+        &factory.clock,
+    )?;
+    if !intent_matches(&persisted, intent) {
+        return Err("adoption request differs from its authenticated queue intent".into());
+    }
+
+    let pull = resolve_pull_request(
+        factory,
+        &intent.repository,
+        intent.pull_request,
+        &intent.issue_identity,
+        intent.issue_number,
+        cancel,
+        Duration::from_micros(
+            budget
+                .remaining(factory.clock.mono_now())
+                .as_micros(),
+        ),
+    )?;
+    if pull.url != intent.pull_request_url
+        || pull.branch != intent.branch
+        || pull.head != intent.head
+        || !same_repository(&pull.base_repository, &intent.base_repository)
+        || pull.base_branch != intent.base_branch
+        || pull.base_head != intent.base_head
+    {
+        return Err("live pull request differs from the sealed adoption intent".into());
+    }
+
+    let branch = GitRefName::branch(&intent.branch)
+        .map_err(|_| "adoption intent has an invalid branch")?;
+    let custody = resolve_worktree(factory, &branch, &intent.head, cancel)?;
+    if custody.path != intent.worktree
+        || custody.identity != intent.source_directory_identity
+        || custody.host != intent.custody_host
+        || custody.attempt != intent.custody_attempt
+        || custody.operation != intent.custody_operation
+    {
+        return Err("live worktree custody differs from the sealed adoption intent".into());
+    }
+    Ok(provenant_fabric_runtime::graph::DeliveryPublication {
+        branch: intent.branch.clone(),
+        head: intent.head.clone(),
+        pull_request: intent.pull_request_url.clone(),
+    })
+}
+
+fn intent_matches(
+    persisted: &AdoptedPullRequest,
+    intent: &provenant_fabric_runtime::graph::DeliveryAdoptionIntent,
+) -> bool {
+    persisted.schema_version == 1
+        && persisted.operation_id == intent.operation_id
+        && persisted.project == intent.project
+        && persisted.tracker == intent.tracker
+        && persisted.item == intent.item
+        && same_repository(&persisted.repository, &intent.repository)
+        && persisted.issue_identity == intent.issue_identity
+        && persisted.issue_number == intent.issue_number
+        && persisted.pull_request == intent.pull_request
+        && persisted.pull_request_url == intent.pull_request_url
+        && persisted.branch == intent.branch
+        && persisted.worktree == intent.worktree
+        && persisted.source_directory_identity == intent.source_directory_identity
+        && persisted.custody_host == intent.custody_host
+        && persisted.custody_attempt == intent.custody_attempt
+        && persisted.custody_operation == intent.custody_operation
+        && persisted.head == intent.head
+        && same_repository(&persisted.base_repository, &intent.base_repository)
+        && persisted.base_branch == intent.base_branch
+        && persisted.base_head == intent.base_head
+}
+
+fn valid_intent(intent: &provenant_fabric_runtime::graph::DeliveryAdoptionIntent) -> bool {
+    let is_digest = intent.operation_id.strip_prefix("sha256:").is_some_and(|value| {
+        value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    });
+    let nonempty = |value: &str| {
+        !value.trim().is_empty() && value.trim() == value && !value.chars().any(char::is_control)
+    };
+    is_digest
+        && [
+            intent.project.as_str(),
+            intent.tracker.as_str(),
+            intent.item.as_str(),
+            intent.repository.as_str(),
+            intent.issue_identity.as_str(),
+            intent.pull_request_url.as_str(),
+            intent.branch.as_str(),
+            intent.worktree.as_str(),
+            intent.custody_host.as_str(),
+            intent.custody_attempt.as_str(),
+            intent.custody_operation.as_str(),
+            intent.base_repository.as_str(),
+            intent.base_branch.as_str(),
+        ]
+        .into_iter()
+        .all(nonempty)
+        && intent.pull_request > 0
+        && intent.issue_number > 0
+        && intent.issue_identity == intent.item
+        && intent
+            .tracker
+            .eq_ignore_ascii_case(&format!("github:{}", intent.repository))
+        && valid_repository(&intent.repository)
+        && same_repository(&intent.repository, &intent.base_repository)
+        && intent.pull_request_url.starts_with("https://")
+        && intent.worktree.starts_with('/')
+        && GitRefName::branch(&intent.branch).is_ok()
+        && intent.custody_host.parse::<provenant_core::HostId>().is_ok()
+        && intent
+            .custody_attempt
+            .parse::<provenant_core::AttemptId>()
+            .is_ok()
+        && intent
+            .custody_operation
+            .parse::<provenant_core::OperationId>()
+            .is_ok()
+        && intent.head.parse::<provenant_core::GitOid>().is_ok()
+        && intent.base_head.parse::<provenant_core::GitOid>().is_ok()
 }
 
 struct PullFacts {
@@ -179,6 +346,11 @@ fn resolve_pull_request(
     let mut forge = ForgePort::new(ports.forge.clone(), "forge", project, state, policy)
         .map_err(|error| format!("cannot start forge adapter: {error}"))?;
     let request = request(cancel, budget);
+    let local_repository = crate::pr::observer::repository_for_project(state, project, &request)
+        .map_err(|error| format!("cannot resolve selected project repository: {error}"))?;
+    if !same_repository(&local_repository, repository) {
+        return Err("tracker and pull-request repository do not match the selected project".into());
+    }
     forge.bind(&request);
     let response = forge
         .request(ForgeOperation::Graphql { query }, request.remaining())
@@ -193,7 +365,9 @@ fn resolve_pull_request(
     }
     let head_repository = repository_field_value(&pull["headRepository"], "head")?;
     let base_repository = repository_field_value(&pull["baseRepository"], "base")?;
-    if head_repository != repository || base_repository != repository {
+    if !same_repository(&head_repository, repository)
+        || !same_repository(&base_repository, repository)
+    {
         return Err("adopted pull request must use the selected repository for both head and base".into());
     }
     let references = pull
@@ -214,7 +388,9 @@ fn resolve_pull_request(
                 && reference
                     .pointer("/repository/nameWithOwner")
                     .and_then(Value::as_str)
-                    == Some(repository)
+                    .is_some_and(|reference_repository| {
+                        same_repository(reference_repository, repository)
+                    })
         })
         .count();
     if matches != 1 {
@@ -434,7 +610,7 @@ fn snapshot_repository(item: &QueueSnapshotItem) -> Result<String, String> {
         .tracker
         .strip_prefix("github:")
         .ok_or("queue item tracker is not GitHub")?;
-    if repository != tracker_repository {
+    if !same_repository(repository, tracker_repository) {
         return Err("queue tracker repository does not match the snapshot repository".into());
     }
     Ok(repository.to_owned())
@@ -459,6 +635,10 @@ fn valid_repository(value: &str) -> bool {
         && value.bytes().all(|byte| {
             byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'/')
         })
+}
+
+fn same_repository(left: &str, right: &str) -> bool {
+    left.eq_ignore_ascii_case(right)
 }
 
 fn parse_oid(value: &str, label: &str) -> Result<String, String> {
@@ -495,23 +675,14 @@ fn graphql_string(value: &str) -> Result<String, String> {
     serde_json::to_string(value).map_err(|_| "cannot encode forge query".into())
 }
 
-fn adoption_operation_id(
-    identity: &AdoptionIdentity<'_>,
-) -> Result<String, String> {
+fn adoption_operation_id(identity: &AdoptionIdentity<'_>) -> Result<String, String> {
     let digest = provenant_records::CanonicalV1::record_digest(
         "delivery-queue-adoption",
         1,
         identity,
     )
     .map_err(|_| "cannot seal adopted pull request identity")?;
-    let suffix = digest
-        .to_string()
-        .strip_prefix("sha256:")
-        .ok_or("adopted pull request digest is malformed")?
-        .to_owned();
-    let operation = format!("queue-adopt-{suffix}");
-    OperationId::parse(&operation).map_err(|_| "adopted pull request operation identity is invalid")?;
-    Ok(operation)
+    Ok(digest.to_string())
 }
 
 #[allow(clippy::disallowed_methods, reason = "forge request uses one bounded absolute deadline")]
@@ -520,4 +691,28 @@ fn request(cancel: &CancelToken, budget: Duration) -> provenant_config::ports::R
     let now = std::time::Instant::now();
     let deadline = now.checked_add(budget).unwrap_or(now + MAX_READ_BUDGET);
     provenant_config::ports::Request::new(deadline, cancel.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn mixed_case_snapshot_repository_matches_canonical_tracker_identity() {
+        let item = QueueSnapshotItem {
+            identity: super::super::queue_registry::QueueIdentity {
+                project: "project".into(),
+                tracker: "github:owner/repository".into(),
+                item: "issue-node-id".into(),
+            },
+            data: json!({"repository":"Owner/Repository"}),
+        };
+
+        assert!(matches!(
+            snapshot_repository(&item).as_deref(),
+            Ok("Owner/Repository")
+        ));
+        assert!(!same_repository("Owner/Repository", "other/Repository"));
+    }
 }
