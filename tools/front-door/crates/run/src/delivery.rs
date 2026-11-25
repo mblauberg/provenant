@@ -1262,13 +1262,7 @@ impl HostDeliveryContext {
         host.refuse_protected_target(&writer, branch, Stage::Push, Some(forge))?;
         let reference = format!("refs/heads/{branch}");
         if publication_identity.is_some() {
-            host.publish_graph_ref(
-                project,
-                &bound.push_url,
-                &reference,
-                head,
-                expected_remote_head,
-            )?;
+            host.publish_graph_ref(project, &bound.push_url, branch, head, expected_remote_head)?;
         } else if local {
             host.refuse_remote_symbolic_target(project, &bound.push_url, branch, Stage::Push)?;
             host.command(
