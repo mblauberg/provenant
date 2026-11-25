@@ -324,6 +324,12 @@ fn children(
                     .or_else(|| visible_names.get(&target).cloned())
                     .ok_or("loop previous binding")?;
             }
+            if let Some(initial) = &mut loop_spec.initial_publication {
+                let target = initial.clone();
+                *initial = reference(prefix, &target, &locals, incoming)
+                    .or_else(|| visible_names.get(&target).cloned())
+                    .ok_or("loop initial publication")?;
+            }
         }
         if let Some(edge) = node
             .loop_body

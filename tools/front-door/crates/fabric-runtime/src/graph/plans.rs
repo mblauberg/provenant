@@ -1580,6 +1580,9 @@ pub(super) fn flatten_fragment(
                 for initial in loop_spec.previous_bindings.values_mut() {
                     *initial = id(initial);
                 }
+                if let Some(initial) = &mut loop_spec.initial_publication {
+                    *initial = id(initial);
+                }
             }
             for input in &mut child.inputs {
                 input.node = id(&input.node);
