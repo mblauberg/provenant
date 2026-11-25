@@ -654,7 +654,7 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
                 && node.depends_on.iter().any(|dependency| {
                     document.nodes.iter().any(|candidate| {
                         candidate.id == *dependency
-                            && candidate.on_fail.as_deref() == Some(&node.id)
+                            && candidate.on_fail.as_deref() == Some(node.id.as_str())
                     })
                 });
             if !valid {
