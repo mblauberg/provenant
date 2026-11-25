@@ -894,6 +894,12 @@ struct PlannedNode {
     read_roots: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     attachments: Vec<String>,
+    // A project-relative fixture stays host-local; bytes already staged by a
+    // peer cross the boundary. Both are forwarded to the launch as NodeInput.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fixture: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fixture_bytes: Option<provenant_records::run::StagedFixture>,
     #[serde(skip_serializing_if = "Option::is_none")]
     capabilities: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]

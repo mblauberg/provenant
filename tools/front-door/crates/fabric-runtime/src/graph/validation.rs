@@ -751,6 +751,8 @@ pub(super) fn validate_flat_plan(
             dispositions: node.dispositions.clone(),
             read_roots: node.read_roots.clone(),
             attachments: node.attachments.clone(),
+            fixture: node.fixture.clone(),
+            fixture_bytes: node.fixture_bytes.clone(),
             // An explicit node set wins; a nonempty attempt set stands in for it.
             capabilities: node.capabilities.clone().or_else(|| {
                 node.attempt

@@ -1568,7 +1568,7 @@ mod tests {
         );
     }
 
-    // Spec: docs/specs/cli.md — an unsuccessful wait names the failed check.
+    // Spec: docs/specs/cli.md#integration-batch-membership — an unsuccessful wait names the failed check.
     #[test]
     fn host_poller_failure_event_names_the_failed_check_in_an_incomplete_wait() {
         let subscription = Subscription {
