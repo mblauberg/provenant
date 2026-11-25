@@ -987,7 +987,7 @@ exit 1
     ));
 
     let url = "https://github.com/fixture/repo/pull/17";
-    let receipt = HostDeliveryContext::new(environment).update_adopted_graph_pr_at_head(
+    let receipt = HostDeliveryContext::new(environment.clone()).update_adopted_graph_pr_at_head(
         &fixture.writer.project,
         expected_head,
         expected_remote_head,
@@ -1021,6 +1021,49 @@ exit 1
         std::fs::read_to_string(fixture.root.join("views"))?.trim(),
         "2"
     );
+    let target = GraphAdoptionTarget {
+        repository: "fixture/repo",
+        pull_request: 17,
+        pull_request_url: url,
+        branch: "lane",
+        base_repository: "fixture/repo",
+        base_branch: "main",
+    };
+    let replay = HostDeliveryContext::new(environment.clone()).update_adopted_graph_pr_at_head(
+        &fixture.writer.project,
+        expected_head,
+        expected_remote_head,
+        &target,
+        &crate::forge_for("origin", "main", &[]),
+    )?;
+    assert_eq!(replay, receipt);
+
+    fixture.commit(&fixture.writer.worktree, "concurrent update")?;
+    let concurrent_head = fixture.git_text(&["rev-parse", "refs/heads/lane"])?;
+    fixture.git(&["push", "origin", "lane:refs/heads/lane"])?;
+    assert!(
+        HostDeliveryContext::new(environment)
+            .update_adopted_graph_pr_at_head(
+                &fixture.writer.project,
+                expected_head,
+                expected_remote_head,
+                &target,
+                &crate::forge_for("origin", "main", &[]),
+            )
+            .is_err()
+    );
+    let remote_after_refusal = fixture.git_text(&[
+        "--git-dir",
+        fixture
+            .root
+            .join("remote.git")
+            .to_str()
+            .ok_or("bare remote")?,
+        "rev-parse",
+        "refs/heads/lane",
+    ])?;
+    assert_eq!(remote_after_refusal, concurrent_head);
+    assert!(!fixture.root.join("created").exists());
     Ok(())
 }
 
