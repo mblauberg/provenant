@@ -861,6 +861,20 @@ fn queue_repair_writer_may_bind_the_published_head() {
     let mut document = queue_publish_document("routine");
     document.delivery = None;
     assert!(validate_plan(&document).is_ok());
+    let mut head_bound = document.clone();
+    head_bound
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "rebase")
+        .unwrap()
+        .loop_body
+        .as_mut()
+        .unwrap()
+        .body[0]
+        .source = Some(SourceBinding::Head {
+        node: "previous.refresh".into(),
+    });
+    assert!(validate_plan(&head_bound).is_ok());
 
     let mut wrong_worktree = document.clone();
     wrong_worktree
