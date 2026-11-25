@@ -3376,6 +3376,37 @@ fn advance_hygiene<R: AttemptOwner, J: GraphJournal>(
 const DELIVERY_CI_WAIT_MAX_SECONDS: u64 = 14_400;
 const DELIVERY_CI_RETRY_MICROS: i64 = 1_000_000;
 
+// A resumed publication must compare against the last receipt for this
+// branch, including an authenticated adopted PR seed.
+fn prior_publication_head(
+    node: &PlannedNode,
+    progress: &NodeProgress,
+    branch: &str,
+) -> Option<String> {
+    if node.kind != Some(NodeKind::Publish) || progress.state != NodeState::Succeeded {
+        return None;
+    }
+    if let Some(intent) = node.delivery_adoption.as_ref() {
+        if intent.branch != branch {
+            return None;
+        }
+        let adoption = progress.delivery_adoption()?;
+        if !adoption.matches_intent(intent) || adoption.ci_admission.is_none() {
+            return None;
+        }
+        return adoption.receipt.map(|receipt| receipt.head);
+    }
+    let publication = progress.delivery_publication.as_ref()?;
+    (publication.source_branch == branch)
+        .then(|| {
+            publication
+                .receipt
+                .as_ref()
+                .map(|receipt| receipt.head.clone())
+        })
+        .flatten()
+}
+
 fn delivery_ci_wait_policy(document: &GraphDocument) -> provenant_records::Sourced<u64> {
     document
         .queue_ci_wait()
@@ -3631,26 +3662,29 @@ fn advance_publish<R: AttemptOwner, J: GraphJournal>(
                 invariant: "a later publication cannot bypass a failed or parked publication",
             });
         }
-        let prior_publication = checkpoint.nodes[prior_index]
-            .delivery_publication
+        let prior = &checkpoint.nodes[prior_index];
+        let same_branch = plan.nodes[prior_index]
+            .delivery_adoption
             .as_ref()
-            .map(|intent| (intent.source_branch.clone(), intent.receipt.clone()));
-        let prior_parked = checkpoint.nodes[prior_index].delivery_park.is_some();
-        if let Some((prior_source_branch, receipt)) = prior_publication {
-            if prior_source_branch != source_branch {
-                continue;
-            }
-            if prior_parked {
+            .is_some_and(|intent| intent.branch == source_branch)
+            || prior
+                .delivery_publication
+                .as_ref()
+                .is_some_and(|intent| intent.source_branch == source_branch);
+        if prior_state == NodeState::Succeeded && same_branch {
+            if prior.delivery_park.is_some() {
                 checkpoint.nodes[node_index].wait_reason = Some("after".into());
                 checkpoint.nodes[node_index].state = NodeState::Pending;
                 journal.save(checkpoint).map_err(GraphError::Journal)?;
                 return Ok(());
             }
-            let receipt = receipt.ok_or_else(|| GraphError::BadCheckpoint {
-                node: node.id.clone(),
-                invariant: "prior graph publication must retain its receipt",
-            })?;
-            expected_remote_head = Some(receipt.head);
+            expected_remote_head = Some(
+                prior_publication_head(&plan.nodes[prior_index], prior, &source_branch)
+                    .ok_or_else(|| GraphError::BadCheckpoint {
+                        node: node.id.clone(),
+                        invariant: "prior graph publication must retain its verified receipt",
+                    })?,
+            );
         }
     }
 
