@@ -2291,7 +2291,8 @@ fn relocated_history_lifecycle(provider: &str, layout: &str, artifacts: &[&str])
 }
 
 #[test]
-fn gc_spares_nonterminal_attempts_and_contention_and_reservations() -> TestResult {
+fn gc_spares_nonterminal_and_live_custody_but_collects_released_read_only_reservation() -> TestResult
+{
     let (_temp, context, store, input, attempt) = seeded()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
@@ -2329,24 +2330,46 @@ fn gc_spares_nonterminal_attempts_and_contention_and_reservations() -> TestResul
     assert!(scratch_root_of(&attempt).join("tmp/keep").exists());
     drop(writer);
     let evidence = attempt.join(input.attempt_id.to_string());
-    fs::create_dir_all(&evidence)?;
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&evidence)?;
     fs::write(evidence.join("reservation.json"), "{}")?;
+    let custody = directory.try_lock(OsStr::new("custody.lock"), LockMode::Exclusive)?;
+    let candidate = attempt.join("provider-state/candidate-0");
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(candidate.join("cache"))?;
+    fs::write(candidate.join("cache/entry"), "cache")?;
+    let record = store.record(input.attempt_id, &call)?;
+    store.settle_cleanup(&record, None, &call);
+    assert!(candidate.join("cache/entry").exists());
     assert!(
         !sweep(&store, &context, 1, DAY_MICROS, false, &call)?
             .kept
             .is_empty()
     );
     assert!(scratch_root_of(&attempt).join("tmp/keep").exists());
-    assert!(
-        attempt
-            .join("provider-state/candidate-0/auth.json")
-            .exists()
-    );
-    fs::remove_file(evidence.join("reservation.json"))?;
-    let report = sweep(&store, &context, 1, DAY_MICROS, false, &call)?;
+    assert!(candidate.join("auth.json").exists());
+    drop(custody);
+    let (_, warnings) = provenant_records::warning::capture(|| {
+        store.settle_cleanup(&record, None, &call);
+    });
+    assert!(!candidate.join("cache").exists());
+    assert!(warnings.iter().any(|warning| {
+        warning.code.as_ref() == provenant_records::warning::READ_ONLY_RESERVATION_RETAINED.as_str()
+    }));
+    let (report, warnings) = provenant_records::warning::capture(|| {
+        sweep(&store, &context, 1, DAY_MICROS, false, &call)
+    });
+    let report = report?;
     assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert!(warnings.iter().any(|warning| {
+        warning.code.as_ref() == provenant_records::warning::READ_ONLY_RESERVATION_RETAINED.as_str()
+    }));
     assert!(!attempt.join("provider-state").exists());
     assert!(!scratch_root_of(&attempt).join("tmp").exists());
+    assert!(evidence.join("reservation.json").exists());
     Ok(())
 }
 

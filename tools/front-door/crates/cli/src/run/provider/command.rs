@@ -515,7 +515,10 @@ pub(super) fn configure_process_tree(
     spec: &mut provenant_providers::LaunchSpec,
     paths: &run::LaunchPaths,
 ) -> Result<PathGrant, String> {
-    let attempt = paths.scratch.parent().ok_or("attempt directory missing")?;
+    let attempt = paths
+        .provider_state
+        .parent()
+        .ok_or("attempt directory missing")?;
     let directory = Directory::open_anchor(attempt).map_err(|error| error.to_string())?;
     let grant = PathGrant {
         path: provenant_supervisor::process_tree::snapshot_path(&directory)

@@ -15,7 +15,10 @@ in the settling phase is a release already under way, so the launch waits on the
 lock is free. A live holder or any other occupancy without that evidence still refuses on the first
 probe, so a release wait never becomes a queue behind a foreign lane. Resource probes run outside
 the admission transaction, and busy capacity is not a
-queue. Uncertain custody keeps its ownership until release is proved. Reconciliation reports released custody only after exclusion and native
+queue. Uncertain custody keeps its ownership until release is proved, except for a terminal
+read-only review: it holds no Git work, so a reservation left by its guardian is not uncertainty
+and reconciliation settles it with a typed warning ([outcome before release](run-settlement.md#outcome-before-release)).
+Reconciliation reports released custody only after exclusion and native
 absence evidence prove it safe; an unknown or live holder retains custody, and uncertain custody
 and unreadable reservations warn while reconciliation continues. Writer-bind refusals identify
 the durable lease holder, branch, worktree, reservation age (from its last durable update) and
@@ -347,19 +350,14 @@ client directly is outside it, and host-side delivery is unaffected.
 
 ### Lane scratch stays outside the attempt record
 
-A lane's temporary directory is `<state>/attempt-scratch/<attempt id>/tmp`: a sibling
-scratch root under the state root, keyed by attempt id, never `attempts/<id>/tmp`.
-`LaunchPaths::temporary`, the per-attempt alias target, the read-only lane's temporary
-scratch write grant, and candidate staging all resolve there; no grant or `TMPDIR` for
-that temporary directory points into the attempt record directory. Other grants do
-remain inside it by design: the lane's `provider-state` and its handoff
-(`attempts/<id>/provider-state/<candidate>`), `LaunchPaths::scratch`
-(`attempts/<id>/scratch`), and the prompt and other durable output paths. Retention,
-disk classification, writer-Git readers and terminal cleanup follow the sibling root,
-and the alias is unlinked with its target. There is no link or fallback at the old path.
-- Why: a lane that walks up from its scratch reached `attempts/<id>` and could write
-  the attempt's own settlement records, which a foreign slot entry could not be
-  distinguished from the host's own handoff (#3844, #3947).
+A lane's temporary directory is `<state>/attempt-scratch/<attempt id>/tmp`, and
+`LaunchPaths::scratch` is its `scratch` child. Both are outside `attempts/<id>`, as
+are the temporary alias and its target. The lane's `provider-state`, progress handoff,
+prompt and durable output paths remain in the attempt directory. Retention, disk
+classification, writer-Git readers and terminal cleanup follow the sibling root; the
+alias is unlinked with its target. There is no fallback to the old scratch paths.
+- Why: an incidental relative write from lane scratch must not land in the attempt's
+  settlement records (#3844, #3947).
 
 ### Lane state stays outside the worktree
 
