@@ -194,6 +194,67 @@ pub fn locate_request(
     Ok(None)
 }
 
+/// Construct the inbox operation for one persisted delivery parking transition.
+/// The caller must persist and reuse `operation_id` and the complete input on
+/// replay; the inbox binds that ID to the content and returns the same receipt.
+/// TODO(#3972-s3): persist the transition and reconcile its receipt on tick.
+pub fn delivery_park(
+    session: String,
+    operation_id: OperationId,
+    work: RequestWork,
+    item: &str,
+    reason: provenant_records::graph::ParkReason,
+    handoff: &str,
+    evidence: &[String],
+) -> Result<InboxInput, InboxError> {
+    // The request body is the durable, bounded handoff. Refuse oversized
+    // identities or evidence rather than silently changing their meaning.
+    if work.graph.trim().is_empty()
+        || work
+            .node
+            .as_deref()
+            .is_none_or(|node| node.trim().is_empty())
+        || work.attempt_id.is_none()
+        || item.trim().is_empty()
+    {
+        return Err(InboxError::Invalid("delivery park identity"));
+    }
+    let mut end = handoff.len().min(1024);
+    while !handoff.is_char_boundary(end) {
+        end -= 1;
+    }
+    let truncated = end < handoff.len();
+    let handoff = &handoff[..end];
+    let body = serde_json::json!({
+        "item": item,
+        "reason": reason,
+        "handoff": handoff,
+        "handoff_truncated": truncated,
+        "evidence": evidence,
+    })
+    .to_string();
+    let input = InboxInput::Ask {
+        extra: Default::default(),
+        session,
+        request: Box::new(RequestDraft {
+            extra: Default::default(),
+            supersedes: None,
+            deadline: None,
+            work: Some(work),
+            kind: RequestKind::Decision,
+            title: "Delivery parked".into(),
+            body,
+            blocking: true,
+            options: Vec::new(),
+            recommended_option_id: None,
+            proceeding_with: None,
+        }),
+        operation_id: Some(operation_id),
+    };
+    input.validate()?;
+    Ok(input)
+}
+
 /// Verified provenance for a graph attempt that is steered across hosts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphSteerContext {

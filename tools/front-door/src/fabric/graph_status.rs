@@ -236,6 +236,10 @@ pub(crate) fn node_digests(rows: &[Value]) -> Vec<NodeDigest> {
                 },
                 result_path.as_deref().unwrap_or("-")
             ));
+            // The checkpoint head is an observation, not a fresh forge read.
+            if let Some(head) = text(&attempt["head"], 128).or_else(|| text(&node["head"], 128)) {
+                line.push_str(&format!(" head={head}/recorded"));
+            }
             if let Some(presence) = &attempt_presence {
                 line.push_str(&format!(" attempt_presence={presence}"));
             }
@@ -475,6 +479,18 @@ mod tests {
             );
             assert!(!digest.settled);
         }
+    }
+
+    #[test]
+    fn digest_labels_the_recorded_head_as_an_observation() {
+        use provenant_core::ProjectId;
+        use provenant_records::WorkKey;
+        use serde_json::json;
+
+        let key = WorkKey::new(ProjectId::from_bytes([7; 16]), "graph", "task", 1).unwrap();
+        let rows = vec![json!({"kind":"node", "work_key":key, "state":"waiting", "head":"abc123"})];
+        let digest = super::node_digests(&rows).remove(0);
+        assert!(digest.line.contains("head=abc123/recorded"));
     }
 
     #[test]
