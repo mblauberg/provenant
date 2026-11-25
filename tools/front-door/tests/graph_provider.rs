@@ -4017,6 +4017,49 @@ fn receipt_output_resolves_the_work_key() -> Result {
     Ok(())
 }
 
+fn receipt_output_carries_catalogue_family_and_role_for_opencode_lane() -> Result {
+    let stream = [
+        r#"{"type":"text","sessionID":"ses_a","part":{"text":"OK"}}"#,
+        r#"{"type":"step_finish","sessionID":"ses_a","part":{"reason":"stop"}}"#,
+    ]
+    .map(|line| format!("{line}\n"))
+    .concat();
+    let (rig, record) = persisted_attempt(
+        "opencode",
+        "opencode/opencode-go/hy4-flash-free",
+        ("work", "fixture"),
+        stream.as_bytes(),
+        b"",
+        0,
+    )?;
+    let target = record.key.to_string();
+    let output = rig.command(&["output", &target, "--part", "receipt", "--json"])?;
+    assert_eq!(
+        code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    let data: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    let data = &data["data"];
+    assert_eq!(data["adapter"], "opencode");
+    assert_eq!(data["model"], "opencode/opencode-go/hy4-flash-free");
+    assert_eq!(data["family"], "tencent");
+    assert_eq!(data["effort"], "unknown");
+    assert_eq!(data["effort_source"], "unknown");
+    assert_eq!(data["resolved_from"], "explicit");
+    assert_eq!(data["role"], "reviewer");
+    let receipt = data["receipt"].as_str().ok_or("receipt line")?;
+    for part in [
+        "opencode/opencode-go/hy4-flash-free@unknown",
+        "tencent",
+        "resolved from explicit",
+    ] {
+        assert!(receipt.contains(part), "{part}: {receipt}");
+    }
+    Ok(())
+}
+
 fn receipt_output_classifies_writers_and_refuses_running_attempts() -> Result {
     for options in [
         PersistedAttemptOptions {
@@ -4286,7 +4329,14 @@ fn receipt_output_reports_unknown_route_for_settled_lost_attempt() -> Result {
     let output = rig.command(&["output", &target, "--part", "receipt", "--json"])?;
     let data: Value = serde_json::from_slice(&output.stdout.bytes)?;
     assert_eq!(code(&output), 0, "{data}");
-    for field in ["adapter", "model", "effort", "family", "resolved_from"] {
+    for field in [
+        "adapter",
+        "model",
+        "effort",
+        "effort_source",
+        "family",
+        "resolved_from",
+    ] {
         assert_eq!(data["data"][field], "unknown", "{field}: {data}");
     }
     assert_eq!(data["data"]["reviewer"]["provenance"], "unknown");
@@ -6585,6 +6635,10 @@ fn main() -> ExitCode {
             (
                 "receipt_output_resolves_the_work_key",
                 receipt_output_resolves_the_work_key,
+            ),
+            (
+                "receipt_output_carries_catalogue_family_and_role_for_opencode_lane",
+                receipt_output_carries_catalogue_family_and_role_for_opencode_lane,
             ),
             (
                 "receipt_output_classifies_writers_and_refuses_running_attempts",

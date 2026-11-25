@@ -471,6 +471,10 @@ fn reviewer_receipts_cover_provenance_and_resolution_evidence()
     assert_eq!(data["resolved_from"], "explicit");
     assert_eq!(data["reviewer"]["provenance"], "unknown");
     assert_eq!(data["reviewer"]["actor_id"], "unknown");
+    assert_eq!(data["effort"], "high");
+    assert_eq!(data["effort_source"], "applied_route.effort");
+    assert_eq!(data["family"], "openai");
+    assert_eq!(data["role"], "reviewer");
     // One grep-able line naming role, applied model and effort, family,
     // resolution source and the attempt; the text form leads with it.
     let receipt = data["receipt"].as_str().ok_or("receipt line")?;
@@ -480,6 +484,7 @@ fn reviewer_receipts_cover_provenance_and_resolution_evidence()
         "codex/gpt-6.1-sol@high".to_owned(),
         "openai".to_owned(),
         "explicit".to_owned(),
+        "effort source applied_route.effort".to_owned(),
         record.key.to_string(),
         record.attempt_id.to_string(),
     ] {
@@ -551,7 +556,14 @@ fn reviewer_receipts_cover_provenance_and_resolution_evidence()
     record.applied_route = None;
     record.observed_route = None;
     let unknown = reviewer_receipt(&record, false).unwrap().0;
-    for field in ["adapter", "model", "effort", "family", "resolved_from"] {
+    for field in [
+        "adapter",
+        "model",
+        "effort",
+        "effort_source",
+        "family",
+        "resolved_from",
+    ] {
         assert_eq!(unknown[field], "unknown", "{field}");
     }
     record.applied_route = Some(Default::default());
@@ -568,6 +580,92 @@ fn reviewer_receipts_cover_provenance_and_resolution_evidence()
     assert_eq!(refused.kind, ErrorKind::Nonterminal);
     Ok(())
 }
+#[test]
+fn receipt_fields_are_sourced_for_opencode_and_codex_lanes()
+-> Result<(), Box<dyn std::error::Error>> {
+    fn settled(
+        attempt: u8,
+        requested: Value,
+        applied: Value,
+    ) -> Result<run::AttemptRecord, Box<dyn std::error::Error>> {
+        let now = WallTime::from_micros(100)?;
+        Ok(serde_json::from_value(json!({
+            "schema_version": 1,
+            "attempt_id": AttemptId::from_bytes([attempt; 16]),
+            "key": {"project": provenant_core::ProjectId::from_bytes([3; 16]), "graph": "receipt", "node": "test", "attempt": 1},
+            "project_id": provenant_core::ProjectId::from_bytes([3; 16]),
+            "attempt_number": 1, "revision": 1, "generation": 0,
+            "requested_route": requested,
+            "applied_route": applied,
+            "authority_digest": provenant_core::Digest::from_bytes([5; 32]),
+            "read_only_writable": [], "protected_paths": [], "trace": {}, "queued_at": now,
+            "state": {"state":"terminal","outcome":"lost","exit_code":null,"finished_at":now,"reason":null},
+            "usage": {},
+            "prompt": {"path":{"encoding":"utf8","path":"prompt.txt"}, "digest": CanonicalV1::file_digest(b""), "bytes":0,"complete":true,"redacted":false}
+        }))?)
+    }
+
+    // A dispatched opencode lane names a route, and the adapter drops an
+    // effort the free model does not support. Both facts must be sourced.
+    let opencode = settled(
+        7,
+        json!({"kind":"named","name":"utility","effort":"high"}),
+        json!({
+            "provider": "opencode",
+            "model": "opencode/opencode-go/hy4-flash-free",
+            "effort": null,
+            "source": "named_route",
+            "effort_warning": {
+                "requested": "high", "applied": null,
+                "model": "opencode/opencode-go/hy4-flash-free",
+                "source": "adapter:drop_unsupported_effort",
+                "reason": "unsupported model effort dropped"
+            }
+        }),
+    )?;
+    let (data, line) = reviewer_receipt(&opencode, false).unwrap();
+    assert_eq!(data["adapter"], "opencode");
+    assert_eq!(data["model"], "opencode/opencode-go/hy4-flash-free");
+    assert_eq!(data["family"], "tencent");
+    assert_eq!(data["effort"], "none");
+    assert_eq!(
+        data["effort_source"],
+        "effort_warning:adapter:drop_unsupported_effort"
+    );
+    assert_eq!(data["resolved_from"], "route utility");
+    assert_eq!(data["role"], "reviewer");
+    for part in [
+        "opencode/opencode-go/hy4-flash-free@none",
+        "tencent",
+        "route utility",
+        "effort source effort_warning:adapter:drop_unsupported_effort",
+    ] {
+        assert!(
+            data["receipt"].as_str().is_some_and(|s| s.contains(part)),
+            "{part}: {data}"
+        );
+    }
+    assert!(line.starts_with(data["receipt"].as_str().ok_or("receipt line")?));
+
+    // A pinned codex lane keeps its applied effort and its explicit origin.
+    let codex = settled(
+        8,
+        json!({"kind":"model","provider":"codex","model":"codex/gpt-6.1-sol","effort":"high"}),
+        json!({
+            "provider": "codex", "model": "codex/gpt-6.1-sol",
+            "effort": "high", "source": "pin"
+        }),
+    )?;
+    let (data, _) = reviewer_receipt(&codex, true).unwrap();
+    assert_eq!(data["adapter"], "codex");
+    assert_eq!(data["family"], "openai");
+    assert_eq!(data["effort"], "high");
+    assert_eq!(data["effort_source"], "applied_route.effort");
+    assert_eq!(data["resolved_from"], "explicit");
+    assert_eq!(data["role"], "writer");
+    Ok(())
+}
+
 #[test]
 fn opencode_without_a_session_record_observes_no_model() {
     let route = run::RouteRecord {

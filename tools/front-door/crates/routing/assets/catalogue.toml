@@ -46,7 +46,8 @@ trains_on_prompts = false
 model = "opencode/opencode-go/deepseek-v4.1-flash"
 monthly_allowance_usd = 80
 efforts = ["low", "high", "max"]
-evidence_ref = "docs/research/opencode-go-models.md#flash-fallbacks; accessed 2026-10-28; variants: docs/research/opencode-interface.md#errors (server /api/model, 2026-11-20)"
+family = "deepseek"
+evidence_ref = "docs/research/opencode-go-models.md#flash-fallbacks; accessed 2026-10-28; variants: docs/research/opencode-interface.md#errors (server /api/model, 2026-11-20); upstream lineage: config/telemetry-prices.toml openrouter_id=deepseek/deepseek-v4.1-flash"
 trains_on_prompts = false
 
 [[models.policy_rules]]
@@ -74,14 +75,16 @@ price_multiplier = 2.0
 model = "opencode/opencode-go/glm-5.3-flash"
 monthly_allowance_usd = 60
 efforts = []
-evidence_ref = "docs/research/opencode-go-models.md#flash-fallbacks; accessed 2026-10-28"
+family = "z-ai"
+evidence_ref = "docs/research/opencode-go-models.md#flash-fallbacks; accessed 2026-10-28; upstream lineage: config/telemetry-prices.toml openrouter_id=z-ai/glm-5.3-flash"
 trains_on_prompts = false
 
 [[models]]
 model = "opencode/opencode-go/hy4-flash-free"
 free = true
 efforts = []
-evidence_ref = "https://opencode.ai/docs/console/models (Hy4 flash Free; zero retention, no training); accessed 2026-11-23"
+family = "tencent"
+evidence_ref = "https://opencode.ai/docs/console/models (Hy4 flash Free; zero retention, no training); accessed 2026-11-23; upstream lineage: https://opencode.ai/data/tencent/hy4-flash (provider model page); accessed 2026-11-25"
 trains_on_prompts = false
 
 
@@ -262,21 +265,24 @@ trains_on_prompts = false
 model = "opencode/opencode/deepseek-v4.1-flash-free"
 free = true
 efforts = ["low", "high", "max"]
-evidence_ref = "https://opencode.ai/docs/zen (privacy: zero retention, no training; not an exception); accessed 2026-10-30; variants: docs/research/opencode-interface.md#errors (server /api/model, 2026-11-20)"
+family = "deepseek"
+evidence_ref = "https://opencode.ai/docs/zen (privacy: zero retention, no training; not an exception); accessed 2026-10-30; variants: docs/research/opencode-interface.md#errors (server /api/model, 2026-11-20); upstream lineage: config/telemetry-prices.toml openrouter_id=deepseek/deepseek-v4.1-flash"
 trains_on_prompts = false
 
 [[models]]
 model = "opencode/opencode/glm-5.3-flash-free"
 free = true
 efforts = []
-evidence_ref = "https://opencode.ai/docs/zen (privacy: zero retention, no training; not an exception); accessed 2026-10-30"
+family = "z-ai"
+evidence_ref = "https://opencode.ai/docs/zen (privacy: zero retention, no training; not an exception); accessed 2026-10-30; upstream lineage: config/telemetry-prices.toml openrouter_id=z-ai/glm-5.3-flash"
 trains_on_prompts = false
 
 [[models]]
 model = "opencode/opencode/hy4-flash-free"
 free = true
 efforts = ["none", "high"]
-evidence_ref = "https://opencode.ai/docs/console/models (Hy4 flash Free; zero retention, no training); accessed 2026-11-23; variants: docs/research/opencode-interface.md#errors (server /api/model, 2026-11-20)"
+family = "tencent"
+evidence_ref = "https://opencode.ai/docs/console/models (Hy4 flash Free; zero retention, no training); accessed 2026-11-23; variants: docs/research/opencode-interface.md#errors (server /api/model, 2026-11-20); upstream lineage: https://opencode.ai/data/tencent/hy4-flash (provider model page); accessed 2026-11-25"
 trains_on_prompts = false
 
 [pacing]
