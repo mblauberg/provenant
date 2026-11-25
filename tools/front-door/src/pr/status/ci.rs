@@ -1,6 +1,6 @@
 //! Exact-head observations for deterministic graph gates.
 use super::{Check, encode, mark_conflict, required_checks, summarise_ci};
-use crate::pr::observer::{Check as Observed, Observer};
+use crate::pr::observer::{Check as Observed, ObserveError, Observer};
 use provenant_fabric_runtime::graph::{
     CiFailedCheck, CiObservation, CiState, ConflictObservation, ConflictState,
 };
@@ -39,17 +39,36 @@ pub(super) fn observe(
         )
         .ok()
     };
+    let rate_limit = std::cell::RefCell::new(None);
     let evidence = |head: &Head| {
         let request = provenant_config::ports::Request::within(READ_BUDGET);
         let mut observer = Observer::open(state, project, &head.repository, &request).ok()?;
         let max_age = observer.fast_interval();
-        observer.checks(&head.sha, max_age, &request).ok()
+        match observer.checks(&head.sha, max_age, &request) {
+            Ok(checks) => Some(checks),
+            Err(ObserveError::RateLimited { reset }) => {
+                *rate_limit.borrow_mut() = Some(reset);
+                None
+            }
+            Err(_) => None,
+        }
     };
     let mut result = observe_with(target, names, delivery_queue, &read, evidence, |head| {
         required_checks(state, project, &policy_target(target, head, &read)?)
     });
+    if let Some(reset) = rate_limit.into_inner() {
+        wait_for_rate_limit(&mut result, reset);
+    }
     result.bound_failed_checks(failed_checks_max_bytes, max_failed_checks);
     result
+}
+
+/// Quota is a retryable observation, not a CI verdict. The shared observer
+/// suppresses further forge reads until the recorded reset.
+fn wait_for_rate_limit(result: &mut CiObservation, reset: jiff::Timestamp) {
+    result.state = CiState::Pending;
+    result.summary = format!("forge rate limit; waiting until {reset}");
+    result.failed_checks.clear();
 }
 
 /// Read mergeability before CI so a conflict is routed to rebase immediately.
@@ -415,6 +434,18 @@ mod tests {
             "details_url":"https://github.com/owner/repo/actions/runs/1",
             "output":{"title":"Build failed","summary":"error: expected a value","text":"src/main.rs:12"}
         }]}])
+    }
+
+    #[test]
+    fn rate_limit_is_a_wait_with_its_reset_not_a_ci_verdict() {
+        let mut observation = summarise_ci(None, None);
+        observation.head_sha = Some(OLD.into());
+        let reset = jiff::Timestamp::from_second(2_000_000_000).unwrap();
+        wait_for_rate_limit(&mut observation, reset);
+        assert_eq!(observation.state, CiState::Pending);
+        assert_eq!(observation.head_sha.as_deref(), Some(OLD));
+        assert!(observation.summary.contains(&reset.to_string()));
+        assert!(observation.failed_checks.is_empty());
     }
 
     #[test]
