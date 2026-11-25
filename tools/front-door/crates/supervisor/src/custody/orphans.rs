@@ -112,7 +112,7 @@ impl Recovery {
         if exit.scope != self.reservation.scope || !exit.unresolved_cleanup {
             return Err(CustodyError::Fenced);
         }
-        let mut report = self.end_candidates(&exit, observer, probe, patience)?;
+        let report = self.end_candidates(&exit, observer, probe, patience)?;
         if !report.survivors.is_empty() {
             return Ok(report);
         }
