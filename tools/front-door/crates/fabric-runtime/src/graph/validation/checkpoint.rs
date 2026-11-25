@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
+pub(in crate::graph) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
     document: &GraphDocument,
     checkpoint: &GraphCheckpoint,
     plan: &PlannedGraph,
@@ -445,8 +445,15 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
             ));
         }
         if node.loop_body.is_some() {
-            loops::validate_progress(progress, node, checkpoint, &positions, plan.queue.is_some())
-                .map_err(|_| bad("loop progress must match round state"))?;
+            loops::validate_progress(
+                progress,
+                node,
+                plan,
+                checkpoint,
+                &positions,
+                plan.queue.is_some(),
+            )
+            .map_err(|_| bad("loop progress must match round state"))?;
             continue;
         }
         if node.composite.is_some() {

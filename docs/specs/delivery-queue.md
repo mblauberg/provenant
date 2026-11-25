@@ -64,7 +64,9 @@ For each item, the default `deliver` shape is optional scope → writer → hygi
 → publish PR → conflict gate → CI gate → review → acceptance → land. A conflict
 gate observes the PR before waiting for CI. `CONFLICTING` routes to a rebase
 writer on the same retained worktree, then hygiene, publication and fresh
-conflict/CI gates. Unknown mergeability is pending, not clean. If the head moves
+conflict/CI gates. Checkpoint validation uses the planned recovery path to keep
+an initial conflict nonterminal while that path is pending. Unknown mergeability
+is pending, not clean. If the head moves
 while mergeability is read, the observation is pending on the new head and
 identifies both heads; stale conflict evidence cannot direct a rebase. A failed CI gate
 passes the failing head, job identities and bounded log excerpts as untrusted

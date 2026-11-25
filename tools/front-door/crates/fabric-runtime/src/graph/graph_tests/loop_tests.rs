@@ -415,6 +415,7 @@ fn delivery_loop_exhaustion_parks_once_and_replays_the_same_transition() {
         loops::validate_progress(
             &progress,
             &plan.nodes[loop_index],
+            &plan,
             &checkpoint,
             &positions,
             true,
@@ -425,6 +426,7 @@ fn delivery_loop_exhaustion_parks_once_and_replays_the_same_transition() {
         loops::validate_progress(
             &progress,
             &plan.nodes[loop_index],
+            &plan,
             &checkpoint,
             &positions,
             false,
@@ -438,6 +440,7 @@ fn delivery_loop_exhaustion_parks_once_and_replays_the_same_transition() {
         loops::validate_progress(
             &progress,
             &plan.nodes[loop_index],
+            &plan,
             &replay,
             &positions,
             true,
@@ -470,6 +473,7 @@ fn delivery_loop_exhaustion_parks_once_and_replays_the_same_transition() {
         loops::validate_progress(
             &progress,
             &plan.nodes[loop_index],
+            &plan,
             &checkpoint,
             &positions,
             true,
@@ -483,6 +487,7 @@ fn delivery_loop_exhaustion_parks_once_and_replays_the_same_transition() {
         loops::validate_progress(
             &progress,
             &plan.nodes[loop_index],
+            &plan,
             &replay,
             &positions,
             true,
@@ -1982,6 +1987,28 @@ fn loop_conflict_recovery_is_bounded_and_replays_the_namespaced_target() {
             &positions,
         ),
         "a failed initial conflict remains nonterminal while fresh CI is pending"
+    );
+    checkpoint.ask_actor = Some("chair".into());
+    let loop_index = positions["delivery"];
+    let mut premature_failure = checkpoint.nodes[loop_index].clone();
+    premature_failure.state = NodeState::Failed;
+    premature_failure.outputs = Some(repair::terminal_outputs(
+        &plan.nodes[loop_index],
+        &checkpoint,
+        &positions,
+        false,
+    ));
+    assert!(
+        loops::validate_progress(
+            &premature_failure,
+            &plan.nodes[loop_index],
+            &plan,
+            &checkpoint,
+            &positions,
+            true,
+        )
+        .is_err(),
+        "checkpoint validation rejects a terminal loop while conflict recovery is pending"
     );
     let mut failed_writer = checkpoint.clone();
     failed_writer.nodes[rebase_index].state = NodeState::Failed;

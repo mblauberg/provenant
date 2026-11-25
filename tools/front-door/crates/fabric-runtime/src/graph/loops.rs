@@ -1332,6 +1332,7 @@ pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
 pub(super) fn validate_progress(
     progress: &NodeProgress,
     node: &PlannedNode,
+    plan: &PlannedGraph,
     checkpoint: &GraphCheckpoint,
     positions: &BTreeMap<String, usize>,
     queue: bool,
