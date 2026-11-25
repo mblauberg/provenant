@@ -1887,7 +1887,7 @@ fn delivery_park_replays_one_request_and_binds_its_transition() {
 }
 
 #[test]
-fn delivery_park_refuses_an_attempt_from_another_graph_or_node() {
+fn delivery_park_binds_the_attempt_to_the_graph() {
     let work = RequestWork {
         extra: Default::default(),
         graph: "graph-1".into(),
@@ -1905,13 +1905,31 @@ fn delivery_park_refuses_an_attempt_from_another_graph_or_node() {
         attempt: 1,
         route_index: 0,
     };
+    // A publication or loop can park on its own node for a writer's attempt.
+    let writer = provenant_records::graph::AttemptKey {
+        node_id: "writer-child".into(),
+        ..key.clone()
+    };
+    assert!(
+        delivery_park(
+            "session-a".into(),
+            OperationId::parse("park-child").unwrap(),
+            work.clone(),
+            Some("issue-42"),
+            Some(&writer),
+            provenant_records::graph::ParkReason::OperationError,
+            "inspect",
+            &[],
+        )
+        .is_ok()
+    );
     for key in [
         provenant_records::graph::AttemptKey {
             graph_id: "other".into(),
             ..key.clone()
         },
         provenant_records::graph::AttemptKey {
-            node_id: "other".into(),
+            node_id: "".into(),
             ..key.clone()
         },
         provenant_records::graph::AttemptKey {
