@@ -2951,21 +2951,19 @@ fn listing_with_evidence<F>(
     mut graphs: Vec<ListedGraph>,
     projections: &mut std::collections::BTreeMap<String, Vec<Value>>,
     selection: (i64, bool, usize, Option<u64>),
-    gather: impl FnOnce() -> Result<F, FacadeError>,
+    mut gather: impl FnMut() -> Result<F, FacadeError>,
     enrich_rows: impl Fn(&mut [Value], &F) -> Result<(), FacadeError>,
 ) -> (Listing, Option<Result<F, FacadeError>>) {
     let (now, full, limit, cursor) = selection;
     let gathered = std::cell::OnceCell::new();
-    let gather = std::cell::RefCell::new(Some(gather));
-    let enrich = |_name: &str, rows: &mut [Value]| {
-        let facts =
-            gathered.get_or_init(|| gather.borrow_mut().take().expect("gathered at most once")());
+    let mut enrich = |_name: &str, rows: &mut [Value]| {
+        let facts = gathered.get_or_init(&mut gather);
         match facts {
             Ok(facts) => enrich_rows(rows, facts),
             Err(error) => Err(error.clone()),
         }
     };
-    let enriched = enrich_liveness_candidates(&mut graphs, projections, enrich);
+    let enriched = enrich_liveness_candidates(&mut graphs, projections, &mut enrich);
     let settled_count = graphs.iter().filter(|graph| graph.settled).count();
     let mut listing = select_listing(graphs, now, full, limit, cursor);
     for graph in &mut listing.rows {

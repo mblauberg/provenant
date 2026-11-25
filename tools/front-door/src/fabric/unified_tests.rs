@@ -657,6 +657,38 @@ fn full_listing_shares_host_scans_and_lazily_reads_local_census() {
 }
 
 #[test]
+fn listing_shares_failed_host_scan_across_both_passes() {
+    let scans = std::cell::Cell::new(0);
+    let graphs = vec![listed("active", false, 1), listed("history", true, 1)];
+    let mut projections = std::collections::BTreeMap::new();
+    projections.insert("active".to_owned(), vec![listing_attempt_row("running")]);
+    projections.insert("history".to_owned(), vec![listing_attempt_row("terminal")]);
+
+    let (listing, facts) = super::listing_with_evidence(
+        graphs,
+        &mut projections,
+        (1, true, 10, None),
+        || {
+            scans.set(scans.get() + 1);
+            Err::<(), _>(FacadeError::Timeout)
+        },
+        |_, _| Ok(()),
+    );
+
+    assert_eq!(scans.get(), 1, "a failed scan is shared, not retried");
+    assert!(matches!(facts, Some(Err(FacadeError::Timeout))));
+    assert_eq!(listing.rows.len(), 2);
+    for graph in listing.rows {
+        assert!(
+            graph
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("status evidence unavailable"))
+        );
+    }
+}
+
+#[test]
 fn the_listing_never_hides_active_work_and_counts_what_it_omits() {
     let day = provenant_cli::limits::LISTING_SETTLED_SECONDS * 1_000_000;
     let now = 10 * day;
