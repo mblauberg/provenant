@@ -356,6 +356,18 @@ from another provider is never substituted, and an absent key stays absent. A
 node-wide account pin does not switch accounts; each fallback candidate of an
 unpinned node may declare its own.
 
+### Launch login recovery
+
+A login failure recorded for an account is cleared at launch only by a probe that
+inspects the credential the lane will use. A CLI `auth status --json` answer names
+the signed-in account but reads only the CLI's local login bit, so it can still
+name the original account after those credentials were replaced. Such a probe
+never clears a recorded failure: launch selects a logged-in account or refuses
+with the account and its sign-in remedy. The rule comes from the adapter registry
+(`account_identity_probe`), not from per-adapter cases in the launch path.
+- Why: an account switch must not make a lane launch on a stale login that the
+  provider then rejects with "Not logged in".
+
 Credential roots must not be HOME or an ancestor of HOME, and directories within
 one account entry are aliases that may overlap. `identity::account_state_paths`
 resolves each adapter's state and credential stores before registration,

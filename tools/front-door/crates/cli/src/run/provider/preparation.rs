@@ -2235,6 +2235,34 @@ pub(super) fn login_check_can_clear(adapter: &str, mismatch: bool) -> bool {
     !mismatch || AdapterSpec::get(adapter).is_some_and(|spec| spec.login_check_names_account)
 }
 
+/// Spec: docs/specs/routing.md#launch-login-recovery
+///
+/// Whether a fresh observation may clear a login failure recorded for an
+/// account at launch. Naming the account is necessary but not sufficient: a
+/// CLI `auth status --json` answer reports the CLI's local login bit, which
+/// can still name the original account after its credentials were replaced.
+/// Only probes that inspect the credential the lane will use may clear a
+/// recorded failure; otherwise the launch selects a logged-in account or
+/// refuses with the account and its sign-in remedy. The rule comes from the
+/// adapter registry, so no adapter is special-cased here.
+fn login_recovery_can_clear(
+    adapter: &str,
+    mismatch: bool,
+    strategy: provenant_records::LoginReprobe,
+) -> bool {
+    if strategy == provenant_records::LoginReprobe::None
+        || strategy == provenant_records::LoginReprobe::ExecutableOnly
+    {
+        return false;
+    }
+    if !login_check_can_clear(adapter, mismatch) {
+        return false;
+    }
+    AdapterSpec::get(adapter).is_none_or(|spec| {
+        spec.account_identity_probe != provenant_records::AccountIdentityProbe::CliAuthStatus
+    })
+}
+
 /// Only the already-selected account may be refreshed. A replacement cannot
 /// grant another account's identity or revive a different catalogue revision.
 fn stale_observation_index(
@@ -2896,6 +2924,102 @@ mod stale_readiness_tests {
         );
 
         assert_eq!(std::fs::read(&token_path)?, token_before);
+        Ok(())
+    }
+
+    #[test]
+    // Spec: docs/specs/routing.md#launch-login-recovery
+    fn claude_auth_status_cannot_clear_a_login_failure_after_credentials_change()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_os::exec::{
+            CapturedStream, ExecError, ExecOptions, ExecOutcome, Executor, Termination,
+        };
+
+        struct StaleStatus {
+            directory: std::path::PathBuf,
+        }
+        impl Executor for StaleStatus {
+            fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+                assert_eq!(options.argv[1..], ["auth", "status", "--json"]);
+                assert!(options.env.unwrap().iter().any(|(key, value)| {
+                    key == "CLAUDE_CONFIG_DIR" && value == self.directory.as_os_str()
+                }));
+                let bytes = br#"{"loggedIn":true,"email":"account@example.test"}"#.to_vec();
+                let total_bytes = bytes.len() as u64;
+                Ok(ExecOutcome {
+                    termination: Termination::Exit(0),
+                    stdout: CapturedStream {
+                        bytes,
+                        total_bytes,
+                        ..Default::default()
+                    },
+                    stderr: CapturedStream::default(),
+                    timed_out: false,
+                    drain_truncated: false,
+                    overflow_stopped: false,
+                    cancelled: false,
+                    elapsed_micros: 0,
+                })
+            }
+        }
+
+        let temp = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(temp.path())?;
+        let home = root.join("home");
+        let state = root.join("state");
+        let directory = home.join(".claude-work");
+        std::fs::create_dir_all(&directory)?;
+        std::fs::create_dir_all(&state)?;
+        let key = provenant_providers::identity::fingerprint("account@example.test")
+            .ok_or("account fingerprint")?;
+        let executor = provenant_providers::host::HostProbeExecutor::new(
+            &StaleStatus {
+                directory: directory.clone(),
+            },
+            &state,
+        )?;
+
+        // The account's credentials were replaced, but Claude's local status bit
+        // still names the original account: an identity-only probe cannot tell a
+        // stale login from a healthy one and must not clear a recorded failure.
+        let (detected, _) = provenant_providers::accounts::detect_for_registration(
+            &executor,
+            "claude",
+            Path::new("/fixture/claude"),
+            &home,
+            std::ffi::OsStr::new("fixture"),
+            &directory,
+            executor.root(),
+        )?;
+        assert_eq!(detected, key);
+        for mismatch in [false, true] {
+            assert!(!login_recovery_can_clear(
+                "claude",
+                mismatch,
+                provenant_records::LoginReprobe::AccountIdentity
+            ));
+        }
+        // Probes that inspect the credential the lane will use may still clear.
+        assert!(login_recovery_can_clear(
+            "agy",
+            true,
+            provenant_records::LoginReprobe::AccountIdentity
+        ));
+        assert!(login_recovery_can_clear(
+            "codex",
+            false,
+            provenant_records::LoginReprobe::Codex
+        ));
+        assert!(login_recovery_can_clear(
+            "cursor",
+            false,
+            provenant_records::LoginReprobe::Cursor
+        ));
+        assert!(!login_recovery_can_clear(
+            "opencode",
+            false,
+            provenant_records::LoginReprobe::ExecutableOnly
+        ));
         Ok(())
     }
 }
@@ -3560,10 +3684,10 @@ pub(super) fn prepare_candidates_inner(
                                     | provenant_quota::ReadinessReason::LoginExpired
                             )
                         );
-                    // A version-only probe cannot clear an authentication refusal.
-                    if auth_failure
-                        && login_check_can_clear(&entry.adapter, mismatch)
-                        && strategy != provenant_records::LoginReprobe::ExecutableOnly
+                    // A version-only probe cannot clear an authentication refusal,
+                    // and neither can a CLI status bit that still names the account
+                    // after its credentials were replaced (#3974).
+                    if auth_failure && login_recovery_can_clear(&entry.adapter, mismatch, strategy)
                     {
                         let executable = Path::new(&record.executable);
                         // Date recovery before I/O: late publication of an older
