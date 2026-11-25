@@ -1693,16 +1693,32 @@ pub(super) fn dependency_state(
         .any(|parent| !checkpoint.nodes[positions[parent]].state.settled());
     let mut skipped = false;
     let mut blocked = false;
-    let recovery_loop = node
+    let recovery_owner = if node
         .loop_body
         .as_ref()
-        .is_some_and(|spec| !spec.retry_on.is_empty());
-    let recovery_triggered = recovery_loop
-        && node.depends_on.iter().any(|parent| {
+        .is_some_and(|spec| !spec.retry_on.is_empty())
+    {
+        Some(node)
+    } else {
+        node.round
+            .as_ref()
+            .filter(|round| round.round == 1)
+            .and_then(|round| positions.get(&round.loop_id))
+            .map(|index| &plan.nodes[*index])
+            .filter(|owner| {
+                owner
+                    .loop_body
+                    .as_ref()
+                    .is_some_and(|spec| !spec.retry_on.is_empty())
+            })
+    };
+    let recovery_triggered = recovery_owner.is_some_and(|owner| {
+        owner.depends_on.iter().any(|parent| {
             let index = positions[parent];
-            plan.nodes[index].on_fail.as_deref() == Some(node.id.as_str())
+            plan.nodes[index].on_fail.as_deref() == Some(owner.id.as_str())
                 && checkpoint.nodes[index].state == NodeState::Failed
-        });
+        })
+    });
     if node
         .after_expansion
         .iter()
@@ -1791,16 +1807,19 @@ pub(super) fn dependency_state(
             NodeState::Blocked | NodeState::Skipped
                 if recovery_triggered
                     && (recovery
-                        || node.depends_on.iter().any(|trigger| {
-                            let trigger_index = positions[trigger];
-                            plan.nodes[trigger_index].on_fail.as_deref() == Some(node.id.as_str())
-                                && checkpoint.nodes[trigger_index].state == NodeState::Failed
-                                && loops::descendant_of(
-                                    &plan.nodes[index],
-                                    trigger,
-                                    plan,
-                                    positions,
-                                )
+                        || recovery_owner.is_some_and(|owner| {
+                            owner.depends_on.iter().any(|trigger| {
+                                let trigger_index = positions[trigger];
+                                plan.nodes[trigger_index].on_fail.as_deref()
+                                    == Some(owner.id.as_str())
+                                    && checkpoint.nodes[trigger_index].state == NodeState::Failed
+                                    && loops::descendant_of(
+                                        &plan.nodes[index],
+                                        trigger,
+                                        plan,
+                                        positions,
+                                    )
+                            })
                         })) => {}
             NodeState::Failed if plan.nodes[index].on_fail.is_some() => skipped = true,
             NodeState::Failed | NodeState::Blocked => blocked = true,
