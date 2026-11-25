@@ -2607,6 +2607,19 @@ impl Factory {
             .as_ref()
             .map(|config| (&config.domains.fabric.queue, &config.origins));
         seal_document_queue(&mut document, queue_config, read_config_error.as_deref())?;
+        if let Some(launch) = &queue_launch {
+            // These values come from registry custody, never from the marker in
+            // the submitted JSON. Replays retain the same policy and identity.
+            document.queue = Some(launch.queue.knobs.clone());
+            document
+                .set_queue_ci_wait(&launch.queue.cap_wait)
+                .map_err(|_| FacadeError::StateCorrupt)?;
+            document
+                .context
+                .get_or_insert_with(Default::default)
+                .work_item = Some(launch.item.identity.item.clone());
+            document.schema_version = document.schema_version.max(2);
+        }
         // Template compilation selected a schema before document metadata was
         // applied; a retained review base requires the schema-2 representation.
         if raw.is_none()
