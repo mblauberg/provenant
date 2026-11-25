@@ -1,5 +1,9 @@
 //! Durable execution records and bounded, project-scoped readers.
 #![forbid(unsafe_code)]
+/// Named ref a pinned review view ships at the host-supplied base. A review
+/// lane cannot fetch, so this ref is how the base stays available in a detached
+/// view that carries no remote default ref.
+pub const REVIEW_BASE_REF: &str = "refs/provenant/review/base";
 mod admission;
 mod artifacts;
 mod board;

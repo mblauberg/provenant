@@ -269,6 +269,48 @@ fn review_lane_working_directory_is_the_pinned_head_not_the_primary()
 }
 
 #[test]
+// Spec: docs/specs/run-launch.md#inputs-and-resources
+fn review_view_ships_a_named_ref_at_the_host_pinned_base()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = CommitSourcePreparation::new()?;
+    // The fixture checkout has no remote default ref. Pin a base and a later
+    // head so the two are distinguishable inside the detached view.
+    let base = fixture.task.base.clone().ok_or("fixture review base")?;
+    std::fs::write(fixture.project.join("reviewed.txt"), "reviewed\n")?;
+    provenant_os::fixture::run_git(&fixture.project, &["add", "reviewed.txt"])?;
+    provenant_os::fixture::run_git(&fixture.project, &["commit", "-qm", "reviewed"])?;
+    let head = String::from_utf8(provenant_os::fixture::run_git(
+        &fixture.project,
+        &["rev-parse", "HEAD"],
+    )?)?;
+    fixture.task.base = Some(base.clone());
+    fixture.task.head = Some(head.trim().to_owned());
+    fixture.task.route = run::RequestedRoute::Review {
+        required_family: None,
+        extra: Default::default(),
+        name: "senior".into(),
+        effort: None,
+        excluded_families: Vec::new(),
+        distinct_families: true,
+        preferred_families: Vec::new(),
+        require_distinct: false,
+    };
+    let launch = fixture.prepare()?;
+    let git_dir = launch.cwd.join(".git");
+    assert!(
+        !git_dir.join("refs/remotes/origin/HEAD").exists(),
+        "the review view must not rely on a remote default ref"
+    );
+    let shipped = std::fs::read_to_string(git_dir.join("refs/provenant/review/base"))?;
+    assert_eq!(
+        shipped.trim(),
+        base.as_str(),
+        "the view must ship the pinned base ref"
+    );
+    Ok(())
+}
+
+#[test]
 fn host_denied_handoff_remains_best_effort() -> Result<(), Box<dyn std::error::Error>> {
     let fixture = CommitSourcePreparation::new()?;
     std::fs::write(fixture.state.join("config.toml"), format!(
