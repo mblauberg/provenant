@@ -270,7 +270,7 @@ fn item_request(queue_id: &str, item: &QueueItem) -> Result<serde_json::Value, S
     Ok(request)
 }
 
-fn matches_item_execution(
+pub(super) fn matches_item_execution(
     queue_id: &str,
     item: &QueueItem,
     execution: &provenant_fabric_runtime::graph::GraphExecution,
