@@ -42,11 +42,15 @@ efforts = []
 evidence_ref = "tests/fixtures/model-listings/cursor-models.txt@82daaf40aaae5c17a9ccb74815e64f4d76c2dbcc; captured 2026-10-23"
 trains_on_prompts = false
 
+# The opencode DeepSeek and Z.ai rows deliberately carry no `family`: they are
+# members of the junior/senior depletion pools, where a catalogue family lets
+# the ladder hand a spent route to a same-provider different-family sibling.
+# Opencode receipt family is sourced from the Hy4 rows below, which are not
+# pool members, so provenance stays sourced without changing fallback routing.
 [[models]]
 model = "opencode/opencode-go/deepseek-v4.1-flash"
 monthly_allowance_usd = 80
 efforts = ["low", "high", "max"]
-family = "deepseek"
 evidence_ref = "docs/research/opencode-go-models.md#flash-fallbacks; accessed 2026-10-28; variants: docs/research/opencode-interface.md#errors (server /api/model, 2026-11-20); upstream lineage: config/telemetry-prices.toml openrouter_id=deepseek/deepseek-v4.1-flash"
 trains_on_prompts = false
 
@@ -75,7 +79,6 @@ price_multiplier = 2.0
 model = "opencode/opencode-go/glm-5.3-flash"
 monthly_allowance_usd = 60
 efforts = []
-family = "z-ai"
 evidence_ref = "docs/research/opencode-go-models.md#flash-fallbacks; accessed 2026-10-28; upstream lineage: config/telemetry-prices.toml openrouter_id=z-ai/glm-5.3-flash"
 trains_on_prompts = false
 
@@ -265,7 +268,6 @@ trains_on_prompts = false
 model = "opencode/opencode/deepseek-v4.1-flash-free"
 free = true
 efforts = ["low", "high", "max"]
-family = "deepseek"
 evidence_ref = "https://opencode.ai/docs/zen (privacy: zero retention, no training; not an exception); accessed 2026-10-30; variants: docs/research/opencode-interface.md#errors (server /api/model, 2026-11-20); upstream lineage: config/telemetry-prices.toml openrouter_id=deepseek/deepseek-v4.1-flash"
 trains_on_prompts = false
 
@@ -273,7 +275,6 @@ trains_on_prompts = false
 model = "opencode/opencode/glm-5.3-flash-free"
 free = true
 efforts = []
-family = "z-ai"
 evidence_ref = "https://opencode.ai/docs/zen (privacy: zero retention, no training; not an exception); accessed 2026-10-30; upstream lineage: config/telemetry-prices.toml openrouter_id=z-ai/glm-5.3-flash"
 trains_on_prompts = false
 
