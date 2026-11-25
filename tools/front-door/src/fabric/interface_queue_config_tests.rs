@@ -169,3 +169,28 @@ fn explicit_queue_on_named_full_document_is_sealed_with_config_sources() {
     assert_eq!(queue.prep_retries.value, 3);
     assert_eq!(queue.prep_retries.source.layer, Layer::Host);
 }
+
+#[test]
+fn queue_delivery_binds_the_bundled_execution_seams() {
+    let library = TemplateLibrary::bundled();
+    let queue = json!({"queue": {}});
+    for (raw, expected) in [(None, false), (Some(&queue), true)] {
+        let mut parameters = json!({"delivery_execution_wired": false});
+        bind_queue_delivery(raw, "deliver", &library, &mut parameters);
+        let node = provenant_fabric_runtime::graph::template::Compiler::new(&library)
+            .compile(&json!({"id":"delivery", "use":"deliver", "with":parameters}))
+            .unwrap();
+        let children = &node.composite.unwrap().nodes;
+        for role in ["delivery-hygiene", "delivery-publish", "delivery-conflict"] {
+            let seam = children
+                .iter()
+                .find(|node| node.role.as_deref() == Some(role))
+                .unwrap();
+            assert_eq!(
+                provenant_fabric_runtime::graph::when::holds(&seam.when),
+                expected
+            );
+        }
+    }
+}
+
