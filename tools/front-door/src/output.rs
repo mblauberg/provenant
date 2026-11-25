@@ -337,6 +337,12 @@ pub(crate) fn strip_ansi(text: &str) -> Cow<'_, str> {
                     index += 1;
                 }
             }
+            // String terminator: ESC backslash can end an OSC or stand alone
+            // (for example after an OSC already closed with BEL). Drop both
+            // bytes so the next printable byte is kept verbatim.
+            Some(b'\\') => {
+                index = (index + 1).min(bytes.len());
+            }
             // Two-byte character set and private sequences.
             Some(b'(' | b')' | b'#' | b'*' | b'+') => {
                 index = (index + 2).min(bytes.len());
