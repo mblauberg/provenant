@@ -1917,6 +1917,7 @@ fn graph_cancel_and_steer_admission_have_one_ordered_winner() -> TestResult {
 // Spec: docs/specs/run.md#stop-intent
 #[test]
 fn stop_settles_a_settling_attempt_and_keeps_its_captured_evidence() -> TestResult {
+    use provenant_core::Clock as _;
     let temp = tempfile::tempdir()?;
     let clock = crate::tests::clock();
     let cancel = provenant_core::CancelToken::new();
