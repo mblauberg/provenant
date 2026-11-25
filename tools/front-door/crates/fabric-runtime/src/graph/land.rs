@@ -706,11 +706,16 @@ pub(super) fn validate_relations(
                 let source = &nodes[*index];
                 upstream.contains(index)
                     && if source.kind == Some(NodeKind::Publish) {
-                        publish_source_writer(nodes, positions, *index).is_some_and(|writer| {
+                        source.delivery_adoption.as_ref().is_some_and(|intent| {
                             !plans::writer(node)
-                                || (node.worktree.is_some()
-                                    && node.worktree == nodes[writer].worktree)
-                        })
+                                || node.worktree.as_deref() == Some(intent.worktree.as_str())
+                        }) || publish_source_writer(nodes, positions, *index).is_some_and(
+                            |writer| {
+                                !plans::writer(node)
+                                    || (node.worktree.is_some()
+                                        && node.worktree == nodes[writer].worktree)
+                            },
+                        )
                     } else {
                         plans::writer(source)
                             && matches!(
