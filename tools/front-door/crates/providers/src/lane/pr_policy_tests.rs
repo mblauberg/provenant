@@ -146,6 +146,72 @@ fn the_gh_wrapper_enforces_the_lane_pull_request_policy() -> Result<(), Box<dyn 
         }
     }
 
+    // Selectors at command boundaries must not change write classification.
+    for policy in [PrPolicy::Never, PrPolicy::Draft] {
+        for (args, allowed) in [
+            (
+                vec!["-R", "o/r", "api", "-X", "POST", "repos/o/r/issues"],
+                false,
+            ),
+            (
+                vec!["--repo=o/r", "api", "repos/o/r/issues", "-f", "title=x"],
+                false,
+            ),
+            (
+                vec![
+                    "--hostname",
+                    "example.com",
+                    "--repo",
+                    "o/r",
+                    "api",
+                    "--input",
+                    "body.json",
+                ],
+                false,
+            ),
+            (vec!["-Ro/r", "pr", "--repo=o/r", "ready", "42"], false),
+            (
+                vec!["pr", "--hostname=example.com", "-R", "o/r", "merge", "42"],
+                false,
+            ),
+            (vec!["--repo", "o/r", "api", "repos/o/r/issues"], true),
+            (
+                vec![
+                    "--hostname=example.com",
+                    "api",
+                    "-f",
+                    "q=x",
+                    "-X",
+                    "GET",
+                    "search/issues",
+                ],
+                true,
+            ),
+            (vec!["-Ro/r", "pr", "--repo", "o/r", "view", "42"], true),
+            (vec!["api", "--template", "-f", "repos/o/r/issues"], true),
+        ] {
+            let output = run("normalised", policy, "host", &args)?;
+            assert_eq!(
+                output.termination == Termination::Exit(0),
+                allowed,
+                "{policy:?} {args:?}"
+            );
+            if allowed {
+                let expected = args
+                    .iter()
+                    .map(|arg| format!("<{arg}>\n"))
+                    .collect::<String>();
+                assert_eq!(
+                    output.stdout.bytes,
+                    expected.as_bytes(),
+                    "{policy:?} {args:?}"
+                );
+            } else {
+                assert!(output.stdout.bytes.is_empty(), "{policy:?} {args:?}");
+            }
+        }
+    }
+
     // All non-maintenance PR writes are refused by both restrictive policies.
     for policy in [PrPolicy::Never, PrPolicy::Draft] {
         for command in [

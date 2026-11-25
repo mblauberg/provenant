@@ -10,11 +10,35 @@ pub(super) fn pr_policy_guard(policy: provenant_config::PrPolicy, source: &str) 
     if policy == PrPolicy::Allowed {
         return String::new();
     }
-    // Fields imply POST only when no method overrides them. Resolve the method
-    // after scanning all arguments, including fields that precede the override.
+    // Normalise selectors at each command boundary in one place, without
+    // changing the arguments forwarded to gh. API options are scanned only
+    // after its command boundary, so option values cannot become commands.
     let mut guard = String::from(
-        r#"provenant_forge_write() {
-  [ "$1" = api ] || return 1
+        r#"provenant_classify() {
+  provenant_pr_action=read
+  provenant_forge_write=false
+  provenant_command=
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -R|--repo|--hostname)
+        shift; [ "$#" -gt 0 ] || return 0; shift ;;
+      -R?*|--repo=*|--hostname=*) shift ;;
+      pr)
+        if [ -n "$provenant_command" ]; then break; fi
+        provenant_command=pr; shift ;;
+      *) break ;;
+    esac
+  done
+  if [ "$provenant_command" = pr ]; then
+    case "$1" in
+      ''|--help|-h|checkout|checks|diff|list|status|view) ;;
+      create) provenant_pr_action=create ;;
+      edit|close|comment|review) provenant_pr_action=maintenance ;;
+      *) provenant_pr_action=write ;;
+    esac
+    return
+  fi
+  [ "$1" = api ] || return 0
   shift
   provenant_api_method=
   provenant_api_payload=false
@@ -29,15 +53,15 @@ pub(super) fn pr_policy_guard(policy: provenant_config::PrPolicy, source: &str) 
         provenant_api_method=$1 ;;
       --method=*) provenant_api_method=${1#--method=} ;;
       -X?*) provenant_api_method=${1#-X} ;;
-      -H|--header|--hostname|--cache|-q|--jq|-p|--preview|--template)
+      -H|--header|--hostname|-R|--repo|--cache|-q|--jq|-p|--preview|-t|--template)
         shift; [ "$#" -gt 0 ] || break ;;
     esac
     shift
   done
   case "$provenant_api_method" in
-    GET|HEAD|get|head) return 1 ;;
-    '') [ "$provenant_api_payload" = true ] && return 0; return 1 ;;
-    *) return 0 ;;
+    GET|HEAD|get|head) ;;
+    '') [ "$provenant_api_payload" = false ] || provenant_forge_write=true ;;
+    *) provenant_forge_write=true ;;
   esac
 }
 "#,
@@ -58,12 +82,8 @@ pub(super) fn pr_policy_guard(policy: provenant_config::PrPolicy, source: &str) 
         PrPolicy::Allowed => unreachable!(),
     };
     let message = quote(&message);
-    // Classify the supported gh PR commands in one place. Unknown commands are
-    // refused until classified, so a new gh mutation cannot silently bypass policy.
-    // A function preserves the caller's arguments and avoids Bash 3.2 parsing
-    // case patterns inside command substitution on macOS.
     guard.push_str(&format!(
-        "provenant_classify_pr() {{\nprovenant_pr_action=read\nwhile [ \"$#\" -gt 0 ]; do\n  case \"$1\" in\n    -R|--repo) shift; [ \"$#\" -gt 0 ] || break; shift ;;\n    -R?*|--repo=*) shift ;;\n    *) break ;;\n  esac\ndone\nif [ \"$1\" = pr ]; then\n  shift\n  while [ \"$#\" -gt 0 ]; do\n    case \"$1\" in\n      -R|--repo) shift; [ \"$#\" -gt 0 ] || break; shift ;;\n      -R?*|--repo=*) shift ;;\n      *) break ;;\n    esac\n  done\n  case \"$1\" in\n    ''|--help|-h|checkout|checks|diff|list|status|view) ;;\n    create) provenant_pr_action=create ;;\n    edit|close|comment|review) provenant_pr_action=maintenance ;;\n    lock|unlock|update-branch|revert|ready|reopen|merge) provenant_pr_action=write ;;\n    *) provenant_pr_action=write ;;\n  esac\nfi\n}}\nprovenant_classify_pr \"$@\"\ncase \"{policy_name}:$provenant_pr_action\" in\n  never:create|never:maintenance|never:write|draft:write)\n    printf '%s\\n' {message} >&2\n    exit 2 ;;\n  draft:create)\n    provenant_has_draft=false\n    for provenant_arg in \"$@\"; do\n      case $provenant_arg in --draft) provenant_has_draft=true ;; esac\n    done\n    if [ \"$provenant_has_draft\" = false ]; then set -- \"$@\" --draft; fi ;;\nesac\nif provenant_forge_write \"$@\"; then\n  printf '%s\\n' {message} >&2\n  exit 2\nfi\n"
+        "provenant_classify \"$@\"\ncase \"{policy_name}:$provenant_pr_action\" in\n  never:create|never:maintenance|never:write|draft:write)\n    printf '%s\\n' {message} >&2\n    exit 2 ;;\n  draft:create)\n    provenant_has_draft=false\n    for provenant_arg in \"$@\"; do\n      case $provenant_arg in --draft) provenant_has_draft=true ;; esac\n    done\n    if [ \"$provenant_has_draft\" = false ]; then set -- \"$@\" --draft; fi ;;\nesac\nif [ \"$provenant_forge_write\" = true ]; then\n  printf '%s\\n' {message} >&2\n  exit 2\nfi\n"
     ));
     guard
 }
