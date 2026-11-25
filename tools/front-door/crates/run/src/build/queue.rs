@@ -1060,7 +1060,7 @@ pub fn admit(request: &AdmissionRequest<'_>) -> Result<Admitted, BuildError> {
                 }
             }
         }
-        if rank < free
+        if (rank < free || (request.class == "ci" && request.limit == 0))
             && let Some(guard) =
                 try_slot(&slots, &order, request.limit, &request.limit_source)?
         {
@@ -1384,6 +1384,54 @@ mod tests {
         assert!(holder.contains("\"limit\":0"));
         assert!(holder.contains("queue.ci_slots=0 from launch"));
         drop(guard);
+        remove_ci_waiter(state.path(), &earlier).unwrap();
+    }
+
+    #[test]
+    fn uncapped_ci_bypasses_rank_after_transient_domain_lock_contention() {
+        let state = tempfile::tempdir().unwrap();
+        let cancel = CancelToken::new();
+        let mut earlier_request =
+            request(state.path(), "earlier", "queue", "earlier", &cancel);
+        earlier_request.class = "ci";
+        let earlier = CiLeaseOwner {
+            project: "project-1".into(),
+            graph_id: "delivery-earlier".into(),
+            node_id: "publish".into(),
+            head_sha: "f".repeat(40),
+        };
+        ensure_ci_waiter(
+            &earlier_request,
+            &earlier,
+            &ci_waiter_id(&earlier).unwrap(),
+        )
+        .unwrap();
+        let slots = open_ci_slots(state.path(), 1).unwrap();
+        let clock = SystemClock::new();
+        let domain = slots
+            .lock_ci_domain(
+                WaitBudget::up_to(
+                    clock.mono_now(),
+                    DurationMicros::from_micros(1_000_000),
+                ),
+                &cancel,
+                &clock,
+            )
+            .unwrap();
+        let mut uncapped = request(state.path(), "zero", "queue", "zero", &cancel);
+        uncapped.class = "ci";
+        uncapped.limit = 0;
+        uncapped.limit_source = "queue.ci_slots=0 from launch".into();
+        let ticket = ci_queue_path(state.path()).join("zero.json");
+        std::thread::scope(|scope| {
+            let attempt = scope.spawn(|| admit(&uncapped));
+            wait_for(&ticket);
+            drop(domain);
+            let Admitted::Held { guard, .. } = attempt.join().unwrap().unwrap() else {
+                panic!("zero-cap CI should bypass the older capped waiter after retry")
+            };
+            assert_eq!(guard.class(), "ci");
+        });
         remove_ci_waiter(state.path(), &earlier).unwrap();
     }
 
