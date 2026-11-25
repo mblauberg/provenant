@@ -879,7 +879,7 @@ pub(super) fn validate_relations(
                             .iter()
                             .filter_map(|dependency| positions.get(dependency).copied())
                             .filter(|index| {
-                                nodes[*index].on_fail.as_deref() == Some(&nodes[target].id)
+                                nodes[*index].on_fail.as_deref() == Some(nodes[target].id.as_str())
                             })
                             .collect();
                         entries.iter().any(|conflict| {

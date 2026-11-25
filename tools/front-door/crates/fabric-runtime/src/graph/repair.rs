@@ -795,20 +795,17 @@ pub(super) fn selected_publication_index(
     let initial = spec.initial_publication.as_deref()?;
     let mut entry_gate = false;
     for dependency in &node.depends_on {
-        let Some(index) = plan
+        let index = plan
             .nodes
             .iter()
-            .position(|candidate| candidate.id == *dependency)
-        else {
-            return None;
-        };
+            .position(|candidate| candidate.id == *dependency)?;
         if plan.nodes[index].round.is_some() {
             continue;
         }
         if checkpoint.nodes[index].state != NodeState::Succeeded {
             return None;
         }
-        entry_gate |= plan.nodes[index].on_fail.as_deref() == Some(&node.id);
+        entry_gate |= plan.nodes[index].on_fail.as_deref() == Some(node.id.as_str());
     }
     if !entry_gate
         || checkpoint.nodes.iter().any(|progress| {
@@ -821,7 +818,12 @@ pub(super) fn selected_publication_index(
     {
         return None;
     }
-    plan.nodes.iter().position(|member| member.id == initial)
+    plan.nodes
+        .iter()
+        .zip(&checkpoint.nodes)
+        .position(|(member, progress)| {
+            member.id == initial && progress.state == NodeState::Succeeded
+        })
 }
 
 pub(super) fn selected_publication(
