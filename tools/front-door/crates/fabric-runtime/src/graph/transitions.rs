@@ -823,6 +823,13 @@ pub(super) fn apply_attempt_observation(
                         }
                     }
                     AttemptOutcome::ProviderStalledRetry => {
+                        let review_limit_reached = review_preparation_substitution(node, attempt)
+                            && progress
+                                .attempts
+                                .iter()
+                                .filter(|attempt| attempt.review_substitution)
+                                .count()
+                                >= limits.review_substitutions;
                         match next_step::settlement_fallback_decision(
                             node,
                             route_index,
