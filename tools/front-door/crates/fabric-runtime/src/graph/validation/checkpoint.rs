@@ -704,11 +704,13 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                         Some(SourceBinding::Node { node: hygiene }) => positions.get(hygiene)
                             .is_some_and(|hygiene_index| {
                                 let hygiene_node = &plan.nodes[*hygiene_index];
-                                let hygiene_outcome = checkpoint.nodes[*hygiene_index].outputs.as_ref()
-                                    .and_then(|outputs| outputs.hygiene.as_ref());
+                                let hygiene_outputs = checkpoint.nodes[*hygiene_index].outputs.as_ref();
                                 matches!(&hygiene_node.source, Some(SourceBinding::Node { node }) if node == &intent.source_node)
-                                    && hygiene_outcome.is_some_and(|outcome| outcome.kind == provenant_records::graph::HygieneOutcomeKind::Clean
-                                        && outcome.after_head.as_deref() == Some(intent.input_head.as_str()))
+                                    && hygiene_outputs.is_some_and(|outputs| {
+                                        outputs.branch.as_deref() == Some(intent.writer_branch.as_str())
+                                            && outputs.hygiene.as_ref().is_some_and(|outcome| outcome.kind == provenant_records::graph::HygieneOutcomeKind::Clean
+                                                && outcome.after_head.as_deref() == Some(intent.input_head.as_str()))
+                                    })
                             }),
                         _ => false,
                     }
@@ -782,6 +784,14 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                     NodeState::Running => intent.is_some(),
                     NodeState::Succeeded => outcome.is_some_and(|outcome| {
                         outcome.kind == provenant_records::graph::HygieneOutcomeKind::Clean
+                            && progress.outputs.as_ref().is_some_and(|outputs| {
+                                outputs.commit == outcome.after_head
+                                    && (document.queue.is_none()
+                                        || outputs.branch.as_deref().is_some_and(|branch| {
+                                            !branch.trim().is_empty()
+                                                && !branch.chars().any(char::is_control)
+                                        }))
+                            })
                     }),
                     NodeState::Failed => outcome.is_some_and(|outcome| {
                         matches!(
