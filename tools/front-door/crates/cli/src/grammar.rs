@@ -862,6 +862,15 @@ pub struct Cancel {
     /// Reason to record (up to 256 bytes)
     #[arg(long, value_parser = reason, catalog_bounds = (0, 256))]
     pub reason: Option<String>,
+    /// Apply this existing stop operation as a revisioned delivery queue control
+    #[arg(long, value_enum, requires_all = ["queue_revision", "operation_id"])]
+    pub queue_control: Option<QueueControlAction>,
+    /// Current delivery queue graph revision
+    #[arg(long, requires = "queue_control", catalog_u64_range = 0..)]
+    pub queue_revision: Option<u64>,
+    /// Stable ID for replaying this queue control
+    #[arg(long, requires = "queue_control", value_parser = explicit_operation_id)]
+    pub operation_id: Option<OperationId>,
 }
 #[derive(Clone, Debug, Args)]
 pub struct Resume {
@@ -877,6 +886,23 @@ pub struct Resume {
     /// Raise a graph limit or budget (KEY=VALUE) on a graph target; may be repeated
     #[arg(long, value_name = "KEY=VALUE")]
     pub extend: Vec<String>,
+    /// Apply this existing retry operation as a revisioned delivery queue control
+    #[arg(long, value_enum, requires_all = ["queue_revision", "operation_id"])]
+    pub queue_control: Option<QueueControlAction>,
+    /// Current delivery queue graph revision
+    #[arg(long, requires = "queue_control", catalog_u64_range = 0..)]
+    pub queue_revision: Option<u64>,
+    /// Stable ID for replaying this queue control
+    #[arg(long, requires = "queue_control", value_parser = explicit_operation_id)]
+    pub operation_id: Option<OperationId>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum QueueControlAction {
+    Accept,
+    Fix,
+    Retry,
+    Drop,
 }
 #[derive(Clone, Debug, Args)]
 pub struct Reconcile {
