@@ -360,8 +360,9 @@ When that writer committed after the predecessor was sealed, admission re-pins
 to the descendant under the same lane custody and warns with both ids; a head
 that moved elsewhere stays a refusal that leaves the graph needing retry. Whether
 refused during admission or before provider launch, the recorded continuation
-refusal pauses the graph with a retry remedy; it does not replace the predecessor
-with a refused successor or report a failed graph outcome. The accepted text and
+refusal pauses the graph with a retry remedy, even when all nodes are settled;
+it does not replace the predecessor with a refused successor or report a failed
+graph outcome. The accepted text and
 any admitted successor remain available in the run record.
 An explicit stop of an attempt holding accepted steering resolves it as not
 continued (`terminal_stop`). When placement or

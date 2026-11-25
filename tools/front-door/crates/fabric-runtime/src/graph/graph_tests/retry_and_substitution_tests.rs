@@ -577,6 +577,7 @@ fn refused_steer_successor_pauses_the_graph_for_retry() {
     let run = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(run.status, GraphStatus::Paused);
     assert_eq!(run.outcome, None);
+    assert_eq!(run.checkpoint.nodes[0].state, NodeState::Blocked);
     assert_eq!(run.checkpoint.nodes[0].advance_error_code.as_deref(), Some("steer_continuation_refused"));
     assert_eq!(owner.calls.len(), 1);
     assert_eq!(advance(&document, &mut owner, &mut journal).unwrap().status, GraphStatus::Paused);
