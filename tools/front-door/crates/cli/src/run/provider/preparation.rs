@@ -2972,12 +2972,10 @@ mod stale_readiness_tests {
         std::fs::create_dir_all(&state)?;
         let key = provenant_providers::identity::fingerprint("account@example.test")
             .ok_or("account fingerprint")?;
-        let executor = provenant_providers::host::HostProbeExecutor::new(
-            &StaleStatus {
-                directory: directory.clone(),
-            },
-            &state,
-        )?;
+        let stale_status = StaleStatus {
+            directory: directory.clone(),
+        };
+        let executor = provenant_providers::host::HostProbeExecutor::new(&stale_status, &state)?;
 
         // The account's credentials were replaced, but Claude's local status bit
         // still names the original account: an identity-only probe cannot tell a
