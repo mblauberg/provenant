@@ -75,6 +75,10 @@ pub(super) enum QueueItemState {
     Pending,
     Launching,
     Active,
+    /// A persisted graph is paused and still owned, but holds no parallel slot.
+    Parked,
+    /// A parked graph atomically reacquired a slot and must resume its existing checkpoint.
+    Resuming,
     Terminal,
 }
 
@@ -416,6 +420,75 @@ impl QueueRegistry {
         })
     }
 
+    /// Revalidate an authenticated launch while its graph journal lock is
+    /// held. A deterministic-refusal observer may have released the same row
+    /// back to Pending after the optimistic authorization above.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "launch identity and journal custody are checked together"
+    )]
+    pub(super) fn revalidate_launch(
+        &self,
+        authorized: &AuthorizedQueueLaunch,
+        project: &str,
+        execution_directory: &str,
+        checkpoint_exists: bool,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        clock: &dyn Clock,
+    ) -> Result<(), String> {
+        self.locked(budget, cancel, clock, |registry| {
+            let queue = registry
+                .queues
+                .get(&authorized.queue.queue_id)
+                .ok_or_else(|| {
+                    "queue launch owner disappeared before graph admission".to_owned()
+                })?;
+            if queue.project != project.to_ascii_lowercase()
+                || queue.project != authorized.queue.project
+                || queue.tracker != authorized.queue.tracker
+                || queue.submission_digest != authorized.queue.submission_digest
+            {
+                return Err("queue launch owner changed before graph admission".into());
+            }
+            let owners = registry
+                .queues
+                .values()
+                .flat_map(|current| current.items.iter())
+                .filter(|item| item.graph_id == authorized.item.graph_id)
+                .count();
+            if owners != 1 {
+                return Err("queue graph no longer has one durable launch owner".into());
+            }
+            let item = queue
+                .items
+                .iter()
+                .find(|item| {
+                    item.identity == authorized.item.identity
+                        && item.graph_id == authorized.item.graph_id
+                })
+                .ok_or_else(|| "queue launch item disappeared before graph admission".to_owned())?;
+            let state_allowed = launch_state_allowed(item.state, checkpoint_exists);
+            let snapshot_item = queue
+                .snapshot
+                .items
+                .get(item.snapshot_index)
+                .filter(|snapshot| snapshot.identity == item.identity);
+            if !state_allowed
+                || item.snapshot_index != authorized.item.snapshot_index
+                || item.launch_request != authorized.item.launch_request
+                || item.execution_directory != execution_directory
+                || item.execution_directory != authorized.item.execution_directory
+                || item.adoption != authorized.item.adoption
+                || item.launch_digest != authorized.item.launch_digest
+                || snapshot_item != Some(&authorized.snapshot_item)
+            {
+                return Err("queue launch intent changed before graph admission".into());
+            }
+            Ok(())
+        })
+    }
+
     /// Return the single persisted adoption intent owned by this graph and
     /// tracker identity. The runtime owner calls this again under registry
     /// custody before it validates the forge and worktree state.
@@ -438,7 +511,9 @@ impl QueueRegistry {
                             && &item.identity == identity
                             && matches!(
                                 item.state,
-                                QueueItemState::Launching | QueueItemState::Active
+                                QueueItemState::Launching
+                                    | QueueItemState::Active
+                                    | QueueItemState::Resuming
                             ))
                         .then_some((queue, item))
                     })
@@ -607,12 +682,28 @@ impl QueueRegistry {
         cancel: &CancelToken,
         clock: &dyn Clock,
     ) -> Result<QueueSchedule, String> {
-        self.claim_runnable_for(Some(queue_id), now, budget, cancel, clock)
+        self.claim_runnable_for(Some(queue_id), &BTreeSet::new(), now, budget, cancel, clock)
+    }
+
+    /// Claim ordinary pending items and only the parked graphs explicitly found
+    /// runnable by the scheduler. Parked rows remain durable owners until this
+    /// lock atomically moves them to `Resuming`.
+    pub(super) fn claim_queue_with_parked(
+        &self,
+        queue_id: &str,
+        runnable_parked: &BTreeSet<QueueIdentity>,
+        now: WallTime,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        clock: &dyn Clock,
+    ) -> Result<QueueSchedule, String> {
+        self.claim_runnable_for(Some(queue_id), runnable_parked, now, budget, cancel, clock)
     }
 
     fn claim_runnable_for(
         &self,
         only_queue: Option<&str>,
+        runnable_parked: &BTreeSet<QueueIdentity>,
         now: WallTime,
         budget: WaitBudget,
         cancel: &CancelToken,
@@ -621,81 +712,66 @@ impl QueueRegistry {
         self.locked(budget, cancel, clock, |registry| {
             let mut schedule = QueueSchedule::default();
             for (queue_id, queue) in &mut registry.queues {
-                if only_queue.is_some_and(|only| only != queue_id) { continue; }
-                let max_parallel = queue.knobs.max_parallel.value;
-                let active = queue.items.iter().filter(|item| matches!(item.state, QueueItemState::Launching | QueueItemState::Active)).count();
-                let pending = queue.items.iter().filter(|item| item.state == QueueItemState::Pending && item.unavailable_reason.is_none()).count();
-                schedule.waiting.extend(queue.items.iter().filter_map(|item| {
-                    item.unavailable_reason.as_ref().map(|reason| format!(
-                        "queue {} item {} is unavailable: {reason}", queue.queue_id, item.identity.item
-                    ))
-                }));
-                if pending > 0 && active >= max_parallel {
-                    if now >= queue.warning_at && queue.wait_warning.is_none() {
-                        let warning = format!(
-                            "queue {} is waiting at max_parallel={} from {} ({}); cap wait={} seconds from {} ({}) before advisory overflow at {}",
-                            queue.queue_id,
-                            max_parallel,
-                            queue.knobs.max_parallel.source.layer.as_str(),
-                            queue.knobs.max_parallel.source.origin.as_deref().unwrap_or("no origin recorded"),
-                            queue.cap_wait.value,
-                            queue.cap_wait.source.layer.as_str(),
-                            queue.cap_wait.source.origin.as_deref().unwrap_or("no origin recorded"),
-                            queue.overflow_at,
-                        );
-                        queue.wait_warning = Some(warning);
-                    }
-                    let warning_pending = now >= queue.warning_at && !queue.wait_warning_emitted;
-                    if warning_pending {
-                        if let Some(warning) = &queue.wait_warning {
-                            schedule.warnings.push(warning.clone());
-                        }
-                    }
-                    if now < queue.overflow_at {
-                        schedule.waiting.push(format!(
-                            "queue {} has {pending} pending items waiting for active capacity {}/{}",
-                            queue.queue_id, active, max_parallel
-                        ));
-                        schedule.launch.extend(queue.items.iter().filter(|item| item.state == QueueItemState::Launching).cloned().map(|item| (queue_id.clone(), item)));
-                        continue;
-                    }
-                    if warning_pending {
-                        schedule.waiting.push(format!(
-                            "queue {} cap warning is awaiting durable acknowledgement before advisory overflow",
-                            queue.queue_id
-                        ));
-                        schedule.launch.extend(queue.items.iter().filter(|item| item.state == QueueItemState::Launching).cloned().map(|item| (queue_id.clone(), item)));
-                        continue;
-                    }
-                    if queue.overflow_reason.is_none() {
-                        queue.overflow_reason = Some(format!(
-                            "max_parallel={} from {} ({}) exceeded after cap wait={} seconds from {} ({}); advisory overflow began at {}",
-                            max_parallel,
-                            queue.knobs.max_parallel.source.layer.as_str(),
-                            queue.knobs.max_parallel.source.origin.as_deref().unwrap_or("no origin recorded"),
-                            queue.cap_wait.value,
-                            queue.cap_wait.source.layer.as_str(),
-                            queue.cap_wait.source.origin.as_deref().unwrap_or("no origin recorded"),
-                            queue.overflow_at,
-                        ));
-                    }
+                if only_queue.is_some_and(|only| only != queue_id) {
+                    continue;
                 }
-                let capacity = max_parallel.saturating_sub(active);
-                let overflow = active >= max_parallel;
-                let mut claimed = 0;
-                for item in queue.items.iter_mut().filter(|item| item.state == QueueItemState::Pending && item.unavailable_reason.is_none()) {
-                    if !overflow && claimed >= capacity {
-                        break;
-                    }
-                    item.state = QueueItemState::Launching;
-                    if overflow {
-                        item.overflow_reason = queue.overflow_reason.clone();
-                    }
-                    claimed += 1;
-                }
-                schedule.launch.extend(queue.items.iter().filter(|item| item.state == QueueItemState::Launching).cloned().map(|item| (queue_id.clone(), item)));
+                claim_runnable_items(queue_id, queue, runnable_parked, now, &mut schedule);
             }
             Ok(schedule)
+        })
+    }
+
+    /// Reserve a slot before applying a direct control to an already parked
+    /// graph. The caller verifies the persisted execution identity first.
+    pub(super) fn reserve_parked_for_control(
+        &self,
+        queue_id: &str,
+        identity: &QueueIdentity,
+        graph_id: &str,
+        now: WallTime,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        clock: &dyn Clock,
+    ) -> Result<bool, String> {
+        self.locked(budget, cancel, clock, |registry| {
+            let queue = registry
+                .queues
+                .get_mut(queue_id)
+                .ok_or_else(|| format!("unknown queue `{queue_id}`"))?;
+            let active = queue
+                .items
+                .iter()
+                .filter(|item| consumes_parallel_slot(item.state))
+                .count();
+            let max_parallel = queue.knobs.max_parallel.value;
+            let overflow_allowed = active >= max_parallel
+                && now >= queue.overflow_at
+                && queue.wait_warning_emitted
+                && queue.overflow_reason.is_some();
+            let overflow_reason = queue.overflow_reason.clone();
+            let Some(item) = queue
+                .items
+                .iter_mut()
+                .find(|item| &item.identity == identity && item.graph_id == graph_id)
+            else {
+                return Err("queue item identity or graph id changed".into());
+            };
+            match item.state {
+                QueueItemState::Launching | QueueItemState::Active | QueueItemState::Resuming => {
+                    Ok(true)
+                }
+                QueueItemState::Parked => {
+                    if active >= max_parallel && !overflow_allowed {
+                        return Ok(false);
+                    }
+                    item.state = QueueItemState::Resuming;
+                    if active >= max_parallel {
+                        item.overflow_reason = overflow_reason;
+                    }
+                    Ok(true)
+                }
+                QueueItemState::Pending | QueueItemState::Terminal => Ok(false),
+            }
         })
     }
 
@@ -720,8 +796,11 @@ impl QueueRegistry {
                 if item.state == QueueItemState::Terminal {
                     return Err("terminal queue item cannot become active".into());
                 }
-                if item.state == QueueItemState::Pending {
-                    return Err("queue item must be claimed before launch acceptance".into());
+                if !matches!(
+                    item.state,
+                    QueueItemState::Launching | QueueItemState::Active | QueueItemState::Resuming
+                ) {
+                    return Err("queue item must be admitted before launch acceptance".into());
                 }
                 item.state = QueueItemState::Active;
                 item.unavailable_reason = None;
@@ -750,11 +829,47 @@ impl QueueRegistry {
             cancel,
             clock,
             |item| {
-                if item.state == QueueItemState::Terminal || item.state == QueueItemState::Active {
+                if !matches!(
+                    item.state,
+                    QueueItemState::Pending | QueueItemState::Launching
+                ) {
                     return Err("only an unaccepted queue item can become unavailable".into());
                 }
                 item.state = QueueItemState::Pending;
                 item.unavailable_reason = Some(reason);
+                Ok(())
+            },
+        )
+    }
+
+    /// Release the parallel slot while retaining durable queue ownership.
+    pub(super) fn mark_parked(
+        &self,
+        queue_id: &str,
+        identity: &QueueIdentity,
+        graph_id: &str,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        clock: &dyn Clock,
+    ) -> Result<(), String> {
+        self.update_item(
+            queue_id,
+            identity,
+            graph_id,
+            budget,
+            cancel,
+            clock,
+            |item| {
+                if item.state == QueueItemState::Parked {
+                    return Ok(());
+                }
+                if !matches!(
+                    item.state,
+                    QueueItemState::Launching | QueueItemState::Active | QueueItemState::Resuming
+                ) {
+                    return Err("only an admitted queue item can become parked".into());
+                }
+                item.state = QueueItemState::Parked;
                 Ok(())
             },
         )
@@ -874,6 +989,193 @@ impl QueueRegistry {
             update(item)
         })
     }
+}
+
+fn consumes_parallel_slot(state: QueueItemState) -> bool {
+    matches!(
+        state,
+        QueueItemState::Launching | QueueItemState::Active | QueueItemState::Resuming
+    )
+}
+
+fn launch_state_allowed(state: QueueItemState, checkpoint_exists: bool) -> bool {
+    match state {
+        QueueItemState::Launching => true,
+        QueueItemState::Active => checkpoint_exists,
+        QueueItemState::Pending
+        | QueueItemState::Parked
+        | QueueItemState::Resuming
+        | QueueItemState::Terminal => false,
+    }
+}
+
+fn claim_runnable_items(
+    queue_id: &str,
+    queue: &mut QueueRecord,
+    runnable_parked: &BTreeSet<QueueIdentity>,
+    now: WallTime,
+    schedule: &mut QueueSchedule,
+) {
+    let max_parallel = queue.knobs.max_parallel.value;
+    let active = queue
+        .items
+        .iter()
+        .filter(|item| consumes_parallel_slot(item.state))
+        .count();
+    let runnable_count = queue
+        .items
+        .iter()
+        .filter(|item| {
+            (item.state == QueueItemState::Pending && item.unavailable_reason.is_none())
+                || (item.state == QueueItemState::Parked
+                    && runnable_parked.contains(&item.identity))
+        })
+        .count();
+    schedule
+        .waiting
+        .extend(queue.items.iter().filter_map(|item| {
+            item.unavailable_reason.as_ref().map(|reason| {
+                format!(
+                    "queue {} item {} is unavailable: {reason}",
+                    queue.queue_id, item.identity.item
+                )
+            })
+        }));
+    if runnable_count > 0 && active >= max_parallel {
+        if now >= queue.warning_at && queue.wait_warning.is_none() {
+            let warning = format!(
+                "queue {} is waiting at max_parallel={} from {} ({}); cap wait={} seconds from {} ({}) before advisory overflow at {}",
+                queue.queue_id,
+                max_parallel,
+                queue.knobs.max_parallel.source.layer.as_str(),
+                queue
+                    .knobs
+                    .max_parallel
+                    .source
+                    .origin
+                    .as_deref()
+                    .unwrap_or("no origin recorded"),
+                queue.cap_wait.value,
+                queue.cap_wait.source.layer.as_str(),
+                queue
+                    .cap_wait
+                    .source
+                    .origin
+                    .as_deref()
+                    .unwrap_or("no origin recorded"),
+                queue.overflow_at,
+            );
+            queue.wait_warning = Some(warning);
+        }
+        let warning_pending = now >= queue.warning_at && !queue.wait_warning_emitted;
+        if warning_pending {
+            if let Some(warning) = &queue.wait_warning {
+                schedule.warnings.push(warning.clone());
+            }
+        }
+        if now < queue.overflow_at {
+            schedule.waiting.push(format!(
+                "queue {} has {runnable_count} runnable items waiting for active capacity {}/{}",
+                queue.queue_id, active, max_parallel
+            ));
+            schedule.launch.extend(
+                queue
+                    .items
+                    .iter()
+                    .filter(|item| {
+                        matches!(
+                            item.state,
+                            QueueItemState::Launching | QueueItemState::Resuming
+                        )
+                    })
+                    .cloned()
+                    .map(|item| (queue_id.to_owned(), item)),
+            );
+            return;
+        }
+        if warning_pending {
+            schedule.waiting.push(format!(
+                "queue {} cap warning is awaiting durable acknowledgement before advisory overflow",
+                queue.queue_id
+            ));
+            schedule.launch.extend(
+                queue
+                    .items
+                    .iter()
+                    .filter(|item| {
+                        matches!(
+                            item.state,
+                            QueueItemState::Launching | QueueItemState::Resuming
+                        )
+                    })
+                    .cloned()
+                    .map(|item| (queue_id.to_owned(), item)),
+            );
+            return;
+        }
+        if queue.overflow_reason.is_none() {
+            queue.overflow_reason = Some(format!(
+                "max_parallel={} from {} ({}) exceeded after cap wait={} seconds from {} ({}); advisory overflow began at {}",
+                max_parallel,
+                queue.knobs.max_parallel.source.layer.as_str(),
+                queue
+                    .knobs
+                    .max_parallel
+                    .source
+                    .origin
+                    .as_deref()
+                    .unwrap_or("no origin recorded"),
+                queue.cap_wait.value,
+                queue.cap_wait.source.layer.as_str(),
+                queue
+                    .cap_wait
+                    .source
+                    .origin
+                    .as_deref()
+                    .unwrap_or("no origin recorded"),
+                queue.overflow_at,
+            ));
+        }
+    }
+    let capacity = max_parallel.saturating_sub(active);
+    let overflow = active >= max_parallel;
+    let overflow_reason = queue.overflow_reason.clone();
+    let mut claimed = 0;
+    for item in &mut queue.items {
+        let next_state = match item.state {
+            QueueItemState::Pending if item.unavailable_reason.is_none() => {
+                Some(QueueItemState::Launching)
+            }
+            QueueItemState::Parked if runnable_parked.contains(&item.identity) => {
+                Some(QueueItemState::Resuming)
+            }
+            _ => None,
+        };
+        let Some(next_state) = next_state else {
+            continue;
+        };
+        if !overflow && claimed >= capacity {
+            break;
+        }
+        item.state = next_state;
+        if overflow {
+            item.overflow_reason = overflow_reason.clone();
+        }
+        claimed += 1;
+    }
+    schedule.launch.extend(
+        queue
+            .items
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item.state,
+                    QueueItemState::Launching | QueueItemState::Resuming
+                )
+            })
+            .cloned()
+            .map(|item| (queue_id.to_owned(), item)),
+    );
 }
 
 fn validate_submission(submission: &QueueSubmission) -> Result<(), String> {
@@ -1094,4 +1396,206 @@ fn string_values(value: &Value) -> Vec<&str> {
     let mut rows = Vec::new();
     collect(value, &mut rows);
     rows
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn identity(item: &str) -> QueueIdentity {
+        QueueIdentity::new("project", "github", item).unwrap()
+    }
+
+    fn item(identity: QueueIdentity, index: usize, state: QueueItemState) -> QueueItem {
+        QueueItem {
+            graph_id: format!("graph-{index}"),
+            identity,
+            snapshot_index: index,
+            launch_request: json!({"op":"run", "template":"deliver"}),
+            execution_directory: "/repo".into(),
+            adoption: None,
+            launch_digest: format!("sha256:{}", "a".repeat(64)),
+            state,
+            terminal_outcome: None,
+            unavailable_reason: None,
+            overflow_reason: None,
+        }
+    }
+
+    fn queue(items: Vec<QueueItem>) -> QueueRecord {
+        let admitted_at = WallTime::from_micros(0).unwrap();
+        let mut knobs = QueueKnobs::default();
+        knobs.max_parallel.value = 1;
+        let source = provenant_records::Source {
+            layer: provenant_records::Layer::Default,
+            origin: None,
+        };
+        QueueRecord {
+            queue_id: "queue-1".into(),
+            submission_digest: format!("sha256:{}", "b".repeat(64)),
+            project: "project".into(),
+            tracker: "github".into(),
+            snapshot: QueueSnapshot {
+                selector: "issues".into(),
+                source: "fixture".into(),
+                resolved_at: admitted_at,
+                items: items
+                    .iter()
+                    .map(|item| QueueSnapshotItem {
+                        identity: item.identity.clone(),
+                        data: json!({"id":item.identity.item.as_str()}),
+                    })
+                    .collect(),
+            },
+            knobs,
+            cap_wait: Sourced {
+                value: 10,
+                source: source.clone(),
+            },
+            admitted_at,
+            warning_at: WallTime::from_micros(5_000_000).unwrap(),
+            overflow_at: WallTime::from_micros(10_000_000).unwrap(),
+            wait_warning: None,
+            wait_warning_emitted: false,
+            overflow_reason: None,
+            items,
+        }
+    }
+
+    #[test]
+    fn unanswered_parked_item_releases_slot_for_pending_admission() {
+        let parked = item(identity("parked"), 0, QueueItemState::Parked);
+        let parked_identity = parked.identity.clone();
+        let mut queue = queue(vec![
+            parked,
+            item(identity("pending"), 1, QueueItemState::Pending),
+            item(identity("next"), 2, QueueItemState::Pending),
+        ]);
+        let now = WallTime::from_micros(0).unwrap();
+        let mut schedule = QueueSchedule::default();
+
+        claim_runnable_items("queue-1", &mut queue, &BTreeSet::new(), now, &mut schedule);
+
+        assert_eq!(queue.items[0].state, QueueItemState::Parked);
+        assert_eq!(queue.items[1].state, QueueItemState::Launching);
+        assert_eq!(queue.items[2].state, QueueItemState::Pending);
+
+        queue.items[1].state = QueueItemState::Terminal;
+        queue.items[1].terminal_outcome = Some("complete".into());
+        let mut wake = QueueSchedule::default();
+        claim_runnable_items(
+            "queue-1",
+            &mut queue,
+            &BTreeSet::from([parked_identity.clone()]),
+            now,
+            &mut wake,
+        );
+
+        assert_eq!(queue.items[0].state, QueueItemState::Resuming);
+        assert_eq!(queue.items[2].state, QueueItemState::Pending);
+        assert!(wake.launch.iter().any(|(queue_id, item)| {
+            queue_id == "queue-1"
+                && item.identity == parked_identity
+                && item.state == QueueItemState::Resuming
+        }));
+
+        let encoded = serde_json::to_vec(&queue).unwrap();
+        let mut restored: QueueRecord = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(restored.items[0].state, QueueItemState::Resuming);
+        let mut blocked = QueueSchedule::default();
+        claim_runnable_items(
+            "queue-1",
+            &mut restored,
+            &BTreeSet::from([parked_identity]),
+            now,
+            &mut blocked,
+        );
+        assert_eq!(restored.items[2].state, QueueItemState::Pending);
+    }
+
+    #[test]
+    fn queue_order_reacquires_one_runnable_parked_item_across_replay() {
+        let parked = item(identity("parked"), 0, QueueItemState::Parked);
+        let parked_identity = parked.identity.clone();
+        let mut queue = queue(vec![
+            parked,
+            item(identity("pending"), 1, QueueItemState::Pending),
+        ]);
+        let now = WallTime::from_micros(0).unwrap();
+        let mut first = QueueSchedule::default();
+
+        claim_runnable_items(
+            "queue-1",
+            &mut queue,
+            &BTreeSet::from([parked_identity.clone()]),
+            now,
+            &mut first,
+        );
+
+        assert_eq!(queue.items[0].state, QueueItemState::Resuming);
+        assert_eq!(queue.items[1].state, QueueItemState::Pending);
+        assert_eq!(first.launch.len(), 1);
+        assert_eq!(first.launch[0].1.identity, parked_identity);
+
+        // A restarted scheduler observes the durable reservation and leaves
+        // unrelated pending work untouched while it reconciles this graph.
+        let encoded = serde_json::to_vec(&queue).unwrap();
+        let mut restored: QueueRecord = serde_json::from_slice(&encoded).unwrap();
+        let mut replay = QueueSchedule::default();
+        claim_runnable_items(
+            "queue-1",
+            &mut restored,
+            &BTreeSet::from([parked_identity.clone()]),
+            now,
+            &mut replay,
+        );
+        assert_eq!(restored.items[0].state, QueueItemState::Resuming);
+        assert_eq!(restored.items[1].state, QueueItemState::Pending);
+        assert_eq!(replay.launch.len(), 1);
+        assert_eq!(replay.launch[0].1.identity, parked_identity);
+    }
+
+    #[test]
+    fn earlier_pending_item_precedes_later_runnable_parked_item() {
+        let parked = item(identity("parked"), 1, QueueItemState::Parked);
+        let parked_identity = parked.identity.clone();
+        let mut queue = queue(vec![
+            item(identity("earlier"), 0, QueueItemState::Pending),
+            parked,
+            item(identity("later"), 2, QueueItemState::Pending),
+        ]);
+        let mut schedule = QueueSchedule::default();
+
+        claim_runnable_items(
+            "queue-1",
+            &mut queue,
+            &BTreeSet::from([parked_identity.clone()]),
+            WallTime::from_micros(0).unwrap(),
+            &mut schedule,
+        );
+
+        assert_eq!(queue.items[0].state, QueueItemState::Launching);
+        assert_eq!(queue.items[1].state, QueueItemState::Parked);
+        assert_eq!(queue.items[2].state, QueueItemState::Pending);
+        assert_eq!(schedule.launch.len(), 1);
+        assert_eq!(schedule.launch[0].1.identity.item, "earlier");
+    }
+
+    #[test]
+    fn stale_launch_authorization_requires_launching_after_checkpoint_absence() {
+        assert!(launch_state_allowed(QueueItemState::Launching, false));
+        assert!(launch_state_allowed(QueueItemState::Launching, true));
+        assert!(!launch_state_allowed(QueueItemState::Active, false));
+        assert!(launch_state_allowed(QueueItemState::Active, true));
+        for state in [
+            QueueItemState::Pending,
+            QueueItemState::Parked,
+            QueueItemState::Resuming,
+            QueueItemState::Terminal,
+        ] {
+            assert!(!launch_state_allowed(state, false));
+            assert!(!launch_state_allowed(state, true));
+        }
+    }
 }

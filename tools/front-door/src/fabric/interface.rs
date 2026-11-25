@@ -2959,7 +2959,14 @@ impl Factory {
                 },
             }));
         }
-        let mut result = match self.launch_submission(document, input, budget, cancel, announce) {
+        let mut result = match self.launch_submission(
+            document,
+            input,
+            queue_launch.as_ref(),
+            budget,
+            cancel,
+            announce,
+        ) {
             // A concurrent launch bound this name to other input between the
             // choice and the bind. Choose again: the family now includes it.
             Err(FacadeError::Conflict)
@@ -3389,6 +3396,7 @@ impl Factory {
         &self,
         document: GraphDocument,
         input: &Value,
+        queue_launch: Option<&super::queue_registry::AuthorizedQueueLaunch>,
         budget: WaitBudget,
         cancel: &CancelToken,
         announce: Option<super::graph_execution::Announce<'_>>,
@@ -3414,6 +3422,7 @@ impl Factory {
             announce,
             Some(&mut replayed),
             None,
+            queue_launch,
         )?;
         let (run, wait_observation, observation_wait, remote_read_allowed) = if replayed {
             (run, None, None, true)
@@ -3632,6 +3641,11 @@ impl Factory {
         if super::queue_controls::drop_fence_active(checkpoint)? {
             return Err(graph_input_reason("dropped queue items cannot be retried"));
         }
+        if input.get("queue_accept_retry").is_some() && target.node.is_none() {
+            return Err(graph_input_reason(
+                "accept gate retry requires one exact node target",
+            ));
+        }
         if provenant_redact::mode().masks_egress()
             && let Some(brief) = input.get("brief").and_then(Value::as_str)
         {
@@ -3702,6 +3716,43 @@ impl Factory {
                     }
                 },
             };
+            if let Some(marker) = input.get("queue_accept_retry") {
+                if input.get("queue_control").is_some() || brief_given || !extensions_empty {
+                    return Err(graph_input_reason(
+                        "accept gate retry cannot carry another control, brief, or extension",
+                    ));
+                }
+                let (operation_key, operation_digest) =
+                    super::queue_controls::authorize_accept_gate_retry(
+                        checkpoint, &id, &node, marker,
+                    )?;
+                let journal = journal.as_deref_mut().ok_or(FacadeError::StateCorrupt)?;
+                journal.save(checkpoint).map_err(graph_journal_error)?;
+                let library = self.template_library(None)?;
+                let resolver = self.launch_resolvers(Some(&encode(document)?))?;
+                patch::retry_node_and_dependants_with_key(
+                    &mut LiveGraph {
+                        document,
+                        checkpoint,
+                    },
+                    &node,
+                    None,
+                    &PatchContext {
+                        catalogue: None,
+                        library: &library,
+                        resolvers: &resolver,
+                        journal: None,
+                        limits: &self.context.config.graph.limits,
+                        worktree_layout: self.context.port_table.worktree_layout.clone(),
+                    },
+                    &operation_key,
+                    &operation_digest,
+                )
+                .map_err(retry_patch_error)?;
+                target.node = Some(node);
+                journal.save(checkpoint).map_err(graph_journal_error)?;
+                return Ok(());
+            }
             if let Some(control) = input.get("queue_control") {
                 let metadata = super::queue_controls::decode_metadata(control)?;
                 if !matches!(
