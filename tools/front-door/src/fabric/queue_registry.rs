@@ -86,6 +86,9 @@ pub(super) struct QueueItem {
     pub launch_digest: String,
     pub state: QueueItemState,
     pub terminal_outcome: Option<String>,
+    /// A deterministic pre-effect refusal, retained while ownership stays active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<String>,
     pub overflow_reason: Option<String>,
 }
 
@@ -174,6 +177,7 @@ pub(super) struct ExistingOwner {
     pub queue_id: String,
     pub graph_id: String,
     pub state: QueueItemState,
+    pub unavailable_reason: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -466,6 +470,7 @@ impl QueueRegistry {
                     launch_digest: launch_digest(&item.launch_request, &item.execution_directory, &item.adoption)?,
                     state: QueueItemState::Pending,
                     terminal_outcome: None,
+                    unavailable_reason: None,
                     overflow_reason: None,
                 })
             }).collect::<Result<_, String>>()?;
@@ -501,6 +506,7 @@ impl QueueRegistry {
                     queue_id: current.queue_id.clone(),
                     graph_id: item.graph_id.clone(),
                     state: item.state,
+                    unavailable_reason: item.unavailable_reason.clone(),
                 })
             }).collect();
             if !owners.is_empty() {
@@ -509,19 +515,6 @@ impl QueueRegistry {
             registry.queues.insert(queue.queue_id.clone(), queue.clone());
             Ok(QueueAdmission::Admitted { queue, replayed: false })
         })
-    }
-
-    /// Claim ordered pending item graphs under the queue's concurrency target.
-    /// Saturated queues warn before `overflow_at`; after it, the cap is advisory
-    /// and every waiting item is returned with a persisted overflow reason.
-    pub(super) fn claim_runnable(
-        &self,
-        now: WallTime,
-        budget: WaitBudget,
-        cancel: &CancelToken,
-        clock: &dyn Clock,
-    ) -> Result<QueueSchedule, String> {
-        self.claim_runnable_for(None, now, budget, cancel, clock)
     }
 
     /// Claim one queue immediately after atomic submission without marking
@@ -551,7 +544,12 @@ impl QueueRegistry {
                 if only_queue.is_some_and(|only| only != queue_id) { continue; }
                 let max_parallel = queue.knobs.max_parallel.value;
                 let active = queue.items.iter().filter(|item| matches!(item.state, QueueItemState::Launching | QueueItemState::Active)).count();
-                let pending = queue.items.iter().filter(|item| item.state == QueueItemState::Pending).count();
+                let pending = queue.items.iter().filter(|item| item.state == QueueItemState::Pending && item.unavailable_reason.is_none()).count();
+                schedule.waiting.extend(queue.items.iter().filter_map(|item| {
+                    item.unavailable_reason.as_ref().map(|reason| format!(
+                        "queue {} item {} is unavailable: {reason}", queue.queue_id, item.identity.item
+                    ))
+                }));
                 if pending > 0 && active >= max_parallel {
                     let mut warned_now = false;
                     if now >= queue.warning_at && queue.wait_warning.is_none() {
@@ -602,7 +600,7 @@ impl QueueRegistry {
                 let capacity = max_parallel.saturating_sub(active);
                 let overflow = active >= max_parallel;
                 let mut claimed = 0;
-                for item in queue.items.iter_mut().filter(|item| item.state == QueueItemState::Pending) {
+                for item in queue.items.iter_mut().filter(|item| item.state == QueueItemState::Pending && item.unavailable_reason.is_none()) {
                     if !overflow && claimed >= capacity {
                         break;
                     }
@@ -632,25 +630,48 @@ impl QueueRegistry {
             if item.state == QueueItemState::Terminal { return Err("terminal queue item cannot become active".into()); }
             if item.state == QueueItemState::Pending { return Err("queue item must be claimed before launch acceptance".into()); }
             item.state = QueueItemState::Active;
+            item.unavailable_reason = None;
             Ok(())
         })
     }
 
-    /// Requeue a launch only after its caller proves no graph was persisted.
-    pub(super) fn release_unlaunched(
+    /// Retain a deterministic refusal made before graph persistence so tick does not replay it forever.
+    pub(super) fn mark_launch_unavailable(
         &self,
         queue_id: &str,
         identity: &QueueIdentity,
         graph_id: &str,
+        reason: &str,
         budget: WaitBudget,
         cancel: &CancelToken,
         clock: &dyn Clock,
     ) -> Result<(), String> {
+        let reason = sanitize_persisted_text(reason)?;
         self.update_item(queue_id, identity, graph_id, budget, cancel, clock, |item| {
-            if item.state == QueueItemState::Active || item.state == QueueItemState::Terminal {
-                return Err("only an unaccepted queue item can be requeued".into());
+            if item.state == QueueItemState::Terminal || item.state == QueueItemState::Active {
+                return Err("only an unaccepted queue item can become unavailable".into());
             }
             item.state = QueueItemState::Pending;
+            item.unavailable_reason = Some(reason);
+            Ok(())
+        })
+    }
+
+    /// Explicit queue replay retries items held by a deterministic pre-effect refusal.
+    pub(super) fn clear_unavailable(
+        &self,
+        queue_id: &str,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        clock: &dyn Clock,
+    ) -> Result<(), String> {
+        self.locked(budget, cancel, clock, |registry| {
+            let queue = registry.queues.get_mut(queue_id).ok_or_else(|| format!("unknown queue `{queue_id}`"))?;
+            for item in &mut queue.items {
+                if item.state == QueueItemState::Pending {
+                    item.unavailable_reason = None;
+                }
+            }
             Ok(())
         })
     }
