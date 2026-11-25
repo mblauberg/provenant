@@ -320,7 +320,7 @@ fn provider_stall_threshold_and_policy_are_overridable_with_a_source() {
         "providers.fixture-provider.stall_policy"
     ));
 
-    let defaults = load(&roots(), None).unwrap();
+    let defaults = load::<&[u8]>(&roots(), None).unwrap();
     assert_eq!(
         defaults.providers["codex"].stall_after_seconds,
         provenant_records::DEFAULT_STALL_AFTER_SECONDS

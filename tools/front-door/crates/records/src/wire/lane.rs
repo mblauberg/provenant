@@ -133,8 +133,10 @@ lane_row! {
         attempt_directory: crate::StructuredPathWire => nullable(super::schema::worktree_path());
         child_command: String => nullable(string());
         last_event_source: LastEventSource => nullable(choices(&["output", "started", "queued"]));
-        /// True when a live running attempt has exceeded its output-sourced
-        /// silence threshold. Never set from the queued/started fallback.
+        // The macro grammar matches field declarations only, not outer doc
+        // comments; `stalled` is documented on `LaneProjectionFacts` below.
+        // True when a live running attempt has exceeded its output-sourced
+        // silence threshold. Never set from the queued/started fallback.
         stalled: bool => boolean();
     }
 }

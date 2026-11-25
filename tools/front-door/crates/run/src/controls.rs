@@ -687,10 +687,10 @@ pub fn stall_fact(record: &AttemptRecord, now: WallTime) -> Option<(u64, WallTim
     }
     let last = record.last_output_at?;
     let threshold = stall_after_seconds(record);
-    (threshold > 0
-        && u128::from(now.as_micros().saturating_sub(last.as_micros()))
-            >= u128::from(threshold) * 1_000_000)
-        .then_some((threshold, last))
+    // `as_micros` is i64; a clock that moved backwards has not gone silent, so
+    // clamp the age at zero before widening it for the u64 threshold.
+    let elapsed = now.as_micros().saturating_sub(last.as_micros()).max(0) as u128;
+    (threshold > 0 && elapsed >= u128::from(threshold) * 1_000_000).then_some((threshold, last))
 }
 
 /// Whether a live running attempt has exceeded its silence threshold. `live`
