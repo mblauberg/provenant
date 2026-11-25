@@ -159,7 +159,11 @@ fn hygiene_scheduler_runs_after_writer_and_publishes_its_typed_head() {
 
 #[test]
 fn hygiene_error_park_replays_the_saved_transition_once() {
-    let document = hygiene_graph();
+    let mut document = hygiene_graph();
+    document.context = Some(provenant_records::run::WorkContext {
+        work_item: Some("issue:3972".into()),
+        ..Default::default()
+    });
     let request_id = provenant_core::HumanRequestId::from_bytes([77; 16]);
     let mut owner = FakeOwner {
         observations: VecDeque::from([hygiene_writer_observation()]),
@@ -176,6 +180,7 @@ fn hygiene_error_park_replays_the_saved_transition_once() {
     let first = advance(&document, &mut owner, &mut journal).unwrap();
     let park = first.checkpoint.nodes[1].delivery_park.as_ref().unwrap();
     assert_eq!(park.reason, provenant_records::graph::ParkReason::OperationError);
+    assert_eq!(park.item.as_deref(), Some("issue:3972"));
     assert_eq!(park.request_id, Some(request_id));
     assert_eq!(owner.hygiene_calls, 1);
     assert_eq!(owner.park_calls.len(), 1);

@@ -1613,6 +1613,202 @@ enum GateStep {
     clippy::too_many_arguments,
     reason = "one admitted execution state follows internal rescheduling"
 )]
+fn graph_ancestors(
+    node_index: usize,
+    plan: &PlannedGraph,
+    positions: &std::collections::BTreeMap<String, usize>,
+) -> std::collections::BTreeSet<usize> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut pending: Vec<usize> = plan.nodes[node_index]
+        .dependencies()
+        .filter_map(|id| positions.get(id).copied())
+        .collect();
+    while let Some(index) = pending.pop() {
+        if seen.insert(index) {
+            pending.extend(
+                plan.nodes[index]
+                    .dependencies()
+                    .filter_map(|id| positions.get(id).copied()),
+            );
+        }
+    }
+    seen
+}
+
+fn node_depends_on(
+    node_index: usize,
+    ancestor: usize,
+    plan: &PlannedGraph,
+    positions: &std::collections::BTreeMap<String, usize>,
+) -> bool {
+    graph_ancestors(node_index, plan, positions).contains(&ancestor)
+}
+
+fn same_expanded_round(left: Option<&loops::LoopRound>, right: Option<&loops::LoopRound>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => left.loop_id == right.loop_id && left.round == right.round,
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn recovery_container_members(
+    root: usize,
+    plan: &PlannedGraph,
+    positions: &std::collections::BTreeMap<String, usize>,
+) -> std::collections::BTreeSet<usize> {
+    let mut members = std::collections::BTreeSet::new();
+    let mut pending = vec![root];
+    while let Some(parent) = pending.pop() {
+        let node = &plan.nodes[parent];
+        for member in &node.composite_members {
+            if let Some(index) = positions.get(member).copied()
+                && members.insert(index)
+            {
+                pending.push(index);
+            }
+        }
+        if node.loop_body.is_some() {
+            for (index, child) in plan.nodes.iter().enumerate() {
+                if child
+                    .round
+                    .as_ref()
+                    .is_some_and(|round| round.loop_id == node.id && round.round == 1)
+                    && members.insert(index)
+                {
+                    pending.push(index);
+                }
+            }
+        }
+    }
+    members
+}
+
+fn reset_skipped_conflict_branch(
+    index: usize,
+    checkpoint: &mut GraphCheckpoint,
+) -> Result<(), &'static str> {
+    let progress = &mut checkpoint.nodes[index];
+    if progress.state != NodeState::Skipped || progress.skip_reason.is_some() {
+        return Ok(());
+    }
+    if !progress.attempts.is_empty()
+        || !progress.previous_attempts.is_empty()
+        || progress.writer_binding.is_some()
+        || progress.outputs.is_some()
+        || progress.gate.is_some()
+        || progress.ci.is_some()
+        || progress.conflict.is_some()
+        || progress.delivery_park.is_some()
+    {
+        return Err("skipped conflict recovery branch has execution evidence");
+    }
+    progress.state = NodeState::Pending;
+    progress.wait_reason = None;
+    progress.skip_reason = None;
+    Ok(())
+}
+
+fn queue_conflict_recheck(
+    node_index: usize,
+    condition: &GateCondition,
+    plan: &PlannedGraph,
+    positions: &std::collections::BTreeMap<String, usize>,
+    checkpoint: &mut GraphCheckpoint,
+) -> Result<(usize, usize), &'static str> {
+    let GateCondition::Ci { target, .. } = condition else {
+        return Err("queue CI conflict must target a published node");
+    };
+    let CiTarget::Node {
+        node: published, ..
+    } = target
+    else {
+        return Err("queue CI conflict must target a published node");
+    };
+    let Some(published_index) = positions.get(published).copied() else {
+        return Err("queue CI conflict target is missing");
+    };
+    if plan.nodes[published_index].kind != Some(NodeKind::Publish) {
+        return Err("queue CI conflict target is not a publication node");
+    }
+    let Some(head) = ci::published_head(target, checkpoint, true) else {
+        return Err("queue CI conflict lost its published head");
+    };
+    let same_round = |candidate: usize| {
+        same_expanded_round(
+            plan.nodes[candidate].round.as_ref(),
+            plan.nodes[node_index].round.as_ref(),
+        )
+    };
+    let conflict_index = graph_ancestors(node_index, plan, positions)
+        .into_iter()
+        .rev()
+        .find(|index| {
+            same_round(*index)
+                && matches!(
+                    &plan.nodes[*index].condition,
+                    Some(GateCondition::Conflict {
+                        target: CiTarget::Node { node, .. },
+                        ..
+                    }) if node == published
+                )
+                && checkpoint.nodes[*index].state == NodeState::Succeeded
+                && checkpoint.nodes[*index]
+                    .gate
+                    .as_ref()
+                    .is_some_and(|gate| gate.passed)
+                && checkpoint.nodes[*index]
+                    .conflict
+                    .as_ref()
+                    .is_some_and(|evidence| {
+                        evidence.state == ConflictState::Clear
+                            && evidence.head_sha.as_deref() == Some(head.as_str())
+                    })
+        })
+        .ok_or("queue CI conflict has no prior clear conflict gate")?;
+    let rebase = plan.nodes[conflict_index]
+        .on_fail
+        .as_ref()
+        .and_then(|target| positions.get(target))
+        .copied()
+        .ok_or("queue conflict gate has no rebase writer")?;
+    let recovery_container =
+        plan.nodes[rebase].composite.is_some() || plan.nodes[rebase].loop_body.is_some();
+    if (!plans::writer(&plan.nodes[rebase]) && !recovery_container) || !same_round(rebase) {
+        return Err("queue conflict recovery target is not a same-round writer or container");
+    }
+
+    reset_skipped_conflict_branch(rebase, checkpoint)?;
+    let contained = if recovery_container {
+        recovery_container_members(rebase, plan, positions)
+    } else {
+        std::collections::BTreeSet::new()
+    };
+    for candidate in 0..plan.nodes.len() {
+        let contained_member = contained.contains(&candidate);
+        let same_round_descendant =
+            same_round(candidate) && node_depends_on(candidate, rebase, plan, positions);
+        if candidate != rebase && (contained_member || same_round_descendant) {
+            reset_skipped_conflict_branch(candidate, checkpoint)?;
+        }
+    }
+
+    let conflict = &mut checkpoint.nodes[conflict_index];
+    conflict.state = NodeState::Pending;
+    conflict.wait_reason = None;
+    conflict.gate = None;
+    conflict.outputs = None;
+    conflict.conflict = None;
+
+    let ci = &mut checkpoint.nodes[node_index];
+    ci.state = NodeState::Pending;
+    ci.wait_reason = None;
+    ci.gate = None;
+    ci.outputs = None;
+    ci.ci = None;
+    Ok((conflict_index, rebase))
+}
+
 fn advance_gate<R: AttemptOwner, J: GraphJournal>(
     document: &GraphDocument,
     owner: &mut R,
@@ -1900,6 +2096,23 @@ fn advance_gate<R: AttemptOwner, J: GraphJournal>(
             effective_budget,
         )
     };
+    if plan.queue.is_some()
+        && matches!(condition, GateCondition::Ci { .. })
+        && checkpoint.nodes[node_index]
+            .ci
+            .as_ref()
+            .is_some_and(|evidence| evidence.state == CiState::Conflict)
+    {
+        queue_conflict_recheck(node_index, condition, plan, positions, checkpoint).map_err(
+            |_| GraphError::BadCheckpoint {
+                node: node.id.clone(),
+                invariant: "queue CI conflict must re-enter its exact published conflict gate",
+            },
+        )?;
+        asks::refresh_wake(checkpoint);
+        journal.save(&*checkpoint).map_err(GraphError::Journal)?;
+        return Ok(GateStep::Reschedule);
+    }
     let exact_queue_ci_red = gate_was_evaluated
         && plan.queue.is_some()
         && reason.is_some()
@@ -4280,6 +4493,12 @@ pub(super) fn park_delivery_transition<R: AttemptOwner, J: GraphJournal>(
             node: document.graph_id.clone(),
             invariant: "delivery park node index must exist",
         })?;
+    // TODO(#3972-queue): queue admission resolves tracker identities and seals
+    // them in the graph context before launching item graphs.
+    let item = document
+        .context
+        .as_ref()
+        .and_then(|context| context.work_item.as_deref());
     let bounded_handoff = delivery_text(handoff, 1024);
     let bounded_evidence: Vec<String> = evidence
         .iter()
@@ -4288,6 +4507,7 @@ pub(super) fn park_delivery_transition<R: AttemptOwner, J: GraphJournal>(
         .collect();
     let identity = serde_json::json!({
         "graph": document.graph_id,
+        "item": item,
         "node": node_id,
         "reason": reason,
         "attempt_key": attempt_key,
@@ -4318,7 +4538,7 @@ pub(super) fn park_delivery_transition<R: AttemptOwner, J: GraphJournal>(
         checkpoint.nodes[node_index].delivery_park = Some(DeliveryParkProgress {
             transition_id: transition_id.clone(),
             operation_id: operation_id.clone(),
-            item: None,
+            item: item.map(str::to_owned),
             attempt_key: attempt_key.cloned(),
             attempt_ref: attempt_ref.map(str::to_owned),
             reason,
@@ -4336,8 +4556,7 @@ pub(super) fn park_delivery_transition<R: AttemptOwner, J: GraphJournal>(
             transition_id: &transition_id,
             operation_id: &operation_id,
             graph_id: &document.graph_id,
-            // TODO(#3972-queue): consume the sealed tracker item identity.
-            item: None,
+            item,
             node_id: &node_id,
             attempt_key,
             attempt_ref,
@@ -5029,18 +5248,16 @@ fn advance_publish<R: AttemptOwner, J: GraphJournal>(
         progress.advance_error = None;
         progress.advance_error_code = None;
         progress.wait_reason = None;
-        if document.delivery == Some(provenant_records::run::DeliveryMode::Pr) {
-            if checkpoint.delivered
-                && checkpoint.pull_request.as_deref() != Some(receipt.pull_request.as_str())
-            {
-                return Err(GraphError::BadCheckpoint {
-                    node: node.id.clone(),
-                    invariant: "queue publication must retain one stable graph PR identity",
-                });
-            }
-            transitions::record_delivery(checkpoint, receipt.pull_request.clone())
-                .map_err(GraphError::Refused)?;
+        if checkpoint.delivered
+            && checkpoint.pull_request.as_deref() != Some(receipt.pull_request.as_str())
+        {
+            return Err(GraphError::BadCheckpoint {
+                node: node.id.clone(),
+                invariant: "queue publication must retain one stable graph PR identity",
+            });
         }
+        transitions::record_delivery(checkpoint, receipt.pull_request.clone())
+            .map_err(GraphError::Refused)?;
         journal.save(checkpoint).map_err(GraphError::Journal)?;
         return Ok(());
     }

@@ -31,6 +31,7 @@ struct Owner {
     policies: std::collections::BTreeMap<String, CiPollBackoff>,
     branch: Option<String>,
     commit: Option<String>,
+    integration_base: Option<provenant_core::GitOid>,
     prompts: Vec<String>,
     source_commits: Vec<Option<String>>,
     park_operations: Vec<String>,
@@ -81,6 +82,14 @@ impl AttemptOwner for Owner {
     fn actor(&self) -> String {
         "fixture".into()
     }
+    fn bound_graph_bases(
+        &self,
+    ) -> (
+        Option<provenant_core::GitOid>,
+        Option<provenant_core::GitOid>,
+    ) {
+        (None, self.integration_base)
+    }
     fn ci_status(&mut self) -> Option<&mut dyn CiStatus> {
         Some(self)
     }
@@ -92,9 +101,35 @@ impl AttemptOwner for Owner {
         self.deliveries += 1;
         Ok(None)
     }
+    fn run_hygiene(
+        &mut self,
+        request: HygieneRequest<'_>,
+    ) -> Result<HygieneExecution, Self::Error> {
+        Ok(HygieneExecution {
+            outcome: provenant_records::graph::HygieneOutcome {
+                kind: provenant_records::graph::HygieneOutcomeKind::Clean,
+                before_head: Some(request.input_head.to_owned()),
+                after_head: Some(request.input_head.to_owned()),
+                handoff: Some("fixture hygiene completed".into()),
+            },
+            branch: self.branch.clone(),
+            formatter_source: Some("fixture".into()),
+            diagnostic: None,
+        })
+    }
+    fn publish_delivery(
+        &mut self,
+        request: PublicationRequest<'_>,
+    ) -> Result<Option<DeliveryPublication>, Self::Error> {
+        Ok(Some(DeliveryPublication {
+            branch: format!("provenant/graph/{}", request.graph_id),
+            head: request.expected_head.to_owned(),
+            pull_request: "https://example.invalid/pr/ci".into(),
+        }))
+    }
     fn observe_or_start(
         &mut self,
-        _: &AttemptKey,
+        key: &AttemptKey,
         input: NodeInput<'_>,
         _: &GraphRoute,
         _: AccessMode,
@@ -105,7 +140,7 @@ impl AttemptOwner for Owner {
         self.prompts.push(input.prompt.into());
         self.source_commits.push(source_commit.map(str::to_owned));
         Ok(AttemptObservation::Terminal {
-            attempt_ref: None,
+            attempt_ref: Some(format!("fixture/{}/{}", key.node_id, self.attempts)),
             outcome: AttemptOutcome::Succeeded,
             launched: true,
             result: None,
@@ -204,11 +239,19 @@ fn ci_without_a_published_head_or_registered_checks_remains_pending() {
         let mut owner = Owner {
             branch: Some("delivered/topic".into()),
             commit: Some("a".repeat(40)),
+            integration_base: Some("f".repeat(40).parse().unwrap()),
+            conflict_observations: VecDeque::from([ConflictObservation {
+                state: ConflictState::Clear,
+                head_sha: Some("a".repeat(40)),
+                summary: "no merge conflicts".into(),
+            }]),
             observations: VecDeque::from([result]),
             ..Default::default()
         };
-        let run = advance(&node_target_document(), &mut owner, &mut Journal::default()).unwrap();
-        let node = &run.checkpoint.nodes[1];
+        let doc = queue_published_document();
+        let run = advance(&doc, &mut owner, &mut Journal::default()).unwrap();
+        let ci_index = doc.nodes.iter().position(|node| node.id == "ci").unwrap();
+        let node = &run.checkpoint.nodes[ci_index];
         assert_eq!(node.state, NodeState::Running);
         assert!(node.gate.is_none());
         assert_eq!(node.ci.as_ref().unwrap().state, CiState::Pending);
@@ -642,10 +685,12 @@ fn ci_timeout_without_registered_checks_reports_not_scheduled() {
 
 #[test]
 fn queue_ci_timeout_parks_pending_checks_without_red_or_green_and_replays() {
-    let mut doc = node_target_document();
+    let mut doc = queue_published_document();
+    let ci_index = doc.nodes.iter().position(|node| node.id == "ci").unwrap();
+    let conflict_head = "a".repeat(40);
     let Some(GateCondition::Ci {
         timeout_seconds, ..
-    }) = &mut doc.nodes[1].condition
+    }) = &mut doc.nodes[ci_index].condition
     else {
         unreachable!()
     };
@@ -653,7 +698,13 @@ fn queue_ci_timeout_parks_pending_checks_without_red_or_green_and_replays() {
     let head = "a".repeat(40);
     let mut owner = Owner {
         branch: Some("delivered/topic".into()),
-        commit: Some(head),
+        commit: Some(head.clone()),
+        integration_base: Some("f".repeat(40).parse().unwrap()),
+        conflict_observations: VecDeque::from([ConflictObservation {
+            state: ConflictState::Clear,
+            head_sha: Some(conflict_head),
+            summary: "no merge conflicts".into(),
+        }]),
         observations: VecDeque::from([
             observation(CiState::Pending, "awaiting check registration"),
             observation(CiState::Pending, "still awaiting checks"),
@@ -665,14 +716,14 @@ fn queue_ci_timeout_parks_pending_checks_without_red_or_green_and_replays() {
     let first = advance(&doc, &mut owner, &mut journal).unwrap();
     assert_eq!(first.status, GraphStatus::Pending);
     assert_eq!(
-        first.checkpoint.nodes[1].ci.as_ref().unwrap().state,
+        first.checkpoint.nodes[ci_index].ci.as_ref().unwrap().state,
         CiState::Pending
     );
 
     owner.wall_seconds = 1;
     owner.monotonic_micros = 1_000_000;
     let timed_out = advance(&doc, &mut owner, &mut journal).unwrap();
-    let node = &timed_out.checkpoint.nodes[1];
+    let node = &timed_out.checkpoint.nodes[ci_index];
     assert_eq!(node.state, NodeState::Running);
     assert!(
         node.gate.is_none(),
@@ -695,7 +746,7 @@ fn queue_ci_timeout_parks_pending_checks_without_red_or_green_and_replays() {
 
     let replay = advance(&doc, &mut owner, &mut journal).unwrap();
     assert_eq!(
-        replay.checkpoint.nodes[1]
+        replay.checkpoint.nodes[ci_index]
             .delivery_park
             .as_ref()
             .unwrap()
@@ -936,7 +987,7 @@ fn ci_validation_rejects_bad_targets_and_timeouts() {
 }
 
 fn node_target_document() -> GraphDocument {
-    let mut document: GraphDocument = serde_json::from_value(serde_json::json!({
+    serde_json::from_value(serde_json::json!({
         "schema_version":2, "graph_id":"node-ci", "nodes":[
             {"id":"write","access":"worktree_write","worktree":"lane","prompt":"write",
              "delivery":"pr","route":{"adapter":"fixture","model":"fixture/model"}},
@@ -944,9 +995,183 @@ fn node_target_document() -> GraphDocument {
              "condition":{"type":"ci","target":{"node":"write"}}}
         ]
     }))
+    .unwrap()
+}
+
+fn queue_published_document() -> GraphDocument {
+    let mut document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version":2, "graph_id":"queue-ci", "integration_branch":"delivery/item",
+        "nodes":[
+            {"id":"write","access":"worktree_write","worktree":"lane","prompt":"write",
+             "route":{"adapter":"fixture","model":"fixture/model"}},
+            {"id":"hygiene","kind":"hygiene","access":"worktree_write","worktree":"lane",
+             "depends_on":["write"],"source":{"type":"node","node":"write"}},
+            {"id":"publish","kind":"publish","access":"worktree_write","worktree":"lane",
+             "depends_on":["hygiene"],"source":{"type":"node","node":"hygiene"}},
+            {"id":"conflict","kind":"gate","access":"read_only","depends_on":["publish"],
+             "on_fail":"rebase","condition":{"type":"conflict","target":{"node":"publish"}}},
+            {"id":"rebase","access":"worktree_write","worktree":"lane","prompt":"rebase",
+             "source":{"type":"head","node":"publish"},"depends_on":["conflict"],
+             "route":{"adapter":"fixture","model":"fixture/model"}},
+            {"id":"ci","kind":"gate","access":"read_only","depends_on":["conflict","publish"],
+             "on_fail":"repair","condition":{"type":"ci","target":{"node":"publish"}}},
+            {"id":"repair","access":"worktree_write","worktree":"lane",
+             "prompt":"Repair CI findings and sweep the whole defect class.",
+             "source":{"type":"head","node":"publish"},"depends_on":["ci","publish"],
+             "inputs":[{"node":"ci","outputs":["findings","commit"]}],
+             "route":{"adapter":"fixture","model":"fixture/model"}}
+        ]
+    }))
     .unwrap();
     document.queue = Some(QueueKnobs::default());
     document
+}
+
+#[test]
+fn expanded_gates_in_distinct_members_of_one_loop_share_a_round() {
+    let conflict = loops::LoopRound {
+        extra: Default::default(),
+        loop_id: "checks".into(),
+        round: 2,
+        node_id: "conflict".into(),
+        until: false,
+        previous_gate: Some("checks--r1--ci".into()),
+    };
+    let ci = loops::LoopRound {
+        node_id: "ci".into(),
+        until: true,
+        ..conflict.clone()
+    };
+    let next_round = loops::LoopRound {
+        round: 3,
+        ..ci.clone()
+    };
+
+    assert!(super::same_expanded_round(Some(&conflict), Some(&ci)));
+    assert!(!super::same_expanded_round(
+        Some(&conflict),
+        Some(&next_round)
+    ));
+    assert!(!super::same_expanded_round(Some(&conflict), None));
+}
+
+#[test]
+fn queue_conflict_recheck_matches_a_bounded_round_and_reactivates_composite_rebase() {
+    let mut document = queue_published_document();
+    document
+        .nodes
+        .retain(|node| matches!(node.id.as_str(), "write" | "hygiene" | "publish"));
+    document.nodes.push(
+        serde_json::from_value(serde_json::json!({
+            "id":"cycle","kind":"loop","access":"read_only","depends_on":["publish"],
+            "loop":{"max_rounds":1,"until":"done","body":[
+                {"id":"conflict","kind":"gate","access":"read_only",
+                 "on_fail":"rebase","condition":{"type":"conflict","target":{"node":"publish"}}},
+                {"id":"rebase","kind":"composite","access":"read_only","depends_on":["conflict"],
+                 "composite":{"nodes":[
+                    {"id":"fix","access":"worktree_write","worktree":"lane","prompt":"rebase",
+                     "source":{"type":"head","node":"publish"},
+                     "route":{"adapter":"fixture","model":"fixture/model"}}
+                 ],"exports":[{"node":"fix","outputs":["result"]}]}},
+                {"id":"ci_repair","access":"worktree_write","worktree":"lane","prompt":"repair",
+                 "source":{"type":"head","node":"publish"},"depends_on":["ci"],
+                 "inputs":[{"node":"ci","outputs":["findings","commit"]}],
+                 "route":{"adapter":"fixture","model":"fixture/model"}},
+                {"id":"ci","kind":"gate","access":"read_only","depends_on":["conflict"],
+                 "on_fail":"ci_repair","condition":{"type":"ci","target":{"node":"publish"}}},
+                {"id":"done","kind":"gate","access":"read_only",
+                 "depends_on":["ci","rebase","ci_repair"],"condition":{"type":"budget"}}
+            ]}
+        }))
+        .unwrap(),
+    );
+    let limits = crate::config::GraphLimits::default();
+    let expanded = loops::expand(&document, &[], &limits).unwrap();
+    let (plan, positions) = validate_flat_plan(&expanded, &limits).unwrap();
+    let conflict_index = positions["cycle--r1--conflict"];
+    let rebase_index = positions["cycle--r1--rebase"];
+    let rebase_writer_index = positions["cycle--r1--rebase--fix"];
+    let ci_index = positions["cycle--r1--ci"];
+    let conflict_round = plan.nodes[conflict_index].round.as_ref().unwrap();
+    let ci_round = plan.nodes[ci_index].round.as_ref().unwrap();
+    assert_eq!(
+        (conflict_round.loop_id.as_str(), conflict_round.round),
+        ("cycle", 1)
+    );
+    assert_eq!((ci_round.loop_id.as_str(), ci_round.round), ("cycle", 1));
+    assert_ne!(conflict_round.node_id, ci_round.node_id);
+
+    let mut checkpoint = transitions::initial_checkpoint(
+        &expanded,
+        &plan,
+        "queue-loop-conflict-recheck".into(),
+        None,
+        None,
+        None,
+    );
+    let head = "a".repeat(40);
+    let publication = &mut checkpoint.nodes[positions["publish"]];
+    publication.state = NodeState::Succeeded;
+    publication.outputs = Some(NodeOutputs {
+        branch: Some("provenant/graph/queue-ci".into()),
+        commit: Some(head.clone()),
+        publication: Some(DeliveryPublication {
+            branch: "provenant/graph/queue-ci".into(),
+            head: head.clone(),
+            pull_request: "https://example.invalid/pr/ci".into(),
+        }),
+        ..Default::default()
+    });
+    let conflict = &mut checkpoint.nodes[conflict_index];
+    conflict.state = NodeState::Succeeded;
+    conflict.gate = Some(GateResult {
+        extra: Default::default(),
+        passed: true,
+        reason: None,
+        on_fail: Some("cycle--r1--rebase".into()),
+    });
+    conflict.conflict = Some(super::ci::ConflictEvidence {
+        state: ConflictState::Clear,
+        head_sha: Some(head.clone()),
+        summary: "clear at published head".into(),
+        wake_at: None,
+        pending_observations: 0,
+    });
+    checkpoint.nodes[rebase_index].state = NodeState::Skipped;
+    checkpoint.nodes[rebase_writer_index].state = NodeState::Skipped;
+    checkpoint.nodes[ci_index].state = NodeState::Running;
+    checkpoint.nodes[ci_index].ci = Some(CiEvidence {
+        wake_at: None,
+        pending_observations: 1,
+        extra: Default::default(),
+        first_observed_stamp: None,
+        clock_reanchors: 0,
+        clock_reanchor_reason: None,
+        state: CiState::Conflict,
+        summary: "PR base moved".into(),
+        head_sha: Some(head),
+        failed_checks: Vec::new(),
+        check_names: vec!["build".into()],
+        truncated: false,
+        elapsed_seconds: 1,
+    });
+    let condition = plan.nodes[ci_index].condition.clone().unwrap();
+
+    let reset =
+        super::queue_conflict_recheck(ci_index, &condition, &plan, &positions, &mut checkpoint)
+            .unwrap();
+
+    assert_eq!(reset, (conflict_index, rebase_index));
+    assert_eq!(checkpoint.nodes[conflict_index].state, NodeState::Pending);
+    assert!(checkpoint.nodes[conflict_index].gate.is_none());
+    assert!(checkpoint.nodes[conflict_index].conflict.is_none());
+    assert_eq!(checkpoint.nodes[rebase_index].state, NodeState::Pending);
+    assert_eq!(
+        checkpoint.nodes[rebase_writer_index].state,
+        NodeState::Pending
+    );
+    assert_eq!(checkpoint.nodes[ci_index].state, NodeState::Pending);
+    assert!(checkpoint.nodes[ci_index].ci.is_none());
 }
 
 #[test]
@@ -979,18 +1204,27 @@ fn ci_node_target_resolves_delivered_branch_and_records_head() {
 fn ci_node_target_keeps_a_moved_published_head_pending_even_if_checks_are_green() {
     let mut green = observation(CiState::Passed, "green for a different head");
     green.head_sha = Some("b".repeat(40));
+    let head = "a".repeat(40);
     let mut owner = Owner {
         branch: Some("delivered/topic".into()),
-        commit: Some("a".repeat(40)),
+        commit: Some(head.clone()),
+        integration_base: Some("f".repeat(40).parse().unwrap()),
+        conflict_observations: VecDeque::from([ConflictObservation {
+            state: ConflictState::Clear,
+            head_sha: Some(head.clone()),
+            summary: "no merge conflicts".into(),
+        }]),
         observations: VecDeque::from([green]),
         ..Default::default()
     };
-    let result = advance(&node_target_document(), &mut owner, &mut Journal::default()).unwrap();
-    let ci = result.checkpoint.nodes[1].ci.as_ref().unwrap();
-    assert_eq!(result.checkpoint.nodes[1].state, NodeState::Running);
-    assert!(result.checkpoint.nodes[1].gate.is_none());
+    let doc = queue_published_document();
+    let result = advance(&doc, &mut owner, &mut Journal::default()).unwrap();
+    let ci_index = doc.nodes.iter().position(|node| node.id == "ci").unwrap();
+    let ci = result.checkpoint.nodes[ci_index].ci.as_ref().unwrap();
+    assert_eq!(result.checkpoint.nodes[ci_index].state, NodeState::Running);
+    assert!(result.checkpoint.nodes[ci_index].gate.is_none());
     assert_eq!(ci.state, CiState::Pending);
-    assert_eq!(ci.head_sha.as_deref(), Some("a".repeat(40).as_str()));
+    assert_eq!(ci.head_sha.as_deref(), Some(head.as_str()));
     assert!(
         ci.summary
             .contains("waiting for publication reconciliation")
@@ -999,48 +1233,86 @@ fn ci_node_target_keeps_a_moved_published_head_pending_even_if_checks_are_green(
 }
 
 #[test]
-fn queue_ci_without_a_published_head_keeps_green_and_red_observations_pending() {
+fn queue_ci_without_a_published_head_does_not_reach_or_settle_the_gate() {
+    let doc = queue_published_document();
+    let ci_index = doc.nodes.iter().position(|node| node.id == "ci").unwrap();
+    let mut owner = Owner {
+        branch: Some("delivered/topic".into()),
+        commit: None,
+        ..Default::default()
+    };
+
+    let run = advance(&doc, &mut owner, &mut Journal::default()).unwrap();
+
+    let ci = &run.checkpoint.nodes[ci_index];
+    assert_eq!(ci.state, NodeState::Pending);
+    assert!(ci.gate.is_none());
+    assert!(ci.outputs.is_none());
+    assert!(ci.ci.is_none());
+    let repair_index = doc
+        .nodes
+        .iter()
+        .position(|node| node.id == "repair")
+        .unwrap();
+    let repair = &run.checkpoint.nodes[repair_index];
+    assert_eq!(repair.state, NodeState::Pending);
+    assert!(
+        owner.targets.is_empty(),
+        "CI must not be queried without a published head to bind"
+    );
+    assert_eq!(
+        owner.attempts, 1,
+        "no CI repair may launch without a published head"
+    );
+}
+
+#[test]
+fn queue_ci_missing_published_head_ignores_green_and_red_reports() {
+    let document = queue_published_document();
+    let (plan, positions) = validate_plan(&document).unwrap();
+    let ci_index = positions["ci"];
     for state in [CiState::Passed, CiState::Failed] {
-        let mut doc = node_target_document();
-        doc.nodes[1].on_fail = Some("repair".into());
-        doc.nodes.push(
-            serde_json::from_value(serde_json::json!({
-                "id":"repair","access":"read_only","prompt":"repair",
-                "depends_on":["ci"],"route":{"adapter":"fixture","model":"fixture/model"}
-            }))
-            .unwrap(),
-        );
-        let mut report = registered(
-            state,
-            "checks reported for a branch without a published commit",
-        );
+        let mut report = registered(state, "report without a bound publication");
         if state == CiState::Failed {
             report.failed_checks.push(failed_check());
         }
         let mut owner = Owner {
-            branch: Some("delivered/topic".into()),
-            commit: None,
             observations: VecDeque::from([report]),
             ..Default::default()
         };
-
-        let run = advance(&doc, &mut owner, &mut Journal::default()).unwrap();
-
-        let ci = &run.checkpoint.nodes[1];
-        assert_eq!(ci.state, NodeState::Running);
-        assert!(ci.gate.is_none());
-        assert!(ci.outputs.is_none());
-        assert_eq!(ci.ci.as_ref().unwrap().state, CiState::Pending);
-        assert_eq!(ci.ci.as_ref().unwrap().head_sha, None);
-        assert_eq!(run.checkpoint.nodes[2].state, NodeState::Pending);
-        assert!(
-            owner.targets.is_empty(),
-            "CI must not be queried without a published head to bind"
+        let mut checkpoint = transitions::initial_checkpoint(
+            &document,
+            &plan,
+            "queue-ci-missing-head".into(),
+            None,
+            None,
+            None,
         );
-        assert_eq!(
-            owner.attempts, 1,
-            "neither green nor red may launch a repair without the published head"
-        );
+        checkpoint.nodes[ci_index].state = NodeState::Running;
+        let wall_now = owner.wall_now();
+        let backoff = owner.ci_poll_backoff("ci");
+
+        let evaluation = super::ci::evaluate(
+            true,
+            ci_index,
+            &plan.nodes[ci_index],
+            &mut checkpoint,
+            &mut owner,
+            wall_now,
+            backoff,
+        )
+        .unwrap();
+
+        assert!(matches!(evaluation, super::ci::Evaluation::Pending));
+        let progress = &checkpoint.nodes[ci_index];
+        assert_eq!(progress.state, NodeState::Running);
+        assert!(progress.gate.is_none());
+        assert!(progress.outputs.is_none());
+        assert_eq!(progress.ci.as_ref().unwrap().state, CiState::Pending);
+        assert!(progress.ci.as_ref().unwrap().head_sha.is_none());
+        assert!(progress.ci.as_ref().unwrap().failed_checks.is_empty());
+        assert!(owner.targets.is_empty());
+        assert_eq!(owner.observations.len(), 1);
     }
 }
 
@@ -1111,23 +1383,7 @@ fn conflict_node_target_does_not_rebase_a_different_head() {
 
 #[test]
 fn queue_conflict_without_a_published_head_waits_instead_of_rebasing() {
-    let mut doc = node_target_document();
-    doc.nodes[1].condition = Some(GateCondition::Conflict {
-        extra: Default::default(),
-        target: CiTarget::Node {
-            node: "write".into(),
-            extra: Default::default(),
-        },
-    });
-    doc.nodes[1].on_fail = Some("rebase".into());
-    doc.nodes.push(
-        serde_json::from_value(serde_json::json!({
-            "id":"rebase","access":"worktree_write","worktree":"lane",
-            "prompt":"Rebase the retained branch","depends_on":["ci"],
-            "route":{"adapter":"fixture","model":"fixture/model"}
-        }))
-        .unwrap(),
-    );
+    let doc = queue_published_document();
     let mut owner = Owner {
         branch: Some("delivered/topic".into()),
         commit: None,
@@ -1141,16 +1397,26 @@ fn queue_conflict_without_a_published_head_waits_instead_of_rebasing() {
 
     let run = advance(&doc, &mut owner, &mut Journal::default()).unwrap();
 
-    let conflict = &run.checkpoint.nodes[1];
-    assert_eq!(conflict.state, NodeState::Running);
+    let conflict_index = doc
+        .nodes
+        .iter()
+        .position(|node| node.id == "conflict")
+        .unwrap();
+    let rebase_index = doc
+        .nodes
+        .iter()
+        .position(|node| node.id == "rebase")
+        .unwrap();
+    let conflict = &run.checkpoint.nodes[conflict_index];
+    assert_ne!(conflict.state, NodeState::Succeeded);
     assert!(conflict.gate.is_none());
-    assert_eq!(
-        conflict.conflict.as_ref().unwrap().state,
-        ConflictState::Pending
+    assert!(conflict.conflict.is_none());
+    assert_ne!(
+        run.checkpoint.nodes[rebase_index].state,
+        NodeState::Succeeded
     );
-    assert_eq!(conflict.conflict.as_ref().unwrap().head_sha, None);
-    assert_eq!(run.checkpoint.nodes[2].state, NodeState::Pending);
     assert_eq!(owner.attempts, 1);
+    assert!(owner.targets.is_empty());
 }
 
 #[test]
@@ -1459,23 +1725,27 @@ fn ci_failure_findings_reach_repair_input_and_survive_resume() {
 
 #[test]
 fn queue_ci_repair_receives_failing_head_findings_and_sweep_instruction() {
-    let mut doc = node_target_document();
-    doc.nodes[1].on_fail = Some("repair".into());
-    doc.nodes.push(
-        serde_json::from_value(serde_json::json!({
-            "id":"repair","access":"read_only","prompt":"Repair the failed CI head.",
-            "source":{"type":"head","node":"write"},"depends_on":["ci"],
-            "inputs":[{"node":"ci","outputs":["findings","commit"]}],
-            "route":{"adapter":"fixture","model":"fixture/model"}
-        }))
-        .unwrap(),
-    );
+    let mut doc = queue_published_document();
+    let ci_index = doc.nodes.iter().position(|node| node.id == "ci").unwrap();
+    let repair_index = doc
+        .nodes
+        .iter()
+        .position(|node| node.id == "repair")
+        .unwrap();
+    doc.nodes[repair_index].prompt =
+        "Repair the failed CI head and sweep the whole defect class.".into();
     let head = "a".repeat(40);
     let mut failure = observation(CiState::Failed, "failed");
     failure.failed_checks.push(failed_check());
     let mut owner = Owner {
         branch: Some("delivered/topic".into()),
         commit: Some(head.clone()),
+        integration_base: Some("f".repeat(40).parse().unwrap()),
+        conflict_observations: VecDeque::from([ConflictObservation {
+            state: ConflictState::Clear,
+            head_sha: Some(head.clone()),
+            summary: "no merge conflicts".into(),
+        }]),
         observations: VecDeque::from([failure]),
         ..Default::default()
     };
@@ -1483,13 +1753,13 @@ fn queue_ci_repair_receives_failing_head_findings_and_sweep_instruction() {
 
     let run = advance(&doc, &mut owner, &mut journal).unwrap();
 
-    let ci = &run.checkpoint.nodes[1];
+    let ci = &run.checkpoint.nodes[ci_index];
     assert_eq!(
         ci.outputs.as_ref().unwrap().commit.as_deref(),
         Some(head.as_str())
     );
     assert_eq!(ci.state, NodeState::Failed);
-    let repair = &run.checkpoint.nodes[2];
+    let repair = &run.checkpoint.nodes[repair_index];
     assert_eq!(repair.state, NodeState::Succeeded);
     assert_eq!(repair.source_commit.as_deref(), Some(head.as_str()));
     assert_eq!(owner.source_commits, vec![None, Some(head.clone())]);

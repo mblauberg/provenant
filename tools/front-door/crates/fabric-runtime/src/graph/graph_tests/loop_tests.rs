@@ -74,22 +74,24 @@ fn extension(
 
 #[test]
 fn queue_loop_can_bind_an_outer_publication_gate() {
-    for kind in ["ci", "conflict"] {
         let mut document: GraphDocument = serde_json::from_value(serde_json::json!({
-            "schema_version":2, "graph_id":"outer-publication", "nodes":[
+            "schema_version":2, "graph_id":"outer-publication", "integration_branch":"delivery/item", "nodes":[
                 {"id":"writer", "access":"worktree_write", "worktree":"retained",
                  "prompt":"Write", "route":{"alias":"junior"}},
-                {"id":"cycle", "kind":"loop", "access":"read_only", "depends_on":["writer"],
+                {"id":"hygiene", "kind":"hygiene", "access":"worktree_write", "worktree":"retained",
+                 "depends_on":["writer"], "source":{"type":"node","node":"writer"}},
+                {"id":"publish", "kind":"publish", "access":"worktree_write", "worktree":"retained",
+                 "depends_on":["hygiene"], "source":{"type":"node","node":"hygiene"}},
+                {"id":"cycle", "kind":"loop", "access":"read_only", "depends_on":["publish"],
                  "loop":{"max_rounds":1, "until":"check", "body":[
                      {"id":"check", "kind":"gate", "access":"read_only",
-                      "condition":{"type":kind,"target":{"node":"writer"}}}
+                      "condition":{"type":"ci","target":{"node":"publish"}}}
                  ]}}
             ]
         })).unwrap();
         document.queue = Some(QueueKnobs::default());
         let expanded = loops::expand(&document, &[], &Default::default()).unwrap();
         assert!(validate_plan(&expanded).is_ok());
-    }
 }
 
 // Spec: docs/specs/fabric.md#bounded-graphs-and-route-fallback
@@ -1724,18 +1726,24 @@ fn loop_rejects_nested_loops_invalid_recovery_targets_and_identifier_ambiguities
 #[test]
 fn loop_conflict_recovery_is_bounded_and_replays_the_namespaced_target() {
     let mut document: GraphDocument = serde_json::from_value(serde_json::json!({
-        "schema_version":2,"graph_id":"loop-conflict-recovery","nodes":[{
-            "id":"delivery","kind":"loop","access":"read_only",
+        "schema_version":2,"graph_id":"loop-conflict-recovery",
+        "integration_branch":"delivery/item","nodes":[
+        {"id":"write","access":"worktree_write","worktree":"/fixture/writer",
+         "prompt":"write the change","write_scope":["src"],"route":{"alias":"senior"}},
+        {"id":"hygiene","kind":"hygiene","access":"worktree_write",
+         "worktree":"/fixture/writer","depends_on":["write"],
+         "source":{"type":"node","node":"write"}},
+        {"id":"publish","kind":"publish","access":"worktree_write",
+         "worktree":"/fixture/writer","depends_on":["hygiene"],
+         "source":{"type":"node","node":"hygiene"}},
+        {"id":"delivery","kind":"loop","access":"read_only","depends_on":["publish"],
             "loop":{"max_rounds":2,"until":"done","body":[
-                {"id":"publish","access":"worktree_write","worktree":"/fixture/writer",
-                 "prompt":"publish the retained worktree","write_scope":["src"],
-                 "route":{"alias":"senior"}},
-                {"id":"conflict","kind":"gate","access":"read_only",
-                 "depends_on":["publish"],"on_fail":"rebase",
+                {"id":"conflict","kind":"gate","access":"read_only","on_fail":"rebase",
                  "condition":{"type":"conflict","target":{"node":"publish"}}},
                 {"id":"rebase","access":"worktree_write","worktree":"/fixture/writer",
                  "prompt":"rebase the retained worktree","write_scope":["src"],
-                 "route":{"alias":"senior"},"depends_on":["conflict"]},
+                 "route":{"alias":"senior"},"depends_on":["conflict"],
+                 "source":{"type":"head","node":"publish"}},
                 {"id":"done","kind":"gate","access":"read_only",
                  "depends_on":["rebase"],"condition":{"type":"budget"}}
             ]}

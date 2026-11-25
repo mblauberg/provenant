@@ -6,6 +6,8 @@ use std::convert::Infallible;
 
 const WRITE_HEAD: &str = "1111111111111111111111111111111111111111";
 const REPAIR_HEAD: &str = "2222222222222222222222222222222222222222";
+const REBASE_HEAD: &str = "5555555555555555555555555555555555555555";
+const REPUBLISHED_HEAD: &str = "6666666666666666666666666666666666666666";
 /// The commit the review read the writer's head against.
 const REVIEW_BASE: &str = "3333333333333333333333333333333333333333";
 /// The fetched land target, one commit past `REVIEW_BASE`.
@@ -72,7 +74,14 @@ struct Owner {
     integration_base: Option<provenant_core::GitOid>,
     conflict_state: Option<ConflictState>,
     conflict_head: Option<String>,
+    conflict_states: VecDeque<ConflictState>,
+    conflict_heads: VecDeque<Option<String>>,
     ci_head: Option<String>,
+    ci_states: VecDeque<CiState>,
+    hygiene_after_heads: VecDeque<String>,
+    hygiene_observations: Vec<(String, String, String)>,
+    publication_heads: Vec<String>,
+    gate_observations: Vec<(String, String)>,
 }
 impl CiStatus for Owner {
     fn host_stamp(&self) -> Option<CiHostStamp> {
@@ -82,10 +91,18 @@ impl CiStatus for Owner {
             host_monotonic_micros: 1,
         })
     }
-    fn observe_ci(&mut self, _: &str, _: &[String], _: bool, _: usize, _: usize) -> CiObservation {
+    fn observe_ci(
+        &mut self,
+        target: &str,
+        _: &[String],
+        _: bool,
+        _: usize,
+        _: usize,
+    ) -> CiObservation {
+        self.gate_observations.push(("ci".into(), target.into()));
         CiObservation {
             extra: Default::default(),
-            state: CiState::Passed,
+            state: self.ci_states.pop_front().unwrap_or(CiState::Passed),
             summary: "checks passed".into(),
             head_sha: self.ci_head.clone().or_else(|| self.head.clone()),
             failed_checks: Vec::new(),
@@ -93,10 +110,19 @@ impl CiStatus for Owner {
             truncated: false,
         }
     }
-    fn observe_conflict(&mut self, _: &str) -> ConflictObservation {
+    fn observe_conflict(&mut self, target: &str) -> ConflictObservation {
+        self.gate_observations
+            .push(("conflict".into(), target.into()));
         ConflictObservation {
-            state: self.conflict_state.unwrap_or(ConflictState::Clear),
-            head_sha: self.conflict_head.clone().or_else(|| self.head.clone()),
+            state: self
+                .conflict_states
+                .pop_front()
+                .or(self.conflict_state)
+                .unwrap_or(ConflictState::Clear),
+            head_sha: self
+                .conflict_heads
+                .pop_front()
+                .unwrap_or_else(|| self.conflict_head.clone().or_else(|| self.head.clone())),
             summary: "published PR conflict state".into(),
         }
     }
@@ -144,11 +170,20 @@ impl AttemptOwner for Owner {
         &mut self,
         request: HygieneRequest<'_>,
     ) -> Result<HygieneExecution, Self::Error> {
+        let after_head = self
+            .hygiene_after_heads
+            .pop_front()
+            .unwrap_or_else(|| REPAIR_HEAD.into());
+        self.hygiene_observations.push((
+            request.node_id.to_owned(),
+            request.input_head.to_owned(),
+            after_head.clone(),
+        ));
         Ok(HygieneExecution {
             outcome: provenant_records::graph::HygieneOutcome {
                 kind: provenant_records::graph::HygieneOutcomeKind::Clean,
                 before_head: Some(request.input_head.to_owned()),
-                after_head: Some(REPAIR_HEAD.into()),
+                after_head: Some(after_head),
                 handoff: Some("formatter completed".into()),
             },
             branch: self.writer_branch.clone(),
@@ -161,6 +196,8 @@ impl AttemptOwner for Owner {
         request: PublicationRequest<'_>,
     ) -> Result<Option<DeliveryPublication>, Self::Error> {
         self.head = Some(request.expected_head.to_owned());
+        self.publication_heads
+            .push(request.expected_head.to_owned());
         Ok(Some(DeliveryPublication {
             branch: "provenant/graph/g-land".into(),
             head: request.expected_head.to_owned(),
@@ -293,6 +330,7 @@ impl AttemptOwner for Owner {
         });
         let (result, branch, commit) = match key.node_id.as_str() {
             "write" => (None, self.writer_branch.clone(), Some(WRITE_HEAD)),
+            "rebase" => (None, replay.branch.map(str::to_owned), Some(REBASE_HEAD)),
             _ if self.repair_fixture
                 && access == AccessMode::WorktreeWrite
                 && replay.branch.is_none() =>
@@ -595,8 +633,11 @@ fn queue_publish_document(tier: &str) -> GraphDocument {
              "worktree":"/wt/feature", "depends_on":["hygiene"],
              "source":{"type":"node","node":"hygiene"}},
             {"id":"conflict", "kind":"gate", "access":"read_only",
-             "depends_on":["publish"],
+             "depends_on":["publish"], "on_fail":"rebase",
              "condition":{"type":"conflict","target":{"node":"publish"}}},
+            {"id":"rebase", "access":"worktree_write", "worktree":"/wt/feature",
+             "prompt":"rebase the published branch", "route":{"alias":"senior"},
+             "depends_on":["conflict"], "source":{"type":"head","node":"publish"}},
             {"id":"ci", "kind":"gate", "access":"read_only",
              "depends_on":["conflict"],
              "condition":{"type":"ci","target":{"node":"publish"}}},
@@ -609,6 +650,29 @@ fn queue_publish_document(tier: &str) -> GraphDocument {
              "condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}},
             {"id":"land", "kind":"land", "access":"read_only",
              "depends_on":["accepted"], "land":{"node":"publish","tier":tier}}
+        ]
+    }))
+    .unwrap();
+    document.queue = Some(QueueKnobs::default());
+    document
+}
+
+fn queue_conflict_recovery_document(recovery: serde_json::Value) -> GraphDocument {
+    let mut document: GraphDocument = serde_json::from_value(json!({
+        "schema_version":2, "graph_id":"g-conflict-recovery",
+        "integration_branch":"delivery/item", "nodes":[
+            {"id":"write", "access":"worktree_write", "worktree":"/wt/feature",
+             "prompt":"write it", "write_scope":["src"], "route":{"alias":"senior"}},
+            {"id":"hygiene", "kind":"hygiene", "access":"worktree_write",
+             "worktree":"/wt/feature", "depends_on":["write"],
+             "source":{"type":"node","node":"write"}},
+            {"id":"publish", "kind":"publish", "access":"worktree_write",
+             "worktree":"/wt/feature", "depends_on":["hygiene"],
+             "source":{"type":"node","node":"hygiene"}},
+            {"id":"conflict", "kind":"gate", "access":"read_only",
+             "depends_on":["publish"], "on_fail":"rebase",
+             "condition":{"type":"conflict","target":{"node":"publish"}}},
+            recovery
         ]
     }))
     .unwrap();
@@ -633,8 +697,18 @@ fn node<'a>(checkpoint: &'a GraphCheckpoint, id: &str) -> &'a NodeProgress {
 }
 
 #[test]
-fn queue_head_source_tracks_the_publication_head_and_retained_writer_chain() {
-    let document = queue_publish_document("routine");
+fn queue_publication_without_writer_delivery_supports_head_review_and_landing() {
+    let mut document = queue_publish_document("routine");
+    document.delivery = None;
+    assert!(
+        document
+            .nodes
+            .iter()
+            .find(|node| node.id == "write")
+            .unwrap()
+            .delivery
+            .is_none()
+    );
     assert!(validate_plan(&document).is_ok());
     let mut owner = owner();
     owner.repair_fixture = true;
@@ -646,6 +720,7 @@ fn queue_head_source_tracks_the_publication_head_and_retained_writer_chain() {
     let checkpoint = run(&document, &mut owner, &mut Journal::default());
 
     assert!(checkpoint.successful(), "{:?}", checkpoint.nodes);
+    assert!(checkpoint.delivered);
     assert_eq!(
         checkpoint.pull_request.as_deref(),
         Some("https://example.invalid/pr/7")
@@ -740,19 +815,7 @@ fn queue_head_source_tracks_the_publication_head_and_retained_writer_chain() {
 #[test]
 fn queue_repair_writer_may_bind_the_published_head() {
     let mut document = queue_publish_document("routine");
-    let repair: GraphNode = serde_json::from_value(json!({
-        "id":"rebase", "access":"worktree_write", "worktree":"/wt/feature",
-        "prompt":"rebase the published branch", "route":{"alias":"senior"},
-        "depends_on":["publish"], "source":{"type":"head","node":"publish"}
-    }))
-    .unwrap();
-    let publish = document
-        .nodes
-        .iter()
-        .position(|node| node.id == "publish")
-        .unwrap();
-    document.nodes.insert(publish + 1, repair);
-
+    document.delivery = None;
     assert!(validate_plan(&document).is_ok());
 
     let mut wrong_worktree = document.clone();
@@ -763,6 +826,87 @@ fn queue_repair_writer_may_bind_the_published_head() {
         .unwrap()
         .worktree = Some("/wt/unretained".into());
     assert!(validate_plan(&wrong_worktree).is_err());
+
+    let mut legacy_writer_source = document;
+    legacy_writer_source
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "review")
+        .unwrap()
+        .source = Some(SourceBinding::Head {
+        node: "write".into(),
+    });
+    assert!(validate_plan(&legacy_writer_source).is_err());
+}
+
+#[test]
+fn queue_conflict_recovery_requires_the_published_head_and_retained_worktree() {
+    let recovery_loop = |worktree: &str| {
+        json!({
+            "id":"rebase", "kind":"loop", "access":"read_only",
+            "depends_on":["conflict"],
+            "loop":{"max_rounds":2,"until":"done","body":[
+                {"id":"fix", "access":"worktree_write", "worktree":worktree,
+                 "prompt":"rebase the retained published branch", "write_scope":["src"],
+                 "route":{"alias":"senior"}, "source":{"type":"head","node":"publish"}},
+                {"id":"done", "kind":"gate", "access":"read_only",
+                 "depends_on":["fix"], "condition":{"type":"budget"}}
+            ]}
+        })
+    };
+
+    let valid = queue_conflict_recovery_document(recovery_loop("/wt/feature"));
+    assert!(validate_plan(&valid).is_ok());
+    let expanded = loops::expand(&valid, &[], &crate::config::GraphLimits::default()).unwrap();
+    let (plan, positions) =
+        validate_flat_plan(&expanded, &crate::config::GraphLimits::default()).unwrap();
+    assert!(matches!(
+        &plan.nodes[positions["rebase--r1--fix"]].source,
+        Some(SourceBinding::Head { node }) if node == "publish"
+    ));
+
+    let different_worktree = queue_conflict_recovery_document(recovery_loop("/wt/unretained"));
+    assert!(validate_plan(&different_worktree).is_err());
+
+    let composite = queue_conflict_recovery_document(json!({
+        "id":"rebase", "kind":"composite", "access":"read_only",
+        "depends_on":["conflict"], "composite":{"nodes":[
+            {"id":"fix", "access":"worktree_write", "worktree":"/wt/feature",
+             "prompt":"rebase the retained published branch", "write_scope":["src"],
+             "route":{"alias":"senior"}, "source":{"type":"head","node":"publish"}},
+            {"id":"followup", "access":"worktree_write", "worktree":"/wt/feature",
+             "prompt":"finish the rebase", "write_scope":["src"],
+             "route":{"alias":"senior"}, "depends_on":["fix"],
+             "source":{"type":"node","node":"fix"}}
+        ], "exports":[{"node":"followup","outputs":["result"]}]}
+    }));
+    assert!(validate_plan(&composite).is_ok());
+
+    let unrelated_writer = queue_conflict_recovery_document(json!({
+        "id":"rebase", "kind":"composite", "access":"read_only",
+        "depends_on":["conflict"], "composite":{"nodes":[
+            {"id":"fix", "access":"worktree_write", "worktree":"/wt/feature",
+             "prompt":"rebase the retained published branch", "write_scope":["src"],
+             "route":{"alias":"senior"}, "source":{"type":"head","node":"publish"}},
+            {"id":"unbound", "access":"worktree_write", "worktree":"/wt/feature",
+             "prompt":"write without the published head", "write_scope":["src"],
+             "route":{"alias":"senior"}, "depends_on":["fix"]}
+        ], "exports":[{"node":"unbound","outputs":["result"]}]}
+    }));
+    assert!(validate_plan(&unrelated_writer).is_err());
+
+    let mut missing_recovery = valid;
+    missing_recovery
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "conflict")
+        .unwrap()
+        .on_fail = None;
+    assert!(
+        validate_plan(&missing_recovery)
+            .err()
+            .is_some_and(|error| error.contains("queue conflict recovery"))
+    );
 }
 
 #[test]
@@ -1712,4 +1856,231 @@ fn a_land_ask_id_carries_the_sequence_and_the_retry_generation() {
     assert_eq!(land::parse("land.ask-1.retry-0", "land"), None);
     assert_eq!(land::parse("land.ask-0", "land"), None);
     assert_eq!(land::parse("other.ask-1", "land"), None);
+}
+
+#[derive(Default)]
+struct ReplayJournal {
+    checkpoint: Option<GraphCheckpoint>,
+    saves: Vec<GraphCheckpoint>,
+    failed_after_conflict_reset: bool,
+}
+impl GraphJournal for ReplayJournal {
+    type Error = std::io::Error;
+    fn load(&mut self, _: &str) -> Result<Option<GraphCheckpoint>, Self::Error> {
+        Ok(self.checkpoint.clone())
+    }
+    fn save(&mut self, checkpoint: &GraphCheckpoint) -> Result<(), Self::Error> {
+        self.checkpoint = Some(checkpoint.clone());
+        self.saves.push(checkpoint.clone());
+        let conflict = checkpoint.nodes.iter().find(|node| node.id == "conflict");
+        let ci = checkpoint.nodes.iter().find(|node| node.id == "ci");
+        let reset_checkpoint = conflict.is_some_and(|node| {
+            node.state == NodeState::Pending && node.gate.is_none() && node.conflict.is_none()
+        }) && ci.is_some_and(|node| {
+            node.state == NodeState::Pending && node.gate.is_none() && node.ci.is_none()
+        }) && checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "publish")
+            .and_then(|node| node.outputs.as_ref())
+            .and_then(|outputs| outputs.commit.as_deref())
+            == Some(REPAIR_HEAD)
+            && checkpoint
+                .nodes
+                .iter()
+                .find(|node| node.id == "rebase")
+                .is_some_and(|node| node.state == NodeState::Pending);
+        if reset_checkpoint && !self.failed_after_conflict_reset {
+            self.failed_after_conflict_reset = true;
+            return Err(std::io::Error::other(
+                "simulated lost acknowledgement after durable conflict reset",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn queue_ci_conflict_after_clear_rebases_republishes_and_rechecks_after_replay() {
+    let mut document = queue_publish_document("routine");
+    document
+        .nodes
+        .retain(|node| !matches!(node.id.as_str(), "review" | "accepted" | "land"));
+    document
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "ci")
+        .unwrap()
+        .on_fail = Some("ci_repair".into());
+    document.nodes.extend(
+        serde_json::from_value::<Vec<GraphNode>>(json!([
+            {"id":"ci_repair","access":"worktree_write","worktree":"/wt/feature",
+             "prompt":"Repair CI findings and sweep the whole defect class.",
+             "source":{"type":"head","node":"publish"},"depends_on":["ci","publish"],
+             "inputs":[{"node":"ci","outputs":["findings","commit"]}],
+             "route":{"alias":"senior"}},
+            {"id":"hygiene_after_rebase","kind":"hygiene","access":"worktree_write",
+             "worktree":"/wt/feature","depends_on":["rebase"],
+             "source":{"type":"node","node":"rebase"}},
+            {"id":"publish_after_rebase","kind":"publish","access":"worktree_write",
+             "worktree":"/wt/feature","depends_on":["hygiene_after_rebase"],
+             "source":{"type":"node","node":"hygiene_after_rebase"}},
+            {"id":"conflict_after_rebase","kind":"gate","access":"read_only",
+             "depends_on":["publish_after_rebase"],"on_fail":"rebase_again",
+             "condition":{"type":"conflict","target":{"node":"publish_after_rebase"}}},
+            {"id":"rebase_again","access":"worktree_write","worktree":"/wt/feature",
+             "prompt":"Rebase the republished branch.",
+             "source":{"type":"head","node":"publish_after_rebase"},
+             "depends_on":["conflict_after_rebase"],"route":{"alias":"senior"}},
+            {"id":"ci_after_rebase","kind":"gate","access":"read_only",
+             "depends_on":["conflict_after_rebase","publish_after_rebase"],
+             "on_fail":"ci_repair_after_rebase",
+             "condition":{"type":"ci","target":{"node":"publish_after_rebase"}}},
+            {"id":"ci_repair_after_rebase","access":"worktree_write","worktree":"/wt/feature",
+             "prompt":"Repair CI findings and sweep the whole defect class.",
+             "source":{"type":"head","node":"publish_after_rebase"},
+             "depends_on":["ci_after_rebase","publish_after_rebase"],
+             "inputs":[{"node":"ci_after_rebase","outputs":["findings","commit"]}],
+             "route":{"alias":"senior"}}
+        ]))
+        .unwrap(),
+    );
+    assert!(validate_plan(&document).is_ok());
+
+    let mut first_owner = owner();
+    first_owner.repair_fixture = true;
+    first_owner.integration_base = Some(TARGET.parse().unwrap());
+    first_owner.hygiene_after_heads = VecDeque::from([REPAIR_HEAD.into(), REPUBLISHED_HEAD.into()]);
+    first_owner.conflict_states = VecDeque::from([
+        ConflictState::Clear,
+        ConflictState::Conflicting,
+        ConflictState::Clear,
+    ]);
+    first_owner.ci_states = VecDeque::from([CiState::Conflict, CiState::Passed]);
+    let mut first_journal = ReplayJournal::default();
+    assert!(matches!(
+        advance(&document, &mut first_owner, &mut first_journal),
+        Err(GraphError::Journal(_))
+    ));
+    assert_eq!(first_owner.launches.len(), 1);
+    assert_eq!(first_owner.launches[0].node, "write");
+    assert_eq!(first_owner.hygiene_observations.len(), 1);
+    assert_eq!(first_owner.publication_heads, vec![REPAIR_HEAD.to_owned()]);
+    assert_eq!(first_owner.gate_observations.len(), 2);
+
+    let reset = first_journal
+        .saves
+        .iter()
+        .find(|checkpoint| {
+            let conflict = node(checkpoint, "conflict");
+            let ci = node(checkpoint, "ci");
+            conflict.state == NodeState::Pending
+                && conflict.gate.is_none()
+                && conflict.conflict.is_none()
+                && ci.state == NodeState::Pending
+                && ci.gate.is_none()
+                && ci.ci.is_none()
+                && node(checkpoint, "publish")
+                    .outputs
+                    .as_ref()
+                    .and_then(|outputs| outputs.commit.as_deref())
+                    == Some(REPAIR_HEAD)
+                && node(checkpoint, "rebase").state == NodeState::Pending
+                && node(checkpoint, "hygiene_after_rebase").state == NodeState::Pending
+        })
+        .expect("CI conflict reset must be durable before retrying conflict observation");
+    let replay_checkpoint: GraphCheckpoint =
+        serde_json::from_slice(&serde_json::to_vec(reset).unwrap()).unwrap();
+
+    let mut replay_owner = owner();
+    replay_owner.repair_fixture = true;
+    replay_owner.integration_base = Some(TARGET.parse().unwrap());
+    replay_owner.hygiene_after_heads = VecDeque::from([REPUBLISHED_HEAD.into()]);
+    replay_owner.conflict_states =
+        VecDeque::from([ConflictState::Conflicting, ConflictState::Clear]);
+    replay_owner.conflict_heads =
+        VecDeque::from([Some(REPAIR_HEAD.into()), Some(REPUBLISHED_HEAD.into())]);
+    replay_owner.ci_states = VecDeque::from([CiState::Passed]);
+    let mut replay_journal = ReplayJournal {
+        checkpoint: Some(replay_checkpoint),
+        failed_after_conflict_reset: true,
+        ..Default::default()
+    };
+    let replayed = advance(&document, &mut replay_owner, &mut replay_journal).unwrap();
+
+    assert_eq!(
+        node(&replayed.checkpoint, "conflict").state,
+        NodeState::Failed
+    );
+    assert_eq!(
+        node(&replayed.checkpoint, "rebase").state,
+        NodeState::Succeeded
+    );
+    assert!(node(&replayed.checkpoint, "ci").gate.is_none());
+    assert_ne!(node(&replayed.checkpoint, "ci").state, NodeState::Failed);
+    assert!(
+        !replay_owner
+            .launches
+            .iter()
+            .any(|launch| launch.node == "ci_repair")
+    );
+    assert_eq!(
+        node(&replayed.checkpoint, "hygiene_after_rebase").state,
+        NodeState::Succeeded
+    );
+    assert_eq!(
+        node(&replayed.checkpoint, "publish_after_rebase").state,
+        NodeState::Succeeded
+    );
+    let receipt = node(&replayed.checkpoint, "publish_after_rebase")
+        .outputs
+        .as_ref()
+        .unwrap()
+        .publication
+        .as_ref()
+        .unwrap();
+    assert_eq!(receipt.head, REPUBLISHED_HEAD);
+    let conflict = node(&replayed.checkpoint, "conflict_after_rebase")
+        .conflict
+        .as_ref()
+        .unwrap();
+    assert_eq!(conflict.state, ConflictState::Clear);
+    assert_eq!(conflict.head_sha.as_deref(), Some(REPUBLISHED_HEAD));
+    let ci = node(&replayed.checkpoint, "ci_after_rebase");
+    assert_eq!(ci.ci.as_ref().unwrap().state, CiState::Passed);
+    assert_eq!(
+        ci.ci.as_ref().unwrap().head_sha.as_deref(),
+        Some(REPUBLISHED_HEAD)
+    );
+    assert_eq!(
+        replay_owner
+            .launches
+            .iter()
+            .filter(|launch| launch.node == "rebase")
+            .count(),
+        1
+    );
+    assert_eq!(
+        replay_owner.hygiene_observations,
+        vec![(
+            "hygiene_after_rebase".into(),
+            REBASE_HEAD.into(),
+            REPUBLISHED_HEAD.into()
+        )]
+    );
+    assert_eq!(
+        replay_owner.publication_heads,
+        vec![REPUBLISHED_HEAD.to_owned()]
+    );
+
+    let launches = replay_owner.launches.clone();
+    let hygiene = replay_owner.hygiene_observations.clone();
+    let publications = replay_owner.publication_heads.clone();
+    let gate_observations = replay_owner.gate_observations.clone();
+    let replayed_again = advance(&document, &mut replay_owner, &mut replay_journal).unwrap();
+    assert_eq!(replayed_again.checkpoint, replayed.checkpoint);
+    assert_eq!(replay_owner.launches, launches);
+    assert_eq!(replay_owner.hygiene_observations, hygiene);
+    assert_eq!(replay_owner.publication_heads, publications);
+    assert_eq!(replay_owner.gate_observations, gate_observations);
 }
