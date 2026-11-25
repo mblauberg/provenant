@@ -125,6 +125,14 @@ pub(super) fn supplied_kinds(node: &GraphNode) -> Vec<OutputKind> {
         OutputKind::Remaining,
     ];
     if node.kind == Some(NodeKind::Loop) {
+        if node
+            .loop_body
+            .as_ref()
+            .is_some_and(|spec| spec.selected_publication.is_some())
+        {
+            kinds.push(OutputKind::Branch);
+            kinds.push(OutputKind::Commit);
+        }
         return kinds;
     }
     let write = node.access == AccessMode::WorktreeWrite;
@@ -135,7 +143,10 @@ pub(super) fn supplied_kinds(node: &GraphNode) -> Vec<OutputKind> {
     if write
         || pinned
         || node.kind == Some(NodeKind::Land)
-        || matches!(node.condition, Some(GateCondition::Ci { .. }))
+        || matches!(
+            node.condition,
+            Some(GateCondition::Ci { .. } | GateCondition::Conflict { .. })
+        )
     {
         kinds.push(OutputKind::Commit);
     }

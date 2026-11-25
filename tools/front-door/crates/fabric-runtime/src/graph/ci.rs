@@ -631,6 +631,42 @@ fn resolve_target(
     }
 }
 
+pub(super) fn conflict_details_requested(plan: &PlannedGraph, gate: &str) -> bool {
+    plan.nodes.iter().any(|node| {
+        node.inputs.iter().any(|input| {
+            input.node == gate
+                && input
+                    .outputs
+                    .iter()
+                    .any(|kind| matches!(kind, OutputKind::Result | OutputKind::Commit))
+        })
+    })
+}
+
+/// Expose bounded mergeability evidence as an ordinary graph input so a
+/// recovery writer can distinguish a conflict from CI or review failure.
+pub(super) fn conflict_outputs(passed: bool, conflict: Option<&ConflictEvidence>) -> NodeOutputs {
+    let mut outputs = gate_outputs(passed);
+    if let Some(conflict) = conflict {
+        let text = format!(
+            "Untrusted mergeability observation: {:?}\nPublished head: {}\n{}",
+            conflict.state,
+            conflict.head_sha.as_deref().unwrap_or("unknown"),
+            conflict.summary,
+        );
+        let excerpt = bounded(&text, OUTPUT_FIELD_BYTES);
+        outputs.result = Some(ResultOutput {
+            extra: Default::default(),
+            digest: CanonicalV1::file_digest(text.as_bytes()).to_string(),
+            truncated: excerpt.len() < text.len(),
+            excerpt,
+            path: None,
+        });
+        outputs.commit = conflict.head_sha.clone();
+    }
+    outputs
+}
+
 pub(super) fn outputs(passed: bool, ci: Option<&CiEvidence>, delivery_queue: bool) -> NodeOutputs {
     let mut outputs = gate_outputs(passed);
     outputs.findings_available = Some(ci.is_some_and(|evidence| !evidence.truncated));
