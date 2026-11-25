@@ -1788,7 +1788,20 @@ pub(super) fn dependency_state(
                 skipped = true
             }
             NodeState::Failed if recovery => {}
-            NodeState::Blocked | NodeState::Skipped if recovery && recovery_triggered => {}
+            NodeState::Blocked | NodeState::Skipped
+                if recovery_triggered
+                    && (recovery
+                        || node.depends_on.iter().any(|trigger| {
+                            let trigger_index = positions[trigger];
+                            plan.nodes[trigger_index].on_fail.as_deref() == Some(node.id.as_str())
+                                && checkpoint.nodes[trigger_index].state == NodeState::Failed
+                                && loops::descendant_of(
+                                    &plan.nodes[index],
+                                    trigger,
+                                    plan,
+                                    positions,
+                                )
+                        })) => {}
             NodeState::Failed if plan.nodes[index].on_fail.is_some() => skipped = true,
             NodeState::Failed | NodeState::Blocked => blocked = true,
             NodeState::Succeeded if recovery && !recovery_triggered => skipped = true,

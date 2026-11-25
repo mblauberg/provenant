@@ -1431,7 +1431,7 @@ fn failed_member(
     !triggered
 }
 
-fn descendant_of(
+pub(super) fn descendant_of(
     node: &PlannedNode,
     ancestor: &str,
     plan: &PlannedGraph,
