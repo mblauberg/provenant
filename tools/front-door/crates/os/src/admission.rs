@@ -11,8 +11,9 @@
 use crate::fs::{Directory, FsError, LockGuard, LockMode, Result};
 use crate::sys::fs as os;
 use serde::{Deserialize, Serialize};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -37,6 +38,42 @@ pub enum AdmissionError {
 /// Slot directory below the host state root.
 pub const DIRECTORY: [&str; 1] = ["admission"];
 pub const SHIM_DIRECTORY: &str = "cargo-bin";
+const CI_DOMAIN_LOCK: &str = ".ci-domain.lock";
+const CI_CAP_MAX_BYTES: u64 = 4096;
+static CI_HOLDER_ID: AtomicU64 = AtomicU64::new(0);
+
+/// Requested active-holder cap and its resolved configuration provenance.
+/// A zero limit is an explicit uncapped override for the shared `ci` class.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdmissionCap {
+    pub limit: u64,
+    pub source: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CiCapMarker {
+    schema: u32,
+    id: String,
+    cap: AdmissionCap,
+}
+
+#[derive(Deserialize)]
+struct CiLeaseCapMarker {
+    lease: CiLeaseCapRecord,
+}
+
+#[derive(Deserialize)]
+struct CiLeaseCapRecord {
+    #[serde(default = "legacy_ci_cap")]
+    cap: AdmissionCap,
+}
+
+fn legacy_ci_cap() -> AdmissionCap {
+    AdmissionCap {
+        limit: 1,
+        source: "legacy durable ci lease".into(),
+    }
+}
 
 pub fn validate_class_name(class: &str) -> std::result::Result<(), AdmissionError> {
     if class.is_empty()
@@ -501,6 +538,81 @@ fn durable_lease_name(index: u64) -> OsString {
     format!("slot-{index}.lease.json").into()
 }
 
+fn ci_holder_marker(index: u64) -> OsString {
+    format!("slot-{index}.holder.json").into()
+}
+
+fn ci_slot_indices(dir: &Directory) -> Result<Vec<u64>> {
+    let mut indices = Vec::new();
+    for entry in dir.entries()? {
+        let name = entry?;
+        let Some(index) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix("slot-"))
+            .and_then(|name| name.strip_suffix(".lock"))
+            .and_then(|index| index.parse::<u64>().ok())
+        else {
+            continue;
+        };
+        indices.push(index);
+    }
+    indices.sort_unstable();
+    indices.dedup();
+    Ok(indices)
+}
+
+fn read_ci_lease_cap(dir: &Directory, index: u64) -> Result<Option<AdmissionCap>> {
+    let name = durable_lease_name(index);
+    let bytes = match dir.read_stable(&name, CI_CAP_MAX_BYTES) {
+        Ok(bytes) => bytes,
+        Err(error) if error.is_not_found() => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let record: CiLeaseCapMarker = serde_json::from_slice(&bytes).map_err(|source| {
+        FsError::Io {
+            operation: "decode durable ci admission cap",
+            path: PathBuf::from(&name),
+            source: std::io::Error::other(source),
+        }
+    })?;
+    Ok(Some(record.lease.cap))
+}
+
+fn read_ci_holder_cap(dir: &Directory, index: u64) -> Result<Option<CiCapMarker>> {
+    let name = ci_holder_marker(index);
+    let bytes = match dir.read_stable(&name, CI_CAP_MAX_BYTES) {
+        Ok(bytes) => bytes,
+        Err(error) if error.is_not_found() => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let record: CiCapMarker = serde_json::from_slice(&bytes).map_err(|source| FsError::Io {
+        operation: "decode active ci admission cap",
+        path: PathBuf::from(&name),
+        source: std::io::Error::other(source),
+    })?;
+    if record.schema != 1 {
+        return Err(FsError::Io {
+            operation: "validate active ci admission cap",
+            path: PathBuf::from(&name),
+            source: std::io::Error::other("unsupported ci admission cap schema"),
+        });
+    }
+    Ok(Some(record))
+}
+
+fn ci_holder_id(index: u64) -> String {
+    let sequence = CI_HOLDER_ID.fetch_add(1, Ordering::Relaxed);
+    format!("{}-{index}-{sequence}", std::process::id())
+}
+
+fn bounded_cap_source(source: &str) -> String {
+    source
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(256)
+        .collect()
+}
+
 /// An open admission slot directory, read-only for the lane.
 pub struct AdmissionSlots {
     dir: Directory,
@@ -552,7 +664,8 @@ impl AdmissionSlots {
                 .mode(0o700)
                 .create(&path)?,
         }
-        for index in 0..limit {
+        let slot_count = if class == "ci" { limit.max(1) } else { limit };
+        for index in 0..slot_count {
             let file = path.join(slot_name(index));
             match std::fs::symlink_metadata(&file) {
                 Ok(meta) if meta.is_file() && meta.nlink() == 1 && meta.uid() == owner => {
@@ -572,14 +685,39 @@ impl AdmissionSlots {
                 .custom_flags(libc::O_NOFOLLOW)
                 .open(&file)?;
         }
+        if class == "ci" {
+            let file = path.join(CI_DOMAIN_LOCK);
+            match std::fs::symlink_metadata(&file) {
+                Ok(meta) if meta.is_file() && meta.nlink() == 1 && meta.uid() == owner => {
+                    if meta.permissions().mode() & 0o7777 != 0o600 {
+                        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600))?;
+                    }
+                }
+                Ok(meta) if meta.is_dir() => std::fs::remove_dir(&file)?,
+                Ok(_) => std::fs::remove_file(&file)?,
+                Err(_) => {}
+            }
+            if !file.exists() {
+                std::fs::OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .mode(0o600)
+                    .custom_flags(libc::O_NOFOLLOW)
+                    .open(&file)?;
+            }
+        }
         Ok(())
     }
 
     /// Open the slot directory without creating anything.
     pub fn open(state: &Path, class: &str) -> std::result::Result<Self, AdmissionError> {
         validate_class_name(class)?;
+        let path = class_directory(state, class);
+        if class == "ci" && path.is_dir() && !path.join(CI_DOMAIN_LOCK).exists() {
+            Self::provision(state, class, 1)?;
+        }
         Ok(Self {
-            dir: Directory::open_anchor(&class_directory(state, class))?,
+            dir: Directory::open_anchor(&path)?,
             class: class.to_string(),
         })
     }
@@ -590,12 +728,160 @@ impl AdmissionSlots {
 
     /// Take the first free slot below `limit`, or none when all are held.
     pub fn try_acquire(&self, limit: u64) -> Result<Option<SlotGuard>> {
-        self.try_acquire_indices(0..limit)
+        if self.class == "ci" {
+            self.try_acquire_ci(limit, "AdmissionSlots::try_acquire")
+        } else {
+            self.try_acquire_indices(0..limit)
+        }
     }
 
     /// Try the supplied indices in order.
     pub fn try_acquire_ordered(&self, order: &[u64]) -> Result<Option<SlotGuard>> {
-        self.try_acquire_indices(order.iter().copied())
+        if self.class == "ci" {
+            self.try_acquire_ci(
+                u64::try_from(order.len()).unwrap_or(u64::MAX),
+                "AdmissionSlots::try_acquire_ordered",
+            )
+        } else {
+            self.try_acquire_indices(order.iter().copied())
+        }
+    }
+
+    /// Try to acquire a `ci` slot using the shared effective cap. Positive
+    /// requests are constrained by the smallest active/request cap; zero is an
+    /// explicit uncapped override. Every returned guard is visible to direct
+    /// `AdmissionSlots` users and durable queue leases in the same domain.
+    pub fn try_acquire_ci(&self, limit: u64, source: &str) -> Result<Option<SlotGuard>> {
+        if self.class != "ci" {
+            return Err(FsError::Io {
+                operation: "acquire ci admission slot",
+                path: self.dir.anchored_path(),
+                source: std::io::Error::other("CI caps require the ci class"),
+            });
+        }
+        let _domain = match self.dir.try_lock_existing(OsStr::new(CI_DOMAIN_LOCK), LockMode::Exclusive) {
+            Ok(guard) => guard,
+            Err(FsError::LockTimeout { .. }) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let mut indices = ci_slot_indices(&self.dir)?;
+        let mut active = 0u64;
+        let mut active_caps = Vec::new();
+        let mut available = Vec::new();
+        for index in &indices {
+            let slot = slot_name(*index);
+            let locked = match self.dir.try_lock_existing(&slot, LockMode::Exclusive) {
+                Ok(guard) => {
+                    drop(guard);
+                    false
+                }
+                Err(FsError::LockTimeout { .. }) => true,
+                Err(error) if error.is_not_found() => continue,
+                Err(error) => return Err(error),
+            };
+            let lease_cap = read_ci_lease_cap(&self.dir, *index)?;
+            let holder = read_ci_holder_cap(&self.dir, *index)?;
+            if lease_cap.is_some() || locked {
+                active = active.saturating_add(1);
+                active_caps.push(lease_cap.or(holder).unwrap_or_else(legacy_ci_cap));
+            } else if let Some(stale) = holder {
+                let marker = ci_holder_marker(*index);
+                if let Ok(bytes) = self.dir.read_stable(&marker, CI_CAP_MAX_BYTES)
+                    && serde_json::from_slice::<CiCapMarker>(&bytes)
+                        .is_ok_and(|record| record.id == stale.id)
+                {
+                    self.dir.unlink(&marker)?;
+                }
+                available.push(*index);
+            } else {
+                available.push(*index);
+            }
+        }
+
+        let uncapped = limit == 0;
+        let effective_cap = if uncapped {
+            None
+        } else {
+            active_caps
+                .iter()
+                .filter(|cap| cap.limit > 0)
+                .map(|cap| cap.limit)
+                .chain(std::iter::once(limit))
+                .min()
+        };
+        if effective_cap.is_some_and(|cap| active >= cap) {
+            return Ok(None);
+        }
+
+        let mut selected = None;
+        for index in available {
+            match self
+                .dir
+                .try_lock_existing(&slot_name(index), LockMode::Exclusive)
+            {
+                Ok(guard) => {
+                    selected = Some((index, guard));
+                    break;
+                }
+                Err(FsError::LockTimeout { .. }) => continue,
+                Err(error) if error.is_not_found() => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        if selected.is_none() {
+            let index = indices.last().map_or(0, |last| last.saturating_add(1));
+            let name = slot_name(index);
+            self.dir
+                .atomic_write(&name, ".ci-slot-", b"", PublishMode::NoReplace)?
+                .require_durable()?;
+            let guard = self.dir.try_lock_existing(&name, LockMode::Exclusive)?;
+            indices.push(index);
+            selected = Some((index, guard));
+        }
+        let Some((index, guard)) = selected else {
+            return Ok(None);
+        };
+        let source = bounded_cap_source(source);
+        let id = ci_holder_id(index);
+        let marker = ci_holder_marker(index);
+        let bytes = serde_json::to_vec(&CiCapMarker {
+            schema: 1,
+            id: id.clone(),
+            cap: AdmissionCap { limit, source },
+        })
+        .map_err(|source| FsError::Io {
+            operation: "encode active ci admission cap",
+            path: PathBuf::from(&marker),
+            source: std::io::Error::other(source),
+        })?;
+        self.dir
+            .atomic_write(&marker, ".ci-holder-", &bytes, PublishMode::NoReplace)?
+            .require_durable()?;
+        let directory = Directory::open_anchor(&self.dir.anchored_path())?;
+        Ok(Some(SlotGuard {
+            guard,
+            index,
+            class: self.class.clone(),
+            ci_holder: Some((directory, marker, id)),
+        }))
+    }
+
+    /// Hold the shared `ci` admission domain while changing a durable lease.
+    pub fn lock_ci_domain(
+        &self,
+        budget: provenant_core::WaitBudget,
+        cancel: &provenant_core::CancelToken,
+        clock: &dyn provenant_core::Clock,
+    ) -> Result<LockGuard> {
+        if self.class != "ci" {
+            return Err(FsError::Io {
+                operation: "lock ci admission domain",
+                path: self.dir.anchored_path(),
+                source: std::io::Error::other("CI domain lock requires the ci class"),
+            });
+        }
+        self.dir
+            .lock(OsStr::new(CI_DOMAIN_LOCK), LockMode::Exclusive, budget, cancel, clock)
     }
 
     fn try_acquire_indices(&self, order: impl Iterator<Item = u64>) -> Result<Option<SlotGuard>> {
@@ -625,6 +911,7 @@ impl AdmissionSlots {
                         guard,
                         index,
                         class: self.class.clone(),
+                        ci_holder: None,
                     }));
                 }
                 Err(FsError::LockTimeout { .. }) => {}
@@ -665,6 +952,23 @@ impl AdmissionSlots {
 
     /// How many of the first `limit` slots are held now.
     pub fn held(&self, limit: u64) -> u64 {
+        if self.class == "ci" {
+            return ci_slot_indices(&self.dir)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|index| {
+                    read_ci_lease_cap(&self.dir, *index)
+                        .ok()
+                        .flatten()
+                        .is_some()
+                        || matches!(
+                            self.dir
+                                .try_lock_existing(&slot_name(*index), LockMode::Shared),
+                            Err(FsError::LockTimeout { .. })
+                        )
+                })
+                .count() as u64;
+        }
         (0..limit)
             .filter(|index| {
                 self.dir
@@ -687,6 +991,7 @@ pub struct SlotGuard {
     guard: LockGuard,
     index: u64,
     class: String,
+    ci_holder: Option<(Directory, OsString, String)>,
 }
 
 impl SlotGuard {
@@ -700,6 +1005,19 @@ impl SlotGuard {
 
     pub fn close_on_exec(&self) -> bool {
         os::is_cloexec(self.guard.handoff_file())
+    }
+}
+
+impl Drop for SlotGuard {
+    fn drop(&mut self) {
+        if let Some((directory, marker, id)) = self.ci_holder.take()
+            && let Ok(bytes) = directory.read_stable(&marker, CI_CAP_MAX_BYTES)
+            && serde_json::from_slice::<CiCapMarker>(&bytes)
+                .is_ok_and(|record| record.id == id)
+        {
+            let _ = directory.unlink(&marker);
+            let _ = directory.sync();
+        }
     }
 }
 
@@ -764,7 +1082,7 @@ mod tests {
             .atomic_write(
                 OsStr::new("slot-0.lease.json"),
                 ".test-lease-",
-                b"persisted owner",
+                br#"{"lease":{"cap":{"limit":1,"source":"test"}}}"#,
                 crate::fs::PublishMode::NoReplace,
             )
             .unwrap()
@@ -777,6 +1095,91 @@ mod tests {
         directory.unlink(OsStr::new("slot-0.lease.json")).unwrap();
         directory.sync().unwrap();
         assert!(slots.try_acquire(1).unwrap().is_some());
+    }
+
+    #[test]
+    fn ci_active_caps_are_shared_across_concurrent_mixed_limits() {
+        let _serial = serial();
+        let (state, slots) = provisioned("ci", 4);
+        let first = slots
+            .try_acquire_ci(4, "queue.ci_slots=4 from launch")
+            .unwrap()
+            .unwrap();
+        let second = slots
+            .try_acquire_ci(4, "queue.ci_slots=4 from launch")
+            .unwrap()
+            .unwrap();
+        let third = slots
+            .try_acquire_ci(4, "queue.ci_slots=4 from launch")
+            .unwrap()
+            .unwrap();
+        let path = state.path().to_owned();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+
+        std::thread::scope(|scope| {
+            let high = scope.spawn(move || {
+                let slots = AdmissionSlots::open(&path, "ci").unwrap();
+                let guard = slots
+                    .try_acquire_ci(4, "queue.ci_slots=4 from launch")
+                    .unwrap();
+                let Some(guard) = guard else {
+                    entered_tx.send(None).unwrap();
+                    return;
+                };
+                entered_tx.send(Some(guard.index())).unwrap();
+                release_rx.recv().unwrap();
+                drop(guard);
+            });
+            assert_eq!(entered_rx.recv().unwrap(), Some(3));
+            assert!(slots
+                .try_acquire_ci(1, "queue.ci_slots=1 from launch")
+                .unwrap()
+                .is_none());
+            drop(first);
+            drop(second);
+            drop(third);
+            assert!(slots
+                .try_acquire_ci(1, "queue.ci_slots=1 from launch")
+                .unwrap()
+                .is_none());
+            release_tx.send(()).unwrap();
+            high.join().unwrap();
+        });
+
+        let low = slots
+            .try_acquire_ci(1, "queue.ci_slots=1 from launch")
+            .unwrap()
+            .unwrap();
+        assert!(slots
+            .try_acquire_ci(4, "queue.ci_slots=4 from launch")
+            .unwrap()
+            .is_none());
+        drop(low);
+        assert!(slots
+            .try_acquire_ci(4, "queue.ci_slots=4 from launch")
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn zero_ci_cap_is_uncapped_for_its_request_but_remains_counted() {
+        let _serial = serial();
+        let (_state, slots) = provisioned("ci", 1);
+        let low = slots
+            .try_acquire_ci(1, "queue.ci_slots=1 from project")
+            .unwrap()
+            .unwrap();
+        let uncapped = slots
+            .try_acquire_ci(0, "queue.ci_slots=0 from launch")
+            .unwrap()
+            .unwrap();
+        assert!(slots
+            .try_acquire_ci(1, "queue.ci_slots=1 from project")
+            .unwrap()
+            .is_none());
+        drop(uncapped);
+        drop(low);
     }
 
     #[test]

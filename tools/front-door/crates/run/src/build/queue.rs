@@ -26,6 +26,8 @@ pub struct AdmissionRequest<'a> {
     pub state: &'a Path,
     pub class: &'a str,
     pub limit: u64,
+    /// Provenance for the effective active-holder cap.
+    pub limit_source: String,
     pub job_id: &'a str,
     pub owner: &'a str,
     pub project_key: &'a str,
@@ -79,6 +81,15 @@ pub struct CiAdmissionLease {
     pub id: String,
     pub slot: u64,
     pub owner: CiLeaseOwner,
+    #[serde(default = "legacy_ci_lease_cap")]
+    pub cap: provenant_os::admission::AdmissionCap,
+}
+
+fn legacy_ci_lease_cap() -> provenant_os::admission::AdmissionCap {
+    provenant_os::admission::AdmissionCap {
+        limit: 1,
+        source: "legacy durable ci lease".into(),
+    }
 }
 
 /// Queue admission outcome. Overflow is advisory and must be recorded by the caller.
@@ -150,6 +161,10 @@ pub fn admit_ci_lease(
                 id: ci_lease_id(&owner)?,
                 slot: index,
                 owner,
+                cap: provenant_os::admission::AdmissionCap {
+                    limit: request.limit,
+                    source: request.limit_source.clone(),
+                },
             };
             let record = CiLeaseRecord {
                 schema: 1,
@@ -183,7 +198,14 @@ pub fn release_ci_lease(
     }
     let clock = SystemClock::new();
     let directory = ci_lease_directory(state)?;
-    let slot_lock = lock_ci_slot(&directory, lease.slot, wait_seconds, cancel, &clock)?;
+    let slots = AdmissionSlots::open(state, "ci").map_err(unavailable)?;
+    let domain_budget = WaitBudget::up_to(
+        clock.mono_now(),
+        DurationMicros::from_micros(wait_seconds.saturating_mul(1_000_000)),
+    );
+    let _domain = slots
+        .lock_ci_domain(domain_budget, cancel, &clock)
+        .map_err(unavailable)?;
     let _registry = lock_ci_lease_registry(&directory, wait_seconds, cancel, &clock)?;
     let marker = ci_lease_marker(lease.slot);
     let record = match directory.read_stable(&marker, CI_LEASE_MAX_BYTES) {
@@ -196,7 +218,6 @@ pub fn release_ci_lease(
     }
     directory.unlink(&marker).map_err(unavailable)?;
     directory.sync().map_err(unavailable)?;
-    drop(slot_lock);
     Ok(true)
 }
 
@@ -296,26 +317,6 @@ fn lock_ci_lease_registry(
         .map_err(unavailable)
 }
 
-fn lock_ci_slot(
-    directory: &Directory,
-    slot: u64,
-    wait_seconds: u64,
-    cancel: &CancelToken,
-    clock: &dyn Clock,
-) -> Result<LockGuard, BuildError> {
-    let name = format!("slot-{slot}.lock");
-    let budget = WaitBudget::cli(clock.mono_now(), wait_seconds).map_err(unavailable)?;
-    directory
-        .lock_existing(
-            OsStr::new(&name),
-            LockMode::Exclusive,
-            budget,
-            cancel,
-            clock,
-        )
-        .map_err(unavailable)
-}
-
 fn ci_lease_marker(slot: u64) -> OsString {
     format!("slot-{slot}.lease.json").into()
 }
@@ -375,6 +376,7 @@ pub fn request_for_job<'a>(job: &'a Job, context: &'a RunContext) -> AdmissionRe
     let limit = env_value(&job.env, "PROVENANT_ADMISSION_SLOTS")
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(resolved.slots);
+    let limit_source = format!("admission.{}.slots ({:?})", resolved.name, resolved.slots_source);
     let wait_seconds = env_value(&job.env, "PROVENANT_ADMISSION_WAIT_SECONDS")
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(resolved.wait_seconds);
@@ -396,6 +398,7 @@ pub fn request_for_job<'a>(job: &'a Job, context: &'a RunContext) -> AdmissionRe
         state: &context.state,
         class: "build",
         limit,
+        limit_source,
         job_id: &job.id,
         owner: &job.owner,
         project_key: &job.project_key,
@@ -511,8 +514,15 @@ fn entry_departed(error: &FsError) -> bool {
 fn try_slot(
     slots: &AdmissionSlots,
     order: &[u64],
+    limit: u64,
+    limit_source: &str,
 ) -> Result<Option<provenant_os::admission::SlotGuard>, BuildError> {
-    match slots.try_acquire_ordered(order) {
+    let result = if slots.class() == "ci" {
+        slots.try_acquire_ci(limit, limit_source)
+    } else {
+        slots.try_acquire_ordered(order)
+    };
+    match result {
         Ok(guard) => Ok(guard),
         Err(error) if entry_departed(&error) => Ok(None),
         Err(error) => Err(unavailable(error)),
@@ -618,10 +628,14 @@ fn check_cancel(
 pub fn admit(request: &AdmissionRequest<'_>) -> Result<Admitted, BuildError> {
     let signals = provenant_os::exec::BuildSignalWait::install().map_err(unavailable)?;
     check_cancel(request, &signals)?;
-    if request.limit == 0 {
+    if request.limit == 0 && request.class != "ci" {
         return Ok(Admitted::Overflow {
             waited: Duration::ZERO,
         });
+    }
+    if request.class == "ci" {
+        AdmissionSlots::provision(request.state, request.class, request.limit.max(1))
+            .map_err(unavailable)?;
     }
     let slots = match AdmissionSlots::open(request.state, request.class) {
         Ok(slots) => slots,
@@ -638,11 +652,20 @@ pub fn admit(request: &AdmissionRequest<'_>) -> Result<Admitted, BuildError> {
             order.push(index);
         }
     }
-    if order.is_empty() {
+    if order.is_empty() && request.class != "ci" {
         return Err(unavailable("no eligible admission slots"));
     }
     let started = Instant::now();
-    if let Some(guard) = try_slot(&slots, &order)? {
+    let queue_path = request.state.join("build/queue").join(request.class);
+    let ci_waiting = if request.class == "ci" && queue_path.is_dir() {
+        let dir = Directory::open_anchor(&queue_path).map_err(unavailable)?;
+        !live_tickets(&dir, &queue_path)?.is_empty()
+    } else {
+        false
+    };
+    if !ci_waiting
+        && let Some(guard) = try_slot(&slots, &order, request.limit, &request.limit_source)?
+    {
         check_cancel(request, &signals)?;
         return Ok(Admitted::Held {
             index: guard.index(),
@@ -663,7 +686,6 @@ pub fn admit(request: &AdmissionRequest<'_>) -> Result<Admitted, BuildError> {
     {
         return Err(unavailable("invalid queue ticket identity"));
     }
-    let queue_path = request.state.join("build/queue").join(request.class);
     std::fs::create_dir_all(&queue_path).map_err(unavailable)?;
     let dir = Directory::open_anchor(&queue_path).map_err(unavailable)?;
     let ticket = Ticket {
@@ -721,13 +743,23 @@ pub fn admit(request: &AdmissionRequest<'_>) -> Result<Admitted, BuildError> {
         _guard: guard,
     };
     let _waiting = mark_waiting(request).ok();
-    let _ = writeln!(
-        std::io::stderr().lock(),
-        "provenant: waiting for a host {} slot ({} held of {})",
-        request.class,
-        slots.held(request.limit),
-        request.limit
-    );
+    if request.class == "ci" && request.limit == 0 {
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "provenant: waiting for the uncapped host ci domain from {} ({} held)",
+            request.limit_source,
+            slots.held(request.limit)
+        );
+    } else {
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "provenant: waiting for a host {} slot ({} held of {} from {})",
+            request.class,
+            slots.held(request.limit),
+            request.limit,
+            request.limit_source
+        );
+    }
     let mut round = 0u64;
     loop {
         check_cancel(request, &signals)?;
@@ -753,13 +785,20 @@ pub fn admit(request: &AdmissionRequest<'_>) -> Result<Admitted, BuildError> {
             .position(|other| other.id == ticket.id)
             .ok_or_else(|| unavailable("queue ticket disappeared"))?;
         let mut free = 0;
-        for index in &order {
-            if try_slot(&slots, &[*index])?.is_some() {
-                free += 1;
+        if request.class == "ci" {
+            if try_slot(&slots, &order, request.limit, &request.limit_source)?.is_some() {
+                free = 1;
+            }
+        } else {
+            for index in &order {
+                if try_slot(&slots, &[*index], request.limit, &request.limit_source)?.is_some() {
+                    free += 1;
+                }
             }
         }
         if rank < free
-            && let Some(guard) = try_slot(&slots, &order)?
+            && let Some(guard) =
+                try_slot(&slots, &order, request.limit, &request.limit_source)?
         {
             check_cancel(request, &signals)?;
             return Ok(Admitted::Held {
@@ -884,6 +923,7 @@ mod tests {
             state,
             class: "build",
             limit: 1,
+            limit_source: "test".into(),
             job_id: id,
             owner,
             project_key: "project",
@@ -925,6 +965,8 @@ mod tests {
         else {
             panic!("first queue lease should acquire its class slot")
         };
+        assert_eq!(lease.cap.limit, 1);
+        assert_eq!(lease.cap.source, "test");
         let slots = AdmissionSlots::open(temp.path(), "ci").unwrap();
         assert!(slots.try_acquire(1).unwrap().is_none());
         let replay = admit_ci_lease(&admission, owner.clone()).unwrap();
@@ -955,6 +997,58 @@ mod tests {
         .unwrap();
         assert_eq!(recovered.released, 1);
         assert!(slots.try_acquire(1).unwrap().is_some());
+    }
+
+    #[test]
+    fn durable_ci_lease_obeys_mixed_active_caps_with_direct_holders() {
+        let temp = tempfile::tempdir().unwrap();
+        let cancel = CancelToken::new();
+        let mut high = request(temp.path(), "high", "graph-high", "high", &cancel);
+        high.class = "ci";
+        high.limit = 4;
+        high.limit_source = "queue.ci_slots=4 from launch".into();
+        let owner_high = CiLeaseOwner {
+            project: "project-1".into(),
+            graph_id: "delivery-high".into(),
+            node_id: "publish".into(),
+            head_sha: "b".repeat(40),
+        };
+        let CiLeaseAdmission::Held { lease: high_lease, .. } =
+            admit_ci_lease(&high, owner_high).unwrap()
+        else {
+            panic!("high-cap queue lease should acquire")
+        };
+        let slots = AdmissionSlots::open(temp.path(), "ci").unwrap();
+        assert!(slots
+            .try_acquire_ci(1, "queue.ci_slots=1 from launch")
+            .unwrap()
+            .is_none());
+
+        release_ci_lease(temp.path(), &high_lease, 1, &cancel).unwrap();
+        let mut low = request(temp.path(), "low", "graph-low", "low", &cancel);
+        low.class = "ci";
+        low.limit = 1;
+        low.limit_source = "queue.ci_slots=1 from launch".into();
+        let owner_low = CiLeaseOwner {
+            project: "project-1".into(),
+            graph_id: "delivery-low".into(),
+            node_id: "publish".into(),
+            head_sha: "c".repeat(40),
+        };
+        let CiLeaseAdmission::Held { lease: low_lease, .. } =
+            admit_ci_lease(&low, owner_low).unwrap()
+        else {
+            panic!("low-cap queue lease should acquire")
+        };
+        assert!(slots
+            .try_acquire_ci(4, "queue.ci_slots=4 from launch")
+            .unwrap()
+            .is_none());
+        release_ci_lease(temp.path(), &low_lease, 1, &cancel).unwrap();
+        assert!(slots
+            .try_acquire_ci(4, "queue.ci_slots=4 from launch")
+            .unwrap()
+            .is_some());
     }
     fn ticket(id: &str, priority: super::super::Priority, time: u64) -> Ticket {
         Ticket {
