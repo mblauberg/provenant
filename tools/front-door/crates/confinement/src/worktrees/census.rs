@@ -1671,6 +1671,16 @@ pub(super) fn observe_worker_holders_while(
             child = parent;
         }
     }
+    // Exclude only verified descendants for every census, independently of
+    // the optional ancestor policy. Ambiguous ancestry remains in the census.
+    for fact in census.facts() {
+        if !within_budget() {
+            return (states, holders, details, taints);
+        }
+        if census.ancestry(&fact.identity, &current.identity) == Ancestry::Yes {
+            excluded.insert(fact.identity.clone());
+        }
+    }
     // Custody is decided per root. A gap that could hide a process anywhere
     // (an incomplete or truncated listing, or a process that could not be
     // described or placed) leaves every root that is not positively live
@@ -1685,6 +1695,18 @@ pub(super) fn observe_worker_holders_while(
             let occupancy = cwd_observer.occupancy_with_retries_while(pid, &within_budget);
             if !within_budget() {
                 return (states, holders, details, taints);
+            }
+            // A vanished query is only absence if a fresh identity lookup
+            // agrees; the PID may already have been reused.
+            if matches!(
+                occupancy.gap,
+                Some(
+                    provenant_os::pid::OccupancyGap::Vanished
+                        | provenant_os::pid::OccupancyGap::Churn
+                )
+            ) && matches!(observer.observe(pid), ProcessObservation::Absent)
+            {
+                continue;
             }
             // EPERM is a common limit of process listings. Place every
             // positive path first; only a complete descriptor observation can
@@ -1756,6 +1778,13 @@ pub(super) fn observe_worker_holders_while(
                         .then_some(UnreadableFailure::CwdDenied)
                 });
             if let Some(failure) = failure
+                && !matches!(
+                    occupancy.gap,
+                    Some(
+                        provenant_os::pid::OccupancyGap::Vanished
+                            | provenant_os::pid::OccupancyGap::Churn
+                    )
+                )
                 && excuse_unreadable(
                     cwd_observer,
                     pid,
@@ -1846,6 +1875,13 @@ pub(super) fn observe_worker_holders_while(
             }
             let foreign_uids = uids_before.filter(|uids| {
                 stable
+                    && !matches!(
+                        occupancy.gap,
+                        Some(
+                            provenant_os::pid::OccupancyGap::Vanished
+                                | provenant_os::pid::OccupancyGap::Churn
+                        )
+                    )
                     && Some(*uids) == uids_after
                     && excusal_applies(
                         &provenant_os::pid::UnreadablePolicyExcusal { uids: *uids },
@@ -2031,6 +2067,13 @@ pub(super) fn observe_worker_holders_while(
             continue;
         }
         if cwd_denied
+            && !matches!(
+                occupancy_gap,
+                Some(
+                    provenant_os::pid::OccupancyGap::Vanished
+                        | provenant_os::pid::OccupancyGap::Churn
+                )
+            )
             && excuse_unreadable(
                 cwd_observer,
                 pid,

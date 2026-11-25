@@ -454,7 +454,13 @@ observation, never missing landing proof.
 
 A root is `Free` only when every possible writer was observed completely with
 stable identity; a placed occupant makes it `Live`, and a failed or partial
-query leaves it `Unknown`, never empty. For each unreadable process the census
+query leaves it `Unknown`, never empty. A process that exited during the census
+is not a possible writer: an `ESRCH` (or equivalent vanished) result from an
+executable or descriptor query followed by a recheck finding the process gone
+is absence, not incomplete evidence; a same-identity zombie is also absent. A
+conflicting or reused PID remains uncertain. Every census excludes the calling
+process and its verified descendants, including short-lived children spawned
+for its own work. For each unreadable process the census
 first computes placement evidence for *every* root from its readable cwd and its
 descriptor paths by directory identity, the same `(dev, ino)` ancestor test used
 to place a live path. A cwd equal to or beneath a root is inside it; a cwd of
@@ -497,7 +503,8 @@ configured entries to the matcher it calls.
 Landing and collection require `Free`; the census grants no signal authority.
 - Why: a retained cwd or descriptor survives permission changes, so current
   permissions cannot prove absence, and an excusal must not free a root a
-  process could still hold.
+  process could still hold. Only an explicit exit signal — never a permission
+  denial or a generic read failure — may drop a process from the census.
 - Owner: `crates/confinement/src/worktrees/census.rs`,
   `crates/confinement/src/worktrees/census_excusal.rs`, `crates/os/src/sys/pid.rs`
 
