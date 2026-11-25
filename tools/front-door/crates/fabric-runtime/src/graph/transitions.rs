@@ -1721,18 +1721,15 @@ pub(super) fn dependency_state(
         .any(|parent| !checkpoint.nodes[positions[parent]].state.settled());
     let mut skipped = false;
     let mut blocked = false;
-    let queue_retry_loop = node
+    let recovery_loop = node
         .loop_body
         .as_ref()
         .is_some_and(|spec| !spec.retry_on.is_empty());
-    let queue_recovery_triggered = queue_retry_loop
+    let recovery_triggered = recovery_loop
         && node.depends_on.iter().any(|parent| {
             let index = positions[parent];
             plan.nodes[index].on_fail.as_deref() == Some(node.id.as_str())
-                && matches!(
-                    checkpoint.nodes[index].state,
-                    NodeState::Failed | NodeState::Blocked
-                )
+                && checkpoint.nodes[index].state == NodeState::Failed
         });
     if node
         .after_expansion
@@ -1819,10 +1816,10 @@ pub(super) fn dependency_state(
                 skipped = true
             }
             NodeState::Failed if recovery => {}
-            NodeState::Blocked if recovery && queue_retry_loop => {}
+            NodeState::Blocked | NodeState::Skipped if recovery && recovery_triggered => {}
             NodeState::Failed if plan.nodes[index].on_fail.is_some() => skipped = true,
             NodeState::Failed | NodeState::Blocked => blocked = true,
-            NodeState::Succeeded if recovery && !queue_recovery_triggered => skipped = true,
+            NodeState::Succeeded if recovery && !recovery_triggered => skipped = true,
             NodeState::Succeeded if recovery => {}
             NodeState::Skipped => skipped = true,
             NodeState::Pending | NodeState::Running => waiting = true,
