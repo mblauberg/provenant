@@ -346,7 +346,7 @@ fn node_bound(
     .then(|| {
         let mut attempt_key = worst_attempt_key.clone();
         attempt_key.previous_attempt_ref = Some("x".repeat(OUTPUT_FIELD_BYTES));
-        provenant_records::graph::DeliveryParkProgress {
+        DeliveryParkProgress {
             transition_id: "x".repeat(256),
             operation_id: "x".repeat(256),
             item: plan.queue.as_ref().map(|_| "x".repeat(OUTPUT_FIELD_BYTES)),

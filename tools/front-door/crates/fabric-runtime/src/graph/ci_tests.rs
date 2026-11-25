@@ -1176,6 +1176,17 @@ fn queue_conflict_recheck_matches_a_bounded_round_and_reactivates_composite_reba
             .conflict
             .as_ref()
             .unwrap()
+            .wake_at
+            .unwrap()
+            .as_micros(),
+        1_000_000,
+        "a conflict recheck wakes at the observed wall time"
+    );
+    assert_eq!(
+        checkpoint.nodes[conflict_index]
+            .conflict
+            .as_ref()
+            .unwrap()
             .ci_rechecks,
         1
     );

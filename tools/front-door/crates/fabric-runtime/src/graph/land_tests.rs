@@ -26,7 +26,7 @@ impl GraphJournal for Journal {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct Launch {
     node: String,
     worktree: Option<String>,

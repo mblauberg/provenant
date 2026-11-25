@@ -854,7 +854,7 @@ fn delivery_policy_briefs_carry_rung_and_repair_inputs() {
     assert_eq!(widened, format!("base\n\n{FINAL_RUNG_SCOPE_BRIEF}"));
     let repair = repair_brief("head", "line one\nline two");
     assert!(repair.contains(REPAIR_SWEEP_INSTRUCTION));
-    let long = repair_brief("head", "x".repeat(9000));
+    let long = repair_brief("head", &"x".repeat(9000));
     assert!(long.chars().count() < 5000);
     assert!(long.contains('…'));
 }

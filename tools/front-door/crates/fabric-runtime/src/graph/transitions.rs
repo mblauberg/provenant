@@ -2304,7 +2304,7 @@ mod tests {
         checkpoint: &mut GraphCheckpoint,
         limits: &crate::config::GraphLimits,
     ) -> AttemptKey {
-        let key = attempt_key(plan, 0, checkpoint, 0).unwrap();
+        let key = super::attempt_key(plan, 0, checkpoint, 0).unwrap();
         begin_attempt(
             0,
             plan,
