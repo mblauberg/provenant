@@ -195,6 +195,9 @@ pub const LANE_GIT_IMPORT_STDERR: WarningCode = WarningCode("LANE_GIT_IMPORT_STD
 pub const NATIVE_INDEX_SYNC_FAILED: WarningCode = WarningCode("NATIVE_INDEX_SYNC_FAILED");
 /// A lane handoff was accepted with an advisory parse notice.
 pub const HANDOFF_PARSE_NOTICE: WarningCode = WarningCode("HANDOFF_PARSE_NOTICE");
+/// A terminal read-only review's reservation was retained without Git work; it no longer fences custody.
+pub const READ_ONLY_RESERVATION_RETAINED: WarningCode =
+    WarningCode("READ_ONLY_RESERVATION_RETAINED");
 /// A build slot custody publication failed before spawn.
 pub const BUILD_SLOT_CUSTODY_UNPUBLISHED: WarningCode =
     WarningCode("BUILD_SLOT_CUSTODY_UNPUBLISHED");

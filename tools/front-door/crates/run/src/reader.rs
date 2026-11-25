@@ -721,6 +721,24 @@ impl RunStore {
             .transpose()
     }
 
+    /// A terminal review with no writer holds no Git work. A reservation that
+    /// outlives its guardian cannot protect commits, staging or an import, so
+    /// it is not custody uncertainty and must not strand stop or reconcile
+    /// (#3844). A writer, an unreadable request and a retained import fence all
+    /// fail closed and keep the fence.
+    pub(crate) fn terminal_read_only_without_git_work(
+        &self,
+        record: &AttemptRecord,
+        call: &Request<'_>,
+        scope: provenant_records::custody::Scope,
+    ) -> bool {
+        matches!(record.state, AttemptState::Terminal { .. })
+            && self
+                .request(record.attempt_id, call)
+                .is_ok_and(|request| request.task.writer.is_none())
+            && !self.retained_import_fence(scope).unwrap_or(true)
+    }
+
     /// A terminal row may precede the guardian releasing writer custody.
     pub fn custody_released(&self, record: &AttemptRecord, call: &Request<'_>) -> Result<bool> {
         use provenant_os::fs::FsError;
@@ -765,6 +783,26 @@ impl RunStore {
         match provenant_supervisor::custody::reservation_present(&slot, scope) {
             Ok(false) => Ok(true),
             Ok(true) => {
+                // A read-only review holds no Git work, so a reservation left
+                // by its departed guardian fences nothing once the row is
+                // terminal. Warn and treat custody as released instead of
+                // re-recording the same uncertainty on every pass (#3844).
+                if self.terminal_read_only_without_git_work(record, call, scope) {
+                    use provenant_records::warning::{
+                        READ_ONLY_RESERVATION_RETAINED, Warning, warn,
+                    };
+                    warn(
+                        Warning::new(
+                            READ_ONLY_RESERVATION_RETAINED,
+                            format!(
+                                "terminal read-only review retained a reservation at {}; no Git work is fenced, custody treated as released",
+                                slot.current_path()?.display()
+                            ),
+                        )
+                        .subject(format!("attempt {}", record.attempt_id)),
+                    );
+                    return Ok(true);
+                }
                 // WorkKey restart resolves this retained attempt first. It uses
                 // the same scoped decision as worktree admission and observation.
                 let decision = provenant_supervisor::custody::attempt_evidence(&slot, scope)

@@ -156,15 +156,71 @@ fn terminal_dependency_waits_for_custody_release() -> TestResult {
         call.clock,
     )?;
     drop(lease);
+    // #3844: a read-only review holds no Git work, so a reservation its
+    // guardian left behind does not keep a terminal row's custody uncertain.
     assert!(
-        !store.custody_released(&record, &call)?,
-        "a free lock does not clear a retained reader fence"
+        store.custody_released(&record, &call)?,
+        "a retained reader fence cannot fence Git work that does not exist"
     );
     record.state = AttemptState::Running {
         extra: Default::default(),
         child_wait: None,
     };
     assert!(!store.custody_released(&record, &call)?);
+    Ok(())
+}
+
+/// #3844: custody of a terminal read-only review is not uncertain merely
+/// because its departed guardian left a reservation behind. There is no
+/// Git work for the reservation to fence, and the typed warning names the
+/// slot so the override is visible rather than silent.
+// Spec: docs/specs/run-settlement.md#outcome-before-release
+#[test]
+fn terminal_read_only_review_reservation_is_not_a_custody_fence() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let input = input();
+    store.create(&input, &call)?;
+    let mut record = store.record(input.attempt_id, &call)?;
+    record.state = AttemptState::Terminal {
+        extra: Default::default(),
+        terminal_cause: None,
+        terminal_note: None,
+        stop: None,
+        outcome: Outcome::Failed,
+        exit_code: Some(1),
+        finished_at: record.queued_at,
+        reason: Some("handoff malformed".into()),
+    };
+    let attempt = store.attempt_dir(record.attempt_id, false)?;
+    let scope = RunStore::scope(&record);
+    let lease = provenant_supervisor::custody::acquire_reader(
+        attempt.try_clone()?,
+        scope,
+        call.lock_budget(),
+        call.cancel,
+        call.clock,
+    )?;
+    drop(lease);
+    assert!(
+        provenant_supervisor::custody::reservation_present(&attempt, scope)?,
+        "fixture must leave a reservation"
+    );
+
+    let (released, warnings) =
+        provenant_records::warning::capture(|| store.custody_released(&record, &call));
+    assert!(released?, "terminal read-only custody is not uncertain");
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(
+        warnings[0].code.as_ref(),
+        provenant_records::warning::READ_ONLY_RESERVATION_RETAINED.as_str()
+    );
+    assert!(
+        warnings[0].message.contains("no Git work is fenced"),
+        "{warnings:?}"
+    );
     Ok(())
 }
 // Medium: filesystem/SQLite boundary, no provider process or timer.

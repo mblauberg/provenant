@@ -15,7 +15,10 @@ in the settling phase is a release already under way, so the launch waits on the
 lock is free. A live holder or any other occupancy without that evidence still refuses on the first
 probe, so a release wait never becomes a queue behind a foreign lane. Resource probes run outside
 the admission transaction, and busy capacity is not a
-queue. Uncertain custody keeps its ownership until release is proved. Reconciliation reports released custody only after exclusion and native
+queue. Uncertain custody keeps its ownership until release is proved, except for a terminal
+read-only review: it holds no Git work, so a reservation left by its guardian is not uncertainty
+and reconciliation settles it with a typed warning ([outcome before release](run-settlement.md#outcome-before-release)).
+Reconciliation reports released custody only after exclusion and native
 absence evidence prove it safe; an unknown or live holder retains custody, and uncertain custody
 and unreadable reservations warn while reconciliation continues. Writer-bind refusals identify
 the durable lease holder, branch, worktree, reservation age (from its last durable update) and

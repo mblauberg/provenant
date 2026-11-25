@@ -4569,9 +4569,15 @@ impl RunStore {
                 read_sealed(&evidence, "reservation.json", RECORD_LIMIT)
             }) {
                 Ok(Some(_)) => {
-                    return Ok(Some(Reconciled::uncertain(
-                        UncertainReason::GuardianNotObservable,
-                    )));
+                    // A read-only review holds no Git work: a reservation its
+                    // departed guardian left cannot fence anything, so it is
+                    // not uncertain custody (#3844). Cleanup still refuses a
+                    // retained reservation under exclusion below.
+                    if !self.terminal_read_only_without_git_work(record, call, scope) {
+                        return Ok(Some(Reconciled::uncertain(
+                            UncertainReason::GuardianNotObservable,
+                        )));
+                    }
                 }
                 Ok(None) => {}
                 Err(RunError::Filesystem(error)) if error.is_not_found() => {}

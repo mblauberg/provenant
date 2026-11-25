@@ -201,6 +201,15 @@ handoffs and never count as negative provider-quality evidence.
 - Why: unfinished work must not appear complete or lose its handoff, and all readers need one cause
   for the next decision.
 
+A terminal read-only review holds no Git work, so custody is not uncertain merely because its
+departed guardian left a reservation in the attempt directory. Reconcile and `stop` treat that
+custody as released with a typed warning naming the slot; they do not re-record the same fence on
+every pass. A writer, an unreadable request, a retained import fence and a live custody lock all
+fail closed and keep the fence, and cleanup still refuses a retained reservation under exclusion.
+- Why: a reservation can only protect commits, staging or an import, none of which a review owns;
+  treating it as uncertainty strands a finished review forever (#3844).
+- Owner: `crates/run/src/reader.rs`, `crates/run/src/controls.rs`
+
 The handoff is the closed `handoff` fence that ends the answer, which always wins. When an answer
 contains several blocks, the last one that ends the answer is authoritative: earlier blocks and the
 prose between them are ordinary answer text. Without one, a `json` fence that decodes as a handoff
