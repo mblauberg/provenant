@@ -2889,10 +2889,7 @@ impl BoundGraphOwner<'_> {
         if host.is_some_and(|host| host != self.factory.context.identity.host) {
             // A peer provisions its own worktree from a branch and a base ref.
             // A caller path is never admitted across the boundary.
-            let caller_path = node
-                .worktree
-                .as_deref()
-                .is_some_and(|path| !path.is_empty());
+            let caller_path = node.worktree.is_some_and(|path| !path.is_empty());
             let peer_writer = access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
                 && !caller_path
                 && node
@@ -5481,6 +5478,20 @@ mod peer_capture_tests {
             return Ok(());
         }
         use provenant_fabric_runtime::graph::{self, AttemptOwner};
+        struct FreeWorkers;
+        impl WorkerObserver for FreeWorkers {
+            fn observe_roots(
+                &self,
+                roots: &[PathBuf],
+            ) -> std::collections::BTreeMap<PathBuf, provenant_confinement::worktrees::Occupancy>
+            {
+                roots
+                    .iter()
+                    .cloned()
+                    .map(|root| (root, provenant_confinement::worktrees::Occupancy::Available))
+                    .collect()
+            }
+        }
         let rig = crate::worktree_tests::repository()?;
         let host = provenant_core::HostId::from_bytes([2; 16]);
         std::fs::write(
@@ -5529,7 +5540,7 @@ mod peer_capture_tests {
             new_worktree: Some(new_worktree),
             ..Default::default()
         };
-        let key = |attempt: u16| graph::AttemptKey {
+        let key = |attempt: u32| graph::AttemptKey {
             extra: Default::default(),
             retry_generation: None,
             previous_attempt_ref: None,
