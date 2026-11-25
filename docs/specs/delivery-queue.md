@@ -30,7 +30,7 @@ violate writer custody or forge policy.
 
 The following names and semantics are the interface between implementation
 slices. They extend the general graph document and template compiler, not a
-`deliver`-specific interpreter. Existing serialized graphs keep their sealed
+`deliver`-specific interpreter. Existing serialised graphs keep their sealed
 plan and replay semantics; new fields are versioned and validated on admission.
 
 | Interface | Contract |
@@ -173,7 +173,7 @@ below are acceptance properties, not an instruction to run builds in this lane.
    plus their tests. Test bounded cycle admission, one increment per admitted
    repair across replay, red at the round limit advancing once to the next rung,
    restart in place and final-rung exhaustion, and rejection of an
-   unbounded cycle. Own the shared serialized types before other slices wire them.
+   unbounded cycle. Own the shared serialised types before other slices wire them.
 2. **Templates and policy:** `crates/fabric-runtime/src/graph/template.rs`,
    `assets/templates/` and template tests. Test both review shapes, sourced knob
    and layer overrides, optional scope propagation, widened final-rung brief,
@@ -204,7 +204,7 @@ when an old sealed plan or checkpoint is decoded and encoded. Slice 0 admits no
 new delivery policy for execution: admission returns
 `AdmissionError::DeliveryQueueUnsupported` until the execution slices wire it.
 
-- `GraphNode.loop_body` is serialized as `loop`: its existing `max_rounds` is
+- `GraphNode.loop_body` is serialised as `loop`: its existing `max_rounds` is
   required and positive, and the owning node `id` is the loop name. Optional
   `LoopSpec.outcome_edge: LoopOutcomeEdge` has `outcome: LoopOutcome`
   (`succeeded` or `exhausted`) and target `node: String`.
