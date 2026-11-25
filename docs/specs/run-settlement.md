@@ -67,9 +67,9 @@ A lane's temporary scratch directory is never a child of the attempt record dire
 it lives at `<state>/attempt-scratch/<attempt id>/tmp`. GC, writer-Git reads, disk
 classification and terminal cleanup resolve that sibling root; no fallback resolves the
 old `attempts/<id>/tmp` path. The lane's `provider-state` and its handoff,
-`LaunchPaths::scratch`, and the prompt and durable output paths remain inside the attempt
-directory by design, as do host-written records. A relative write from temporary scratch
-cannot reach them.
+the prompt and durable output paths remain inside the attempt directory by design, as do
+host-written records. `LaunchPaths::scratch` is a child of the sibling temporary directory,
+so an incidental relative write there does not land in the attempt record directory.
 - Why: a lane could otherwise write the attempt's own settlement records by walking up
   from its scratch, and a foreign record could not be told from settlement's own
   (#3844, #3947).
@@ -206,8 +206,10 @@ departed guardian left a reservation in the attempt directory. Reconcile and `st
 custody as released with a typed warning naming the slot; they do not re-record the same fence on
 every pass. This exception still requires the lock-aware custody release decision: a live custody
 lock remains a fence even when reboot recovery cannot acquire it, and must not clear temporary
-retention. A writer, an unreadable request, and a retained import fence also fail closed, and cleanup
-still refuses a retained reservation under exclusion.
+retention. A writer, an unreadable request, and a retained import fence also fail closed.
+After the custody lock is confirmed free, settlement cache cleanup and retention likewise
+allow the terminal read-only reservation with the typed warning; their other exclusion and
+settlement checks still apply.
 - Why: reservations fence commits, staging and imports, which a review does not own, but the custody
   lock must remain an exclusion boundary during concurrent release (#3844).
 - Owner: `crates/run/src/reader.rs`, `crates/run/src/controls.rs`
@@ -239,8 +241,8 @@ trailing-prose note.
 The `<attempt>/handoff.json` snapshot slot is owned by settlement, not the lane. Settlement seals a
 `HandoffResult` envelope derived from captured output; the envelope shape is the provenance, so there
 is no separate tag and no window in which a snapshot exists without its proof. Bytes found in the
-slot at capture that do not decode as that envelope were written by the provider, commonly because
-its scratch and `$TMPDIR` live under the attempt directory. Settlement keeps those bytes as
+slot at capture that do not decode as that envelope were written by the provider, including files
+left by older launches whose scratch lived under the attempt directory. Settlement keeps those bytes as
 `handoff.provider-written.json`, warns that the file was provider-written, clears the slot and seals
 the envelope from output: a complete answer still settles rather than retrying forever (#3844).
 Only a `HandoffResult` envelope is settlement's snapshot. Before #3078 the slot held a bare
@@ -261,8 +263,7 @@ a safe entry is not an unsafe class: it
 keeps its typed, retriable cause and does not settle. The launch prompt tells the lane that the
 harness writes the attempt's own records, including the sealed `handoff.json`, while the progress
 handoff under `provider-state` is the lane's to update throughout the task. Provider scratch and
-`$TMPDIR` remain under the attempt directory; ownership, not location, is what keeps a lane's file
-out of the sealed record.
+`$TMPDIR` live in the sibling scratch root; settlement still validates ownership of its snapshot slot.
 - Why: a lane can discover supervisor records from its scratch and write a bare handoff object that
   fails the sealed-envelope decode; trusting it, or retrying a decode that can never change, strands
   a finished attempt. The single sealed publish lets a settlement resume recognise its own record
@@ -450,8 +451,9 @@ Raw and exported metadata each bind the bytes they describe, and local capture p
 evidence, not publication artifacts.
 - Why: the disclosure policy must not corrupt local evidence.
 
-Reconciliation never replays an uncertain launch. Cleanup does not delete under a reservation or
-follow links, and preserves lock identity.
+Reconciliation never replays an uncertain launch. Cleanup preserves reservation exclusion except
+for released terminal read-only attempts as described above, does not follow links, and preserves
+lock identity.
 - Why: recovery must not disturb live owners or unrelated paths.
 
 Attempt records reject identity mismatches and unsupported store versions without rewriting the

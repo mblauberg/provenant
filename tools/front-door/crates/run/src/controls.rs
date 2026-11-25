@@ -4571,8 +4571,7 @@ impl RunStore {
                 Ok(Some(_)) => {
                     // A read-only review holds no Git work: a reservation its
                     // departed guardian left cannot fence anything, so it is
-                    // not uncertain custody (#3844). Cleanup still refuses a
-                    // retained reservation under exclusion below.
+                    // not uncertain custody (#3844).
                     if !self.terminal_read_only_without_git_work(record, call, scope)
                         || !self.custody_released(record, call)?
                     {

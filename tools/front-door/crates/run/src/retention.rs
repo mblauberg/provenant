@@ -974,8 +974,16 @@ impl RunStore {
             Err(error) => return Err(error.into()),
         };
         match provenant_supervisor::custody::reservation_present(&attempt, Self::scope(record)) {
-            Ok(true) => return Err(RunError::Validation("attempt reservation retained")),
-            Ok(false) => {}
+            Ok(true)
+                if !scoped.terminal_read_only_without_git_work(
+                    record,
+                    call,
+                    Self::scope(record),
+                ) =>
+            {
+                return Err(RunError::Validation("attempt reservation retained"));
+            }
+            Ok(_) => {}
             Err(error) => return Err(error.into()),
         }
         // Age cannot grant custody of private, unimported Git objects or an

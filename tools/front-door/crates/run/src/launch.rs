@@ -731,10 +731,9 @@ impl RunStore {
         };
         ready.attempts.sync()?;
         let directory = self.attempt_dir(input.attempt_id, true)?;
-        for name in ["scratch", "provider-state"] {
-            crate::artifacts::subdir(&directory, std::ffi::OsStr::new(name), true)?;
-        }
-        crate::artifacts::subdir(&scratch, std::ffi::OsStr::new("tmp"), true)?;
+        crate::artifacts::subdir(&directory, std::ffi::OsStr::new("provider-state"), true)?;
+        let tmp = crate::artifacts::subdir(&scratch, std::ffi::OsStr::new("tmp"), true)?;
+        crate::artifacts::subdir(&tmp, std::ffi::OsStr::new("scratch"), true)?;
         let base = self
             .context
             .state_root
@@ -755,7 +754,7 @@ impl RunStore {
             )
             .unwrap_or(0)
             .saturating_add(task.provider_timeout_seconds.saturating_mul(1000)),
-            scratch: base.join("scratch"),
+            scratch: temporary.join("scratch"),
             provider_state: base.join("provider-state"),
             temporary,
             temporary_alias,
@@ -2183,11 +2182,14 @@ impl RunStore {
                 .join(format!("attempts/{id}"));
             let prompt = output_prompt(&directory, &prompt);
             let staging = (|| -> Result<std::path::PathBuf> {
-                for child in ["scratch", "provider-state"] {
-                    crate::artifacts::subdir(&attempt_dir, std::ffi::OsStr::new(child), true)?;
-                }
+                crate::artifacts::subdir(
+                    &attempt_dir,
+                    std::ffi::OsStr::new("provider-state"),
+                    true,
+                )?;
                 let scratch = self.attempt_scratch_dir(id, true)?;
-                crate::artifacts::subdir(&scratch, std::ffi::OsStr::new("tmp"), true)?;
+                let tmp = crate::artifacts::subdir(&scratch, std::ffi::OsStr::new("tmp"), true)?;
+                crate::artifacts::subdir(&tmp, std::ffi::OsStr::new("scratch"), true)?;
                 Ok(crate::plan::scratch_root(self.context.state_root.as_path(), id).join("tmp"))
             })();
             let temporary = match staging {
@@ -2221,7 +2223,7 @@ impl RunStore {
                 deadline_unix_ms: u64::try_from(now()?.as_micros() / 1000)
                     .unwrap_or(0)
                     .saturating_add(task.provider_timeout_seconds.saturating_mul(1000)),
-                scratch: base.join("scratch"),
+                scratch: temporary.join("scratch"),
                 provider_state: base.join("provider-state"),
                 temporary,
                 temporary_alias,
@@ -3380,6 +3382,8 @@ mod policy_reporting_tests {
             .join("attempts")
             .join(run.attempt_id.to_string());
         assert!(!paths.temporary.starts_with(&attempt));
+        assert_eq!(paths.scratch, paths.temporary.join("scratch"));
+        assert!(paths.scratch.is_dir());
         assert_eq!(
             paths.temporary,
             crate::plan::scratch_root(context.state_root.as_path(), run.attempt_id).join("tmp")

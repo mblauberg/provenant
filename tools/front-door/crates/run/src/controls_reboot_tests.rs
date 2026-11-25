@@ -358,6 +358,22 @@ fn lost_read_only_review_keeps_reservation_fenced_by_live_custody_lock() -> Test
     );
     assert!(custody::reservation_present(&attempt, scope)?);
     drop(custody_lock);
+    // The synthetic terminal record must also be terminal in the index:
+    // the retained hint only updates terminal rows.
+    store.db.execute(
+        "UPDATE attempts SET terminal=1 WHERE id=?1",
+        [id.to_string()],
+    )?;
+    store.set_temporary_retained(id, true, &call)?;
+    assert!(store.temporary_retained(id, &call)?);
+    let (result, warnings) = provenant_records::warning::capture(|| {
+        store.reconcile_terminal_temporary(&record, &call, &SystemProcessObserver)
+    });
+    assert_eq!(result?, None);
+    assert!(!store.temporary_retained(id, &call)?);
+    assert!(warnings.iter().any(|warning| {
+        warning.code.as_ref() == provenant_records::warning::READ_ONLY_RESERVATION_RETAINED.as_str()
+    }));
     Ok(())
 }
 

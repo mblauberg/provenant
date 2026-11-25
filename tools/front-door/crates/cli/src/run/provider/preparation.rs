@@ -3772,9 +3772,13 @@ pub(super) fn prepare_candidates_inner(
     // A failed publication must not prevent a correctly prepared lane launching.
     let publish_availability =
         |records: &[provenant_providers::AvailabilityRecord]| -> Result<(), String> {
-            let attempt_dir =
-                Directory::open_anchor(paths.scratch.parent().ok_or("attempt path unavailable")?)
-                    .map_err(|e| e.to_string())?;
+            let attempt_dir = Directory::open_anchor(
+                paths
+                    .provider_state
+                    .parent()
+                    .ok_or("attempt path unavailable")?,
+            )
+            .map_err(|e| e.to_string())?;
             attempt_dir
                 .atomic_write(
                     std::ffi::OsStr::new("availability.json"),

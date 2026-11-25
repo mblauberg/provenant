@@ -1582,12 +1582,16 @@ impl RunStore {
             };
             Some(lease)
         };
-        if !matches!(
-            provenant_supervisor::custody::reservation_present(&attempt_dir, Self::scope(record)),
-            Ok(false)
-        ) {
-            let _ = self.set_temporary_retained(record.attempt_id, true, call);
-            return;
+        match provenant_supervisor::custody::reservation_present(&attempt_dir, Self::scope(record))
+        {
+            Ok(false) => {}
+            Ok(true)
+                if self.terminal_read_only_without_git_work(record, call, Self::scope(record))
+                    && self.custody_released(record, call).unwrap_or(false) => {}
+            _ => {
+                let _ = self.set_temporary_retained(record.attempt_id, true, call);
+                return;
+            }
         }
         // The terminal record retains tmp before cleanup; clear that hint only
         // after removal succeeds.
