@@ -784,7 +784,7 @@ impl AdmissionSlots {
             Err(FsError::LockTimeout { .. }) => return Ok(None),
             Err(error) => return Err(error),
         };
-        let mut indices = ci_slot_indices(&self.dir)?;
+        let indices = ci_slot_indices(&self.dir)?;
         let mut active = 0u64;
         let mut active_caps = Vec::new();
         let mut available = Vec::new();
@@ -865,7 +865,6 @@ impl AdmissionSlots {
                 .atomic_write(&name, ".ci-slot-", b"", PublishMode::NoReplace)?
                 .require_durable()?;
             let guard = self.dir.try_lock_existing(&name, LockMode::Exclusive)?;
-            indices.push(index);
             selected = Some((index, guard));
         }
         let Some((index, guard)) = selected else {
