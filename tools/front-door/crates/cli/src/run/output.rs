@@ -516,15 +516,40 @@ pub(super) fn receipt_model(adapter: Option<&str>, model: Option<&str>) -> Optio
     })
 }
 
-pub(super) fn receipt_family(model: Option<&str>) -> String {
-    provenant_routing::Catalogue::bundled()
-        .ok()
+pub(super) fn receipt_family(
+    catalogue: Option<&provenant_routing::Catalogue>,
+    model: Option<&str>,
+) -> String {
+    catalogue
         .and_then(|catalogue| {
             ModelId::parse(model?)
                 .ok()
                 .and_then(|id| catalogue.model(&id).and_then(|entry| entry.family.clone()))
         })
         .unwrap_or_else(|| "unknown".into())
+}
+
+/// The effort that actually ran, paired with the evidence that justifies it.
+/// A recorded applied effort wins. An adapter warning supplies the recorded
+/// applied default or drop; without either, the effort and its source are unknown.
+pub(super) fn receipt_effort(record: &run::AttemptRecord) -> (String, String) {
+    let route = record.applied_route.as_ref();
+    if let Some(effort) = route
+        .and_then(|route| route.effort.as_deref())
+        .filter(|value| !value.is_empty())
+    {
+        return (effort.to_owned(), "applied_route.effort".into());
+    }
+    if let Some(warning) = route.and_then(|route| route.effort_warning.as_ref()) {
+        let source = format!("effort_warning:{}", warning.source);
+        if let Some(applied) = warning.applied.as_deref().filter(|value| !value.is_empty()) {
+            return (applied.to_owned(), source);
+        }
+        // The adapter dropped the requested effort: report the applied value
+        // explicitly rather than presenting the requested effort as applied.
+        return ("none".into(), source);
+    }
+    ("unknown".into(), "unknown".into())
 }
 
 pub(super) fn receipt_resolution(record: &run::AttemptRecord) -> String {
@@ -542,6 +567,24 @@ pub(super) fn receipt_resolution(record: &run::AttemptRecord) -> String {
             "unknown".into()
         };
     }
+    // Dispatched lanes name a route rather than an exact model. The launch
+    // record carries the decision that selected the applied model, so use it
+    // instead of reporting an unknown resolution for every named lane.
+    match route.source.as_deref() {
+        Some("pin") => return "explicit".into(),
+        Some("pool") => return "pool".into(),
+        Some("named_route") => {
+            return match &record.requested_route {
+                run::RequestedRoute::Named { name, .. }
+                | run::RequestedRoute::Review { name, .. } => format!("route {name}"),
+                _ => "route".into(),
+            };
+        }
+        Some("fallback") => return "fallback".into(),
+        Some("continuation") => return "continuation".into(),
+        _ => {}
+    }
+    // A model pin may predate the recorded launch source.
     let run::RequestedRoute::Model {
         provider, model, ..
     } = &record.requested_route
@@ -560,6 +603,7 @@ pub(super) fn receipt_resolution(record: &run::AttemptRecord) -> String {
 pub(super) fn reviewer_receipt(
     record: &provenant_records::run::AttemptRecord,
     writer: bool,
+    catalogue: Option<&provenant_routing::Catalogue>,
 ) -> Result<(Value, String), Fail> {
     use provenant_records::run::AttemptState;
     if !matches!(record.state, AttemptState::Terminal { .. }) {
@@ -580,18 +624,15 @@ pub(super) fn reviewer_receipt(
         .unwrap_or("unknown");
     let qualified_model =
         route.and_then(|r| receipt_model(r.provider.as_deref(), r.model.as_deref()));
-    let effort = route
-        .and_then(|r| r.effort.as_deref())
-        .filter(|value| !value.is_empty())
-        .unwrap_or("unknown");
-    let family = receipt_family(qualified_model.as_deref());
+    let (effort, effort_source) = receipt_effort(record);
+    let family = receipt_family(catalogue, qualified_model.as_deref());
     let resolved_from = receipt_resolution(record);
     let reviewer = run::fact(record.clone())?.reviewer;
     let reviewer_model = record
         .observed_route
         .as_ref()
         .and_then(|route| receipt_model(route.provider.as_deref(), route.model.as_deref()));
-    let reviewer_family = receipt_family(reviewer_model.as_deref());
+    let reviewer_family = receipt_family(catalogue, reviewer_model.as_deref());
     let provenance = reviewer
         .as_ref()
         .map_or("unknown", |reviewer| match reviewer.provenance {
@@ -615,14 +656,14 @@ pub(super) fn reviewer_receipt(
     let label = if writer { "Writer" } else { "Reviewer" };
     let qualified_model = qualified_model.as_deref().unwrap_or("unknown");
     let line = format!(
-        "{label}: {qualified_model}@{effort} ({family}; resolved from {resolved_from}), attempt {} {}",
+        "{label}: {qualified_model}@{effort} ({family}; resolved from {resolved_from}; effort source {effort_source}), attempt {} {}",
         record.key, record.attempt_id
     );
     let attribution = format!(
         "Reviewer provenance: {provenance}, actor {actor}, model {reviewer_model}, family {reviewer_family}"
     );
     Ok((
-        json!({"key": record.key, "attempt_id": record.attempt_id, "adapter": adapter, "model": model, "effort": effort, "family": family, "role": role, "resolved_from": resolved_from, "receipt": line, "reviewer": {"provenance": provenance, "actor_id": actor, "model": reviewer_model, "family": reviewer_family}, "reviewer_provenance": attribution}),
+        json!({"key": record.key, "attempt_id": record.attempt_id, "adapter": adapter, "model": model, "effort": effort, "effort_source": effort_source, "family": family, "role": role, "resolved_from": resolved_from, "receipt": line, "reviewer": {"provenance": provenance, "actor_id": actor, "model": reviewer_model, "family": reviewer_family}, "reviewer_provenance": attribution}),
         format!("{line}\n{attribution}\n"),
     ))
 }
@@ -720,7 +761,8 @@ fn output_read_part(
     let part = match command.part {
         Part::Receipt => {
             let task = session.store.request(record.attempt_id, call)?.task;
-            return reviewer_receipt(&record, task.writer.is_some());
+            let catalogue = crate::model_discovery::effective(edge.roots).ok();
+            return reviewer_receipt(&record, task.writer.is_some(), catalogue.as_ref());
         }
         Part::Result => run::ArtifactPart::Result,
         Part::Prompt => run::ArtifactPart::Prompt,

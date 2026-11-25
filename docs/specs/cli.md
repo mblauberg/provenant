@@ -294,8 +294,19 @@ reports its effective bound in `tail` for bytes or `tail_lines` for lines, with
 ### Settled attempt provenance receipts
 
 A receipt identifies a settled local attempt and reports only supported route
-and reviewer attribution. Ambiguous, running or peer-owned targets are refused;
-missing evidence stays unknown.
+and reviewer attribution. Every receipt names the adapter, model, family,
+effort, `effort_source`, `resolved_from` and role, for both writer and reviewer
+lanes and for every adapter. Family for both the applied model and observed
+reviewer comes from the effective routing catalogue at output time, including
+discovery and host and project overlays;
+an effort is the applied value, or the value and source recorded when an adapter
+dropped or defaulted it. A requested effort alone is not evidence of the
+applied effort; without recorded applied or warning evidence, both effort and
+its source are `unknown`. `resolved_from` names
+the recorded launch decision (an explicit pin, a pool, a named route, a
+fallback or a continuation), so dispatched lanes do not collapse to "unknown".
+Ambiguous, running or peer-owned targets are refused; missing evidence stays
+unknown with its source.
 
 - Why: provenance must not mistake a writer for a reviewer or infer a route.
 

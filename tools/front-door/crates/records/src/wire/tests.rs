@@ -393,6 +393,7 @@ fn every_output_mode_matches_exactly_one_variant() {
             adapter: json!("codex"),
             model: json!("m"),
             effort: Value::Null,
+            effort_source: Value::Null,
             family: json!("f"),
             role: Value::Null,
             resolved_from: Value::Null,
