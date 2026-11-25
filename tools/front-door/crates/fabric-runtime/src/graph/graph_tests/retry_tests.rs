@@ -1592,6 +1592,21 @@ fn keyed_retry_replays_exact_target_after_checkpoint_restart() {
     .unwrap_err();
     assert_eq!(conflict.code, "idempotency_conflict");
     assert_eq!(restored, before_replay);
+
+    let changed_payload = patch::retry_node_and_dependants_with_key(
+        &mut patch::LiveGraph {
+            document: &document,
+            checkpoint: &mut restored,
+        },
+        "work",
+        Some("different brief"),
+        &context,
+        &operation_id.to_string(),
+        "different-control-digest",
+    )
+    .unwrap_err();
+    assert_eq!(changed_payload.code, "idempotency_conflict");
+    assert_eq!(restored, before_replay);
 }
 
 #[test]
