@@ -244,11 +244,12 @@ impl QueueRegistry {
     /// A queue id replay is accepted only when it carries the exact same record.
     pub(super) fn admit(
         &self,
-        submission: QueueSubmission,
+        mut submission: QueueSubmission,
         budget: WaitBudget,
         cancel: &CancelToken,
         clock: &dyn Clock,
     ) -> Result<QueueAdmission, String> {
+        sanitize_submission(&mut submission)?;
         validate_submission(&submission)?;
         self.locked(budget, cancel, clock, |registry| {
             let items: Vec<QueueItem> = submission.items.iter().enumerate().map(|(index, item)| QueueItem {
@@ -559,6 +560,35 @@ fn same_submission(existing: &QueueRecord, proposed: &QueueRecord) -> bool {
 fn launch_digest(request: &Value, execution_directory: &str, adoption: &Option<Value>) -> String {
     let bytes = serde_json::to_vec(&(request, execution_directory, adoption)).unwrap_or_default();
     provenant_records::CanonicalV1::file_digest(&bytes).to_string()
+}
+
+fn sanitize_submission(submission: &mut QueueSubmission) -> Result<(), String> {
+    submission.snapshot.selector = sanitize_persisted_text(&submission.snapshot.selector)?;
+    submission.snapshot.source = sanitize_persisted_text(&submission.snapshot.source)?;
+    for item in &mut submission.items {
+        item.launch_request = sanitize_persisted_value(&item.launch_request)?;
+        item.adoption = item.adoption.as_ref().map(sanitize_persisted_value).transpose()?;
+    }
+    for item in &mut submission.snapshot.items {
+        item.data = sanitize_persisted_value(&item.data)?;
+    }
+    Ok(())
+}
+
+fn sanitize_persisted_text(value: &str) -> Result<String, String> {
+    let safe = provenant_redact::publication_text(value.as_bytes(), [])
+        .map_err(|_| "queue input could not be sanitised for durable storage".to_owned())?;
+    String::from_utf8(safe)
+        .map_err(|_| "queue input sanitisation produced invalid text".to_owned())
+}
+
+fn sanitize_persisted_value(value: &Value) -> Result<Value, String> {
+    let encoded = serde_json::to_vec(value)
+        .map_err(|_| "queue input could not be encoded for sanitisation".to_owned())?;
+    let safe = provenant_redact::publication_text(&encoded, [])
+        .map_err(|_| "queue input could not be sanitised for durable storage".to_owned())?;
+    serde_json::from_slice(&safe)
+        .map_err(|_| "queue input sanitisation produced invalid structured data".to_owned())
 }
 
 fn validate_launch_request(value: &Value) -> Result<(), String> {
