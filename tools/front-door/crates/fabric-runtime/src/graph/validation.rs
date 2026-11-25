@@ -521,7 +521,7 @@ pub(super) fn validate_flat_plan(
                     && document
                         .integration_branch
                         .as_deref()
-                        .is_some_and(|branch| branch == intent.base_branch)
+                        .is_some_and(|branch| branch == intent.branch)
                     && intent.valid()
                     && node.source.is_none()
                     && node.worktree.as_deref() == Some(intent.worktree.as_str())
