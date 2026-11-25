@@ -230,7 +230,6 @@ fn recovery_members(
         pending.extend(
             node.composite_members
                 .iter()
-                .chain(&node.after_expansion)
                 .filter_map(|id| positions.get(id).copied()),
         );
         if node.loop_body.is_some() {
@@ -276,9 +275,70 @@ fn recovery_source_is_published_head(
     bound
 }
 
-/// Queue conflict recovery must rebase the exact published head on its
-/// retained writer worktree. Compound recovery targets are inspected after
-/// composites and bounded loops have been expanded.
+fn loop_is_at_final_round(
+    gate: &PlannedNode,
+    nodes: &[PlannedNode],
+) -> bool {
+    let Some(round) = &gate.round else {
+        return false;
+    };
+    let last_round = nodes
+        .iter()
+        .filter_map(|node| node.round.as_ref())
+        .filter(|member| member.loop_id == round.loop_id)
+        .map(|member| member.round)
+        .max();
+    last_round == Some(round.round)
+}
+
+fn recovery_returns_through_fresh_gates(
+    writers: &[usize],
+    nodes: &[PlannedNode],
+    positions: &BTreeMap<String, usize>,
+) -> bool {
+    let terminal_writers: Vec<_> = writers
+        .iter()
+        .copied()
+        .filter(|writer| {
+            !writers.iter().any(|descendant| {
+                *descendant != *writer
+                    && ancestors(nodes, positions, &nodes[*descendant].id).contains(writer)
+            })
+        })
+        .collect();
+    !terminal_writers.is_empty()
+        && terminal_writers.iter().all(|writer| {
+            nodes.iter().enumerate().any(|(publish_index, publish)| {
+                if publish.kind != Some(NodeKind::Publish)
+                    || publish_source_writer(nodes, positions, publish_index) != Some(*writer)
+                {
+                    return false;
+                }
+                let conflicts: Vec<_> = nodes
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, gate)| {
+                        matches!(gate.condition.as_ref(), Some(GateCondition::Conflict { .. }))
+                            && gate_targets_node(&gate.condition, &publish.id)
+                            && ancestors(nodes, positions, &gate.id).contains(&publish_index)
+                    })
+                    .map(|(index, _)| index)
+                    .collect();
+                conflicts.iter().any(|conflict| {
+                    nodes.iter().enumerate().any(|(ci_index, ci)| {
+                        matches!(ci.condition.as_ref(), Some(GateCondition::Ci { .. }))
+                            && gate_targets_node(&ci.condition, &publish.id)
+                            && ancestors(nodes, positions, &ci.id).contains(&publish_index)
+                            && ancestors(nodes, positions, &ci.id).contains(conflict)
+                    })
+                })
+            })
+        })
+}
+
+/// Queue repairs must use their exact published head and retained worktree,
+/// then return through hygiene, a new publication, and gates for that head.
+/// Compound recovery targets are inspected after expansion.
 pub(super) fn validate_conflict_recovery(
     nodes: &[PlannedNode],
     positions: &BTreeMap<String, usize>,
@@ -288,27 +348,33 @@ pub(super) fn validate_conflict_recovery(
         return Ok(());
     }
     for gate in nodes {
+        let is_conflict = matches!(gate.condition.as_ref(), Some(GateCondition::Conflict { .. }));
+        let is_ci_repair = matches!(gate.condition.as_ref(), Some(GateCondition::Ci { .. }))
+            && gate.on_fail.is_some();
+        if !is_conflict && !is_ci_repair {
+            continue;
+        }
         let published_id = match &gate.condition {
             Some(GateCondition::Conflict {
                 target: CiTarget::Node { node, .. },
                 ..
+            })
+            | Some(GateCondition::Ci {
+                target: CiTarget::Node { node, .. },
+                ..
             }) => node,
-            Some(GateCondition::Conflict { .. }) => {
+            _ => {
                 return Err(format!(
-                    "node {}: queue conflict gate requires a published node and retained-worktree rebase",
+                    "node {}: queue conflict and CI repairs require a published node target",
                     gate.id
                 ));
             }
-            _ => continue,
         };
         let invalid = || {
             format!(
-                "node {}: queue conflict recovery must rebase its published head in the retained worktree",
+                "node {}: queue repair must use its published head and return through hygiene, fresh publication, conflict and CI gates",
                 gate.id
             )
-        };
-        let Some(recovery_id) = gate.on_fail.as_deref() else {
-            return Err(invalid());
         };
         let Some(published_index) = positions.get(published_id).copied() else {
             return Err(invalid());
@@ -317,6 +383,14 @@ pub(super) fn validate_conflict_recovery(
         if published.kind != Some(NodeKind::Publish) {
             return Err(invalid());
         }
+        let Some(recovery_id) = gate.on_fail.as_deref() else {
+            // A terminal conflict without a repair route is safe only when
+            // bounded loop exhaustion will persist the park transition.
+            if is_conflict && loop_is_at_final_round(gate, nodes) {
+                continue;
+            }
+            return Err(invalid());
+        };
         let Some(published_writer) = publish_source_writer(nodes, positions, published_index)
         else {
             return Err(invalid());
@@ -355,6 +429,7 @@ pub(super) fn validate_conflict_recovery(
                             })
                     })
             })
+            || !recovery_returns_through_fresh_gates(&writers, nodes, positions)
         {
             return Err(invalid());
         }
@@ -1530,4 +1605,36 @@ pub(super) fn validate_progress(
             NodeState::Failed => progress.outputs.is_none(),
         };
     if valid { Ok(()) } else { Err(()) }
+}
+
+#[cfg(test)]
+mod recovery_members_tests {
+    use super::*;
+
+    #[test]
+    fn recovery_members_excludes_after_expansion_prerequisites() {
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":2,"graph_id":"recovery-members",
+            "nodes":[
+                {"id":"recovery","access":"worktree_write","worktree":"/wt/retained",
+                 "prompt":"rebase","write_scope":["src"],"route":{"alias":"senior"}},
+                {"id":"prerequisite","access":"worktree_write","worktree":"/wt/other",
+                 "prompt":"unrelated prerequisite","write_scope":["docs"],
+                 "route":{"alias":"senior"}}
+            ]
+        }))
+        .unwrap();
+        let (plan, positions) =
+            validate_flat_plan(&document, &crate::config::GraphLimits::default()).unwrap();
+        let recovery = positions["recovery"];
+        let prerequisite = positions["prerequisite"];
+        let mut nodes = plan.nodes;
+        nodes[recovery]
+            .after_expansion
+            .push("prerequisite".into());
+
+        let members = recovery_members(recovery, &nodes, &positions);
+        assert!(members.contains(&recovery));
+        assert!(!members.contains(&prerequisite));
+    }
 }

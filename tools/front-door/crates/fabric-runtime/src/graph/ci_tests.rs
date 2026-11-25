@@ -1136,6 +1136,7 @@ fn queue_conflict_recheck_matches_a_bounded_round_and_reactivates_composite_reba
         summary: "clear at published head".into(),
         wake_at: None,
         pending_observations: 0,
+        ci_rechecks: 0,
     });
     checkpoint.nodes[rebase_index].state = NodeState::Skipped;
     checkpoint.nodes[rebase_writer_index].state = NodeState::Skipped;
@@ -1157,14 +1158,27 @@ fn queue_conflict_recheck_matches_a_bounded_round_and_reactivates_composite_reba
     });
     let condition = plan.nodes[ci_index].condition.clone().unwrap();
 
-    let reset =
-        super::queue_conflict_recheck(ci_index, &condition, &plan, &positions, &mut checkpoint)
-            .unwrap();
+    let reset = super::queue_conflict_recheck(
+        ci_index,
+        &condition,
+        &plan,
+        &positions,
+        &mut checkpoint,
+        Some(provenant_core::WallTime::from_micros(1_000_000).unwrap()),
+    )
+    .unwrap();
 
     assert_eq!(reset, (conflict_index, rebase_index));
-    assert_eq!(checkpoint.nodes[conflict_index].state, NodeState::Pending);
+    assert_eq!(checkpoint.nodes[conflict_index].state, NodeState::Running);
     assert!(checkpoint.nodes[conflict_index].gate.is_none());
-    assert!(checkpoint.nodes[conflict_index].conflict.is_none());
+    assert_eq!(
+        checkpoint.nodes[conflict_index]
+            .conflict
+            .as_ref()
+            .unwrap()
+            .ci_rechecks,
+        1
+    );
     assert_eq!(checkpoint.nodes[rebase_index].state, NodeState::Pending);
     assert_eq!(
         checkpoint.nodes[rebase_writer_index].state,
@@ -1172,6 +1186,162 @@ fn queue_conflict_recheck_matches_a_bounded_round_and_reactivates_composite_reba
     );
     assert_eq!(checkpoint.nodes[ci_index].state, NodeState::Pending);
     assert!(checkpoint.nodes[ci_index].ci.is_none());
+}
+
+#[test]
+fn queue_conflict_recheck_replays_into_a_later_recovery_round() {
+    let mut document = queue_published_document();
+    document
+        .nodes
+        .retain(|node| matches!(node.id.as_str(), "write" | "hygiene" | "publish"));
+    document.nodes.extend(
+        serde_json::from_value::<Vec<GraphNode>>(serde_json::json!([
+            {"id":"conflict","kind":"gate","access":"read_only","depends_on":["publish"],
+             "on_fail":"rebase","condition":{"type":"conflict","target":{"node":"publish"}}},
+            {"id":"rebase","kind":"loop","access":"read_only","depends_on":["conflict"],
+             "loop":{"max_rounds":2,"until":"checked","body":[
+                {"id":"fix","access":"worktree_write","worktree":"lane","prompt":"rebase",
+                 "source":{"type":"head","node":"publish"},
+                 "route":{"adapter":"fixture","model":"fixture/model"}},
+                {"id":"checked","kind":"gate","access":"read_only","depends_on":["fix"],
+                 "condition":{"type":"budget"}}
+             ]}},
+            {"id":"ci","kind":"gate","access":"read_only","depends_on":["conflict","publish"],
+             "condition":{"type":"ci","target":{"node":"publish"}}}
+        ]))
+        .unwrap(),
+    );
+
+    let limits = crate::config::GraphLimits::default();
+    let expanded = loops::expand(&document, &[], &limits).unwrap();
+    let (plan, positions) = validate_flat_plan(&expanded, &limits).unwrap();
+    let conflict_index = positions["conflict"];
+    let rebase_index = positions["rebase"];
+    let first_until_index = positions["rebase--r1--checked"];
+    let second_fix_index = positions["rebase--r2--fix"];
+    let ci_index = positions["ci"];
+    let mut checkpoint = transitions::initial_checkpoint(
+        &expanded,
+        &plan,
+        "queue-conflict-recovery-round-replay".into(),
+        None,
+        None,
+        None,
+    );
+    let head = "a".repeat(40);
+    checkpoint.nodes[positions["publish"]].state = NodeState::Succeeded;
+    checkpoint.nodes[positions["publish"]].outputs = Some(NodeOutputs {
+        branch: Some("provenant/graph/queue-ci".into()),
+        commit: Some(head.clone()),
+        publication: Some(DeliveryPublication {
+            branch: "provenant/graph/queue-ci".into(),
+            head: head.clone(),
+            pull_request: "https://example.invalid/pr/ci".into(),
+        }),
+        ..Default::default()
+    });
+    checkpoint.nodes[conflict_index].state = NodeState::Succeeded;
+    checkpoint.nodes[conflict_index].gate = Some(GateResult {
+        extra: Default::default(),
+        passed: true,
+        reason: None,
+        on_fail: Some("rebase".into()),
+    });
+    checkpoint.nodes[conflict_index].conflict = Some(super::ci::ConflictEvidence {
+        state: ConflictState::Clear,
+        head_sha: Some(head.clone()),
+        summary: "clear at published head".into(),
+        wake_at: None,
+        pending_observations: 0,
+        ci_rechecks: 0,
+    });
+    checkpoint.nodes[rebase_index].state = NodeState::Skipped;
+    for id in [
+        "rebase--r1--fix",
+        "rebase--r1--checked",
+        "rebase--r2--fix",
+        "rebase--r2--checked",
+    ] {
+        checkpoint.nodes[positions[id]].state = NodeState::Skipped;
+    }
+    checkpoint.nodes[ci_index].state = NodeState::Running;
+    checkpoint.nodes[ci_index].ci = Some(CiEvidence {
+        wake_at: None,
+        pending_observations: 1,
+        extra: Default::default(),
+        first_observed_stamp: None,
+        clock_reanchors: 0,
+        clock_reanchor_reason: None,
+        state: CiState::Conflict,
+        summary: "PR base moved".into(),
+        head_sha: Some(head),
+        failed_checks: Vec::new(),
+        check_names: vec!["build".into()],
+        truncated: false,
+        elapsed_seconds: 1,
+    });
+    let condition = plan.nodes[ci_index].condition.clone().unwrap();
+    super::queue_conflict_recheck(
+        ci_index,
+        &condition,
+        &plan,
+        &positions,
+        &mut checkpoint,
+        Some(provenant_core::WallTime::from_micros(1_000_000).unwrap()),
+    )
+    .unwrap();
+
+    for id in [
+        "rebase--r1--fix",
+        "rebase--r1--checked",
+        "rebase--r2--fix",
+        "rebase--r2--checked",
+    ] {
+        assert_eq!(checkpoint.nodes[positions[id]].state, NodeState::Pending);
+    }
+
+    let mut replay: GraphCheckpoint =
+        serde_json::from_value(serde_json::to_value(&checkpoint).unwrap()).unwrap();
+    let mut inactive_replay = replay.clone();
+    inactive_replay.nodes[first_until_index].state = NodeState::Succeeded;
+    assert!(matches!(
+        super::transitions::node_action(
+            second_fix_index,
+            &plan,
+            &mut inactive_replay,
+            &positions
+        ),
+        super::transitions::NodeAction::Wait { changed: true }
+    ));
+    assert_eq!(
+        inactive_replay.nodes[second_fix_index].state,
+        NodeState::Skipped,
+        "a successful prior until gate keeps the later recovery round inactive"
+    );
+
+    replay.nodes[conflict_index].state = NodeState::Failed;
+    replay.nodes[conflict_index].gate = Some(GateResult {
+        extra: Default::default(),
+        passed: false,
+        reason: Some("CONFLICTING".into()),
+        on_fail: Some("rebase".into()),
+    });
+    replay.nodes[first_until_index].state = NodeState::Failed;
+    replay.nodes[first_until_index].gate = Some(GateResult {
+        extra: Default::default(),
+        passed: false,
+        reason: Some("CI still reports a conflict".into()),
+        on_fail: None,
+    });
+    assert!(matches!(
+        super::transitions::node_action(rebase_index, &plan, &mut replay, &positions),
+        super::transitions::NodeAction::Loop(_)
+    ));
+    assert!(matches!(
+        super::transitions::node_action(second_fix_index, &plan, &mut replay, &positions),
+        super::transitions::NodeAction::Attempt
+    ));
+    assert_eq!(replay.nodes[second_fix_index].state, NodeState::Pending);
 }
 
 #[test]

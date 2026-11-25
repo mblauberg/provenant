@@ -719,8 +719,9 @@ fn node_bound(
         }
     }
     if conflict {
-        // Exact head, summary, poll deadline and count survive a pending replay.
-        bytes = bytes.saturating_add(OUTPUT_FIELD_BYTES + 128);
+        // Exact head, summary, poll deadline, observation count and CI recheck
+        // marker survive a pending replay.
+        bytes = bytes.saturating_add(OUTPUT_FIELD_BYTES + 160);
     }
     if plans::writer(node) {
         bytes = bytes.saturating_add(6 * 4096 + 256);

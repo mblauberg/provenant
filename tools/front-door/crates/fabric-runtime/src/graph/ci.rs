@@ -60,6 +60,9 @@ pub struct ConflictEvidence {
     pub wake_at: Option<provenant_core::WallTime>,
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub pending_observations: u64,
+    /// CI conflict events already followed by an exact-head mergeability recheck.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub ci_rechecks: u64,
 }
 
 pub(super) fn default_failed_checks_max_bytes() -> usize {
@@ -493,6 +496,9 @@ pub(super) fn evaluate_conflict<O: AttemptOwner>(
         }
     }
     let prior = checkpoint.nodes[index].conflict.as_ref();
+    let ci_rechecks = prior
+        .filter(|prior| prior.head_sha.as_ref() == observed_head.as_ref())
+        .map_or(0, |prior| prior.ci_rechecks);
     let pending_observations =
         if prior.and_then(|prior| prior.head_sha.as_ref()) == observed_head.as_ref() {
             prior.map_or(0, |prior| prior.pending_observations)
@@ -517,6 +523,7 @@ pub(super) fn evaluate_conflict<O: AttemptOwner>(
         ),
         wake_at: None,
         pending_observations,
+        ci_rechecks,
     };
     checkpoint.nodes[index].conflict = Some(evidence.clone());
     Ok(match state {

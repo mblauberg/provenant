@@ -638,6 +638,21 @@ fn queue_publish_document(tier: &str) -> GraphDocument {
             {"id":"rebase", "access":"worktree_write", "worktree":"/wt/feature",
              "prompt":"rebase the published branch", "route":{"alias":"senior"},
              "depends_on":["conflict"], "source":{"type":"head","node":"publish"}},
+            {"id":"hygiene_after_rebase", "kind":"hygiene", "access":"worktree_write",
+             "worktree":"/wt/feature", "depends_on":["rebase"],
+             "source":{"type":"node","node":"rebase"}},
+            {"id":"publish_after_rebase", "kind":"publish", "access":"worktree_write",
+             "worktree":"/wt/feature", "depends_on":["hygiene_after_rebase"],
+             "source":{"type":"node","node":"hygiene_after_rebase"}},
+            {"id":"rebase_checks", "kind":"loop", "access":"read_only",
+             "depends_on":["publish_after_rebase"],
+             "loop":{"max_rounds":1,"until":"ci_after_rebase","body":[
+                {"id":"conflict_after_rebase", "kind":"gate", "access":"read_only",
+                 "condition":{"type":"conflict","target":{"node":"publish_after_rebase"}}},
+                {"id":"ci_after_rebase", "kind":"gate", "access":"read_only",
+                 "depends_on":["conflict_after_rebase"],
+                 "condition":{"type":"ci","target":{"node":"publish_after_rebase"}}}
+             ]}},
             {"id":"ci", "kind":"gate", "access":"read_only",
              "depends_on":["conflict"],
              "condition":{"type":"ci","target":{"node":"publish"}}},
@@ -845,12 +860,22 @@ fn queue_conflict_recovery_requires_the_published_head_and_retained_worktree() {
         json!({
             "id":"rebase", "kind":"loop", "access":"read_only",
             "depends_on":["conflict"],
-            "loop":{"max_rounds":2,"until":"done","body":[
+            "loop":{"max_rounds":1,"until":"refresh_ci","body":[
                 {"id":"fix", "access":"worktree_write", "worktree":worktree,
                  "prompt":"rebase the retained published branch", "write_scope":["src"],
                  "route":{"alias":"senior"}, "source":{"type":"head","node":"publish"}},
-                {"id":"done", "kind":"gate", "access":"read_only",
-                 "depends_on":["fix"], "condition":{"type":"budget"}}
+                {"id":"hygiene", "kind":"hygiene", "access":"worktree_write",
+                 "worktree":worktree, "depends_on":["fix"],
+                 "source":{"type":"node","node":"fix"}},
+                {"id":"refresh", "kind":"publish", "access":"worktree_write",
+                 "worktree":worktree, "depends_on":["hygiene"],
+                 "source":{"type":"node","node":"hygiene"}},
+                {"id":"refresh_conflict", "kind":"gate", "access":"read_only",
+                 "depends_on":["refresh"],
+                 "condition":{"type":"conflict","target":{"node":"refresh"}}},
+                {"id":"refresh_ci", "kind":"gate", "access":"read_only",
+                 "depends_on":["refresh_conflict"],
+                 "condition":{"type":"ci","target":{"node":"refresh"}}}
             ]}
         })
     };
@@ -877,7 +902,21 @@ fn queue_conflict_recovery_requires_the_published_head_and_retained_worktree() {
             {"id":"followup", "access":"worktree_write", "worktree":"/wt/feature",
              "prompt":"finish the rebase", "write_scope":["src"],
              "route":{"alias":"senior"}, "depends_on":["fix"],
-             "source":{"type":"node","node":"fix"}}
+             "source":{"type":"node","node":"fix"}},
+            {"id":"hygiene", "kind":"hygiene", "access":"worktree_write",
+             "worktree":"/wt/feature", "depends_on":["followup"],
+             "source":{"type":"node","node":"followup"}},
+            {"id":"refresh", "kind":"publish", "access":"worktree_write",
+             "worktree":"/wt/feature", "depends_on":["hygiene"],
+             "source":{"type":"node","node":"hygiene"}},
+            {"id":"checks", "kind":"loop", "access":"read_only",
+             "depends_on":["refresh"], "loop":{"max_rounds":1,"until":"refresh_ci","body":[
+                {"id":"refresh_conflict", "kind":"gate", "access":"read_only",
+                 "condition":{"type":"conflict","target":{"node":"refresh"}}},
+                {"id":"refresh_ci", "kind":"gate", "access":"read_only",
+                 "depends_on":["refresh_conflict"],
+                 "condition":{"type":"ci","target":{"node":"refresh"}}}
+             ]}}
         ], "exports":[{"node":"followup","outputs":["result"]}]}
     }));
     assert!(validate_plan(&composite).is_ok());
@@ -905,8 +944,61 @@ fn queue_conflict_recovery_requires_the_published_head_and_retained_worktree() {
     assert!(
         validate_plan(&missing_recovery)
             .err()
-            .is_some_and(|error| error.contains("queue conflict recovery"))
+            .is_some_and(|error| error.contains("queue repair"))
     );
+}
+
+#[test]
+fn queue_ci_repair_must_republish_and_recheck_the_repaired_head() {
+    let ci_repair_document = |reenter: bool| {
+        let mut document = queue_publish_document("routine");
+        document
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "ci")
+            .unwrap()
+            .on_fail = Some("ci_repair".into());
+        document.nodes.push(
+            serde_json::from_value(json!({
+                "id":"ci_repair", "access":"worktree_write", "worktree":"/wt/feature",
+                "prompt":"repair the published CI findings", "write_scope":["src"],
+                "depends_on":["ci","publish"],
+                "source":{"type":"head","node":"publish"}, "route":{"alias":"senior"}
+            }))
+            .unwrap(),
+        );
+        if reenter {
+            document.nodes.extend(
+                serde_json::from_value::<Vec<GraphNode>>(json!([
+                    {"id":"hygiene_after_ci_repair", "kind":"hygiene",
+                     "access":"worktree_write", "worktree":"/wt/feature",
+                     "depends_on":["ci_repair"],
+                     "source":{"type":"node","node":"ci_repair"}},
+                    {"id":"publish_after_ci_repair", "kind":"publish",
+                     "access":"worktree_write", "worktree":"/wt/feature",
+                     "depends_on":["hygiene_after_ci_repair"],
+                     "source":{"type":"node","node":"hygiene_after_ci_repair"}},
+                    {"id":"ci_repair_checks", "kind":"loop", "access":"read_only",
+                     "depends_on":["publish_after_ci_repair"],
+                     "loop":{"max_rounds":1,"until":"ci_after_ci_repair","body":[
+                        {"id":"conflict_after_ci_repair", "kind":"gate",
+                         "access":"read_only",
+                         "condition":{"type":"conflict",
+                           "target":{"node":"publish_after_ci_repair"}}},
+                        {"id":"ci_after_ci_repair", "kind":"gate", "access":"read_only",
+                         "depends_on":["conflict_after_ci_repair"],
+                         "condition":{"type":"ci",
+                           "target":{"node":"publish_after_ci_repair"}}}
+                     ]}}
+                ]))
+                .unwrap(),
+            );
+        }
+        document
+    };
+
+    assert!(validate_plan(&ci_repair_document(true)).is_ok());
+    assert!(validate_plan(&ci_repair_document(false)).is_err());
 }
 
 #[test]
