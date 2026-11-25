@@ -25,6 +25,9 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const LIMIT: u64 = 4 * 1024 * 1024;
 const REPLAY_PAGE: u64 = 100;
 const LABEL_BYTES: usize = 128;
+/// Failed checks a journal event keeps so a wait that settles from it can
+/// still name them; names and links are already bounded at the source.
+const MAX_FAILURE_DETAILS: usize = 16;
 const MAX_PR_ASSOCIATIONS: usize = 128;
 const GAP: Duration = Duration::from_secs(60);
 
@@ -755,10 +758,16 @@ fn poll_detail(
         projected_checks.push(json!({"bucket":bucket}));
     }
     let mut projected_status = serde_json::to_value(status)?;
-    // Full failure details are read from the observer at completion; do not
-    // let an unbounded check matrix overflow the event journal.
-    if let Some(status) = projected_status.as_object_mut() {
-        status.remove("failed_check_details");
+    // Keep a bounded set of failure details so a default wait that settles
+    // from this event still names the failed checks. Full details are re-read
+    // from the observer at completion; capping the count keeps a large check
+    // matrix from overflowing the event journal. Names and links are bounded
+    // when the status line is built, so only the count needs bounding here.
+    if let Some(details) = projected_status
+        .get_mut("failed_check_details")
+        .and_then(Value::as_array_mut)
+    {
+        details.truncate(MAX_FAILURE_DETAILS);
     }
     if let Some(names) = projected_status
         .get_mut("failing_checks")
@@ -1557,6 +1566,46 @@ mod tests {
         assert!(
             serde_json::to_vec(&detail).unwrap().len() < provenant_fabric_store::MAX_BODY_BYTES
         );
+    }
+
+    // Spec: docs/specs/cli.md — an unsuccessful wait names the failed check.
+    #[test]
+    fn host_poller_failure_event_names_the_failed_check_in_an_incomplete_wait() {
+        let subscription = Subscription {
+            repository: "owner/repo".into(),
+            number: 7,
+            head: None,
+        };
+        let names: Vec<String> = (0..64).map(|i| format!("check-{i}")).collect();
+        let details: Vec<_> = names
+            .iter()
+            .map(|name| json!({"name":name,"url":"https://ci/run/1","bucket":"fail"}))
+            .collect();
+        let status: crate::pr::status::Line = serde_json::from_value(json!({
+            "number":7,"state":"OPEN","head":"abc","draft":false,
+            "checks_passed":0,"checks_total":64,"checks_failed":64,"checks_pending":0,
+            "failing_checks":names.clone(),"failed_check_details":details,
+            "merge":"UNKNOWN","review":"unknown","error":null
+        }))
+        .unwrap();
+        let detail = poll_detail(&subscription, &status, &[]).unwrap();
+        // A bounded projection must still carry failure details into the
+        // journal, without letting a large matrix overflow the event body.
+        let projected = detail["status"]["failed_check_details"].as_array().unwrap();
+        assert_eq!(projected.len(), MAX_FAILURE_DETAILS);
+        assert!(
+            serde_json::to_vec(&detail).unwrap().len() < provenant_fabric_store::MAX_BODY_BYTES
+        );
+        // A default (incomplete) wait settles from the event directly, with no
+        // fresh observer read, so the failure must still be named downstream.
+        let reading = crate::status_wait::reading_pr_event(7, None, false, detail);
+        assert_eq!(reading.settle, crate::status_wait::Settle::Unsuccessful);
+        let recovered: crate::pr::status::Line =
+            serde_json::from_value(reading.data.clone()).unwrap();
+        let lines = recovered.failure_lines();
+        assert_eq!(lines.len(), MAX_FAILURE_DETAILS);
+        assert!(lines[0].contains("check-0"), "{lines:?}");
+        assert!(lines[0].contains("https://ci/run/1"), "{lines:?}");
     }
 
     #[test]
