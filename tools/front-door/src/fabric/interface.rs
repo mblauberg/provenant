@@ -88,24 +88,6 @@ fn seal_document_queue(
     Ok(())
 }
 
-/// The bundled delivery composite's execution seams are opt-in for ordinary
-/// launches, but are required whenever it is compiled as a queue item.
-fn bind_queue_delivery(
-    raw: Option<&Value>,
-    name: &str,
-    library: &TemplateLibrary,
-    parameters: &mut Value,
-) {
-    if raw
-        .and_then(|document| document.get("queue"))
-        .is_some_and(|queue| !queue.is_null())
-        && name == "deliver"
-        && library.layer(name) == Some(Layer::Default)
-    {
-        parameters["delivery_execution_wired"] = json!(true);
-    }
-}
-
 // Preserve the parser's field path and message for actionable diagnostics.
 fn decode_input<T: serde::de::DeserializeOwned>(
     value: Value,
@@ -1804,7 +1786,6 @@ impl Factory {
             {
                 parameters["brief"] = brief.clone();
             }
-            bind_queue_delivery(raw, &template_name, &library, &mut parameters);
             if template.is_composite() {
                 let fields = node.as_object_mut().ok_or_else(invalid)?;
                 fields.remove("prompt");
@@ -2911,12 +2892,6 @@ impl Factory {
         {
             parameters["brief"] = brief.clone();
         }
-        bind_queue_delivery(
-            raw,
-            node["use"].as_str().unwrap_or("task"),
-            context.library,
-            &mut parameters,
-        );
         if template.is_composite() {
             let fields = node.as_object_mut().ok_or_else(|| {
                 FacadeError::invalid(InvalidInputDetail::Field("document".into()))
