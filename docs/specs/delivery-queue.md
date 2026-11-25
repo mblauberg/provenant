@@ -223,7 +223,11 @@ can be admitted.
   failed named gate admits another bounded round, and the failed evidence stays
   in the checkpoint. Its optional `selected_publication` names a body publication:
   success exports the receipt from the successful round, including its exact
-  head. Consumers must use that receipt and revalidate its head before landing.
+  head. Optional `initial_publication` names the directly bound initial seed:
+  if the entry gates all pass and every recovery round is skipped, the owner
+  exports that seed's receipt. Landing admission requires conflict, CI and verdict
+  entry gates for the seed as well as each recovery publication. Consumers must
+  use the selected receipt and revalidate its head before landing.
   A queue item composes these graph mechanisms into one recovery owner. Each new
   repair head returns through hygiene, publication, conflict, CI and review;
   exhausted or incomplete evidence parks instead of selecting a stale head.

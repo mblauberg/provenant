@@ -31,6 +31,9 @@ pub struct LoopSpec {
     /// Local publication whose exact receipt is exported by a successful loop.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_publication: Option<String>,
+    /// Initial publication selected when all entry gates pass without repair.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_publication: Option<String>,
 }
 
 fn default_extension_rounds() -> usize {
@@ -634,6 +637,33 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
                     .map(|target| (child.id.clone(), (target.to_owned(), extra.clone())))
             })
             .collect();
+        if let Some(initial) = spec.initial_publication.as_deref() {
+            let valid = !spec.retry_on.is_empty()
+                && spec.selected_publication.as_deref().is_some_and(|local| {
+                    spec.previous_bindings
+                        .get(local)
+                        .is_some_and(|seed| seed == initial)
+                })
+                && node
+                    .depends_on
+                    .iter()
+                    .any(|dependency| dependency == initial)
+                && document.nodes.iter().any(|candidate| {
+                    candidate.id == initial && candidate.kind == Some(NodeKind::Publish)
+                })
+                && node.depends_on.iter().any(|dependency| {
+                    document.nodes.iter().any(|candidate| {
+                        candidate.id == *dependency
+                            && candidate.on_fail.as_deref() == Some(&node.id)
+                    })
+                });
+            if !valid {
+                return Err(format!(
+                    "loop {} initial_publication must be its directly bound publication seed and have an entry failure gate",
+                    node.id
+                ));
+            }
+        }
         let mut retry_nodes = std::collections::BTreeSet::new();
         for retry in &spec.retry_on {
             let Some(gate) = spec.body.iter().find(|member| member.id == *retry) else {
@@ -1321,7 +1351,12 @@ fn passed(node: &PlannedNode, checkpoint: &GraphCheckpoint, plan: &PlannedGraph)
                     || conflict_recovery_round_state(index, plan, checkpoint, &positions)
                         == Some(ConflictRecoveryRoundState::Succeeded))
         });
-    gate_passed
+    (gate_passed
+        || node
+            .loop_body
+            .as_ref()
+            .is_some_and(|spec| spec.initial_publication.is_some())
+            && repair::selected_publication(node, checkpoint, plan).is_some())
         && node
             .loop_body
             .as_ref()
@@ -1648,6 +1683,25 @@ pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
         .depends_on
         .retain(|parent| plan.nodes[positions[parent]].round.is_none());
     if let Some(state) = dependency_state(&external, plan, checkpoint, positions) {
+        if state == NodeState::Skipped && spec.initial_publication.is_some() {
+            let rounds_settled = checkpoint
+                .nodes
+                .iter()
+                .filter(|progress| {
+                    progress
+                        .round
+                        .as_ref()
+                        .is_some_and(|round| round.loop_id == node.id)
+                })
+                .all(|progress| progress.state.settled());
+            if rounds_settled && repair::selected_publication(node, checkpoint, plan).is_some() {
+                let outputs = repair::terminal_outputs(node, checkpoint, positions, plan, true);
+                checkpoint.nodes[index].state = NodeState::Succeeded;
+                checkpoint.nodes[index].outputs = Some(outputs);
+                journal.save(checkpoint).map_err(GraphError::Journal)?;
+            }
+            return Ok(None);
+        }
         if checkpoint.nodes[index].state != state {
             checkpoint.nodes[index].state = state;
             journal.save(checkpoint).map_err(GraphError::Journal)?;

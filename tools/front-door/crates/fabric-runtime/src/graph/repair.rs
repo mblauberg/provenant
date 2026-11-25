@@ -763,11 +763,11 @@ pub(super) fn terminal_outputs(
     outputs
 }
 
-pub(super) fn selected_publication(
+pub(super) fn selected_publication_index(
     node: &PlannedNode,
     checkpoint: &GraphCheckpoint,
     plan: &PlannedGraph,
-) -> Option<DeliveryPublication> {
+) -> Option<usize> {
     let spec = node.loop_body.as_ref()?;
     let local = spec.selected_publication.as_deref()?;
     let passed_round = checkpoint
@@ -778,18 +778,60 @@ pub(super) fn selected_publication(
             (round.loop_id == node.id && round.until && progress.state == NodeState::Succeeded)
                 .then_some(round.round)
         })
-        .max()?;
-    let (member, progress) =
-        plan.nodes
+        .max();
+    if let Some(round_number) = passed_round {
+        return plan
+            .nodes
             .iter()
             .zip(&checkpoint.nodes)
-            .find(|(member, progress)| {
+            .position(|(member, progress)| {
                 member.round.as_ref().is_some_and(|round| {
                     round.loop_id == node.id
-                        && round.round == passed_round
+                        && round.round == round_number
                         && round.node_id == local
                 }) && progress.state == NodeState::Succeeded
-            })?;
+            });
+    }
+    let initial = spec.initial_publication.as_deref()?;
+    let mut entry_gate = false;
+    for dependency in &node.depends_on {
+        let Some(index) = plan
+            .nodes
+            .iter()
+            .position(|candidate| candidate.id == *dependency)
+        else {
+            return None;
+        };
+        if plan.nodes[index].round.is_some() {
+            continue;
+        }
+        if checkpoint.nodes[index].state != NodeState::Succeeded {
+            return None;
+        }
+        entry_gate |= plan.nodes[index].on_fail.as_deref() == Some(&node.id);
+    }
+    if !entry_gate
+        || checkpoint.nodes.iter().any(|progress| {
+            progress
+                .round
+                .as_ref()
+                .is_some_and(|round| round.loop_id == node.id)
+                && progress.state != NodeState::Skipped
+        })
+    {
+        return None;
+    }
+    plan.nodes.iter().position(|member| member.id == initial)
+}
+
+pub(super) fn selected_publication(
+    node: &PlannedNode,
+    checkpoint: &GraphCheckpoint,
+    plan: &PlannedGraph,
+) -> Option<DeliveryPublication> {
+    let index = selected_publication_index(node, checkpoint, plan)?;
+    let member = &plan.nodes[index];
+    let progress = &checkpoint.nodes[index];
     if member.kind != Some(NodeKind::Publish) {
         return None;
     }
