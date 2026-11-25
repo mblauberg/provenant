@@ -77,6 +77,8 @@ pub(super) struct QueueItem {
     pub launch_request: Value,
     /// Caller checkout used to rebuild the launch context after restart.
     pub execution_directory: String,
+    /// Sealed, validated custody for an explicitly adopted pull request.
+    pub adoption: Option<Value>,
     /// Digest of the canonical replay input and execution directory.
     pub launch_digest: String,
     pub state: QueueItemState,
@@ -88,6 +90,8 @@ pub(super) struct QueueItem {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct QueueRecord {
     pub queue_id: String,
+    /// Stable digest of user-selected inputs, computed before tracker reads.
+    pub submission_digest: String,
     pub project: String,
     pub tracker: String,
     pub snapshot: QueueSnapshot,
@@ -121,11 +125,13 @@ pub(super) struct QueueItemSpec {
     pub graph_id: String,
     pub launch_request: Value,
     pub execution_directory: String,
+    pub adoption: Option<Value>,
 }
 
 #[derive(Clone, Debug)]
 pub(super) struct QueueSubmission {
     pub queue_id: String,
+    pub submission_digest: String,
     pub project: String,
     pub tracker: String,
     pub snapshot: QueueSnapshot,
@@ -211,6 +217,29 @@ impl QueueRegistry {
         Ok(result)
     }
 
+    /// Look up a retried operation before resolving its selector again. The
+    /// operation digest is bound before network reads; a match returns the
+    /// original tracker snapshot and graph IDs even if the tracker has changed.
+    pub(super) fn find_operation(
+        &self,
+        queue_id: &str,
+        submission_digest: &str,
+        project: &str,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        clock: &dyn Clock,
+    ) -> Result<Option<QueueRecord>, String> {
+        self.locked(budget, cancel, clock, |registry| {
+            let Some(existing) = registry.queues.get(queue_id) else { return Ok(None); };
+            if existing.project == project.to_ascii_lowercase()
+                && existing.submission_digest == submission_digest
+            {
+                return Ok(Some(existing.clone()));
+            }
+            Err(format!("delivery queue id `{queue_id}` already names different input"))
+        })
+    }
+
     /// Atomically reserve every selected identity before any item graph starts.
     /// A queue id replay is accepted only when it carries the exact same record.
     pub(super) fn admit(
@@ -228,13 +257,15 @@ impl QueueRegistry {
                 snapshot_index: index,
                 launch_request: item.launch_request.clone(),
                 execution_directory: item.execution_directory.clone(),
-                launch_digest: launch_digest(&item.launch_request, &item.execution_directory),
+                adoption: item.adoption.clone(),
+                launch_digest: launch_digest(&item.launch_request, &item.execution_directory, &item.adoption),
                 state: QueueItemState::Pending,
                 terminal_outcome: None,
                 overflow_reason: None,
             }).collect();
             let queue = QueueRecord {
                 queue_id: submission.queue_id.clone(),
+                submission_digest: submission.submission_digest.clone(),
                 project: submission.project.clone(),
                 tracker: submission.tracker.clone(),
                 snapshot: submission.snapshot.clone(),
@@ -289,9 +320,34 @@ impl QueueRegistry {
         cancel: &CancelToken,
         clock: &dyn Clock,
     ) -> Result<QueueSchedule, String> {
+        self.claim_runnable_for(None, now, budget, cancel, clock)
+    }
+
+    /// Claim one queue immediately after atomic submission without marking
+    /// unrelated queues as launched before their owning project can run them.
+    pub(super) fn claim_queue(
+        &self,
+        queue_id: &str,
+        now: WallTime,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        clock: &dyn Clock,
+    ) -> Result<QueueSchedule, String> {
+        self.claim_runnable_for(Some(queue_id), now, budget, cancel, clock)
+    }
+
+    fn claim_runnable_for(
+        &self,
+        only_queue: Option<&str>,
+        now: WallTime,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        clock: &dyn Clock,
+    ) -> Result<QueueSchedule, String> {
         self.locked(budget, cancel, clock, |registry| {
             let mut schedule = QueueSchedule::default();
             for (queue_id, queue) in &mut registry.queues {
+                if only_queue.is_some_and(|only| only != queue_id) { continue; }
                 let active = queue.items.iter().filter(|item| matches!(item.state, QueueItemState::Launching | QueueItemState::Active)).count();
                 let pending = queue.items.iter().filter(|item| item.state == QueueItemState::Pending).count();
                 if pending > 0 && active >= queue.max_parallel.value {
@@ -442,6 +498,9 @@ fn validate_submission(submission: &QueueSubmission) -> Result<(), String> {
     if submission.max_parallel.value == 0 {
         return Err("queue max_parallel must be positive".into());
     }
+    if !submission.submission_digest.starts_with("sha256:") {
+        return Err("queue submission digest must be a canonical sha256 digest".into());
+    }
     if submission.warning_at > submission.overflow_at {
         return Err("queue warning deadline must not follow its overflow deadline".into());
     }
@@ -483,31 +542,22 @@ fn validate_submission(submission: &QueueSubmission) -> Result<(), String> {
         }
         validate_launch_request(&item.launch_request)?;
         validate_launch_request(&snapshot.data)?;
+        if let Some(adoption) = &item.adoption {
+            validate_launch_request(adoption)?;
+        }
     }
     Ok(())
 }
 
 fn same_submission(existing: &QueueRecord, proposed: &QueueRecord) -> bool {
     existing.queue_id == proposed.queue_id
+        && existing.submission_digest == proposed.submission_digest
         && existing.project == proposed.project
         && existing.tracker == proposed.tracker
-        && existing.snapshot == proposed.snapshot
-        && existing.max_parallel == proposed.max_parallel
-        && existing.admitted_at == proposed.admitted_at
-        && existing.warning_at == proposed.warning_at
-        && existing.overflow_at == proposed.overflow_at
-        && existing.items.len() == proposed.items.len()
-        && existing.items.iter().zip(&proposed.items).all(|(left, right)| {
-            left.identity == right.identity
-                && left.graph_id == right.graph_id
-                && left.snapshot_index == right.snapshot_index
-                && left.launch_digest == right.launch_digest
-                && left.execution_directory == right.execution_directory
-        })
 }
 
-fn launch_digest(request: &Value, execution_directory: &str) -> String {
-    let bytes = serde_json::to_vec(&(request, execution_directory)).unwrap_or_default();
+fn launch_digest(request: &Value, execution_directory: &str, adoption: &Option<Value>) -> String {
+    let bytes = serde_json::to_vec(&(request, execution_directory, adoption)).unwrap_or_default();
     provenant_records::CanonicalV1::file_digest(&bytes).to_string()
 }
 
