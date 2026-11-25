@@ -101,6 +101,18 @@ pub(super) fn escalation_owner(
     plan: &PlannedGraph,
 ) -> Option<(usize, &EscalateSpec)> {
     let node = plan.nodes.get(node_index)?;
+    if let Some(target) = node.on_fail.as_deref()
+        && let Some((index, owner)) = plan.nodes.iter().enumerate().find(|(_, candidate)| {
+            candidate.id == target
+                && candidate
+                    .loop_body
+                    .as_ref()
+                    .is_some_and(|spec| !spec.retry_on.is_empty())
+        })
+        && let Some(spec) = owner.escalate.as_ref()
+    {
+        return Some((index, spec));
+    }
     if let Some(round) = &node.round
         && let Some((index, owner)) = plan
             .nodes
