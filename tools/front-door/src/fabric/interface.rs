@@ -3610,6 +3610,7 @@ impl Factory {
         self.control_receipt(run, &target, input, budget, cancel, false)
     }
 
+    #[cfg(test)]
     pub(super) fn prepare_retry(
         &self,
         target: &mut super::unified::GraphTarget,
@@ -3775,7 +3776,7 @@ impl Factory {
                 let (terminal, _) = super::queue_controls::reserve_retry_control(
                     checkpoint, document, &id, &node, &metadata, &payload,
                 )?;
-                let journal = journal.as_deref_mut().ok_or(FacadeError::StateCorrupt)?;
+                let journal = journal.ok_or(FacadeError::StateCorrupt)?;
                 if terminal {
                     journal.save(checkpoint).map_err(graph_journal_error)?;
                     return Err(FacadeError::Conflict);

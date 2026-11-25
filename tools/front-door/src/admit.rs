@@ -31,8 +31,7 @@ pub(crate) fn acquire_delivery_ci_lease(
     owner: provenant_run::build::queue::CiLeaseOwner,
     ci_slots: &provenant_records::Sourced<usize>,
     wait_policy: &provenant_records::Sourced<u64>,
-    allow_overflow: bool,
-    waited_millis: u64,
+    (allow_overflow, waited_millis): (bool, u64),
     wait_seconds: u64,
     cancel: &provenant_core::CancelToken,
 ) -> Option<provenant_fabric_runtime::graph::DeliveryCiAdmission> {

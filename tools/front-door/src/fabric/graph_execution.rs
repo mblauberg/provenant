@@ -1142,7 +1142,7 @@ impl Factory {
         clippy::too_many_arguments,
         reason = "submission replay disposition and queue launch custody are separate from advancement"
     )]
-    pub(crate) fn graph_launch_result(
+    pub(super) fn graph_launch_result(
         &self,
         input: GraphInput,
         budget: WaitBudget,

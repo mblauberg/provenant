@@ -2583,8 +2583,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             owner,
             ci_slots,
             wait_policy,
-            allow_overflow,
-            waited_millis,
+            (allow_overflow, waited_millis),
             self.factory.context.config.graph.launch_wait_seconds,
             self.cancel,
         ))

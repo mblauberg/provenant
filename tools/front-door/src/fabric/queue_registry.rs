@@ -200,7 +200,10 @@ pub(super) struct ExistingOwner {
 
 #[derive(Clone, Debug)]
 pub(super) enum QueueAdmission {
-    Admitted { queue: QueueRecord, replayed: bool },
+    Admitted {
+        queue: Box<QueueRecord>,
+        replayed: bool,
+    },
     Owned(Vec<ExistingOwner>),
 }
 
@@ -569,7 +572,7 @@ impl QueueRegistry {
                     && existing.submission_digest == submission.submission_digest
                 {
                     return Ok(QueueAdmission::Admitted {
-                        queue: existing.clone(),
+                        queue: Box::new(existing.clone()),
                         replayed: true,
                     });
                 }
@@ -666,7 +669,7 @@ impl QueueRegistry {
                 .queues
                 .insert(queue.queue_id.clone(), queue.clone());
             Ok(QueueAdmission::Admitted {
-                queue,
+                queue: Box::new(queue),
                 replayed: false,
             })
         })
@@ -725,8 +728,7 @@ impl QueueRegistry {
     /// graph. The caller verifies the persisted execution identity first.
     pub(super) fn reserve_parked_for_control(
         &self,
-        queue_id: &str,
-        identity: &QueueIdentity,
+        (queue_id, identity): (&str, &QueueIdentity),
         graph_id: &str,
         now: WallTime,
         budget: WaitBudget,
@@ -786,8 +788,7 @@ impl QueueRegistry {
         clock: &dyn Clock,
     ) -> Result<(), String> {
         self.update_item(
-            queue_id,
-            identity,
+            (queue_id, identity),
             graph_id,
             budget,
             cancel,
@@ -812,8 +813,7 @@ impl QueueRegistry {
     /// Retain a deterministic refusal made before graph persistence so tick does not replay it forever.
     pub(super) fn mark_launch_unavailable(
         &self,
-        queue_id: &str,
-        identity: &QueueIdentity,
+        (queue_id, identity): (&str, &QueueIdentity),
         graph_id: &str,
         reason: &str,
         budget: WaitBudget,
@@ -822,8 +822,7 @@ impl QueueRegistry {
     ) -> Result<(), String> {
         let reason = sanitise_persisted_text(reason)?;
         self.update_item(
-            queue_id,
-            identity,
+            (queue_id, identity),
             graph_id,
             budget,
             cancel,
@@ -853,8 +852,7 @@ impl QueueRegistry {
         clock: &dyn Clock,
     ) -> Result<(), String> {
         self.update_item(
-            queue_id,
-            identity,
+            (queue_id, identity),
             graph_id,
             budget,
             cancel,
@@ -920,8 +918,7 @@ impl QueueRegistry {
     /// Terminal settlement must come from a conclusive graph observation.
     pub(super) fn mark_terminal(
         &self,
-        queue_id: &str,
-        identity: &QueueIdentity,
+        (queue_id, identity): (&str, &QueueIdentity),
         graph_id: &str,
         outcome: &str,
         budget: WaitBudget,
@@ -932,8 +929,7 @@ impl QueueRegistry {
             return Err("terminal outcome must be non-empty".into());
         }
         self.update_item(
-            queue_id,
-            identity,
+            (queue_id, identity),
             graph_id,
             budget,
             cancel,
@@ -968,8 +964,7 @@ impl QueueRegistry {
 
     fn update_item(
         &self,
-        queue_id: &str,
-        identity: &QueueIdentity,
+        (queue_id, identity): (&str, &QueueIdentity),
         graph_id: &str,
         budget: WaitBudget,
         cancel: &CancelToken,
@@ -1068,10 +1063,8 @@ fn claim_runnable_items(
             queue.wait_warning = Some(warning);
         }
         let warning_pending = now >= queue.warning_at && !queue.wait_warning_emitted;
-        if warning_pending {
-            if let Some(warning) = &queue.wait_warning {
-                schedule.warnings.push(warning.clone());
-            }
+        if warning_pending && let Some(warning) = &queue.wait_warning {
+            schedule.warnings.push(warning.clone());
         }
         if now < queue.overflow_at {
             schedule.waiting.push(format!(

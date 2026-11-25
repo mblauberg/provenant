@@ -1759,12 +1759,19 @@ pub(crate) fn unified_graph_command(
                 )
                 .into());
             }
-            let action_matches = match (&command, action) {
-                (GraphCommand::Stop { .. }, provenant_cli::QueueControlAction::Drop)
-                | (GraphCommand::Retry { .. }, provenant_cli::QueueControlAction::Retry)
-                | (GraphCommand::Retry { .. }, provenant_cli::QueueControlAction::Fix) => true,
-                _ => false,
-            };
+            let action_matches = matches!(
+                (&command, action),
+                (
+                    GraphCommand::Stop { .. },
+                    provenant_cli::QueueControlAction::Drop
+                ) | (
+                    GraphCommand::Retry { .. },
+                    provenant_cli::QueueControlAction::Retry
+                ) | (
+                    GraphCommand::Retry { .. },
+                    provenant_cli::QueueControlAction::Fix
+                )
+            );
             if !action_matches {
                 return Err(std::io::Error::other(
                     "stop accepts queue control drop; retry accepts retry or fix",
@@ -2223,8 +2230,7 @@ pub(crate) fn unified_graph_steer(
                 &resolved.graph,
                 node_id,
                 &metadata,
-                &text,
-                &work_key,
+                (&text, &work_key),
                 budget,
                 &cancel,
             )?;

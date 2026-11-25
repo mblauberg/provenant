@@ -2075,7 +2075,7 @@ fn queue_control_metadata_and_receipt_use_declared_inbox_fields() {
 
 #[test]
 fn saved_receipt_preserves_flattened_wire_fields() {
-    let mut fixture = Fixture::new();
+    let fixture = Fixture::new();
     let saved = fixture
         .call(ask(RequestKind::Decision, "receipt-wire"))
         .unwrap();

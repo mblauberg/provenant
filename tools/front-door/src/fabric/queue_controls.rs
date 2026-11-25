@@ -396,8 +396,7 @@ fn request_id_for_drop(
 fn begin(
     factory: &Factory,
     graph_id: &str,
-    target_node: Option<&str>,
-    request_id: Option<HumanRequestId>,
+    (target_node, request_id): (Option<&str>, Option<HumanRequestId>),
     metadata: &Metadata,
     payload: &Value,
     budget: WaitBudget,
@@ -573,8 +572,7 @@ pub(super) fn queue_live_fix(
     graph_id: &str,
     node_id: &str,
     metadata: &Metadata,
-    text: &str,
-    work_key: &provenant_records::WorkKey,
+    (text, work_key): (&str, &provenant_records::WorkKey),
     budget: WaitBudget,
     cancel: &CancelToken,
 ) -> Result<Value, FacadeError> {
@@ -1118,8 +1116,7 @@ pub(super) fn reserve_control_capacity(
         .map_err(|_| FacadeError::OwnerUnavailable)?;
     registry
         .reserve_parked_for_control(
-            queue_id,
-            &item.identity,
+            (queue_id, &item.identity),
             graph_id,
             now,
             budget,
@@ -1254,8 +1251,7 @@ pub(super) fn handle_graph_operation(
             let (intent, _) = begin(
                 factory,
                 &target.graph,
-                target.node.as_deref(),
-                None,
+                (target.node.as_deref(), None),
                 &metadata,
                 &payload,
                 budget,
@@ -1434,8 +1430,7 @@ fn accept_request(
     let (mut intent, replayed) = begin(
         factory,
         &graph_id,
-        metadata.review_node.as_deref(),
-        Some(id),
+        (metadata.review_node.as_deref(), Some(id)),
         &metadata,
         &payload,
         budget,
@@ -1534,8 +1529,7 @@ fn accept_request(
         &mut journal,
         &mut checkpoint,
         &intent,
-        answer_id,
-        &reason,
+        (answer_id, &reason),
     )?;
     drop(journal);
     retry_failed_gates(
@@ -1568,8 +1562,7 @@ fn apply_accept_disposition_locked(
     journal: &mut FileJournal,
     checkpoint: &mut provenant_fabric_runtime::graph::GraphCheckpoint,
     intent: &Intent,
-    answer_id: HumanAnswerId,
-    reason: &str,
+    (answer_id, reason): (HumanAnswerId, &str),
 ) -> Result<(Intent, Vec<String>), FacadeError> {
     let disposition = DeliveryReviewDisposition {
         operation_id: intent.metadata.operation_id.clone(),
@@ -1790,8 +1783,7 @@ pub(super) fn reconcile_pending(
                     graph_id,
                     node,
                     &intent.metadata,
-                    text,
-                    &work_key,
+                    (text, &work_key),
                     budget,
                     cancel,
                 )?;
@@ -1847,7 +1839,13 @@ mod tests {
     use super::*;
 
     fn operation(value: u8) -> OperationId {
-        OperationId::parse(&format!("{value:02x}".repeat(16))).unwrap()
+        OperationId::parse(&format!("{value:02x}").repeat(16)).unwrap()
+    }
+
+    #[test]
+    fn operation_fixture_preserves_all_bytes_and_distinguishes_operations() {
+        assert_eq!(operation(1).to_string(), "01".repeat(16));
+        assert_ne!(operation(1), operation(2));
     }
 
     fn metadata(revision: u64, operation_id: OperationId) -> Metadata {
@@ -1975,7 +1973,7 @@ mod tests {
             option_id: None,
             text: Some(reason.into()),
             expect_revision: 4,
-            channel: None,
+            channel: provenant_records::inbox::InteractionChannel::Cli,
             operation_id: Some(operation_id.clone()),
         })
         .unwrap();

@@ -2309,7 +2309,7 @@ fn a_named_launch_with_the_same_digest_returns_its_graph_without_launching() -> 
     let launch = || {
         barrier.wait();
         provenant_cli::run::with_deferred_provider_launch(|| {
-            factory.launch_submission(document.clone(), &json!({}), budget, &cancel, None)
+            factory.launch_submission(document.clone(), &json!({}), None, budget, &cancel, None)
         })
     };
     let results = std::thread::scope(|scope| {
@@ -2342,8 +2342,14 @@ fn a_named_launch_with_the_same_digest_returns_its_graph_without_launching() -> 
     )?
     .ok_or("checkpoint")?;
     assert_eq!(saved.nodes[0].attempts.len(), 1);
-    let replay =
-        factory.launch_submission(document, &json!({"wait_seconds":30}), budget, &cancel, None)?;
+    let replay = factory.launch_submission(
+        document,
+        &json!({"wait_seconds":30}),
+        None,
+        budget,
+        &cancel,
+        None,
+    )?;
     assert_eq!(replay["replayed"], true);
     assert_eq!(replay["timed_out"], false);
     let after = FileJournal::read_checkpoint(

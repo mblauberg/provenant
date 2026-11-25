@@ -175,16 +175,15 @@ pub(super) fn tick_queues(
         for warning in &schedule.warnings {
             super::interface::warn_operator(warning);
         }
-        if !schedule.warnings.is_empty() {
-            if let Err(error) =
+        if !schedule.warnings.is_empty()
+            && let Err(error) =
                 registry.acknowledge_wait_warning(&queue.queue_id, lock_budget, &cancel, &clock)
-            {
-                report.warnings.push(format!(
-                    "queue {} cap warning acknowledgement failed; overflow remains gated: {error}",
-                    queue.queue_id
-                ));
-                continue;
-            }
+        {
+            report.warnings.push(format!(
+                "queue {} cap warning acknowledgement failed; overflow remains gated: {error}",
+                queue.queue_id
+            ));
+            continue;
         }
         report.warnings.extend(schedule.warnings);
         report.warnings.extend(schedule.waiting);
@@ -605,8 +604,7 @@ pub(super) fn mark_launch_unavailable_if_absent(
         return Ok(false);
     }
     registry.mark_launch_unavailable(
-        queue_id,
-        &item.identity,
+        (queue_id, &item.identity),
         &item.graph_id,
         reason,
         budget,
@@ -633,8 +631,7 @@ fn mark_observed_terminal(
         }
     };
     registry.mark_terminal(
-        queue_id,
-        &item.identity,
+        (queue_id, &item.identity),
         &item.graph_id,
         outcome,
         budget,

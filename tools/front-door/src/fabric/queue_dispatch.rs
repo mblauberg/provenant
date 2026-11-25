@@ -106,8 +106,7 @@ pub(super) fn submit_queue(
         return launch_and_receipt(
             factory,
             &registry,
-            existing,
-            true,
+            (existing, true),
             Vec::new(),
             budget,
             cancel,
@@ -149,8 +148,7 @@ pub(super) fn submit_queue(
                 return launch_and_receipt(
                     factory,
                     &registry,
-                    existing,
-                    true,
+                    (existing, true),
                     Vec::new(),
                     budget,
                     cancel,
@@ -173,8 +171,7 @@ pub(super) fn submit_queue(
             return launch_and_receipt(
                 factory,
                 &registry,
-                existing,
-                true,
+                (existing, true),
                 Vec::new(),
                 budget,
                 cancel,
@@ -198,8 +195,7 @@ pub(super) fn submit_queue(
             return launch_and_receipt(
                 factory,
                 &registry,
-                existing,
-                true,
+                (existing, true),
                 Vec::new(),
                 budget,
                 cancel,
@@ -259,8 +255,7 @@ pub(super) fn submit_queue(
                         return launch_and_receipt(
                             factory,
                             &registry,
-                            existing,
-                            true,
+                            (existing, true),
                             warnings,
                             budget,
                             cancel,
@@ -330,8 +325,7 @@ pub(super) fn submit_queue(
         QueueAdmission::Admitted { queue, replayed } => launch_and_receipt(
             factory,
             &registry,
-            queue,
-            replayed,
+            (*queue, replayed),
             std::mem::take(&mut warnings),
             budget,
             cancel,
@@ -343,8 +337,7 @@ pub(super) fn submit_queue(
 fn launch_and_receipt(
     factory: &Factory,
     registry: &QueueRegistry,
-    queue: QueueRecord,
-    replayed: bool,
+    (queue, replayed): (QueueRecord, bool),
     mut warnings: Vec<String>,
     budget: WaitBudget,
     cancel: &CancelToken,
