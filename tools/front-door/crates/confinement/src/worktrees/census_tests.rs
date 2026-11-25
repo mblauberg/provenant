@@ -1022,20 +1022,21 @@ fn a_vanished_descriptor_query_is_absent_but_live_eprem_stays_unknown() -> Resul
 {
     use provenant_os::pid::OccupancyGap;
     use provenant_supervisor::census::{Census, CensusError, ProcessIdentity};
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     struct GapObserver {
         census: Census,
         outside: PathBuf,
         gap: Option<OccupancyGap>,
         after: ProcessObservation,
-        queried: std::cell::Cell<bool>,
+        queried: AtomicBool,
     }
     impl ProcessObserver for GapObserver {
         fn boot_identity(&self) -> Result<String, CensusError> {
             Ok("boot".into())
         }
         fn observe(&self, pid: i64) -> ProcessObservation {
-            if pid == 200 && self.queried.get() {
+            if pid == 200 && self.queried.load(Ordering::Relaxed) {
                 return self.after.clone();
             }
             match self.census.process(pid) {
@@ -1052,7 +1053,7 @@ fn a_vanished_descriptor_query_is_absent_but_live_eprem_stays_unknown() -> Resul
             Ok(CwdObservation::Path(self.outside.clone()))
         }
         fn occupancy(&self, _: i64) -> provenant_os::pid::OccupancyObservation {
-            self.queried.set(true);
+            self.queried.store(true, Ordering::Relaxed);
             provenant_os::pid::OccupancyObservation {
                 paths: Vec::new(),
                 complete: false,
@@ -1089,7 +1090,7 @@ fn a_vanished_descriptor_query_is_absent_but_live_eprem_stays_unknown() -> Resul
                 outside: outside.clone(),
                 gap: Some(gap),
                 after,
-                queried: std::cell::Cell::new(false),
+                queried: AtomicBool::new(false),
             };
             Ok(observe_worker_roots(
                 std::slice::from_ref(&root),
