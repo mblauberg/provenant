@@ -1656,11 +1656,17 @@ pub(crate) enum GraphCommand<'a> {
     Status,
     Stop {
         reason: Option<&'a str>,
+        queue_control: Option<provenant_cli::QueueControlAction>,
+        queue_revision: Option<u64>,
+        operation_id: Option<&'a provenant_core::OperationId>,
     },
     Retry {
         extend: &'a [String],
         brief: Option<&'a str>,
         brief_file: Option<&'a std::path::Path>,
+        queue_control: Option<provenant_cli::QueueControlAction>,
+        queue_revision: Option<u64>,
+        operation_id: Option<&'a provenant_core::OperationId>,
     },
 }
 
@@ -1788,6 +1794,48 @@ pub(crate) fn unified_graph_command(
                 provenant_cli::brief::read_brief(source, provenant_cli::brief::MAX_BRIEF_BYTES)
             })
             .transpose()?;
+        let queue_control = match &command {
+            GraphCommand::Stop {
+                queue_control,
+                queue_revision,
+                operation_id,
+                ..
+            }
+            | GraphCommand::Retry {
+                queue_control,
+                queue_revision,
+                operation_id,
+                ..
+            } => queue_control
+                .as_ref()
+                .map(|action| (*action, *queue_revision, *operation_id)),
+            GraphCommand::Status => None,
+        };
+        if let Some((action, revision, operation_id)) = queue_control {
+            if targets.len() != 1 || revision.is_none() || operation_id.is_none() {
+                return Err(std::io::Error::other(
+                    "a queue control requires one target, --queue-revision and --operation-id",
+                )
+                .into());
+            }
+            let action_matches = match (&command, action) {
+                (GraphCommand::Stop { .. }, provenant_cli::QueueControlAction::Drop)
+                | (GraphCommand::Retry { .. }, provenant_cli::QueueControlAction::Retry)
+                | (GraphCommand::Retry { .. }, provenant_cli::QueueControlAction::Fix) => true,
+                _ => false,
+            };
+            if !action_matches {
+                return Err(std::io::Error::other(
+                    "stop accepts queue control drop; retry accepts retry or fix",
+                )
+                .into());
+            }
+            if action == provenant_cli::QueueControlAction::Fix
+                && resolved_brief.as_deref().is_none_or(str::is_empty)
+            {
+                return Err(std::io::Error::other("queue fix requires --brief or --brief-file").into());
+            }
+        }
         let selectors: Vec<(String, Option<&str>)> = if targets.is_empty() {
             vec![(String::new(), None)]
         } else {
@@ -1805,7 +1853,7 @@ pub(crate) fn unified_graph_command(
             let mut input = json!({"op":name,"id":selector});
             match &command {
                 GraphCommand::Status => {}
-                GraphCommand::Stop { reason } => {
+                GraphCommand::Stop { reason, .. } => {
                     if let Some(reason) = reason {
                         input["reason"] = json!(reason);
                     }
@@ -1816,6 +1864,19 @@ pub(crate) fn unified_graph_command(
                         input["brief"] = json!(brief);
                     }
                 }
+            }
+            if let Some((action, revision, operation_id)) = queue_control {
+                let action = match action {
+                    provenant_cli::QueueControlAction::Accept => "accept",
+                    provenant_cli::QueueControlAction::Fix => "fix",
+                    provenant_cli::QueueControlAction::Retry => "retry",
+                    provenant_cli::QueueControlAction::Drop => "drop",
+                };
+                input["queue_control"] = json!({
+                    "action": action,
+                    "expected_revision": revision,
+                    "operation_id": operation_id,
+                });
             }
             let Some(factory) = &factory else {
                 let mut data = lane_graph_read(input)?;
@@ -2136,14 +2197,110 @@ pub(crate) fn unified_graph_steer(
         let factory = factory(globals, workers)?;
         let (resolved, checkpoint) =
             resolve_with_checkpoint(&factory, &args.target, Want::Attempt { settled: false })?;
-        if super::steer::selected_is_settled(&resolved, &checkpoint) {
-            return settled_steer_result(&factory, args, &resolved, &checkpoint, None);
-        }
         let project = factory.context.identity.project;
         let work_key = resolved
             .work_key(project)
             .ok_or(FacadeError::StateCorrupt)?;
         let operation_id = graph_steer_operation_id(args.operation_id.as_ref(), &work_key)?;
+        let selected_settled = super::steer::selected_is_settled(&resolved, &checkpoint);
+        if let Some(action) = args.queue_control {
+            if action != provenant_cli::QueueControlAction::Fix {
+                return Err(std::io::Error::other("steer accepts queue control fix only").into());
+            }
+            let queue_revision = args
+                .queue_revision
+                .ok_or_else(|| std::io::Error::other("queue fix requires --queue-revision"))?;
+            let queue_operation_id = args
+                .operation_id
+                .clone()
+                .ok_or_else(|| std::io::Error::other("queue fix requires --operation-id"))?;
+            let source = provenant_cli::brief::select_brief_source([
+                args.brief
+                    .clone()
+                    .map(provenant_cli::brief::BriefSource::Text),
+                args.brief_file
+                    .clone()
+                    .map(provenant_cli::brief::BriefSource::file),
+            ])?
+            .ok_or_else(|| std::io::Error::other("steer requires a brief source"))?;
+            let text = provenant_cli::brief::read_brief(
+                source,
+                provenant_records::control::CONTROL_TEXT_BYTES,
+            )?;
+            let text = provenant_fabric_runtime::graph::normalise_prompt_text(&text)
+                .map_err(std::io::Error::other)?;
+            provenant_fabric_runtime::graph::patch::scan_for_secrets(&text)
+                .map_err(std::io::Error::other)?;
+            let cancel = CancelToken::new();
+            let budget = WaitBudget::cli(
+                factory.clock.mono_now(),
+                factory.context.config.graph.launch_wait_seconds,
+            )?;
+            let metadata = super::queue_controls::Metadata {
+                action: super::queue_controls::Action::Fix,
+                expected_revision: queue_revision,
+                operation_id: queue_operation_id.clone(),
+                review_node: None,
+                review_head: None,
+                graph_id: Some(resolved.graph.clone()),
+            };
+            let proof = (!selected_settled).then(|| {
+                super::steer::verified_target(
+                    &factory,
+                    &resolved,
+                    &checkpoint,
+                    budget,
+                    &cancel,
+                )
+            });
+            if selected_settled
+                || matches!(proof.as_ref(), Some(super::steer::TargetProof::Settled))
+            {
+                let result = factory.graph_document(
+                    json!({
+                        "op": "retry",
+                        "id": args.target.to_string(),
+                        "brief": text,
+                        "queue_control": {
+                            "action": "fix",
+                            "expected_revision": queue_revision,
+                            "operation_id": queue_operation_id,
+                            "graph_id": resolved.graph,
+                        }
+                    }),
+                    budget,
+                    &cancel,
+                )?;
+                return Ok(SteerResult::Queued(json!({"queue_control": result["queue_control"], "result": result})));
+            }
+            if matches!(proof.as_ref(), Some(super::steer::TargetProof::Conflict)) {
+                return Ok(SteerResult::Refused(
+                    "queue fix requires one verified current live attempt",
+                ));
+            }
+            let node_id = resolved
+                .node
+                .as_deref()
+                .ok_or(FacadeError::StateCorrupt)?;
+            let receipt = super::queue_controls::queue_live_fix(
+                &factory,
+                &resolved.graph,
+                node_id,
+                &metadata,
+                &text,
+                &work_key,
+                budget,
+                &cancel,
+            )?;
+            return Ok(SteerResult::Pending(json!({
+                "queued": true,
+                "queue_control": receipt,
+                "warning": "the graph tick will revalidate and deliver the accepted queue fix"
+            })));
+        }
+        if selected_settled {
+            return settled_steer_result(&factory, args, &resolved, &checkpoint, None);
+        }
         let source = provenant_cli::brief::select_brief_source([
             args.brief
                 .clone()

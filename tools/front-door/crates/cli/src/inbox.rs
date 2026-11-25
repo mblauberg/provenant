@@ -1,8 +1,8 @@
 //! Human inbox grammar and thin CLI adapter over Fabric's service.
 use crate::metadata::CatalogueArg;
-use crate::{Globals, fabric::Context};
+use crate::{Globals, QueueControlAction, fabric::Context};
 use clap::{Args, Subcommand, ValueEnum};
-use provenant_core::{Clock, HumanAnswerId, HumanRequestId, OperationId, WaitBudget};
+use provenant_core::{Clock, GitOid, HumanAnswerId, HumanRequestId, OperationId, WaitBudget};
 use provenant_fabric_runtime::inbox::{
     InboxError, InboxInput, InboxProject, InboxProjectPath, InboxResult,
 };
@@ -233,6 +233,18 @@ pub struct Answer {
     pub channel: Channel,
     #[arg(long)]
     pub operation_id: Option<OperationId>,
+    /// Compose this existing answer as a delivery queue accept control
+    #[arg(long, value_enum, requires_all = ["queue_revision", "review_node", "review_head", "operation_id"])]
+    pub queue_control: Option<QueueControlAction>,
+    /// Current delivery queue graph revision
+    #[arg(long, requires = "queue_control", catalog_u64_range = 0..)]
+    pub queue_revision: Option<u64>,
+    /// Exact queue review node whose findings are being accepted
+    #[arg(long, requires = "queue_control")]
+    pub review_node: Option<String>,
+    /// Exact Git head recorded by that review
+    #[arg(long, requires = "queue_control")]
+    pub review_head: Option<GitOid>,
     /// With --all-projects and a remote --host: the project key (as in a listed
     /// request's project_key) that selects the local project to route through
     #[arg(long)]
@@ -256,6 +268,12 @@ pub struct Steer {
     pub brief_file: Option<PathBuf>,
     #[arg(long)]
     pub operation_id: Option<OperationId>,
+    /// Compose this existing steer as a delivery queue fix control
+    #[arg(long, value_enum, requires_all = ["queue_revision", "operation_id"])]
+    pub queue_control: Option<QueueControlAction>,
+    /// Current delivery queue graph revision
+    #[arg(long, requires = "queue_control", catalog_u64_range = 0..)]
+    pub queue_revision: Option<u64>,
 }
 #[derive(Clone, Debug, Args)]
 pub struct ChairMessage {
@@ -385,7 +403,13 @@ impl HumanCommand {
                 operation_id: args.operation_id,
             },
             Self::Answer(args) => InboxInput::Answer {
-                extra: Default::default(),
+                extra: queue_control_extra(
+                    args.queue_control,
+                    args.queue_revision,
+                    args.operation_id.as_ref(),
+                    args.review_node.as_deref(),
+                    args.review_head,
+                ),
                 id: args.id.id,
                 action: match args.action {
                     Action::Choose => AnswerAction::Choose,
@@ -468,6 +492,34 @@ impl HumanCommand {
             },
         })
     }
+}
+
+fn queue_control_extra(
+    action: Option<QueueControlAction>,
+    expected_revision: Option<u64>,
+    operation_id: Option<&OperationId>,
+    review_node: Option<&str>,
+    review_head: Option<GitOid>,
+) -> BTreeMap<String, serde_json::Value> {
+    let Some(action) = action else {
+        return BTreeMap::new();
+    };
+    let action = match action {
+        QueueControlAction::Accept => "accept",
+        QueueControlAction::Fix => "fix",
+        QueueControlAction::Retry => "retry",
+        QueueControlAction::Drop => "drop",
+    };
+    BTreeMap::from([(
+        "queue_control".into(),
+        serde_json::json!({
+            "action": action,
+            "expected_revision": expected_revision,
+            "operation_id": operation_id,
+            "review_node": review_node,
+            "review_head": review_head,
+        }),
+    )])
 }
 
 #[derive(Debug, thiserror::Error)]
