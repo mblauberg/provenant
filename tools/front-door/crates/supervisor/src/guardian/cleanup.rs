@@ -48,21 +48,31 @@ impl Driver<'_> {
         // Explain known custody blockers before spending the diagnostic budget
         // on host-wide descriptor discovery. Their identity is already pinned.
         if let Some(census) = census {
-            for fact in census.facts().filter(|fact| {
-                !fact.zombie
-                    && (self.tracked.contains(&fact.identity)
-                        || self.reservation.provider.as_ref() == Some(&fact.identity))
-            }) {
+            // Collect the known holders before recording them: `record_holder`
+            // mutates this driver, so no immutable borrow of it may span the
+            // loop. Only matching facts are copied, and the list is small.
+            let known: Vec<(i64, Option<String>)> = census
+                .facts()
+                .filter(|fact| {
+                    !fact.zombie
+                        && (self.tracked.contains(&fact.identity)
+                            || self.reservation.provider.as_ref() == Some(&fact.identity))
+                })
+                .map(|fact| (fact.identity.pid, fact.command.clone()))
+                .collect();
+            let attempt = self.reservation.scope.attempt;
+            for (pid, command) in known {
                 found = true;
+                self.record_holder(pid, command.as_deref(), &resource, true);
                 push_warning(
                     warnings,
                     omitted,
                     &format!(
                         "cleanup deadline: pid {} command {:?} remains in attempt process custody; resource {} cannot be released; close the service or wait for it to exit, then run `provenant reconcile` for attempt {}; writer custody remains fenced",
-                        fact.identity.pid,
-                        fact.command.as_deref().unwrap_or("unknown"),
+                        pid,
+                        command.as_deref().unwrap_or("unknown"),
                         resource.display(),
-                        self.reservation.scope.attempt,
+                        attempt,
                     ),
                 );
             }
@@ -85,6 +95,12 @@ impl Driver<'_> {
                     .occupancy_while(fact.identity.pid, &|| Instant::now() < deadline);
                 if observed.paths.iter().any(|path| path == &resource) {
                     found = true;
+                    self.record_holder(
+                        fact.identity.pid,
+                        fact.command.as_deref(),
+                        &resource,
+                        false,
+                    );
                     push_warning(
                         warnings,
                         omitted,
@@ -110,6 +126,30 @@ impl Driver<'_> {
                 ),
             );
         }
+    }
+
+    /// Keep the holder observation for status. The bound keeps the durable
+    /// exit small; warnings already carry the full text for the owner.
+    fn record_holder(
+        &mut self,
+        pid: i64,
+        command: Option<&str>,
+        resource: &std::path::Path,
+        ownership_proven: bool,
+    ) {
+        if self.observed_holders.len() >= 8
+            || self.observed_holders.iter().any(|holder| {
+                holder.pid == pid && holder.resource == resource.display().to_string()
+            })
+        {
+            return;
+        }
+        self.observed_holders.push(crate::custody::ObservedHolder {
+            pid,
+            command: provenant_core::bounded_line(command.unwrap_or("unknown"), 128),
+            resource: resource.display().to_string(),
+            ownership_proven,
+        });
     }
 
     pub(super) fn persist_tracking(&mut self, warnings: &mut Vec<String>, omitted: &mut u64) {

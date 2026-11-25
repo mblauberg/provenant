@@ -1851,6 +1851,12 @@ pub struct ProcessExit {
     /// The same descendants with boot and native start time, so recovery after
     /// the guardian is gone can prove a PID still names the process found.
     pub unresolved_identities: Vec<ProcessIdentity>,
+    /// Processes observed at the cleanup deadline with the writer lock path
+    /// still open. Descriptor occupancy is diagnostic only: it never grants
+    /// signal or settlement authority, so a holder found only by its open
+    /// descriptor is marked unproven.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub observed_holders: Vec<ObservedHolder>,
     pub settlement_evidence: SettlementEvidence,
     /// Present while a guardian retains custody of this unresolved exit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1864,6 +1870,20 @@ pub struct ProcessExit {
     #[serde(flatten)]
     pub extra: ExtraFields,
 }
+/// One process observed holding a lock resource at the cleanup deadline.
+/// `ownership_proven` is true only for an exact recorded descendant; a process
+/// found by its open descriptor is named for the owner but never signalled on
+/// that evidence alone.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObservedHolder {
+    pub pid: i64,
+    #[serde(default)]
+    pub command: String,
+    pub resource: String,
+    #[serde(default)]
+    pub ownership_proven: bool,
+}
+
 impl ProcessExit {
     /// Construct the guardian's pre-spawn admission evidence in one owner so
     /// retaining its resource fact cannot depend on an adapter's prose.
@@ -1902,6 +1922,7 @@ impl ProcessExit {
             unresolved_cleanup: false,
             unresolved_pids: vec![],
             unresolved_identities: vec![],
+            observed_holders: vec![],
             settlement_evidence: SettlementEvidence::NeverSpawned,
             retention: None,
             stdout: CaptureTotals::default(),

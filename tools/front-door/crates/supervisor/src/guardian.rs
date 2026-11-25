@@ -869,6 +869,7 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         last_tracking: None,
         journal_warning_active: false,
         cleanup_holders_warned: false,
+        observed_holders: Vec::new(),
         stopped_descendants: std::collections::BTreeSet::new(),
         settlement_evidence: SettlementEvidence::Unresolved,
         reaped: Vec::new(),
@@ -949,6 +950,10 @@ struct Driver<'a> {
     journal_warning_active: bool,
     /// The diagnostic holder scan has run; it runs once per guardian.
     cleanup_holders_warned: bool,
+    /// Processes seen holding the writer lock path at the cleanup deadline.
+    /// The exit carries these so status can name survivors even when the
+    /// guardian that observed them is gone.
+    observed_holders: Vec<crate::custody::ObservedHolder>,
     /// Descendants this guardian signalled, for the one summary warning.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     stopped_descendants: std::collections::BTreeSet<ProcessIdentity>,
@@ -2157,6 +2162,7 @@ impl Driver<'_> {
             } else {
                 Vec::new()
             },
+            observed_holders: self.observed_holders.clone(),
             settlement_evidence: self.settlement_evidence,
             retention: unresolved.then(|| Retention {
                 guardian: self.guardian.clone(),

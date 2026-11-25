@@ -245,7 +245,13 @@ proves the old process tree is gone; same-boot absence, a reused PID, an
 unobservable host, incomplete evidence and unreachable peers stay `unknown`,
 because a child may have forked into another session and been reparented. Status
 never mutates or schedules recovery; unattended and settling rows name the scoped
-`provenant reconcile` action, which rechecks custody before settlement.
+`provenant reconcile` action, which rechecks custody before settlement. A
+settling row also names PIDs and the custody writer-lock path observed at the
+guardian's cleanup deadline, when that observation was published; a resource
+found only through its open descriptor is labelled ownership unproven, because
+an observed path is not proof of ownership. Other locks and unrecorded detached
+processes may not be observed, including when no exit was published. `provenant reconcile <lane>` ends only the
+survivors the attempt proved and leaves unproven holders for the owner to close.
 
 `status NAME --full` gives each unsettled attempt its newest event time and
 names the source (`output`, `started` or `queued`), so old output is not mistaken

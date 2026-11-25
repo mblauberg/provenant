@@ -1130,7 +1130,11 @@ impl provenant_supervisor::census::ProcessObserver for RebootObserver {
         provenant_supervisor::census::Census,
         provenant_supervisor::census::CensusError,
     > {
-        unreachable!("reboot proof needs only the boot identity")
+        // Reboot proof needs only the boot identity, but holderless settlement
+        // now also takes a bounded census to reap sandbox-marked escapees.
+        // This observer's world has no live processes, so the faithful answer
+        // is an empty census rather than a panic.
+        provenant_supervisor::census::Census::from_observations([], [], [], true, false, 16)
     }
 }
 

@@ -145,10 +145,29 @@ every new attempt even when the kernel lease is free.
 
 At the first cleanup deadline one diagnostic census per guardian names
 observable PIDs, command names and open writer-lock paths with a reconcile
-action. An open path is not proof of lock ownership; unknown holders stay
-explicit uncertainty; a timeout alone never authorises settlement or an
-unrelated signal.
-- Why: a leftover descendant could still write the worktree.
+action. The bounded observation is persisted in the process exit so status can
+still name survivors after the guardian is gone; an owner found only by its
+open descriptor is reported as ownership unproven. An open path is not proof of
+lock ownership; unknown holders stay explicit uncertainty; a timeout alone
+never authorises settlement or an unrelated signal. This observation covers the
+custody writer-lock path, not arbitrary repository locks, and cannot be persisted
+when the guardian dies before publishing an exit. An unrecorded, unsandboxed
+detached process may therefore be neither reaped nor reported.
+- Why: a leftover descendant could still write the worktree, and a chair
+  cannot clean up what status no longer names.
+
+When a lane is killed before its guardian can publish an exit, `reconcile` ends
+its recorded process tree under writer exclusion once the guardian's published
+identity is proven absent. Candidates are the provider and descendant
+identities the reservation recorded and live processes carrying the attempt's
+sandbox mark; each identity is revalidated before TERM and again before KILL. A live guardian fences the
+reap, a survivor keeps the attempt fenced and is reported with its PID, and no
+exit is invented. Bare PIDs, process groups, sessions and descriptor paths grant
+no signal authority.
+- Why: an account-limit kill must not leave a detached service holding the
+  repository's heavy lock, but a recycled PID or a sibling's process must never
+  be signalled to clear it.
+- Owner: `crates/supervisor/src/custody/orphans.rs`, `crates/run/src/controls.rs`
 
 ### Retention is bounded and event-driven
 

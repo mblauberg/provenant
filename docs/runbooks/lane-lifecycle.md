@@ -104,6 +104,15 @@ uncertain or reset a worktree with edits.
   import, so recover that work by hand. For a retained queued lane that never
   dispatched, run `provenant reconcile --abandon NAME/NODE#N --reason TEXT`; it
   refuses attempts with process evidence, a fence or worktree custody.
+- A lane whose guardian dies before publishing an exit can leave its recorded
+  process tree holding a heavy lock. `provenant reconcile TARGET` ends the
+  recorded provider and descendants under writer exclusion after proving the
+  guardian gone, then settles the attempt. When the guardian publishes a cleanup
+  observation, `status` names the observed PIDs and custody writer-lock path;
+  an open descriptor alone leaves ownership unproven. Arbitrary repository
+  locks and unrecorded detached processes may not be reported, especially if
+  the guardian dies before publishing an exit. It never signals on a bare PID,
+  a process group or an open path.
 - `reconcile` reports storage errors in `writer_reservation_errors` and exits
   non-zero.
 - A valid handoff declaring `stopped_early` or `blocked` makes an otherwise
