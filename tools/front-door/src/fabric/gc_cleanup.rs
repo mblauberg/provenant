@@ -53,6 +53,7 @@ pub(crate) fn spawn(
 pub(crate) fn run(
     request: &str,
     workers: &dyn WorkerObserver,
+    measure_free_bytes: impl FnOnce(&Path) -> Result<u64, String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if provenant_cli::fabric::in_lane() {
         return Err("lane cleanup requires host custody".into());
@@ -65,8 +66,28 @@ pub(crate) fn run(
         provenant_core::RootInputs::new(settled.roots.home.clone(), settled.roots.checkout.clone());
     inputs.state_dir = Some(settled.roots.state_root.clone());
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    // The settled lane's own space returns before a host-wide sweep starts.
+    // The checkpoint then censuses a worktree that is already gone, not one
+    // about to disappear.
     let cancel = CancelToken::new();
-    collect_owned_worktree(&settled, &roots, workers, delivery.as_ref(), &cancel)
+    let collected = collect_owned_worktree(&settled, &roots, workers, delivery.as_ref(), &cancel);
+    // Settlement is a natural checkpoint. Below gc.free_floor, start one
+    // bounded sweep from the state root; no daemon or extra schedule needed.
+    if let Err(error) = crate::gc_support::collect_below_floor(
+        &settled.roots.state_root,
+        &settled.roots.home,
+        workers,
+        measure_free_bytes,
+    ) {
+        provenant_records::warning::warn(
+            provenant_records::warning::Warning::new(
+                provenant_records::warning::GC_SCHEDULE_FAILED,
+                format!("settlement free-floor sweep failed: {error}"),
+            )
+            .once_per_change(),
+        );
+    }
+    collected
 }
 
 /// Exact integration ref and pinned tip supplied by an applied GC sweep.

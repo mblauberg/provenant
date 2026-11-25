@@ -310,6 +310,9 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "create_from_remote_base_reports_ok_and_exists",
             "create_list_and_remove_a_managed_worktree",
             "naming_and_post_create_ports_are_advisory_and_evidenced",
+            "gc_floor_checkpoint_fires_below_floor_only",
+            "gc_free_floor_bounded_join_fails_when_sweep_is_held",
+            "gc_cleanup_below_floor_starts_a_sweep",
             "gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache",
             "scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_writer_locks",
             "gc_trims_lane_build_directories_to_the_cap_and_spares_held_locks",
@@ -435,6 +438,13 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 "naming_and_post_create_ports_are_advisory_and_evidenced" => {
                     naming_and_post_create_ports_are_advisory_and_evidenced()
                 }
+                "gc_floor_checkpoint_fires_below_floor_only" => {
+                    gc_floor_checkpoint_fires_below_floor_only()
+                }
+                "gc_free_floor_bounded_join_fails_when_sweep_is_held" => {
+                    gc_free_floor_bounded_join_fails_when_sweep_is_held()
+                }
+                "gc_cleanup_below_floor_starts_a_sweep" => gc_cleanup_below_floor_starts_a_sweep(),
                 "gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache" => {
                     gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache()
                 }

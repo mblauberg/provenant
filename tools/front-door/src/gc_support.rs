@@ -1,6 +1,6 @@
 //! Host observations used by the existing GC composition.
 use crate::worktrees::Error;
-use provenant_confinement::worktrees::WorktreeContext;
+use provenant_confinement::worktrees::{WorkerObserver, WorktreeContext};
 use provenant_core::{ActorId, CancelToken, Clock, GitOid, Roots};
 use provenant_os::{
     clock::SystemClock,
@@ -8,6 +8,7 @@ use provenant_os::{
     fs::{Directory, LockMode, Metadata, PublishMode},
 };
 use provenant_run::{AttemptReader, AttemptState, ExecutionContext, LaneQuery, RunStore};
+use serde::Serialize;
 use std::{
     cell::{Cell, RefCell},
     collections::BTreeMap,
@@ -15,6 +16,100 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
+
+/// One candidate a collection pass deliberately left in place. GC never
+/// deletes it without fresh custody, but the operator needs to know what
+/// stayed, why, and how large it is.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct UncollectedItem {
+    /// Candidate path, or the attempt/worktree identity when no path is known.
+    pub path: PathBuf,
+    /// Observed bytes; `None` when the class exposes no byte census.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
+    /// Owning class, such as `cargo_cache`, `attempt_scratch` or `worktree`.
+    pub class: &'static str,
+    /// Why the candidate was kept: live holder, uncertain custody, retained
+    /// evidence, unmerged work and similar.
+    pub reason: String,
+}
+
+impl UncollectedItem {
+    pub(crate) fn human_line(&self) -> String {
+        match self.bytes {
+            Some(bytes) => format!(
+                "uncollected {} {}: {} bytes; kept: {}",
+                self.class,
+                self.path.display(),
+                bytes,
+                self.reason
+            ),
+            None => format!(
+                "uncollected {} {}: bytes unknown; kept: {}",
+                self.class,
+                self.path.display(),
+                self.reason
+            ),
+        }
+    }
+}
+
+/// Read free bytes on the state volume. The production measurement handed to
+/// [`collect_below_floor`]; tests inject a reading instead of depending on the
+/// host's disk state.
+pub(crate) fn state_volume_free_bytes(state_root: &Path) -> Result<u64, String> {
+    Directory::open_anchor(state_root)
+        .map_err(|error| error.to_string())
+        .and_then(|volume| volume.available_bytes().map_err(|error| error.to_string()))
+        .map_err(|error| format!("cannot measure free space: {error}"))
+}
+
+/// Start one bounded sweep from a natural checkpoint when the state volume is
+/// below `gc.free_floor`. All inputs are read from the state root and the
+/// caller's home, so this works from a detached settlement worker as well as a
+/// launch, and needs no daemon. The free-space reading is injected so a test
+/// never depends on ambient disk state. The configured floor and its source
+/// travel with the settings.
+pub(crate) fn collect_below_floor(
+    state_root: &Path,
+    home: &Path,
+    workers: &dyn WorkerObserver,
+    measure_free_bytes: impl FnOnce(&Path) -> Result<u64, String>,
+) -> Result<bool, String> {
+    let settings = provenant_config::GcSettings::read(state_root)
+        .map_err(|error| format!("cannot read gc settings: {error}"))?;
+    if !settings.schedule {
+        return Ok(false);
+    }
+    let limits = settings
+        .disk_limits(state_root)
+        .map_err(|error| format!("cannot resolve gc.free_floor: {error}"))?;
+    let free = measure_free_bytes(state_root)?;
+    if free >= limits.free_floor {
+        return Ok(false);
+    }
+    let globals = provenant_cli::Globals {
+        state_dir: Some(state_root.to_path_buf()),
+        ..Default::default()
+    };
+    let idle_seconds = settings
+        .idle_seconds()
+        .map_err(|_| "invalid gc.idle".to_owned())?;
+    // The trigger fired once the bounded sweep started. An incomplete result
+    // is reported by that sweep; it does not mean the checkpoint failed to
+    // start collection.
+    if let Err(error) = crate::worktrees::scheduled_gc(&globals, idle_seconds, workers, Some(home))
+    {
+        provenant_records::warning::warn(
+            provenant_records::warning::Warning::new(
+                provenant_records::warning::GC_SCHEDULE_FAILED,
+                format!("free-floor sweep did not complete: {error}"),
+            )
+            .once_per_change(),
+        );
+    }
+    Ok(true)
+}
 
 pub(crate) fn host_git_with_stderr(
     repo: &Path,

@@ -427,6 +427,7 @@ pub(crate) fn gc_worker(globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
                     .idle_seconds()
                     .map_err(|error| error.to_string())?,
                 workers,
+                Some(&resolved.home),
             )
         })();
         let failed = collected.as_ref().err().cloned();

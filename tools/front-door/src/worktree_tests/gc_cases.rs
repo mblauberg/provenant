@@ -9,6 +9,131 @@ fn stranded_worktree_path(value: &Value) -> Result<PathBuf> {
     Ok(Path::new(root).join(relative))
 }
 
+/// Spec: docs/specs/disk.md#dispatch-and-new-build-pressure
+/// A natural checkpoint starts a bounded sweep only below the floor. The
+/// free-space reading is injected, so this never depends on the host's disk.
+pub(super) fn gc_floor_checkpoint_fires_below_floor_only() -> Result {
+    let rig = repository()?;
+    let workers = provenant_confinement::worktrees::SystemWorkerObserver;
+    let checkpoint = |free: u64| {
+        crate::gc_support::collect_below_floor(&rig.state, &rig.home, &workers, |_| Ok(free))
+    };
+    fs::write(
+        rig.state.join("config.toml"),
+        b"schema_version=1\n[gc]\nfree_floor='1B'\n",
+    )?;
+    assert!(
+        !checkpoint(u64::MAX)?,
+        "a healthy free-space reading must not sweep"
+    );
+    fs::write(
+        rig.state.join("config.toml"),
+        b"schema_version=1\n[gc]\nfree_floor='18446744073709551615B'\n",
+    )?;
+    assert!(checkpoint(0)?, "a below-floor reading must start a sweep");
+    fs::write(
+        rig.state.join("config.toml"),
+        b"schema_version=1\n[gc]\nfree_floor='18446744073709551615B'\nschedule=false\n",
+    )?;
+    assert!(
+        !checkpoint(0)?,
+        "disabled scheduling must not start a sweep"
+    );
+    Ok(())
+}
+
+/// Spec: docs/specs/disk.md#floor-triggered-and-joined-sweeps
+/// An explicit floor request joins a held sweep within the configured budget;
+/// an expired join is a reported failure, never a successful empty collection.
+pub(super) fn gc_free_floor_bounded_join_fails_when_sweep_is_held() -> Result {
+    let rig = repository()?;
+    fs::write(
+        rig.state.join("config.toml"),
+        b"schema_version=1\n[gc]\nsweep_budget='0'\nfree_floor='18446744073709551615B'\n",
+    )?;
+    let clock = provenant_os::clock::SystemClock::new();
+    let crate::gc_sweep::Acquire::Held(_lease) =
+        crate::gc_sweep::acquire(&rig.state, Duration::from_secs(30), &clock)?
+    else {
+        return Err("could not hold the sweep lease".into());
+    };
+    let output = command(
+        &rig,
+        &[
+            "gc",
+            "--apply",
+            "--free-floor",
+            "18446744073709551615B",
+            "--json",
+        ],
+    )?;
+    assert_ne!(
+        code(&output),
+        0,
+        "a bounded join that expired must fail: {}",
+        String::from_utf8_lossy(&output.stdout.bytes)
+    );
+    let value = json(&output)?;
+    let message = value["error"]["message"]
+        .as_str()
+        .ok_or("gc failure message")?;
+    assert!(message.contains("bounded wait"), "{message}");
+    assert!(
+        message.contains("this invocation collected nothing"),
+        "{message}"
+    );
+    assert!(!message.contains("holder"), "{message}");
+    Ok(())
+}
+
+/// Spec: docs/specs/disk.md#floor-triggered-and-joined-sweeps
+/// Settlement runs its own collection before the floor checkpoint, and the
+/// checkpoint starts a scheduled sweep with the injected below-floor reading.
+/// The explicit home keeps that sweep inside the rig.
+pub(super) fn gc_cleanup_below_floor_starts_a_sweep() -> Result {
+    let fixture = crate::fabric::peer_tests::SettlementFixture::resumed()?;
+    // Settlement sweeps from the state root it recorded; configure and
+    // observe that root, not the rig's spelling of it.
+    let state = fixture.settled.roots.state_root.clone();
+    fs::write(
+        state.join("config.toml"),
+        b"schema_version=1\n[gc]\nfree_floor='18446744073709551615B'\n",
+    )?;
+    let request = serde_json::to_string(&(
+        fixture.settled.clone(),
+        None::<provenant_run::WriterDeliveryReceipt>,
+    ))?;
+    let before = fs::read_to_string(state.join("tick").join("gc-sweep-epoch"))
+        .ok()
+        .and_then(|epoch| epoch.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    // Drive the production entry point with the rig's installed environment;
+    // no volume has u64::MAX bytes free, so the real measurement is below it.
+    let cleanup = command(&fixture.rig, &["internal", "lane-cleanup", &request])?;
+    assert_eq!(
+        code(&cleanup),
+        0,
+        "{}",
+        String::from_utf8_lossy(&cleanup.stderr.bytes)
+    );
+    assert!(
+        !String::from_utf8_lossy(&cleanup.stderr.bytes).contains("did not complete"),
+        "{}",
+        String::from_utf8_lossy(&cleanup.stderr.bytes)
+    );
+    // A completed sweep clears its progress record; the sweep lease epoch is
+    // the durable evidence that a sweep acquired the lease and ran.
+    let epoch = fs::read_to_string(state.join("tick").join("gc-sweep-epoch"))?;
+    assert!(
+        epoch
+            .trim()
+            .parse::<u64>()
+            .is_ok_and(|epoch| epoch > before),
+        "sweep epoch did not advance past {before}: {epoch:?}"
+    );
+    Ok(())
+}
+
 pub(super) fn gc_keeps_and_names_stranded_work() -> Result {
     let rig = repository()?;
     let created = ok(
@@ -1666,9 +1791,11 @@ pub(super) fn gc_collects_a_fast_forwarded_lane_its_settlement_missed() -> Resul
                 provenant_os::fs::LockMode::Exclusive,
             )?;
             let pending_receipt = settlement_receipt(&fixture)?;
-            crate::fabric::gc_cleanup::run(&request, &FreeWorkers).map_err(|error| {
-                format!("busy settlement cleanup failed: {error}; receipt={pending_receipt}")
-            })?;
+            crate::fabric::gc_cleanup::run(&request, &FreeWorkers, |_| Ok(u64::MAX)).map_err(
+                |error| {
+                    format!("busy settlement cleanup failed: {error}; receipt={pending_receipt}")
+                },
+            )?;
             assert!(fixture.worktree.exists());
             drop(held);
         } else {
@@ -1725,7 +1852,7 @@ pub(super) fn completion_and_sweep_retain_unlanded_or_dirty_lanes() -> Result {
             .map_err(|error| error.to_string())?
             .pop()
             .ok_or("settlement did not start collection")?;
-        crate::fabric::gc_cleanup::run(&request, &FreeWorkers)?;
+        crate::fabric::gc_cleanup::run(&request, &FreeWorkers, |_| Ok(u64::MAX))?;
         assert!(
             fixture.worktree.exists(),
             "settlement collection removed a kept lane (dirty={dirty})"
