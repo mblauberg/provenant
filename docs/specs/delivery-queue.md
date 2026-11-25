@@ -131,6 +131,23 @@ A replacement must meet the same typed input/output and authority contracts. A
 composite override changes its constituent nodes, not unsupported leaf fields on
 the composite. No engine fork or custom JavaScript hook is needed.
 
+`graph::template::seal_queue_knobs` resolves the three queue knobs over
+`QUEUE_KNOB_PRECEDENCE` (default, host, project, launch), sealing the winning
+`Sourced<usize>` value with its layer and optional origin; an undeclared layer
+warns and is ignored. `seal_queue_knob` does the same for one knob. The host
+supplies candidates keyed by `domains.fabric.queue.*`; absent keys keep their
+shipped value and source. The `deliver` composite exposes `review_shape`
+(`single` default, or `panel`) with the matching `review_template`
+(`review` or `review-panel`), `ladder`, `max_ci_rounds`, `lenses`, and the
+`failing_head`/`failure_excerpt` repair inputs. `widen_final_rung_brief` and
+`repair_brief` produce the final-rung and repair brief text: the sweep-the-class
+instruction is always carried by a repair brief, and untrusted heads and
+excerpts are bounded before they enter it. Hygiene, publication and conflict
+observation are role-marked seam nodes in the composite (`delivery-hygiene`,
+`delivery-publish`, `delivery-conflict`): the shared `GateCondition` has no
+variant for them, so execution slices bind by identity rather than a new leaf
+field on the composite.
+
 The new default removes today's pre-CI `findings-panel` and post-CI
 `review-panel` pair in `assets/templates/composites.toml`: a clean item costs
 one writer and one single reviewer, plus optional scope and deterministic gates,
