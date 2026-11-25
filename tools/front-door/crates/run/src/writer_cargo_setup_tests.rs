@@ -239,7 +239,7 @@ fn a_branch_that_did_not_exist_at_launch_is_stray_work() {
         'a',
         &[(MAIN, 'a'), ("refs/heads/stray", 'a'), (ORIGIN_MAIN, 'a')],
     );
-    let plan = StrayPlan::new(Some(MAIN), &launch, &on_new);
+    let plan = StrayPlan::new(MAIN, Some(MAIN), &launch, &on_new);
     assert_eq!(plan.new_branch.as_deref(), Some("stray"));
     let found = plan
         .report("/repo", worktree, &[])
@@ -258,13 +258,19 @@ fn a_branch_that_did_not_exist_at_launch_is_stray_work() {
         'a',
         &[(MAIN, 'a'), ("refs/heads/stray", 'a'), (ORIGIN_MAIN, 'a')],
     );
-    let plan = StrayPlan::new(Some(MAIN), &launch, &left);
+    let plan = StrayPlan::new(MAIN, Some(MAIN), &launch, &left);
     assert_eq!(plan.new_branch, None);
     assert_eq!(plan.report("/repo", worktree, &[]), None);
     // The branch the primary sat on at launch is never new, even when unborn.
     let unborn = primary(MAIN, 'a', &[]);
     assert_eq!(
-        StrayPlan::new(Some(MAIN), &std::collections::BTreeMap::new(), &unborn).new_branch,
+        StrayPlan::new(
+            MAIN,
+            Some(MAIN),
+            &std::collections::BTreeMap::new(),
+            &unborn
+        )
+        .new_branch,
         None
     );
 }
@@ -278,7 +284,7 @@ fn commits_on_new_or_advanced_branches_are_candidates_even_after_switching_back(
         'a',
         &[(MAIN, 'a'), ("refs/heads/stray", 'b'), (ORIGIN_MAIN, 'a')],
     );
-    let plan = StrayPlan::new(Some(MAIN), &launch, &switched_back);
+    let plan = StrayPlan::new(MAIN, Some(MAIN), &launch, &switched_back);
     assert_eq!(plan.new_branch, None);
     assert!(
         plan.tips.contains(&oid('b')),
@@ -294,7 +300,7 @@ fn commits_on_new_or_advanced_branches_are_candidates_even_after_switching_back(
     assert!(found.note.contains("1 commit(s)"), "{}", found.note);
     assert!(found.note.contains("stray"), "{}", found.note);
     let advanced = primary(MAIN, 'c', &[(MAIN, 'c'), (ORIGIN_MAIN, 'a')]);
-    let plan = StrayPlan::new(Some(MAIN), &launch, &advanced);
+    let plan = StrayPlan::new(MAIN, Some(MAIN), &launch, &advanced);
     assert!(plan.tips.contains(&oid('c')));
     assert!(plan.tip_names.iter().any(|name| name == "main"));
 }
@@ -313,7 +319,7 @@ fn a_pull_fast_forward_is_not_stray_work() {
             ("refs/remotes/origin/new", 'c'),
         ],
     );
-    let plan = StrayPlan::new(Some(MAIN), &launch, &pulled);
+    let plan = StrayPlan::new(MAIN, Some(MAIN), &launch, &pulled);
     assert_eq!(plan.new_branch, None);
     assert!(
         plan.excluded.contains(&oid('b')),
@@ -326,6 +332,55 @@ fn a_pull_fast_forward_is_not_stray_work() {
     assert!(
         !plan.tips.contains(&oid('c')),
         "remote-tracking refs are never the lane's work"
+    );
+}
+
+// Spec: docs/specs/run-settlement.md#stray-lane-work
+#[test]
+fn a_bound_branch_commit_turns_a_primary_move_into_a_warning() {
+    const WRITER: &str = "refs/heads/chore/writer";
+    let launch = refs(&[(MAIN, 'a'), (WRITER, 'a'), (ORIGIN_MAIN, 'a')]);
+    // Another process detaches the primary at a commit no launch ref reaches,
+    // while the lane commits on the branch it was bound to (#3943).
+    let moved = primary(
+        "refs/heads/main",
+        'b',
+        &[(MAIN, 'b'), (WRITER, 'c'), (ORIGIN_MAIN, 'a')],
+    );
+    let plan = StrayPlan::new(WRITER, Some(MAIN), &launch, &moved);
+    assert!(plan.bound_branch_advanced);
+    let found = plan
+        .report("/repo", Path::new("/repo/.worktrees/writer"), &[oid('b')])
+        .expect("an unaccounted primary move is still observed");
+    // Warn leaves the Succeeded outcome untouched and emits a typed warning;
+    // only Review holds the lane and its dependants for the chair.
+    let note = match found.disposition() {
+        StrayDisposition::Warn { note } => note,
+        StrayDisposition::Review { note } => {
+            panic!("the lane committed on its bound branch: {note}")
+        }
+    };
+    assert!(
+        note.contains(&oid('b').to_string()),
+        "the warning names the new primary HEAD: {note}"
+    );
+    assert!(note.contains("(main)"), "it names the HEAD's ref: {note}");
+
+    // With no bound-branch commits the same move is still held for review: the
+    // work may be in the primary checkout (#3611).
+    let stalled = primary(
+        "refs/heads/main",
+        'b',
+        &[(MAIN, 'b'), (WRITER, 'a'), (ORIGIN_MAIN, 'a')],
+    );
+    let plan = StrayPlan::new(WRITER, Some(MAIN), &launch, &stalled);
+    assert!(!plan.bound_branch_advanced);
+    let found = plan
+        .report("/repo", Path::new("/repo/.worktrees/writer"), &[oid('b')])
+        .expect("an unaccounted primary move is a finding");
+    assert!(
+        matches!(found.disposition(), StrayDisposition::Review { note } if note.contains("stray work")),
+        "a lane whose bound branch stayed at base is still held"
     );
 }
 
@@ -459,11 +514,18 @@ fn git_separates_a_pull_and_lane_commits_from_work_left_in_the_primary_checkout(
         "a pull fast-forward is not the lane's work"
     );
 
-    // A commit made directly in the primary checkout is.
+    // A commit made directly in the primary checkout is observed. The lane has
+    // committed on its bound branch above, so settlement warns rather than
+    // failing: the move cannot be attributed to the lane (#3943).
     run_git(&project, &["commit", "--allow-empty", "-qm", "stray"])?;
     let found = assess()?.ok_or("a primary commit is a finding")?;
     assert!(found.note.contains("1 commit(s)"), "{}", found.note);
     assert!(found.note.contains(&main), "{}", found.note);
+    assert!(found.bound_branch_advanced);
+    assert!(
+        matches!(found.disposition(), StrayDisposition::Warn { .. }),
+        "the bound branch advanced, so the primary move is a warning"
+    );
     run_git(
         &project,
         &["reset", "-q", "--hard", &format!("origin/{main}")],

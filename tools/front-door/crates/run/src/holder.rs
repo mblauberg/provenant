@@ -3316,9 +3316,11 @@ impl RunStore {
                             None => note,
                         });
                     }
-                    // Work left in the primary checkout (a branch that did not
-                    // exist at launch, or commits nothing else accounts for) is
-                    // not a success, whatever the bound branch holds. Nothing
+                    // An unaccounted move in the primary checkout warns when
+                    // the lane committed on its bound branch: that is work in
+                    // the right place, and Git cannot attribute the move to the
+                    // lane. Without bound-branch commits the work may be in the
+                    // primary checkout, so the lane is held for review. Nothing
                     // here refuses the lane.
                     if decoded.outcome == Outcome::Succeeded {
                         let stray = self.writer_stray(
@@ -3333,9 +3335,26 @@ impl RunStore {
                         let finding = match stray {
                             Ok(None) => None,
                             Ok(Some(stray)) => {
-                                decoded.outcome = Outcome::ReviewRequired;
-                                stray_work = true;
-                                Some(stray.note)
+                                use provenant_records::warning::{
+                                    PRIMARY_MOVED_UNATTRIBUTED, STRAY_LANE_WORK, Warning, warn,
+                                };
+                                // Spec: docs/specs/cli.md#warnings-are-typed-values
+                                let finding = match stray.disposition() {
+                                    crate::writer::StrayDisposition::Warn { note } => {
+                                        warn(Warning::new(
+                                            PRIMARY_MOVED_UNATTRIBUTED,
+                                            note.clone(),
+                                        ));
+                                        note
+                                    }
+                                    crate::writer::StrayDisposition::Review { note } => {
+                                        decoded.outcome = Outcome::ReviewRequired;
+                                        stray_work = true;
+                                        warn(Warning::new(STRAY_LANE_WORK, note.clone()));
+                                        note
+                                    }
+                                };
+                                Some(finding)
                             }
                             Err(error) => {
                                 warn_stray_check(&error);
@@ -3343,9 +3362,6 @@ impl RunStore {
                             }
                         };
                         if let Some(finding) = finding {
-                            use provenant_records::warning::{STRAY_LANE_WORK, Warning, warn};
-                            // Spec: docs/specs/cli.md#warnings-are-typed-values
-                            warn(Warning::new(STRAY_LANE_WORK, finding.clone()));
                             decoded.reason = Some(match decoded.reason.take() {
                                 Some(reason) => format!("{reason}; {finding}"),
                                 None => finding,

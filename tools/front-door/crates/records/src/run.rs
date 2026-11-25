@@ -2304,8 +2304,8 @@ settlement_reasons! {
     ProviderStop { source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::ProviderStop) },
     /// A writer left edits it did not commit.
     UncommittedWork { source: Provider, node: Failed, outcome: Uncommitted, stop: None },
-    /// The bound branch gained no commits while the primary checkout moved: the
-    /// lane's work went to the wrong checkout (#3611).
+    /// The bound branch stayed at base while the primary checkout moved with
+    /// unaccounted work: the lane's work went to the wrong checkout (#3611).
     StrayWork { source: Host, node: Failed, outcome: ReviewRequired, stop: None },
     /// Refused before any process started.
     PreLaunchRefusal { source: Host, node: Failed, outcome: Preserve, stop: None },
@@ -3018,7 +3018,8 @@ pub enum PartialSignal {
     /// A writer left edits it did not commit.
     UncommittedWork,
     /// The primary checkout moved during the attempt while the bound branch
-    /// gained no commits: the work was made outside the bound worktree.
+    /// stayed at base with unaccounted work: the work was made outside the
+    /// bound worktree.
     StrayWork,
 }
 impl PartialSignal {
