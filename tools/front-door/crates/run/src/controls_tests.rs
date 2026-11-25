@@ -1954,7 +1954,7 @@ fn stop_settles_a_sealed_running_attempt_without_a_holder() -> TestResult {
     exit.scope = RunStore::scope(&running);
     crate::dispatch_tests::seal_exit(&store, &exit)?;
     assert_eq!(
-        RunStore::attempt_presence(context.state_root.as_path(), &store.record(id, &call)?),
+        attempt_presence(context.state_root.as_path(), &store.record(id, &call)?),
         Some(AttemptPresence::Settling),
         "a sealed Running attempt must be the settling status sees"
     );
