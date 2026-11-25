@@ -78,8 +78,6 @@ pub(super) fn is_false(value: &bool) -> bool {
     !value
 }
 
-pub const QUEUE_CI_WAIT_KEY: &str = "queue_ci_wait";
-
 /// Config keys for the sealed delivery queue settings.
 pub const QUEUE_MAX_PARALLEL_KEY: &str = "domains.fabric.queue.max_parallel";
 pub const QUEUE_CI_SLOTS_KEY: &str = "domains.fabric.queue.ci_slots";
@@ -241,6 +239,9 @@ pub(super) fn canonical_len<T: Serialize>(value: &T) -> usize {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphDocument {
+    /// Queue CI lease wait resolved from the authenticated item configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_ci_wait: Option<provenant_records::Sourced<u64>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue: Option<QueueKnobs>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1198,22 +1199,14 @@ pub(super) fn validate_delivery_contracts(document: &GraphDocument) -> Result<()
 
 impl GraphDocument {
     /// The authenticated queue item's sourced CI lease wait, when present.
-    /// Kept in document extras so older non-queue constructors remain stable.
+    /// Stored as a typed field so queue admission data has a declared owner.
     pub fn queue_ci_wait(&self) -> Option<provenant_records::Sourced<u64>> {
-        self.extra
-            .get(QUEUE_CI_WAIT_KEY)
-            .cloned()
-            .and_then(|value| serde_json::from_value(value).ok())
+        self.queue_ci_wait.clone()
     }
 
     /// Seal the queue registry's sourced CI wait into the persisted document.
-    pub fn set_queue_ci_wait(
-        &mut self,
-        wait: &provenant_records::Sourced<u64>,
-    ) -> Result<(), serde_json::Error> {
-        self.extra
-            .insert(QUEUE_CI_WAIT_KEY.into(), serde_json::to_value(wait)?);
-        Ok(())
+    pub fn set_queue_ci_wait(&mut self, wait: &provenant_records::Sourced<u64>) {
+        self.queue_ci_wait = Some(wait.clone());
     }
 
     /// The host digest of the input that created this graph. A named `run` whose
@@ -1439,10 +1432,29 @@ pub enum CiState {
     NotScheduled,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CiLimitSource {
+    #[default]
+    Default,
+    Condition,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CiFailedChecksPolicy {
+    pub max_bytes: usize,
+    pub max_bytes_source: CiLimitSource,
+    pub max_checks: usize,
+    pub max_checks_source: CiLimitSource,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CiObservation {
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_reset_at: Option<provenant_core::WallTime>,
     pub state: CiState,
     pub summary: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1473,6 +1485,10 @@ pub struct CiEvidence {
     pub pending_observations: u64,
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_reset_at: Option<provenant_core::WallTime>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_checks_policy: Option<CiFailedChecksPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_observed_stamp: Option<CiHostStamp>,
     #[serde(default, skip_serializing_if = "is_zero_u8")]
@@ -1858,29 +1874,16 @@ pub struct DeliveryReviewDisposition {
     pub reason: String,
 }
 
-const DELIVERY_REVIEW_DISPOSITION_KEY: &str = "delivery_review_disposition";
-
 impl NodeProgress {
-    /// Read the typed chair disposition retained in the forward-compatible
-    /// progress extras. Malformed or future data never counts as approval.
+    /// Read the typed chair disposition retained on the reviewed node.
     pub fn delivery_review_disposition(&self) -> Option<DeliveryReviewDisposition> {
-        self.extra
-            .get(DELIVERY_REVIEW_DISPOSITION_KEY)
-            .cloned()
-            .and_then(|value| serde_json::from_value(value).ok())
+        self.delivery_review_disposition.clone()
     }
 
     /// Store a validated disposition without changing the original review
     /// output or its exact-head settlement.
-    pub fn set_delivery_review_disposition(
-        &mut self,
-        disposition: &DeliveryReviewDisposition,
-    ) -> Result<(), serde_json::Error> {
-        self.extra.insert(
-            DELIVERY_REVIEW_DISPOSITION_KEY.to_owned(),
-            serde_json::to_value(disposition)?,
-        );
-        Ok(())
+    pub fn set_delivery_review_disposition(&mut self, disposition: &DeliveryReviewDisposition) {
+        self.delivery_review_disposition = Some(disposition.clone());
     }
 }
 
@@ -2248,6 +2251,9 @@ impl PendingSteerQueue {
 pub struct GraphCheckpoint {
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
+    /// Durable queue-control intents retained with the graph checkpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_queue_controls: Option<super::QueueControlLedger>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cancellation_request_receipt: Option<CancellationRequestReceipt>,
     /// Worktree creation intents saved before the host performs Git effects.
@@ -2421,6 +2427,10 @@ pub struct NodeProgress {
     pub delivery_park: Option<DeliveryParkProgress>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conflict: Option<ci::ConflictEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_adoption: Option<super::queue_adoption::DeliveryAdoptionProgress>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_review_disposition: Option<DeliveryReviewDisposition>,
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
     /// Direct children of a composite, whose individual evidence stays available.

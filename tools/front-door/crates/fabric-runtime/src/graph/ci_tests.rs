@@ -184,6 +184,7 @@ fn document() -> GraphDocument {
 }
 fn observation(state: CiState, summary: &str) -> CiObservation {
     CiObservation {
+        quota_reset_at: None,
         extra: Default::default(),
         state,
         summary: summary.into(),
@@ -196,6 +197,7 @@ fn observation(state: CiState, summary: &str) -> CiObservation {
 /// An observation whose checks have registered for the head.
 fn registered(state: CiState, summary: &str) -> CiObservation {
     CiObservation {
+        quota_reset_at: None,
         check_names: vec!["build".into()],
         ..observation(state, summary)
     }
@@ -1302,6 +1304,8 @@ fn queue_conflict_recheck_matches_a_bounded_round_and_reactivates_composite_reba
     checkpoint.nodes[rebase_writer_index].state = NodeState::Skipped;
     checkpoint.nodes[ci_index].state = NodeState::Running;
     checkpoint.nodes[ci_index].ci = Some(CiEvidence {
+        quota_reset_at: None,
+        failed_checks_policy: None,
         wake_at: None,
         pending_observations: 1,
         extra: Default::default(),
@@ -1460,6 +1464,8 @@ fn queue_conflict_recheck_replays_into_a_later_recovery_round() {
     }
     checkpoint.nodes[ci_index].state = NodeState::Running;
     checkpoint.nodes[ci_index].ci = Some(CiEvidence {
+        quota_reset_at: None,
+        failed_checks_policy: None,
         wake_at: None,
         pending_observations: 1,
         extra: Default::default(),
@@ -2339,11 +2345,9 @@ fn ci_configured_evidence_caps_apply_before_checkpoint_and_findings() {
     let run = advance(&doc, &mut owner, &mut journal).unwrap();
     let ci = run.checkpoint.nodes[0].ci.as_ref().unwrap();
     assert_eq!(ci.failed_checks.len(), 1);
-    assert_eq!(ci.extra["failed_checks_policy"]["max_bytes"], 150);
-    assert_eq!(
-        ci.extra["failed_checks_policy"]["max_bytes_source"],
-        "condition"
-    );
+    let policy = ci.failed_checks_policy.as_ref().unwrap();
+    assert_eq!(policy.max_bytes, 150);
+    assert_eq!(policy.max_bytes_source, CiLimitSource::Condition);
     assert!(canonical_len(&ci.failed_checks) <= 150);
     assert!(ci.truncated);
     assert!(run.checkpoint.nodes[0].outputs.as_ref().unwrap().warnings[0].contains("truncated"));

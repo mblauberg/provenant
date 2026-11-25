@@ -211,7 +211,10 @@ outcomes, so parallel writers do not invent incompatible interfaces.
 The wire additions require graph `schema_version: 2`; absent fields stay absent
 when an old sealed plan or checkpoint is decoded and encoded. A queue item is
 bound only after registry authentication of its persisted launch intent; static
-admission checks the resulting typed graph before execution.
+admission checks the resulting typed graph before execution. Queue control
+ledgers, review and adoption evidence, CI wait and quota facts are declared
+host-owned record fields; malformed values fail decoding rather than being
+silently treated as absent. Unknown extension fields still round-trip.
 
 - `GraphNode.loop_body` is serialised as `loop`: its existing `max_rounds` is
   required and positive, and the owning node `id` is the loop name. Optional

@@ -158,6 +158,10 @@ pub struct Expansion {
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_review_disposition: Option<DeliveryReviewDisposition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_review_node: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retired: Option<Box<RetiredExpansion>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_generation: Option<u64>,
@@ -1443,6 +1447,7 @@ pub(super) fn flatten_fragment(
         local_nodes.push(stub);
     }
     let mut local = GraphDocument {
+        queue_ci_wait: None,
         queue: None,
         review: None,
         review_subject_missing: false,
@@ -2151,6 +2156,8 @@ pub(super) fn fallback_expansion(
         .map_err(|error| format!("fallback stage does not expand: {error}"))?;
     Ok(Expansion {
         extra: Default::default(),
+        delivery_review_disposition: None,
+        delivery_review_node: None,
         retired: None,
         retry_generation: None,
         final_result: false,

@@ -1491,6 +1491,7 @@ mod graph_ask_inbox_tests {
             service.execute(
                 InboxInput::Answer {
                     extra: Default::default(),
+                    queue_control: None,
                     id: request,
                     action: if option.is_some() {
                         AnswerAction::Choose
@@ -1809,6 +1810,7 @@ mod graph_ask_inbox_tests {
         service.execute(
             InboxInput::Answer {
                 extra: Default::default(),
+                    queue_control: None,
                 id: open.id,
                 action: AnswerAction::Choose,
                 option_id: Some("hold".into()),
@@ -1913,6 +1915,7 @@ mod graph_ask_inbox_tests {
         service.execute(
             InboxInput::Answer {
                 extra: Default::default(),
+                    queue_control: None,
                 id: open[0].id,
                 action: AnswerAction::Choose,
                 option_id: Some("ship".into()),

@@ -55,6 +55,8 @@ mod plans;
 mod prompt_store;
 mod prompt_text;
 mod queue_adoption;
+pub mod queue_control;
+pub use queue_control::QueueControlLedger;
 pub mod relay;
 mod repair;
 mod schedule;
@@ -4134,18 +4136,13 @@ fn advance_adopted_publish<R: AttemptOwner, J: GraphJournal>(
         );
     }
     if checkpoint.nodes[node_index].delivery_adoption().is_none() {
-        checkpoint.nodes[node_index]
-            .set_delivery_adoption(&DeliveryAdoptionProgress {
-                operation_id: intent.operation_id.clone(),
-                ci_admission: None,
-                ci_admission_wait: None,
-                receipt: None,
-                error: None,
-            })
-            .map_err(|_| GraphError::BadCheckpoint {
-                node: node.id.clone(),
-                invariant: "adoption intent progress must be serializable",
-            })?;
+        checkpoint.nodes[node_index].set_delivery_adoption(&DeliveryAdoptionProgress {
+            operation_id: intent.operation_id.clone(),
+            ci_admission: None,
+            ci_admission_wait: None,
+            receipt: None,
+            error: None,
+        });
         checkpoint.nodes[node_index].state = NodeState::Running;
         checkpoint.nodes[node_index].wait_reason = None;
         journal.save(checkpoint).map_err(GraphError::Journal)?;
@@ -4192,12 +4189,7 @@ fn advance_adopted_publish<R: AttemptOwner, J: GraphJournal>(
         let evidence =
             vec![diagnostic.unwrap_or_else(|| "queue pull-request adoption failed".into())];
         adoption.error = Some(evidence[0].clone());
-        checkpoint.nodes[node_index]
-            .set_delivery_adoption(&adoption)
-            .map_err(|_| GraphError::BadCheckpoint {
-                node: node.id.clone(),
-                invariant: "adoption error must be serializable",
-            })?;
+        checkpoint.nodes[node_index].set_delivery_adoption(&adoption);
         checkpoint.nodes[node_index].state = NodeState::Running;
         checkpoint.nodes[node_index].advance_error_code =
             Some("publication_adoption_unavailable".into());
@@ -4235,12 +4227,7 @@ fn advance_adopted_publish<R: AttemptOwner, J: GraphJournal>(
                 owner.wall_now(),
             )?);
             adoption.ci_admission_wait = wait.clone();
-            checkpoint.nodes[node_index]
-                .set_delivery_adoption(&adoption)
-                .map_err(|_| GraphError::BadCheckpoint {
-                    node: node.id.clone(),
-                    invariant: "adoption wait must be serializable before its attempt",
-                })?;
+            checkpoint.nodes[node_index].set_delivery_adoption(&adoption);
             asks::refresh_wake(checkpoint);
             journal.save(checkpoint).map_err(GraphError::Journal)?;
         }
@@ -4252,12 +4239,7 @@ fn advance_adopted_publish<R: AttemptOwner, J: GraphJournal>(
         if wait.clock_missing && wall_now.is_some() {
             wait = start_delivery_ci_wait::<R, J>(document, &node.id, wall_now)?;
             adoption.ci_admission_wait = Some(wait.clone());
-            checkpoint.nodes[node_index]
-                .set_delivery_adoption(&adoption)
-                .map_err(|_| GraphError::BadCheckpoint {
-                    node: node.id.clone(),
-                    invariant: "adoption wait must be serializable after clock recovery",
-                })?;
+            checkpoint.nodes[node_index].set_delivery_adoption(&adoption);
             asks::refresh_wake(checkpoint);
             journal.save(checkpoint).map_err(GraphError::Journal)?;
         }
@@ -4283,12 +4265,7 @@ fn advance_adopted_publish<R: AttemptOwner, J: GraphJournal>(
                 wait.wake_at = delivery_ci_wait_retry_at(&wait, now);
             }
             adoption.ci_admission_wait = Some(wait);
-            checkpoint.nodes[node_index]
-                .set_delivery_adoption(&adoption)
-                .map_err(|_| GraphError::BadCheckpoint {
-                    node: node.id.clone(),
-                    invariant: "adoption wait must be serializable during its retry",
-                })?;
+            checkpoint.nodes[node_index].set_delivery_adoption(&adoption);
             asks::refresh_wake(checkpoint);
             journal.save(checkpoint).map_err(GraphError::Journal)?;
             return Ok(());
@@ -4296,12 +4273,7 @@ fn advance_adopted_publish<R: AttemptOwner, J: GraphJournal>(
         adoption.ci_admission = Some(admission);
     }
     let progress = &mut checkpoint.nodes[node_index];
-    progress
-        .set_delivery_adoption(&adoption)
-        .map_err(|_| GraphError::BadCheckpoint {
-            node: node.id.clone(),
-            invariant: "verified adoption receipt must be serializable",
-        })?;
+    progress.set_delivery_adoption(&adoption);
     progress.outputs = Some(NodeOutputs {
         schema_version: 2,
         publication: Some(receipt.clone()),

@@ -9,6 +9,7 @@ fn library() -> TemplateLibrary {
 
 fn document(nodes: Vec<GraphNode>) -> GraphDocument {
     GraphDocument {
+        queue_ci_wait: None,
         queue: None,
         review: None,
         review_subject_missing: false,

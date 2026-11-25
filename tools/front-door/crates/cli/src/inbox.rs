@@ -3,6 +3,7 @@ use crate::metadata::CatalogueArg;
 use crate::{Globals, QueueControlAction, fabric::Context};
 use clap::{Args, Subcommand, ValueEnum};
 use provenant_core::{Clock, GitOid, HumanAnswerId, HumanRequestId, OperationId, WaitBudget};
+use provenant_fabric_runtime::graph::queue_control::{Action as QueueControlOperation, Metadata};
 use provenant_fabric_runtime::inbox::{
     InboxError, InboxInput, InboxProject, InboxProjectPath, InboxResult,
 };
@@ -403,13 +404,14 @@ impl HumanCommand {
                 operation_id: args.operation_id,
             },
             Self::Answer(args) => InboxInput::Answer {
-                extra: queue_control_extra(
+                extra: Default::default(),
+                queue_control: queue_control_metadata(
                     args.queue_control,
                     args.queue_revision,
                     args.operation_id.as_ref(),
                     args.review_node.as_deref(),
                     args.review_head,
-                ),
+                )?,
                 id: args.id.id,
                 action: match args.action {
                     Action::Choose => AnswerAction::Choose,
@@ -494,32 +496,33 @@ impl HumanCommand {
     }
 }
 
-fn queue_control_extra(
+fn queue_control_metadata(
     action: Option<QueueControlAction>,
     expected_revision: Option<u64>,
     operation_id: Option<&OperationId>,
     review_node: Option<&str>,
     review_head: Option<GitOid>,
-) -> BTreeMap<String, serde_json::Value> {
+) -> Result<Option<Metadata>, Error> {
     let Some(action) = action else {
-        return BTreeMap::new();
+        return Ok(None);
     };
     let action = match action {
-        QueueControlAction::Accept => "accept",
-        QueueControlAction::Fix => "fix",
-        QueueControlAction::Retry => "retry",
-        QueueControlAction::Drop => "drop",
+        QueueControlAction::Accept => QueueControlOperation::Accept,
+        QueueControlAction::Fix => QueueControlOperation::Fix,
+        QueueControlAction::Retry => QueueControlOperation::Retry,
+        QueueControlAction::Drop => QueueControlOperation::Drop,
     };
-    BTreeMap::from([(
-        "queue_control".into(),
-        serde_json::json!({
-            "action": action,
-            "expected_revision": expected_revision,
-            "operation_id": operation_id,
-            "review_node": review_node,
-            "review_head": review_head,
-        }),
-    )])
+    Ok(Some(Metadata {
+        action,
+        expected_revision: expected_revision
+            .ok_or(Error::Input("queue control requires an expected revision"))?,
+        operation_id: operation_id
+            .cloned()
+            .ok_or(Error::Input("queue control requires an operation ID"))?,
+        review_node: review_node.map(str::to_owned),
+        review_head,
+        graph_id: None,
+    }))
 }
 
 #[derive(Debug, thiserror::Error)]

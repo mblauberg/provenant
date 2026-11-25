@@ -305,6 +305,7 @@ fn observe_with(
     match resolve_head(target, read) {
         Some(after) if after == before => result,
         Some(after) => CiObservation {
+            quota_reset_at: None,
             state: CiState::Pending,
             summary: format!(
                 "head superseded {} -> {}; waiting for checks",
@@ -317,6 +318,7 @@ fn observe_with(
             extra: Default::default(),
         },
         None => CiObservation {
+            quota_reset_at: None,
             state: CiState::Unavailable,
             summary: "target head unavailable after reading checks".into(),
             head_sha: Some(before.sha),
@@ -449,10 +451,8 @@ mod tests {
         assert_eq!(observation.head_sha.as_deref(), Some(OLD));
         assert!(observation.summary.contains(&reset.to_string()));
         assert_eq!(
-            observation.extra.get("quota_reset_at"),
-            Some(&serde_json::json!(
-                provenant_core::WallTime::from_micros(reset.as_microsecond()).unwrap()
-            ))
+            observation.quota_reset_at,
+            Some(provenant_core::WallTime::from_micros(reset.as_microsecond()).unwrap())
         );
         assert!(observation.failed_checks.is_empty());
     }

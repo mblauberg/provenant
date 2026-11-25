@@ -128,9 +128,7 @@ pub(super) fn bind_item(
     };
     document.review_base = Some(initial_base.to_owned());
     document.queue = Some(launch.queue.knobs.clone());
-    document
-        .set_queue_ci_wait(&launch.queue.cap_wait)
-        .map_err(super::interface::graph_input_reason)?;
+    document.set_queue_ci_wait(&launch.queue.cap_wait);
     document
         .context
         .get_or_insert_with(Default::default)

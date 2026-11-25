@@ -76,6 +76,7 @@ impl CiStatus for Owner {
         _: usize,
     ) -> CiObservation {
         CiObservation {
+            quota_reset_at: None,
             extra: Default::default(),
             state: CiState::Passed,
             summary: "passed".into(),

@@ -326,6 +326,8 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
         .map(|node| {
             let boundary = node.condition.is_some() || node.loop_body.is_some();
             NodeProgress {
+                delivery_adoption: None,
+                delivery_review_disposition: None,
                 delivery_loop: None,
                 escalation: None,
                 delivery_hygiene: None,
@@ -407,6 +409,8 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                     outcome: SeparationOutcome::Unavailable,
                 }),
                 ci: matches!(node.condition, Some(GateCondition::Ci { .. })).then(|| CiEvidence {
+                    quota_reset_at: None,
+                    failed_checks_policy: None,
                     wake_at: Some(envelope::latest()),
                     pending_observations: u64::MAX,
                     extra: Default::default(),
@@ -522,6 +526,7 @@ host_refused_before_acceptance: false,
     GraphCheckpoint {
         bases,
         extra: Default::default(),
+        delivery_queue_controls: None,
         cancellation_request_receipt: None,
         pending_writer_provisioning: Default::default(),
         pending_steers: worst_case_pending_steers(),
@@ -1136,6 +1141,7 @@ fn ci_failed_checks_and_findings_fit_the_configured_envelope() {
             for node in &mut checkpoint.nodes {
                 if let Some(ci) = &mut node.ci {
                     let mut observation = CiObservation {
+                        quota_reset_at: None,
                         extra: Default::default(),
                         state: CiState::Failed,
                         summary: worst(OUTPUT_FIELD_BYTES),

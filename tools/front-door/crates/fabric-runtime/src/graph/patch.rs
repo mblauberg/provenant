@@ -401,7 +401,6 @@ pub fn admit_delivery_review_disposition(
     budget: &crate::config::GraphBudget,
     requester_path: Option<&[u8]>,
 ) -> Result<Admitted, PatchError> {
-    const DISPOSITION_EXTRA: &str = "delivery_review_disposition";
     let key = disposition.operation_id.to_string();
     let digest = CanonicalV1::record_digest(
         "delivery-review-disposition",
@@ -540,18 +539,10 @@ pub fn admit_delivery_review_disposition(
     let next_revision = current
         .checked_add(1)
         .ok_or_else(|| PatchError::invalid("graph revision exhausted"))?;
-    let mut extra = provenant_records::ExtraFields::new();
-    extra.insert(
-        DISPOSITION_EXTRA.to_owned(),
-        serde_json::to_value(disposition)
-            .map_err(|error| PatchError::invalid(error.to_string()))?,
-    );
-    extra.insert(
-        "delivery_review_node".into(),
-        Value::String(node_id.to_owned()),
-    );
     let expansion = Expansion {
-        extra,
+        extra: Default::default(),
+        delivery_review_disposition: Some(disposition.clone()),
+        delivery_review_node: Some(node_id.to_owned()),
         retired: None,
         retry_generation: None,
         final_result: false,
@@ -575,9 +566,7 @@ pub fn admit_delivery_review_disposition(
         }),
     };
     let mut candidate = graph.checkpoint.clone();
-    candidate.nodes[progress_index]
-        .set_delivery_review_disposition(disposition)
-        .map_err(|error| PatchError::invalid(error.to_string()))?;
+    candidate.nodes[progress_index].set_delivery_review_disposition(disposition);
     candidate.expansions.push(expansion.clone());
     let admitted = admit_candidate(
         graph.document,
@@ -599,9 +588,7 @@ pub fn admit_delivery_review_disposition(
         &admitted.plan,
         limits,
     );
-    graph.checkpoint.nodes[progress_index]
-        .set_delivery_review_disposition(disposition)
-        .map_err(|error| PatchError::invalid(error.to_string()))?;
+    graph.checkpoint.nodes[progress_index].set_delivery_review_disposition(disposition);
     Ok(Admitted {
         revision,
         replayed: false,
@@ -754,6 +741,8 @@ fn admit_patch_for_retry(
         }
         graph.checkpoint.expansions.push(Expansion {
             extra: Default::default(),
+            delivery_review_disposition: None,
+            delivery_review_node: None,
             retired: None,
             retry_generation: None,
             final_result: false,
@@ -1540,6 +1529,7 @@ pub fn compile_submission(
         return Err(PatchError::invalid("patch adds no nodes"));
     }
     let mut document = GraphDocument {
+        queue_ci_wait: None,
         queue: None,
         review: None,
         review_subject_missing: false,
@@ -2102,6 +2092,8 @@ pub(super) fn prepare(
     let revision = current + 1;
     let mut expansion = Expansion {
         extra: Default::default(),
+        delivery_review_disposition: None,
+        delivery_review_node: None,
         retired: None,
         retry_generation: None,
         final_result: false,

@@ -90,21 +90,19 @@ fn adopted_publication_is_the_expected_head_for_a_republish() {
     let mut checkpoint =
         transitions::initial_checkpoint(&document, &plan, "digest".into(), None, None, None);
     checkpoint.nodes[0].state = NodeState::Succeeded;
-    checkpoint.nodes[0]
-        .set_delivery_adoption(&DeliveryAdoptionProgress {
-            operation_id: operation,
-            ci_admission: Some(DeliveryCiAdmission::Unavailable {
-                reason: "offline".into(),
-            }),
-            ci_admission_wait: None,
-            receipt: Some(DeliveryPublication {
-                branch: "topic".into(),
-                head: head.clone(),
-                pull_request: "https://example.test/pr/8".into(),
-            }),
-            error: None,
-        })
-        .unwrap();
+    checkpoint.nodes[0].set_delivery_adoption(&DeliveryAdoptionProgress {
+        operation_id: operation,
+        ci_admission: Some(DeliveryCiAdmission::Unavailable {
+            reason: "offline".into(),
+        }),
+        ci_admission_wait: None,
+        receipt: Some(DeliveryPublication {
+            branch: "topic".into(),
+            head: head.clone(),
+            pull_request: "https://example.test/pr/8".into(),
+        }),
+        error: None,
+    });
     assert_eq!(
         prior_publication_head(&plan.nodes[0], &checkpoint.nodes[0], "topic"),
         Some(head)

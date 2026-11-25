@@ -2628,6 +2628,8 @@ fn container_retry_brief_names_the_field_and_template_the_container_came_from() 
     // does not so this exercises the unsupported container-edit diagnostic.
     checkpoint.expansions.push(plans::Expansion {
         extra: Default::default(),
+        delivery_review_disposition: None,
+        delivery_review_node: None,
         retired: None,
         retry_generation: None,
         final_result: false,
@@ -2837,4 +2839,39 @@ fn retry_of_launch_blocked_writer_starts_a_new_attempt_in_the_same_worktree() {
         "/fixture/launch-blocked"
     );
     assert_eq!(next_owner.calls.len(), 1);
+}
+
+#[test]
+fn expansion_review_disposition_uses_declared_wire_fields() {
+    let disposition = DeliveryReviewDisposition {
+        operation_id: provenant_core::OperationId::parse("review-disposition-op").unwrap(),
+        request_id: provenant_core::HumanRequestId::from_bytes([5; 16]),
+        answer_id: provenant_core::HumanAnswerId::from_bytes([6; 16]),
+        head: "0123456789abcdef0123456789abcdef01234567".parse().unwrap(),
+        reason: "reviewed exact head".into(),
+    };
+    let expansion = plans::Expansion {
+        extra: Default::default(),
+        delivery_review_disposition: Some(disposition.clone()),
+        delivery_review_node: Some("review".into()),
+        retired: None,
+        retry_generation: None,
+        final_result: false,
+        final_fragment: false,
+        floor_warnings: Vec::new(),
+        source: String::new(),
+        nodes: Vec::new(),
+        uses: Vec::new(),
+        patch: None,
+    };
+    let value = serde_json::to_value(&expansion).unwrap();
+    assert_eq!(value["delivery_review_node"], "review");
+    assert_eq!(
+        value["delivery_review_disposition"],
+        serde_json::to_value(&disposition).unwrap()
+    );
+    let decoded: plans::Expansion = serde_json::from_value(value).unwrap();
+    assert_eq!(decoded.delivery_review_disposition, Some(disposition));
+    assert_eq!(decoded.delivery_review_node.as_deref(), Some("review"));
+    assert!(decoded.extra.is_empty());
 }

@@ -241,6 +241,7 @@ fn offer_until_ack_byte_budget_counts_serialised_envelope_and_leaves_answer_queu
     let created = receipt(f.call(ask(RequestKind::Question, "ask")).unwrap());
     f.call(InboxInput::Answer {
         extra: Default::default(),
+        queue_control: None,
         id: created.request_id,
         action: AnswerAction::Reply,
         option_id: None,
@@ -278,6 +279,7 @@ fn oversized_answer_is_refused_and_small_budget_skips_large_answers() {
     let large = receipt(f.call(ask(RequestKind::Question, "large")).unwrap());
     let make_answer = |text: String, operation: &str| InboxInput::Answer {
         extra: Default::default(),
+        queue_control: None,
         id: large.request_id,
         action: AnswerAction::Reply,
         option_id: None,
@@ -446,6 +448,7 @@ fn receipt(result: InboxResult) -> InboxReceipt {
 fn answer(id: HumanRequestId, operation: &str) -> InboxInput {
     InboxInput::Answer {
         extra: Default::default(),
+        queue_control: None,
         id,
         action: AnswerAction::Choose,
         option_id: Some("repair".into()),
@@ -535,6 +538,7 @@ fn inbox_all_kinds_preserve_text_and_reject_stale_or_invalid_answers() {
         let created = receipt(f.call(ask(kind, &format!("create-{action:?}"))).unwrap());
         let mut input = InboxInput::Answer {
             extra: Default::default(),
+            queue_control: None,
             id: created.request_id,
             action,
             option_id: None,
@@ -1996,4 +2000,75 @@ fn delivery_park_replays_a_prelaunch_refusal_with_its_graph_attempt_key() {
     assert_eq!(body["attempt_key"]["graph_id"], "graph-preparation");
     assert_eq!(body["attempt_key"]["attempt"], 3);
     assert_eq!(body["reason"], "operation_error");
+}
+
+#[test]
+fn queue_control_metadata_and_receipt_use_declared_inbox_fields() {
+    let metadata = crate::graph::queue_control::Metadata {
+        action: crate::graph::queue_control::Action::Accept,
+        expected_revision: 4,
+        operation_id: OperationId::parse("queue-control-op").unwrap(),
+        review_node: Some("review".into()),
+        review_head: None,
+        graph_id: Some("g-queue".into()),
+    };
+    let input = InboxInput::Answer {
+        extra: Default::default(),
+        queue_control: Some(metadata.clone()),
+        id: HumanRequestId::from_bytes([3; 16]),
+        action: AnswerAction::Choose,
+        option_id: Some("accept".into()),
+        text: None,
+        expect_revision: 2,
+        channel: InteractionChannel::Cli,
+        operation_id: op("answer-op"),
+    };
+    let input_value = serde_json::to_value(&input).unwrap();
+    assert_eq!(
+        input_value["queue_control"],
+        serde_json::to_value(&metadata).unwrap()
+    );
+    let decoded: InboxInput = serde_json::from_value(input_value).unwrap();
+    let InboxInput::Answer {
+        queue_control,
+        extra,
+        ..
+    } = decoded
+    else {
+        panic!("answer input")
+    };
+    assert_eq!(queue_control, Some(metadata));
+    assert!(extra.is_empty());
+
+    let receipt_control = QueueControlReceipt {
+        action: crate::graph::queue_control::Action::Accept,
+        operation_id: OperationId::parse("queue-control-op").unwrap(),
+        graph_id: "g-queue".into(),
+        target_node: Some("repair".into()),
+        expected_revision: 4,
+        applied_revision: Some(5),
+        state: crate::graph::queue_control::Phase::Applied,
+        replayed: false,
+        request_id: Some(HumanRequestId::from_bytes([3; 16])),
+        answer_id: Some(HumanAnswerId::from_bytes([4; 16])),
+    };
+    let receipt = InboxReceipt {
+        extra: Default::default(),
+        queue_control: Some(receipt_control.clone()),
+        operation_id: OperationId::parse("answer-op").unwrap(),
+        request_id: HumanRequestId::from_bytes([3; 16]),
+        revision: 2,
+        state: RequestState::Answered,
+        answer_id: Some(HumanAnswerId::from_bytes([4; 16])),
+        delivery: None,
+        work_coverage: None,
+    };
+    let receipt_value = serde_json::to_value(&receipt).unwrap();
+    assert_eq!(
+        receipt_value["queue_control"],
+        serde_json::to_value(&receipt_control).unwrap()
+    );
+    let decoded: InboxReceipt = serde_json::from_value(receipt_value).unwrap();
+    assert_eq!(decoded.queue_control, Some(receipt_control));
+    assert!(decoded.extra.is_empty());
 }

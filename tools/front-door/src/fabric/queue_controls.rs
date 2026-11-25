@@ -1,9 +1,13 @@
 //! Revisioned compositions for controls on durable delivery queue items.
 use super::{BoundFacade, FacadeError, Factory};
 use crate::fabric::owner::graph_journal_error;
+#[cfg(test)]
+use provenant_core::GitOid;
 use provenant_core::{
-    CancelToken, CanonicalV1, Clock, GitOid, HumanAnswerId, HumanRequestId, OperationId, WaitBudget,
+    CancelToken, CanonicalV1, Clock, HumanAnswerId, HumanRequestId, OperationId, WaitBudget,
 };
+pub(super) use provenant_fabric_runtime::graph::queue_control::{Action, Metadata};
+use provenant_fabric_runtime::graph::queue_control::{Intent, Phase, QueueControlLedger as Ledger};
 use provenant_fabric_runtime::{
     graph::{
         AttemptState, DeliveryReviewDisposition, FileJournal, GraphJournal, LiveGraph, NodeState,
@@ -11,7 +15,7 @@ use provenant_fabric_runtime::{
     },
     inbox::{
         AnswerAction, GraphSteerContext, InboxFilter, InboxInput, InboxItem, InboxResult,
-        RequestState,
+        QueueControlReceipt, RequestState,
     },
 };
 use provenant_records::graph::ParkReason;
@@ -19,84 +23,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
-const CONTROL_LEDGER_KEY: &str = "delivery_queue_controls";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(super) enum Action {
-    Accept,
-    Fix,
-    Retry,
-    Drop,
-}
-
-/// Metadata is attached only to an existing user-facing operation. It is not
-/// accepted from a graph document or stored plan.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct Metadata {
-    pub action: Action,
-    pub expected_revision: u64,
-    pub operation_id: OperationId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub review_node: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub review_head: Option<GitOid>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub graph_id: Option<String>,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AcceptGateRetry {
     operation_id: OperationId,
     gate: String,
     baseline_generation: u64,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Ledger {
-    #[serde(default)]
-    intents: BTreeMap<String, Intent>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Intent {
-    digest: String,
-    metadata: Metadata,
-    graph_id: String,
-    target_node: Option<String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    retry_generations: BTreeMap<String, u64>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    gate_generations: BTreeMap<String, u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    request_id: Option<HumanRequestId>,
-    payload: Value,
-    phase: Phase,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    answer_id: Option<HumanAnswerId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    applied_revision: Option<u64>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum Phase {
-    Pending,
-    Answered,
-    DispositionAdmitted,
-    DropAdmitted,
-    Applied,
-    Refused,
-}
-
-impl Phase {
-    fn terminal(self) -> bool {
-        matches!(self, Self::Applied | Self::Refused)
-    }
 }
 
 fn refusal(reason: impl std::fmt::Display) -> FacadeError {
@@ -115,17 +47,11 @@ pub(super) fn decode_metadata(value: &Value) -> Result<Metadata, FacadeError> {
     })
 }
 
-fn ledger(
-    checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
-) -> Result<Ledger, FacadeError> {
+fn ledger(checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint) -> Ledger {
     checkpoint
-        .extra
-        .get(CONTROL_LEDGER_KEY)
-        .cloned()
-        .map(serde_json::from_value)
-        .transpose()
-        .map_err(|_| FacadeError::StateCorrupt)
-        .map(Option::unwrap_or_default)
+        .delivery_queue_controls
+        .clone()
+        .unwrap_or_default()
 }
 
 fn ledger_has_drop_fence(ledger: &Ledger) -> bool {
@@ -138,18 +64,11 @@ fn ledger_has_drop_fence(ledger: &Ledger) -> bool {
 pub(super) fn drop_fence_active(
     checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
 ) -> Result<bool, FacadeError> {
-    Ok(ledger_has_drop_fence(&ledger(checkpoint)?))
+    Ok(ledger_has_drop_fence(&ledger(checkpoint)))
 }
 
-fn save_ledger(
-    checkpoint: &mut provenant_fabric_runtime::graph::GraphCheckpoint,
-    ledger: &Ledger,
-) -> Result<(), FacadeError> {
-    let value = serde_json::to_value(ledger).map_err(|_| FacadeError::StateCorrupt)?;
-    checkpoint
-        .extra
-        .insert(CONTROL_LEDGER_KEY.to_owned(), value);
-    Ok(())
+fn save_ledger(checkpoint: &mut provenant_fabric_runtime::graph::GraphCheckpoint, ledger: &Ledger) {
+    checkpoint.delivery_queue_controls = Some(ledger.clone());
 }
 
 pub(super) fn control_digest(
@@ -197,7 +116,7 @@ fn reserve_checkpoint(
             "queue control requires a persisted delivery queue graph",
         ));
     }
-    let mut ledger = ledger(checkpoint)?;
+    let mut ledger = ledger(checkpoint);
     let key = metadata.operation_id.to_string();
     let digest = control_digest(metadata, graph_id, target_node, request_id, payload)?;
     if let Some(saved) = ledger.intents.get(&key) {
@@ -261,7 +180,7 @@ fn reserve_checkpoint(
         applied_revision: None,
     };
     ledger.intents.insert(key, intent.clone());
-    save_ledger(checkpoint, &ledger)?;
+    save_ledger(checkpoint, &ledger);
     Ok((intent, false))
 }
 
@@ -296,9 +215,9 @@ pub(super) fn reserve_retry_control(
             .any(|record| record.key.as_deref() == Some(operation_id.as_str()));
         if !has_receipt && patch::revision(checkpoint) != metadata.expected_revision {
             intent.phase = Phase::Refused;
-            let mut ledger = ledger(checkpoint)?;
+            let mut ledger = ledger(checkpoint);
             ledger.intents.insert(operation_id, intent.clone());
-            save_ledger(checkpoint, &ledger)?;
+            save_ledger(checkpoint, &ledger);
         }
     }
     Ok((intent.phase.terminal(), replayed))
@@ -372,11 +291,11 @@ fn reserve_drop_control(
         && patch::revision(&checkpoint) != metadata.expected_revision
     {
         intent.phase = Phase::Refused;
-        let mut ledger = ledger(&checkpoint)?;
+        let mut ledger = ledger(&checkpoint);
         ledger
             .intents
             .insert(metadata.operation_id.to_string(), intent.clone());
-        save_ledger(&mut checkpoint, &ledger)?;
+        save_ledger(&mut checkpoint, &ledger);
         journal.save(&checkpoint).map_err(graph_journal_error)?;
         return Ok((intent, replayed));
     }
@@ -403,21 +322,21 @@ fn reserve_drop_control(
             );
         }
         intent.phase = Phase::DropAdmitted;
-        let mut ledger = ledger(&checkpoint)?;
+        let mut ledger = ledger(&checkpoint);
         ledger
             .intents
             .insert(metadata.operation_id.to_string(), intent.clone());
-        save_ledger(&mut checkpoint, &ledger)?;
+        save_ledger(&mut checkpoint, &ledger);
     } else if intent.phase != Phase::DropAdmitted {
         intent.phase = Phase::DropAdmitted;
-        let mut ledger = ledger(&checkpoint)?;
+        let mut ledger = ledger(&checkpoint);
         ledger
             .intents
             .insert(metadata.operation_id.to_string(), intent.clone());
-        save_ledger(&mut checkpoint, &ledger)?;
+        save_ledger(&mut checkpoint, &ledger);
     }
     journal.save(&checkpoint).map_err(graph_journal_error)?;
-    let intent = ledger(&checkpoint)?
+    let intent = ledger(&checkpoint)
         .intents
         .get(&metadata.operation_id.to_string())
         .cloned()
@@ -448,7 +367,7 @@ fn find_intent(
         .map_err(graph_journal_error)?
         .ok_or(FacadeError::NotFound)?;
     let key = metadata.operation_id.to_string();
-    let mut saved_ledger = ledger(&checkpoint)?;
+    let mut saved_ledger = ledger(&checkpoint);
     let Some(intent) = saved_ledger.intents.remove(&key) else {
         return Ok(None);
     };
@@ -519,7 +438,7 @@ fn begin(
         .load(graph_id)
         .map_err(graph_journal_error)?
         .ok_or(FacadeError::NotFound)?;
-    let mut ledger = ledger(&checkpoint)?;
+    let mut ledger = ledger(&checkpoint);
     let key = metadata.operation_id.to_string();
     let digest = control_digest(metadata, graph_id, target_node, request_id, payload)?;
     if let Some(saved) = ledger.intents.get(&key) {
@@ -642,7 +561,7 @@ fn begin(
         applied_revision: None,
     };
     ledger.intents.insert(key, intent.clone());
-    save_ledger(&mut checkpoint, &ledger)?;
+    save_ledger(&mut checkpoint, &ledger);
     journal.save(&checkpoint).map_err(graph_journal_error)?;
     Ok((intent, false))
 }
@@ -722,14 +641,14 @@ pub(super) fn queue_live_fix(
             .then_some("queue fix target attempt is no longer the current live attempt")
     });
     if reason.is_some() {
-        let mut ledger = ledger(&checkpoint)?;
+        let mut ledger = ledger(&checkpoint);
         let saved = ledger
             .intents
             .get_mut(&metadata.operation_id.to_string())
             .ok_or(FacadeError::StateCorrupt)?;
         saved.phase = Phase::Refused;
         let receipt = saved.clone();
-        save_ledger(&mut checkpoint, &ledger)?;
+        save_ledger(&mut checkpoint, &ledger);
         journal.save(&checkpoint).map_err(graph_journal_error)?;
         return Ok(control_receipt(&receipt, replayed));
     }
@@ -760,18 +679,18 @@ pub(super) fn queue_live_fix(
         .enqueue(metadata.operation_id.to_string(), pending)
         .is_err()
     {
-        let mut ledger = ledger(&checkpoint)?;
+        let mut ledger = ledger(&checkpoint);
         let saved = ledger
             .intents
             .get_mut(&metadata.operation_id.to_string())
             .ok_or(FacadeError::StateCorrupt)?;
         saved.phase = Phase::Refused;
         let receipt = saved.clone();
-        save_ledger(&mut checkpoint, &ledger)?;
+        save_ledger(&mut checkpoint, &ledger);
         journal.save(&checkpoint).map_err(graph_journal_error)?;
         return Ok(control_receipt(&receipt, replayed));
     }
-    let mut ledger = ledger(&checkpoint)?;
+    let mut ledger = ledger(&checkpoint);
     let saved = ledger
         .intents
         .get_mut(&metadata.operation_id.to_string())
@@ -779,7 +698,7 @@ pub(super) fn queue_live_fix(
     saved.phase = Phase::Applied;
     saved.applied_revision = Some(patch::revision(&checkpoint));
     let receipt = saved.clone();
-    save_ledger(&mut checkpoint, &ledger)?;
+    save_ledger(&mut checkpoint, &ledger);
     let receipt = control_receipt(&receipt, replayed);
     journal.save(&checkpoint).map_err(graph_journal_error)?;
     Ok(receipt)
@@ -807,7 +726,7 @@ fn update_intent(
         .load(graph_id)
         .map_err(graph_journal_error)?
         .ok_or(FacadeError::NotFound)?;
-    let mut ledger = ledger(&checkpoint)?;
+    let mut ledger = ledger(&checkpoint);
     let key = operation_id.to_string();
     let intent = ledger
         .intents
@@ -815,7 +734,7 @@ fn update_intent(
         .ok_or(FacadeError::StateCorrupt)?;
     update(intent);
     let result = intent.clone();
-    save_ledger(&mut checkpoint, &ledger)?;
+    save_ledger(&mut checkpoint, &ledger);
     journal.save(&checkpoint).map_err(graph_journal_error)?;
     Ok(result)
 }
@@ -825,12 +744,12 @@ fn refuse_intent_locked(
     checkpoint: &mut provenant_fabric_runtime::graph::GraphCheckpoint,
     operation_id: &OperationId,
 ) -> Result<(), FacadeError> {
-    let mut ledger = ledger(checkpoint)?;
+    let mut ledger = ledger(checkpoint);
     let Some(intent) = ledger.intents.get_mut(&operation_id.to_string()) else {
         return Err(FacadeError::StateCorrupt);
     };
     intent.phase = Phase::Refused;
-    save_ledger(checkpoint, &ledger)?;
+    save_ledger(checkpoint, &ledger);
     journal.save(checkpoint).map_err(graph_journal_error)
 }
 
@@ -855,7 +774,7 @@ fn complete_retry(
         .map_err(graph_journal_error)?
         .ok_or(FacadeError::NotFound)?;
     let key = operation_id.to_string();
-    let mut ledger = ledger(&checkpoint)?;
+    let mut ledger = ledger(&checkpoint);
     let saved = ledger
         .intents
         .get_mut(&key)
@@ -882,7 +801,7 @@ fn complete_retry(
     saved.phase = Phase::Applied;
     saved.applied_revision = Some(patch::revision(&checkpoint));
     let result = saved.clone();
-    save_ledger(&mut checkpoint, &ledger)?;
+    save_ledger(&mut checkpoint, &ledger);
     journal.save(&checkpoint).map_err(graph_journal_error)?;
     Ok(result)
 }
@@ -908,7 +827,7 @@ fn complete_drop(
         .map_err(graph_journal_error)?
         .ok_or(FacadeError::NotFound)?;
     let key = operation_id.to_string();
-    let mut ledger = ledger(&checkpoint)?;
+    let mut ledger = ledger(&checkpoint);
     let saved = ledger
         .intents
         .get_mut(&key)
@@ -921,7 +840,7 @@ fn complete_drop(
     saved.phase = Phase::Applied;
     saved.applied_revision = Some(patch::revision(&checkpoint));
     let result = saved.clone();
-    save_ledger(&mut checkpoint, &ledger)?;
+    save_ledger(&mut checkpoint, &ledger);
     journal.save(&checkpoint).map_err(graph_journal_error)?;
     Ok(result)
 }
@@ -947,7 +866,7 @@ fn refuse_unadmitted_retry(
         .load(graph_id)
         .map_err(graph_journal_error)?
         .ok_or(FacadeError::NotFound)?;
-    let mut ledger = ledger(&checkpoint)?;
+    let mut ledger = ledger(&checkpoint);
     let key = operation_id.to_string();
     let Some(intent) = ledger.intents.get_mut(&key) else {
         return Ok(());
@@ -973,25 +892,29 @@ fn refuse_unadmitted_retry(
         });
     if !has_retry_receipt {
         intent.phase = Phase::Refused;
-        save_ledger(&mut checkpoint, &ledger)?;
+        save_ledger(&mut checkpoint, &ledger);
         journal.save(&checkpoint).map_err(graph_journal_error)?;
     }
     Ok(())
 }
 
+fn typed_control_receipt(intent: &Intent, replayed: bool) -> QueueControlReceipt {
+    QueueControlReceipt {
+        action: intent.metadata.action,
+        operation_id: intent.metadata.operation_id.clone(),
+        graph_id: intent.graph_id.clone(),
+        target_node: intent.target_node.clone(),
+        expected_revision: intent.metadata.expected_revision,
+        applied_revision: intent.applied_revision,
+        state: intent.phase,
+        replayed,
+        request_id: intent.request_id,
+        answer_id: intent.answer_id,
+    }
+}
+
 fn control_receipt(intent: &Intent, replayed: bool) -> Value {
-    json!({
-        "action": intent.metadata.action,
-        "operation_id": intent.metadata.operation_id,
-        "graph_id": intent.graph_id,
-        "target_node": intent.target_node,
-        "expected_revision": intent.metadata.expected_revision,
-        "applied_revision": intent.applied_revision,
-        "state": intent.phase,
-        "replayed": replayed,
-        "request_id": intent.request_id,
-        "answer_id": intent.answer_id,
-    })
+    json!(typed_control_receipt(intent, replayed))
 }
 
 fn intent_requires_parallel_slot(intent: &Intent) -> bool {
@@ -1001,7 +924,7 @@ fn intent_requires_parallel_slot(intent: &Intent) -> bool {
 pub(super) fn checkpoint_has_pending_parallel_control(
     checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
 ) -> Result<bool, FacadeError> {
-    Ok(ledger(checkpoint)?
+    Ok(ledger(checkpoint)
         .intents
         .values()
         .any(intent_requires_parallel_slot))
@@ -1010,7 +933,7 @@ pub(super) fn checkpoint_has_pending_parallel_control(
 pub(super) fn checkpoint_has_pending_control(
     checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
 ) -> Result<bool, FacadeError> {
-    Ok(ledger(checkpoint)?
+    Ok(ledger(checkpoint)
         .intents
         .values()
         .any(|intent| !intent.phase.terminal()))
@@ -1032,7 +955,7 @@ pub(super) fn authorise_accept_gate_retry(
             "accept gate retry target does not match its marker",
         ));
     }
-    let ledger = ledger(checkpoint)?;
+    let ledger = ledger(checkpoint);
     let operation_key = marker.operation_id.to_string();
     if ledger_has_drop_fence(&ledger) {
         return Err(refusal("dropped queue items cannot be retried"));
@@ -1423,7 +1346,8 @@ fn accept_request(
     cancel: &CancelToken,
 ) -> Result<InboxResult, FacadeError> {
     let InboxInput::Answer {
-        mut extra,
+        extra,
+        queue_control,
         id,
         action,
         option_id,
@@ -1435,12 +1359,8 @@ fn accept_request(
     else {
         return Err(refusal("queue accept requires an inbox answer"));
     };
-    let mut metadata = decode_metadata(
-        extra
-            .remove("queue_control")
-            .as_ref()
-            .ok_or_else(|| refusal("queue control metadata is required"))?,
-    )?;
+    let mut metadata =
+        queue_control.ok_or_else(|| refusal("queue control metadata is required"))?;
     if metadata.action != Action::Accept
         || operation_id.as_ref() != Some(&metadata.operation_id)
         || action != AnswerAction::Reply
@@ -1458,6 +1378,7 @@ fn accept_request(
     patch::scan_for_secrets(&reason).map_err(refusal)?;
     let answer = InboxInput::Answer {
         extra,
+        queue_control: None,
         id,
         action,
         option_id,
@@ -1540,7 +1461,7 @@ fn accept_request(
         .load(&graph_id)
         .map_err(graph_journal_error)?
         .ok_or(FacadeError::NotFound)?;
-    let saved = ledger(&checkpoint)?
+    let saved = ledger(&checkpoint)
         .intents
         .get(&metadata.operation_id.to_string())
         .cloned()
@@ -1596,14 +1517,14 @@ fn accept_request(
     };
     let answer_id = receipt.answer_id.ok_or(FacadeError::StateCorrupt)?;
     if !matches!(intent.phase, Phase::DispositionAdmitted | Phase::Applied) {
-        let mut control_ledger = ledger(&checkpoint)?;
+        let mut control_ledger = ledger(&checkpoint);
         let saved = control_ledger
             .intents
             .get_mut(&metadata.operation_id.to_string())
             .ok_or(FacadeError::StateCorrupt)?;
         saved.phase = Phase::Answered;
         saved.answer_id = Some(answer_id);
-        save_ledger(&mut checkpoint, &control_ledger)?;
+        save_ledger(&mut checkpoint, &control_ledger);
         journal.save(&checkpoint).map_err(graph_journal_error)?;
     }
     let (admitted_intent, gates) = apply_accept_disposition_locked(
@@ -1636,9 +1557,7 @@ fn accept_request(
             saved.applied_revision = admitted_intent.applied_revision;
         },
     )?;
-    receipt
-        .extra
-        .insert("queue_control".into(), control_receipt(&intent, replayed));
+    receipt.queue_control = Some(typed_control_receipt(&intent, replayed));
     Ok(InboxResult::Saved { receipt })
 }
 
@@ -1687,7 +1606,7 @@ fn apply_accept_disposition_locked(
         &factory.context.config.graph.limits,
     )
     .map_err(|error| refusal(error.to_string()))?;
-    let mut ledger = ledger(checkpoint)?;
+    let mut ledger = ledger(checkpoint);
     let key = intent.metadata.operation_id.to_string();
     let disposition_was_admitted = ledger.intents.get(&key).is_some_and(|saved| {
         saved.phase == Phase::DispositionAdmitted || saved.phase == Phase::Applied
@@ -1712,7 +1631,7 @@ fn apply_accept_disposition_locked(
             .collect();
     }
     let saved = saved.clone();
-    save_ledger(checkpoint, &ledger)?;
+    save_ledger(checkpoint, &ledger);
     journal.save(checkpoint).map_err(graph_journal_error)?;
     Ok((saved, gates))
 }
@@ -1739,7 +1658,7 @@ fn retry_failed_gates(
             .load(graph_id)
             .map_err(graph_journal_error)?
             .ok_or(FacadeError::NotFound)?;
-        let ledger = ledger(&checkpoint)?;
+        let ledger = ledger(&checkpoint);
         let intent = ledger
             .intents
             .get(operation_key)
@@ -1783,8 +1702,13 @@ pub(super) fn handle_inbox_control(
     budget: WaitBudget,
     cancel: &CancelToken,
 ) -> Result<Option<InboxResult>, FacadeError> {
-    let marked_answer =
-        matches!(&input, InboxInput::Answer { extra, .. } if extra.contains_key("queue_control"));
+    let marked_answer = matches!(
+        &input,
+        InboxInput::Answer {
+            queue_control: Some(_),
+            ..
+        }
+    );
     if !marked_answer {
         return Ok(None);
     }
@@ -1810,7 +1734,7 @@ pub(super) fn reconcile_pending(
         .load(graph_id)
         .map_err(graph_journal_error)?
         .ok_or(FacadeError::NotFound)?;
-    let mut intents: Vec<_> = ledger(&checkpoint)?
+    let mut intents: Vec<_> = ledger(&checkpoint)
         .intents
         .into_values()
         .filter(|intent| !intent.phase.terminal())
@@ -1963,13 +1887,13 @@ mod tests {
         saved
             .intents
             .insert(control.operation_id.to_string(), intent.clone());
-        save_ledger(&mut checkpoint, &saved).unwrap();
+        save_ledger(&mut checkpoint, &saved);
 
         // Model a process restart by round-tripping the journal checkpoint.
         let persisted = serde_json::to_value(&checkpoint).unwrap();
         let restored: provenant_fabric_runtime::graph::GraphCheckpoint =
             serde_json::from_value(persisted).unwrap();
-        let restored_ledger = ledger(&restored).unwrap();
+        let restored_ledger = ledger(&restored);
         assert_eq!(
             restored_ledger
                 .intents
@@ -2000,6 +1924,21 @@ mod tests {
     }
 
     #[test]
+    fn malformed_control_ledger_is_not_treated_as_absent() {
+        let checkpoint = json!({
+            "schema_version": 2,
+            "graph_id": "queue-1",
+            "plan_digest": "digest",
+            "nodes": [],
+            "delivery_queue_controls": {"intents": "invalid"}
+        });
+        assert!(
+            serde_json::from_value::<provenant_fabric_runtime::graph::GraphCheckpoint>(checkpoint)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn operation_replay_digest_binds_target_and_payload() {
         let control = metadata(4, operation(1));
         let payload = json!({"op":"retry"});
@@ -2027,6 +1966,7 @@ mod tests {
             graph_id: Some("queue-1".into()),
         };
         let payload = serde_json::to_value(InboxInput::Answer {
+            queue_control: None,
             extra: Default::default(),
             id: request_id,
             action: AnswerAction::Reply,
@@ -2078,7 +2018,7 @@ mod tests {
         saved
             .intents
             .insert(operation_id.to_string(), intent.clone());
-        save_ledger(&mut checkpoint, &saved).unwrap();
+        save_ledger(&mut checkpoint, &saved);
 
         let marker = json!({
             "operation_id":operation_id,
@@ -2102,7 +2042,7 @@ mod tests {
         drop_intent.phase = Phase::DropAdmitted;
         dropping.intents.insert("drop-op".into(), drop_intent);
         let mut fenced = checkpoint;
-        save_ledger(&mut fenced, &dropping).unwrap();
+        save_ledger(&mut fenced, &dropping);
         assert!(authorise_accept_gate_retry(&fenced, "queue-1", "gate", &marker).is_err());
     }
 
@@ -2148,7 +2088,7 @@ mod tests {
         saved
             .intents
             .insert(retry.metadata.operation_id.to_string(), drop_intent);
-        save_ledger(&mut checkpoint, &saved).unwrap();
+        save_ledger(&mut checkpoint, &saved);
         assert!(checkpoint_has_pending_control(&checkpoint).unwrap());
         assert!(!checkpoint_has_pending_parallel_control(&checkpoint).unwrap());
     }
@@ -2182,20 +2122,20 @@ mod tests {
         saved
             .intents
             .insert(drop_metadata.operation_id.to_string(), drop_intent);
-        save_ledger(&mut checkpoint, &saved).unwrap();
+        save_ledger(&mut checkpoint, &saved);
 
         let persisted = serde_json::to_value(&checkpoint).unwrap();
         let restored: provenant_fabric_runtime::graph::GraphCheckpoint =
             serde_json::from_value(persisted).unwrap();
         assert!(drop_fence_active(&restored).unwrap());
 
-        let mut refused = ledger(&restored).unwrap();
+        let mut refused = ledger(&restored);
         refused
             .intents
             .get_mut(&drop_metadata.operation_id.to_string())
             .unwrap()
             .phase = Phase::Refused;
-        save_ledger(&mut checkpoint, &refused).unwrap();
+        save_ledger(&mut checkpoint, &refused);
         assert!(!drop_fence_active(&checkpoint).unwrap());
     }
 }

@@ -108,6 +108,7 @@ pub(super) fn checkpoint_bound(
     let skeleton = GraphCheckpoint {
         bases: None,
         extra: Default::default(),
+        delivery_queue_controls: None,
         cancellation_request_receipt: None,
         pending_writer_provisioning: Default::default(),
         pending_steers: Default::default(),
@@ -377,6 +378,8 @@ fn node_bound(
     });
     let boundary = gate || node.loop_body.is_some();
     let mut skeleton = NodeProgress {
+        delivery_adoption: None,
+        delivery_review_disposition: None,
         delivery_loop: node.loop_body.as_ref().map(|spec| {
             provenant_records::graph::DeliveryLoopProgress {
                 name: node.id.clone(),
@@ -477,6 +480,8 @@ fn node_bound(
             outcome: SeparationOutcome::Unconstrained,
         }),
         ci: ci.then(|| CiEvidence {
+            quota_reset_at: None,
+            failed_checks_policy: None,
             wake_at: Some(latest()),
             pending_observations: u64::MAX,
             extra: Default::default(),

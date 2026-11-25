@@ -101,6 +101,7 @@ impl CiStatus for Owner {
     ) -> CiObservation {
         self.gate_observations.push(("ci".into(), target.into()));
         CiObservation {
+            quota_reset_at: None,
             extra: Default::default(),
             state: self.ci_states.pop_front().unwrap_or(CiState::Passed),
             summary: "checks passed".into(),

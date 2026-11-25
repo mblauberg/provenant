@@ -75,12 +75,11 @@ pub(super) fn default_max_failed_checks() -> usize {
 impl CiObservation {
     /// Carry a forge quota reset independently of the human-readable summary.
     pub fn set_quota_reset(&mut self, reset: provenant_core::WallTime) {
-        self.extra
-            .insert("quota_reset_at".into(), serde_json::json!(reset));
+        self.quota_reset_at = Some(reset);
     }
 
     fn quota_reset(&self) -> Option<provenant_core::WallTime> {
-        serde_json::from_value(self.extra.get("quota_reset_at")?.clone()).ok()
+        self.quota_reset_at
     }
 
     /// Cap the complete canonical JSON array, including names, URLs and escapes.
@@ -223,6 +222,7 @@ pub(super) fn evaluate<O: AttemptOwner>(
             max_checks,
         ),
         _ => CiObservation {
+            quota_reset_at: None,
             extra: Default::default(),
             state: CiState::Unavailable,
             summary: if binding.is_none() {
@@ -303,11 +303,7 @@ pub(super) fn evaluate<O: AttemptOwner>(
     }
     let quota_reset = observation
         .quota_reset()
-        .or_else(|| {
-            prior.as_ref().and_then(|evidence| {
-                serde_json::from_value(evidence.extra.get("quota_reset_at")?.clone()).ok()
-            })
-        })
+        .or_else(|| prior.as_ref().and_then(|evidence| evidence.quota_reset_at))
         .filter(|reset| {
             delivery_queue
                 && observation.state == CiState::Pending
@@ -377,12 +373,22 @@ pub(super) fn evaluate<O: AttemptOwner>(
     checkpoint.nodes[index].ci = Some(CiEvidence {
         wake_at: None,
         pending_observations,
-        extra: [("failed_checks_policy".into(), serde_json::json!({
-            "max_bytes": max_bytes,
-            "max_bytes_source": if failed_checks_max_bytes.is_some() { "condition" } else { "default" },
-            "max_checks": max_checks,
-            "max_checks_source": if max_failed_checks.is_some() { "condition" } else { "default" },
-        }))].into(),
+        extra: Default::default(),
+        quota_reset_at: quota_reset,
+        failed_checks_policy: Some(CiFailedChecksPolicy {
+            max_bytes,
+            max_bytes_source: if failed_checks_max_bytes.is_some() {
+                CiLimitSource::Condition
+            } else {
+                CiLimitSource::Default
+            },
+            max_checks,
+            max_checks_source: if max_failed_checks.is_some() {
+                CiLimitSource::Condition
+            } else {
+                CiLimitSource::Default
+            },
+        }),
         first_observed_stamp: anchor,
         clock_reanchors: reanchors,
         clock_reanchor_reason: reanchor_reason,
@@ -394,13 +400,6 @@ pub(super) fn evaluate<O: AttemptOwner>(
         truncated: observation.truncated,
         elapsed_seconds,
     });
-    if let Some(reset) = quota_reset
-        && let Some(evidence) = checkpoint.nodes[index].ci.as_mut()
-    {
-        evidence
-            .extra
-            .insert("quota_reset_at".into(), serde_json::json!(reset));
-    }
     let timed_out = prior.is_some() && !superseded && elapsed_seconds >= *timeout_seconds;
     if !delivery_queue && timed_out {
         return Ok(Evaluation::Settled(Some(if unscheduled {

@@ -97,7 +97,7 @@ pub fn minimum_schema_version(document: &GraphDocument) -> u32 {
 pub(super) fn document_requires_review_fields(document: &GraphDocument) -> bool {
     document.queue.is_some()
         || document.review_base.is_some()
-        || document.extra.contains_key(QUEUE_CI_WAIT_KEY)
+        || document.queue_ci_wait.is_some()
         || nodes_have_v2(&document.nodes)
 }
 
@@ -268,13 +268,10 @@ pub(super) fn validate_schema(document: &GraphDocument) -> Result<(), AdmissionE
     if !matches!(document.schema_version, 1 | 2) || document.schema_version == 1 && has_v2 {
         return Err(AdmissionError::Schema("schema version".into()));
     }
-    if document.extra.contains_key(QUEUE_CI_WAIT_KEY) {
-        let Some(wait) = document.queue_ci_wait() else {
-            return Err(AdmissionError::Schema("queue CI wait source".into()));
-        };
-        if document.queue.is_none() || !(1..=14_400).contains(&wait.value) {
-            return Err(AdmissionError::Schema("queue CI wait bounds".into()));
-        }
+    if let Some(wait) = &document.queue_ci_wait
+        && (document.queue.is_none() || !(1..=14_400).contains(&wait.value))
+    {
+        return Err(AdmissionError::Schema("queue CI wait bounds".into()));
     }
     Ok(())
 }

@@ -103,32 +103,19 @@ pub struct DeliveryAdoptionRequest<'a> {
     pub intent: &'a DeliveryAdoptionIntent,
 }
 
-const DELIVERY_ADOPTION_KEY: &str = "delivery_adoption";
-
 impl NodeProgress {
-    /// Read the typed, host-verified adoption progress from forward-compatible
-    /// progress extras. Malformed data never supplies publication evidence.
+    /// Read the typed, host-verified adoption progress from node progress.
     pub fn delivery_adoption(&self) -> Option<DeliveryAdoptionProgress> {
-        self.extra
-            .get(DELIVERY_ADOPTION_KEY)
-            .cloned()
-            .and_then(|value| serde_json::from_value(value).ok())
+        self.delivery_adoption.clone()
     }
 
     pub(super) fn has_delivery_adoption(&self) -> bool {
-        self.extra.contains_key(DELIVERY_ADOPTION_KEY)
+        self.delivery_adoption.is_some()
     }
 
     /// Persist adoption progress without conflating it with a newly published
     /// writer receipt.
-    pub fn set_delivery_adoption(
-        &mut self,
-        progress: &DeliveryAdoptionProgress,
-    ) -> Result<(), serde_json::Error> {
-        self.extra.insert(
-            DELIVERY_ADOPTION_KEY.to_owned(),
-            serde_json::to_value(progress)?,
-        );
-        Ok(())
+    pub fn set_delivery_adoption(&mut self, progress: &DeliveryAdoptionProgress) {
+        self.delivery_adoption = Some(progress.clone());
     }
 }

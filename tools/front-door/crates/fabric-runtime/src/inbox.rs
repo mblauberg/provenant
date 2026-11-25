@@ -298,6 +298,8 @@ pub enum InboxInput {
     Answer {
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        queue_control: Option<crate::graph::queue_control::Metadata>,
         id: HumanRequestId,
         action: AnswerAction,
         option_id: Option<String>,
@@ -399,6 +401,8 @@ impl From<InboxCursor> for String {
 pub struct InboxReceipt {
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_control: Option<QueueControlReceipt>,
     pub operation_id: OperationId,
     pub request_id: HumanRequestId,
     pub revision: u64,
@@ -407,6 +411,21 @@ pub struct InboxReceipt {
     pub delivery: Option<AnswerDelivery>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_coverage: Option<WorkCoverage>,
+}
+
+/// Typed receipt attached to a completed durable delivery-queue control.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueControlReceipt {
+    pub action: crate::graph::queue_control::Action,
+    pub operation_id: OperationId,
+    pub graph_id: String,
+    pub target_node: Option<String>,
+    pub expected_revision: u64,
+    pub applied_revision: Option<u64>,
+    pub state: crate::graph::queue_control::Phase,
+    pub replayed: bool,
+    pub request_id: Option<HumanRequestId>,
+    pub answer_id: Option<HumanAnswerId>,
 }
 
 // Flattened into `InboxResult::Saved`: a single-pass reader keeps that chain at
@@ -423,6 +442,7 @@ provenant_records::deserialize_with_extra!(InboxReceipt {
         answer_id: Option<HumanAnswerId>,
         delivery: Option<AnswerDelivery>,
         work_coverage: Option<WorkCoverage>,
+        queue_control: Option<QueueControlReceipt>,
     }
 });
 
@@ -1592,6 +1612,7 @@ impl<'a> InboxService<'a> {
         Ok(InboxResult::Saved {
             receipt: InboxReceipt {
                 extra: Default::default(),
+                queue_control: None,
                 operation_id: operation.clone(),
                 request_id: value.id,
                 revision: value.revision,

@@ -894,6 +894,7 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
             }
         }
         let body_document = GraphDocument {
+            queue_ci_wait: None,
             // Outer publication bindings are checked after expansion; the
             // isolated body has only local names and uses temporary refs.
             queue: None,
@@ -1520,6 +1521,8 @@ pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
                 return progress;
             }
             let mut fresh = NodeProgress {
+                delivery_adoption: None,
+                delivery_review_disposition: None,
                 delivery_loop: None,
                 escalation: None,
                 delivery_hygiene: None,
