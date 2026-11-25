@@ -2381,6 +2381,11 @@ mod tests {
     #[test]
     fn restrictive_gh_wrappers_parse_in_system_shell() -> Result<(), Box<dyn std::error::Error>> {
         use provenant_config::PrPolicy;
+        use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
+        use std::time::Duration;
+
+        let temp = tempfile::tempdir()?;
+        let executor = SystemExecutor::new(1)?;
         let policy = provenant_config::GithubPolicy::default();
         for pr_policy in [PrPolicy::Never, PrPolicy::Draft] {
             let script = gh_wrapper(
@@ -2396,13 +2401,14 @@ mod tests {
                     pr_source: "default",
                 },
             );
-            let output = std::process::Command::new("/bin/sh")
-                .args(["-n", "-c", &script])
-                .output()?;
-            assert!(
-                output.status.success(),
+            let argv = ["/bin/sh".into(), "-n".into(), "-c".into(), script.into()];
+            let output =
+                executor.execute(ExecOptions::new(&argv, temp.path(), Duration::from_secs(5)))?;
+            assert_eq!(
+                output.termination,
+                Termination::Exit(0),
                 "{pr_policy:?}: {}",
-                String::from_utf8_lossy(&output.stderr)
+                String::from_utf8_lossy(&output.stderr.bytes)
             );
         }
         Ok(())
