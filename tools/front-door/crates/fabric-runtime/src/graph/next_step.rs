@@ -832,6 +832,13 @@ pub(super) fn settlement_fallback_decision(
     launched: bool,
     evidence: FallbackEvidence<'_>,
 ) -> SettlementFallback {
+    let FallbackEvidence {
+        preparation: fallback_evidence,
+        unreadable: evidence_unreadable,
+        review_limit_reached,
+        cause: fallback_cause,
+        skipped_accounts,
+    } = evidence;
     // The run-side `retry` stall policy is an explicit, persisted request to
     // consume the next route after custody has stopped the provider. It is the
     // sole launched-attempt exception to fallback's normal safety gate.
@@ -847,13 +854,6 @@ pub(super) fn settlement_fallback_decision(
             }
         };
     }
-    let FallbackEvidence {
-        preparation: fallback_evidence,
-        unreadable: evidence_unreadable,
-        review_limit_reached,
-        cause: fallback_cause,
-        skipped_accounts,
-    } = evidence;
     let route = node.routes.get(route_index);
     // Preparation evidence proves custody. A refusal before provider launch
     // takes the cause default, while an explicit, non-pinned node override

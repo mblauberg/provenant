@@ -822,6 +822,27 @@ pub(super) fn apply_attempt_observation(
                             }
                         }
                     }
+                    AttemptOutcome::ProviderStalledRetry => {
+                        match next_step::settlement_fallback_decision(
+                            node,
+                            route_index,
+                            outcome,
+                            launched,
+                            FallbackEvidence {
+                                preparation: fallback_evidence,
+                                unreadable: evidence_unreadable,
+                                review_limit_reached,
+                                cause: fallback_cause.as_ref(),
+                                skipped_accounts: &skipped_accounts,
+                            },
+                        ) {
+                            SettlementFallback::Continue => true,
+                            SettlementFallback::Fail { code, message } => {
+                                fail_node(progress, code.map(str::to_owned), message);
+                                false
+                            }
+                        }
+                    }
                     AttemptOutcome::DeadlineExceeded => {
                         progress.advance_error_code = Some("deadline_exceeded".into());
                         progress.advance_error =
