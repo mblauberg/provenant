@@ -810,17 +810,46 @@ pub struct Output {
     #[arg(long, value_name = "FILE", conflicts_with = "path")]
     pub to: Option<PathBuf>,
     /// Print the attempt's artifact path for this part instead of its content
-    #[arg(long, conflicts_with_all = ["to", "offset", "tail", "max_bytes"])]
+    #[arg(long, conflicts_with_all = ["to", "offset", "tail", "tail_lines", "max_bytes"])]
     pub path: bool,
     /// Byte offset to start from
-    #[arg(long, default_value = "0", conflicts_with = "tail")]
+    #[arg(long, default_value = "0", conflicts_with_all = ["tail", "tail_lines"])]
     pub offset: u64,
     /// Return at most the last N bytes of the selected part
     #[arg(long, catalog_u64_range = 1..)]
     pub tail: Option<u64>,
+    /// Return at most the last N lines of the selected part (clamped to the shared line bound)
+    #[arg(long, catalog_u64_range = 1.., conflicts_with_all = ["to", "offset", "tail"])]
+    pub tail_lines: Option<u64>,
     /// Maximum bytes to return
     #[arg(long, default_value = "65536", catalog_u64_range = 1..=65536)]
     pub max_bytes: u64,
+}
+
+/// The unit of a bounded tail. One selection is shared by every reader so a
+/// line request means the same thing for an attempt, a peer, a composite and
+/// an event stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tail {
+    Bytes(u64),
+    Lines(u64),
+}
+
+impl Output {
+    /// The tail the caller selected, with line counts clamped once here. A
+    /// byte count stays a byte count: the page bound still applies to both.
+    pub fn tail_selection(&self) -> Option<Tail> {
+        self.tail.map(Tail::Bytes).or_else(|| {
+            self.tail_lines
+                .map(|lines| Tail::Lines(lines.min(crate::limits::TAIL_LINES)))
+        })
+    }
+
+    /// Whether a line request exceeded the shared bound and was clamped.
+    pub fn tail_clamped(&self) -> bool {
+        self.tail_lines
+            .is_some_and(|lines| lines > crate::limits::TAIL_LINES)
+    }
 }
 #[derive(Clone, Debug, Args)]
 pub struct Cancel {

@@ -281,8 +281,13 @@ exports without inventing an attempt identity, `output GRAPH/NODE` selects a
 composite explicitly, and a bare graph with several top-level nodes is
 ambiguous and lists them. Offsets and limits count bytes; a page that splits a
 UTF-8 character returns lossless base64 and advances by the bytes returned.
+`--tail N` bounds the last N bytes; `--tail-lines N` bounds the last N lines and
+is clamped to the shared line bound in every reader, including peer, composite
+and event reads. A non-applicable header is omitted, never printed as
+unavailable, and when stdout is not a TTY human output carries no ANSI escapes.
 `output` and `steer` resolve the same numbered attempt, and a clamped tail
-reports its effective bound.
+reports its effective bound in `tail` for bytes or `tail_lines` for lines, with
+`tail_clamped` indicating whether the requested line count was reduced.
 
 - Why: a reader must be able to inspect the intended attempt safely.
 

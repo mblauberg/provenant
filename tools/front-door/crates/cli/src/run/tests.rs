@@ -1150,7 +1150,14 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                         let crate::Command::Output(command) = inv.command else {
                             return Err("output command".into());
                         };
-                        let reply = output_from_session(command, edge, &session, id, &call);
+                        let reply = output_from_session(
+                            command,
+                            edge,
+                            &session,
+                            id,
+                            &call,
+                            inv.globals.full,
+                        );
                         assert_eq!(reply.result.status, Status::Ok, "{}", reply.human);
                         let row = &reply.result.data;
                         assert_eq!(row["state"], "failed");

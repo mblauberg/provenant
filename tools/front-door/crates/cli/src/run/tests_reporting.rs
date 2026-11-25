@@ -294,9 +294,11 @@ fn output_retains_safe_refusal_remedies() -> Result<(), Box<dyn std::error::Erro
                 path: false,
                 offset: 0,
                 tail: None,
+                tail_lines: None,
                 max_bytes: 65_536,
             };
-            let reply = output_from_session(output_command(), edge, &session, attempt, &call);
+            let reply =
+                output_from_session(output_command(), edge, &session, attempt, &call, false);
             assert!(reply.result.error.is_none(), "{:?}", reply.result.error);
             assert_eq!(reply.result.data["reason"], expected);
             assert_eq!(
@@ -332,6 +334,7 @@ fn output_retains_safe_refusal_remedies() -> Result<(), Box<dyn std::error::Erro
                 &session,
                 without_note.attempt_id,
                 &call,
+                false,
             );
             assert!(reply.result.error.is_none(), "{:?}", reply.result.error);
             assert!(!serde_json::to_string(&reply.result.data)?.contains("PROVIDER_SENTINEL"));

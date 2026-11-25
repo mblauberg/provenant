@@ -16,7 +16,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use std::borrow::Cow;
 use std::collections::HashSet;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -279,7 +279,7 @@ pub(crate) fn emit_summarised<T: Serialize>(
     read_only: bool,
     summary: Option<&Summary>,
 ) -> u8 {
-    emit_with_writers(
+    emit_with_writers_and_tty(
         result,
         globals,
         &mut io::stdout().lock(),
@@ -287,12 +287,76 @@ pub(crate) fn emit_summarised<T: Serialize>(
         human,
         read_only,
         summary,
+        io::stdout().is_terminal(),
     )
+}
+
+/// Human text with terminal escape sequences removed. A pipe or a file is not
+/// a terminal: colour and cursor controls there cost bytes and let a captured
+/// line reorder or hide text from the reader. Everything else, including line
+/// breaks and tabs, is kept as written.
+pub(crate) fn strip_ansi(text: &str) -> Cow<'_, str> {
+    let bytes = text.as_bytes();
+    if !bytes.contains(&0x1b) {
+        return Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != 0x1b {
+            let start = index;
+            while index < bytes.len() && bytes[index] != 0x1b {
+                index += 1;
+            }
+            // The slice ends before an ASCII byte, so it is a UTF-8 boundary.
+            out.push_str(&text[start..index]);
+            continue;
+        }
+        index += 1;
+        match bytes.get(index) {
+            // CSI: parameters and intermediates, then one final byte.
+            Some(b'[') => {
+                index += 1;
+                while index < bytes.len() && !(0x40..=0x7e).contains(&bytes[index]) {
+                    index += 1;
+                }
+                index = index.saturating_add(1).min(bytes.len());
+            }
+            // OSC: ends at BEL or at the string terminator ESC backslash.
+            Some(b']') => {
+                index += 1;
+                while index < bytes.len() {
+                    if bytes[index] == 0x07 {
+                        index += 1;
+                        break;
+                    }
+                    if bytes[index] == 0x1b && bytes.get(index + 1) == Some(&b'\\') {
+                        index += 2;
+                        break;
+                    }
+                    index += 1;
+                }
+            }
+            // String terminator: ESC backslash can end an OSC or stand alone
+            // (for example after an OSC already closed with BEL). Drop both
+            // bytes so the next printable byte is kept verbatim.
+            Some(b'\\') => {
+                index = (index + 1).min(bytes.len());
+            }
+            // Two-byte character set and private sequences.
+            Some(b'(' | b')' | b'#' | b'*' | b'+') => {
+                index = (index + 2).min(bytes.len());
+            }
+            _ => {}
+        }
+    }
+    Cow::Owned(out)
 }
 
 /// The emission seam shared by production and targeted tests: a refusal's
 /// rendered bytes go to the supplied writers, so a test can drive the same
-/// `fail_with_cause` path instead of hand-building a `CommandResult`.
+/// `fail_with_cause` path instead of hand-building a `CommandResult`. Buffers
+/// are not terminals, so human text is stripped for them.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_with_writers<T: Serialize, Wout: Write, Werr: Write>(
     result: &CommandResult<T>,
@@ -303,6 +367,29 @@ pub(crate) fn emit_with_writers<T: Serialize, Wout: Write, Werr: Write>(
     read_only: bool,
     summary: Option<&Summary>,
 ) -> u8 {
+    emit_with_writers_and_tty(
+        result, globals, stdout, stderr, human, read_only, summary, false,
+    )
+}
+
+/// `emit_with_writers` with the caller's terminal decision. The binary edge
+/// passes whether stdout is a TTY; tests pass the piped case explicitly.
+#[allow(clippy::too_many_arguments)]
+fn emit_with_writers_and_tty<T: Serialize, Wout: Write, Werr: Write>(
+    result: &CommandResult<T>,
+    globals: &provenant_cli::Globals,
+    stdout: &mut Wout,
+    stderr: &mut Werr,
+    human: &str,
+    read_only: bool,
+    summary: Option<&Summary>,
+    tty: bool,
+) -> u8 {
+    let human = if tty {
+        Cow::Borrowed(human)
+    } else {
+        strip_ansi(human)
+    };
     let warnings = take_warnings();
     let explanation = if summary.is_none() && result.command == "land" {
         serde_json::to_value(&result.data)
@@ -323,15 +410,32 @@ pub(crate) fn emit_with_writers<T: Serialize, Wout: Write, Werr: Write>(
     } else {
         Cow::Borrowed(result.next.as_slice())
     };
-    let summary = summary.or(explanation.as_ref().map(|(summary, _)| summary));
+    let summary = summary
+        .or(explanation.as_ref().map(|(summary, _)| summary))
+        .map(|summary| {
+            if tty {
+                summary.clone()
+            } else {
+                // A compact view prints the summary rows, not the raw text, so
+                // the same terminal-safety rule has to reach every row.
+                Summary {
+                    lines: summary
+                        .lines
+                        .iter()
+                        .map(|line| strip_ansi(line).into_owned())
+                        .collect(),
+                    omitted: summary.omitted,
+                }
+            }
+        });
     let mode = if !globals.json && matches!(result.command.as_str(), "help" | "version") {
         RenderMode::Human {
-            text: human,
+            text: human.as_ref(),
             read_only,
             summary: None,
         }
     } else {
-        globals.render_mode(human, read_only, summary)
+        globals.render_mode(human.as_ref(), read_only, summary.as_ref())
     };
     // Build one resolved envelope carrying the steps the owner chose (or the
     // land explanation's step) so JSON and human mode read the same next array.
@@ -751,6 +855,68 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().expect("tempdir");
         f(dir.path());
+    }
+
+    // Spec: docs/specs/cli.md#output-references-and-bounded-tails
+    #[test]
+    fn piped_stdout_has_no_ansi_escapes_but_a_terminal_keeps_them() {
+        let result = CommandResult::new("output", Outcome::Ok, json!({"state": "succeeded"}));
+        let globals = provenant_cli::Globals {
+            full: true,
+            ..Default::default()
+        };
+        let human = "settlement: succeeded\n\u{1b}[31mred findings\u{1b}[0m \u{1b}]8;;https://example.invalid\u{7}link\u{1b}\\ tail\n";
+        let mut piped = Vec::new();
+        let mut err = Vec::new();
+        assert_eq!(
+            emit_with_writers_and_tty(
+                &result, &globals, &mut piped, &mut err, human, true, None, false,
+            ),
+            0
+        );
+        let printed = String::from_utf8(piped).expect("utf8");
+        assert!(!printed.contains('\u{1b}'), "{printed:?}");
+        assert!(printed.contains("red findings"), "{printed:?}");
+        assert!(printed.contains("link tail"), "{printed:?}");
+        let mut terminal = Vec::new();
+        let mut err = Vec::new();
+        emit_with_writers_and_tty(
+            &result,
+            &globals,
+            &mut terminal,
+            &mut err,
+            human,
+            true,
+            None,
+            true,
+        );
+        assert!(
+            String::from_utf8(terminal)
+                .expect("utf8")
+                .contains("\u{1b}[31m"),
+            "a terminal keeps the escapes"
+        );
+
+        // The compact view prints summary rows, so those must be clean too.
+        let compact_globals = provenant_cli::Globals::default();
+        let summary = Summary {
+            lines: vec!["\u{1b}[1msettlement: succeeded\u{1b}[0m".into()],
+            omitted: 0,
+        };
+        let mut compact = Vec::new();
+        emit_with_writers_and_tty(
+            &result,
+            &compact_globals,
+            &mut compact,
+            &mut Vec::new(),
+            "",
+            true,
+            Some(&summary),
+            false,
+        );
+        let compact = String::from_utf8(compact).expect("utf8");
+        assert!(!compact.contains('\u{1b}'), "{compact:?}");
+        assert!(compact.contains("settlement: succeeded"), "{compact:?}");
     }
 
     #[test]
