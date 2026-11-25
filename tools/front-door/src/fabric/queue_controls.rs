@@ -1,0 +1,1189 @@
+//! Revisioned compositions for controls on durable delivery queue items.
+use super::{BoundFacade, Factory, FacadeError};
+use crate::fabric::owner::graph_journal_error;
+use provenant_core::{CancelToken, CanonicalV1, GitOid, HumanAnswerId, HumanRequestId, OperationId, WaitBudget};
+use provenant_fabric_runtime::{
+    graph::{
+        AttemptState, DeliveryReviewDisposition, FileJournal, GraphJournal, LiveGraph,
+        NodeState, PendingGraphSteer, patch,
+    },
+    inbox::{
+        AnswerAction, GraphSteerContext, InboxFilter, InboxInput, InboxItem, InboxResult,
+        RequestState,
+    },
+};
+use provenant_records::graph::ParkReason;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use std::collections::BTreeMap;
+
+const CONTROL_LEDGER_KEY: &str = "delivery_queue_controls";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum Action {
+    Accept,
+    Fix,
+    Retry,
+    Drop,
+}
+
+/// Metadata is attached only to an existing user-facing operation. It is not
+/// accepted from a graph document or stored plan.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Metadata {
+    pub action: Action,
+    pub expected_revision: u64,
+    pub operation_id: OperationId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_node: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_head: Option<GitOid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Ledger {
+    #[serde(default)]
+    intents: BTreeMap<String, Intent>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Intent {
+    digest: String,
+    metadata: Metadata,
+    graph_id: String,
+    target_node: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    retry_generations: BTreeMap<String, u64>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    gate_generations: BTreeMap<String, u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    request_id: Option<HumanRequestId>,
+    payload: Value,
+    phase: Phase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    answer_id: Option<HumanAnswerId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    applied_revision: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Phase {
+    Pending,
+    Answered,
+    DispositionAdmitted,
+    Applied,
+    Refused,
+}
+
+impl Phase {
+    fn terminal(self) -> bool {
+        matches!(self, Self::Applied | Self::Refused)
+    }
+}
+
+fn refusal(reason: impl std::fmt::Display) -> FacadeError {
+    FacadeError::invalid(
+        provenant_fabric_runtime::coordination::facade::InvalidInputDetail::graph_reason(reason),
+    )
+}
+
+fn decode_metadata(value: &Value) -> Result<Metadata, FacadeError> {
+    serde_json::from_value(value.clone()).map_err(|error| {
+        FacadeError::invalid(
+            provenant_fabric_runtime::coordination::facade::InvalidInputDetail::graph_reason(
+                format!("queue control metadata: {error}"),
+            ),
+        )
+    })
+}
+
+fn ledger(checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint) -> Result<Ledger, FacadeError> {
+    checkpoint
+        .extra
+        .get(CONTROL_LEDGER_KEY)
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|_| FacadeError::StateCorrupt)
+        .map(Option::unwrap_or_default)
+}
+
+fn save_ledger(
+    checkpoint: &mut provenant_fabric_runtime::graph::GraphCheckpoint,
+    ledger: &Ledger,
+) -> Result<(), FacadeError> {
+    let value = serde_json::to_value(ledger).map_err(|_| FacadeError::StateCorrupt)?;
+    checkpoint
+        .extra
+        .insert(CONTROL_LEDGER_KEY.to_owned(), value);
+    Ok(())
+}
+
+fn control_digest(
+    metadata: &Metadata,
+    graph_id: &str,
+    target_node: Option<&str>,
+    request_id: Option<HumanRequestId>,
+    payload: &Value,
+) -> Result<String, FacadeError> {
+    CanonicalV1::record_digest(
+        "delivery-queue-control",
+        1,
+        &(metadata, graph_id, target_node, request_id, payload),
+    )
+    .map(|digest| digest.to_string())
+    .map_err(|_| FacadeError::StateCorrupt)
+}
+
+fn competes_with(ledger: &Ledger, metadata: &Metadata) -> bool {
+    ledger.intents.values().any(|saved| {
+        saved.metadata.expected_revision == metadata.expected_revision || !saved.phase.terminal()
+    })
+}
+
+fn request_id_for_drop(
+    checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
+    target_node: Option<&str>,
+) -> Result<Option<HumanRequestId>, FacadeError> {
+    let mut requests = checkpoint
+        .nodes
+        .iter()
+        .filter(|progress| target_node.is_none_or(|node| progress.id == node))
+        .filter_map(|progress| progress.delivery_park.as_ref()?.request_id);
+    let request_id = requests.next();
+    if requests.next().is_some() {
+        return Err(refusal("drop requires one unambiguous owned park request"));
+    }
+    Ok(request_id)
+}
+
+fn begin(
+    factory: &Factory,
+    graph_id: &str,
+    target_node: Option<&str>,
+    request_id: Option<HumanRequestId>,
+    metadata: &Metadata,
+    payload: &Value,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+) -> Result<(Intent, bool), FacadeError> {
+    let project = factory.context.identity.project;
+    if metadata
+        .graph_id
+        .as_deref()
+        .is_some_and(|expected| expected != graph_id)
+    {
+        return Err(refusal("queue control graph identity does not match its target"));
+    }
+    let mut journal = FileJournal::open(
+        &factory.context.roots.state,
+        project,
+        graph_id,
+        budget,
+        cancel,
+        &factory.clock,
+    )
+    .map_err(graph_journal_error)?;
+    let execution = FileJournal::execution(&factory.context.roots.state, project, graph_id)
+        .map_err(graph_journal_error)?
+        .ok_or(FacadeError::NotFound)?;
+    if execution.document.queue.is_none() {
+        return Err(refusal("queue control requires a persisted delivery queue graph"));
+    }
+    let mut checkpoint = journal
+        .load(graph_id)
+        .map_err(graph_journal_error)?
+        .ok_or(FacadeError::NotFound)?;
+    let mut ledger = ledger(&checkpoint)?;
+    let key = metadata.operation_id.to_string();
+    let digest = control_digest(metadata, graph_id, target_node, request_id, payload)?;
+    if let Some(saved) = ledger.intents.get(&key) {
+        if saved.digest != digest {
+            return Err(FacadeError::OperationConflict);
+        }
+        return Ok((saved.clone(), true));
+    }
+    let current = patch::revision(&checkpoint);
+    if current != metadata.expected_revision {
+        return Err(refusal(format!(
+            "queue control expects graph revision {}, current revision is {current}",
+            metadata.expected_revision
+        )));
+    }
+    if metadata.action == Action::Accept {
+        let request_id = request_id.ok_or_else(|| refusal("accept requires a park request ID"))?;
+        let node_id = metadata
+            .review_node
+            .as_deref()
+            .ok_or_else(|| refusal("accept requires an exact review node"))?;
+        let head = metadata
+            .review_head
+            .ok_or_else(|| refusal("accept requires an exact reviewed head"))?;
+        let Some(park) = checkpoint.nodes.iter().find_map(|progress| {
+            progress
+                .delivery_park
+                .as_ref()
+                .filter(|park| park.request_id == Some(request_id))
+        }) else {
+            return Err(refusal("accept request is not owned by this graph"));
+        };
+        let expected_head = head.to_string();
+        if park.reason != ParkReason::LadderExhausted
+            || park.head.as_deref() != Some(expected_head.as_str())
+        {
+            return Err(refusal("accept request does not match the current exhausted review head"));
+        }
+        // Validate the disposition before answering the inbox request. The
+        // placeholder answer ID is never saved; it proves only the exact-head,
+        // findings and gate predicates under the same journal lock.
+        let probe_disposition = DeliveryReviewDisposition {
+            operation_id: metadata.operation_id.clone(),
+            request_id,
+            answer_id: HumanAnswerId::from_bytes([0; 16]),
+            head,
+            reason: payload
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+        };
+        let mut probe = checkpoint.clone();
+        patch::admit_delivery_review_disposition(
+            &mut LiveGraph {
+                document: &execution.document,
+                checkpoint: &mut probe,
+            },
+            metadata.expected_revision,
+            node_id,
+            &probe_disposition,
+            &factory.context.config.graph.limits,
+            &factory.context.config.graph.budget,
+            execution.requester_path.as_deref(),
+        )
+        .map_err(|error| refusal(error.to_string()))?;
+    }
+    if competes_with(&ledger, metadata) {
+        return Err(refusal(
+            "another queue control already owns this graph revision or is pending",
+        ));
+    }
+    let retry_generations = checkpoint
+        .nodes
+        .iter()
+        .filter_map(|progress| {
+            progress
+                .retry_generation
+                .map(|generation| (progress.id.clone(), generation))
+        })
+        .collect();
+    let request_id = if metadata.action == Action::Drop {
+        request_id.or(request_id_for_drop(&checkpoint, target_node)?)
+    } else {
+        request_id
+    };
+    let intent = Intent {
+        digest,
+        metadata: metadata.clone(),
+        graph_id: graph_id.to_owned(),
+        target_node: target_node.map(str::to_owned),
+        retry_generations,
+        gate_generations: BTreeMap::new(),
+        request_id,
+        payload: payload.clone(),
+        phase: Phase::Pending,
+        answer_id: None,
+        applied_revision: None,
+    };
+    ledger.intents.insert(key, intent.clone());
+    save_ledger(&mut checkpoint, &ledger)?;
+    journal.save(&checkpoint).map_err(graph_journal_error)?;
+    Ok((intent, false))
+}
+
+/// Compose `steer` into the durable pending-steer queue for a live queue item.
+/// The control intent and the graph-owned steer receipt are saved together;
+/// the graph tick revalidates the exact work key before delivery.
+pub(super) fn queue_live_fix(
+    factory: &Factory,
+    graph_id: &str,
+    node_id: &str,
+    metadata: &Metadata,
+    text: &str,
+    work_key: &provenant_records::WorkKey,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+) -> Result<Value, FacadeError> {
+    if metadata.action != Action::Fix {
+        return Err(refusal("live queue steering requires a fix control"));
+    }
+    let text = provenant_fabric_runtime::graph::normalise_prompt_text(text).map_err(refusal)?;
+    patch::scan_for_secrets(&text).map_err(refusal)?;
+    let payload = json!({"kind":"steer", "text":text, "work_key":work_key});
+    let (intent, replayed) = begin(
+        factory,
+        graph_id,
+        Some(node_id),
+        None,
+        metadata,
+        &payload,
+        budget,
+        cancel,
+    )?;
+    if intent.phase.terminal() {
+        return Ok(control_receipt(&intent, replayed));
+    }
+
+    let project = factory.context.identity.project;
+    let execution = FileJournal::execution(&factory.context.roots.state, project, graph_id)
+        .map_err(graph_journal_error)?
+        .ok_or(FacadeError::NotFound)?;
+    let mut journal = FileJournal::open(
+        &factory.context.roots.state,
+        project,
+        graph_id,
+        budget,
+        cancel,
+        &factory.clock,
+    )
+    .map_err(graph_journal_error)?;
+    let mut checkpoint = journal
+        .load(graph_id)
+        .map_err(graph_journal_error)?
+        .ok_or(FacadeError::NotFound)?;
+    let reason = if patch::revision(&checkpoint) != metadata.expected_revision {
+        Some("queue fix graph revision changed before the steer was queued")
+    } else if execution.document.queue.is_none() {
+        Some("queue fix requires a persisted delivery queue graph")
+    } else {
+        None
+    };
+    let Some(progress) = checkpoint.nodes.iter().find(|progress| progress.id == node_id) else {
+        return Err(refusal("queue fix target node no longer exists"));
+    };
+    let attempts: Vec<_> = progress.recorded_attempts().collect();
+    let Some((index, attempt)) = attempts
+        .iter()
+        .enumerate()
+        .find(|(_, attempt)| attempt.key.work_key(project).ok().as_ref() == Some(work_key))
+    else {
+        return Err(refusal("queue fix target attempt is no longer recorded"));
+    };
+    let reason = reason.or_else(|| {
+        (attempt.state == AttemptState::Terminal || index + 1 != attempts.len())
+            .then_some("queue fix target attempt is no longer the current live attempt")
+    });
+    if reason.is_some() {
+        let mut ledger = ledger(&checkpoint)?;
+        let saved = ledger
+            .intents
+            .get_mut(&metadata.operation_id.to_string())
+            .ok_or(FacadeError::StateCorrupt)?;
+        saved.phase = Phase::Refused;
+        let receipt = saved.clone();
+        save_ledger(&mut checkpoint, &ledger)?;
+        journal.save(&checkpoint).map_err(graph_journal_error)?;
+        return Ok(control_receipt(&receipt, replayed));
+    }
+    let launch_actor = attempt
+        .launch_actor
+        .parse()
+        .map_err(|_| FacadeError::StateCorrupt)?;
+    let launch_operation = super::graph_execution::graph_operation(
+        "graph-attempt-operation",
+        &attempt.key,
+    )
+    .map_err(|_| FacadeError::StateCorrupt)?;
+    let pending = PendingGraphSteer {
+        operation_id: metadata.operation_id.clone(),
+        caller_operation_id: Some(metadata.operation_id.clone()),
+        work_key: work_key.clone(),
+        graph_context: GraphSteerContext {
+            launch_actor,
+            launch_operation,
+            origin_work_key: work_key.clone(),
+        },
+        requester_host: factory.context.identity.inbox.host,
+        requester_agent: factory.context.identity.inbox.agent.clone(),
+        requester_actor: factory.context.identity.inbox.actor,
+        text,
+        refusal: None,
+    };
+    if checkpoint
+        .pending_steers
+        .enqueue(metadata.operation_id.to_string(), pending)
+        .is_err()
+    {
+        let mut ledger = ledger(&checkpoint)?;
+        let saved = ledger
+            .intents
+            .get_mut(&metadata.operation_id.to_string())
+            .ok_or(FacadeError::StateCorrupt)?;
+        saved.phase = Phase::Refused;
+        let receipt = saved.clone();
+        save_ledger(&mut checkpoint, &ledger)?;
+        journal.save(&checkpoint).map_err(graph_journal_error)?;
+        return Ok(control_receipt(&receipt, replayed));
+    }
+    let mut ledger = ledger(&checkpoint)?;
+    let saved = ledger
+        .intents
+        .get_mut(&metadata.operation_id.to_string())
+        .ok_or(FacadeError::StateCorrupt)?;
+    saved.phase = Phase::Applied;
+    saved.applied_revision = Some(patch::revision(&checkpoint));
+    let receipt = saved.clone();
+    save_ledger(&mut checkpoint, &ledger)?;
+    let receipt = control_receipt(&receipt, replayed);
+    journal.save(&checkpoint).map_err(graph_journal_error)?;
+    Ok(receipt)
+}
+
+fn update_intent(
+    factory: &Factory,
+    graph_id: &str,
+    operation_id: &OperationId,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+    update: impl FnOnce(&mut Intent),
+) -> Result<Intent, FacadeError> {
+    let project = factory.context.identity.project;
+    let mut journal = FileJournal::open(
+        &factory.context.roots.state,
+        project,
+        graph_id,
+        budget,
+        cancel,
+        &factory.clock,
+    )
+    .map_err(graph_journal_error)?;
+    let mut checkpoint = journal
+        .load(graph_id)
+        .map_err(graph_journal_error)?
+        .ok_or(FacadeError::NotFound)?;
+    let mut ledger = ledger(&checkpoint)?;
+    let key = operation_id.to_string();
+    let intent = ledger
+        .intents
+        .get_mut(&key)
+        .ok_or(FacadeError::StateCorrupt)?;
+    update(intent);
+    let result = intent.clone();
+    save_ledger(&mut checkpoint, &ledger)?;
+    journal.save(&checkpoint).map_err(graph_journal_error)?;
+    Ok(result)
+}
+
+fn control_receipt(intent: &Intent, replayed: bool) -> Value {
+    json!({
+        "action": intent.metadata.action,
+        "operation_id": intent.metadata.operation_id,
+        "expected_revision": intent.metadata.expected_revision,
+        "applied_revision": intent.applied_revision,
+        "state": intent.phase,
+        "replayed": replayed,
+        "request_id": intent.request_id,
+        "answer_id": intent.answer_id,
+    })
+}
+
+fn attach_receipt(mut result: Value, intent: &Intent, replayed: bool) -> Value {
+    if let Some(object) = result.as_object_mut() {
+        object.insert("queue_control".into(), control_receipt(intent, replayed));
+    }
+    result
+}
+
+pub(super) fn handle_graph_operation(
+    factory: &Factory,
+    input: Value,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+) -> Result<Value, FacadeError> {
+    let metadata = decode_metadata(
+        input
+            .get("queue_control")
+            .ok_or_else(|| refusal("queue control metadata is required"))?,
+    )?;
+    let operation = input
+        .get("op")
+        .and_then(Value::as_str)
+        .ok_or_else(|| refusal("graph operation is required"))?;
+    let valid = matches!(
+        (metadata.action, operation),
+        (Action::Drop, "stop")
+            | (Action::Retry, "retry")
+            | (Action::Fix, "retry")
+    );
+    if !valid {
+        return Err(refusal("queue control action does not match the existing graph operation"));
+    }
+    let selector = input
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| refusal("graph target is required"))?;
+    let target = factory
+        .graph_target(selector)?
+        .ok_or(FacadeError::NotFound)?;
+    let mut payload = without_queue_control(&input)?;
+    if metadata.action == Action::Fix {
+        let raw = payload
+            .get("brief")
+            .and_then(Value::as_str)
+            .filter(|brief| !brief.is_empty())
+            .ok_or_else(|| refusal("fix requires a replacement brief"))?;
+        let brief = provenant_fabric_runtime::graph::normalise_prompt_text(raw).map_err(refusal)?;
+        patch::scan_for_secrets(&brief).map_err(refusal)?;
+        payload["brief"] = Value::String(brief);
+    }
+    let (mut intent, replayed) = begin(
+        factory,
+        &target.graph,
+        target.node.as_deref(),
+        None,
+        &metadata,
+        &payload,
+        budget,
+        cancel,
+    )?;
+    if !intent.phase.terminal() {
+        let already_retried = matches!(metadata.action, Action::Fix | Action::Retry)
+            && retry_generation_changed(factory, &target.graph, &intent, budget, cancel)?;
+        if !already_retried {
+            let mut underlying = payload.clone();
+            if let Some(value) = underlying.as_object_mut() {
+                value.remove("queue_control");
+            }
+            let operation_result = factory.graph_document(underlying, budget, cancel)?;
+            if metadata.action == Action::Drop {
+                close_owned_park(factory, &intent, budget, cancel)?;
+            }
+            let revision = current_revision(factory, &target.graph, budget, cancel)?;
+            intent = update_intent(
+                factory,
+                &target.graph,
+                &metadata.operation_id,
+                budget,
+                cancel,
+                |saved| {
+                    saved.phase = Phase::Applied;
+                    saved.applied_revision = Some(revision);
+                },
+            )?;
+            return Ok(attach_receipt(operation_result, &intent, replayed));
+        }
+        let revision = current_revision(factory, &target.graph, budget, cancel)?;
+        intent = update_intent(
+            factory,
+            &target.graph,
+            &metadata.operation_id,
+            budget,
+            cancel,
+            |saved| {
+                saved.phase = Phase::Applied;
+                saved.applied_revision = Some(revision);
+            },
+        )?;
+    }
+    let status = factory.graph_document(
+        json!({"op":"status", "id":selector}),
+        budget,
+        cancel,
+    )?;
+    Ok(attach_receipt(status, &intent, replayed))
+}
+
+fn without_queue_control(input: &Value) -> Result<Value, FacadeError> {
+    let mut payload = input.clone();
+    payload
+        .as_object_mut()
+        .ok_or_else(|| refusal("graph operation must be an object"))?
+        .remove("queue_control");
+    Ok(payload)
+}
+
+fn current_revision(
+    factory: &Factory,
+    graph_id: &str,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+) -> Result<u64, FacadeError> {
+    let mut journal = FileJournal::open(
+        &factory.context.roots.state,
+        factory.context.identity.project,
+        graph_id,
+        budget,
+        cancel,
+        &factory.clock,
+    )
+    .map_err(graph_journal_error)?;
+    let checkpoint = journal
+        .load(graph_id)
+        .map_err(graph_journal_error)?
+        .ok_or(FacadeError::NotFound)?;
+    Ok(patch::revision(&checkpoint))
+}
+
+fn retry_generation_changed(
+    factory: &Factory,
+    graph_id: &str,
+    intent: &Intent,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+) -> Result<bool, FacadeError> {
+    let mut journal = FileJournal::open(
+        &factory.context.roots.state,
+        factory.context.identity.project,
+        graph_id,
+        budget,
+        cancel,
+        &factory.clock,
+    )
+    .map_err(graph_journal_error)?;
+    let checkpoint = journal
+        .load(graph_id)
+        .map_err(graph_journal_error)?
+        .ok_or(FacadeError::NotFound)?;
+    Ok(checkpoint.nodes.iter().any(|progress| {
+        intent.retry_generations.get(&progress.id).copied() != progress.retry_generation
+            && progress.retry_generation.is_some()
+    }))
+}
+
+fn inbox_item(
+    factory: &Factory,
+    id: HumanRequestId,
+    host: Option<String>,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+) -> Result<InboxItem, FacadeError> {
+    let result = BoundFacade { factory }.inbox_owner(
+        InboxInput::List {
+            extra: Default::default(),
+            id: Some(id),
+            session: None,
+            state: InboxFilter::All,
+            limit: 1,
+            cursor: None,
+        },
+        host,
+        budget,
+        cancel,
+    )
+    .map_err(|_| FacadeError::OwnerUnavailable)?;
+    match result {
+        InboxResult::Item { item, .. } => Ok(*item),
+        _ => Err(FacadeError::StateCorrupt),
+    }
+}
+
+fn accept_request(
+    factory: &Factory,
+    input: InboxInput,
+    host: Option<String>,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+) -> Result<InboxResult, FacadeError> {
+    let InboxInput::Answer {
+        mut extra,
+        id,
+        action,
+        option_id,
+        mut text,
+        expect_revision,
+        channel,
+        operation_id,
+    } = input
+    else {
+        return Err(refusal("queue accept requires an inbox answer"));
+    };
+    let metadata = decode_metadata(
+        extra
+            .remove("queue_control")
+            .as_ref()
+            .ok_or_else(|| refusal("queue control metadata is required"))?,
+    )?;
+    if metadata.action != Action::Accept
+        || operation_id.as_ref() != Some(&metadata.operation_id)
+        || action != AnswerAction::Reply
+        || option_id.is_some()
+    {
+        return Err(refusal("accept requires a reply answer using the control operation ID"));
+    }
+    let Some(raw_reason) = text.take() else {
+        return Err(refusal("accept requires a reason in the answer text"));
+    };
+    let reason = provenant_fabric_runtime::graph::normalise_prompt_text(&raw_reason)
+        .map_err(refusal)?;
+    patch::scan_for_secrets(&reason).map_err(refusal)?;
+    let mut answer = InboxInput::Answer {
+        extra,
+        id,
+        action,
+        option_id,
+        text: Some(reason.clone()),
+        expect_revision,
+        channel,
+        operation_id: operation_id.clone(),
+    };
+    answer.validate().map_err(|error| refusal(error.to_string()))?;
+    let item = inbox_item(factory, id, host.clone(), budget, cancel)?;
+    if item.request.owner_host != factory.context.identity.host {
+        return Err(refusal("queue accept must run on the host that owns the graph"));
+    }
+    let request_graph = item
+        .request
+        .request
+        .work
+        .as_ref()
+        .map(|work| work.graph.as_str());
+    let answer_replay = item.answer.as_ref().is_some_and(|saved| {
+        saved.operation_id == metadata.operation_id
+            && saved.request_revision == expect_revision
+            && item.request.answer_id == Some(saved.id)
+    });
+    if (!answer_replay
+        && (item.request.revision != expect_revision || item.request.state != RequestState::Open))
+        || metadata
+            .graph_id
+            .as_deref()
+            .is_some_and(|expected| request_graph != Some(expected))
+    {
+        return Err(refusal("accept request is stale or belongs to another control"));
+    }
+    let graph_id = item
+        .request
+        .request
+        .work
+        .as_ref()
+        .map(|work| work.graph.clone())
+        .ok_or_else(|| refusal("accept inbox request has no graph identity"))?;
+    let payload = serde_json::to_value(&answer).map_err(|_| FacadeError::StateCorrupt)?;
+    let (mut intent, replayed) = begin(
+        factory,
+        &graph_id,
+        metadata.review_node.as_deref(),
+        Some(id),
+        &metadata,
+        &payload,
+        budget,
+        cancel,
+    )?;
+    if metadata.action != Action::Accept {
+        return Err(refusal("queue answer does not carry accept intent"));
+    }
+    let project = factory.context.identity.project;
+    let execution = FileJournal::execution(&factory.context.roots.state, project, &graph_id)
+        .map_err(graph_journal_error)?
+        .ok_or(FacadeError::NotFound)?;
+    let mut journal = FileJournal::open(
+        &factory.context.roots.state,
+        project,
+        &graph_id,
+        budget,
+        cancel,
+        &factory.clock,
+    )
+    .map_err(graph_journal_error)?;
+    let mut checkpoint = journal
+        .load(&graph_id)
+        .map_err(graph_journal_error)?
+        .ok_or(FacadeError::NotFound)?;
+    let saved = ledger(&checkpoint)?
+        .intents
+        .get(&metadata.operation_id.to_string())
+        .cloned()
+        .ok_or(FacadeError::StateCorrupt)?;
+    if !matches!(saved.phase, Phase::DispositionAdmitted | Phase::Applied)
+        && patch::revision(&checkpoint) != metadata.expected_revision
+    {
+        return Err(refusal("queue accept graph revision changed before its answer was admitted"));
+    }
+    // A prior Inbox write with this same operation ID is replayed by the inbox
+    // store, closing the crash window between the answer receipt and graph edit.
+    let local_host = factory.context.identity.host.to_string();
+    let result = BoundFacade { factory }.inbox_owner(
+        answer,
+        Some(local_host),
+        budget,
+        cancel,
+    )
+    .map_err(|_| FacadeError::OwnerUnavailable)?;
+    let InboxResult::Saved { mut receipt } = result else {
+        return Err(FacadeError::StateCorrupt);
+    };
+    let answer_id = receipt.answer_id.ok_or(FacadeError::StateCorrupt)?;
+    let (admitted_intent, gates) = apply_accept_disposition_locked(
+        factory,
+        &execution.document,
+        execution.requester_path.as_deref(),
+        &mut journal,
+        &mut checkpoint,
+        &intent,
+        answer_id,
+        &reason,
+    )?;
+    drop(journal);
+    retry_failed_gates(
+        factory,
+        &graph_id,
+        &metadata.operation_id.to_string(),
+        &gates,
+        budget,
+        cancel,
+    )?;
+    intent = update_intent(
+        factory,
+        &graph_id,
+        &metadata.operation_id,
+        budget,
+        cancel,
+        |saved| {
+            saved.phase = Phase::Applied;
+            saved.applied_revision = admitted_intent.applied_revision;
+        },
+    )?;
+    receipt.extra.insert(
+        "queue_control".into(),
+        control_receipt(&intent, replayed),
+    );
+    Ok(InboxResult::Saved { receipt })
+}
+
+fn apply_accept_disposition_locked(
+    factory: &Factory,
+    document: &provenant_fabric_runtime::graph::GraphDocument,
+    requester_path: Option<&[u8]>,
+    journal: &mut FileJournal,
+    checkpoint: &mut provenant_fabric_runtime::graph::GraphCheckpoint,
+    intent: &Intent,
+    answer_id: HumanAnswerId,
+    reason: &str,
+) -> Result<(Intent, Vec<String>), FacadeError> {
+    let disposition = DeliveryReviewDisposition {
+        operation_id: intent.metadata.operation_id.clone(),
+        request_id: intent.request_id.ok_or(FacadeError::StateCorrupt)?,
+        answer_id,
+        head: intent
+            .metadata
+            .review_head
+            .ok_or(FacadeError::StateCorrupt)?,
+        reason: reason.to_owned(),
+    };
+    let node_id = intent
+        .metadata
+        .review_node
+        .as_deref()
+        .ok_or(FacadeError::StateCorrupt)?;
+    let admitted = patch::admit_delivery_review_disposition(
+        &mut LiveGraph {
+            document,
+            checkpoint,
+        },
+        intent.metadata.expected_revision,
+        node_id,
+        &disposition,
+        &factory.context.config.graph.limits,
+        &factory.context.config.graph.budget,
+        requester_path,
+    )
+    .map_err(|error| refusal(error.to_string()))?;
+    let gates = patch::failed_delivery_review_gates(
+        document,
+        checkpoint,
+        node_id,
+        &factory.context.config.graph.limits,
+    )
+    .map_err(|error| refusal(error.to_string()))?;
+    let mut ledger = ledger(checkpoint)?;
+    let key = intent.metadata.operation_id.to_string();
+    let disposition_was_admitted = ledger
+        .intents
+        .get(&key)
+        .is_some_and(|saved| {
+            saved.phase == Phase::DispositionAdmitted || saved.phase == Phase::Applied
+        });
+    let saved = ledger.intents.get_mut(&key).ok_or(FacadeError::StateCorrupt)?;
+    saved.phase = Phase::DispositionAdmitted;
+    saved.answer_id = Some(answer_id);
+    saved.applied_revision = Some(admitted.revision);
+    if !disposition_was_admitted {
+        saved.gate_generations = gates
+            .iter()
+            .filter_map(|gate| {
+                checkpoint
+                    .nodes
+                    .iter()
+                    .find(|progress| progress.id == *gate)
+                    .map(|progress| (gate.clone(), progress.retry_generation.unwrap_or_default()))
+            })
+            .collect();
+    }
+    let saved = saved.clone();
+    save_ledger(checkpoint, &ledger)?;
+    journal.save(checkpoint).map_err(graph_journal_error)?;
+    Ok((saved, gates))
+}
+
+fn retry_failed_gates(
+    factory: &Factory,
+    graph_id: &str,
+    operation_key: &str,
+    gates: &[String],
+    budget: WaitBudget,
+    cancel: &CancelToken,
+) -> Result<(), FacadeError> {
+    for gate in gates {
+        let mut journal = FileJournal::open(
+            &factory.context.roots.state,
+            factory.context.identity.project,
+            graph_id,
+            budget,
+            cancel,
+            &factory.clock,
+        )
+        .map_err(graph_journal_error)?;
+        let checkpoint = journal
+            .load(graph_id)
+            .map_err(graph_journal_error)?
+            .ok_or(FacadeError::NotFound)?;
+        let ledger = ledger(&checkpoint)?;
+        let intent = ledger
+            .intents
+            .get(operation_key)
+            .ok_or(FacadeError::StateCorrupt)?;
+        let baseline = intent.gate_generations.get(gate).copied().unwrap_or_default();
+        let progress = checkpoint
+            .nodes
+            .iter()
+            .find(|progress| progress.id == *gate)
+            .ok_or(FacadeError::StateCorrupt)?;
+        if progress.retry_generation.unwrap_or_default() != baseline
+            || !matches!(progress.state, NodeState::Failed | NodeState::Blocked)
+        {
+            continue;
+        }
+        drop(journal);
+        factory.graph_document(
+            json!({"op":"retry", "id":format!("{graph_id}/{gate}")}),
+            budget,
+            cancel,
+        )?;
+    }
+    Ok(())
+}
+
+pub(super) fn handle_inbox_control(
+    factory: &Factory,
+    input: InboxInput,
+    host: Option<String>,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+) -> Result<Option<InboxResult>, FacadeError> {
+    let marked_answer = matches!(&input, InboxInput::Answer { extra, .. } if extra.contains_key("queue_control"));
+    if !marked_answer {
+        return Ok(None);
+    }
+    accept_request(factory, input, host, budget, cancel).map(Some)
+}
+
+pub(super) fn reconcile_pending(
+    factory: &Factory,
+    graph_id: &str,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+) -> Result<(), FacadeError> {
+    let mut journal = FileJournal::open(
+        &factory.context.roots.state,
+        factory.context.identity.project,
+        graph_id,
+        budget,
+        cancel,
+        &factory.clock,
+    )
+    .map_err(graph_journal_error)?;
+    let checkpoint = journal
+        .load(graph_id)
+        .map_err(graph_journal_error)?
+        .ok_or(FacadeError::NotFound)?;
+    let intents: Vec<_> = ledger(&checkpoint)?
+        .intents
+        .into_values()
+        .filter(|intent| !intent.phase.terminal())
+        .collect();
+    drop(journal);
+    for intent in intents {
+        match intent.metadata.action {
+            Action::Accept => {
+                let mut payload = intent.payload.clone();
+                payload["queue_control"] = serde_json::to_value(&intent.metadata)
+                    .map_err(|_| FacadeError::StateCorrupt)?;
+                let input: InboxInput = serde_json::from_value(payload)
+                    .map_err(|_| FacadeError::StateCorrupt)?;
+                accept_request(factory, input, None, budget, cancel)?;
+            }
+            Action::Fix if intent.payload.get("kind").and_then(Value::as_str) == Some("steer") => {
+                let work_key: provenant_records::WorkKey = serde_json::from_value(
+                    intent
+                        .payload
+                        .get("work_key")
+                        .cloned()
+                        .ok_or(FacadeError::StateCorrupt)?,
+                )
+                .map_err(|_| FacadeError::StateCorrupt)?;
+                let text = intent
+                    .payload
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .ok_or(FacadeError::StateCorrupt)?;
+                let node = intent
+                    .target_node
+                    .as_deref()
+                    .ok_or(FacadeError::StateCorrupt)?;
+                queue_live_fix(
+                    factory,
+                    graph_id,
+                    node,
+                    &intent.metadata,
+                    text,
+                    &work_key,
+                    budget,
+                    cancel,
+                )?;
+            }
+            Action::Drop | Action::Retry | Action::Fix => {
+                let mut input = intent.payload.clone();
+                input["queue_control"] = serde_json::to_value(&intent.metadata)
+                    .map_err(|_| FacadeError::StateCorrupt)?;
+                handle_graph_operation(factory, input, budget, cancel)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn close_owned_park(
+    factory: &Factory,
+    intent: &Intent,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+) -> Result<(), FacadeError> {
+    let Some(request_id) = intent.request_id else {
+        return Ok(());
+    };
+    let item = inbox_item(factory, request_id, None, budget, cancel)?;
+    if item.request.state != RequestState::Open {
+        return Ok(());
+    }
+    let result = BoundFacade { factory }.inbox_owner(
+        InboxInput::Close {
+            extra: Default::default(),
+            id: request_id,
+            state: RequestState::Withdrawn,
+            reason: "delivery queue item dropped".into(),
+            expect_revision: item.request.revision,
+            operation_id: Some(intent.metadata.operation_id.clone()),
+        },
+        Some(item.request.owner_host.to_string()),
+        budget,
+        cancel,
+    )?;
+    if matches!(result, InboxResult::Saved { .. }) {
+        Ok(())
+    } else {
+        Err(FacadeError::StateCorrupt)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn operation(value: u8) -> OperationId {
+        OperationId::parse(&format!("{value:02x}".repeat(16))).unwrap()
+    }
+
+    fn metadata(revision: u64, operation_id: OperationId) -> Metadata {
+        Metadata {
+            action: Action::Retry,
+            expected_revision: revision,
+            operation_id,
+            review_node: None,
+            review_head: None,
+            graph_id: Some("queue-1".into()),
+        }
+    }
+
+    #[test]
+    fn pending_control_survives_checkpoint_restart_and_blocks_competitors() {
+        let control = metadata(4, operation(1));
+        let intent = Intent {
+            digest: "digest".into(),
+            metadata: control.clone(),
+            graph_id: "queue-1".into(),
+            target_node: Some("node".into()),
+            retry_generations: BTreeMap::new(),
+            gate_generations: BTreeMap::new(),
+            request_id: None,
+            payload: json!({"op":"retry"}),
+            phase: Phase::Pending,
+            answer_id: None,
+            applied_revision: None,
+        };
+        let mut checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
+            serde_json::from_value(json!({
+                "schema_version": 2,
+                "graph_id": "queue-1",
+                "plan_digest": "digest",
+                "nodes": []
+            }))
+            .unwrap();
+        let mut saved = Ledger::default();
+        saved
+            .intents
+            .insert(control.operation_id.to_string(), intent.clone());
+        save_ledger(&mut checkpoint, &saved).unwrap();
+
+        // Model a process restart by round-tripping the journal checkpoint.
+        let persisted = serde_json::to_value(&checkpoint).unwrap();
+        let restored: provenant_fabric_runtime::graph::GraphCheckpoint =
+            serde_json::from_value(persisted).unwrap();
+        let restored_ledger = ledger(&restored).unwrap();
+        assert_eq!(restored_ledger.intents.get(&control.operation_id.to_string()), Some(&intent));
+        assert!(competes_with(&restored_ledger, &metadata(5, operation(2))));
+
+        let mut completed = restored_ledger;
+        completed
+            .intents
+            .get_mut(&control.operation_id.to_string())
+            .unwrap()
+            .phase = Phase::Applied;
+        assert!(competes_with(&completed, &metadata(4, operation(2))));
+        assert!(!competes_with(&completed, &metadata(5, operation(2))));
+    }
+
+    #[test]
+    fn operation_replay_digest_binds_target_and_payload() {
+        let control = metadata(4, operation(1));
+        let payload = json!({"op":"retry"});
+        let first = control_digest(&control, "queue-1", Some("node"), None, &payload).unwrap();
+        let replay = control_digest(&control, "queue-1", Some("node"), None, &payload).unwrap();
+        let changed = control_digest(
+            &control,
+            "queue-1",
+            Some("other-node"),
+            None,
+            &payload,
+        )
+        .unwrap();
+        assert_eq!(first, replay);
+        assert_ne!(first, changed);
+    }
+}
+
