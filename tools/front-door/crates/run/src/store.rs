@@ -123,6 +123,12 @@ pub(crate) fn work_key(
     provenant_records::WorkKey::new(project, graph, node, attempt)
         .map_err(|_| RunError::Validation("work key"))
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TerminalDecision {
+    Ordinary,
+    GraphStopAfterExit,
+}
+
 /// Result and route material is supplied by the trusted provider/confinement
 /// composition edge, after secret scanning. This storage API never launches.
 #[derive(Clone)]
@@ -722,12 +728,29 @@ impl RunStore {
                 else {
                     return Err(RunError::Conflict);
                 };
+                let owner_stopped_after_exit = outcome == Outcome::Cancelled
+                    && pending.terminal_evidence == Some(TerminalEvidence::ProcessExit)
+                    && matches!(
+                        pending.cancellation_disposition,
+                        Some(
+                            CancellationDisposition::Unknown
+                                | CancellationDisposition::AcknowledgedIneffective
+                        )
+                    )
+                    && matches!(
+                        provenant_supervisor::custody::read_stop_intent(&dir, Self::scope(&current)),
+                        Ok(provenant_supervisor::custody::StopIntentState::Requested(request))
+                            if request.reason == provenant_supervisor::machine::StopReason::ExplicitCancellation
+                                && request.requester == current.verified_owner.unwrap_or(self.context.actor_id)
+                    );
                 if (outcome == Outcome::Cancelled
+                    && !owner_stopped_after_exit
                     && !stored.never_spawned
                     && stored.cancel_delivered_before_exit != Some(true)
                     && !(pending.terminal_evidence == Some(TerminalEvidence::ImportCancellation)
                         && import_cancelled(&dir, Self::scope(&current))?))
                     || (outcome == Outcome::Cancelled
+                        && !owner_stopped_after_exit
                         && stored.never_spawned
                         && stored.stop_reason
                             != Some(
@@ -1130,6 +1153,7 @@ impl RunStore {
             outcome_exit,
             !exit.never_spawned,
             exit.cancel_delivered_before_exit,
+            TerminalDecision::Ordinary,
             false,
             call,
         );
@@ -1344,6 +1368,7 @@ impl RunStore {
                 None,
                 false,
                 None,
+                TerminalDecision::Ordinary,
                 true,
                 call,
             )
@@ -1591,6 +1616,7 @@ impl RunStore {
         outcome_exit: Option<i64>,
         launched: bool,
         cancellation_delivered: Option<bool>,
+        decision: TerminalDecision,
         publication_locked: bool,
         call: &Request<'_>,
     ) -> Result<AttemptRecord> {
@@ -1695,7 +1721,8 @@ impl RunStore {
             next.cancellation_disposition = Some(CancellationDisposition::ImportEffective);
         } else if publication.outcome == Outcome::Cancelled
             && publication.terminal_cause != Some(TerminalCause::Steered)
-            && (!launched || cancellation_delivered == Some(true))
+            && ((!launched && decision == TerminalDecision::Ordinary)
+                || cancellation_delivered == Some(true))
         {
             next.cancellation_disposition = Some(CancellationDisposition::Effective);
         } else {
@@ -1883,6 +1910,75 @@ impl RunStore {
             "machine rebooted before the guardian settled the attempt",
             call,
         )
+    }
+
+    /// Commit an owner stop for a Running attempt whose provider exit is
+    /// sealed. This is a cancellation, not a loss: the provider's own exit is
+    /// the decision evidence, and its captured output, handoff and exit stay
+    /// untouched. The caller scope-checked `exit`; the record is re-checked
+    /// here so a concurrent terminal decision wins.
+    pub(crate) fn commit_stopped_after_exit(
+        &self,
+        scope: provenant_records::custody::Scope,
+        reason: &str,
+        exit: &StoredExit,
+        call: &Request<'_>,
+    ) -> Result<()> {
+        let old = self.record(scope.attempt, call)?;
+        if Self::scope(&old) != scope || !matches!(old.state, AttemptState::Running { .. }) {
+            return Err(RunError::Conflict);
+        }
+        let attempt = self.attempt_dir(scope.attempt, false)?;
+        let raw = read_sealed(&attempt, AttemptFile::ProcessExit.name(), RECORD_LIMIT)?
+            .ok_or(RunError::Conflict)?;
+        let exit_evidence = ArtifactRecord {
+            extra: Default::default(),
+            path: artifact_path(scope.attempt, AttemptFile::ProcessExit.name())?,
+            digest: CanonicalV1::file_digest(&raw),
+            bytes: raw.len() as u64,
+            complete: true,
+            redacted: false,
+        };
+        let outcome_exit = match exit.termination {
+            Some(Termination::Exit(code)) => Some(code),
+            _ => None,
+        };
+        let revision = old.revision;
+        let publication = TerminalPublication {
+            handoff: Ok(None),
+            terminal_cause: None,
+            terminal_note: None,
+            outcome: Outcome::Cancelled,
+            finished_at: call
+                .clock
+                .wall_now()
+                .map_err(|_| RunError::Validation("wall clock"))?,
+            started_at: old.started_at,
+            provider_ms: old.provider_ms,
+            reason: Some(provenant_core::bounded_line(reason, 4096)),
+            result: "",
+            complete: true,
+            redacted: false,
+            resolved_route: old.resolved_route.clone(),
+            applied_route: old.applied_route.clone(),
+            observed_route: old.observed_route.clone(),
+            usage: old.usage.clone(),
+            session: old.session.clone(),
+            partial_signals: old.partial_signals.clone(),
+        };
+        self.commit_terminal(
+            old,
+            revision,
+            &publication,
+            Some(exit_evidence),
+            outcome_exit,
+            !exit.never_spawned,
+            exit.cancel_delivered_before_exit,
+            TerminalDecision::GraphStopAfterExit,
+            true,
+            call,
+        )?;
+        Ok(())
     }
 
     pub(crate) fn commit_lost(

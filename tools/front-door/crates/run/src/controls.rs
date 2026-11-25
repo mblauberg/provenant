@@ -119,7 +119,7 @@ thread_local! {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum CancelReceipt {
-    /// Queued work ended without reaching a provider.
+    /// The stop ended the attempt without a live provider to act on it.
     Cancelled,
     AlreadyTerminal,
     Requested,
@@ -2617,6 +2617,67 @@ impl RunStore {
             generation: record.generation,
         }
     }
+    /// Settle a Running attempt whose sealed provider exit makes status report
+    /// settling. The provider is gone, so a stop request cannot reach it; when
+    /// no holder can act on the stop and no driver owns settlement, the stop
+    /// commits the attempt terminal from the provider's own captured exit. A
+    /// live holder keeps the ordinary stop path and settles the attempt itself.
+    fn cancel_vanished(
+        &self,
+        record: &AttemptRecord,
+        reason: &str,
+        call: &Request<'_>,
+    ) -> Result<Option<CancelReceipt>> {
+        let id = record.attempt_id;
+        if !matches!(&record.state, AttemptState::Running { .. }) {
+            return Ok(None);
+        }
+        let scope = Self::scope(record);
+        let attempt = self.attempt_dir(id, false)?;
+        let Ok(Some(raw)) = read_sealed(&attempt, "process-exit.json", RECORD_LIMIT) else {
+            return Ok(None);
+        };
+        // Only the exit sealed for this generation proves this provider is gone.
+        let Ok(exit) = crate::db::decode::<provenant_supervisor::custody::StoredExit>(&raw) else {
+            return Ok(None);
+        };
+        if exit.schema_version != 1
+            || exit.scope != scope
+            || (exit.termination.is_none() && !exit.never_spawned)
+        {
+            return Ok(None);
+        }
+        use provenant_supervisor::custody::HolderPresence;
+        if custody::observe_holder(&attempt, scope, &SystemProcessObserver) == HolderPresence::Live
+            || crate::settlement::settlement_owner_live(&attempt, scope, call.clock) == Some(true)
+        {
+            return Ok(None);
+        }
+        // Hold the same lease as settlement while publishing the decision.
+        // A pending terminal intent already belongs to recovery.
+        let Ok(_driver) = attempt.try_lock(
+            std::ffi::OsStr::new("settlement-driver.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+        ) else {
+            return Ok(None);
+        };
+        if read_sealed(&attempt, "terminal-pending.json", TERMINAL_RECORD_LIMIT)?.is_some() {
+            return Ok(None);
+        }
+        // The owner request is durable evidence, not proof of delivery.
+        if custody::request_stop(
+            attempt,
+            scope,
+            record.verified_owner.unwrap_or(self.context.actor_id),
+            StopReason::ExplicitCancellation,
+        )
+        .is_err()
+        {
+            return Ok(None);
+        }
+        self.commit_stopped_after_exit(scope, reason, &exit, call)?;
+        Ok(Some(CancelReceipt::Cancelled))
+    }
     /// Cancel one attempt. Queued work is withdrawn; started work gets a stop
     /// request. A handoff that has not yet published its launch summary is
     /// retried within the call budget.
@@ -2703,6 +2764,14 @@ impl RunStore {
                 drop(publication);
                 id = successor;
                 continue;
+            }
+            if follow_graph_successors
+                && let Some(receipt) = self.cancel_vanished(&current, reason, call)?
+            {
+                drop(publication);
+                let committed = self.record(id, call)?;
+                self.settle_cleanup(&committed, None, call);
+                return self.finish_graph_cancel(id, pending_steer_parent, receipt, call);
             }
             if matches!(&current.state, AttemptState::Terminal { .. }) {
                 // This is an owner intent only. It remains distinct from the
