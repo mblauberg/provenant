@@ -13,7 +13,6 @@ use std::time::Duration;
 const MAX_QUEUE_ITEMS: usize = 256;
 const MAX_TRACKER_QUERY_BYTES: usize = 1024;
 const MAX_ITEM_BODY_BYTES: usize = 512 * 1024;
-pub(super) const TYPED_BINDER_UNAVAILABLE_REASON: &str = "queue item graph admission is disabled until the authenticated typed delivery binder is available";
 
 pub(super) fn is_queue_submission(input: &Value) -> bool {
     input.get("queue_item").is_none()
@@ -397,7 +396,8 @@ fn launch_and_receipt(
                 "queue item {} remains reserved for fixed graph {} because launch did not confirm that identity",
                 item.identity.item, item.graph_id
             )),
-            Err(error) if is_binder_unavailable(&error) => {
+            Err(error) if deterministic_launch_refusal(&error).is_some() => {
+                let reason = deterministic_launch_refusal(&error).ok_or(FacadeError::StateCorrupt)?;
                 match provenant_fabric_runtime::graph::FileJournal::read_status_snapshot(
                     &factory.context.roots.state,
                     factory.context.identity.project,
@@ -409,19 +409,19 @@ fn launch_and_receipt(
                                 &queue.queue_id,
                                 &item.identity,
                                 &item.graph_id,
-                                TYPED_BINDER_UNAVAILABLE_REASON,
+                                reason,
                                 budget,
                                 cancel,
                                 &factory.clock,
                             )
                             .map_err(super::interface::graph_input_reason)?;
                         warnings.push(format!(
-                            "queue item {} is unavailable: {TYPED_BINDER_UNAVAILABLE_REASON}",
+                            "queue item {} is unavailable: {reason}",
                             item.identity.item
                         ));
                     }
                     _ => warnings.push(format!(
-                        "queue item {} remains reserved for fixed graph {} because binder refusal could not prove that no graph was persisted",
+                        "queue item {} remains reserved for fixed graph {} because static refusal could not prove that no graph was persisted",
                         item.identity.item, item.graph_id
                     )),
                 }
@@ -447,14 +447,28 @@ fn launch_and_receipt(
     ))
 }
 
-pub(super) fn is_binder_unavailable(error: &FacadeError) -> bool {
-    use provenant_fabric_runtime::coordination::facade::InvalidInputDetail;
-    matches!(
-        error,
-        FacadeError::InvalidInput {
-            detail: Some(InvalidInputDetail::GraphReason(reason))
-        } if reason == TYPED_BINDER_UNAVAILABLE_REASON
-    )
+pub(super) fn deterministic_launch_refusal(error: &FacadeError) -> Option<&'static str> {
+    use provenant_fabric_runtime::coordination::facade::DispatchRefusalFact;
+    match error {
+        FacadeError::InvalidInput { .. } => Some("queue item input failed static admission"),
+        FacadeError::DispatchRefused {
+            fact:
+                Some(
+                    DispatchRefusalFact::GraphSchema
+                    | DispatchRefusalFact::GraphComposite
+                    | DispatchRefusalFact::GraphPlan
+                    | DispatchRefusalFact::GraphCycle { .. }
+                    | DispatchRefusalFact::GraphWriterWorktree { .. }
+                    | DispatchRefusalFact::GraphStructuralLimit(_)
+                    | DispatchRefusalFact::GraphExtension(_)
+                    | DispatchRefusalFact::GraphNodeLimit { .. }
+                    | DispatchRefusalFact::GraphEnvelope
+                    | DispatchRefusalFact::GraphOutputKind(_),
+                ),
+            ..
+        } => Some("queue item graph failed static admission"),
+        _ => None,
+    }
 }
 
 fn queue_policy(factory: &Factory) -> Result<(QueueKnobs, Sourced<u64>, Vec<String>), FacadeError> {
@@ -764,4 +778,16 @@ fn queue_receipt(
         "warnings": warnings,
         "waiting": waiting,
     })
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+
+    #[test]
+    fn static_refusals_park_but_transient_owner_failures_retry() {
+        let invalid = super::super::interface::graph_input_reason("invalid item plan");
+        assert!(deterministic_launch_refusal(&invalid).is_some());
+        assert!(deterministic_launch_refusal(&FacadeError::OwnerUnavailable).is_none());
+    }
 }

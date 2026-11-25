@@ -24,6 +24,7 @@ mod peer;
 mod peer_source_binding;
 mod queue_adoption;
 mod queue_controls;
+mod queue_delivery;
 mod queue_dispatch;
 mod queue_registry;
 mod queue_scheduler;
