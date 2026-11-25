@@ -286,7 +286,9 @@ publication after settlement. Host, launch and node settings opt a lane in.
 The provider's `gh` tool enforces the policy before forwarding a command:
 `never` refuses `gh pr create|edit|close` (and the other PR mutations) and
 mutating forge API calls while leaving reads working; `draft` adds `--draft`
-to `pr create` and refuses promotion, merge, reopen and forge writes;
+to `pr create`, permits edit, close, comment and review, and refuses promotion,
+merge, reopen, lock, unlock, update-branch, revert and forge writes. Unknown PR
+subcommands are refused under both restrictive policies until classified;
 `allowed` forwards unchanged. A missing or unknown value falls back to `never`.
 The effective value and source appear in the writer preamble, the launch
 receipt and `run --explain`. The wrapper is a tool-policy control, not an

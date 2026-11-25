@@ -51,7 +51,7 @@ impl PrPolicy {
                 "do not open, edit or close pull requests and do not write to the forge API; the chair publishes after settlement"
             }
             Self::Draft => {
-                "open pull requests only as drafts; the gh wrapper adds --draft, and the lane cannot promote, merge or reopen them"
+                "open pull requests only as drafts; the gh wrapper adds --draft, permits edit, close, comment and review, and refuses other PR writes and forge writes"
             }
             Self::Allowed => {
                 "you may open, edit and close pull requests with gh; use a filled pull request template and `gh pr create --body-file FILE`"

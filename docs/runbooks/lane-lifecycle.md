@@ -56,9 +56,11 @@ refs intact. Failed and cancelled lanes keep their worktrees.
   stops one.
 - A lane's pull requests follow `lanes.pr` (default `never`, so a leaf implement
   lane does not open one against the wrong base). `never` makes the lane's `gh`
-  refuse `pr create|edit|close` and forge writes; `draft` adds `--draft` to
-  `pr create`; `allowed` forwards unchanged. Set it with `provenant config set
-  lanes.pr draft` or `--set lanes.pr=allowed`. The value and its source appear
+  refuse PR mutations and forge writes; `draft` adds `--draft` to `pr create`,
+  permits edit, close, comment and review, and refuses other PR writes and forge
+  writes. Both refuse unknown PR subcommands until classified; `allowed` forwards
+  unchanged. Set it with `provenant config set lanes.pr draft` or `--set
+  lanes.pr=allowed`. The value and its source appear
   in the preamble, launch receipt and `run --explain`. `provenant pr open` is a
   host operation for a settled attempt (see [GitHub workflow](github-workflow.md#branch-commit-pull-request)).
 - Writers follow `lanes.ci_scope` (default `none`: push and report, and the chair
