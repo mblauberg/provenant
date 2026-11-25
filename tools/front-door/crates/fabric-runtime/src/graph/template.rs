@@ -2392,6 +2392,8 @@ impl<'a> Compiler<'a> {
             #[serde(default)]
             selected_publication: Option<String>,
             #[serde(default)]
+            initial_publication: Option<String>,
+            #[serde(default)]
             max_extension_rounds: Option<usize>,
             #[serde(default)]
             review_repair: bool,
@@ -2448,6 +2450,9 @@ impl<'a> Compiler<'a> {
         }
         if let Some(publication) = repeat.selected_publication {
             spec.insert("selected_publication".into(), Value::String(publication));
+        }
+        if let Some(publication) = repeat.initial_publication {
+            spec.insert("initial_publication".into(), Value::String(publication));
         }
         if review_repair {
             if repeat.max_rounds == 0 {

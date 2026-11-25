@@ -869,7 +869,40 @@ pub(super) fn validate_relations(
                         });
                         !conflicts.is_empty() && ci_after_conflict && verdict_after_ci
                     });
-                if !gates_valid {
+                let initial_valid = nodes[target]
+                    .loop_body
+                    .as_ref()
+                    .and_then(|spec| spec.initial_publication.as_deref())
+                    .is_none_or(|initial| {
+                        let entries: Vec<_> = nodes[target]
+                            .depends_on
+                            .iter()
+                            .filter_map(|dependency| positions.get(dependency).copied())
+                            .filter(|index| {
+                                nodes[*index].on_fail.as_deref() == Some(&nodes[target].id)
+                            })
+                            .collect();
+                        entries.iter().any(|conflict| {
+                            matches!(
+                                &nodes[*conflict].condition,
+                                Some(GateCondition::Conflict { .. })
+                            ) && gate_targets_node(&nodes[*conflict].condition, initial)
+                                && entries.iter().any(|ci| {
+                                    matches!(&nodes[*ci].condition, Some(GateCondition::Ci { .. }))
+                                        && gate_targets_node(&nodes[*ci].condition, initial)
+                                        && ancestors(nodes, positions, &nodes[*ci].id)
+                                            .contains(conflict)
+                                        && entries.iter().any(|verdict| {
+                                            matches!(
+                                                &nodes[*verdict].condition,
+                                                Some(GateCondition::Verdict { .. })
+                                            ) && ancestors(nodes, positions, &nodes[*verdict].id)
+                                                .contains(ci)
+                                        })
+                                })
+                        })
+                    });
+                if !gates_valid || !initial_valid {
                     return Err(format!(
                         "node {}: land must follow conflict, CI and verdict gates for every selected publication round",
                         node.id
@@ -978,29 +1011,8 @@ fn selected_loop_publication_node(
 ) -> Option<String> {
     let boundary_index = *positions.get(target)?;
     let boundary = &plan.nodes[boundary_index];
-    let local = boundary
-        .loop_body
-        .as_ref()?
-        .selected_publication
-        .as_deref()?;
-    let round = checkpoint
-        .nodes
-        .iter()
-        .filter_map(|progress| {
-            let round = progress.round.as_ref()?;
-            (round.loop_id == target && round.until && progress.state == NodeState::Succeeded)
-                .then_some(round.round)
-        })
-        .max()?;
-    plan.nodes
-        .iter()
-        .find(|node| {
-            node.kind == Some(NodeKind::Publish)
-                && node.round.as_ref().is_some_and(|member| {
-                    member.loop_id == target && member.round == round && member.node_id == local
-                })
-        })
-        .map(|node| node.id.clone())
+    let index = repair::selected_publication_index(boundary, checkpoint, plan)?;
+    Some(plan.nodes[index].id.clone())
 }
 
 fn verified_publication_writer<'a>(

@@ -12,6 +12,7 @@ pub(super) fn nodes_have_v2(nodes: &[GraphNode]) -> bool {
                     || !spec.previous_bindings.is_empty()
                     || !spec.retry_on.is_empty()
                     || spec.selected_publication.is_some()
+                    || spec.initial_publication.is_some()
             })
             || node.review_base.is_some()
             || node.family_group.is_some()
@@ -69,6 +70,7 @@ fn value_has_v2(value: &serde_json::Value) -> bool {
                 || map.contains_key("previous_bindings")
                 || map.contains_key("retry_on")
                 || map.contains_key("selected_publication")
+                || map.contains_key("initial_publication")
                 || map.contains_key("family_group")
                 || map.contains_key("review_base")
                 || map
