@@ -2194,7 +2194,7 @@ impl Factory {
             .as_ref()
             .map(|_| submission_digest(&prepared, None, None))
             .transpose()?;
-        if let (Some(launch), Some(digest)) = (&queue_launch, &queue_replay_digest)
+        if let Some(launch) = &queue_launch
             && let Some(execution) = FileJournal::execution(
                 &self.context.roots.state,
                 self.context.identity.project,
@@ -2202,7 +2202,13 @@ impl Factory {
             )
             .map_err(graph_journal_error)?
         {
-            if execution.document.replay_digest() != Some(digest.as_str()) {
+            if !super::queue_scheduler::matches_item_execution(
+                &launch.queue.queue_id,
+                &launch.item,
+                &execution,
+            )
+            .map_err(|_| FacadeError::StateCorrupt)?
+            {
                 return Err(FacadeError::Conflict);
             }
             let run = self.graph(
