@@ -1414,6 +1414,7 @@ fn recover_provisioning(
                     | WorktreeError::CheckedOut
                     | WorktreeError::InvalidRequest
                     | WorktreeError::WorktreeExists { .. }
+                    | WorktreeError::UnrelatedBase { .. }
                     | WorktreeError::BranchCollision { .. }
                     | WorktreeError::RemoteOnlyBranch { .. }
                     | WorktreeError::BaseNotFound { .. }

@@ -208,6 +208,15 @@ pub enum WorktreeError {
         reason: String,
     },
     #[error(
+        "base {base} at {base_oid} has no merge base with branch {branch} at {head}; pass --worktree to use the existing checkout, or merge or rebase the branch onto the intended base before launching"
+    )]
+    UnrelatedBase {
+        branch: String,
+        head: GitOid,
+        base: String,
+        base_oid: GitOid,
+    },
+    #[error(
         "registered Git project has no verified primary checkout; run `provenant worktree list` from its primary checkout to refresh the layout, then retry"
     )]
     ProjectLayoutUnresolved,
@@ -455,7 +464,10 @@ impl WorktreeError {
         Some(match self {
             Self::StaleRegistration => "run `git worktree prune`, then retry",
             Self::WorktreeExists { .. } => {
-                "run `provenant worktree list` to inspect the existing checkout, then remove it with `provenant worktree remove NAME` or retry with a matching clean tree; for a base conflict, omit --base or pick a matching base"
+                "run `provenant worktree list` to inspect the existing checkout, then remove it with `provenant worktree remove NAME` or retry with a matching clean tree"
+            }
+            Self::UnrelatedBase { .. } => {
+                "pass --worktree PATH to launch from the existing branch checkout, or merge or rebase the branch onto the intended base before retrying"
             }
             Self::GitEntryHeld { locked: true } => "run `git worktree unlock <path>`, then retry",
             Self::GitEntryHeld { locked: false } => {

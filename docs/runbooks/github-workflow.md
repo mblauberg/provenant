@@ -68,7 +68,9 @@ lane.
 `--base` names the pull request's merge target; it never resets the branch. An
 existing branch behind its base warns `BRANCH_BEHIND_BASE` and proceeds at its
 current tip, so re-running a repair keeps the branch's commits. Merge the base
-into the branch before landing when the warning appears.
+into the branch before landing when the warning appears. A `--base` with no merge
+base with the branch refuses: pass `--worktree` to use the existing checkout, or
+merge or rebase the branch onto the intended base before launching again.
 
 ## Merge
 

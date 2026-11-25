@@ -147,7 +147,13 @@ one a chair pre-created with `provenant worktree create`, is rebound; a differen
 unclean tree is refused with the named cause. When the managed path already holds a registered
 linked checkout on the named branch, `--branch` and the branch resolved by `run implement --pr N`
 bind that checkout in place as `--worktree` would, and report its path on an info line rather than
-provisioning it again. Reuse takes the checkout's own head: `--base` is advisory only. An unheld
+provisioning it again. Reuse takes the checkout's own head: for an existing branch `--base` is the
+merge target for diffs, stray-work accounting and the PR, never an ancestry requirement or a reset.
+A branch whose base is in its history is reused without a behind-base warning; a branch behind its
+base is reused with `BRANCH_BEHIND_BASE`, naming how many commits it is behind and that the lane may
+merge the base. A base with no merge base at all is unrelated and refuses with a `WRITER_SCOPE`
+message that names `--worktree` and the merge/rebase option; an incomplete history from a shallow
+clone warns and proceeds instead of refusing on absent evidence. An unheld
 dirty checkout follows `lanes.writer_dirty` (`wip_commit` by default), not the provisioning
 refusal. A live writer or an unsettled attempt on that checkout still refuses, naming the holder
 and the exact command that settles it (or a wait-for-holder step when no attempt is named); that

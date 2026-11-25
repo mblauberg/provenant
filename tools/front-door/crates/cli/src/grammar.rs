@@ -715,7 +715,7 @@ pub struct GraphRunArgs {
     /// Create an owned writer worktree on this branch
     #[arg(long, catalog_requires = "base")]
     pub branch: Option<String>,
-    /// Git base for a new writer branch
+    /// New writer branch starts here; for an existing branch, its merge target
     #[arg(long, catalog_requires = "branch")]
     pub base: Option<String>,
     /// Pin a review to this pull request, or repair a PR with `run implement --pr N` (host resolves its base and head)

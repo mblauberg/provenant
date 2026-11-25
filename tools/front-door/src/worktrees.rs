@@ -193,6 +193,7 @@ impl Error {
             ) => Outcome::Invalid,
             Self::Worktree(
                 WorktreeError::WorktreeExists { .. }
+                | WorktreeError::UnrelatedBase { .. }
                 | WorktreeError::Dirty(_)
                 | WorktreeError::DetachedPrimary
                 | WorktreeError::DetachedUnmerged { .. }
