@@ -94,10 +94,11 @@ pub(super) fn resolve(
     if issue_identity != item.identity.item {
         return Err("queue item identity does not match its tracker snapshot".into());
     }
-    let project = factory.context.identity.project.to_string();
-    if !item.identity.project.eq_ignore_ascii_case(&project) {
+    let selected_project = factory.context.identity.project.to_string();
+    if !item.identity.project.eq_ignore_ascii_case(&selected_project) {
         return Err("queue item project does not match the selected project".into());
     }
+    let project = item.identity.project.clone();
 
     let pull = resolve_pull_request(
         factory,
