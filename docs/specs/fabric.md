@@ -478,6 +478,9 @@ explicitly. The `domains.wait.pr_*` settings (conditional requests, intervals)
 change forge-observer request cadence only, never a gate verdict.
 - Why: deterministic decisions need durable evidence without a launch.
 
+The [delivery queue target](delivery-queue.md) extends these graph capabilities
+with bounded conditional cycles, escalation and durable item scheduling.
+
 ### Bounded loops
 
 Admission counts every possible round. A body writer integrates by fast-forward
