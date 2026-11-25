@@ -128,16 +128,19 @@ pub fn render_output(command: Output, read: Result<(Value, String), Fail>, full:
                     text = format!("{state}\npartial result\n{text}");
                 }
             }
+            if let Some(tail) = command.tail_selection() {
+                match tail {
+                    crate::Tail::Bytes(bytes) => data["tail"] = json!(bytes),
+                    crate::Tail::Lines(lines) => data["tail_lines"] = json!(lines),
+                }
+                data["tail_clamped"] = json!(command.tail_clamped());
+            }
             if let Some(tail) = receipt_tail {
                 let start = match tail {
                     crate::Tail::Bytes(bytes) => tail_start_bytes(text.as_bytes(), bytes),
                     crate::Tail::Lines(lines) => tail_start_lines(text.as_bytes(), lines),
                 };
                 text = text[start..].to_owned();
-                match tail {
-                    crate::Tail::Bytes(bytes) => data["tail"] = json!(bytes),
-                    crate::Tail::Lines(lines) => data["tail_lines"] = json!(lines),
-                }
                 data["tail_text"] = json!(text);
             }
             if let Some(path) = &to {
@@ -886,13 +889,6 @@ fn output_read_part(
         if matches!(command.part, Part::Stderr) && text.is_empty() {
             text = "payload evicted by retention; the retained capture tail is empty\n".into();
         }
-    }
-    if let Some(tail) = tail {
-        match tail {
-            crate::Tail::Bytes(bytes) => data["tail"] = json!(bytes),
-            crate::Tail::Lines(lines) => data["tail_lines"] = json!(lines),
-        }
-        data["tail_clamped"] = json!(command.tail_clamped());
     }
     if matches!(command.part, Part::Result)
         && command.tail_selection().is_none()

@@ -213,6 +213,58 @@ fn output_chunk_bytes(data: &Value) -> Vec<u8> {
 
 // Spec: docs/specs/cli.md#output-references-and-bounded-tails
 #[test]
+fn output_tail_metadata_preserves_units_across_readers() {
+    let progress = composite_progress(json!({
+        "schema_version": 2,
+        "result": {"digest": "sha256:fixture", "excerpt": "one\ntwo\n", "truncated": false, "path": null},
+        "findings": [], "warnings": []
+    }));
+    let schema = provenant_records::wire::data_schema("output").unwrap();
+    for (bytes, lines, field, expected, clamped) in [
+        (None, Some(501), "tail_lines", 500, true),
+        (Some(3), None, "tail", 3, false),
+        (None, Some(0), "tail_lines", 0, false),
+    ] {
+        let mut command = composite_output_command(0, 64);
+        command.tail = bytes;
+        command.tail_lines = lines;
+        let composite = composite_graph_output(&command, "typed-output", &progress, false).unwrap();
+        let mut replies = vec![composite.result.data];
+        for part in [provenant_cli::Part::Result, provenant_cli::Part::Events] {
+            command.part = part;
+            // Both local and peer readers reach this same rendering boundary.
+            let data = json!({"attempt_id": "fixture", "events": []});
+            replies.push(
+                provenant_cli::run::render_output(
+                    command.clone(),
+                    Ok((data, String::new())),
+                    false,
+                )
+                .result
+                .data,
+            );
+        }
+        for data in &replies {
+            assert_eq!(data[field], expected);
+            assert_eq!(data["tail_clamped"], clamped);
+            assert!(
+                data.get(if field == "tail" {
+                    "tail_lines"
+                } else {
+                    "tail"
+                })
+                .is_none()
+            );
+        }
+        provenant_records::wire::schema::validate(&schema, &replies[0]).unwrap();
+        if lines == Some(0) {
+            assert!(output_chunk_bytes(&replies[0]).is_empty());
+        }
+    }
+}
+
+// Spec: docs/specs/cli.md#output-references-and-bounded-tails
+#[test]
 fn composite_output_paginates_multibyte_text_as_bounded_bytes() {
     let excerpt = "🧪éx";
     let progress = composite_progress(json!({

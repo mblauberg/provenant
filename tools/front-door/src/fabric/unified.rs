@@ -3588,7 +3588,9 @@ fn composite_graph_output(
             provenant_cli::Tail::Bytes(bytes) => {
                 provenant_cli::run::tail_start_bytes(window, bytes)
             }
-            provenant_cli::Tail::Lines(lines) => composite_tail_start(window, lines),
+            provenant_cli::Tail::Lines(lines) => {
+                provenant_cli::run::tail_start_lines(window, lines)
+            }
         };
         start += bounded_start;
     }
@@ -3636,11 +3638,8 @@ fn composite_graph_output(
             digest: result.map(|result| result.digest.clone()),
             bytes,
             selected,
-            tail: tail.map(|selection| match selection {
-                provenant_cli::Tail::Bytes(bytes) => bytes,
-                provenant_cli::Tail::Lines(lines) => lines,
-            }),
-            tail_clamped: tail.map(|_| command.tail_clamped()),
+            tail: None,
+            tail_clamped: None,
             to: None,
             written: None,
         },
@@ -3651,18 +3650,6 @@ fn composite_graph_output(
         Ok((data, excerpt.to_owned())),
         full,
     ))
-}
-
-fn composite_tail_start(bytes: &[u8], lines: u64) -> usize {
-    bytes
-        .strip_suffix(b"\n")
-        .unwrap_or(bytes)
-        .iter()
-        .enumerate()
-        .rev()
-        .filter(|(_, byte)| **byte == b'\n')
-        .nth(usize::try_from(lines.saturating_sub(1)).unwrap_or(usize::MAX))
-        .map_or(0, |(index, _)| index + 1)
 }
 
 /// The failed or blocked node rows under a graph or node target.
