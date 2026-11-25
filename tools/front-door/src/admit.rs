@@ -24,6 +24,115 @@ use std::{
     time::Duration,
 };
 
+/// Admit a published queue head through the same fair host-wide `ci` class as
+/// `provenant admit ci`, then persist the exact owner under its acquired slot.
+pub(crate) fn acquire_delivery_ci_lease(
+    state: &Path,
+    owner: provenant_run::build::queue::CiLeaseOwner,
+    limit: usize,
+    wait_seconds: u64,
+    cancel: &provenant_core::CancelToken,
+) -> provenant_fabric_runtime::graph::DeliveryCiAdmission {
+    use provenant_run::build::{Priority, queue};
+    use sha2::{Digest, Sha256};
+
+    let identity = match serde_json::to_vec(&owner) {
+        Ok(identity) => identity,
+        Err(error) => {
+            let reason = format!("cannot encode lease identity: {error}");
+            say(&format!("delivery CI admission unavailable: {reason}"));
+            return provenant_fabric_runtime::graph::DeliveryCiAdmission::Unavailable {
+                reason,
+            };
+        }
+    };
+    let digest = Sha256::digest(&identity)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let limit = match u64::try_from(limit) {
+        Ok(limit) => limit,
+        Err(_) => {
+            let reason = "delivery CI slot limit exceeds the host admission range".to_owned();
+            say(&format!("delivery CI admission unavailable: {reason}"));
+            return provenant_fabric_runtime::graph::DeliveryCiAdmission::Unavailable {
+                reason,
+            };
+        }
+    };
+    let ticket_owner = format!("delivery:{}:{}", owner.graph_id, owner.node_id);
+    let command = "delivery CI observation".to_owned();
+    let request = queue::AdmissionRequest {
+        state,
+        class: "ci",
+        limit,
+        job_id: &digest,
+        owner: &ticket_owner,
+        project_key: &owner.project,
+        priority: Priority::Interactive,
+        aging: Duration::from_secs(120),
+        command_digest: digest.clone(),
+        overflow: queue::OverflowPolicy::Queue,
+        affinity: Vec::new(),
+        excluded: Vec::new(),
+        cancel,
+        scratch: None,
+        attempt_id: None,
+        command: Some(command),
+        wait_seconds,
+    };
+    match queue::admit_ci_lease(&request, owner.clone()) {
+        Ok(queue::CiLeaseAdmission::Held { lease, .. }) => {
+            let owner = lease.owner;
+            provenant_fabric_runtime::graph::DeliveryCiAdmission::Held {
+                lease: provenant_fabric_runtime::graph::DeliveryCiLease {
+                    id: lease.id,
+                    slot: lease.slot,
+                    project: owner.project,
+                    graph_id: owner.graph_id,
+                    node_id: owner.node_id,
+                    head_sha: owner.head_sha,
+                },
+            }
+        }
+        Ok(queue::CiLeaseAdmission::Overflow { waited }) => {
+            let waited_millis = waited.as_millis().min(u128::from(u64::MAX)) as u64;
+            say(&format!(
+                "delivery CI admission overflow after {waited_millis} ms; continuing under the advisory queue cap"
+            ));
+            provenant_fabric_runtime::graph::DeliveryCiAdmission::Overflow { waited_millis }
+        }
+        Err(error) => {
+            let reason = provenant_core::bounded_line(&error.to_string(), 512);
+            say(&format!(
+                "delivery CI admission unavailable; continuing without a class lease: {reason}"
+            ));
+            provenant_fabric_runtime::graph::DeliveryCiAdmission::Unavailable { reason }
+        }
+    }
+}
+
+pub(crate) fn release_delivery_ci_lease(
+    state: &Path,
+    lease: &provenant_fabric_runtime::graph::DeliveryCiLease,
+    wait_seconds: u64,
+    cancel: &provenant_core::CancelToken,
+) -> Result<(), String> {
+    let lease = provenant_run::build::queue::CiAdmissionLease {
+        id: lease.id.clone(),
+        slot: lease.slot,
+        owner: provenant_run::build::queue::CiLeaseOwner {
+            project: lease.project.clone(),
+            graph_id: lease.graph_id.clone(),
+            node_id: lease.node_id.clone(),
+            head_sha: lease.head_sha.clone(),
+        },
+    };
+    provenant_run::build::queue::release_ci_lease(state, &lease, wait_seconds, cancel)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
 fn subcommand(args: &[OsString]) -> Option<&str> {
     let mut args = args.iter().map(OsString::as_os_str);
     while let Some(arg) = args.next() {
