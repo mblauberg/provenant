@@ -2197,14 +2197,15 @@ impl Factory {
         }
         let mut input = self.apply_pr_repair(prepared)?;
         if let Some(launch) = &queue_launch {
-            let branch = launch
-                .item
-                .adoption
-                .as_ref()
-                .and_then(|adoption| adoption.get("branch"))
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-                .unwrap_or_else(|| format!("queue/{}", launch.item.graph_id));
+            let branch = if let Some(adoption) = &launch.item.adoption {
+                adoption
+                    .get("branch")
+                    .and_then(Value::as_str)
+                    .ok_or(FacadeError::StateCorrupt)?
+                    .to_owned()
+            } else {
+                format!("queue/{}", launch.item.graph_id)
+            };
             provenant_confinement::repo::GitRefName::branch(&branch)
                 .map_err(|_| FacadeError::StateCorrupt)?;
             let worktree = if let Some(adoption) = &launch.item.adoption {
