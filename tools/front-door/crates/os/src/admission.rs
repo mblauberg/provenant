@@ -738,7 +738,8 @@ impl AdmissionSlots {
     /// Try the supplied indices in order.
     pub fn try_acquire_ordered(&self, order: &[u64]) -> Result<Option<SlotGuard>> {
         if self.class == "ci" {
-            self.try_acquire_ci(
+            self.try_acquire_ci_ordered(
+                order,
                 u64::try_from(order.len()).unwrap_or(u64::MAX),
                 "AdmissionSlots::try_acquire_ordered",
             )
@@ -752,6 +753,25 @@ impl AdmissionSlots {
     /// explicit uncapped override. Every returned guard is visible to direct
     /// `AdmissionSlots` users and durable queue leases in the same domain.
     pub fn try_acquire_ci(&self, limit: u64, source: &str) -> Result<Option<SlotGuard>> {
+        self.try_acquire_ci_with_order(limit, source, None)
+    }
+
+    /// Try supplied slot indices first while applying the shared class cap.
+    pub fn try_acquire_ci_ordered(
+        &self,
+        order: &[u64],
+        limit: u64,
+        source: &str,
+    ) -> Result<Option<SlotGuard>> {
+        self.try_acquire_ci_with_order(limit, source, Some(order))
+    }
+
+    fn try_acquire_ci_with_order(
+        &self,
+        limit: u64,
+        source: &str,
+        preferred: Option<&[u64]>,
+    ) -> Result<Option<SlotGuard>> {
         if self.class != "ci" {
             return Err(FsError::Io {
                 operation: "acquire ci admission slot",
@@ -813,8 +833,18 @@ impl AdmissionSlots {
             return Ok(None);
         }
 
+        let mut candidates = Vec::with_capacity(available.len());
+        if let Some(preferred) = preferred {
+            for index in preferred.iter().copied() {
+                if available.contains(&index) && !candidates.contains(&index) {
+                    candidates.push(index);
+                }
+            }
+        } else {
+            candidates = available;
+        }
         let mut selected = None;
-        for index in available {
+        for index in candidates {
             match self
                 .dir
                 .try_lock_existing(&slot_name(index), LockMode::Exclusive)
@@ -828,7 +858,7 @@ impl AdmissionSlots {
                 Err(error) => return Err(error),
             }
         }
-        if selected.is_none() {
+        if selected.is_none() && preferred.is_none() {
             let index = indices.last().map_or(0, |last| last.saturating_add(1));
             let name = slot_name(index);
             self.dir
