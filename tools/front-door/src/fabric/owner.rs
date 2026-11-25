@@ -6893,10 +6893,9 @@ mod recovery_rebuild_tests {
 
 #[cfg(test)]
 mod delivery_hygiene_receipt_tests {
-    use super::delivery_hygiene_receipt_matches;
-
     #[test]
     fn recovery_receipt_requires_operation_marker_and_one_expected_parent() {
+        use super::delivery_hygiene_receipt_matches;
         let head = "b".repeat(40);
         let expected = "a".repeat(40);
         let receipt = format!("{head}\0Apply formatter\n\nDelivery-Queue-Operation: hygiene-1\n");
