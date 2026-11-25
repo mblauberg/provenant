@@ -22,9 +22,9 @@ pub(crate) struct NodeDigest {
     pub attempt_state: Option<String>,
     /// This host's current liveness projection for the selected attempt.
     pub attempt_presence: Option<String>,
-    /// A live attempt silent past its configured output-sourced threshold.
+    /// A live attempt silent past its configured silence threshold.
     pub stalled: bool,
-    /// The last output-sourced event time, rendered beside `stalled`.
+    /// The last output or provider start time, rendered beside `stalled`.
     pub last_event_at: Option<String>,
     pub line: String,
     pub state: String,

@@ -322,15 +322,15 @@ pub fn admission_actor_description(
     }
 }
 
-/// Stall age starts at the last output, never at the queued/started fallback,
-/// and only a live writer can be silent rather than lost.
+/// Stall age starts at the last output or provider start, and only a live
+/// writer can be silent rather than lost.
 fn stalled_projection(
     lane: &run::AttemptRecord,
     now: Option<WallTime>,
     source: provenant_records::wire::LastEventSource,
     presence: Option<provenant_records::wire::LanePresence>,
 ) -> Option<bool> {
-    if source != provenant_records::wire::LastEventSource::Output
+    if source == provenant_records::wire::LastEventSource::Queued
         || presence != Some(provenant_records::wire::LanePresence::Live)
     {
         return None;
@@ -1004,9 +1004,15 @@ mod tests {
             super::stalled_projection(&lane, Some(now), LastEventSource::Output, live),
             Some(true)
         );
-        // The queued/started fallback never turns into a stall.
+        // A provider that has never emitted output is measured from start.
+        lane.last_output_at = None;
+        lane.started_at = Some(WallTime::from_micros(1_000_000).expect("start time"));
         assert_eq!(
             super::stalled_projection(&lane, Some(now), LastEventSource::Started, live),
+            Some(true)
+        );
+        assert_eq!(
+            super::stalled_projection(&lane, Some(now), LastEventSource::Queued, live),
             None
         );
         // A writer whose presence is unknown is not called silent.

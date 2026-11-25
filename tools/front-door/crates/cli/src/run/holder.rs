@@ -547,6 +547,13 @@ impl Holder for HostHolder<'_> {
         );
         Ok(())
     }
+    fn provider_activity(
+        &self,
+        context: &[u8],
+        last_output: Option<provenant_core::WallTime>,
+    ) -> custody::Result<()> {
+        self.inner.provider_activity(context, last_output)
+    }
     fn budget_warning(&self, context: &[u8], tokens: u64, budget: u64) -> custody::Result<()> {
         self.inner.budget_warning(context, tokens, budget)
     }

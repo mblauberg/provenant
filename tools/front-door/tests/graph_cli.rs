@@ -1363,6 +1363,62 @@ fn node_route_table_reaches_explain_with_one_full_model_spelling() -> Result {
     Ok(())
 }
 
+// Spec: docs/specs/supervisor.md#attempt-silence-is-reported-action-is-opt-in
+#[test]
+fn silent_provider_is_visible_in_status_and_ends_wait() -> Result {
+    if !PROVIDER_CUSTODY {
+        return Ok(());
+    }
+    let mut rig = GraphProject::new()?;
+    rig.enable_codex_fixture()?;
+    rig.declare_forge("master")?;
+    std::fs::write(
+        rig.state().join("config.toml"),
+        "schema_version=1\n[gc]\nfree_floor='1B'\n[providers.codex]\nstall_after_seconds=1\n",
+    )?;
+    let document = rig.document(&json!({
+        "schema_version": support::GRAPH_DOCUMENT_SCHEMA_VERSION,
+        "graph_id": "silent-provider",
+        "integration_branch": "silent/integration",
+        "nodes": [{
+            "id": "writer", "prompt": "write the change", "access": "worktree_write",
+            "worktree": ".worktrees/silent-provider-writer", "write_scope": ["."],
+            "delivery": "integrate:silent/integration", "provision_worktree": true,
+            "route": {"adapter": "codex", "model": "codex/gpt-6-luna"}
+        }]
+    }))?;
+    let document = document.to_str().ok_or("document path")?;
+    let (launch, launched) = rig.run(&["run", "--file", document])?;
+    assert_launch_admitted(&launch, &launched)?;
+    let graph = launched["data"]["checkpoint"]["graph_id"]
+        .as_str()
+        .ok_or("graph id")?;
+    let output = rig
+        .command()
+        .args(["wait", graph, "--timeout", "8s"])
+        .output()?;
+    let waited = last_record(&output)?;
+    let (_, status) = rig.run(&["status", graph])?;
+    std::fs::write(
+        rig.project
+            .join(".worktrees/silent-provider-writer/fixture-release"),
+        b"release",
+    )?;
+    assert_eq!(output.status.code(), Some(6), "{waited}");
+    assert_eq!(
+        waited["data"]["targets"][0]["settle"], "stalled",
+        "{waited}"
+    );
+    let rows = status["data"]["rows"].as_array().ok_or("status rows")?;
+    let attempt = rows
+        .iter()
+        .find(|row| row["kind"] == "attempt" && row["stalled"] == true)
+        .ok_or_else(|| format!("no stalled attempt: {status}"))?;
+    assert_eq!(attempt["last_event_source"], "started", "{attempt}");
+    assert!(attempt["last_event_at"].is_string(), "{attempt}");
+    Ok(())
+}
+
 #[test]
 fn batch_launch_provisions_planned_slice_worktrees_and_explains_same_admission() -> Result {
     let mut rig = GraphProject::new()?;

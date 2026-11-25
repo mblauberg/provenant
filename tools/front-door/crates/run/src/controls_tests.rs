@@ -2739,7 +2739,7 @@ fn steer_stop_conflict_preserves_each_durable_intent_and_receipt() -> TestResult
 
 #[test]
 // Spec: docs/specs/supervisor.md#attempt-silence-is-reported-action-is-opt-in
-fn stall_age_comes_only_from_output_and_live_presence() -> TestResult {
+fn stall_age_uses_output_or_start_and_requires_live_presence() -> TestResult {
     let temp = tempfile::tempdir()?;
     let clock = crate::tests::clock();
     let cancel = provenant_core::CancelToken::new();
@@ -2777,10 +2777,13 @@ fn stall_age_comes_only_from_output_and_live_presence() -> TestResult {
     assert!(stalled_at(&record, now, true));
     // An unobserved or absent writer is a custody problem, not silence.
     assert!(!stalled_at(&record, now, false));
-    // No output means no stall, however old the queued/started fallback is.
+    // A provider that never emits output is measured from its start, not queue.
     record.last_output_at = None;
+    record.started_at = Some(last);
+    assert_eq!(stall_fact(&record, now), Some((30, last)));
+    assert!(stalled_at(&record, now, true));
+    record.started_at = None;
     assert_eq!(stall_fact(&record, now), None);
-    assert!(!stalled_at(&record, now, true));
     // Zero disables the report rather than stalling every live attempt.
     record.last_output_at = Some(last);
     record.limits = Some(provenant_records::LaneLimits {

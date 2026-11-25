@@ -1567,6 +1567,19 @@ pub fn request_stop(
 }
 
 pub fn stop(handle: &CustodyHandle, reason: StopReason) -> Result<StopReceipt> {
+    stop_inner(handle, reason, false)
+}
+
+/// Request a stop without replacing a different, already recorded stop.
+pub fn stop_if_unrequested(handle: &CustodyHandle, reason: StopReason) -> Result<StopReceipt> {
+    stop_inner(handle, reason, true)
+}
+
+fn stop_inner(
+    handle: &CustodyHandle,
+    reason: StopReason,
+    preserve_existing: bool,
+) -> Result<StopReceipt> {
     let request = StopIntent {
         schema_version: 1,
         scope: handle.scope,
@@ -1592,6 +1605,7 @@ pub fn stop(handle: &CustodyHandle, reason: StopReason) -> Result<StopReceipt> {
         Err(CustodyError::Filesystem(error)) if error.is_exists() => {
             match read_record::<StopIntent>(&handle.directory, "stop-intent.json", RECORD_LIMIT) {
                 Ok(previous) if previous == request => return Ok(StopReceipt::AlreadyRequested),
+                Ok(_) if preserve_existing => return Err(CustodyError::StopConflict),
                 Ok(previous)
                     if request.reason == StopReason::Steered
                         && previous.reason != StopReason::Steered =>

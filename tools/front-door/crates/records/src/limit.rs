@@ -312,8 +312,8 @@ pub enum StallPolicy {
     Report,
     /// Warn, then queue a steering turn for this exact attempt.
     Steer,
-    /// Warn, then stop the provider and settle with `provider_stalled` so the
-    /// graph can advance to the next route in the pool.
+    /// Warn, then stop with `provider_stalled_retry` so the graph can advance
+    /// to the next route in the pool.
     Retry,
     /// Warn, then stop the provider and settle with `provider_stalled`.
     Fail,

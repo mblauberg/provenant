@@ -135,8 +135,8 @@ lane_row! {
         last_event_source: LastEventSource => nullable(choices(&["output", "started", "queued"]));
         // The macro grammar matches field declarations only, not outer doc
         // comments; `stalled` is documented on `LaneProjectionFacts` below.
-        // True when a live running attempt has exceeded its output-sourced
-        // silence threshold. Never set from the queued/started fallback.
+        // True when a live running attempt has exceeded its
+        // silence threshold. Never set from the queued fallback.
         stalled: bool => boolean();
     }
 }
@@ -241,7 +241,7 @@ pub struct LaneProjectionFacts {
     /// Which observation supplied `last_event_at`, so a quiet writer's stale
     /// timestamp is not mistaken for a fresh heartbeat.
     pub last_event_source: Option<LastEventSource>,
-    /// Output-sourced silence past the attempt's configured threshold.
+    /// Silence since last output or provider start past the configured threshold.
     pub stalled: Option<bool>,
     /// Host-local attempt directory; never projected across a peer boundary.
     pub attempt_directory: Option<crate::StructuredPathWire>,

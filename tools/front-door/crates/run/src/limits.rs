@@ -88,9 +88,9 @@ pub fn lane_limits(
         deadline_seconds,
         repair_cycles: knob("lanes.max_repair_cycles"),
         gh_invocations: gh_budget(&task.profile),
-        // Zero disables the stall report; it is recorded as absent so status
-        // never claims a threshold that is not enforced anywhere.
-        stall_after_seconds: nonzero(Limit::new(
+        // Preserve zero and its source: it explicitly disables detection and
+        // differs from a legacy record that has no recorded threshold.
+        stall_after_seconds: Some(Limit::new(
             caps.stall_after_seconds,
             caps.stall_source,
             LimitStrength::Default,
@@ -225,6 +225,18 @@ mod tests {
 
     fn found(limit: &Option<Limit>) -> Option<(u64, Layer)> {
         limit.as_ref().map(|l| (l.value, l.source))
+    }
+
+    #[test]
+    fn disabled_stall_threshold_remains_explicit_with_its_source() {
+        let state = state("");
+        let caps = HostCaps {
+            stall_after_seconds: 0,
+            stall_source: Layer::Host,
+            ..HostCaps::default()
+        };
+        let limits = lane_limits(&writer_task(), state.path(), "p", "claude", caps);
+        assert_eq!(found(&limits.stall_after_seconds), Some((0, Layer::Host)));
     }
 
     /// Acceptance 1: each limit reports the source that won.

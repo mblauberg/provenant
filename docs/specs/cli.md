@@ -203,7 +203,7 @@ including `--follow` transitions and their digest lines, stay bounded to
 `SUMMARY_ROW_BYTES` with a clip marker: a wait is a stream of observations, not
 a detail view, even though `status NAME --full` prints whole rows.
 
-A live attempt past its configured output-sourced silence threshold ends a wait
+A live attempt past its configured silence threshold ends a wait
 with the `stalled` outcome and exit code 6. Each target's `settle` field is
 `stalled` and its line names the last-event time; the work is still running, so
 a stalled outcome never claims settlement and its next step points at `status`.
@@ -262,10 +262,9 @@ survivors the attempt proved and leaves unproven holders for the owner to close.
 `status NAME --full` gives each unsettled attempt its newest event time and
 names the source (`output`, `started` or `queued`), so old output is not mistaken
 for a heartbeat. `status --json` also carries `stalled: true` when a live
-attempt's output-sourced last event is older than
-`providers.<id>.stall_after_seconds`; the queued or started fallback never sets
-it, and the chair's digest prints `stalled last_event=<time>` beside the same
-attempt. The threshold and its layer appear under the row's recorded limits and
+attempt's last output, or its start if no output has arrived, is older than
+`providers.<id>.stall_after_seconds`; the queued fallback never sets it. The
+chair's digest prints `stalled last_event=<time>` beside the same attempt. The threshold and its layer appear under the row's recorded limits and
 in `run --explain`. `child_command` is set only for a command that went through the
 admission shim, and a lane waiting on a heavy-job lock reports the command it
 waits to run. The attempt directory and child command stay host-local and never

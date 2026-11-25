@@ -678,14 +678,13 @@ pub fn stall_after_seconds(record: &AttemptRecord) -> u64 {
 }
 
 /// Read-only stall fact for a running, live attempt: the threshold and the
-/// output-sourced time of its last event. The queued/started fallback in status
-/// is never used here, so a lane that has not emitted output cannot be called
-/// stalled on the strength of its launch time.
+/// last output time, or the start time if the provider has emitted nothing.
+/// A queued attempt is never measured as a running provider.
 pub fn stall_fact(record: &AttemptRecord, now: WallTime) -> Option<(u64, WallTime)> {
     if !matches!(record.state, AttemptState::Running { .. }) {
         return None;
     }
-    let last = record.last_output_at?;
+    let last = record.last_output_at.or(record.started_at)?;
     let threshold = stall_after_seconds(record);
     // `as_micros` is i64; a clock that moved backwards has not gone silent, so
     // clamp the age at zero before widening it for the u64 threshold.
@@ -1185,11 +1184,9 @@ fn lock_timeout_reports_a_concurrently_settled_attempt() {
 }
 
 impl RunStore {
-    /// Act on an output-sourced stall once, after warning. Detection lives in
-    /// the read-only projection; this is the opt-in action path and it never
-    /// runs from the guardian. A sealed marker makes the action idempotent, so
-    /// repeated reconciles cannot steer or stop the same attempt twice.
-    fn apply_stall_policy(
+    /// Apply Run's policy after warning. The guardian and recovery can retry
+    /// an interrupted action; steering and custody requests are idempotent.
+    pub(crate) fn apply_stall_policy(
         &self,
         record: &AttemptRecord,
         handle: &provenant_supervisor::custody::CustodyHandle,
@@ -1205,7 +1202,27 @@ impl RunStore {
             .limits
             .as_ref()
             .map_or(StallPolicy::Report, |limits| limits.stall_policy);
-        if policy == StallPolicy::Report || limit.is_none() {
+        if limit.is_none() {
+            return Ok(None);
+        }
+        let attempt = self.attempt_dir(record.attempt_id, false)?;
+        const MARKER: &str = "stall-action.json";
+        if let Some(raw) = read_sealed(&attempt, MARKER, RECORD_LIMIT)? {
+            let marker: serde_json::Value = serde_json::from_slice(&raw)
+                .map_err(|_| RunError::Validation("stall action marker"))?;
+            if matches!(marker["policy"].as_str(), Some("retry" | "fail")) {
+                warning::warn(
+                    Warning::new(
+                        warning::PROVIDER_STALLED,
+                        "retrying the recorded stall stop request",
+                    )
+                    .subject(record.attempt_id.to_string())
+                    .once_per_change(),
+                );
+                custody::stop_if_unrequested(handle, StopReason::SupervisorSignal)
+                    .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?;
+                return Ok(Some(Reconciled::StallStop { policy }));
+            }
             return Ok(None);
         }
         let now = call
@@ -1215,11 +1232,6 @@ impl RunStore {
         let Some((threshold, last)) = stall_fact(record, now) else {
             return Ok(None);
         };
-        let attempt = self.attempt_dir(record.attempt_id, false)?;
-        const MARKER: &str = "stall-action.json";
-        if read_sealed(&attempt, MARKER, RECORD_LIMIT)?.is_some() {
-            return Ok(None);
-        }
         let marker = serde_json::json!({
             "schema_version": 1,
             "policy": policy.as_str(),
@@ -1227,7 +1239,6 @@ impl RunStore {
             "last_event_at": last,
             "source": limit.as_ref().map(|limit| limit.source),
         });
-        crate::artifacts::seal(&attempt, MARKER, &crate::db::bytes(&marker)?, RECORD_LIMIT)?;
         let source = provenant_records::provenance::Source {
             layer: limit
                 .as_ref()
@@ -1241,31 +1252,51 @@ impl RunStore {
                     .unwrap_or("unknown")
             )),
         };
+        let message = format!(
+            "PROVIDER_STALLED: provider silent for at least {threshold}s since {last}; policy {}",
+            policy.as_str()
+        );
+        // Guardian stdio is detached. Publish the warning for status before
+        // requesting an action, rather than relying on its stderr sink.
+        if read_sealed(&attempt, "stall-warning.json", RECORD_LIMIT)?.is_none() {
+            crate::artifacts::seal(
+                &attempt,
+                "stall-warning.json",
+                &crate::db::bytes(&message)?,
+                RECORD_LIMIT,
+            )?;
+        }
         warning::warn(
-            Warning::new(
-                warning::PROVIDER_STALLED,
-                format!(
-                    "provider silent for at least {threshold}s since {last}; policy {}",
-                    policy.as_str()
-                ),
-            )
-            .subject(record.attempt_id.to_string())
-            .source(source)
-            .once_per_change(),
+            Warning::new(warning::PROVIDER_STALLED, message)
+                .subject(record.attempt_id.to_string())
+                .source(source)
+                .once_per_change(),
         );
         match policy {
             StallPolicy::Report => Ok(None),
             StallPolicy::Steer => {
-                let text = format!(
-                    "The provider has emitted no output since {last} (threshold {threshold}s). Continue the task now; if you cannot, report the blocker."
-                );
+                // The operation must keep identical text across an interrupted
+                // reconcile, even if further provider output was observed.
+                let text = "The provider has gone silent. Continue the task now; if you cannot, report the blocker.";
                 let operation = OperationId::parse(&format!("stall-{}", record.attempt_id))
                     .map_err(|_| RunError::Validation("stall steer operation"))?;
-                self.steer(record.attempt_id, operation, &text, call)?;
+                self.steer(record.attempt_id, operation, text, call)?;
+                crate::artifacts::seal(
+                    &attempt,
+                    MARKER,
+                    &crate::db::bytes(&marker)?,
+                    RECORD_LIMIT,
+                )?;
                 Ok(Some(Reconciled::Held))
             }
             StallPolicy::Retry | StallPolicy::Fail => {
-                custody::stop(handle, StopReason::SupervisorSignal)
+                crate::artifacts::seal(
+                    &attempt,
+                    MARKER,
+                    &crate::db::bytes(&marker)?,
+                    RECORD_LIMIT,
+                )?;
+                custody::stop_if_unrequested(handle, StopReason::SupervisorSignal)
                     .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?;
                 Ok(Some(Reconciled::StallStop { policy }))
             }
@@ -4989,9 +5020,8 @@ impl RunStore {
                         Ok(Reconciled::Finished)
                     }
                     Ok(Observation::Live) => {
-                        // Silence is read-only in the guardian. An opt-in
-                        // policy acts here, after a typed warning, and is
-                        // idempotent across reconcile passes.
+                        // Recovery may repeat the guardian holder's idempotent
+                        // policy action after warning.
                         if let Some(state) = self.apply_stall_policy(record, &handle, call)? {
                             return Ok(state);
                         }

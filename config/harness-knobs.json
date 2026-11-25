@@ -151,13 +151,13 @@
       "type": "int",
       "min": 0,
       "default": "1800",
-      "effect": "Seconds without provider output after which a running attempt is reported as stalled in status, wait and the chair's digest, with the last-event time. 0 disables the report. The threshold uses output-sourced activity, never the queued or started fallback, and never signals the provider."
+      "effect": "Seconds without provider output after which a running attempt is reported as stalled in status, wait and the chair's digest, with the last-event time. 0 disables the report. The threshold starts at the last output, or provider start before the first output; queued time is excluded. Detection never signals the provider."
     },
     "stall_policy": {
       "type": "enum",
       "values": ["report", "steer", "retry", "fail"],
       "default": "report",
-      "effect": "Opt-in action after the stall is reported: report warns only; steer queues a steering turn; retry and fail stop the provider and settle with the typed provider_stalled cause. All actions warn first; silence is never a stop reason in the guardian."
+      "effect": "Opt-in action after the stall is reported: report warns only; steer queues a steering turn; retry stops the provider and advances to the next route within the retry budget; fail stops it with a typed provider_stalled cause. All actions warn first."
     }
   },
   "host_run_settings": {
