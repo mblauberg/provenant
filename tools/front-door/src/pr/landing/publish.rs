@@ -187,6 +187,26 @@ pub fn merge_member(
     merge_member_with_queue_policy(forge, number, head, method, grant, reviewed, None)
 }
 
+/// Repeat the queue's exact-head checks when recovering an uncertain dispatch.
+pub(super) fn merge_delivery_member(
+    forge: &mut dyn Forge,
+    pr: &EligiblePr,
+    method: MergeMethod,
+    grant: &PublicationGrant,
+    reviewed: bool,
+) -> Result<String, LandingError> {
+    super::gate::require_delivery_queue_ci(forge, pr)?;
+    merge_member_with_queue_policy(
+        forge,
+        pr.number,
+        &pr.head,
+        method,
+        grant,
+        reviewed,
+        Some(&pr.base_branch),
+    )
+}
+
 fn merge_member_with_queue_policy(
     forge: &mut dyn Forge,
     number: u64,
@@ -457,6 +477,24 @@ mod tests {
             &mut |_| Ok(()),
         )
     }
+    #[test]
+    fn delivery_recovery_rechecks_current_ci_before_retrying_merge() {
+        let (mut forge, _, candidate) = queue_fixture();
+        let pr = &candidate.steps[0].pr;
+        forge.check_runs.get_mut(&pr.head).unwrap()[0].checks[0].result = GateResult::Failed;
+        assert!(matches!(
+            merge_delivery_member(
+                &mut forge,
+                pr,
+                MergeMethod::Merge,
+                &PublicationGrant::default(),
+                true
+            ),
+            Err(LandingError::UnmetGate(_))
+        ));
+        assert!(forge.merges.is_empty());
+    }
+
     #[test]
     fn delivery_queue_merges_only_after_exact_head_ci_and_fresh_clean_mergeability()
     -> Result<(), LandingError> {
