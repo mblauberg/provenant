@@ -706,8 +706,10 @@ fn only_a_refused_descriptor_query_is_the_excusable_gap() {
         DescriptorsDenied.worse(DescriptorsDenied),
         DescriptorsDenied
     );
-    assert_eq!(Vanished.worse(DescriptorsDenied), Vanished);
-    assert_eq!(DescriptorsDenied.worse(Vanished), Vanished);
+    assert_eq!(Vanished.worse(DescriptorsDenied), DescriptorsDenied);
+    assert_eq!(DescriptorsDenied.worse(Vanished), DescriptorsDenied);
+    assert_eq!(Vanished.worse(Churn), Churn);
+    assert_eq!(Churn.worse(Vanished), Churn);
 }
 
 #[cfg(test)]

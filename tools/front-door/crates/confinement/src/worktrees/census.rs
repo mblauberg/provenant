@@ -1671,20 +1671,14 @@ pub(super) fn observe_worker_holders_while(
             child = parent;
         }
     }
-    // Exclusion of the caller's own process tree is scoped to run admission,
-    // just like the ancestor walk above. During landing a short-lived child
-    // spawned for a probe can vanish while its descriptors are read, so it must
-    // not turn a free worktree Unknown; an ordinary census still names it as a
-    // real writer. Only descendants whose full parent chain is present and
-    // verified are excluded; an ambiguous chain keeps the process in the census.
-    if ancestors {
-        for fact in census.facts() {
-            if !within_budget() {
-                return (states, holders, details, taints);
-            }
-            if census.ancestry(&fact.identity, &current.identity) == Ancestry::Yes {
-                excluded.insert(fact.identity.clone());
-            }
+    // Exclude only verified descendants for every census, independently of
+    // the optional ancestor policy. Ambiguous ancestry remains in the census.
+    for fact in census.facts() {
+        if !within_budget() {
+            return (states, holders, details, taints);
+        }
+        if census.ancestry(&fact.identity, &current.identity) == Ancestry::Yes {
+            excluded.insert(fact.identity.clone());
         }
     }
     // Custody is decided per root. A gap that could hide a process anywhere
@@ -1702,9 +1696,16 @@ pub(super) fn observe_worker_holders_while(
             if !within_budget() {
                 return (states, holders, details, taints);
             }
-            // The listing could not name this pid, but an explicit ESRCH from
-            // its descriptors proves it is gone rather than incomplete.
-            if occupancy.gap == Some(provenant_os::pid::OccupancyGap::Vanished) {
+            // A vanished query is only absence if a fresh identity lookup
+            // agrees; the PID may already have been reused.
+            if matches!(
+                occupancy.gap,
+                Some(
+                    provenant_os::pid::OccupancyGap::Vanished
+                        | provenant_os::pid::OccupancyGap::Churn
+                )
+            ) && matches!(observer.observe(pid), ProcessObservation::Absent)
+            {
                 continue;
             }
             // EPERM is a common limit of process listings. Place every
@@ -1777,6 +1778,13 @@ pub(super) fn observe_worker_holders_while(
                         .then_some(UnreadableFailure::CwdDenied)
                 });
             if let Some(failure) = failure
+                && !matches!(
+                    occupancy.gap,
+                    Some(
+                        provenant_os::pid::OccupancyGap::Vanished
+                            | provenant_os::pid::OccupancyGap::Churn
+                    )
+                )
                 && excuse_unreadable(
                     cwd_observer,
                     pid,
@@ -1839,13 +1847,6 @@ pub(super) fn observe_worker_holders_while(
             if !within_budget() {
                 return (states, holders, details, taints);
             }
-            // An explicit ESRCH from a descriptor or executable query is a
-            // vanished process, not an incomplete observation of a live one.
-            // It holds nothing now, whatever an earlier snapshot appeared to
-            // show. Permission denials never take this path.
-            if occupancy.gap == Some(provenant_os::pid::OccupancyGap::Vanished) {
-                continue;
-            }
             let uids_after = cwd_observer.process_uids(pid);
             let after = observer.observe(pid);
             // A process that exited during the occupancy query (absent, or a
@@ -1874,6 +1875,13 @@ pub(super) fn observe_worker_holders_while(
             }
             let foreign_uids = uids_before.filter(|uids| {
                 stable
+                    && !matches!(
+                        occupancy.gap,
+                        Some(
+                            provenant_os::pid::OccupancyGap::Vanished
+                                | provenant_os::pid::OccupancyGap::Churn
+                        )
+                    )
                     && Some(*uids) == uids_after
                     && excusal_applies(
                         &provenant_os::pid::UnreadablePolicyExcusal { uids: *uids },
@@ -2059,6 +2067,13 @@ pub(super) fn observe_worker_holders_while(
             continue;
         }
         if cwd_denied
+            && !matches!(
+                occupancy_gap,
+                Some(
+                    provenant_os::pid::OccupancyGap::Vanished
+                        | provenant_os::pid::OccupancyGap::Churn
+                )
+            )
             && excuse_unreadable(
                 cwd_observer,
                 pid,

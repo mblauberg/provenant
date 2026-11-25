@@ -799,13 +799,14 @@ fn land_worker_census_excludes_verified_ancestors_and_the_callers_children()
             Ok(self.0.clone())
         }
     }
-    struct Cwds(BTreeMap<i64, PathBuf>);
+    struct Cwds(BTreeMap<i64, PathBuf>, PathBuf);
     impl CwdObserver for Cwds {
-        fn occupancy(&self, _: i64) -> provenant_os::pid::OccupancyObservation {
+        fn occupancy(&self, pid: i64) -> provenant_os::pid::OccupancyObservation {
+            let denied = pid == 110 && self.0.get(&pid) == Some(&self.1);
             provenant_os::pid::OccupancyObservation {
                 paths: vec![],
-                complete: true,
-                gap: None,
+                complete: !denied,
+                gap: denied.then_some(provenant_os::pid::OccupancyGap::DescriptorsDenied),
             }
         }
         fn cwd(&self, pid: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
@@ -867,6 +868,7 @@ fn land_worker_census_excludes_verified_ancestors_and_the_callers_children()
                     )
                 })
                 .collect(),
+            root.clone(),
         );
         let observe = |cwds: &Cwds, ancestors| {
             observe_worker_roots(
@@ -896,9 +898,7 @@ fn land_worker_census_excludes_verified_ancestors_and_the_callers_children()
         cwds.0.insert(110, root.clone());
         assert_eq!(observe(&cwds, true), before_child);
     }
-    // Descendant exclusion is scoped to run admission, matching ancestor
-    // exclusion: an ordinary census still names the caller's child as a
-    // writer, while a land census treats it as part of the caller.
+    // Descendant exclusion applies with or without ancestor exclusion.
     {
         let processes = Processes(Census::from_observations(
             facts.clone(),
@@ -913,6 +913,7 @@ fn land_worker_census_excludes_verified_ancestors_and_the_callers_children()
                 .iter()
                 .map(|fact| (fact.identity.pid, outside.clone()))
                 .collect(),
+            root.clone(),
         );
         cwds.0.insert(110, root.clone()); // verified child of the caller
         let observe = |ancestors| {
@@ -927,8 +928,8 @@ fn land_worker_census_excludes_verified_ancestors_and_the_callers_children()
                 .clone()
         };
         assert!(
-            observe(false).is_observed(),
-            "ordinary census must name the caller's child"
+            observe(false).is_available(),
+            "ordinary census must exclude the caller's child"
         );
         assert!(
             observe(true).is_available(),
@@ -991,6 +992,7 @@ fn land_worker_census_excludes_verified_ancestors_and_the_callers_children()
                 .iter()
                 .map(|fact| (fact.identity.pid, outside.clone()))
                 .collect(),
+            root.clone(),
         );
         let observe = |cwds: &Cwds| {
             observe_worker_roots(
@@ -1025,12 +1027,17 @@ fn a_vanished_descriptor_query_is_absent_but_live_eprem_stays_unknown() -> Resul
         census: Census,
         outside: PathBuf,
         gap: Option<OccupancyGap>,
+        after: ProcessObservation,
+        queried: std::cell::Cell<bool>,
     }
     impl ProcessObserver for GapObserver {
         fn boot_identity(&self) -> Result<String, CensusError> {
             Ok("boot".into())
         }
         fn observe(&self, pid: i64) -> ProcessObservation {
+            if pid == 200 && self.queried.get() {
+                return self.after.clone();
+            }
             match self.census.process(pid) {
                 ProcessLookup::Present(fact) => ProcessObservation::Present(fact.clone()),
                 _ => ProcessObservation::Absent,
@@ -1045,6 +1052,7 @@ fn a_vanished_descriptor_query_is_absent_but_live_eprem_stays_unknown() -> Resul
             Ok(CwdObservation::Path(self.outside.clone()))
         }
         fn occupancy(&self, _: i64) -> provenant_os::pid::OccupancyObservation {
+            self.queried.set(true);
             provenant_os::pid::OccupancyObservation {
                 paths: Vec::new(),
                 complete: false,
@@ -1072,30 +1080,50 @@ fn a_vanished_descriptor_query_is_absent_but_live_eprem_stays_unknown() -> Resul
         command: None,
     };
     let current = fact(100);
-    let state_for = |gap: OccupancyGap| -> Result<Occupancy, Box<dyn Error>> {
-        let census =
-            Census::from_observations([current.clone(), fact(200)], [], [], true, false, 32)?;
-        let observer = GapObserver {
-            census,
-            outside: outside.clone(),
-            gap: Some(gap),
+    let state_for =
+        |gap: OccupancyGap, after: ProcessObservation| -> Result<Occupancy, Box<dyn Error>> {
+            let census =
+                Census::from_observations([current.clone(), fact(200)], [], [], true, false, 32)?;
+            let observer = GapObserver {
+                census,
+                outside: outside.clone(),
+                gap: Some(gap),
+                after,
+                queried: std::cell::Cell::new(false),
+            };
+            Ok(observe_worker_roots(
+                std::slice::from_ref(&root),
+                &observer,
+                &observer,
+                &current,
+                true,
+            )
+            .0[&root]
+                .clone())
         };
-        Ok(observe_worker_roots(
-            std::slice::from_ref(&root),
-            &observer,
-            &observer,
-            &current,
-            true,
-        )
-        .0[&root]
-            .clone())
-    };
     // ESRCH says the process exited mid-census: it holds nothing and cannot
     // make the worktree unknown.
-    assert!(state_for(OccupancyGap::Vanished)?.is_available());
+    assert!(state_for(OccupancyGap::Vanished, ProcessObservation::Absent)?.is_available());
+    // Conflicting live or reused identities cannot be discarded on one ESRCH.
+    assert!(
+        state_for(
+            OccupancyGap::Vanished,
+            ProcessObservation::Present(fact(200))
+        )?
+        .is_unknown()
+    );
+    let mut reused = fact(200);
+    reused.identity.native_start += 1;
+    assert!(state_for(OccupancyGap::Vanished, ProcessObservation::Present(reused))?.is_unknown());
     // EPERM on a still-listed process is a real permission failure, so the
     // data-loss boundary keeps the worktree Unknown.
-    assert!(state_for(OccupancyGap::DescriptorsDenied)?.is_unknown());
+    assert!(
+        state_for(
+            OccupancyGap::DescriptorsDenied,
+            ProcessObservation::Present(fact(200))
+        )?
+        .is_unknown()
+    );
     Ok(())
 }
 

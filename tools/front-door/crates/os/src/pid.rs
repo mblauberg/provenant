@@ -142,11 +142,13 @@ impl OccupancyGap {
 
     /// The more serious of two gaps. A permission refusal ranks below other
     /// failures, so it cannot hide a missing path or unstable observation. A
-    /// vanished process is the strongest signal: it holds nothing, so it
-    /// outranks every transient or permission-only gap.
+    /// vanished query cannot override a conflicting observation: the PID
+    /// may have been reused between snapshots.
     pub fn worse(self, other: Self) -> Self {
-        if self == Self::Vanished || other == Self::Vanished {
-            Self::Vanished
+        if self == Self::Vanished {
+            other
+        } else if other == Self::Vanished {
+            self
         } else if self == Self::DescriptorsDenied {
             other
         } else {

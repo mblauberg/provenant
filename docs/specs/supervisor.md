@@ -453,12 +453,11 @@ A root is `Free` only when every possible writer was observed completely with
 stable identity; a placed occupant makes it `Live`, and a failed or partial
 query leaves it `Unknown`, never empty. A process that exited during the census
 is not a possible writer: an `ESRCH` (or equivalent vanished) result from an
-executable or descriptor query is absence, not incomplete evidence, and so is
-a process the identity recheck finds gone or a zombie. For a landing census the
-census also excludes the calling process and its verified descendants: a
-short-lived child spawned by the caller for its own work is part of the caller,
-not an independent writer, while an ordinary census still names it. For each
-unreadable process the census
+executable or descriptor query followed by a recheck finding the process gone
+is absence, not incomplete evidence; a same-identity zombie is also absent. A
+conflicting or reused PID remains uncertain. Every census excludes the calling
+process and its verified descendants, including short-lived children spawned
+for its own work. For each unreadable process the census
 first computes placement evidence for *every* root from its readable cwd and its
 descriptor paths by directory identity, the same `(dev, ino)` ancestor test used
 to place a live path. A cwd equal to or beneath a root is inside it; a cwd of
