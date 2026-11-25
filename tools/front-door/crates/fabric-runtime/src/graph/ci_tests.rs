@@ -718,7 +718,11 @@ fn queue_quota_reset_defers_timeout_across_restart() {
             head_sha: Some(head),
             summary: "clear".into(),
         }]),
-        observations: VecDeque::from([limited.clone(), limited]),
+        observations: VecDeque::from([
+            limited,
+            observation(CiState::Pending, "forge unavailable"),
+            observation(CiState::Pending, "forge unavailable"),
+        ]),
         tick: true,
         ..Default::default()
     };
@@ -729,11 +733,15 @@ fn queue_quota_reset_defers_timeout_across_restart() {
         Some(serde_json::from_slice(&serde_json::to_vec(&first.checkpoint).unwrap()).unwrap());
     owner.wall_seconds = 9;
     owner.monotonic_micros = 9_000_000;
+    // An explicit advance can probe early and fail to retrieve a fresh reset.
+    // The persisted reset still protects the gate through that observation.
+    owner.tick = false;
     let early = advance(&doc, &mut owner, &mut journal).unwrap();
     assert!(early.checkpoint.nodes[ci_index].delivery_park.is_none());
     assert_eq!(early.checkpoint.wake_at.unwrap().as_micros(), 10_000_000);
     owner.wall_seconds = 10;
     owner.monotonic_micros = 10_000_000;
+    owner.tick = true;
     let expired = advance(&doc, &mut owner, &mut journal).unwrap();
     assert!(expired.checkpoint.nodes[ci_index].delivery_park.is_some());
 }
