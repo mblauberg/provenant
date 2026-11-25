@@ -125,6 +125,8 @@ pub(super) struct QueueRecord {
     /// The cap is advisory after this persisted deadline.
     pub overflow_at: WallTime,
     pub wait_warning: Option<String>,
+    #[serde(default)]
+    pub wait_warning_emitted: bool,
     pub overflow_reason: Option<String>,
     pub items: Vec<QueueItem>,
 }
@@ -486,6 +488,7 @@ impl QueueRegistry {
                 warning_at: submission.warning_at,
                 overflow_at: submission.overflow_at,
                 wait_warning: None,
+                wait_warning_emitted: false,
                 overflow_reason: None,
                 items,
             };
@@ -551,7 +554,6 @@ impl QueueRegistry {
                     ))
                 }));
                 if pending > 0 && active >= max_parallel {
-                    let mut warned_now = false;
                     if now >= queue.warning_at && queue.wait_warning.is_none() {
                         let warning = format!(
                             "queue {} is waiting at max_parallel={} from {} ({}); cap wait={} seconds from {} ({}) before advisory overflow at {}",
@@ -564,9 +566,13 @@ impl QueueRegistry {
                             queue.cap_wait.source.origin.as_deref().unwrap_or("no origin recorded"),
                             queue.overflow_at,
                         );
-                        queue.wait_warning = Some(warning.clone());
-                        schedule.warnings.push(warning);
-                        warned_now = true;
+                        queue.wait_warning = Some(warning);
+                    }
+                    let warning_pending = now >= queue.warning_at && !queue.wait_warning_emitted;
+                    if warning_pending {
+                        if let Some(warning) = &queue.wait_warning {
+                            schedule.warnings.push(warning.clone());
+                        }
                     }
                     if now < queue.overflow_at {
                         schedule.waiting.push(format!(
@@ -576,9 +582,9 @@ impl QueueRegistry {
                         schedule.launch.extend(queue.items.iter().filter(|item| item.state == QueueItemState::Launching).cloned().map(|item| (queue_id.clone(), item)));
                         continue;
                     }
-                    if warned_now {
+                    if warning_pending {
                         schedule.waiting.push(format!(
-                            "queue {} recorded its cap warning; advisory overflow becomes eligible on the next scheduling pass",
+                            "queue {} cap warning is awaiting durable acknowledgement before advisory overflow",
                             queue.queue_id
                         ));
                         schedule.launch.extend(queue.items.iter().filter(|item| item.state == QueueItemState::Launching).cloned().map(|item| (queue_id.clone(), item)));
@@ -671,6 +677,24 @@ impl QueueRegistry {
                 if item.state == QueueItemState::Pending {
                     item.unavailable_reason = None;
                 }
+            }
+            Ok(())
+        })
+    }
+
+    /// Acknowledge warning delivery before the advisory cap can overflow.
+    pub(super) fn acknowledge_wait_warning(
+        &self,
+        queue_id: &str,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        clock: &dyn Clock,
+    ) -> Result<(), String> {
+        self.locked(budget, cancel, clock, |registry| {
+            let queue = registry.queues.get_mut(queue_id)
+                .ok_or_else(|| format!("unknown queue `{queue_id}`"))?;
+            if queue.wait_warning.is_some() {
+                queue.wait_warning_emitted = true;
             }
             Ok(())
         })
