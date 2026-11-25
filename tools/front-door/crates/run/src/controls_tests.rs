@@ -1916,7 +1916,7 @@ fn graph_cancel_and_steer_admission_have_one_ordered_winner() -> TestResult {
 
 // Spec: docs/specs/run.md#stop-intent
 #[test]
-fn stop_settles_a_settling_attempt_and_keeps_its_captured_evidence() -> TestResult {
+fn stop_settles_a_sealed_running_attempt_without_a_holder() -> TestResult {
     use provenant_core::Clock as _;
     let temp = tempfile::tempdir()?;
     let clock = crate::tests::clock();
@@ -1947,45 +1947,133 @@ fn stop_settles_a_settling_attempt_and_keeps_its_captured_evidence() -> TestResu
         .ok_or("attempt not admitted")?;
     let attempt = store.attempt_dir(id, false)?;
     crate::artifacts::seal(&attempt, "stdout.log", b"captured answer", CAPTURE_LIMIT)?;
+    crate::artifacts::seal(&attempt, "handoff.json", b"captured handoff", RECORD_LIMIT)?;
+    // The provider sealed its own exit while the record stayed Running. This,
+    // not a hand-written settling row, is what status reports as settling.
     let mut exit = crate::tests::exit();
     exit.scope = RunStore::scope(&running);
     crate::dispatch_tests::seal_exit(&store, &exit)?;
-    // This legacy state is no longer written in production, but it still
-    // survives in stores: a provider that exited while settlement wedged.
-    let mut record = store.record(id, &call)?;
-    let mut value = serde_json::to_value(&record)?;
-    value["state"] = serde_json::json!({"state":"settling","publication_pending":true});
-    record = serde_json::from_value(value)?;
-    store.db.execute(
-        "UPDATE attempts SET record=?1 WHERE id=?2",
-        rusqlite::params![crate::db::bytes(&record)?, id.to_string()],
-    )?;
-    assert!(matches!(
-        store.record(id, &call)?.state,
-        AttemptState::Settling { .. }
-    ));
+    assert_eq!(
+        RunStore::attempt_presence(context.state_root.as_path(), &store.record(id, &call)?),
+        Some(AttemptPresence::Settling),
+        "a sealed Running attempt must be the settling status sees"
+    );
 
-    let (cancelled, receipt) = store.cancel_graph(id, "stop the settling attempt", &call)?;
+    let (cancelled, receipt) = store.cancel_graph(id, "stop the vanished provider", &call)?;
     assert_eq!(cancelled, id);
     assert_eq!(receipt, CancelReceipt::Cancelled);
     let settled = store.record(id, &call)?;
     assert!(
-        matches!(settled.state, AttemptState::Terminal { .. }),
-        "a stopped graph leaves no attempt in Settling: {settled:?}"
+        matches!(
+            &settled.state,
+            AttemptState::Terminal {
+                outcome: Outcome::Cancelled,
+                ..
+            }
+        ),
+        "stop must settle a vanished provider as cancelled: {settled:?}"
     );
-    // Settlement release keeps every captured artifact as evidence.
+    assert_eq!(
+        settled.terminal_evidence,
+        Some(TerminalEvidence::ProcessExit)
+    );
+    assert_eq!(
+        settled.cancellation_disposition,
+        Some(CancellationDisposition::Unknown),
+        "a stop with no delivery proof must not claim effectiveness"
+    );
     assert!(
-        crate::artifacts::read_sealed(&attempt, "stdout.log", CAPTURE_LIMIT)?.is_some(),
-        "captured output was discarded"
+        settled.exit_evidence.is_some(),
+        "the sealed exit was dropped from the terminal decision"
+    );
+    // Every captured artifact survives the terminal commit.
+    assert_eq!(
+        crate::artifacts::read_sealed(&attempt, "stdout.log", CAPTURE_LIMIT)?.as_deref(),
+        Some(b"captured answer".as_slice())
+    );
+    assert_eq!(
+        crate::artifacts::read_sealed(&attempt, "handoff.json", RECORD_LIMIT)?.as_deref(),
+        Some(b"captured handoff".as_slice())
     );
     assert!(
         crate::artifacts::read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_some(),
         "sealed exit was discarded"
     );
     assert_eq!(
-        store.cancel_graph(id, "stop the settling attempt again", &call)?,
+        store.cancel_graph(id, "stop the vanished provider again", &call)?,
         (id, CancelReceipt::AlreadyTerminal)
     );
+    Ok(())
+}
+
+// Spec: docs/specs/run.md#stop-intent
+#[test]
+fn stop_asks_a_live_holder_to_settle_its_sealed_exit() -> TestResult {
+    use provenant_core::Clock as _;
+    use provenant_supervisor::census::ProcessObservation;
+    use provenant_supervisor::custody::HolderPresence;
+    let temp = tempfile::tempdir()?;
+    let clock = crate::tests::clock();
+    let cancel = provenant_core::CancelToken::new();
+    let call = crate::tests::call(&clock, &cancel);
+    let context = crate::tests::context(temp.path())?;
+    let store = RunStore::open(&context, &call)?;
+    let mut run = crate::tests::input();
+    run.created_at = clock.wall_now()?;
+    run.request.task.writer = Some(WriterRequest {
+        extra: Default::default(),
+        custody_project: Some(context.project_id),
+        project: temp.path().join("checkout"),
+        worktree: temp.path().join("checkout/.worktrees/held"),
+    });
+    let id = run.attempt_id;
+    store.create(&run, &call)?;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &crate::tests::route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    let running = store
+        .claim(id, &clock, &call)?
+        .ok_or("attempt not admitted")?;
+    let attempt = store.attempt_dir(id, false)?;
+    let mut exit = crate::tests::exit();
+    exit.scope = RunStore::scope(&running);
+    crate::dispatch_tests::seal_exit(&store, &exit)?;
+    let ProcessObservation::Present(fact) =
+        SystemProcessObserver.observe(i64::from(std::process::id()))
+    else {
+        return Err("test process identity unavailable".into());
+    };
+    crate::artifacts::seal(
+        &attempt,
+        "process.json",
+        &serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "scope": RunStore::scope(&running),
+            "publication_pending": false,
+            "census_complete": true,
+            "guardian": fact.identity,
+        }))?,
+        RECORD_LIMIT,
+    )?;
+    assert_eq!(
+        custody::observe_holder(&attempt, RunStore::scope(&running), &SystemProcessObserver),
+        HolderPresence::Live,
+        "the fixture must prove a live holder before asserting the stop path"
+    );
+    assert_eq!(
+        store.cancel_graph(id, "stop the held attempt", &call)?,
+        (id, CancelReceipt::Requested),
+        "a live holder owns settlement and must be asked to stop"
+    );
+    assert!(matches!(
+        store.record(id, &call)?.state,
+        AttemptState::Running { .. }
+    ));
     Ok(())
 }
 

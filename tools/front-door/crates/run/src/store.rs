@@ -1885,6 +1885,75 @@ impl RunStore {
         )
     }
 
+    /// Commit an owner stop for a Running attempt whose provider exit is
+    /// sealed. This is a cancellation, not a loss: the provider's own exit is
+    /// the decision evidence, and its captured output, handoff and exit stay
+    /// untouched. The caller scope-checked `exit`; the record is re-checked
+    /// here so a concurrent terminal decision wins.
+    pub(crate) fn commit_stopped_after_exit(
+        &self,
+        scope: provenant_records::custody::Scope,
+        reason: &str,
+        exit: &StoredExit,
+        call: &Request<'_>,
+    ) -> Result<()> {
+        let old = self.record(scope.attempt, call)?;
+        if Self::scope(&old) != scope || !matches!(old.state, AttemptState::Running { .. }) {
+            return Err(RunError::Conflict);
+        }
+        let attempt = self.attempt_dir(scope.attempt, false)?;
+        let raw = read_sealed(&attempt, AttemptFile::ProcessExit.name(), RECORD_LIMIT)?
+            .ok_or(RunError::Conflict)?;
+        let exit_evidence = ArtifactRecord {
+            extra: Default::default(),
+            path: artifact_path(scope.attempt, AttemptFile::ProcessExit.name())?,
+            digest: CanonicalV1::file_digest(&raw),
+            bytes: raw.len() as u64,
+            complete: true,
+            redacted: false,
+        };
+        let outcome_exit = match exit.termination {
+            Some(Termination::Exit(code)) => Some(code),
+            _ => None,
+        };
+        let revision = old.revision;
+        let publication = TerminalPublication {
+            handoff: Ok(None),
+            terminal_cause: None,
+            terminal_note: None,
+            outcome: Outcome::Cancelled,
+            finished_at: call
+                .clock
+                .wall_now()
+                .map_err(|_| RunError::Validation("wall clock"))?,
+            started_at: old.started_at,
+            provider_ms: old.provider_ms,
+            reason: Some(provenant_core::bounded_line(reason, 4096)),
+            result: "",
+            complete: true,
+            redacted: false,
+            resolved_route: old.resolved_route.clone(),
+            applied_route: old.applied_route.clone(),
+            observed_route: old.observed_route.clone(),
+            usage: old.usage.clone(),
+            session: old.session.clone(),
+            partial_signals: old.partial_signals.clone(),
+        };
+        let committed = self.commit_terminal(
+            old,
+            revision,
+            &publication,
+            Some(exit_evidence),
+            outcome_exit,
+            !exit.never_spawned,
+            exit.cancel_delivered_before_exit,
+            false,
+            call,
+        )?;
+        self.settle_cleanup(&committed, None, call);
+        Ok(())
+    }
+
     pub(crate) fn commit_lost(
         &self,
         scope: provenant_records::custody::Scope,

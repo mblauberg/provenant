@@ -2617,45 +2617,46 @@ impl RunStore {
             generation: record.generation,
         }
     }
-    /// Release a settling attempt instead of leaving a stop request for a
-    /// provider that has already exited. The sealed exit and every other
-    /// captured artifact stay as evidence; only the attempt state is committed
-    /// terminal. A live holder or active settlement driver keeps the ordinary
-    /// stop path, which asks that holder to stop.
-    fn cancel_settling(
+    /// Settle a Running attempt whose sealed provider exit makes status report
+    /// settling. The provider is gone, so a stop request cannot reach it; when
+    /// no holder can act on the stop and no driver owns settlement, the stop
+    /// commits the attempt terminal from the provider's own captured exit. A
+    /// live holder keeps the ordinary stop path and settles the attempt itself.
+    fn cancel_vanished(
         &self,
         id: AttemptId,
         reason: &str,
         call: &Request<'_>,
     ) -> Result<Option<CancelReceipt>> {
         let record = self.record(id, call)?;
-        if !matches!(&record.state, AttemptState::Settling { .. }) {
+        if !matches!(&record.state, AttemptState::Running { .. }) {
             return Ok(None);
         }
-        let attempt = self.attempt_dir(id, false)?;
         let scope = Self::scope(&record);
+        let attempt = self.attempt_dir(id, false)?;
+        let Some(raw) = read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)? else {
+            return Ok(None);
+        };
+        // Only the exit sealed for this generation proves this provider is gone.
+        let exit: provenant_supervisor::custody::StoredExit = crate::db::decode(&raw)?;
+        if exit.scope != scope {
+            return Ok(None);
+        }
         use provenant_supervisor::custody::HolderPresence;
-        let presence = custody::observe_holder(&attempt, scope, &SystemProcessObserver);
-        // A live provider still acts on its stop intent, and a live settlement
-        // driver is already making progress. Neither is a stuck settlement.
-        if presence == HolderPresence::Live
+        if custody::observe_holder(&attempt, scope, &SystemProcessObserver) == HolderPresence::Live
             || crate::settlement::settlement_owner_live(&attempt, scope, call.clock) == Some(true)
         {
             return Ok(None);
         }
-        // A sealed exit is the provider's own durable proof that it is gone;
-        // a changed boot proves the same. Without either, absence is not proven
-        // and the stop must not declare a loss it cannot support.
-        if read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_none()
-            && presence != HolderPresence::Gone
-        {
-            return Ok(None);
-        }
-        self.commit_lost(
+        // Keep the owner's request as the disposition evidence. No holder
+        // exists to deliver it to, so the sealed exit carries the outcome.
+        let _ = custody::request_stop(
+            attempt,
             scope,
-            &format!("stop released a settling attempt: {reason}"),
-            call,
-        )?;
+            record.verified_owner.unwrap_or(self.context.actor_id),
+            StopReason::ExplicitCancellation,
+        );
+        self.commit_stopped_after_exit(scope, reason, &exit, call)?;
         Ok(Some(CancelReceipt::Cancelled))
     }
     /// Cancel one attempt. Queued work is withdrawn; started work gets a stop
@@ -2686,10 +2687,11 @@ impl RunStore {
         let mut pending_steer_parent = None;
         loop {
             let record = self.record(id, call)?;
-            // A settling provider can no longer act on a stop intent. Commit
-            // its terminal state when its exit proves the provider is gone, so
-            // stop never leaves it pending behind wedged settlement input.
-            if let Some(receipt) = self.cancel_settling(id, reason, call)? {
+            // A sealed exit makes a Running attempt report as settling and
+            // leaves no provider to act on the stop. Settle it here unless a
+            // holder or driver still owns settlement, so stop never leaves
+            // the graph pending behind a vanished process.
+            if let Some(receipt) = self.cancel_vanished(id, reason, call)? {
                 return self.finish_graph_cancel(id, pending_steer_parent, receipt, call);
             }
             if let AttemptState::Queued { .. } = record.state {
