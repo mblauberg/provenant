@@ -1853,6 +1853,55 @@ fn delivery_park_replays_one_request_and_binds_its_transition() {
 }
 
 #[test]
+fn delivery_park_refuses_an_attempt_from_another_graph_or_node() {
+    let work = RequestWork {
+        extra: Default::default(),
+        graph: "graph-1".into(),
+        node: Some("writer".into()),
+        attempt_id: None,
+        repository: None,
+        head: None,
+    };
+    let key = provenant_records::graph::AttemptKey {
+        extra: Default::default(),
+        retry_generation: None,
+        previous_attempt_ref: None,
+        graph_id: "graph-1".into(),
+        node_id: "writer".into(),
+        attempt: 1,
+        route_index: 0,
+    };
+    for key in [
+        provenant_records::graph::AttemptKey {
+            graph_id: "other".into(),
+            ..key.clone()
+        },
+        provenant_records::graph::AttemptKey {
+            node_id: "other".into(),
+            ..key.clone()
+        },
+        provenant_records::graph::AttemptKey {
+            attempt: 0,
+            ..key.clone()
+        },
+    ] {
+        assert!(
+            delivery_park(
+                "session-a".into(),
+                OperationId::parse("park-1").unwrap(),
+                work.clone(),
+                Some("issue-42"),
+                Some(&key),
+                provenant_records::graph::ParkReason::OperationError,
+                "inspect",
+                &[],
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
 fn delivery_park_replays_a_prelaunch_refusal_with_its_graph_attempt_key() {
     let f = Fixture::new();
     let key = provenant_records::graph::AttemptKey {

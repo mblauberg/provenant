@@ -216,6 +216,11 @@ pub fn delivery_park(
             .as_deref()
             .is_none_or(|node| node.trim().is_empty())
         || (work.attempt_id.is_none() && attempt_key.is_none())
+        || attempt_key.is_some_and(|key| {
+            key.graph_id != work.graph
+                || work.node.as_deref() != Some(key.node_id.as_str())
+                || key.attempt == 0
+        })
         || item.is_some_and(|item| item.trim().is_empty())
     {
         return Err(InboxError::Invalid("delivery park identity"));
