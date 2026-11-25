@@ -3991,7 +3991,18 @@ fn settlement_fault_modes(modes: &[&str]) -> std::result::Result<(), Box<dyn std
                     provenant_supervisor::census::Census,
                     provenant_supervisor::census::CensusError,
                 > {
-                    unreachable!("reboot proof needs only the boot identity")
+                    // Reboot proof needs only the boot identity, but holderless
+                    // settlement now also takes a bounded census to reap
+                    // sandbox-marked escapees. This observer's world has no
+                    // live processes, so answer with an empty census.
+                    provenant_supervisor::census::Census::from_observations(
+                        [],
+                        [],
+                        [],
+                        true,
+                        false,
+                        16,
+                    )
                 }
             }
             let observer: &dyn provenant_supervisor::census::ProcessObserver =
