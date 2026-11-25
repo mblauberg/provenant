@@ -485,7 +485,8 @@ mod identity_policy_tests {
         let fake = crate::dispatch_tests::Fake::with_observed(
             Some(crate::tests::route()),
             Some(Outcome::Succeeded),
-        );
+        )
+        .with_answer(Some(crate::dispatch_tests::DONE_ANSWER.into()), Some(true));
         let (finished, warnings) = provenant_records::warning::capture(|| {
             store.finish(id, &attempt, &observed, &fake, &call)
         });
@@ -501,6 +502,11 @@ mod identity_policy_tests {
             "writer must succeed: {:?}",
             finished.state
         );
+        if let AttemptState::Terminal { reason, .. } = &finished.state {
+            let reason = reason.as_deref().ok_or("primary move reason")?;
+            assert!(reason.contains(&primary_head), "{reason}");
+            assert!(!reason.contains("gained no commits"), "{reason}");
+        }
         assert!(
             warnings.iter().any(|warning| {
                 warning.code == provenant_records::warning::PRIMARY_MOVED_UNATTRIBUTED.as_str()
