@@ -1300,6 +1300,7 @@ mod tests {
                 reason,
                 &provenant_confinement::worktrees::SystemWorkerObserver,
                 &call,
+                None,
             )
         });
         assert!(matches!(

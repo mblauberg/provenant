@@ -358,7 +358,10 @@ pub fn prune_orphan_registration(
         if marker.file_name() != Some(OsStr::new(".git")) {
             continue;
         }
-        if super::census::split_at_extant_directory(&marker).as_ref() != Some(&target) {
+        let Some(path) = marker.parent() else {
+            return OrphanRegistrationPrune::Retained;
+        };
+        if super::census::split_at_extant_directory(path).as_ref() != Some(&target) {
             continue;
         }
         // Path match alone is not licence to delete. The owner record must
