@@ -191,6 +191,17 @@ impl std::fmt::Display for DetachedWorktreeRemedies {
     }
 }
 
+/// Facts for a refused branch with no merge base with its declared base.
+/// Boxed inside [`WorktreeError`] so a wide refusal cannot enlarge every CLI
+/// result that carries the error through `RunError`.
+#[derive(Debug)]
+pub(super) struct UnrelatedBaseRefusal {
+    pub(super) branch: String,
+    pub(super) head: GitOid,
+    pub(super) base: String,
+    pub(super) base_oid: GitOid,
+}
+
 #[derive(Debug, Error)]
 pub enum WorktreeError {
     #[error(transparent)]
@@ -208,14 +219,10 @@ pub enum WorktreeError {
         reason: String,
     },
     #[error(
-        "base {base} at {base_oid} has no merge base with branch {branch} at {head}; pass --worktree to use the existing checkout, or merge or rebase the branch onto the intended base before launching"
+        "base {} at {} has no merge base with branch {} at {}; pass --worktree to use the existing checkout, or merge or rebase the branch onto the intended base before launching",
+        .0.base, .0.base_oid, .0.branch, .0.head
     )]
-    UnrelatedBase {
-        branch: String,
-        head: GitOid,
-        base: String,
-        base_oid: GitOid,
-    },
+    UnrelatedBase(Box<UnrelatedBaseRefusal>),
     #[error(
         "registered Git project has no verified primary checkout; run `provenant worktree list` from its primary checkout to refresh the layout, then retry"
     )]
@@ -466,7 +473,7 @@ impl WorktreeError {
             Self::WorktreeExists { .. } => {
                 "run `provenant worktree list` to inspect the existing checkout, then remove it with `provenant worktree remove NAME` or retry with a matching clean tree"
             }
-            Self::UnrelatedBase { .. } => {
+            Self::UnrelatedBase(..) => {
                 "pass --worktree PATH to launch from the existing branch checkout, or merge or rebase the branch onto the intended base before retrying"
             }
             Self::GitEntryHeld { locked: true } => "run `git worktree unlock <path>`, then retry",

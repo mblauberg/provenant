@@ -1350,6 +1350,23 @@ mod remoteless_writer_tests;
 mod tests;
 
 #[cfg(test)]
+mod error_size_tests {
+    use super::*;
+
+    /// Every CLI result carries this error, so a wide refusal cause would make
+    /// clippy's `result_large_err` fire across the workspace. Large causes are
+    /// boxed to keep the error below that 128-byte threshold.
+    #[test]
+    fn run_error_stays_below_clippy_large_err_threshold() {
+        let size = std::mem::size_of::<RunError>();
+        assert!(
+            size < 128,
+            "RunError grew to {size} bytes; box wide refusal causes so CLI results stay small"
+        );
+    }
+}
+
+#[cfg(test)]
 mod diagnostic_projection_tests {
     use super::*;
     use provenant_records::diagnostic::{BoundaryClass, Destination};

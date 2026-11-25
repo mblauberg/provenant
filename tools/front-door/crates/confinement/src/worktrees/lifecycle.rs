@@ -604,12 +604,14 @@ fn reuse_existing_worktree(
                 ));
             }
             BaseRelation::Unrelated => {
-                return Err(WorktreeError::UnrelatedBase {
-                    branch: request.branch.clone(),
-                    head,
-                    base: base.to_owned(),
-                    base_oid,
-                });
+                return Err(WorktreeError::UnrelatedBase(Box::new(
+                    UnrelatedBaseRefusal {
+                        branch: request.branch.clone(),
+                        head,
+                        base: base.to_owned(),
+                        base_oid,
+                    },
+                )));
             }
         }
     }
@@ -863,12 +865,14 @@ fn create_with_default(
                 ));
             }
             BaseRelation::Unrelated => {
-                return Err(WorktreeError::UnrelatedBase {
-                    branch: request.branch.clone(),
-                    head: existing_head,
-                    base: base_text.to_owned(),
-                    base_oid: base,
-                });
+                return Err(WorktreeError::UnrelatedBase(Box::new(
+                    UnrelatedBaseRefusal {
+                        branch: request.branch.clone(),
+                        head: existing_head,
+                        base: base_text.to_owned(),
+                        base_oid: base,
+                    },
+                )));
             }
         }
     }
