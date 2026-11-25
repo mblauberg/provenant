@@ -475,11 +475,13 @@ conditional observation reports `review=unknown` because the REST response has n
 review decision; CI settlement alone decides the verdict.
 
 Review-subject selection reads the same observer. When its REST core quota is
-spent, a complete batched GraphQL row serves the base and head so the launch can
-proceed; when no GraphQL read can answer, the refusal is typed `FORGE_QUOTA` and
-its `next:` says `retry after <reset>`. It is never rendered as invalid input,
-because the caller supplied no bad field, and a peer refusing this way is
-retried rather than settled as a verdict. (#3986)
+spent, a batched GraphQL row with valid base and head subject fields and a usable
+PR URL serves the launch even if its check rollup is truncated; rollup completeness
+does not determine subject completeness. When the required subject fields are
+unavailable, the refusal is typed `FORGE_QUOTA` and its `next:` says `retry after
+<reset>`. It is never rendered as invalid input, because the caller supplied no
+bad field, and a peer refusing this way is retried rather than settled as a
+verdict. (#3986)
 
 ### Integration batch membership
 

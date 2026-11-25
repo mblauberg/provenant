@@ -69,10 +69,13 @@ fn subject_from_batch(batch: crate::pr::status::batch::Batch) -> Option<PullSubj
         return None;
     };
     let entry = entries.into_iter().next()?;
-    if entry.truncated
-        || entry.state == "UNAVAILABLE"
+    if entry.state == "UNAVAILABLE"
         || entry.base_ref_oid.is_empty()
         || entry.base_ref_name.is_empty()
+        || entry
+            .url
+            .rsplit_once("/pull/")
+            .is_none_or(|(repository, _)| repository.is_empty())
     {
         return None;
     }
@@ -777,10 +780,12 @@ mod tests {
             base_ref_oid: oid.to_string(),
             base_ref_name: "main".into(),
             checks: Vec::new(),
-            truncated: false,
+            truncated: true,
         };
+        // The rollup may be incomplete while the subject fields are complete.
+        // That must not force a rate-limited review launch back to REST.
         let subject = subject_from_batch(Batch::Entries(vec![entry.clone()]))
-            .ok_or("a complete GraphQL row must serve the subject")?;
+            .ok_or("complete subject fields must serve despite a truncated check rollup")?;
         assert_eq!(subject.base_ref_oid, oid);
         assert_eq!(subject.head_ref_oid, oid);
         assert_eq!(subject.base_ref_name, "main");
