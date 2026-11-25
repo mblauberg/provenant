@@ -474,6 +474,13 @@ GraphQL and REST when either is unavailable or rate limited. A wait's
 conditional observation reports `review=unknown` because the REST response has no
 review decision; CI settlement alone decides the verdict.
 
+Review-subject selection reads the same observer. When its REST core quota is
+spent, a complete batched GraphQL row serves the base and head so the launch can
+proceed; when no GraphQL read can answer, the refusal is typed `FORGE_QUOTA` and
+its `next:` says `retry after <reset>`. It is never rendered as invalid input,
+because the caller supplied no bad field, and a peer refusing this way is
+retried rather than settled as a verdict. (#3986)
+
 ### Integration batch membership
 
 `pr status` infers integration batches from bounded Git history: a member whose

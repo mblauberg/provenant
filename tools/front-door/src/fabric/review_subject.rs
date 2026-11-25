@@ -14,14 +14,81 @@ fn observed_pull(
     number: u64,
     request: &provenant_config::ports::Request,
 ) -> Result<PullSubject, FacadeError> {
-    let repository = crate::pr::observer::repository_for_project(state, project, request)
-        .map_err(|error| graph_subject_error(error.to_string()))?;
-    let mut observer = Observer::open(state, project, &repository, request)
-        .map_err(|error| graph_subject_error(error.to_string()))?;
-    let resource = observer
-        .resource(&format!("pulls/{number}"), Duration::ZERO, request)
-        .map_err(|error| graph_subject_error(error.to_string()))?;
+    let repository = match crate::pr::observer::repository_for_project(state, project, request) {
+        Ok(repository) => repository,
+        Err(error) => return subject_read_result(state, project, number, error),
+    };
+    let mut observer = match Observer::open(state, project, &repository, request) {
+        Ok(observer) => observer,
+        Err(error) => return subject_read_result(state, project, number, error),
+    };
+    let resource = match observer.resource(&format!("pulls/{number}"), Duration::ZERO, request) {
+        Ok(resource) => resource,
+        Err(error) => return subject_read_result(state, project, number, error),
+    };
     pull_subject(&resource)
+}
+
+/// A rate-limited forge read prefers the batched GraphQL path: it has its own
+/// quota and can still answer when the REST core allowance is spent. When no
+/// GraphQL row can serve the range, the refusal is typed and carries the reset
+/// instead of naming an input field the caller never supplied (#3986).
+fn subject_read_result(
+    state: &std::path::Path,
+    project: &std::path::Path,
+    number: u64,
+    error: crate::pr::observer::ObserveError,
+) -> Result<PullSubject, FacadeError> {
+    match error {
+        crate::pr::observer::ObserveError::RateLimited { reset } => {
+            match graphql_pull_subject(state, project, number) {
+                Some(subject) => Ok(subject),
+                None => Err(forge_quota_error(reset)),
+            }
+        }
+        error => Err(graph_subject_error(error.to_string())),
+    }
+}
+
+/// The batched GraphQL read answers a subject only with a complete, current
+/// base and head. Cached rows written before those fields existed simply
+/// cannot serve this read; the typed refusal then names when to retry.
+fn graphql_pull_subject(
+    state: &std::path::Path,
+    project: &std::path::Path,
+    number: u64,
+) -> Option<PullSubject> {
+    let crate::pr::status::batch::Batch::Entries(entries) =
+        crate::pr::status::batch::single(state, project, number)
+    else {
+        return None;
+    };
+    let entry = entries.into_iter().next()?;
+    if entry.truncated
+        || entry.state == "UNAVAILABLE"
+        || entry.base_ref_oid.is_empty()
+        || entry.base_ref_name.is_empty()
+    {
+        return None;
+    }
+    Some(PullSubject {
+        base_ref_oid: provenant_core::GitOid::parse(&entry.base_ref_oid).ok()?,
+        base_ref_name: entry.base_ref_name,
+        head_ref_oid: provenant_core::GitOid::parse(&entry.head).ok()?,
+        head_ref_name: None,
+        url: entry.url,
+    })
+}
+
+/// `RunKind` carries the run's stable `FORGE_QUOTA` code through `code()` and
+/// the facade's typed outcome; the reset lives in the safe `next` repair.
+fn forge_quota_error(reset: jiff::Timestamp) -> FacadeError {
+    FacadeError::RunKind {
+        run_code: "FORGE_QUOTA".into(),
+        next: format!("retry after {reset}"),
+        detail: Some(format!("GitHub rate limit; reset {reset}")),
+        resource: None,
+    }
 }
 
 /// The REST pull resource is the same shape the landing adapter observes.
@@ -640,6 +707,90 @@ mod tests {
             assert!(warning.contains("review range"), "{warning}");
         }
 
+        Ok(())
+    }
+
+    /// Issue #3986: a spent REST core quota is a typed, retryable refusal, not
+    /// an invalid input field the caller never supplied. No GraphQL row is
+    /// available here, so the reset is carried in the safe repair.
+    #[test]
+    fn rate_limited_subject_is_a_typed_retryable_refusal() -> crate::worktree_tests::support::Result
+    {
+        use super::*;
+        use std::ffi::OsStr;
+
+        let rig = crate::worktree_tests::repository()?;
+        // The fake forge names `owner/repo`; pre-record a live REST limit in
+        // the shared observer state so the pull read refuses before a request.
+        let dir = crate::pr::observer::shared_dir(&rig.state, "owner/repo")?;
+        let reset = jiff::Timestamp::now().as_second() + 3600;
+        dir.atomic_write(
+            OsStr::new("rate-limit.json"),
+            ".rate-",
+            &serde_json::to_vec(&serde_json::json!({"reset": reset}))?,
+            provenant_os::fs::PublishMode::Replace,
+        )?;
+        let request = provenant_config::ports::Request::within(Duration::from_secs(60));
+        let error = observed_pull(&rig.state, &rig.project, 7, &request)
+            .err()
+            .ok_or("a rate-limited subject must refuse")?;
+        assert_eq!(error.code(), "FORGE_QUOTA", "{error:?}");
+        let diagnostic = error.diagnostic();
+        let next = diagnostic.next.as_deref().unwrap_or_default();
+        assert!(next.contains("retry after"), "{next}");
+        let detail = diagnostic.detail.as_deref().unwrap_or_default();
+        assert!(detail.contains("rate limit"), "{detail}");
+        assert_eq!(
+            provenant_cli::fabric::facade_outcome(&error),
+            (
+                provenant_records::Outcome::Refused,
+                provenant_run::ErrorKind::ForgeQuota
+            )
+        );
+        Ok(())
+    }
+
+    /// Issue #3986: where the batched GraphQL read can serve the range, it
+    /// answers the subject instead of refusing at all. A fresh cached row that
+    /// carries base and head is enough; older rows lack the base fields.
+    #[test]
+    fn graphql_row_serves_a_rate_limited_subject() -> crate::worktree_tests::support::Result {
+        use super::*;
+        use crate::worktree_tests::support::git;
+        use std::ffi::OsStr;
+
+        let rig = crate::worktree_tests::repository()?;
+        let base = git(&rig, &["rev-parse", "HEAD"])?;
+        let dir = crate::pr::observer::shared_dir(&rig.state, "owner/repo")?;
+        let cache = serde_json::json!({
+            "entries": [{
+                "fetched_at": jiff::Timestamp::now().as_millisecond(),
+                "entry": {
+                    "number": 7,
+                    "state": "OPEN",
+                    "head": base,
+                    "draft": false,
+                    "merge": "CLEAN",
+                    "review": null,
+                    "url": "https://github.com/owner/repo/pull/7",
+                    "base_ref_oid": base,
+                    "base_ref_name": "main",
+                    "checks": [],
+                    "truncated": false
+                }
+            }]
+        });
+        dir.atomic_write(
+            OsStr::new("pr-status.json"),
+            ".pr-status-",
+            &serde_json::to_vec(&cache)?,
+            provenant_os::fs::PublishMode::Replace,
+        )?;
+        let subject = graphql_pull_subject(&rig.state, &rig.project, 7)
+            .ok_or("a complete GraphQL row must serve the subject")?;
+        assert_eq!(subject.base_ref_oid.to_string(), base);
+        assert_eq!(subject.head_ref_oid.to_string(), base);
+        assert_eq!(subject.base_ref_name, "main");
         Ok(())
     }
 }

@@ -30,6 +30,12 @@ pub(crate) struct Entry {
     pub merge: String,
     pub review: Option<String>,
     pub url: String,
+    /// The base commit and branch, so a rate-limited REST subject read can be
+    /// served by this GraphQL row. Older cache entries lack them.
+    #[serde(default)]
+    pub base_ref_oid: String,
+    #[serde(default)]
+    pub base_ref_name: String,
     /// Every reported check in the observer's bucket vocabulary, in rollup
     /// order. Empty when the rollup declared nothing.
     pub checks: Vec<RawCheck>,
@@ -286,7 +292,7 @@ fn rollup_query(owner: &str, name: &str, numbers: &[u64]) -> String {
         query.push_str(":pullRequest(number:");
         query.push_str(&number.to_string());
         query.push_str(
-            "){number state isDraft mergeStateStatus reviewDecision url headRefOid statusCheckRollup{contexts(last:100){totalCount nodes{__typename ...on CheckRun{name status conclusion detailsUrl} ...on StatusContext{context state targetUrl}}}}}",
+            "){number state isDraft mergeStateStatus reviewDecision url headRefOid baseRefOid baseRefName statusCheckRollup{contexts(last:100){totalCount nodes{__typename ...on CheckRun{name status conclusion detailsUrl} ...on StatusContext{context state targetUrl}}}}}",
         );
     }
     query.push_str("}}");
@@ -320,6 +326,10 @@ struct Pull {
     url: String,
     #[serde(rename = "headRefOid", default)]
     head: String,
+    #[serde(rename = "baseRefOid", default)]
+    base_ref_oid: String,
+    #[serde(rename = "baseRefName", default)]
+    base_ref_name: String,
     #[serde(rename = "statusCheckRollup", default)]
     rollup: Option<Rollup>,
 }
@@ -346,6 +356,8 @@ fn entry(number: u64, pull: Option<Pull>) -> Entry {
             merge: "unknown".into(),
             review: None,
             url: String::new(),
+            base_ref_oid: String::new(),
+            base_ref_name: String::new(),
             checks: Vec::new(),
             truncated: false,
         };
@@ -376,6 +388,8 @@ fn entry(number: u64, pull: Option<Pull>) -> Entry {
         merge: pull.merge,
         review: pull.review,
         url: pull.url,
+        base_ref_oid: pull.base_ref_oid,
+        base_ref_name: pull.base_ref_name,
         checks: checks.clone(),
         // A node the rollup cannot speak for, or more contexts than one page
         // holds, makes this rollup incomplete; callers then read REST exactly.
