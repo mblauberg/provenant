@@ -526,6 +526,26 @@ pub(super) fn check_expanded_ids(
     Ok(())
 }
 
+// Retry gates must control the until gate's success edge. Merely waiting for
+// settlement permits a failed retry gate to be bypassed by a passing until.
+fn retry_gate_controls_until(spec: &LoopSpec, retry: &str) -> bool {
+    let mut pending = vec![spec.until.as_str()];
+    let mut seen = std::collections::BTreeSet::new();
+    while let Some(id) = pending.pop() {
+        if id == retry {
+            return true;
+        }
+        if !seen.insert(id) {
+            continue;
+        }
+        if let Some(node) = spec.body.iter().find(|node| node.id == id) {
+            pending.extend(node.depends_on.iter().map(String::as_str));
+            pending.extend(node.inputs.iter().map(|input| input.node.as_str()));
+        }
+    }
+    false
+}
+
 fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<GraphDocument, String> {
     let declared: std::collections::BTreeSet<_> = document.nodes.iter().map(|n| &n.id).collect();
     if document.nodes.iter().any(|n| {
@@ -670,6 +690,7 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
                 return Err(format!("loop {} retry_on must name a body gate", node.id));
             };
             if !retry_nodes.insert(retry)
+                || !retry_gate_controls_until(spec, retry)
                 || gate.kind != Some(NodeKind::Gate)
                 || !matches!(
                     &gate.condition,
@@ -681,7 +702,7 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
                 )
             {
                 return Err(format!(
-                    "loop {} retry_on must uniquely name typed CI, conflict or verdict gates",
+                    "loop {} retry_on must uniquely name typed CI, conflict or verdict gates on the until success path",
                     node.id
                 ));
             }
