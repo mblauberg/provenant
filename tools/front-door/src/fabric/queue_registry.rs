@@ -5,6 +5,7 @@
 //! graph observation releases an identity for a later submission.
 
 use provenant_core::{CancelToken, Clock, WaitBudget, WallTime};
+use provenant_fabric_runtime::graph::QueueKnobs;
 use provenant_os::fs::{Directory, LockMode, PublishMode};
 use provenant_records::Sourced;
 use serde::{Deserialize, Serialize};
@@ -14,11 +15,13 @@ use std::{collections::{BTreeMap, BTreeSet}, ffi::OsStr, path::Path};
 const REGISTRY_FILE: &str = "registry.json";
 const REGISTRY_LOCK: &str = "registry.lock";
 const REGISTRY_BYTES: u64 = 16 * 1024 * 1024;
-const REGISTRY_SCHEMA: u64 = 1;
+const REGISTRY_SCHEMA: u64 = 2;
+const MAX_QUEUE_CAP_WAIT_SECONDS: u64 = 14_400;
 
 /// Canonical tracker identity. The selector resolver owns tracker-specific
 /// item canonicalisation; project and tracker names are folded here.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct QueueIdentity {
     pub project: String,
     pub tracker: String,
@@ -86,6 +89,22 @@ pub(super) struct QueueItem {
     pub overflow_reason: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct QueueItemMarker {
+    pub queue_id: String,
+    pub identity: QueueIdentity,
+    pub graph_id: String,
+    pub launch_digest: String,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct AuthorizedQueueLaunch {
+    pub queue: QueueRecord,
+    pub item: QueueItem,
+    pub snapshot_item: QueueSnapshotItem,
+}
+
 /// A persisted queue and its ordered item graphs.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct QueueRecord {
@@ -95,7 +114,8 @@ pub(super) struct QueueRecord {
     pub project: String,
     pub tracker: String,
     pub snapshot: QueueSnapshot,
-    pub max_parallel: Sourced<usize>,
+    pub knobs: QueueKnobs,
+    pub cap_wait: Sourced<u64>,
     pub admitted_at: WallTime,
     /// Emit the advisory warning at this deadline while items wait at cap.
     pub warning_at: WallTime,
@@ -111,6 +131,11 @@ struct Registry {
     schema_version: u64,
     generation: u64,
     queues: BTreeMap<String, QueueRecord>,
+}
+
+#[derive(Deserialize)]
+struct RegistryHeader {
+    schema_version: u64,
 }
 
 impl Default for Registry {
@@ -135,7 +160,8 @@ pub(super) struct QueueSubmission {
     pub project: String,
     pub tracker: String,
     pub snapshot: QueueSnapshot,
-    pub max_parallel: Sourced<usize>,
+    pub knobs: QueueKnobs,
+    pub cap_wait: Sourced<u64>,
     pub admitted_at: WallTime,
     pub warning_at: WallTime,
     pub overflow_at: WallTime,
@@ -163,6 +189,35 @@ pub(super) struct QueueSchedule {
     pub waiting: Vec<String>,
 }
 
+pub(super) fn bounded_wait_deadlines(
+    admitted_at: WallTime,
+    cap_wait: &Sourced<u64>,
+) -> Result<(WallTime, WallTime), String> {
+    if !(1..=MAX_QUEUE_CAP_WAIT_SECONDS).contains(&cap_wait.value) {
+        return Err("queue cap wait must be 1..=14400 seconds".into());
+    }
+    let overflow_delta = i64::try_from(cap_wait.value)
+        .ok()
+        .and_then(|seconds| seconds.checked_mul(1_000_000))
+        .ok_or("queue overflow wait is out of range")?;
+    let warning_delta = i64::try_from(cap_wait.value / 2)
+        .ok()
+        .and_then(|seconds| seconds.checked_mul(1_000_000))
+        .ok_or("queue warning wait is out of range")?;
+    let warning = admitted_at
+        .as_micros()
+        .checked_add(warning_delta)
+        .ok_or("queue warning deadline overflow")?;
+    let overflow = admitted_at
+        .as_micros()
+        .checked_add(overflow_delta)
+        .ok_or("queue overflow deadline overflow")?;
+    Ok((
+        WallTime::from_micros(warning).map_err(|_| "queue warning deadline is invalid")?,
+        WallTime::from_micros(overflow).map_err(|_| "queue overflow deadline is invalid")?,
+    ))
+}
+
 /// Serialises all queue ownership decisions in the host state domain.
 pub(super) struct QueueRegistry {
     directory: Directory,
@@ -187,14 +242,21 @@ impl QueueRegistry {
             .lock(OsStr::new(REGISTRY_LOCK), LockMode::Exclusive, budget, cancel, clock)
             .map_err(|error| format!("delivery queue registry lock failed: {error}"))?;
         let mut registry = match self.directory.read_bounded(OsStr::new(REGISTRY_FILE), REGISTRY_BYTES) {
-            Ok(bytes) => serde_json::from_slice::<Registry>(&bytes)
-                .map_err(|error| format!("delivery queue registry is corrupt: {error}"))?,
+            Ok(bytes) => {
+                let header = serde_json::from_slice::<RegistryHeader>(&bytes)
+                    .map_err(|error| format!("delivery queue registry is corrupt: {error}"))?;
+                if header.schema_version != REGISTRY_SCHEMA {
+                    return Err(format!(
+                        "unsupported delivery queue registry schema {}; expected {REGISTRY_SCHEMA}",
+                        header.schema_version
+                    ));
+                }
+                serde_json::from_slice::<Registry>(&bytes)
+                    .map_err(|error| format!("delivery queue registry is corrupt: {error}"))?
+            }
             Err(error) if error.is_not_found() => Registry::default(),
             Err(error) => return Err(format!("delivery queue registry read failed: {error}")),
         };
-        if registry.schema_version != REGISTRY_SCHEMA {
-            return Err(format!("unsupported delivery queue registry schema {}", registry.schema_version));
-        }
         let before = registry.clone();
         let result = operation(&mut registry)?;
         if registry == before {
@@ -229,14 +291,147 @@ impl QueueRegistry {
         cancel: &CancelToken,
         clock: &dyn Clock,
     ) -> Result<Option<QueueRecord>, String> {
+        if project != project.to_ascii_lowercase() {
+            return Err("queue project identity must be canonical lowercase text".into());
+        }
+        if !is_sha256_digest(submission_digest) {
+            return Err("queue submission digest must be a canonical sha256 digest".into());
+        }
         self.locked(budget, cancel, clock, |registry| {
             let Some(existing) = registry.queues.get(queue_id) else { return Ok(None); };
-            if existing.project == project.to_ascii_lowercase()
+            if existing.project == project
                 && existing.submission_digest == submission_digest
             {
                 return Ok(Some(existing.clone()));
             }
             Err(format!("delivery queue id `{queue_id}` already names different input"))
+        })
+    }
+
+    /// Verify that a launch marker and replay request name an already reserved
+    /// item in this project and execution directory. Raw queue metadata cannot
+    /// enable the queue plan by itself.
+    pub(super) fn authorize_launch(
+        &self,
+        project: &str,
+        execution_directory: &str,
+        request: &Value,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        clock: &dyn Clock,
+    ) -> Result<AuthorizedQueueLaunch, String> {
+        let marker: QueueItemMarker = serde_json::from_value(
+            request.get("queue_item").cloned().ok_or("queue launch marker is missing")?,
+        )
+        .map_err(|_| "queue launch marker is invalid".to_owned())?;
+        let mut replay_request = request.clone();
+        let object = replay_request
+            .as_object_mut()
+            .ok_or("queue launch request must be an object")?;
+        object.remove("queue_item");
+        for field in ["wait_seconds", "explain", "detached"] {
+            object.remove(field);
+        }
+        self.locked(budget, cancel, clock, |registry| {
+            let queue = registry
+                .queues
+                .get(&marker.queue_id)
+                .ok_or_else(|| "queue launch has no persisted owner".to_owned())?;
+            if queue.project != project.to_ascii_lowercase()
+                || marker.identity.project != queue.project
+                || marker.identity.tracker != queue.tracker
+                || marker.queue_id.trim().is_empty()
+                || !is_sha256_digest(&marker.launch_digest)
+            {
+                return Err("queue launch does not belong to this project".into());
+            }
+            let item = queue
+                .items
+                .iter()
+                .find(|item| item.identity == marker.identity && item.graph_id == marker.graph_id)
+                .ok_or_else(|| "queue launch item identity or graph id changed".to_owned())?;
+            let expected_digest =
+                launch_digest(&item.launch_request, &item.execution_directory, &item.adoption)?;
+            if !matches!(item.state, QueueItemState::Launching | QueueItemState::Active)
+                || item.launch_digest != marker.launch_digest
+                || item.execution_directory != execution_directory
+                || item.launch_request != replay_request
+                || expected_digest != item.launch_digest
+            {
+                return Err("queue launch does not match its persisted item intent".into());
+            }
+            let snapshot_item = queue
+                .snapshot
+                .items
+                .get(item.snapshot_index)
+                .filter(|snapshot| snapshot.identity == item.identity)
+                .ok_or_else(|| "queue snapshot identity is corrupt".to_owned())?;
+            Ok(AuthorizedQueueLaunch {
+                queue: queue.clone(),
+                item: item.clone(),
+                snapshot_item: snapshot_item.clone(),
+            })
+        })
+    }
+
+    /// Return the single persisted adoption intent owned by this graph and
+    /// tracker identity. The runtime owner calls this again under registry
+    /// custody before it validates the forge and worktree state.
+    pub(super) fn adoption_for(
+        &self,
+        graph_id: &str,
+        identity: &QueueIdentity,
+        operation_id: &str,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        clock: &dyn Clock,
+    ) -> Result<Value, String> {
+        self.locked(budget, cancel, clock, |registry| {
+            let matches: Vec<_> = registry
+                .queues
+                .values()
+                .flat_map(|queue| {
+                    queue.items.iter().filter_map(move |item| {
+                        (item.graph_id == graph_id
+                            && &item.identity == identity
+                            && matches!(item.state, QueueItemState::Launching | QueueItemState::Active))
+                            .then_some((queue, item))
+                    })
+                })
+                .collect();
+            let [(queue, item)] = matches.as_slice() else {
+                return Err("adoption intent does not have exactly one active queue owner".into());
+            };
+            let value = item
+                .adoption
+                .as_ref()
+                .ok_or("queue item has no persisted adoption intent")?;
+            let snapshot_item = queue
+                .snapshot
+                .items
+                .get(item.snapshot_index)
+                .filter(|snapshot| snapshot.identity == item.identity)
+                .ok_or_else(|| "adoption item is absent from its persisted snapshot".to_owned())?;
+            if value["operation_id"].as_str() != Some(operation_id)
+                || value["project"].as_str() != Some(identity.project.as_str())
+                || value["tracker"].as_str() != Some(identity.tracker.as_str())
+                || value["item"].as_str() != Some(identity.item.as_str())
+                || value["issue_identity"].as_str() != Some(identity.item.as_str())
+                || value["schema_version"].as_u64() != Some(1)
+                || &snapshot_item.identity != identity
+                || snapshot_item.data["id"].as_str() != Some(identity.item.as_str())
+                || snapshot_item.data["number"].as_u64() != value["issue_number"].as_u64()
+                || !snapshot_item
+                    .data["repository"]
+                    .as_str()
+                    .zip(value["repository"].as_str())
+                    .is_some_and(|(snapshot_repo, adoption_repo)| {
+                        snapshot_repo.eq_ignore_ascii_case(adoption_repo)
+                    })
+            {
+                return Err("adoption intent does not match its persisted tracker identity".into());
+            }
+            Ok(value.clone())
         })
     }
 
@@ -249,28 +444,39 @@ impl QueueRegistry {
         cancel: &CancelToken,
         clock: &dyn Clock,
     ) -> Result<QueueAdmission, String> {
-        sanitize_submission(&mut submission)?;
-        validate_submission(&submission)?;
         self.locked(budget, cancel, clock, |registry| {
-            let items: Vec<QueueItem> = submission.items.iter().enumerate().map(|(index, item)| QueueItem {
-                identity: item.identity.clone(),
-                graph_id: item.graph_id.clone(),
-                snapshot_index: index,
-                launch_request: item.launch_request.clone(),
-                execution_directory: item.execution_directory.clone(),
-                adoption: item.adoption.clone(),
-                launch_digest: launch_digest(&item.launch_request, &item.execution_directory, &item.adoption),
-                state: QueueItemState::Pending,
-                terminal_outcome: None,
-                overflow_reason: None,
-            }).collect();
+            if let Some(existing) = registry.queues.get(&submission.queue_id) {
+                if existing.project == submission.project
+                    && existing.submission_digest == submission.submission_digest
+                {
+                    return Ok(QueueAdmission::Admitted { queue: existing.clone(), replayed: true });
+                }
+                return Err(format!("delivery queue id `{}` already names different input", submission.queue_id));
+            }
+            sanitize_submission(&mut submission)?;
+            validate_submission(&submission)?;
+            let items: Vec<QueueItem> = submission.items.iter().enumerate().map(|(index, item)| {
+                Ok(QueueItem {
+                    identity: item.identity.clone(),
+                    graph_id: item.graph_id.clone(),
+                    snapshot_index: index,
+                    launch_request: item.launch_request.clone(),
+                    execution_directory: item.execution_directory.clone(),
+                    adoption: item.adoption.clone(),
+                    launch_digest: launch_digest(&item.launch_request, &item.execution_directory, &item.adoption)?,
+                    state: QueueItemState::Pending,
+                    terminal_outcome: None,
+                    overflow_reason: None,
+                })
+            }).collect::<Result<_, String>>()?;
             let queue = QueueRecord {
                 queue_id: submission.queue_id.clone(),
                 submission_digest: submission.submission_digest.clone(),
                 project: submission.project.clone(),
                 tracker: submission.tracker.clone(),
                 snapshot: submission.snapshot.clone(),
-                max_parallel: submission.max_parallel.clone(),
+                knobs: submission.knobs.clone(),
+                cap_wait: submission.cap_wait.clone(),
                 admitted_at: submission.admitted_at,
                 warning_at: submission.warning_at,
                 overflow_at: submission.overflow_at,
@@ -278,12 +484,6 @@ impl QueueRegistry {
                 overflow_reason: None,
                 items,
             };
-            if let Some(existing) = registry.queues.get(&submission.queue_id) {
-                if same_submission(existing, &queue) {
-                    return Ok(QueueAdmission::Admitted { queue: existing.clone(), replayed: true });
-                }
-                return Err(format!("delivery queue id `{}` already names different input", submission.queue_id));
-            }
             for item in &queue.items {
                 if registry.queues.values().any(|existing| {
                     existing.project == queue.project
@@ -349,41 +549,58 @@ impl QueueRegistry {
             let mut schedule = QueueSchedule::default();
             for (queue_id, queue) in &mut registry.queues {
                 if only_queue.is_some_and(|only| only != queue_id) { continue; }
+                let max_parallel = queue.knobs.max_parallel.value;
                 let active = queue.items.iter().filter(|item| matches!(item.state, QueueItemState::Launching | QueueItemState::Active)).count();
                 let pending = queue.items.iter().filter(|item| item.state == QueueItemState::Pending).count();
-                if pending > 0 && active >= queue.max_parallel.value {
+                if pending > 0 && active >= max_parallel {
+                    let mut warned_now = false;
+                    if now >= queue.warning_at && queue.wait_warning.is_none() {
+                        let warning = format!(
+                            "queue {} is waiting at max_parallel={} from {} ({}); cap wait={} seconds from {} ({}) before advisory overflow at {}",
+                            queue.queue_id,
+                            max_parallel,
+                            queue.knobs.max_parallel.source.layer.as_str(),
+                            queue.knobs.max_parallel.source.origin.as_deref().unwrap_or("no origin recorded"),
+                            queue.cap_wait.value,
+                            queue.cap_wait.source.layer.as_str(),
+                            queue.cap_wait.source.origin.as_deref().unwrap_or("no origin recorded"),
+                            queue.overflow_at,
+                        );
+                        queue.wait_warning = Some(warning.clone());
+                        schedule.warnings.push(warning);
+                        warned_now = true;
+                    }
                     if now < queue.overflow_at {
-                        if now >= queue.warning_at && queue.wait_warning.is_none() {
-                            let warning = format!(
-                                "queue {} is waiting at max_parallel={} from {} ({}) before advisory overflow at {}",
-                                queue.queue_id,
-                                queue.max_parallel.value,
-                                queue.max_parallel.source.layer.as_str(),
-                                queue.max_parallel.source.origin.as_deref().unwrap_or("no origin recorded"),
-                                queue.overflow_at,
-                            );
-                            queue.wait_warning = Some(warning.clone());
-                            schedule.warnings.push(warning);
-                        }
                         schedule.waiting.push(format!(
                             "queue {} has {pending} pending items waiting for active capacity {}/{}",
-                            queue.queue_id, active, queue.max_parallel.value
+                            queue.queue_id, active, max_parallel
+                        ));
+                        schedule.launch.extend(queue.items.iter().filter(|item| item.state == QueueItemState::Launching).cloned().map(|item| (queue_id.clone(), item)));
+                        continue;
+                    }
+                    if warned_now {
+                        schedule.waiting.push(format!(
+                            "queue {} recorded its cap warning; advisory overflow becomes eligible on the next scheduling pass",
+                            queue.queue_id
                         ));
                         schedule.launch.extend(queue.items.iter().filter(|item| item.state == QueueItemState::Launching).cloned().map(|item| (queue_id.clone(), item)));
                         continue;
                     }
                     if queue.overflow_reason.is_none() {
                         queue.overflow_reason = Some(format!(
-                            "max_parallel={} from {} ({}) exceeded after bounded wait; advisory overflow began at {}",
-                            queue.max_parallel.value,
-                            queue.max_parallel.source.layer.as_str(),
-                            queue.max_parallel.source.origin.as_deref().unwrap_or("no origin recorded"),
+                            "max_parallel={} from {} ({}) exceeded after cap wait={} seconds from {} ({}); advisory overflow began at {}",
+                            max_parallel,
+                            queue.knobs.max_parallel.source.layer.as_str(),
+                            queue.knobs.max_parallel.source.origin.as_deref().unwrap_or("no origin recorded"),
+                            queue.cap_wait.value,
+                            queue.cap_wait.source.layer.as_str(),
+                            queue.cap_wait.source.origin.as_deref().unwrap_or("no origin recorded"),
                             queue.overflow_at,
                         ));
                     }
                 }
-                let capacity = queue.max_parallel.value.saturating_sub(active);
-                let overflow = active >= queue.max_parallel.value;
+                let capacity = max_parallel.saturating_sub(active);
+                let overflow = active >= max_parallel;
                 let mut claimed = 0;
                 for item in queue.items.iter_mut().filter(|item| item.state == QueueItemState::Pending) {
                     if !overflow && claimed >= capacity {
@@ -496,17 +713,30 @@ fn validate_submission(submission: &QueueSubmission) -> Result<(), String> {
     if submission.queue_id.trim().is_empty() || submission.queue_id.contains('\0') {
         return Err("queue id must be non-empty text".into());
     }
-    if submission.max_parallel.value == 0 {
+    submission.knobs.validate().map_err(|error| format!("invalid sealed queue knobs: {error}"))?;
+    if submission.knobs.max_parallel.value == 0 {
         return Err("queue max_parallel must be positive".into());
     }
-    if !submission.submission_digest.starts_with("sha256:") {
+    if !(1..=MAX_QUEUE_CAP_WAIT_SECONDS).contains(&submission.cap_wait.value) {
+        return Err("queue cap wait must be 1..=14400 seconds".into());
+    }
+    if !is_sha256_digest(&submission.submission_digest) {
         return Err("queue submission digest must be a canonical sha256 digest".into());
     }
-    if submission.warning_at > submission.overflow_at {
-        return Err("queue warning deadline must not follow its overflow deadline".into());
+    if submission.admitted_at > submission.warning_at || submission.warning_at >= submission.overflow_at {
+        return Err("queue deadlines must satisfy admitted_at <= warning_at < overflow_at".into());
+    }
+    let deadlines = bounded_wait_deadlines(submission.admitted_at, &submission.cap_wait)?;
+    if deadlines != (submission.warning_at, submission.overflow_at) {
+        return Err("queue deadlines do not match the sourced cap-wait policy".into());
     }
     if submission.project.trim().is_empty() || submission.tracker.trim().is_empty() {
         return Err("queue project and tracker must be non-empty".into());
+    }
+    if submission.project != submission.project.to_ascii_lowercase()
+        || submission.tracker != submission.tracker.to_ascii_lowercase()
+    {
+        return Err("queue project and tracker identities must be canonical lowercase values".into());
     }
     if submission.items.is_empty() || submission.items.len() != submission.snapshot.items.len() {
         return Err("queue snapshot and item graph count must match and be non-empty".into());
@@ -550,16 +780,16 @@ fn validate_submission(submission: &QueueSubmission) -> Result<(), String> {
     Ok(())
 }
 
-fn same_submission(existing: &QueueRecord, proposed: &QueueRecord) -> bool {
-    existing.queue_id == proposed.queue_id
-        && existing.submission_digest == proposed.submission_digest
-        && existing.project == proposed.project
-        && existing.tracker == proposed.tracker
+fn launch_digest(request: &Value, execution_directory: &str, adoption: &Option<Value>) -> Result<String, String> {
+    let bytes = serde_json::to_vec(&(request, execution_directory, adoption))
+        .map_err(|_| "queue replay identity could not be encoded".to_owned())?;
+    Ok(provenant_records::CanonicalV1::file_digest(&bytes).to_string())
 }
 
-fn launch_digest(request: &Value, execution_directory: &str, adoption: &Option<Value>) -> String {
-    let bytes = serde_json::to_vec(&(request, execution_directory, adoption)).unwrap_or_default();
-    provenant_records::CanonicalV1::file_digest(&bytes).to_string()
+fn is_sha256_digest(value: &str) -> bool {
+    value
+        .strip_prefix("sha256:")
+        .is_some_and(|hex| hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()))
 }
 
 fn sanitize_submission(submission: &mut QueueSubmission) -> Result<(), String> {
