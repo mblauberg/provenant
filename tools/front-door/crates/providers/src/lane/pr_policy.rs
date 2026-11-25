@@ -10,10 +10,37 @@ pub(super) fn pr_policy_guard(policy: provenant_config::PrPolicy, source: &str) 
     if policy == PrPolicy::Allowed {
         return String::new();
     }
-    // A mutating `gh api` call is a forge write. Reads (GET/HEAD, no field
-    // flags) continue to work so the lane can still inspect pull requests.
+    // Fields imply POST only when no method overrides them. Resolve the method
+    // after scanning all arguments, including fields that precede the override.
     let mut guard = String::from(
-        "provenant_forge_write() {\n  [ \"$1\" = api ] || return 1\n  shift\n  while [ \"$#\" -gt 0 ]; do\n    case \"$1\" in\n      -f|-F|--field|--raw-field|--input|--field=*|--raw-field=*|--input=*) return 0 ;;\n      -X|--method) shift; [ \"$#\" -gt 0 ] || return 1\n        case \"$1\" in GET|HEAD|get|head) ;; *) return 0 ;; esac ;;\n      --method=*) case \"${1#--method=}\" in GET|HEAD|get|head) ;; *) return 0 ;; esac ;;\n      -X*) case \"${1#-X}\" in GET|HEAD|get|head) ;; *) return 0 ;; esac ;;\n    esac\n    shift\n  done\n  return 1\n}\n",
+        r#"provenant_forge_write() {
+  [ "$1" = api ] || return 1
+  shift
+  provenant_api_method=
+  provenant_api_payload=false
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -f|-F|--field|--raw-field|--input)
+        provenant_api_payload=true
+        shift; [ "$#" -gt 0 ] || break ;;
+      -f?*|-F?*|--field=*|--raw-field=*|--input=*) provenant_api_payload=true ;;
+      -X|--method)
+        shift; [ "$#" -gt 0 ] || break
+        provenant_api_method=$1 ;;
+      --method=*) provenant_api_method=${1#--method=} ;;
+      -X?*) provenant_api_method=${1#-X} ;;
+      -H|--header|--hostname|--cache|-q|--jq|-p|--preview|--template)
+        shift; [ "$#" -gt 0 ] || break ;;
+    esac
+    shift
+  done
+  case "$provenant_api_method" in
+    GET|HEAD|get|head) return 1 ;;
+    '') [ "$provenant_api_payload" = true ] && return 0; return 1 ;;
+    *) return 0 ;;
+  esac
+}
+"#,
     );
     let (policy_name, message) = match policy {
         PrPolicy::Never => (

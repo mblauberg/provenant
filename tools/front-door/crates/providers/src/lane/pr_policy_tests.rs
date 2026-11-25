@@ -111,6 +111,41 @@ fn the_gh_wrapper_enforces_the_lane_pull_request_policy() -> Result<(), Box<dyn 
     )?;
     assert_eq!(api_read.termination, Termination::Exit(0));
 
+    // Explicit read methods override the write implied by fields, in either order.
+    for policy in [PrPolicy::Never, PrPolicy::Draft] {
+        for (args, allowed) in [
+            (
+                vec!["api", "-X", "GET", "repos/o/r/pulls", "-f", "state=open"],
+                true,
+            ),
+            (
+                vec!["api", "repos/o/r/pulls", "-f", "state=open", "--method=GET"],
+                true,
+            ),
+            (
+                vec!["api", "-F", "page=1", "-XHEAD", "repos/o/r/pulls"],
+                true,
+            ),
+            (vec!["api", "repos/o/r/pulls", "-f", "state=open"], false),
+            (
+                vec!["api", "-X", "POST", "repos/o/r/pulls", "-f", "state=open"],
+                false,
+            ),
+        ] {
+            let output = run("api-method", policy, "host", &args)?;
+            assert_eq!(
+                output.termination == Termination::Exit(0),
+                allowed,
+                "{policy:?} {args:?}"
+            );
+            assert_eq!(
+                !output.stdout.bytes.is_empty(),
+                allowed,
+                "{policy:?} {args:?}"
+            );
+        }
+    }
+
     // All non-maintenance PR writes are refused by both restrictive policies.
     for policy in [PrPolicy::Never, PrPolicy::Draft] {
         for command in [

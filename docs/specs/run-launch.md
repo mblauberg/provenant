@@ -285,7 +285,9 @@ implement writer lane in a graph does not open a pull request; the chair owns
 publication after settlement. Host, launch and node settings opt a lane in.
 The provider's `gh` tool enforces the policy before forwarding a command:
 `never` refuses `gh pr create|edit|close` (and the other PR mutations) and
-mutating forge API calls while leaving reads working; `draft` adds `--draft`
+mutating forge API calls while leaving reads working, including explicit GET or HEAD
+requests with query fields. Fields without an explicit method imply POST and are
+refused; `draft` adds `--draft`
 to `pr create`, permits edit, close, comment and review, and refuses promotion,
 merge, reopen, lock, unlock, update-branch, revert and forge writes. Unknown PR
 subcommands are refused under both restrictive policies until classified;
