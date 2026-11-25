@@ -4914,6 +4914,7 @@ mod gc_preview_tests {
 
     /// Counts observations instead of walking real processes. The one root that
     /// stays unknown models a candidate whose custody the census cannot decide.
+    #[allow(dead_code)] // The harness=false worktree driver drops this #[test] helper.
     #[derive(Default)]
     struct CountingWorkers {
         calls: std::sync::atomic::AtomicUsize,
