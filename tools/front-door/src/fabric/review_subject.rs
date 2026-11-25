@@ -51,24 +51,30 @@ fn subject_read_result(
 }
 
 /// The batched GraphQL read answers a subject only with a complete, current
-/// base and head. Cached rows written before those fields existed simply
-/// cannot serve this read; the typed refusal then names when to retry.
+/// base and head. A cached row that cannot serve this read is refreshed before
+/// the typed refusal names when to retry.
 fn graphql_pull_subject(
     state: &std::path::Path,
     project: &std::path::Path,
     number: u64,
 ) -> Option<PullSubject> {
-    subject_from_batch(crate::pr::status::batch::single(state, project, number))
+    subject_from_batch(crate::pr::status::batch::single_with_cache_filter(
+        state,
+        project,
+        number,
+        |entry| subject_from_entry(entry).is_some(),
+    ))
 }
 
-/// Mapping a complete batched row to a subject is transport-independent, so a
-/// row can be tested without standing up a forge port. A row missing either
-/// base field is from an older cache and cannot answer a subject read.
+/// Map a complete batched row to a subject, independently of check rollup completeness.
 fn subject_from_batch(batch: crate::pr::status::batch::Batch) -> Option<PullSubject> {
     let crate::pr::status::batch::Batch::Entries(entries) = batch else {
         return None;
     };
-    let entry = entries.into_iter().next()?;
+    subject_from_entry(entries.first()?)
+}
+
+fn subject_from_entry(entry: &crate::pr::status::batch::Entry) -> Option<PullSubject> {
     if entry.state == "UNAVAILABLE"
         || entry.base_ref_oid.is_empty()
         || entry.base_ref_name.is_empty()
@@ -81,10 +87,10 @@ fn subject_from_batch(batch: crate::pr::status::batch::Batch) -> Option<PullSubj
     }
     Some(PullSubject {
         base_ref_oid: provenant_core::GitOid::parse(&entry.base_ref_oid).ok()?,
-        base_ref_name: entry.base_ref_name,
+        base_ref_name: entry.base_ref_name.clone(),
         head_ref_oid: provenant_core::GitOid::parse(&entry.head).ok()?,
         head_ref_name: None,
-        url: entry.url,
+        url: entry.url.clone(),
     })
 }
 
@@ -792,6 +798,89 @@ mod tests {
         let mut older = entry;
         older.base_ref_oid.clear();
         assert!(subject_from_batch(Batch::Entries(vec![older])).is_none());
+        Ok(())
+    }
+    /// A fresh cached row missing subject fields must not hide a usable GraphQL response.
+    #[cfg(unix)]
+    #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "the fixture needs a fresh cache timestamp"
+    )]
+    fn rate_limited_subject_refreshes_incomplete_fresh_cache()
+    -> crate::worktree_tests::support::Result {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+
+        let state = tempfile::tempdir()?;
+        let project = tempfile::tempdir()?;
+        let command = project.path().join("forge");
+        std::fs::write(
+            &command,
+            "#!/bin/sh\nif [ \"$PROVENANT_PORT_REQUEST_PATH\" = graphql ]; then cat graphql.json; else printf '%s' '{\"nameWithOwner\":\"owner/repo\"}'; fi\n",
+        )?;
+        std::fs::set_permissions(&command, std::fs::Permissions::from_mode(0o700))?;
+        let mut ports = provenant_config::PortTable::builtin();
+        ports.forge.backend = provenant_config::PortBackend::Command {
+            command: provenant_records::PortCommand {
+                argv: vec![command.to_string_lossy().into_owned()],
+                exit_codes: provenant_records::CommandExitCodes {
+                    success: vec![0],
+                    unknown: Vec::new(),
+                    other: provenant_records::ExitDisposition::Refused,
+                },
+            },
+        };
+        std::fs::write(state.path().join("ports.json"), serde_json::to_vec(&ports)?)?;
+        std::fs::write(
+            state.path().join("config.toml"),
+            "schema_version = 1\n[domains.wait]\npr_interval_ms = 60000\n",
+        )?;
+        let base = "1111111111111111111111111111111111111111";
+        let head = "2222222222222222222222222222222222222222";
+        let row = serde_json::json!({
+            "number": 7, "state": "OPEN", "head": head, "draft": false,
+            "merge": "CLEAN", "review": null,
+            "url": "https://github.com/owner/repo/pull/7", "checks": [], "truncated": false
+        });
+        let cache = serde_json::json!({"entries": [{
+            "fetched_at": jiff::Timestamp::now().as_millisecond(), "entry": row
+        }]});
+        let dir = crate::pr::observer::shared_dir(state.path(), "owner/repo")?;
+        dir.atomic_write(
+            std::ffi::OsStr::new("pr-status.json"),
+            ".fixture-",
+            &serde_json::to_vec(&cache)?,
+            provenant_os::fs::PublishMode::Replace,
+        )?;
+        let response = serde_json::json!({"data": {"repository": {"a00": {
+            "state": "OPEN", "isDraft": false, "mergeStateStatus": "CLEAN",
+            "url": "https://github.com/owner/repo/pull/7", "headRefOid": head,
+            "baseRefOid": base, "baseRefName": "main"
+        }}}});
+        std::fs::write(
+            project.path().join("graphql.json"),
+            serde_json::to_vec(&serde_json::json!({"status": 200, "body": response.to_string()}))?,
+        )?;
+        let crate::pr::status::batch::Batch::Entries(cached) =
+            crate::pr::status::batch::single(state.path(), project.path(), 7)
+        else {
+            return Err("fixture cache must be readable".into());
+        };
+        assert!(
+            cached[0].base_ref_oid.is_empty(),
+            "fixture must hit the legacy cache"
+        );
+        let reset = jiff::Timestamp::from_second(2_000_000_000)?;
+        let subject = subject_read_result(
+            state.path(),
+            project.path(),
+            7,
+            crate::pr::observer::ObserveError::RateLimited { reset },
+        )?;
+        assert_eq!(subject.base_ref_oid.to_string(), base);
+        assert_eq!(subject.head_ref_oid.to_string(), head);
+        assert_eq!(subject.base_ref_name, "main");
         Ok(())
     }
 }

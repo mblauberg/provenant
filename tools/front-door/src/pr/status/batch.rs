@@ -65,11 +65,22 @@ pub(crate) enum Batch {
 
 /// The requested pull requests' facts from the shared cache, else one GraphQL
 /// query, else a batch-level refusal the caller resolves per pull request.
+pub(crate) fn snapshot(state: &Path, project: &Path, numbers: &[u64]) -> Batch {
+    snapshot_with_cache_filter(state, project, numbers, |_| true)
+}
+
+/// Reuse a fresh row only when it satisfies the caller's required fields.
+/// A rejected cached row triggers one GraphQL read, not a second cache lookup.
 #[allow(
     clippy::disallowed_methods,
     reason = "the batch cache TTL boundary owns the wall clock"
 )]
-pub(crate) fn snapshot(state: &Path, project: &Path, numbers: &[u64]) -> Batch {
+fn snapshot_with_cache_filter(
+    state: &Path,
+    project: &Path,
+    numbers: &[u64],
+    accepts: impl Fn(&Entry) -> bool,
+) -> Batch {
     if numbers.is_empty() {
         return Batch::Entries(Vec::new());
     }
@@ -83,7 +94,9 @@ pub(crate) fn snapshot(state: &Path, project: &Path, numbers: &[u64]) -> Batch {
     };
     let ttl = observer::fast_interval(state, project).unwrap_or(Duration::from_secs(5));
     let now = jiff::Timestamp::now();
-    if let Some(entries) = fresh_cache(&dir, numbers, now, ttl) {
+    if let Some(entries) = fresh_cache(&dir, numbers, now, ttl)
+        && entries.iter().all(accepts)
+    {
         return Batch::Entries(entries);
     }
     match read(state, project, &repository, numbers) {
@@ -98,6 +111,16 @@ pub(crate) fn snapshot(state: &Path, project: &Path, numbers: &[u64]) -> Batch {
 /// `snapshot` for exactly one pull request, used when a REST read is limited.
 pub(crate) fn single(state: &Path, project: &Path, number: u64) -> Batch {
     snapshot(state, project, &[number])
+}
+
+/// A single row whose cached form must satisfy the caller's needs.
+pub(crate) fn single_with_cache_filter(
+    state: &Path,
+    project: &Path,
+    number: u64,
+    accepts: impl Fn(&Entry) -> bool,
+) -> Batch {
+    snapshot_with_cache_filter(state, project, &[number], accepts)
 }
 
 /// The canonical repository name, one cheap read shared with every transport.

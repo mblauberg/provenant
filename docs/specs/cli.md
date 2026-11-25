@@ -477,8 +477,9 @@ review decision; CI settlement alone decides the verdict.
 Review-subject selection reads the same observer. When its REST core quota is
 spent, a batched GraphQL row with valid base and head subject fields and a usable
 PR URL serves the launch even if its check rollup is truncated; rollup completeness
-does not determine subject completeness. When the required subject fields are
-unavailable, the refusal is typed `FORGE_QUOTA` and its `next:` says `retry after
+does not determine subject completeness. A fresh cached row missing or invalidating
+those fields is refreshed through GraphQL before refusing. When the required subject
+fields are unavailable, the refusal is typed `FORGE_QUOTA` and its `next:` says `retry after
 <reset>`. It is never rendered as invalid input, because the caller supplied no
 bad field, and a peer refusing this way is retried rather than settled as a
 verdict. (#3986)
