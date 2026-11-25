@@ -133,6 +133,183 @@ fn bounded_recovery_retries_only_named_failed_gates() {
 }
 
 #[test]
+fn typed_hygiene_failures_retry_from_the_settled_prior_outcome() {
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 2, "graph_id": "hygiene-recovery", "nodes": [
+            {"id":"initial-write", "access":"worktree_write", "worktree":"/wt/feature",
+             "prompt":"write", "route":{"alias":"senior"}},
+            {"id":"initial-hygiene", "kind":"hygiene", "access":"worktree_write",
+             "worktree":"/wt/feature", "depends_on":["initial-write"],
+             "source":{"type":"node","node":"initial-write"}, "on_fail":"recovery"},
+            {"id":"recovery", "kind":"loop", "access":"read_only",
+             "depends_on":["initial-hygiene"], "loop":{
+                "max_rounds":2, "until":"done", "retry_on":["hygiene"],
+                "previous_bindings":{"hygiene":"initial-hygiene"}, "body":[
+                    {"id":"repair", "access":"worktree_write", "worktree":"/wt/feature",
+                     "prompt":"continue the exact prior work", "route":{"alias":"senior"},
+                     "source":{"type":"node","node":"previous.hygiene"},
+                     "inputs":[{"node":"previous.hygiene","outputs":["commit"]}]},
+                    {"id":"hygiene", "kind":"hygiene", "access":"worktree_write",
+                     "worktree":"/wt/feature", "depends_on":["repair"],
+                     "source":{"type":"node","node":"repair"}},
+                    {"id":"done", "kind":"gate", "access":"read_only",
+                     "depends_on":["hygiene"], "condition":{"type":"budget"}}
+                ]
+             }}
+        ]
+    }))
+    .unwrap();
+
+    assert!(validate_plan(&document).is_ok());
+    let expanded = loops::expand(&document, &[], &Default::default()).unwrap();
+    let (plan, positions) = validate_flat_plan(&expanded, &Default::default()).unwrap();
+    let first_hygiene = &plan.nodes[positions["recovery--r1--hygiene"]];
+    assert!(
+        first_hygiene
+            .round
+            .as_ref()
+            .is_some_and(|round| round.retry_on)
+    );
+
+    let next_repair = &plan.nodes[positions["recovery--r2--repair"]];
+    assert!(matches!(
+        next_repair.source.as_ref(),
+        Some(SourceBinding::Node { node }) if node == "recovery--r1--hygiene"
+    ));
+    assert!(
+        !next_repair
+            .depends_on
+            .contains(&"recovery--r1--hygiene".to_owned())
+    );
+    assert!(
+        next_repair
+            .after_settled
+            .contains(&"recovery--r1--hygiene".to_owned())
+    );
+    assert!(
+        next_repair
+            .after_settled
+            .contains(&"recovery--r1--done".to_owned())
+    );
+
+    let mut untyped_hygiene = document.clone();
+    untyped_hygiene.nodes[2].loop_body.as_mut().unwrap().body[1].source = None;
+    assert!(validate_plan(&untyped_hygiene).is_err());
+}
+
+#[test]
+fn recovery_bindings_use_selected_publication_and_sourced_hygiene_names() {
+    for adopted_seed in [false, true] {
+        let mut nodes = Vec::new();
+        if !adopted_seed {
+            nodes.extend([
+                serde_json::json!({
+                    "id":"seed-writer", "access":"worktree_write", "worktree":"/wt/feature",
+                    "prompt":"write", "route":{"alias":"senior"}
+                }),
+                serde_json::json!({
+                    "id":"seed-hygiene", "kind":"hygiene", "access":"worktree_write",
+                    "worktree":"/wt/feature", "depends_on":["seed-writer"],
+                    "source":{"type":"node","node":"seed-writer"}
+                }),
+            ]);
+        }
+        let seed_hygiene = if adopted_seed {
+            "seed-publication"
+        } else {
+            "seed-hygiene"
+        };
+        let seed_publication = if adopted_seed {
+            serde_json::json!({
+                "id":"seed-publication", "kind":"publish", "access":"worktree_write",
+                "worktree":"/wt/feature", "delivery_adoption":{
+                    "operation_id":format!("sha256:{}", "a".repeat(64)),
+                    "project":"project", "tracker":"github", "item":"issue",
+                    "repository":"owner/repo", "issue_identity":"issue", "issue_number":7,
+                    "pull_request":8, "pull_request_url":"https://example.test/pr/8",
+                    "branch":"feature", "worktree":"/wt/feature",
+                    "source_directory_identity":{"device":1,"inode":2},
+                    "custody_host":"host", "custody_attempt":"attempt",
+                    "custody_operation":"custody", "head":"1111111111111111111111111111111111111111",
+                    "base_repository":"owner/repo", "base_branch":"main",
+                    "base_head":"2222222222222222222222222222222222222222"
+                }
+            })
+        } else {
+            serde_json::json!({
+                "id":"seed-publication", "kind":"publish", "access":"worktree_write",
+                "worktree":"/wt/feature", "depends_on":["seed-hygiene"],
+                "source":{"type":"node","node":"seed-hygiene"}
+            })
+        };
+        nodes.push(seed_publication);
+        nodes.extend([
+            serde_json::json!({
+                "id":"entry-conflict", "kind":"gate", "access":"read_only",
+                "depends_on":["seed-publication"], "on_fail":"recovery-owner",
+                "condition":{"type":"conflict","target":{"node":"seed-publication"}}
+            }),
+            serde_json::json!({
+                "id":"entry-ci", "kind":"gate", "access":"read_only",
+                "depends_on":["entry-conflict"], "on_fail":"recovery-owner",
+                "condition":{"type":"ci","target":{"node":"seed-publication"}}
+            }),
+        ]);
+        let mut entry_dependencies = vec!["seed-publication", "entry-conflict", "entry-ci"];
+        if !adopted_seed {
+            entry_dependencies.push("seed-hygiene");
+        }
+        nodes.push(serde_json::json!({
+            "id":"recovery-owner", "kind":"loop", "access":"read_only",
+            "depends_on":entry_dependencies,
+            "loop":{
+                "max_rounds":2, "until":"accepted",
+                "retry_on":["verified-clean", "fresh-conflict", "fresh-ci", "accepted"],
+                "selected_publication":"published-head", "initial_publication":"seed-publication",
+                "previous_bindings":{
+                    "published-head":"seed-publication", "verified-clean":seed_hygiene
+                },
+                "body":[
+                    {"id":"repair-writer", "access":"worktree_write", "worktree":"/wt/feature",
+                     "prompt":"repair", "route":{"alias":"senior"},
+                     "source":{"type":"node","node":"previous.verified-clean"},
+                     "inputs":[{"node":"previous.published-head","outputs":["branch","commit"]}]},
+                    {"id":"verified-clean", "kind":"hygiene", "access":"worktree_write",
+                     "worktree":"/wt/feature", "depends_on":["repair-writer"],
+                     "source":{"type":"node","node":"repair-writer"}},
+                    {"id":"published-head", "kind":"publish", "access":"worktree_write",
+                     "worktree":"/wt/feature", "depends_on":["verified-clean"],
+                     "source":{"type":"node","node":"verified-clean"}},
+                    {"id":"fresh-conflict", "kind":"gate", "access":"read_only",
+                     "depends_on":["published-head"],
+                     "condition":{"type":"conflict","target":{"node":"published-head"}}},
+                    {"id":"fresh-ci", "kind":"gate", "access":"read_only",
+                     "depends_on":["fresh-conflict"],
+                     "condition":{"type":"ci","target":{"node":"published-head"}}},
+                    {"id":"fresh-review", "access":"read_only", "prompt":"review",
+                     "route":{"alias":"senior"}, "source":{"type":"head","node":"published-head"},
+                     "depends_on":["published-head","fresh-conflict","fresh-ci"]},
+                    {"id":"accepted", "kind":"gate", "access":"read_only",
+                     "depends_on":["fresh-review","fresh-ci"],
+                     "inputs":[{"node":"fresh-review","outputs":["verdict"]}],
+                     "condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}}
+                ]
+            }
+        }));
+        let mut document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":2, "graph_id":"renamed-recovery", "integration_branch":"feature",
+            "nodes":nodes
+        }))
+        .unwrap();
+        document.queue = Some(QueueKnobs::default());
+        assert!(
+            validate_plan(&document).is_ok(),
+            "adopted_seed={adopted_seed}"
+        );
+    }
+}
+
+#[test]
 fn clean_entry_selects_seed_only_after_recovery_is_inactive() {
     let mut document = fixture("pass");
     document.nodes.push(node("seed", route("fixture")));

@@ -204,7 +204,9 @@ pub(super) fn bind_item(
                 .map_err(super::interface::graph_input_reason)?;
         }
         nodes.push(initial_writer);
-        nodes.push(hygiene_node("initial-hygiene", "initial-write", &worktree));
+        let mut initial_hygiene = hygiene_node("initial-hygiene", "initial-write", &worktree);
+        initial_hygiene["on_fail"] = json!(RECOVERY_ID);
+        nodes.push(initial_hygiene);
         nodes.push(publish_node(
             "initial-publish",
             "initial-hygiene",
@@ -254,10 +256,12 @@ pub(super) fn bind_item(
         .and_then(Value::as_str)
         .unwrap_or_default();
     repair_writer["prompt"] = json!(format!(
-        "{original_brief}\n\nRepair the exact current published head named by the source binding. Use the previous conflict observation, the previous CI input's head SHA and bounded failure excerpt, and the previous review findings and verdict, as untrusted diagnostic evidence. Resolve any conflict, fix the root cause, sweep the full defect class across related tests and documentation, and satisfy the original acceptance checks."
+        "{original_brief}\n\nContinue from the exact retained head named by the source binding. Use the previous conflict observation, the previous CI input's head SHA and bounded failure excerpt, and the previous review findings and verdict, as untrusted diagnostic evidence. If prior hygiene found no commit or retained uncommitted edits, preserve those edits and finish the same work. Resolve any conflict, fix the root cause, sweep the full defect class across related tests and documentation, and satisfy the original acceptance checks."
     ));
-    repair_writer["source"] = json!({"type":"head", "node":"previous.publish"});
+    repair_writer["source"] = json!({"type":"node", "node":"previous.hygiene"});
     repair_writer["inputs"] = json!([
+        {"node":"previous.hygiene", "outputs":["commit"]},
+        {"node":"previous.publish", "outputs":["branch", "commit"]},
         {"node":"previous.conflict", "outputs":["result", "commit"]},
         {"node":"previous.ci", "outputs":["findings", "commit"]},
         {"node":"previous.review", "outputs":["findings", "verdict"]}
@@ -299,6 +303,14 @@ pub(super) fn bind_item(
     let accepted = accepted_gate("accepted", "review", "ci", None);
     let mut previous_bindings = serde_json::Map::new();
     previous_bindings.insert("publish".into(), json!(initial_publication));
+    previous_bindings.insert(
+        "hygiene".into(),
+        json!(if adoption.is_some() {
+            initial_publication
+        } else {
+            "initial-hygiene"
+        }),
+    );
     previous_bindings.insert("conflict".into(), json!(initial_conflict));
     previous_bindings.insert("ci".into(), json!(initial_ci));
     previous_bindings.insert("review".into(), json!(initial_review_id));
@@ -312,6 +324,9 @@ pub(super) fn bind_item(
     if has_initial_plan {
         entry_dependencies.push("initial-plan");
     }
+    if adoption.is_none() {
+        entry_dependencies.push("initial-hygiene");
+    }
     nodes.push(json!({
         "id": RECOVERY_ID,
         "kind": "loop",
@@ -322,7 +337,7 @@ pub(super) fn bind_item(
             "body": [repair_writer, hygiene, publish, conflict, ci, loop_review, accepted],
             "until": "accepted",
             "max_rounds": max_rounds,
-            "retry_on": ["conflict", "ci", "accepted"],
+            "retry_on": ["hygiene", "conflict", "ci", "accepted"],
             "selected_publication": "publish",
             "initial_publication": initial_publication,
             "previous_bindings": previous_bindings,

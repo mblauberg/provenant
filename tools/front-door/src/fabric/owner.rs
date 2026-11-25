@@ -3995,6 +3995,15 @@ impl BoundGraphOwner<'_> {
                 });
             }
         }
+        // Re-entry may retain uncommitted edits, but the committed checkout
+        // must still be the exact head selected by the graph's source binding.
+        if node.source_commit.is_some_and(|expected| expected != head) {
+            return Err(FacadeError::DispatchRefused {
+                fact: None,
+                disk: None,
+                reason: "retained queue writer head differs from the graph source".into(),
+            });
+        }
         Ok(Some(QueueWriterPredecessor {
             attempt: predecessor,
             source_head,
