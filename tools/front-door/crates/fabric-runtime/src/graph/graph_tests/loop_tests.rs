@@ -133,6 +133,50 @@ fn bounded_recovery_retries_only_named_failed_gates() {
 }
 
 #[test]
+fn clean_entry_selects_seed_only_after_recovery_is_inactive() {
+    let mut document = fixture("pass");
+    document.nodes.push(node("seed", route("fixture")));
+    document.nodes.push(node("entry", route("fixture")));
+    let expanded = loops::expand(&document, &[], &Default::default()).unwrap();
+    let (mut plan, positions) = validate_flat_plan(&expanded, &Default::default()).unwrap();
+    let owner_index = positions["revise"];
+    let seed_index = positions["seed"];
+    let entry_index = positions["entry"];
+    plan.nodes[owner_index].depends_on = vec!["seed".into(), "entry".into()];
+    let spec = plan.nodes[owner_index].loop_body.as_mut().unwrap();
+    spec.selected_publication = Some("review".into());
+    spec.initial_publication = Some("seed".into());
+    plan.nodes[entry_index].on_fail = Some("revise".into());
+    let mut checkpoint = initial_checkpoint(&expanded, &plan, "digest".into(), None, None, None);
+    checkpoint.nodes[seed_index].state = NodeState::Succeeded;
+    checkpoint.nodes[entry_index].state = NodeState::Succeeded;
+    for progress in &mut checkpoint.nodes {
+        if progress
+            .round
+            .as_ref()
+            .is_some_and(|round| round.loop_id == "revise")
+        {
+            progress.state = NodeState::Skipped;
+        }
+    }
+    assert_eq!(
+        repair::selected_publication_index(&plan.nodes[owner_index], &checkpoint, &plan),
+        Some(seed_index)
+    );
+    checkpoint.nodes[entry_index].state = NodeState::Failed;
+    assert_eq!(
+        repair::selected_publication_index(&plan.nodes[owner_index], &checkpoint, &plan),
+        None
+    );
+    checkpoint.nodes[entry_index].state = NodeState::Succeeded;
+    checkpoint.nodes[seed_index].state = NodeState::Pending;
+    assert_eq!(
+        repair::selected_publication_index(&plan.nodes[owner_index], &checkpoint, &plan),
+        None
+    );
+}
+
+#[test]
 fn loop_body_preserves_an_outer_node_source_and_entry_dependency() {
     let document: GraphDocument = serde_json::from_value(serde_json::json!({
         "schema_version": 2,
