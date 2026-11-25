@@ -2474,6 +2474,39 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
     ) -> Result<Option<provenant_fabric_runtime::graph::DeliveryPublication>, Self::Error> {
         self.execute_delivery_publication_inner(&request).map(Some)
     }
+    fn admit_delivery_ci(
+        &mut self,
+        graph_id: &str,
+        node_id: &str,
+        head_sha: &str,
+        limit: usize,
+    ) -> Result<provenant_fabric_runtime::graph::DeliveryCiAdmission, Self::Error> {
+        let owner = provenant_run::build::queue::CiLeaseOwner {
+            project: self.factory.context.identity.project.to_string(),
+            graph_id: graph_id.to_owned(),
+            node_id: node_id.to_owned(),
+            head_sha: head_sha.to_owned(),
+        };
+        Ok(crate::admit::acquire_delivery_ci_lease(
+            self.factory.context.roots.state.as_path(),
+            owner,
+            limit,
+            self.factory.context.config.graph.launch_wait_seconds,
+            self.cancel,
+        ))
+    }
+    fn release_delivery_ci(
+        &mut self,
+        lease: &provenant_fabric_runtime::graph::DeliveryCiLease,
+    ) -> Result<(), Self::Error> {
+        crate::admit::release_delivery_ci_lease(
+            self.factory.context.roots.state.as_path(),
+            lease,
+            self.factory.context.config.graph.launch_wait_seconds,
+            self.cancel,
+        )
+        .map_err(|error| FacadeError::io(format!("release delivery CI lease: {error}")))
+    }
     fn park_delivery(
         &mut self,
         request: provenant_fabric_runtime::graph::DeliveryParkRequest<'_>,

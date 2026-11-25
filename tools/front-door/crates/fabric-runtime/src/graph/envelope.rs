@@ -331,6 +331,7 @@ fn node_bound(
             source_branch: "x".repeat(OUTPUT_FIELD_BYTES),
             integration_base: "2".repeat(64),
             expected_remote_head: Some("3".repeat(64)),
+            ci_admission: None,
             receipt: Some(DeliveryPublication {
                 branch: "x".repeat(OUTPUT_FIELD_BYTES),
                 head: "4".repeat(64),
