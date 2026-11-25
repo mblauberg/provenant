@@ -1211,15 +1211,9 @@ fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
                 "continued after the seal",
             )?;
             let native = provenant_os::git::resolve_git_executable(None).ok_or("native Git")?;
-            crate::delivery_tests::private_git(
+            crate::delivery_tests::worktree_git(&fixture, &native, &["add", "post-steer.txt"])?;
+            crate::delivery_tests::worktree_git(
                 &fixture,
-                &candidate,
-                &native,
-                &["add", "post-steer.txt"],
-            )?;
-            crate::delivery_tests::private_git(
-                &fixture,
-                &candidate,
                 &native,
                 &["commit", "-m", "Post-seal writer commit"],
             )?;
@@ -1415,10 +1409,12 @@ fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
                 // The writer's own post-seal commit is a descendant of the
                 // sealed head. The successor must adopt it, keep the source
                 // pin and warn with both ids; any other head stays refused.
-                let current = crate::objects::private_tip(
-                    &crate::objects::bound_source(&attempt)?.ok_or("private source")?,
-                    launch.branch.as_str(),
-                )?;
+                let current: provenant_core::GitOid = crate::delivery_tests::worktree_git(
+                    &fixture,
+                    &git,
+                    &["rev-parse", "HEAD"],
+                )?
+                .parse()?;
                 if marker == DeliveredSteerDescendant {
                     let sealed = shared_head.ok_or("sealed head")?;
                     assert_ne!(current, sealed);
