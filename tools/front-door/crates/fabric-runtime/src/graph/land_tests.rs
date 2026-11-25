@@ -1233,6 +1233,13 @@ fn a_repair_without_a_delivered_branch_fails_before_launch() {
 }
 
 #[test]
+fn land_scheduler_resolves_land_execution_with_graph_advance_in_scope() {
+    // The graph-level advance is also in scope during tests; the land entry
+    // point must still resolve to the scheduler's eight-argument operation.
+    let _land_advance = land::advance::<Owner, Journal>;
+}
+
+#[test]
 fn an_auto_tier_lands_the_newest_delivered_head_through_the_host() {
     let mut owner = owner();
     let checkpoint = run(

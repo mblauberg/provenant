@@ -12,10 +12,8 @@ use provenant_fabric_runtime::graph::{
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
-mod observation;
+pub(super) mod observation;
 pub(super) use observation::wait_submission;
-#[cfg(test)]
-pub(super) use observation::{graph_wait_needs_refresh, next_remote_deadline};
 use observation::{launch_retry_due, observation_clock_error, wait_graph_updates};
 
 /// A `wait_seconds` that is not a usable wait budget.

@@ -15,7 +15,7 @@ use provenant_records::workflow::{ReviewVerdict, RiskTier};
 use std::collections::{BTreeMap, BTreeSet};
 
 mod execution;
-pub(super) use execution::*;
+pub(super) use execution::{advance, land_ask, validate_progress};
 
 /// Land the pull request delivered by `node`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
