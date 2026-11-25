@@ -3,7 +3,7 @@ use super::*;
 fn graph_run_has_remote_pending(
     run: &provenant_fabric_runtime::graph::GraphRun,
     local_host: Option<provenant_core::HostId>,
-    target: Option<&super::unified::GraphTarget>,
+    target: Option<&super::super::unified::GraphTarget>,
 ) -> bool {
     use provenant_fabric_runtime::graph::AttemptState;
     run.checkpoint
@@ -101,7 +101,7 @@ impl GraphObservationHistory {
         &mut self,
         run: &provenant_fabric_runtime::graph::GraphRun,
         local_host: Option<provenant_core::HostId>,
-        target: Option<&super::unified::GraphTarget>,
+        target: Option<&super::super::unified::GraphTarget>,
     ) -> bool {
         let remote_pending = graph_run_has_remote_pending(run, local_host, target);
         self.remote_source_seen |= remote_pending;
@@ -141,7 +141,7 @@ pub(super) fn wait_graph_updates<C: provenant_core::Clock + ?Sized>(
     cancel: &CancelToken,
     observation: &mut crate::status_wait::LocalObservation,
     local_host: Option<provenant_core::HostId>,
-    remote_target: Option<&super::unified::GraphTarget>,
+    remote_target: Option<&super::super::unified::GraphTarget>,
     watch_launch_retries: bool,
     mut active: impl FnMut(&provenant_fabric_runtime::graph::GraphRun) -> bool,
     mut observe: impl FnMut(

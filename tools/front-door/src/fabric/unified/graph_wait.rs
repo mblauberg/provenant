@@ -23,7 +23,7 @@ pub(crate) fn check_targets(
                 match provenant_cli::fabric::graph_relay::from_lane(&operation, cancel, left) {
                     Ok(value) => value,
                     Err(error) => {
-                        let error = super::interface::relay_error(error);
+                        let error = super::super::interface::relay_error(error);
                         if is_target_not_found(&error) {
                             return Err(Box::new(target_fault(ResolveError::NotFound {
                                 target: target.to_string(),
@@ -160,7 +160,7 @@ pub(crate) fn read_status_rows(
             cancel,
             left,
         )
-        .map_err(super::interface::relay_error)?;
+        .map_err(super::super::interface::relay_error)?;
         wait_remaining(deadline, cancel)?;
         return Ok(value["rows"]
             .as_array()
