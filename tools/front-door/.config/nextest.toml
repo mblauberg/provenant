@@ -209,3 +209,9 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 [[profile.ci.overrides]]
 filter = 'package(=provenant-run) & test(=holder::writer_recovery_tests::stopped_writer_preserves_work_and_arbitrates_steer_continuation)'
 slow-timeout = { period = "30s", terminate-after = 4 }
+
+# This fixture creates 96 real attempts and permits up to 60 one-second GC
+# passes. Keep the per-pass budget and assertions; bound their combined runtime.
+[[profile.default.overrides]]
+filter = 'package(=provenant) & binary(=worktrees) & test(=gc_bounded_passes_collect_settled_scratch_and_keep_busy_custody)'
+slow-timeout = { period = "30s", terminate-after = 6 }

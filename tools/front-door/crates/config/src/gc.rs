@@ -193,6 +193,14 @@ retention_classes! {
         settings: ["gc.idle"],
         triggers: GC
     },
+    AttemptScratch => {
+        owner: Run,
+        adapter: attempt_scratch,
+        eligibility: Declared,
+        detail: "released, unreserved attempt; finished work or unowned idle lifetime",
+        settings: ["gc.idle"],
+        triggers: GC
+    },
     ProviderState => {
         owner: Run,
         adapter: provider_state,
@@ -263,14 +271,6 @@ retention_classes! {
         eligibility: Declared,
         detail: "unpinned payload above the configured cap",
         settings: ["retention.payload_cap_bytes"],
-        triggers: GC
-    },
-    AttemptScratch => {
-        owner: Run,
-        adapter: attempt_scratch,
-        eligibility: Declared,
-        detail: "released, unreserved attempt; finished work or unowned idle lifetime",
-        settings: ["gc.idle"],
         triggers: GC
     },
     PortReceipts => {

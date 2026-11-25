@@ -1528,6 +1528,7 @@ pub(super) fn gc_bounded_passes_collect_settled_scratch_and_keep_busy_custody() 
     let mut previous = scratch.len();
     let mut saw_progress = false;
     let mut saw_deferred = false;
+    let mut last_report = Value::Null;
     for _ in 0..30 {
         let output = command(&rig, &["gc", "--apply", "--idle", "0", "--json"])?;
         let report: Value = serde_json::from_slice(&output.stdout.bytes)?;
@@ -1553,13 +1554,14 @@ pub(super) fn gc_bounded_passes_collect_settled_scratch_and_keep_busy_custody() 
         }
         saw_progress |= remaining < previous;
         previous = remaining;
+        last_report = report;
         if remaining == 1 {
             break;
         }
     }
     assert!(
         saw_progress && saw_deferred && previous == 1,
-        "bounded passes must collect every available candidate"
+        "bounded passes must collect every available candidate: remaining={previous}, progress={saw_progress}, deferred={saw_deferred}, last report={last_report}"
     );
     drop(held);
     for _ in 0..30 {

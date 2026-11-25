@@ -135,9 +135,11 @@ so a large tree progresses across passes. A survey snapshot never grants removal
 authority: takeover and resumption need fresh candidate custody checks. Each
 trigger and scope keeps its own bounded restart record, so unfinished scopes
 resume independently without growing the lease record, and an ambiguous cursor
-restarts its scope from the beginning rather than skipping work. The advisory
-dweller census runs after the collection classes, not before them: one bounded
-observation is cached for the whole pass and reused for every settled attempt
+restarts its scope from the beginning rather than skipping work. Attempt
+scratch collection precedes the broader provider-state and payload-cap scans so
+they cannot consume its first pass budget. The advisory dweller census runs
+after the collection classes: one bounded observation is cached for the whole
+pass and reused for every settled attempt
 and terminal worktree instead of re-walking the process table per candidate.
 A census cut short by its bound or the sweep deadline is reported incomplete;
 an undecided candidate is kept, never treated as free. The report names how

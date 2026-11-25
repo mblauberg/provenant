@@ -24,6 +24,8 @@ provenant --project /absolute/path/to/repo gc --apply --json
 - `gc --idle DURATION` overrides `gc.idle` for one run; `--idle 0` makes
   ownerless idle artefacts eligible at once. `--full` lists each affected PID
   where the text output aggregates them.
+- Attempt scratch is collected before the broader provider-state and payload-cap
+  scans, so those scans do not consume its first pass budget.
 - The advisory dweller census runs after collection with one cached observation
   per pass, so a large settled store cannot spend `gc.sweep_budget` before
   anything is collected. The report names how many settled candidates were
