@@ -633,6 +633,17 @@ impl GraphProject {
             env: Vec::new(),
         })
     }
+    fn add_review_subject(&self) -> Result {
+        std::fs::write(self.project.join("subject.txt"), "review subject\n")?;
+        for args in [vec!["add", "subject.txt"], vec!["commit", "-qm", "subject"]] {
+            let output = provenant_os::fixture::git_command()
+                .current_dir(&self.project)
+                .args(args)
+                .output()?;
+            assert!(output.status.success(), "{output:?}");
+        }
+        Ok(())
+    }
     fn state(&self) -> PathBuf {
         self.temp.path().join("state")
     }
@@ -2384,8 +2395,61 @@ fn upgrade_verify_dry_run_explains_a_scratch_project() -> Result {
 
 // Spec: docs/specs/run-launch.md#writer-binding
 #[test]
+fn smoke_explanation_skips_review_only_when_no_base_is_available() -> Result {
+    let rig = GraphProject::new()?;
+    let (_, root) = rig.run(&["run", "smoke", "--explain"])?;
+    let review_skipped = |reply: &Value| {
+        reply["data"]["skipped"].as_array().is_some_and(|rows| {
+            rows.iter().any(|row| {
+                row["node"]
+                    .as_str()
+                    .is_some_and(|id| id.contains("review--"))
+                    && row["reason"]
+                        .as_str()
+                        .is_some_and(|reason| reason.contains("smoke-review"))
+            })
+        })
+    };
+    assert!(
+        review_skipped(&root),
+        "root commit must skip review: {root}"
+    );
+    assert!(
+        root["data"]["warnings"].as_array().is_some_and(|warnings| {
+            warnings.iter().any(|warning| {
+                warning
+                    .as_str()
+                    .is_some_and(|text| text.contains("checkout first parent is unavailable"))
+            })
+        }),
+        "root commit must explain the skip: {root}"
+    );
+    rig.add_review_subject()?;
+    let (_, parent) = rig.run(&["run", "smoke", "--explain"])?;
+    assert!(
+        !review_skipped(&parent),
+        "a parent must enable review: {parent}"
+    );
+    assert!(
+        parent["data"]["source_admission"]
+            .as_array()
+            .is_some_and(|rows| {
+                rows.iter().any(|row| {
+                    row["node"]
+                        .as_str()
+                        .is_some_and(|id| id.contains("review--"))
+                })
+            }),
+        "review must be admitted: {parent}"
+    );
+    Ok(())
+}
+
+// Spec: docs/specs/run-launch.md#writer-binding
+#[test]
 fn smoke_explanation_uses_selected_project_from_credential_containing_cwd() -> Result {
     let rig = GraphProject::new()?;
+    rig.add_review_subject()?;
     let home = rig.temp.path().join("home");
     std::fs::create_dir_all(home.join(".ssh"))?;
     let output = rig
@@ -2502,6 +2566,7 @@ fn bundled_smoke_runs_from_a_primary_checkout_and_a_linked_worktree() -> Result 
 #[test]
 fn bundled_smoke_binds_branch_and_worktree_controls_to_its_write_node() -> Result {
     let rig = GraphProject::new()?;
+    rig.add_review_subject()?;
     let (_, explained) = rig.run(&[
         "run",
         "smoke",
