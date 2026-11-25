@@ -119,7 +119,7 @@ thread_local! {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum CancelReceipt {
-    /// Queued work ended without reaching a provider.
+    /// The stop ended the attempt without a live provider to act on it.
     Cancelled,
     AlreadyTerminal,
     Requested,
@@ -2617,6 +2617,47 @@ impl RunStore {
             generation: record.generation,
         }
     }
+    /// Release a settling attempt instead of leaving a stop request for a
+    /// provider that has already exited. The sealed exit and every other
+    /// captured artifact stay as evidence; only the attempt state is committed
+    /// terminal. A live holder or active settlement driver keeps the ordinary
+    /// stop path, which asks that holder to stop.
+    fn cancel_settling(
+        &self,
+        id: AttemptId,
+        reason: &str,
+        call: &Request<'_>,
+    ) -> Result<Option<CancelReceipt>> {
+        let record = self.record(id, call)?;
+        if !matches!(&record.state, AttemptState::Settling { .. }) {
+            return Ok(None);
+        }
+        let attempt = self.attempt_dir(id, false)?;
+        let scope = Self::scope(&record);
+        use provenant_supervisor::custody::HolderPresence;
+        let presence = custody::observe_holder(&attempt, scope, &SystemProcessObserver);
+        // A live provider still acts on its stop intent, and a live settlement
+        // driver is already making progress. Neither is a stuck settlement.
+        if presence == HolderPresence::Live
+            || crate::settlement::settlement_owner_live(&attempt, scope, call.clock) == Some(true)
+        {
+            return Ok(None);
+        }
+        // A sealed exit is the provider's own durable proof that it is gone;
+        // a changed boot proves the same. Without either, absence is not proven
+        // and the stop must not declare a loss it cannot support.
+        if read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_none()
+            && presence != HolderPresence::Gone
+        {
+            return Ok(None);
+        }
+        self.commit_lost(
+            scope,
+            &format!("stop released a settling attempt: {reason}"),
+            call,
+        )?;
+        Ok(Some(CancelReceipt::Cancelled))
+    }
     /// Cancel one attempt. Queued work is withdrawn; started work gets a stop
     /// request. A handoff that has not yet published its launch summary is
     /// retried within the call budget.
@@ -2645,6 +2686,12 @@ impl RunStore {
         let mut pending_steer_parent = None;
         loop {
             let record = self.record(id, call)?;
+            // A settling provider can no longer act on a stop intent. Commit
+            // its terminal state when its exit proves the provider is gone, so
+            // stop never leaves it pending behind wedged settlement input.
+            if let Some(receipt) = self.cancel_settling(id, reason, call)? {
+                return self.finish_graph_cancel(id, pending_steer_parent, receipt, call);
+            }
             if let AttemptState::Queued { .. } = record.state {
                 let now = call
                     .clock

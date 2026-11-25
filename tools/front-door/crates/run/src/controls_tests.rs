@@ -1914,6 +1914,80 @@ fn graph_cancel_and_steer_admission_have_one_ordered_winner() -> TestResult {
     Ok(())
 }
 
+// Spec: docs/specs/run.md#stop-intent
+#[test]
+fn stop_settles_a_settling_attempt_and_keeps_its_captured_evidence() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let clock = crate::tests::clock();
+    let cancel = provenant_core::CancelToken::new();
+    let call = crate::tests::call(&clock, &cancel);
+    let context = crate::tests::context(temp.path())?;
+    let store = RunStore::open(&context, &call)?;
+    let mut run = crate::tests::input();
+    run.created_at = clock.wall_now()?;
+    run.request.task.writer = Some(WriterRequest {
+        extra: Default::default(),
+        custody_project: Some(context.project_id),
+        project: temp.path().join("checkout"),
+        worktree: temp.path().join("checkout/.worktrees/settling"),
+    });
+    let id = run.attempt_id;
+    store.create(&run, &call)?;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &crate::tests::route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    let running = store
+        .claim(id, &clock, &call)?
+        .ok_or("attempt not admitted")?;
+    let attempt = store.attempt_dir(id, false)?;
+    crate::artifacts::seal(&attempt, "stdout.log", b"captured answer", CAPTURE_LIMIT)?;
+    let mut exit = crate::tests::exit();
+    exit.scope = RunStore::scope(&running);
+    crate::dispatch_tests::seal_exit(&store, &exit)?;
+    // This legacy state is no longer written in production, but it still
+    // survives in stores: a provider that exited while settlement wedged.
+    let mut record = store.record(id, &call)?;
+    let mut value = serde_json::to_value(&record)?;
+    value["state"] = serde_json::json!({"state":"settling","publication_pending":true});
+    record = serde_json::from_value(value)?;
+    store.db.execute(
+        "UPDATE attempts SET record=?1 WHERE id=?2",
+        rusqlite::params![crate::db::bytes(&record)?, id.to_string()],
+    )?;
+    assert!(matches!(
+        store.record(id, &call)?.state,
+        AttemptState::Settling { .. }
+    ));
+
+    let (cancelled, receipt) = store.cancel_graph(id, "stop the settling attempt", &call)?;
+    assert_eq!(cancelled, id);
+    assert_eq!(receipt, CancelReceipt::Cancelled);
+    let settled = store.record(id, &call)?;
+    assert!(
+        matches!(settled.state, AttemptState::Terminal { .. }),
+        "a stopped graph leaves no attempt in Settling: {settled:?}"
+    );
+    // Settlement release keeps every captured artifact as evidence.
+    assert!(
+        crate::artifacts::read_sealed(&attempt, "stdout.log", CAPTURE_LIMIT)?.is_some(),
+        "captured output was discarded"
+    );
+    assert!(
+        crate::artifacts::read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_some(),
+        "sealed exit was discarded"
+    );
+    assert_eq!(
+        store.cancel_graph(id, "stop the settling attempt again", &call)?,
+        (id, CancelReceipt::AlreadyTerminal)
+    );
+    Ok(())
+}
+
 // Spec: docs/specs/run-settlement.md#settlement
 #[test]
 fn writer_lock_contention_waits_without_blocking_settlement() -> TestResult {
