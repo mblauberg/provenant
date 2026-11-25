@@ -671,7 +671,7 @@ pub(crate) fn tick_graphs(
     workers: &'static dyn WorkerObserver,
 ) -> Result<crate::tick::Graphs, Box<dyn std::error::Error>> {
     use provenant_fabric_runtime::graph::{FileJournal, GraphJournal, advance_with_budget};
-    let mut report = crate::tick::Graphs::default();
+    let mut report = super::queue_scheduler::reconcile_controls_before_tick(resolved, workers);
     for binding in provenant_config::registered_projects(&resolved.roots)? {
         let project = binding.project_id();
         let ids = match FileJournal::pending_graph_ids(&resolved.roots.state, project) {
@@ -859,6 +859,10 @@ pub(crate) fn tick_graphs(
             }
         }
     }
+    let queue_report = super::queue_scheduler::tick_queues(resolved, now, workers);
+    report.advanced += queue_report.advanced;
+    report.errors.extend(queue_report.errors);
+    report.warnings.extend(queue_report.warnings);
     Ok(report)
 }
 
@@ -1607,11 +1611,12 @@ impl Factory {
                 let brief_given = request.get("brief").is_some_and(|v| !v.is_null());
                 let node_given = target.node.is_some();
                 retry_changed = brief_given || node_given || !extensions.is_empty();
-                self.prepare_retry(
+                self.prepare_retry_with_journal(
                     target,
                     request,
                     document,
                     checkpoint.as_mut().ok_or(FacadeError::NotFound)?,
+                    &mut journal,
                 )?;
             }
             let candidate = match checkpoint.as_ref().filter(|_| !retry_changed) {
