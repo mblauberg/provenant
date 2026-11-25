@@ -481,6 +481,20 @@ fn resume_preserves_explicit_worktrees_and_settled_lane_ownership()
                 "graph predecessor accepted mismatched {field}"
             );
         }
+        // A new graph can adopt the retained writer worktree of a finished
+        // attempt: its own source and head pins describe the adoptive graph,
+        // so they must not be compared with the earlier graph's sealed pins.
+        // Writer identity, terminal custody and the lane owner still match
+        // (#3987).
+        if origin == Some(WorktreeOrigin::Lane) {
+            let mut adopted = graph.request.task.clone();
+            let context = adopted.context.as_mut().ok_or("graph context")?;
+            context.graph_id = Some("adopting-graph".into());
+            context.node_id = Some("adopting-node".into());
+            adopted.source_head = Some("2".repeat(40));
+            adopted.head = Some("3".repeat(40));
+            store.check_launch_writer_lineage(&graph_record, &adopted, &tree.worktree, &call)?;
+        }
         assert_eq!(
             store
                 .request(resumed.attempt_id, &call)?

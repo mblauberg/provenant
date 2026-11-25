@@ -92,6 +92,27 @@ fn typed_preparation(
     }
 }
 
+/// Classify a writer-lineage check under launch custody. A lineage mismatch is
+/// a local preparation step that the operator can repair; recording it as a
+/// corrupt run record or a handoff failure hides the repair behind a generic
+/// `provenant reconcile` instruction (#3987). An unfinished predecessor still
+/// keeps its authority boundary, because no successor may take its worktree.
+fn launch_lineage_refusal(policy: &provenant_records::policy::Policy, error: &RunError) -> HandOff {
+    match error {
+        RunError::Nonterminal => boundary_handoff(
+            policy,
+            "CONTROLS_RUNSTORE_CHECK_WRITER_LINEAGE_AUTHORITY",
+            format!("writer lineage: {error}"),
+            provenant_records::diagnostic::BoundaryClass::Authority,
+        ),
+        RunError::WriterLineage(detail) => HandOff::TypedLocal {
+            message: format!("writer lineage mismatch: {detail}"),
+            cause: TerminalCause::PreparationRefused,
+        },
+        _ => typed_local(policy, "writer lineage", error),
+    }
+}
+
 fn boundary_handoff(
     policy: &provenant_records::policy::Policy,
     code: &str,
@@ -314,16 +335,7 @@ impl RunStore {
             && let Err(error) =
                 self.check_launch_writer_lineage(record, task, &writer.worktree, call)
         {
-            let refusal = if matches!(error, RunError::Nonterminal) {
-                boundary_handoff(
-                    &policy,
-                    "CONTROLS_RUNSTORE_CHECK_WRITER_LINEAGE_AUTHORITY",
-                    format!("writer lineage: {error}"),
-                    provenant_records::diagnostic::BoundaryClass::Authority,
-                )
-            } else {
-                typed_local(&policy, "writer lineage", &error)
-            };
+            let refusal = launch_lineage_refusal(&policy, &error);
             local_or_withdraw!(Err::<(), _>(refusal));
         }
         // Reconcile may have withdrawn this attempt before the lease existed.
@@ -875,6 +887,45 @@ mod tests {
         };
         assert!(matches!(
             super::typed_preparation(&test_policy(), "Git setup", &boundary),
+            HandOff::Boundary { .. }
+        ));
+    }
+
+    /// A writer-lineage mismatch under launch custody is a typed preparation
+    /// refusal whose note names the step to repair, not an authority boundary
+    /// whose remedy sends the operator to reconcile a successful attempt (#3987).
+    #[test]
+    fn writer_lineage_is_a_typed_preparation_refusal() {
+        let refusal = super::launch_lineage_refusal(
+            &test_policy(),
+            &RunError::WriterLineage("graph predecessor writer or source"),
+        );
+        let HandOff::TypedLocal { cause, message } = refusal else {
+            panic!("writer lineage was not a typed local preparation refusal");
+        };
+        assert_eq!(cause, TerminalCause::PreparationRefused);
+        assert_eq!(
+            message,
+            "writer lineage mismatch: graph predecessor writer or source"
+        );
+        let (failure, note) = crate::launch::handoff_preparation(
+            &HandOff::TypedLocal {
+                message: message.clone(),
+                cause,
+            },
+            &format!("launch preparation failed: {message}"),
+        );
+        assert_eq!(
+            failure,
+            Some(provenant_records::run::PreparationFailure::GitSetup)
+        );
+        let note = note.expect("missing preparation note");
+        assert!(note.contains("retained writer worktree"), "{note}");
+        assert!(!note.contains("provenant reconcile"), "{note}");
+
+        // An unfinished predecessor still refuses at the authority boundary.
+        assert!(matches!(
+            super::launch_lineage_refusal(&test_policy(), &RunError::Nonterminal),
             HandOff::Boundary { .. }
         ));
     }

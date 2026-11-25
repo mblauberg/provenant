@@ -339,7 +339,10 @@ will run to read it (`lanes.steer_settled=queue`). A live sibling does not read 
 node's note, and a completed or cancelled graph, or a terminal attempt with no
 continuation for its node, refuses with `steer_graph_complete` in both human
 and JSON output. The repair names the command that starts a new round on the
-same worktree (`provenant run implement --worktree ... --brief-file FILE`).
+same worktree (`provenant run implement --worktree ... --brief-file FILE`). A
+finished task is terminal for this rule: success never admits a follow-up
+attempt, even when the steering was queued while the writer was live; the note
+stays accepted and resolves as not-continued.
 
 A writer's continuation reuses the retained worktree, including edits left
 uncommitted when a turn finishes naturally. Admission waits for

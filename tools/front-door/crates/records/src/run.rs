@@ -1682,6 +1682,8 @@ impl TerminalCause {
         let salient = reason.split(';').next().unwrap_or(reason).trim();
         let remedy = if salient.contains("no Git remote is declared") {
             "declare `ports.git.remote` or set the branch's upstream, then retry"
+        } else if salient.contains("writer lineage") {
+            "check the retained writer worktree's owner, source and head against its sealed predecessor, then retry"
         } else {
             "correct the local launch preparation failure and retry"
         };

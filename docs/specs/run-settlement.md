@@ -391,8 +391,14 @@ decide custody.
 ## Continuation
 
 A retry starts a fresh attempt with the original authority, not a provider session replay. A
-preparation refusal creates no successor, and uncertain custody never starts another writer.
-- Why: retries must preserve authority and avoid concurrent writers.
+preparation refusal creates no successor, and uncertain custody never starts another writer. A
+finished task creates no automatic follow-up: once an attempt succeeds, queued steering stays
+accepted but resolves as not-continued rather than admitting a second task that would refuse at
+preparation and hide the successful attempt. A preparation refusal after a finished task is a
+typed operation outcome; the graph keeps the successful attempt and its result instead of
+reading as failed.
+- Why: retries must preserve authority and avoid concurrent writers, and a never-launched
+  successor must not replace the work the writer already finished.
 
 A context handoff stops with a typed cause and a fresh graph continuation can receive the
 handoff. A dirty budget boundary takes precedence, and handoff is deferred during budget wrap-up.

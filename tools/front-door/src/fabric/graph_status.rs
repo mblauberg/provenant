@@ -92,6 +92,37 @@ pub(super) fn path_text(value: &Value) -> Option<String> {
     })
 }
 
+/// Select the attempt that represents a node in status. A live attempt always
+/// owns the display. Once the node is settled, an attempt that never launched
+/// cannot carry a result, so it must not hide an earlier successful attempt and
+/// its result: a preparation refusal is an operation outcome, not the node's
+/// work (#3987). A node with no result-bearing attempt keeps its latest one.
+fn selected_attempt<'a>(node: &Value, rows: &'a [Value]) -> Option<&'a Value> {
+    let attempts: Vec<_> = rows
+        .iter()
+        .filter(|row| row["kind"] == "attempt" && row["work_key"] == node["work_key"])
+        .collect();
+    attempts
+        .iter()
+        .rfind(|row| {
+            matches!(
+                row["state"].as_str(),
+                Some("running" | "starting" | "queued")
+            ) || row["presence"].as_str() == Some("live")
+        })
+        .or_else(|| {
+            attempts.iter().rfind(|row| {
+                row["outcome"].as_str() == Some("succeeded")
+                    || !row["result_path"].is_null()
+                    || row["result_summary"]
+                        .as_str()
+                        .is_some_and(|summary| !summary.is_empty())
+            })
+        })
+        .or_else(|| attempts.last())
+        .copied()
+}
+
 /// Select each node's current attempt once, or the explicitly selected older
 /// attempt. Node state owns settlement; a previous attempt cannot settle it.
 pub(crate) fn node_digests(rows: &[Value]) -> Vec<NodeDigest> {
@@ -105,9 +136,7 @@ pub(crate) fn node_digests(rows: &[Value]) -> Vec<NodeDigest> {
         nodes
             .into_iter()
             .map(|node| {
-                let attempt = rows
-                    .iter()
-                    .rfind(|row| row["kind"] == "attempt" && row["work_key"] == node["work_key"]);
+                let attempt = selected_attempt(node, rows);
                 (node, attempt.unwrap_or(node))
             })
             .collect()
@@ -497,6 +526,52 @@ mod tests {
         assert!(
             digest.line.contains(&reason),
             "digest clipped the reason: {}",
+            digest.line
+        );
+    }
+
+    #[test]
+    fn a_never_launched_refusal_does_not_hide_the_successful_attempt() {
+        // Spec: docs/specs/cli.md#status-selection
+        use super::node_digests;
+        use provenant_core::ProjectId;
+        use provenant_records::WorkKey;
+        use serde_json::{Value, json};
+
+        let key = json!(WorkKey::new(ProjectId::from_bytes([11; 16]), "g", "task", 1).unwrap());
+        let rows: Vec<Value> = vec![
+            json!({"kind":"node","work_key":key,"state":"succeeded"}),
+            json!({
+                "kind":"attempt","work_key":key,"state":"terminal",
+                "outcome":"succeeded","result_path":"attempts/1/result.md",
+                "result_summary":"task 1 finished and pushed its commits"
+            }),
+            json!({
+                "kind":"attempt","work_key":key,"state":"terminal",
+                "outcome":"rejected","terminal_cause":"handoff_refused",
+                "cause_code":"handoff_refused","result_path":null,
+                "reason":"writer lineage: invalid run record: graph predecessor writer or source"
+            }),
+        ];
+
+        let digest = node_digests(&rows).remove(0);
+        assert_eq!(digest.outcome, "succeeded");
+        assert_eq!(
+            digest.result_path.as_deref(),
+            Some("attempts/1/result.md"),
+            "a refusal that never launched hid the successful result: {}",
+            digest.line
+        );
+        assert!(
+            digest
+                .line
+                .contains("result=task 1 finished and pushed its commits"),
+            "{}",
+            digest.line
+        );
+        assert!(
+            !digest.line.contains("cause=handoff_refused"),
+            "the refused attempt replaced the successful one: {}",
             digest.line
         );
     }

@@ -727,11 +727,14 @@ fn steer_replays_are_idempotent_and_natural_settlement_adopts_all_intents() -> T
     crate::dispatch_tests::seal_exit(&store, &exit)?;
     let mut publication = crate::tests::publication();
     publication.session = Some("fixture-session".into());
+    // A writer that leaves retained edits naturally continues into its queued
+    // turn. A finished (`Succeeded`) writer never creates a follow-up (#3987).
+    publication.outcome = Outcome::Uncommitted;
     running = store.publish_terminal(id, running.revision, &publication, &exit, &call)?;
     assert!(matches!(
         running.state,
         AttemptState::Terminal {
-            outcome: Outcome::Succeeded,
+            outcome: Outcome::Uncommitted,
             terminal_cause: None,
             ..
         }
@@ -947,6 +950,68 @@ fn steer_replays_are_idempotent_and_natural_settlement_adopts_all_intents() -> T
         store.record(id, &call)?.steering.unwrap().state,
         provenant_records::run::SteeringState::Resumed,
         "the saved disposition does not depend on retained child proof rows"
+    );
+    Ok(())
+}
+
+// Spec: docs/specs/fabric.md#session-ready-steering
+#[test]
+fn a_finished_task_creates_no_steer_follow_up() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let mut clock = crate::tests::clock();
+    let cancel = provenant_core::CancelToken::new();
+    let call = crate::tests::call(&clock, &cancel);
+    let context = crate::tests::context(temp.path())?;
+    let store = RunStore::open(&context, &call)?;
+    let run = crate::tests::input();
+    let id = run.attempt_id;
+    store.create(&run, &call)?;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &crate::tests::route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    let running = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+    store.steer(
+        id,
+        OperationId::parse("steer-after-finish")?,
+        "Inspect the failing path.",
+        &call,
+    )?;
+    let mut exit = crate::tests::exit();
+    exit.scope = RunStore::scope(&running);
+    crate::dispatch_tests::seal_exit(&store, &exit)?;
+    let mut publication = crate::tests::publication();
+    publication.session = Some("fixture-session".into());
+    let finished = store.publish_terminal(id, running.revision, &publication, &exit, &call)?;
+    assert!(matches!(
+        finished.state,
+        AttemptState::Terminal {
+            outcome: Outcome::Succeeded,
+            ..
+        }
+    ));
+
+    clock.advance(provenant_core::DurationMicros::from_micros(100))?;
+    let call = crate::tests::call(&clock, &cancel);
+    assert_eq!(
+        store.prepare_steer_continuation(id, &call)?,
+        None,
+        "a finished task must not spawn a follow-up attempt (#3987)"
+    );
+    let record = store.record(id, &call)?;
+    assert_eq!(record.superseded_by, None);
+    let status = record.steering.ok_or("steering status")?;
+    assert_eq!(
+        status.state,
+        provenant_records::run::SteeringState::NotContinued
+    );
+    assert_eq!(
+        status.cause,
+        Some(provenant_records::run::SteeringCause::TerminalStop)
     );
     Ok(())
 }
