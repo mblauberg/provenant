@@ -1090,7 +1090,7 @@ fn smoke_template_pins_its_review_nodes_only_when_a_base_is_supplied() {
     assert!(bound.iter().all(|value| value.as_deref() == Some(base)));
 
     // Without a launch binding no review lens carries a base at all, so the
-    // per-node no-base refusal applies while read and write compile unchanged.
+    // facade decides whether to skip review while read and write compile unchanged.
     let unbound = review_bases(json!({}));
     assert_eq!(unbound.len(), bound.len());
     assert!(
