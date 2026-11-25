@@ -514,6 +514,8 @@ pub enum InboxError {
     WorkLookup(String),
     #[error("steering could not be queued: {0}")]
     Steer(String),
+    #[error("steering has no graph continuation turn for this attempt")]
+    SteerNoTurn,
     #[error("work repository or head mismatch")]
     WorkMismatch,
     #[error(
@@ -569,7 +571,8 @@ pub fn execute_with_steer(
     validate_request(identity, config, in_lane, &input)?;
     let mut service = InboxService::open(root, identity, clock, cancel)?
         .with_work_lookup(work_lookup)
-        .with_control_lookup(control_lookup);
+        .with_control_lookup(control_lookup)
+        .with_steer_fallback(config.steer.fallback);
     if let Some(delivery) = steer_delivery {
         service = service.with_steer_delivery(delivery);
     }
@@ -652,6 +655,7 @@ impl InboxError {
             Self::RequestLimit => "request_limit",
             Self::WorkLookup(_) => "work_lookup_failed",
             Self::Steer(_) => "steer_failed",
+            Self::SteerNoTurn => "steer_no_turn",
             Self::WorkMismatch => "work_mismatch",
             Self::Store(provenant_fabric_store::Error::NotFound) => "not_found",
             Self::Store(provenant_fabric_store::Error::Busy) => "busy",
@@ -957,6 +961,7 @@ pub struct InboxService<'a> {
     work_lookup: Option<&'a WorkLookup<'a>>,
     control_lookup: Option<&'a ControlLookup<'a>>,
     steer_delivery: Option<&'a SteerDelivery<'a>>,
+    steer_fallback: crate::config::SteerFallback,
     identity: &'a Identity,
     clock: &'a dyn Clock,
 }
@@ -973,6 +978,7 @@ impl<'a> InboxService<'a> {
             work_lookup: None,
             control_lookup: None,
             steer_delivery: None,
+            steer_fallback: crate::config::SteerFallback::default(),
             identity,
             clock,
         })
@@ -990,6 +996,11 @@ impl<'a> InboxService<'a> {
 
     pub fn with_steer_delivery(mut self, delivery: &'a SteerDelivery<'a>) -> Self {
         self.steer_delivery = Some(delivery);
+        self
+    }
+
+    pub fn with_steer_fallback(mut self, fallback: crate::config::SteerFallback) -> Self {
+        self.steer_fallback = fallback;
         self
     }
 
@@ -1056,8 +1067,11 @@ impl<'a> InboxService<'a> {
                         self.control_lookup.ok_or(InboxError::OwnerUnavailable)?(&input, &request)?;
                     let support = self.support(&route);
                     let queued_continuation = matches!(input, InboxInput::Steer { .. })
-                        && support.continues()
-                        && self.steer_delivery.is_some();
+                        && route.launch == LaunchKind::Lane
+                        && self.steer_delivery.is_some()
+                        && (support.continues()
+                            || self.steer_fallback
+                                == crate::config::SteerFallback::FreshWithHandoff);
                     // Refused before any side effect, so nothing is recorded.
                     if !queued_continuation && (!support.delivers() || !route.registered) {
                         return Ok(self.control_receipt(&input, &id, &route, support, None));
@@ -1125,6 +1139,8 @@ impl<'a> InboxService<'a> {
                     && support.continues()
                 {
                     Some(AnswerTransport::ProviderContinuation)
+                } else if delivered && matches!(input, InboxInput::Steer { .. }) {
+                    None
                 } else {
                     delivered.then_some(AnswerTransport::FabricMail)
                 },
@@ -1133,10 +1149,20 @@ impl<'a> InboxService<'a> {
                 } else {
                     ControlState::Unsupported
                 },
-                reason: if delivered && support.continues() {
-                    "input is durably saved; Provenant requests an interrupt only after the live adapter validates its session, then resumes that same session only if its identity remains consistent through settlement".into()
+                reason: if delivered
+                    && matches!(input, InboxInput::Steer { .. })
+                    && !support.continues()
+                {
+                    "input is durably saved for a fresh turn under domains.fabric.steer.fallback = fresh_with_handoff; the running attempt is not interrupted".into()
+                } else if delivered && matches!(input, InboxInput::Steer { .. }) {
+                    "input is durably saved for the next turn; the running attempt is not interrupted".into()
                 } else if !delivered && support.continues() {
                     "this owner edge cannot persist continuation input".into()
+                } else if !delivered
+                    && matches!(input, InboxInput::Steer { .. })
+                    && self.steer_fallback == crate::config::SteerFallback::Refuse
+                {
+                    "the route does not support continuation and domains.fabric.steer.fallback is refuse".into()
                 } else {
                     support.reason().into()
                 },
@@ -1146,7 +1172,7 @@ impl<'a> InboxService<'a> {
     }
 
     /// Persist the exact steering text with the run owner. Its shared stream
-    /// decoder requests interruption after validating the live session.
+    /// decoder may retain a session for the next turn.
     fn send_steer(
         &self,
         input: &InboxInput,
@@ -1158,7 +1184,7 @@ impl<'a> InboxService<'a> {
         let InboxInput::Steer { attempt, text, .. } = input else {
             return Err(InboxError::Invalid("control target"));
         };
-        if !support.continues() || route.launch != LaunchKind::Lane {
+        if route.launch != LaunchKind::Lane {
             return Err(InboxError::Invalid("steer continuation route"));
         }
         let message_id = self.steer_delivery.ok_or(InboxError::OwnerUnavailable)?(

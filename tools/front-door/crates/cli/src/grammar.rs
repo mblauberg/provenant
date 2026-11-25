@@ -179,7 +179,7 @@ pub enum Command {
     Retry(Resume),
     /// Deliver a steering note; resume the session where the provider supports it
     #[command(
-        long_about = "Save a steering note durably, then hand it to the live attempt. Providers that can resume a session (claude, codex, cursor, agy, opencode) keep that session across the restart. Providers without session resume (command and host-native routes) restart fresh with the accepted brief, prior handoff and queued steering text. The configured fallback and its source are printed before the live attempt is interrupted, and restarts are staggered so a batch cannot race the launch lock.",
+        long_about = "Queue a steering note for the next turn without interrupting the running attempt. Settlement resumes the retained session or applies the configured fallback. The default fresh_with_handoff starts fresh with the accepted brief, prior handoff and queued steering text; refuse rejects unsupported routes up front and leaves unavailable sessions without a successor.",
         add = crate::metadata::CoreCommand(3, "provenant steer fix-login/implement --brief-file - < message.md")
     )]
     Steer(crate::inbox::Steer),

@@ -1215,7 +1215,13 @@ pub fn attempt_provider(
     Ok([&record.applied_route, &record.resolved_route]
         .into_iter()
         .flatten()
-        .find_map(|route| route.provider.clone()))
+        .find_map(|route| {
+            if route.host_native.is_some() {
+                Some("host-native".into())
+            } else {
+                route.provider.clone()
+            }
+        }))
 }
 
 #[cfg(test)]

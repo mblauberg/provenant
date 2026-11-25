@@ -316,8 +316,10 @@ lane), not route-selection history, so a same-identity continuation always
 resumes.
 
 Delivery is a queued turn at the next boundary, not live injection and never an
-interrupt. A steer to a running lane is always accepted: its text is durable at
-once and the live attempt keeps running. The host's shared
+interrupt. The owner refuses a route that advertises unsupported continuation
+when `domains.fabric.steer.fallback = "refuse"`, with a typed unsupported
+receipt before saving the steer. Otherwise its text is durable at once and the
+live attempt keeps running. The host's shared
 adapter stream decoder records the first validated session identity against the
 admitted route and spawned process; after settlement the graph resumes the
 same provider, model, account and session with the saved text as the next user
@@ -327,8 +329,8 @@ with the accepted brief, previous bounded handoff and queued steer text;
 `refuse` keeps the steer without a successor. A route, account, session or
 process identity mismatch is fatal and never takes the fresh fallback. Adapters
 advertise `continuation` only when their run path can retain and resume the
-session; other routes are `unsupported` and start fresh. Concurrent continuations
-are spaced by `domains.fabric.steer.restart_spacing_ms`.
+session; other routes are `unsupported` and use the configured fallback.
+Concurrent continuations are spaced by `domains.fabric.steer.restart_spacing_ms`.
 
 Session readiness is evidence for how the next turn is delivered, not a gate on
 accepting the text: a running attempt is never refused for lacking a session.
@@ -339,7 +341,8 @@ continuation for its node, refuses with `steer_graph_complete` in both human
 and JSON output. The repair names the command that starts a new round on the
 same worktree (`provenant run implement --worktree ... --brief-file FILE`).
 
-A writer's continuation reuses the retained worktree, so admission waits for
+A writer's continuation reuses the retained worktree, including edits left
+uncommitted when a turn finishes naturally. Admission waits for
 settlement to release the steered attempt's custody: steering stays queued and
 the reaction is retried, never dropped. A custody or writer-lineage check that
 fails while admitting a steer continuation is a typed continuation refusal, not
@@ -363,8 +366,8 @@ continuation has launched. A refused continuation keeps closed facts (authority
 rule, field, failure kind) into its settled reason; provider output and identity
 values never supply that explanation.
 
-The guardian preserves the typed `steered` stop through exit publication, and run
-admits the continuation only when the interrupt was delivered before exit. A live
+For an independently requested `steered` stop, the guardian preserves its typed
+reason through exit publication. A live
 identity conflict (and incomplete identity evidence from oversized, undecodable or
 unreadable output) is sealed separately from the bounded stdout tail, and the
 guardian routes a conflict through its protocol-rejection stop. A conflict is

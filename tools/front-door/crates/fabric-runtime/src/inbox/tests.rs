@@ -1679,6 +1679,40 @@ fn unsupported_steer_refuses_before_any_side_effect() {
     assert!(mailbox(&f, f.identity.inbox.actor).is_empty());
 }
 
+// Spec: docs/specs/fabric.md#session-ready-steering
+#[test]
+fn unsupported_route_obeys_owner_fallback_before_delivery() {
+    let f = Fixture::new();
+    let route = control_route(Some(Harness::Command), LaunchKind::Lane);
+    let lookup = move |_: &InboxInput, _: &Request<'_>| Ok(route.clone());
+    let deliveries = std::cell::Cell::new(0);
+    let delivery = |_, _: &OperationId, _: &str, _: &Request<'_>| {
+        deliveries.set(deliveries.get() + 1);
+        Ok(MessageId::from_bytes([8; 16]))
+    };
+    let execute = |fallback| {
+        f.service()
+            .with_control_lookup(&lookup)
+            .with_steer_delivery(&delivery)
+            .with_steer_fallback(fallback)
+            .execute(steer("continue", "fallback-choice"), &f.cancel)
+            .unwrap()
+    };
+    let InboxResult::Control { receipt } = execute(crate::config::SteerFallback::Refuse) else {
+        panic!("expected control receipt");
+    };
+    assert_eq!(receipt.state, ControlState::Unsupported);
+    assert_eq!(receipt.support, ControlSupport::Unsupported);
+    assert!(receipt.reason.contains("fallback is refuse"));
+    assert_eq!(deliveries.get(), 0);
+    let InboxResult::Control { receipt } = execute(crate::config::SteerFallback::FreshWithHandoff)
+    else {
+        panic!("expected control receipt");
+    };
+    assert_eq!(receipt.state, ControlState::Queued);
+    assert_eq!(deliveries.get(), 1);
+}
+
 #[test]
 fn control_text_is_bounded_and_nonblank() {
     let f = Fixture::new();

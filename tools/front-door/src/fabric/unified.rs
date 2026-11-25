@@ -1904,6 +1904,7 @@ enum SteerResult {
     Queued(Value),
     Pending(Value),
     Refused(&'static str),
+    NoTurn,
     /// The target's graph will run no further attempt; no future turn can read
     /// the steering text, so it must be refused with a way to start a round.
     CompleteRefused {
@@ -2235,6 +2236,7 @@ pub(crate) fn unified_graph_steer(
                 }
                 Ok(_) => return Err(FacadeError::StateCorrupt.into()),
                 Err(error) if super::steer::steer_delivery_unavailable(&error) => {}
+                Err(error) if error.code() == "steer_no_turn" => return Ok(SteerResult::NoTurn),
                 Err(provenant_fabric_runtime::relay::ServiceError::InboxOwner { .. }) => {
                     return Ok(SteerResult::Refused(
                         "the verified inbox owner refused steering",
@@ -2341,6 +2343,14 @@ pub(crate) fn unified_graph_steer(
             "steer_target_refused",
             message,
             "amend the brief and retry with `provenant steer <target> --brief-file FILE`",
+            globals,
+        ),
+        Ok(SteerResult::NoTurn) => crate::fail(
+            "steer",
+            provenant_records::Outcome::Refused,
+            "steer_no_turn",
+            "the attempt has no graph continuation turn for steering",
+            "start a new graph round with the instruction in its brief",
             globals,
         ),
         Ok(SteerResult::CompleteRefused { message, repair }) => crate::fail(

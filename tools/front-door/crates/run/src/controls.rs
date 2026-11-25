@@ -1090,9 +1090,8 @@ fn lock_timeout_reports_a_concurrently_settled_attempt() {
 }
 
 impl RunStore {
-    /// Persist one idempotent steer for an exact running attempt. A live
-    /// interrupt is requested only after the shared adapter stream has
-    /// validated a session identity for this exact route and provider process.
+    /// Persist one idempotent steer for an exact running attempt. Settlement
+    /// delivers it at the next turn boundary without interrupting this attempt.
     pub fn steer(
         &self,
         id: AttemptId,

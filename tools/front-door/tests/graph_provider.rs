@@ -1188,6 +1188,19 @@ fn public_implement_steers_and_resumes_the_same_local_codex_session() -> Result 
             .parse()?;
         let request = store.request(id, &call)?;
         let record = store.record(id, &call)?;
+        if ordinal == 0 {
+            assert!(
+                matches!(
+                    &record.state,
+                    provenant_run::AttemptState::Terminal {
+                        outcome: provenant_run::Outcome::Uncommitted,
+                        terminal_cause: None,
+                        ..
+                    }
+                ),
+                "the natural first turn must retain its uncommitted work: {record:?}"
+            );
+        }
         let context = request.task.context.as_ref().ok_or("graph context")?;
         assert!(context.graph_template_launch, "{request:?}");
         assert_eq!(

@@ -136,10 +136,16 @@ pub fn deliver_steer(
     };
     let store = provenant_run::RunStore::open(&context, &run_call)
         .map_err(|error| InboxError::Steer(error.to_string()))?;
-    // A steer to a running lane is always accepted: the text is durable and
-    // delivered at the next turn boundary, whether or not a live provider
-    // session can be retained. There is no session gate and no interrupt here;
-    // `steer` itself refuses a target that is not running.
+    let record = store
+        .record(attempt, &run_call)
+        .map_err(|error| InboxError::Steer(error.to_string()))?;
+    if record.context.as_ref().is_none_or(|context| {
+        context.graph_id.is_none() || context.node_id.is_none() || context.attempt.is_none()
+    }) {
+        return Err(InboxError::SteerNoTurn);
+    }
+    // The inbox owner has checked route capability and fallback. Session
+    // availability is decided at settlement, without interrupting this run.
     let outcome = store.steer(attempt, operation_id.clone(), text, &run_call);
     match outcome {
         Ok(provenant_run::SteerReceipt::Queued { message_id })

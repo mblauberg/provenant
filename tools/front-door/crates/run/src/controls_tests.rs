@@ -547,6 +547,93 @@ fn uncertain_reasons_serialise_by_kind_and_keep_their_text() {
 
 // Spec: docs/specs/fabric.md#session-ready-steering
 #[test]
+fn steered_claude_without_a_session_starts_a_fresh_turn() -> TestResult {
+    use std::os::unix::fs::DirBuilderExt;
+
+    let temp = tempfile::tempdir()?;
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(temp.path().join("state"))?;
+    let mut clock = crate::tests::clock();
+    let cancel = provenant_core::CancelToken::new();
+    let call = crate::tests::call(&clock, &cancel);
+    let context = crate::tests::context(temp.path())?;
+    let store = RunStore::open(&context, &call)?;
+    let mut run = crate::tests::input();
+    if let provenant_records::run::RequestedRoute::Model {
+        provider, model, ..
+    } = &mut run.request.task.route
+    {
+        *provider = "claude".into();
+        *model = "claude/claude-sonnet-5-5".into();
+    }
+    let mut route = crate::tests::route();
+    route.provider = Some("claude".into());
+    route.model = Some("claude/claude-sonnet-5-5".into());
+    let id = run.attempt_id;
+    store.create(&run, &call)?;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route,
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    let running = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+    assert!(running.session.is_none());
+    store.steer(
+        id,
+        OperationId::parse("steer-no-session")?,
+        "Apply this instruction.",
+        &call,
+    )?;
+    let queued = store.record(id, &call)?;
+    assert!(matches!(queued.state, AttemptState::Running { .. }));
+    assert!(queued.cancellation_disposition.is_none());
+    let mut exit = crate::tests::exit();
+    exit.scope = RunStore::scope(&running);
+    crate::dispatch_tests::seal_exit(&store, &exit)?;
+    let mut publication = crate::tests::publication();
+    publication.resolved_route = Some(route.clone());
+    publication.applied_route = Some(route.clone());
+    publication.observed_route = Some(route.clone());
+    store.publish_terminal(id, running.revision, &publication, &exit, &call)?;
+    assert!(matches!(
+        store.record(id, &call)?.state,
+        AttemptState::Terminal {
+            outcome: Outcome::Succeeded,
+            terminal_cause: None,
+            ..
+        }
+    ));
+    clock.advance(provenant_core::DurationMicros::from_micros(100))?;
+    let call = crate::tests::call(&clock, &cancel);
+    assert!(matches!(
+        store.prepare_steer_continuation(id, &call),
+        Err(RunError::SteerSessionUnavailable)
+    ));
+    let child = store
+        .prepare_fresh_steer_continuation(id, &call)?
+        .ok_or("fresh successor")?;
+    let child_record = store.record(child, &call)?;
+    assert_eq!(child_record.continuation.as_deref(), Some("fresh"));
+    let prompt = store.artifact_bytes(&child_record.prompt, RECORD_LIMIT)?;
+    assert!(
+        String::from_utf8(prompt)?
+            .contains("Queued steering instructions:\nApply this instruction.")
+    );
+    store.mark_starting(&child_record, &route, &[], &Default::default(), None, &call)?;
+    let successor = store
+        .claim(child, &clock, &call)?
+        .ok_or("fresh successor did not start")?;
+    assert!(matches!(successor.state, AttemptState::Running { .. }));
+    assert_eq!(store.record(id, &call)?.superseded_by, Some(child));
+    Ok(())
+}
+
+// Spec: docs/specs/fabric.md#session-ready-steering
+#[test]
 fn steer_replays_are_idempotent_and_natural_settlement_adopts_all_intents() -> TestResult {
     use provenant_supervisor::census::ProcessObservation;
 
@@ -634,8 +721,7 @@ fn steer_replays_are_idempotent_and_natural_settlement_adopts_all_intents() -> T
             .is_none()
     );
 
-    // The provider exits cleanly after intent persistence but before its
-    // cancellation request takes effect. Settlement must still adopt it.
+    // The provider exits cleanly after intent persistence. Settlement adopts it.
     let mut exit = crate::tests::exit();
     exit.scope = RunStore::scope(&running);
     crate::dispatch_tests::seal_exit(&store, &exit)?;

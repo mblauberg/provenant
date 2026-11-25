@@ -43,7 +43,7 @@ impl ControlSupport {
             Self::LiveInjection => "injected at a tool boundary of the live session",
             Self::MailOnly => "delivered as Fabric mail for the session to read",
             Self::ContinuationOnly => {
-                "saves input durably; requests an interrupt only after the live adapter validates its session, then resumes the same session after settlement"
+                "saves input durably for a continuation after settlement without interrupting the running attempt"
             }
             Self::Unsupported => "the adapter offers no control path for this launch",
         }
