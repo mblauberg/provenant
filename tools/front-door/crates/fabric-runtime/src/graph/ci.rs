@@ -285,11 +285,18 @@ pub(super) fn evaluate<O: AttemptOwner>(
     // Inspect raw CI text before applying caps so warnings see the complete
     // source; the checkpoint and repair input retain the original bytes.
     observation = prompt_text::normalise(&observation, prompt_text::Context::CiObservation)?;
-    let quota_reset = observation.quota_reset().filter(|reset| {
-        delivery_queue
-            && observation.state == CiState::Pending
-            && wall_now.is_some_and(|now| *reset > now)
-    });
+    let quota_reset = observation
+        .quota_reset()
+        .or_else(|| {
+            prior.as_ref().and_then(|evidence| {
+                serde_json::from_value(evidence.extra.get("quota_reset_at")?.clone()).ok()
+            })
+        })
+        .filter(|reset| {
+            delivery_queue
+                && observation.state == CiState::Pending
+                && wall_now.is_some_and(|now| *reset > now)
+        });
     observation.bound_failed_checks(max_bytes, max_checks);
     if delivery_queue && observation.state == CiState::Passed && observation.check_names.is_empty()
     {
@@ -387,6 +394,13 @@ pub(super) fn evaluate<O: AttemptOwner>(
         truncated: observation.truncated,
         elapsed_seconds,
     });
+    if let Some(reset) = quota_reset
+        && let Some(evidence) = checkpoint.nodes[index].ci.as_mut()
+    {
+        evidence
+            .extra
+            .insert("quota_reset_at".into(), serde_json::json!(reset));
+    }
     let timed_out = prior.is_some() && !superseded && elapsed_seconds >= *timeout_seconds;
     if !delivery_queue && timed_out {
         return Ok(Evaluation::Settled(Some(if unscheduled {
