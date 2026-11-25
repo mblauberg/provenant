@@ -729,6 +729,7 @@ impl crate::run::TerminalCause {
         Self::SettlementFailure,
         Self::ProviderEarlyStop,
         Self::ProviderStalled,
+        Self::ProviderStalledRetry,
         Self::FreePoolQuota,
         Self::CommandUnavailable,
         Self::HostNativeUnconfigured,
@@ -776,6 +777,7 @@ mod terminal_cause_tests {
             | TerminalCause::SettlementFailure
             | TerminalCause::ProviderEarlyStop
             | TerminalCause::ProviderStalled
+            | TerminalCause::ProviderStalledRetry
             | TerminalCause::FreePoolQuota
             | TerminalCause::CommandUnavailable
             | TerminalCause::HostNativeUnconfigured

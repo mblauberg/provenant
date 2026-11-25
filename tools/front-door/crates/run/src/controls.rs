@@ -727,7 +727,7 @@ pub enum Reconciled {
     /// the deadline was requested of it. It settles the attempt as a timeout.
     DeadlineStop,
     /// A silent provider was stopped after the opt-in stall policy warned.
-    /// The settlement records the typed `provider_stalled` cause.
+    /// Settlement records the policy-specific typed provider-stall cause.
     StallStop {
         policy: provenant_records::StallPolicy,
     },

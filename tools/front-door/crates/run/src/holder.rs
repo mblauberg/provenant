@@ -3790,8 +3790,13 @@ impl RunStore {
             && matches!(marker["policy"].as_str(), Some("retry" | "fail"))
         {
             decoded.outcome = Outcome::Failed;
-            decoded.terminal_cause = Some(TerminalCause::ProviderStalled);
-            decoded.reason = Some(TerminalCause::ProviderStalled.detail().into());
+            let cause = if marker["policy"] == "retry" {
+                TerminalCause::ProviderStalledRetry
+            } else {
+                TerminalCause::ProviderStalled
+            };
+            decoded.terminal_cause = Some(cause);
+            decoded.reason = Some(cause.detail().into());
         }
         if matches!(
             decoded.outcome,
@@ -3803,6 +3808,7 @@ impl RunStore {
                     | TerminalCause::IdentityMismatch
                     | TerminalCause::ProviderCaptureDefect { .. }
                     | TerminalCause::ProviderStalled
+                    | TerminalCause::ProviderStalledRetry
             )
         ) {
             decoded.terminal_cause = None;

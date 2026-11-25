@@ -373,6 +373,32 @@ fn never_spawned_attempt_retries_elsewhere_only_with_released_custody() {
     }
 }
 
+/// Invariant: only an explicit retry-policy stall consumes the next route;
+/// the fail-policy outcome stays terminal after the same launched stall.
+#[test]
+fn stalled_provider_retry_advances_but_fail_policy_does_not() {
+    for (outcome, expected_routes, expected_state) in [
+        (
+            AttemptOutcome::ProviderStalledRetry,
+            vec!["first", "second"],
+            NodeState::Succeeded,
+        ),
+        (AttemptOutcome::TaskFailed, vec!["first"], NodeState::Failed),
+    ] {
+        let document = document("worktree_write", serde_json::Value::Null);
+        let mut owner = Owner {
+            observations: [terminal("a/1", outcome, None, None), done("b/1")].into(),
+            ..Default::default()
+        };
+        let run = advance(&document, &mut owner, &mut journal(&document)).unwrap();
+        assert_eq!(adapters(&owner), expected_routes);
+        assert_eq!(run.checkpoint.nodes[0].state, expected_state);
+        if outcome == AttemptOutcome::ProviderStalledRetry {
+            assert_eq!(owner.worktrees[0], owner.worktrees[1]);
+        }
+    }
+}
+
 fn adapters(owner: &Owner) -> Vec<&str> {
     owner
         .routes

@@ -4307,6 +4307,12 @@ impl BoundGraphOwner<'_> {
                             {
                                 AttemptOutcome::DeclaredStop
                             }
+                            Outcome::Failed
+                                if attempt.state.terminal_cause()
+                                    == Some(provenant_records::run::TerminalCause::ProviderStalledRetry) =>
+                            {
+                                AttemptOutcome::ProviderStalledRetry
+                            }
                             Outcome::Failed => AttemptOutcome::TaskFailed,
                             Outcome::ReviewRequired => AttemptOutcome::ReviewRequired,
                             // Uncommitted edits without a declared stop need the

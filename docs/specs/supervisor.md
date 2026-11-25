@@ -89,8 +89,10 @@ Detection is read-only and warns with `PROVIDER_STALLED`; it never signals a
 provider. `providers.<id>.stall_policy` defaults to `report`. Only an explicit
 `steer`, `retry` or `fail` acts, and every action warns first: `steer` queues one
 steering turn for that attempt; `retry` and `fail` stop the provider through
-run-side custody (never from the guardian's silence branch) and settle the
-terminal record with the typed `provider_stalled` cause and its typed remedy.
+run-side custody (never from the guardian's silence branch). `retry` seals a
+typed `provider_stalled_retry` intent that advances the graph to the next route
+within its retry budget; `fail` settles with the typed `provider_stalled` cause
+and stays terminal.
 The action marker is sealed once per attempt, so repeated reconciles cannot act
 twice. Silence remains a report, not a stop reason, in the guardian's closed
 `StopReason` set.

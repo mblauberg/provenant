@@ -60,6 +60,8 @@ pub enum AttemptState {
 pub enum AttemptOutcome {
     Succeeded,
     TaskFailed,
+    /// A settled provider stall explicitly requested the next route.
+    ProviderStalledRetry,
     DeclaredStop,
     StoppedNoWork,
     OtherFailure,
