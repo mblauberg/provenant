@@ -874,6 +874,16 @@ fn queue_repair_writer_may_bind_the_published_head() {
         .source = Some(SourceBinding::Head {
         node: "previous.refresh".into(),
     });
+    head_bound
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "rebase")
+        .unwrap()
+        .loop_body
+        .as_mut()
+        .unwrap()
+        .previous_bindings
+        .remove("verified_clean");
     assert!(validate_plan(&head_bound).is_ok());
 
     let mut wrong_worktree = document.clone();
