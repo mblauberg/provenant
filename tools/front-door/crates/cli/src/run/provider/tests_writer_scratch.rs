@@ -1343,6 +1343,19 @@ printf 'agy 1.0.0\n'
         .profile
         .knobs
         .insert("lanes.publish".into(), serde_json::json!(true));
+    // This fixture pins the advisory project github.json label policy, which
+    // the gh shim only reaches when the lane's own PR policy forwards writes.
+    // Leaf implement lanes default to lanes.pr=never and are refused by the
+    // wrapper (pinned in the_gh_wrapper_enforces_the_lane_pull_request_policy);
+    // opt this lane in so the advisory warning stays under test.
+    publishing_task
+        .profile
+        .knobs
+        .insert("lanes.pr".into(), serde_json::json!("allowed"));
+    publishing_task
+        .profile
+        .knob_sources
+        .insert("lanes.pr".into(), provenant_records::Layer::Launch);
     // The host's Git configuration selection comes from the host context, so
     // the runner's own system file and environment cannot reach this check.
     let mut git_host = run::HostLaunchContext::from_environment(&state, &project, git.clone());
@@ -1402,6 +1415,15 @@ printf 'agy 1.0.0\n'
     );
     assert_eq!(credential.mediation, "gh wrapper (advisory)");
     assert!(!serde_json::to_string(credential)?.contains("fixture-host-token"));
+    // The opt-in above must reach the prepared lane as a sourced receipt; the
+    // default would be never and the gh shim would refuse the advisory check.
+    let lane_pr = publishing
+        .route
+        .pr_policy
+        .as_ref()
+        .ok_or("lane PR policy receipt")?;
+    assert_eq!(lane_pr.value, "allowed");
+    assert_eq!(lane_pr.source, provenant_records::Layer::Launch);
     let gh_config = publishing_paths.temporary.join("candidate-0/gh-config");
     let gh_shim = std::fs::read_to_string(publishing_paths.temporary.join("candidate-0/bin/gh"))?;
     assert!(gh_shim.contains(provenant_config::GH_INVOCATIONS_FILE));
@@ -1711,8 +1733,10 @@ printf 'agy 1.0.0\n'
         executor.execute(options)
     };
     phase("gh shim policy");
-    // Project github.json denials are advisory: the shim forwards the call and
-    // warns with its source; it does not refuse the invocation.
+    // With lanes.pr=allowed (set on this fixture above), project github.json
+    // denials are advisory: the shim forwards the call and warns with its
+    // source; it does not refuse the invocation. Under the default never
+    // policy the wrapper would exit 2 instead.
     let warned = run_shim("ci")?;
     assert_eq!(warned.termination, provenant_os::exec::Termination::Exit(0));
     assert_eq!(warned.stdout.bytes, b"forwarded\n");
