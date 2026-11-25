@@ -1021,42 +1021,70 @@ fn status_keys(rows: &mut [Value], project: provenant_core::ProjectId) -> Result
     Ok(())
 }
 
-/// Enrich graph attempt rows from identity-checked host records within the
-/// caller's budget. The run owner retains typed terminal causes.
-pub(crate) fn enrich_status_rows_within(
+/// Host-wide facts shared by every evidence pass of one `status` command.
+/// Reopening the store and rescanning admission, worktrees and the process
+/// census once per graph made a fleet-wide `status --full` take minutes.
+struct StatusFacts<'a> {
+    execution: provenant_run::ExecutionContext,
+    call: provenant_run::Request<'a>,
+    store: Option<provenant_run::RunStore>,
+    lane_holders: Vec<provenant_os::admission::HeldInfo>,
+    worktrees:
+        std::collections::BTreeMap<provenant_core::AttemptId, provenant_cli::run::LaneWorktree>,
+    // A census is expensive and only useful when a local attempt is present;
+    // the first local row asks for it and later rows share the one reading.
+    local_census: std::cell::OnceCell<Result<provenant_supervisor::census::Census, ()>>,
+}
+
+impl<'a> StatusFacts<'a> {
+    fn gather(
+        context: &Context,
+        clock: &'a SystemClock,
+        cancel: &'a CancelToken,
+    ) -> Result<Self, FacadeError> {
+        let execution = provenant_run::ExecutionContext {
+            state_root: context.roots.state.clone(),
+            project_id: context.identity.project,
+            actor_id: context.identity.inbox.actor,
+            read_prompts: false,
+        };
+        let call = provenant_run::Request { clock, cancel };
+        let store =
+            provenant_run::RunStore::open_read_only(&execution, &call).map_err(run_error)?;
+        Ok(Self {
+            execution,
+            call,
+            store,
+            lane_holders: provenant_os::admission::all_holders(context.roots.state.as_path()),
+            worktrees: provenant_cli::run::worktree_index(context.project_root.as_path()),
+            local_census: std::cell::OnceCell::new(),
+        })
+    }
+
+    fn census(&self) -> Result<&provenant_supervisor::census::Census, ()> {
+        self.local_census
+            .get_or_init(|| {
+                provenant_supervisor::census::ProcessObserver::census(
+                    &provenant_supervisor::census::SystemProcessObserver,
+                    provenant_supervisor::census::MAX_CENSUS_ENTRIES,
+                )
+                .map_err(|_| ())
+            })
+            .as_ref()
+    }
+}
+
+/// Enrich graph attempt rows from identity-checked host records using facts
+/// gathered once for the whole listing. The run owner retains typed terminal
+/// causes.
+fn enrich_status_rows_with_facts(
     rows: &mut [Value],
     context: &Context,
     clock: &SystemClock,
-    cancel: &CancelToken,
+    facts: &StatusFacts<'_>,
     peer_budget: WaitBudget,
 ) -> Result<(), FacadeError> {
     status_keys(rows, context.identity.project)?;
-    let execution = provenant_run::ExecutionContext {
-        state_root: context.roots.state.clone(),
-        project_id: context.identity.project,
-        actor_id: context.identity.inbox.actor,
-        read_prompts: false,
-    };
-    let call = provenant_run::Request { clock, cancel };
-    let store = provenant_run::RunStore::open_read_only(&execution, &call).map_err(run_error)?;
-    let lane_holders = provenant_os::admission::all_holders(context.roots.state.as_path());
-    let worktrees = provenant_cli::run::worktree_index(context.project_root.as_path());
-    let local_prefix = format!("{}/", context.identity.host);
-    let local_census = rows
-        .iter()
-        .any(|row| {
-            row["kind"] == "attempt"
-                && row["attempt_id"]
-                    .as_str()
-                    .is_some_and(|id| id.starts_with(&local_prefix))
-        })
-        .then(|| {
-            provenant_supervisor::census::ProcessObserver::census(
-                &provenant_supervisor::census::SystemProcessObserver,
-                provenant_supervisor::census::MAX_CENSUS_ENTRIES,
-            )
-            .map_err(|_| ())
-        });
     let mut peer_executor = None;
     for row in rows.iter_mut() {
         if row["kind"] != "attempt" {
@@ -1069,12 +1097,12 @@ pub(crate) fn enrich_status_rows_within(
         let host = host.parse().map_err(|_| FacadeError::StateCorrupt)?;
         let attempt = attempt.parse().map_err(|_| FacadeError::StateCorrupt)?;
         let (record, waits) = if host == context.identity.host {
-            let Some(store) = &store else {
+            let Some(store) = &facts.store else {
                 continue;
             };
-            match store.record(attempt, &call) {
+            match store.record(attempt, &facts.call) {
                 Ok(record) => {
-                    let waits = store.lane_waits(std::slice::from_ref(&record), &call);
+                    let waits = store.lane_waits(std::slice::from_ref(&record), &facts.call);
                     (record, waits)
                 }
                 // A collected run leaves the retained graph's own row readable.
@@ -1169,11 +1197,11 @@ pub(crate) fn enrich_status_rows_within(
         if let Some(subtree) = &record.peer.peer_subtree {
             row["peer_subtree"] = json!(subtree);
         }
-        let census = local_census
-            .as_ref()
-            .and_then(|census| census.as_ref().ok())
-            .map(Ok)
-            .unwrap_or(Err(()));
+        let census = if host == context.identity.host {
+            facts.census()
+        } else {
+            Err(())
+        };
         let mut projected = provenant_cli::run::project_lane_with_admission(
             &record,
             &waits,
@@ -1181,12 +1209,13 @@ pub(crate) fn enrich_status_rows_within(
             clock.wall_now().ok(),
             host == context.identity.host && row["latest_attempt"] == true,
             census,
-            &lane_holders,
+            &facts.lane_holders,
         );
         if host == context.identity.host
-            && let Some(store) = &store
+            && let Some(store) = &facts.store
         {
-            let evidence = provenant_cli::run::status_evidence(store, &execution, &record, &call);
+            let evidence =
+                provenant_cli::run::status_evidence(store, &facts.execution, &record, &facts.call);
             projected.provider_error = evidence["provider_error"].as_str().map(str::to_owned);
             projected.handoff =
                 (!evidence["handoff"].is_null()).then(|| evidence["handoff"].clone());
@@ -1200,7 +1229,7 @@ pub(crate) fn enrich_status_rows_within(
         row.as_object_mut()
             .ok_or(FacadeError::StateCorrupt)?
             .extend(fields.as_object().ok_or(FacadeError::StateCorrupt)?.clone());
-        if let Some(worktree) = worktrees.get(&record.attempt_id) {
+        if let Some(worktree) = facts.worktrees.get(&record.attempt_id) {
             row["worktree"] = serde_json::to_value(worktree).unwrap_or(Value::Null);
         }
         if row["head"].is_null() {
@@ -1223,6 +1252,20 @@ pub(crate) fn enrich_status_rows_within(
         }
     }
     Ok(())
+}
+
+/// Enrich one graph's rows with freshly gathered facts. A listing with many
+/// graphs gathers the facts once and calls `enrich_status_rows_with_facts` for
+/// each graph instead of paying for these host-wide scans every time.
+pub(crate) fn enrich_status_rows_within(
+    rows: &mut [Value],
+    context: &Context,
+    clock: &SystemClock,
+    cancel: &CancelToken,
+    peer_budget: WaitBudget,
+) -> Result<(), FacadeError> {
+    let facts = StatusFacts::gather(context, clock, cancel)?;
+    enrich_status_rows_with_facts(rows, context, clock, &facts, peer_budget)
 }
 
 /// Keep graph cause codes scalar even when a closed terminal cause has data.
@@ -2614,10 +2657,30 @@ pub(crate) fn graph_listing(
             now,
         );
         let budget = WaitBudget::cli(factory.clock.mono_now(), 55)?;
+        // One set of host-wide facts serves every graph on the page. Reading
+        // the store, admission, worktree index or process census per graph made
+        // `--full` pay the same global scan once per graph. Gathering is lazy
+        // so a store failure stays one graph's evidence problem, as before,
+        // instead of refusing the whole listing.
+        let gathered: std::cell::RefCell<Option<Result<StatusFacts<'_>, FacadeError>>> =
+            std::cell::RefCell::new(None);
         // Unavailable attempt/peer evidence must not hide a graph: the retained
         // projection still explicitly marks external facts stale.
         let enrich = |_name: &str, rows: &mut [Value]| {
-            enrich_status_rows_within(rows, &factory.context, &factory.clock, &cancel, budget)
+            let mut slot = gathered.borrow_mut();
+            if slot.is_none() {
+                *slot = Some(StatusFacts::gather(
+                    &factory.context,
+                    &factory.clock,
+                    &cancel,
+                ));
+            }
+            let facts = match slot.as_ref() {
+                Some(Ok(facts)) => facts,
+                Some(Err(error)) => return Err(error.clone()),
+                None => return Err(FacadeError::StateCorrupt),
+            };
+            enrich_status_rows_with_facts(rows, &factory.context, &factory.clock, facts, budget)
         };
         // Classify liveness before selecting the page. Only active work and
         // settled graphs still naming a non-terminal attempt can acquire a live
@@ -3636,7 +3699,14 @@ fn host_graph_output(
         }
         return Err(fault.into());
     };
-    let failure_rows = if command.target.attempt.is_none() {
+    // A settled lane that already produced a result has answered the reader.
+    // Appending the graph's failure rows buries that answer in stale status
+    // lines, including "unreadable" lines for retained attempts whose records
+    // can no longer be decoded (#3976). An unsettled lane or one with no result
+    // still gets its failure diagnostics.
+    let needs_failures =
+        output_needs_graph_failures(command.target.attempt.is_some(), &checkpoint, progress);
+    let failure_rows = if needs_failures {
         node_failure_rows(
             factory,
             checkpoint,
@@ -3772,6 +3842,22 @@ fn composite_graph_output(
         Ok((data, excerpt.to_owned())),
         full,
     ))
+}
+
+/// Whether an `output` read still needs the graph's failure rows. A settled
+/// lane with a declared result already carries its answer; re-reading stale
+/// attempt evidence only adds noise to that page.
+fn output_needs_graph_failures(
+    attempt_given: bool,
+    checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
+    progress: &provenant_fabric_runtime::graph::NodeProgress,
+) -> bool {
+    let failed = graph_snapshot(checkpoint.clone()).outcome
+        == Some(provenant_fabric_runtime::graph::GraphOutcome::Failed);
+    !attempt_given
+        && !failed
+        && progress.outputs.is_some()
+        && checkpoint.nodes.iter().all(|node| node.state.settled())
 }
 
 /// The failed or blocked node rows under a graph or node target.

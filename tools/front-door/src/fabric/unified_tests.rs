@@ -2648,3 +2648,44 @@ fn state_ranking_and_predicates_behave_consistently() {
         assert!(!StateRank::of(state).is_live());
     }
 }
+
+// Spec: docs/specs/cli.md#output-references-and-bounded-tails
+#[test]
+fn settled_lane_output_skips_stale_failure_rows() {
+    let settled: GraphCheckpoint = serde_json::from_value(json!({
+        "schema_version":2,"graph_id":"settled-review","plan_digest":"digest","nodes":[
+            {"id":"review","state":"succeeded","worktree":null,"attempts":[],
+             "outputs":{"schema_version":2,"findings":[],"verdict":"VERDICT: PASS"}}
+        ]
+    }))
+    .expect("settled review checkpoint");
+    let progress = settled.nodes.first().expect("review node");
+    assert!(
+        !super::output_needs_graph_failures(false, &settled, progress),
+        "a settled review lane with a result must not append failure rows"
+    );
+
+    // An explicit attempt read never appends the graph's failure rows either.
+    assert!(!super::output_needs_graph_failures(
+        true, &settled, progress
+    ));
+
+    // Failed work without a result still needs its diagnostics.
+    let mut failed = settled.clone();
+    failed.nodes[0].state = NodeState::Failed;
+    failed.nodes[0].outputs = None;
+    assert!(super::output_needs_graph_failures(
+        false,
+        &failed,
+        &failed.nodes[0]
+    ));
+
+    // Unsettled work still needs its diagnostics, even after a prior result.
+    let mut running = settled;
+    running.nodes[0].state = NodeState::Running;
+    assert!(super::output_needs_graph_failures(
+        false,
+        &running,
+        &running.nodes[0]
+    ));
+}

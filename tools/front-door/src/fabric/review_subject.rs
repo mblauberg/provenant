@@ -195,10 +195,13 @@ impl Factory {
                     rereads += 1;
                 }
                 if pull_subject.head_ref_oid != expected {
-                    return Err(graph_subject_error(format!(
-                        "PR head mismatch: expected {expected} but forge reports {}. Re-run once the push is visible; use --head with the new head.",
-                        pull_subject.head_ref_oid
-                    )));
+                    // Issue #3976: name the field and the cause instead of
+                    // hiding both ids inside a generic "invalid input field"
+                    // detail with a "check the named input field" repair.
+                    return Err(FacadeError::invalid(InvalidInputDetail::StaleHead {
+                        supplied: expected.to_string(),
+                        current: pull_subject.head_ref_oid.to_string(),
+                    }));
                 }
             }
             let (repository, _) = pull_subject
@@ -550,9 +553,15 @@ mod tests {
             .err()
             .ok_or("stale head must refuse")?;
             assert_eq!(calls.get(), 4);
-            let text = format!("{error:?}");
-            assert!(text.contains(&fx.forge_new), "{text}");
-            assert!(text.contains(&fx.forge_old), "{text}");
+            let diagnostic = error.diagnostic();
+            let detail = diagnostic.detail.as_deref().unwrap_or_default();
+            assert!(detail.contains("--head"), "{detail}");
+            assert!(detail.contains("not the pull request's head"), "{detail}");
+            assert!(detail.contains(&fx.forge_new), "{detail}");
+            assert!(detail.contains(&fx.forge_old), "{detail}");
+            let next = diagnostic.next.as_deref().unwrap_or_default();
+            assert!(!next.contains("check the named input field"), "{next}");
+            assert!(next.contains(&fx.forge_new), "{next}");
         }
 
         // --head without --pr is a usage refusal.

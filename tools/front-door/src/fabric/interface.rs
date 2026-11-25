@@ -3294,12 +3294,15 @@ impl Factory {
                             | provenant_fabric_runtime::graph::NodeState::Running
                     )
             });
-        if target.node.is_none()
+        // A settled graph with nothing to resume has no graph-wide retry: the
+        // chair must name a node. A graph of exactly one node names it without
+        // guessing; a wider graph still needs an explicit node.
+        let settled_without_target = target.node.is_none()
             && !brief_given
             && extensions_empty
             && !has_resumable_work
-            && checkpoint.nodes.iter().all(|node| node.state.settled())
-        {
+            && checkpoint.nodes.iter().all(|node| node.state.settled());
+        if settled_without_target && checkpoint.nodes.len() != 1 {
             let node = checkpoint.nodes.iter().find(|node| {
                 matches!(
                     node.state,
@@ -3312,9 +3315,10 @@ impl Factory {
                 node: node.map_or_else(|| "NODE".into(), |node| node.id.clone()),
             }));
         }
-        if target.node.is_some() || brief_given {
-            // A brief belongs to one node. A graph of one node names it;
-            // otherwise the chair must say which.
+        if target.node.is_some() || brief_given || settled_without_target {
+            // A brief belongs to one node, and a settled graph without a target
+            // retries its only node. A graph of one node names it; otherwise the
+            // chair must say which.
             let node = match target.node.clone() {
                 Some(node) => node,
                 None => match checkpoint.nodes.as_slice() {

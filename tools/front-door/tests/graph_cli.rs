@@ -3413,16 +3413,22 @@ fn settled_task_graph(rig: &GraphProject) -> Result<String> {
 
 // Spec: docs/specs/retry-owner.md#recovery-preserves-work-and-budget
 #[test]
-fn settled_graph_retry_requires_a_node() -> Result {
+fn settled_single_node_graph_retry_infers_the_node() -> Result {
     let rig = GraphProject::new()?;
     let id = settled_task_graph(&rig)?;
-    let (output, refusal) = rig.run(&["retry", &id])?;
-    assert!(!output.status.success(), "{refusal}");
+    let (output, retried) = rig.run(&["retry", &id])?;
     assert!(
-        refusal["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains(&format!("provenant retry {id}/task"))),
-        "{refusal}"
+        output.status.success(),
+        "retry: {retried}, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // An inferred node is a changed retry: it resets the node and stages a new
+    // attempt, rather than being admitted as a running no-op.
+    assert!(
+        retried["data"]["rows"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|row| row["kind"] == "attempt")),
+        "{retried}"
     );
     Ok(())
 }

@@ -228,7 +228,9 @@ structured output share the selection. A live attempt always represents its
 node; otherwise the newest attempt that produced a result represents it, so a
 later preparation refusal that never launched cannot hide an earlier
 successful attempt, its result path or its summary. The refusal stays visible
-in the full rows and its own operation outcome.
+in the full rows and its own operation outcome. One bounded set of host-wide
+evidence — run store, admission holders, worktree index and process census —
+serves every listed graph, so a `--full` page never repeats those scans per graph.
 
 `status --mine` reads active custody across projects (or one `--project`),
 including attempts nested under the current chair and unattended items open to
@@ -294,7 +296,10 @@ reads. It replaces FILE and reports the written byte count; it requires a settle
 is clamped to the shared line bound in every reader, including peer, composite
 and event reads. A non-applicable header is omitted, never printed as
 unavailable, and when stdout is not a TTY human output carries no ANSI escapes.
-`output` and `steer` resolve the same numbered attempt, and a clamped tail
+A settled lane that already carries a result is not followed by the graph's
+failure rows: stale attempt status, including unreadable records, belongs to a
+reader of unfinished work, not to the lane's answer. `output` and `steer`
+resolve the same numbered attempt, and a clamped tail
 reports its effective bound in `tail` for bytes or `tail_lines` for lines, with
 `tail_clamped` indicating whether the requested line count was reduced.
 

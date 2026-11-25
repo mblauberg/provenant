@@ -125,7 +125,8 @@ exclusive with `--pr`, since both would name the head and `--pr` takes it
 from the forge. Diff evidence and selection use base...head, including branches that
 merged main. Because the forge can report the previous head seconds after a
 push, `--pr N --head SHA` pins the expected head: the host rereads the forge
-within a bounded wait and refuses, naming both SHAs, if the mismatch persists.
+within a bounded wait and, if the mismatch persists, refuses naming `--head`,
+saying the supplied head is not the PR's head and showing both SHAs.
 Without `--head`, a local remote-tracking ref ahead of the forge warns and
 names both commits. Every pinned launch receipt reports the base and head it
 selected, and nested review launches keep the same pins. Without a subject the

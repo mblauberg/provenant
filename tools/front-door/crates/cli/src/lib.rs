@@ -1388,6 +1388,7 @@ fn constraints(path: &str) -> Vec<String> {
         ],
         "provenant retry" => &[
             "target is NAME[/NODE[#N]]: a graph recovers, a node starts its next attempt, an attempt continues",
+            "a settled graph of one node infers that node; a wider graph needs /NODE",
         ],
         "provenant chair log append" => &[
             "operation-id and issued-at are generated when omitted; supply both for planned retries",
