@@ -331,6 +331,12 @@ absent is different: it is still abandonable. Abandon completes the journal, ret
 worktree and its uncommitted work, and warns with the custody slot that was to hold the fence
 instead of treating the record as corrupt.
 
+Once the loss commits, an absent checkout whose
+registration proves this attempt's lane ownership is pruned by removing only that Git admin
+directory; every other registration, a locked or ambiguous one, and one owned by another
+attempt are left alone and warned about with the exact `git -C <common> worktree prune`
+remedy. Prune never changes the settled outcome.
+
 An unreadable process alone is not an occupant, but only an explicit host policy may free a
 root. Before any excusal the census computes placement evidence for every root from the
 process's readable cwd and descriptor paths by directory identity, the same `(dev, ino)`

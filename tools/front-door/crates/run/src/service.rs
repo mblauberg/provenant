@@ -750,8 +750,10 @@ impl<'a> Service<'a> {
         reason: &str,
         workers: &dyn provenant_confinement::worktrees::WorkerObserver,
         call: &Request<'_>,
+        common: Option<&Path>,
     ) -> Result<Reconciled> {
-        self.store.abandon_settlement(id, reason, workers, call)
+        self.store
+            .abandon_settlement(id, reason, workers, call, common)
     }
     pub fn reconcile(
         &self,

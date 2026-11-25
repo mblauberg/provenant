@@ -1181,6 +1181,7 @@ mod tests {
                 &workers,
                 &call,
                 &observer,
+                None,
             );
             if allowed {
                 assert!(matches!(result?, crate::Reconciled::Abandoned { .. }));
@@ -1208,7 +1209,8 @@ mod tests {
                         "guardian lost",
                         &workers,
                         &call,
-                        &observer
+                        &observer,
+                        None
                     )?,
                     crate::Reconciled::Abandoned { .. }
                 ));
@@ -1219,7 +1221,8 @@ mod tests {
                             "different",
                             &workers,
                             &call,
-                            &observer
+                            &observer,
+                            None
                         )
                         .is_err()
                 );
@@ -1327,6 +1330,194 @@ mod tests {
             read_sealed(&attempt, "retained-evidence", RECORD_LIMIT)?.as_deref(),
             Some(b"keep".as_slice())
         );
+        Ok(())
+    }
+
+    #[test]
+    fn abandon_clears_only_its_own_removed_worktree_registration() -> TestResult {
+        // Spec: docs/specs/supervisor.md#explicit-abandonment
+        use provenant_confinement::worktrees::{
+            Occupancy, WorkerObserver, WorktreeOrigin, WorktreeOwner,
+        };
+        use provenant_supervisor::census::{
+            Census, CensusError, ProcessFact, ProcessIdentity, ProcessObservation, ProcessObserver,
+        };
+
+        struct AbsentWorkers;
+        impl WorkerObserver for AbsentWorkers {
+            fn observe_roots(
+                &self,
+                _: &[std::path::PathBuf],
+            ) -> std::collections::BTreeMap<std::path::PathBuf, Occupancy> {
+                panic!("an absent writer tree must not consult the census")
+            }
+        }
+        struct Quiet(ProcessFact);
+        impl ProcessObserver for Quiet {
+            fn boot_identity(&self) -> std::result::Result<String, CensusError> {
+                Ok(self.0.identity.boot.clone())
+            }
+            fn observe(&self, _: i64) -> ProcessObservation {
+                ProcessObservation::Present(self.0.clone())
+            }
+            fn census(&self, _: usize) -> std::result::Result<Census, CensusError> {
+                Census::from_observations([self.0.clone()], [], [], true, false, 64)
+            }
+        }
+        let quiet = Quiet(ProcessFact {
+            identity: ProcessIdentity {
+                boot: "fixture-current-boot".into(),
+                pid: 123,
+                native_start: 1,
+                group_id: 123,
+                session_id: 123,
+            },
+            parent_pid: 1,
+            zombie: false,
+            cpu_micros: None,
+            command: None,
+        });
+
+        fn register(
+            common: &std::path::Path,
+            name: &str,
+            worktree: &std::path::Path,
+            owner_id: provenant_core::AttemptId,
+        ) -> TestResult {
+            let admin = common.join("worktrees").join(name);
+            std::fs::create_dir_all(&admin)?;
+            std::fs::write(
+                admin.join("gitdir"),
+                format!("{}/.git\n", worktree.display()),
+            )?;
+            let owner = WorktreeOwner {
+                attempt_id: Some(owner_id),
+                operation_id: Some("op-3906".parse()?),
+                branch: format!("lane-{name}"),
+                base: "1".repeat(40),
+                host: provenant_core::HostId::from_bytes([3; 16]),
+                created_at: WallTime::from_micros(1_780_000_010_000_000)?,
+                origin: WorktreeOrigin::Lane,
+                label: None,
+                reference: None,
+            };
+            std::fs::write(
+                admin.join("provenant-owner.json"),
+                serde_json::to_vec(&owner)?,
+            )?;
+            Ok(())
+        }
+
+        fn launched(
+            store: &crate::RunStore,
+            clock: &TestClock,
+            call: &crate::Request<'_>,
+            project: &std::path::Path,
+            worktree: &std::path::Path,
+        ) -> std::result::Result<provenant_core::AttemptId, Box<dyn std::error::Error>> {
+            let mut run = crate::tests::input();
+            run.created_at = clock.wall_now()?;
+            run.request.task.writer = Some(crate::WriterRequest {
+                extra: Default::default(),
+                custody_project: Some(crate::tests::writer_project()),
+                project: project.to_path_buf(),
+                worktree: worktree.to_path_buf(),
+            });
+            store.create(&run, call)?;
+            let id = run.attempt_id;
+            store.mark_starting(
+                &store.record(id, call)?,
+                &crate::tests::route(),
+                &[],
+                &Default::default(),
+                None,
+                call,
+            )?;
+            store.claim(id, clock, call)?.ok_or("not admitted")?;
+            let attempt = store.attempt_dir(id, false)?;
+            let scope = crate::RunStore::scope(&store.record(id, call)?);
+            let slot = store
+                .attempt_writer_slot(id, call)?
+                .ok_or("missing writer slot")?;
+            std::fs::create_dir_all(&slot)?;
+            let slot = provenant_os::fs::Directory::open_anchor(&slot)?;
+            drop(provenant_supervisor::custody::acquire_reader(
+                slot.try_clone()?,
+                scope,
+                call.lock_budget(),
+                call.cancel,
+                clock,
+            )?);
+            crate::artifacts::seal(&attempt, "retained-evidence", b"keep", RECORD_LIMIT)?;
+            Ok(id)
+        }
+
+        let temp = tempfile::tempdir()?;
+        let clock = TestClock::new(
+            WallTime::from_micros(1_780_000_020_000_000)?,
+            MonoTime::from_micros(0),
+        );
+        let cancel = CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let context = crate::tests::context(temp.path())?;
+        let store = crate::RunStore::open(&context, &call)?;
+        let project = temp.path().join("checkout");
+        let common = project.join(".git");
+        std::fs::create_dir_all(common.join("worktrees"))?;
+        let own_tree = project.join(".worktrees/lane");
+        let foreign_tree = project.join(".worktrees/other");
+        let own = launched(&store, &clock, &call, &project, &own_tree)?;
+        let foreign = launched(&store, &clock, &call, &project, &foreign_tree)?;
+        register(&common, "lane", &own_tree, own)?;
+        register(&common, "other", &foreign_tree, own)?;
+        // Only this attempt's registration points at its recorded checkout;
+        // the second names the other lane's path but is owned by this attempt,
+        // so it is never ours to prune while abandoning that lane.
+        let (result, warnings) = provenant_records::warning::capture(|| {
+            store.abandon_settlement_with_observer(
+                own,
+                "guardian lost",
+                &AbsentWorkers,
+                &call,
+                &quiet,
+                Some(&common),
+            )
+        });
+        assert!(matches!(result?, crate::Reconciled::Abandoned { .. }));
+        assert!(
+            !warnings.iter().any(|warning| {
+                warning.code.as_ref()
+                    == provenant_records::warning::ABANDON_STALE_WORKTREE_REGISTRATION.as_str()
+            }),
+            "{warnings:?}"
+        );
+        assert!(!common.join("worktrees/lane").exists());
+        assert!(common.join("worktrees/other").exists());
+
+        // A registration at this checkout owned by another attempt is not ours
+        // to prune: warn with the one command that clears it and leave it.
+        let (result, warnings) = provenant_records::warning::capture(|| {
+            store.abandon_settlement_with_observer(
+                foreign,
+                "guardian lost",
+                &AbsentWorkers,
+                &call,
+                &quiet,
+                Some(&common),
+            )
+        });
+        assert!(matches!(result?, crate::Reconciled::Abandoned { .. }));
+        let stale: Vec<_> = warnings
+            .iter()
+            .filter(|warning| {
+                warning.code.as_ref()
+                    == provenant_records::warning::ABANDON_STALE_WORKTREE_REGISTRATION.as_str()
+            })
+            .collect();
+        assert_eq!(stale.len(), 1, "{warnings:?}");
+        let repair = stale[0].repair.as_deref().ok_or("missing remedy")?;
+        assert!(repair.ends_with("worktree prune"), "exact remedy: {repair}");
+        assert!(common.join("worktrees/other").exists());
         Ok(())
     }
 
@@ -1698,6 +1889,7 @@ mod tests {
                 reason,
                 &provenant_confinement::worktrees::SystemWorkerObserver,
                 &call,
+                None,
             )?,
             crate::Reconciled::Abandoned { reason: saved } if saved == reason
         ));
@@ -1755,6 +1947,7 @@ mod tests {
                 reason,
                 &provenant_confinement::worktrees::SystemWorkerObserver,
                 &call,
+                None,
             );
             if fenced {
                 assert!(result.is_err());
@@ -1774,7 +1967,8 @@ mod tests {
                         id,
                         reason,
                         &provenant_confinement::worktrees::SystemWorkerObserver,
-                        &call
+                        &call,
+                        None
                     )?,
                     crate::Reconciled::Abandoned { .. }
                 ));
@@ -1784,7 +1978,8 @@ mod tests {
                             id,
                             "different reason",
                             &provenant_confinement::worktrees::SystemWorkerObserver,
-                            &call
+                            &call,
+                            None
                         )
                         .is_err()
                 );
@@ -3112,6 +3307,7 @@ mod tests {
             reason,
             &provenant_confinement::worktrees::SystemWorkerObserver,
             &call,
+            None,
         )?;
         let stored: serde_json::Value = serde_json::from_slice(
             &read_sealed(&directory, "queued-abandonment.json", RECORD_LIMIT)?
@@ -3335,8 +3531,16 @@ impl crate::RunStore {
         reason: &str,
         workers: &dyn provenant_confinement::worktrees::WorkerObserver,
         call: &crate::Request<'_>,
+        common: Option<&std::path::Path>,
     ) -> Result<crate::Reconciled> {
-        self.abandon_settlement_with_observer(id, reason, workers, call, &SystemProcessObserver)
+        self.abandon_settlement_with_observer(
+            id,
+            reason,
+            workers,
+            call,
+            &SystemProcessObserver,
+            common,
+        )
     }
 
     fn abandon_settlement_with_observer(
@@ -3346,6 +3550,7 @@ impl crate::RunStore {
         workers: &dyn provenant_confinement::worktrees::WorkerObserver,
         call: &crate::Request<'_>,
         observer: &dyn provenant_supervisor::census::ProcessObserver,
+        common: Option<&std::path::Path>,
     ) -> Result<crate::Reconciled> {
         call.check()?;
         if reason.trim().is_empty() || reason.len() > 4096 {
@@ -3528,6 +3733,7 @@ impl crate::RunStore {
             }
             None
         };
+        let writer = self.request(id, call)?.task.writer;
         if declare_lost {
             // Re-read presence after acquiring all native exclusion leases.
             if provenant_supervisor::custody::observe_holder(&attempt, scope, observer)
@@ -3535,7 +3741,6 @@ impl crate::RunStore {
             {
                 return Err(abandon_refused(AbandonmentRefusal::Live { scope }));
             }
-            let writer = self.request(id, call)?.task.writer;
             let path = writer
                 .as_ref()
                 .map(|w| w.worktree.clone())
@@ -3636,7 +3841,28 @@ impl crate::RunStore {
         }
         drop(unfenced_lease);
         drop(launch_guards);
-        abandoned(&attempt, scope)?.ok_or(RunError::Conflict)
+        let result = abandoned(&attempt, scope)?.ok_or(RunError::Conflict)?;
+        // An absent checkout proves the lane holds nothing, but Git may still
+        // register that branch at the missing path. Clear only this attempt's
+        // registration; anything not provably ours is warned about, never
+        // touched. A prune failure cannot undo the settlement (#3906).
+        if let (Some(common), Some(writer)) = (common, writer.as_ref()) {
+            use provenant_confinement::worktrees::OrphanRegistrationPrune;
+            match provenant_confinement::worktrees::prune_orphan_registration(
+                common,
+                &writer.worktree,
+                id,
+            ) {
+                OrphanRegistrationPrune::None | OrphanRegistrationPrune::Pruned => {}
+                OrphanRegistrationPrune::Retained => warn_abandon_stale_registration(
+                    id,
+                    common,
+                    &writer.worktree,
+                    "it is locked, ambiguous, or not proven to belong to this lane",
+                ),
+            }
+        }
+        Ok(result)
     }
 }
 
@@ -3708,6 +3934,34 @@ fn warn_retained_fence_missing(attempt: provenant_core::AttemptId, slot: Option<
         });
     }
     warn(warning);
+}
+
+/// An abandoned lane whose registration could not be pruned still settles;
+/// name the one command that clears it. Never suggests touching another tree.
+fn warn_abandon_stale_registration(
+    attempt: provenant_core::AttemptId,
+    common: &std::path::Path,
+    worktree: &std::path::Path,
+    detail: &str,
+) {
+    use provenant_records::diagnostic::{Destination, shell_path};
+    use provenant_records::warning::{ABANDON_STALE_WORKTREE_REGISTRATION, Warning, warn};
+    let repair = shell_path(common, Destination::Local).map_or_else(
+        |_| "git worktree prune".to_owned(),
+        |root| format!("git -C {root} worktree prune"),
+    );
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    warn(
+        Warning::new(
+            ABANDON_STALE_WORKTREE_REGISTRATION,
+            format!(
+                "abandoned lane {attempt} left a Git registration for its removed worktree {}: {detail}; {repair}",
+                worktree.display()
+            ),
+        )
+        .subject(format!("attempt {attempt}"))
+        .repair(repair),
+    );
 }
 
 #[derive(Serialize, Deserialize)]

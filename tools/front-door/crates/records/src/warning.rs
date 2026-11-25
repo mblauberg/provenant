@@ -173,6 +173,9 @@ pub const WRITER_FENCE_LIST_FAILED: WarningCode = WarningCode("WRITER_FENCE_LIST
 /// A settled writer attempt named a retained fence that is missing; abandon proceeds.
 pub const ABANDON_RETAINED_FENCE_MISSING: WarningCode =
     WarningCode("ABANDON_RETAINED_FENCE_MISSING");
+/// An abandoned lane left a stale Git worktree registration; the lane settled.
+pub const ABANDON_STALE_WORKTREE_REGISTRATION: WarningCode =
+    WarningCode("ABANDON_STALE_WORKTREE_REGISTRATION");
 /// A lane tool-state commit was refused by policy; settlement continues.
 pub const TOOL_STATE_COMMIT_FAILED: WarningCode = WarningCode("TOOL_STATE_COMMIT_FAILED");
 /// An admission receipt is visible but its durability is unconfirmed.
