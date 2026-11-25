@@ -43,16 +43,14 @@ fn private_view_binding_refuses_replaced_directories_and_foreign_paths() -> Test
         fixture.assert_not_published();
     }
     let mut fixture = Fixture::new("sha1")?;
-    let (attempt, _) = fixture.overlay()?;
-    let other_attempt = fixture.root.join("other-attempt");
-    fs::create_dir_all(other_attempt.join("tmp/candidate-0/git-common"))?;
-    fs::create_dir(other_attempt.join("tmp/candidate-0/git-objects"))?;
+    let (_attempt, scratch) = fixture.overlay()?;
+    let other_id = AttemptId::from_bytes([9; 16]);
+    let (other_attempt, other_temporary) = crate::tests::scratch_layout(&fixture.state, other_id)?;
+    fs::create_dir_all(other_temporary.join("candidate-0/git-common"))?;
+    fs::create_dir(other_temporary.join("candidate-0/git-objects"))?;
     assert!(
-        super::bind(
-            &Directory::open_anchor(&other_attempt)?,
-            &attempt.current_path()?.join("tmp/candidate-0")
-        )
-        .is_err()
+        super::bind(&Directory::open_anchor(&other_attempt)?, &scratch).is_err(),
+        "a view bound to another attempt's record must be refused"
     );
     Ok(())
 }
@@ -61,10 +59,12 @@ fn private_view_binding_refuses_replaced_directories_and_foreign_paths() -> Test
 fn private_view_refuses_incomplete_identity_versions() -> TestResult {
     for version in [1, 2, 3] {
         let temp = tempfile::tempdir()?;
-        let path = fs::canonicalize(temp.path())?;
-        fs::create_dir_all(path.join("tmp/candidate-0/git-common"))?;
-        fs::create_dir(path.join("tmp/candidate-0/git-objects"))?;
-        let attempt = Directory::open_anchor(&path)?;
+        let state = fs::canonicalize(temp.path())?;
+        let (attempt_path, temporary) =
+            crate::tests::scratch_layout(&state, AttemptId::from_bytes([12; 16]))?;
+        fs::create_dir_all(temporary.join("candidate-0/git-common"))?;
+        fs::create_dir(temporary.join("candidate-0/git-objects"))?;
+        let attempt = Directory::open_anchor(&attempt_path)?;
         crate::artifacts::seal(
             &attempt,
             "writer-objects.json",
@@ -434,8 +434,8 @@ impl Fixture {
             None,
             &["read-tree", &self.base.to_string()],
         )?;
-        let attempt = self.root.join("attempt");
-        let scratch = attempt.join("tmp/candidate-0");
+        let (attempt, temporary) = crate::tests::scratch_layout(&self.state, self.import_attempt)?;
+        let scratch = temporary.join("candidate-0");
         fs::create_dir_all(&scratch)?;
         let private_objects = scratch.join("git-objects");
         fs::rename(&self.source, &private_objects)?;
@@ -489,9 +489,9 @@ impl Fixture {
             .output()?)
     }
 
-    fn prepare_attempt(&self, name: &str, base: GitOid) -> TestResult<(Directory, PathBuf)> {
-        let attempt_path = self.root.join(name);
-        let scratch = attempt_path.join("tmp/candidate-0");
+    fn prepare_attempt(&self, id: AttemptId, base: GitOid) -> TestResult<(Directory, PathBuf)> {
+        let (attempt_path, temporary) = crate::tests::scratch_layout(&self.state, id)?;
+        let scratch = temporary.join("candidate-0");
         fs::create_dir_all(&scratch)?;
         let attempt = Directory::open_anchor(&attempt_path)?;
         super::prepare_bound(
@@ -614,10 +614,11 @@ impl Fixture {
 fn host_prepared_private_repository_reads_shared_base_and_imports_new_commit() -> TestResult {
     for format in ["sha1", "sha256"] {
         let mut fixture = Fixture::new(format)?;
-        let attempt = fixture.root.join("prepared-attempt");
-        let scratch = attempt.join("tmp/candidate-0");
+        let (attempt_path, temporary) =
+            crate::tests::scratch_layout(&fixture.state, AttemptId::from_bytes([11; 16]))?;
+        let scratch = temporary.join("candidate-0");
         fs::create_dir_all(&scratch)?;
-        let attempt = Directory::open_anchor(&attempt)?;
+        let attempt = Directory::open_anchor(&attempt_path)?;
         super::prepare_bound(
             &fixture.git,
             fixture.worktree.repo(),
@@ -700,8 +701,8 @@ fn shared_object_snapshot_bounds_empty_files_and_directories() -> TestResult {
 // Spec: docs/specs/run-launch.md#admission-and-custody
 fn per_attempt_git_views_keep_identity_and_configuration_private() -> TestResult {
     let fixture = Fixture::new("sha1")?;
-    let (_, first) = fixture.prepare_attempt("private-attempt-1", fixture.base)?;
-    let (_, second) = fixture.prepare_attempt("private-attempt-2", fixture.base)?;
+    let (_, first) = fixture.prepare_attempt(AttemptId::from_bytes([1; 16]), fixture.base)?;
+    let (_, second) = fixture.prepare_attempt(AttemptId::from_bytes([2; 16]), fixture.base)?;
     let first_common = first.join("git-common");
     let second_common = second.join("git-common");
     assert_ne!(first_common, second_common);
@@ -767,8 +768,10 @@ fn per_attempt_git_views_keep_identity_and_configuration_private() -> TestResult
 // Spec: docs/specs/run-launch.md#admission-and-custody
 fn plain_commit_excludes_a_sibling_attempts_staged_path() -> TestResult {
     let fixture = Fixture::new("sha1")?;
-    let (_, lane_scratch) = fixture.prepare_attempt("commit-attempt", fixture.base)?;
-    let (_, sibling_scratch) = fixture.prepare_attempt("staged-sibling", fixture.base)?;
+    let (_, lane_scratch) =
+        fixture.prepare_attempt(AttemptId::from_bytes([3; 16]), fixture.base)?;
+    let (_, sibling_scratch) =
+        fixture.prepare_attempt(AttemptId::from_bytes([4; 16]), fixture.base)?;
 
     fs::write(
         fixture.lane.join("sibling-staged"),
@@ -810,15 +813,16 @@ fn plain_commit_excludes_a_sibling_attempts_staged_path() -> TestResult {
 // Spec: docs/specs/run-launch.md#admission-and-custody
 fn launch_at_an_advanced_tip_preserves_a_live_siblings_staged_index() -> TestResult {
     let fixture = Fixture::new("sha1")?;
-    let (_, sibling_scratch) = fixture.prepare_attempt("live-sibling", fixture.base)?;
+    let (_, sibling_scratch) =
+        fixture.prepare_attempt(AttemptId::from_bytes([5; 16]), fixture.base)?;
     fs::write(fixture.lane.join("sibling-staged"), "live staged bytes\n")?;
     fixture.git_attempt(&sibling_scratch, &["add", "sibling-staged"])?;
     let sibling_index = fs::read(sibling_scratch.join("git-common/index"))?;
 
     let advanced = child_of(&fixture, fixture.base, "branch advanced")?;
     update_ref(&fixture, "refs/heads/lane", advanced)?;
-    let (_, launched_scratch) = fixture.prepare_attempt("new-launch", advanced)?;
-    let launched = Directory::open_anchor(&fixture.root.join("new-launch"))?;
+    let (launched, launched_scratch) =
+        fixture.prepare_attempt(AttemptId::from_bytes([6; 16]), advanced)?;
     let source = super::bound_source(&launched)?.ok_or("launched private view")?;
     assert_eq!(super::private_tip(&source, "refs/heads/lane")?, advanced);
     assert_eq!(
@@ -848,9 +852,10 @@ fn launch_at_an_advanced_tip_preserves_a_live_siblings_staged_index() -> TestRes
 // Spec: docs/specs/run-launch.md#admission-and-custody
 fn private_commits_survive_a_losing_host_settlement_cas() -> TestResult {
     let fixture = Fixture::new("sha1")?;
-    let (first_attempt, first_scratch) = fixture.prepare_attempt("first-writer", fixture.base)?;
+    let (first_attempt, first_scratch) =
+        fixture.prepare_attempt(AttemptId::from_bytes([7; 16]), fixture.base)?;
     let (second_attempt, second_scratch) =
-        fixture.prepare_attempt("second-writer", fixture.base)?;
+        fixture.prepare_attempt(AttemptId::from_bytes([8; 16]), fixture.base)?;
 
     fs::write(fixture.lane.join("first-writer-file"), "first commit\n")?;
     fixture.git_attempt(&first_scratch, &["add", "first-writer-file"])?;
@@ -2184,17 +2189,17 @@ fn same_head_import_pins_survive_independent_publication_cleanup() -> TestResult
 fn object_source_binding_is_scoped_and_refuses_symlinked_candidates() -> TestResult {
     let temp = tempfile::tempdir()?;
     let root = fs::canonicalize(temp.path())?;
-    let attempt = root.join("attempt");
-    let scratch = attempt.join("tmp/candidate-3");
+    let (attempt, temporary) = crate::tests::scratch_layout(&root, AttemptId::from_bytes([3; 16]))?;
+    let scratch = temporary.join("candidate-3");
     fs::create_dir_all(scratch.join("git-objects"))?;
     fs::create_dir_all(scratch.join("git-common"))?;
     let held = Directory::open_anchor(&attempt)?;
     assert!(super::bound_source(&held)?.is_none());
     assert!(super::object_binding(&held)?.is_none());
-    assert!(super::bind(&held, &attempt.join("tmp/../escape")).is_err());
+    assert!(super::bind(&held, &temporary.join("../escape")).is_err());
     super::bind(&held, &scratch)?;
     super::bind(&held, &scratch)?;
-    assert!(super::bind(&held, &attempt.join("tmp/candidate-4")).is_err());
+    assert!(super::bind(&held, &temporary.join("candidate-4")).is_err());
     let source = super::bound_source(&held)?.ok_or("source binding")?;
     assert!(
         source
@@ -2202,12 +2207,12 @@ fn object_source_binding_is_scoped_and_refuses_symlinked_candidates() -> TestRes
             .metadata()?
             .same_identity(&Directory::open_anchor(&scratch.join("git-objects"))?.metadata()?)
     );
-    fs::rename(&scratch, attempt.join("retained"))?;
+    fs::rename(&scratch, temporary.join("retained"))?;
     assert!(
         !super::object_binding(&held)?.is_none(),
         "policy detection must not open reclaimed scratch"
     );
-    symlink(attempt.join("retained"), &scratch)?;
+    symlink(temporary.join("retained"), &scratch)?;
     assert!(super::bound_source(&held).is_err());
     Ok(())
 }
@@ -3072,8 +3077,9 @@ fn stopped_merge_retains_private_state_without_adoption_by_a_new_attempt() -> Te
     );
     assert_eq!(fs::read(fixture.lane.join("file"))?, working);
     let native_before = fs::read(&host_index)?;
-    let next_attempt_path = fixture.root.join("continuation");
-    let next_scratch = next_attempt_path.join("tmp/candidate-0");
+    let (next_attempt_path, next_temporary) =
+        crate::tests::scratch_layout(&fixture.state, AttemptId::from_bytes([13; 16]))?;
+    let next_scratch = next_temporary.join("candidate-0");
     fs::create_dir_all(&next_scratch)?;
     let next_attempt = Directory::open_anchor(&next_attempt_path)?;
     super::prepare_bound(
@@ -4540,7 +4546,7 @@ fn read_only_private_git_fetches_without_changing_linked_checkout() -> TestResul
 // Spec: docs/specs/run-launch.md#admission-and-custody
 fn host_git_uses_the_pinned_attempt_common_directory() -> TestResult {
     let fixture = Fixture::new("sha1")?;
-    let (_, scratch) = fixture.prepare_attempt("attempt-with-planted-commondir", fixture.base)?;
+    let (_, scratch) = fixture.prepare_attempt(AttemptId::from_bytes([9; 16]), fixture.base)?;
     let common = scratch.join("git-common");
     let rogue = fixture.root.join("rogue-dir");
     fs::create_dir_all(&rogue)?;

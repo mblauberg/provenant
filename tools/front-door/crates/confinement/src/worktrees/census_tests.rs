@@ -680,6 +680,17 @@ fn native_unreadable_windowserver_allows_cleanup_of_a_merged_clean_tree()
 #[test]
 #[allow(clippy::disallowed_methods)] // A real child provides the cwd observation fixture.
 fn system_observer_names_the_process_inside_a_tree() -> Result<(), Box<dyn Error>> {
+    const ROOT: &str = "PROVENANT_CENSUS_NAMED_PROCESS_ROOT";
+    const PID: &str = "PROVENANT_CENSUS_NAMED_PROCESS_PID";
+    if let Some(root) = std::env::var_os(ROOT) {
+        let pid: i64 = std::env::var(PID)?.parse()?;
+        assert!(matches!(
+            live_refusal(&SystemWorkerObserver, Path::new(&root)),
+            WorktreeError::LiveProcess(process) if process.pid == pid
+        ));
+        return Ok(());
+    }
+
     struct Child(std::process::Child);
     impl Drop for Child {
         fn drop(&mut self) {
@@ -698,10 +709,27 @@ fn system_observer_names_the_process_inside_a_tree() -> Result<(), Box<dyn Error
             .spawn()?,
     );
     let pid = i64::from(child.0.id());
-    assert!(matches!(
-        live_refusal(&SystemWorkerObserver, &path),
-        WorktreeError::LiveProcess(process) if process.pid == pid
-    ));
+    // The observer is a sibling of the occupant, like a separate lane. A
+    // direct child of the observer is deliberately excluded from the census.
+    let output = std::process::Command::new(std::env::current_exe()?)
+        .args([
+            "--exact",
+            "worktrees::census_tests::system_observer_names_the_process_inside_a_tree",
+        ])
+        .env(ROOT, &path)
+        .env(PID, pid.to_string())
+        .output()?;
+    assert!(
+        output.status.success(),
+        "observer failed: {}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+        "observer test did not run: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
     Ok(())
 }
 
@@ -781,7 +809,7 @@ fn worker_census_places_a_process_in_a_deleted_directory_by_its_nearest_ancestor
 }
 
 #[test]
-fn land_worker_census_excludes_only_ancestors_through_the_session_leader()
+fn land_worker_census_excludes_verified_ancestors_and_the_callers_children()
 -> Result<(), Box<dyn Error>> {
     use provenant_supervisor::census::{Census, CensusError, ProcessIdentity};
     struct Processes(Census);
@@ -799,13 +827,14 @@ fn land_worker_census_excludes_only_ancestors_through_the_session_leader()
             Ok(self.0.clone())
         }
     }
-    struct Cwds(BTreeMap<i64, PathBuf>);
+    struct Cwds(BTreeMap<i64, PathBuf>, PathBuf);
     impl CwdObserver for Cwds {
-        fn occupancy(&self, _: i64) -> provenant_os::pid::OccupancyObservation {
+        fn occupancy(&self, pid: i64) -> provenant_os::pid::OccupancyObservation {
+            let denied = pid == 110 && self.0.get(&pid) == Some(&self.1);
             provenant_os::pid::OccupancyObservation {
                 paths: vec![],
-                complete: true,
-                gap: None,
+                complete: !denied,
+                gap: denied.then_some(provenant_os::pid::OccupancyGap::DescriptorsDenied),
             }
         }
         fn cwd(&self, pid: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
@@ -867,6 +896,7 @@ fn land_worker_census_excludes_only_ancestors_through_the_session_leader()
                     )
                 })
                 .collect(),
+            root.clone(),
         );
         let observe = |cwds: &Cwds, ancestors| {
             observe_worker_roots(
@@ -882,13 +912,57 @@ fn land_worker_census_excludes_only_ancestors_through_the_session_leader()
         assert!(observe(&cwds, false).is_observed());
         let state = observe(&cwds, true);
         assert_eq!(state.is_available(), complete);
-        // Above-session ancestors, siblings, descendants and independent
-        // sessions remain live, even when the census is incomplete.
-        for pid in [1, 95, 110, 200] {
+        // Above-session ancestors, siblings and independent sessions remain
+        // live, even when the census is incomplete.
+        for pid in [1, 95, 200] {
             cwds.0.insert(pid, root.clone());
             assert!(observe(&cwds, true).is_observed(), "pid {pid}");
             cwds.0.insert(pid, outside.clone());
         }
+        // The caller's verified child is part of the caller, not an
+        // independent writer: a probe the caller spawned must not make the
+        // worktree live even while it is still in the listing.
+        let before_child = observe(&cwds, true);
+        cwds.0.insert(110, root.clone());
+        assert_eq!(observe(&cwds, true), before_child);
+    }
+    // Descendant exclusion applies with or without ancestor exclusion.
+    {
+        let processes = Processes(Census::from_observations(
+            facts.clone(),
+            [],
+            [],
+            true,
+            false,
+            32,
+        )?);
+        let mut cwds = Cwds(
+            facts
+                .iter()
+                .map(|fact| (fact.identity.pid, outside.clone()))
+                .collect(),
+            root.clone(),
+        );
+        cwds.0.insert(110, root.clone()); // verified child of the caller
+        let observe = |ancestors| {
+            observe_worker_roots(
+                std::slice::from_ref(&root),
+                &processes,
+                &cwds,
+                &current,
+                ancestors,
+            )
+            .0[&root]
+                .clone()
+        };
+        assert!(
+            observe(false).is_available(),
+            "ordinary census must exclude the caller's child"
+        );
+        assert!(
+            observe(true).is_available(),
+            "land census must exclude the caller's child"
+        );
     }
     for ambiguity in [
         "equal_stamp",
@@ -946,6 +1020,7 @@ fn land_worker_census_excludes_only_ancestors_through_the_session_leader()
                 .iter()
                 .map(|fact| (fact.identity.pid, outside.clone()))
                 .collect(),
+            root.clone(),
         );
         let observe = |cwds: &Cwds| {
             observe_worker_roots(
@@ -965,6 +1040,213 @@ fn land_worker_census_excludes_only_ancestors_through_the_session_leader()
         // inside the root it still makes the root live.
         cwds.0.insert(10, root.clone());
         assert!(observe(&cwds).is_observed(), "{ambiguity}");
+    }
+    Ok(())
+}
+
+// Spec: docs/specs/supervisor.md#unreadable-processes-need-positive-non-occupancy-evidence
+#[test]
+fn a_vanished_descriptor_query_is_absent_but_live_eprem_stays_unknown() -> Result<(), Box<dyn Error>>
+{
+    use provenant_os::pid::OccupancyGap;
+    use provenant_supervisor::census::{Census, CensusError, ProcessIdentity};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct GapObserver {
+        census: Census,
+        outside: PathBuf,
+        gap: Option<OccupancyGap>,
+        after: ProcessObservation,
+        queried: AtomicBool,
+    }
+    impl ProcessObserver for GapObserver {
+        fn boot_identity(&self) -> Result<String, CensusError> {
+            Ok("boot".into())
+        }
+        fn observe(&self, pid: i64) -> ProcessObservation {
+            if pid == 200 && self.queried.load(Ordering::Relaxed) {
+                return self.after.clone();
+            }
+            match self.census.process(pid) {
+                ProcessLookup::Present(fact) => ProcessObservation::Present(fact.clone()),
+                _ => ProcessObservation::Absent,
+            }
+        }
+        fn census(&self, _: usize) -> Result<Census, CensusError> {
+            Ok(self.census.clone())
+        }
+    }
+    impl CwdObserver for GapObserver {
+        fn cwd(&self, _: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
+            Ok(CwdObservation::Path(self.outside.clone()))
+        }
+        fn occupancy(&self, _: i64) -> provenant_os::pid::OccupancyObservation {
+            self.queried.store(true, Ordering::Relaxed);
+            provenant_os::pid::OccupancyObservation {
+                paths: Vec::new(),
+                complete: false,
+                gap: self.gap,
+            }
+        }
+    }
+
+    let temp = tempfile::tempdir()?;
+    let worktree = temp.path().join("worktree");
+    provenant_os::fixture::private_state_dir(&worktree)?;
+    let root = canonicalize(&worktree)?;
+    let outside = canonicalize(temp.path())?;
+    let fact = |pid: i64| ProcessFact {
+        identity: ProcessIdentity {
+            boot: "boot".into(),
+            pid,
+            native_start: pid as u64,
+            group_id: 10,
+            session_id: 10,
+        },
+        parent_pid: 1,
+        zombie: false,
+        cpu_micros: None,
+        command: None,
+    };
+    let current = fact(100);
+    let state_for =
+        |gap: OccupancyGap, after: ProcessObservation| -> Result<Occupancy, Box<dyn Error>> {
+            let census =
+                Census::from_observations([current.clone(), fact(200)], [], [], true, false, 32)?;
+            let observer = GapObserver {
+                census,
+                outside: outside.clone(),
+                gap: Some(gap),
+                after,
+                queried: AtomicBool::new(false),
+            };
+            Ok(observe_worker_roots(
+                std::slice::from_ref(&root),
+                &observer,
+                &observer,
+                &current,
+                true,
+            )
+            .0[&root]
+                .clone())
+        };
+    // ESRCH says the process exited mid-census: it holds nothing and cannot
+    // make the worktree unknown.
+    assert!(state_for(OccupancyGap::Vanished, ProcessObservation::Absent)?.is_available());
+    // Conflicting live or reused identities cannot be discarded on one ESRCH.
+    assert!(
+        state_for(
+            OccupancyGap::Vanished,
+            ProcessObservation::Present(fact(200))
+        )?
+        .is_unknown()
+    );
+    let mut reused = fact(200);
+    reused.identity.native_start += 1;
+    assert!(state_for(OccupancyGap::Vanished, ProcessObservation::Present(reused))?.is_unknown());
+    // EPERM on a still-listed process is a real permission failure, so the
+    // data-loss boundary keeps the worktree Unknown.
+    assert!(
+        state_for(
+            OccupancyGap::DescriptorsDenied,
+            ProcessObservation::Present(fact(200))
+        )?
+        .is_unknown()
+    );
+    Ok(())
+}
+
+// Spec: docs/specs/supervisor.md#unreadable-processes-need-positive-non-occupancy-evidence
+#[cfg(target_os = "linux")]
+#[test]
+fn vanished_linux_proc_entry_needs_an_absent_identity_recheck() -> Result<(), Box<dyn Error>> {
+    use provenant_os::pid::{OccupancyGap, SystemCwdObserver};
+    use provenant_supervisor::census::{Census, CensusError, ProcessIdentity};
+
+    const GONE_PID: i64 = i32::MAX as i64;
+    struct Processes {
+        census: Census,
+        recheck: ProcessObservation,
+    }
+    impl ProcessObserver for Processes {
+        fn boot_identity(&self) -> Result<String, CensusError> {
+            Ok("boot".into())
+        }
+        fn observe(&self, pid: i64) -> ProcessObservation {
+            if pid == GONE_PID {
+                self.recheck.clone()
+            } else {
+                match self.census.process(pid) {
+                    ProcessLookup::Present(fact) => ProcessObservation::Present(fact.clone()),
+                    _ => ProcessObservation::Absent,
+                }
+            }
+        }
+        fn census(&self, _: usize) -> Result<Census, CensusError> {
+            Ok(self.census.clone())
+        }
+    }
+    struct NativeOccupancy(PathBuf);
+    impl CwdObserver for NativeOccupancy {
+        fn cwd(&self, _: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
+            Ok(CwdObservation::Path(self.0.clone()))
+        }
+        fn occupancy(&self, pid: i64) -> provenant_os::pid::OccupancyObservation {
+            SystemCwdObserver.occupancy(pid)
+        }
+    }
+
+    let temp = tempfile::tempdir()?;
+    let worktree = temp.path().join("worktree");
+    provenant_os::fixture::private_state_dir(&worktree)?;
+    let root = canonicalize(&worktree)?;
+    let cwd = NativeOccupancy(canonicalize(temp.path())?);
+    let fact = |pid: i64| ProcessFact {
+        identity: ProcessIdentity {
+            boot: "boot".into(),
+            pid,
+            native_start: pid as u64,
+            group_id: pid,
+            session_id: pid,
+        },
+        parent_pid: 1,
+        zombie: false,
+        cpu_micros: None,
+        command: None,
+    };
+    let current = fact(100);
+    let census = Census::from_observations(
+        [current.clone()],
+        [(GONE_PID, ObservationIssue::PermissionDenied)],
+        [],
+        true,
+        false,
+        32,
+    )?;
+    // This PID is beyond Linux's supported pid_max: both the executable and
+    // descriptor queries fail, and the missing /proc entry confirms exit.
+    assert_eq!(cwd.occupancy(GONE_PID).gap, Some(OccupancyGap::Vanished));
+    for (recheck, available) in [
+        (ProcessObservation::Absent, true),
+        (ProcessObservation::Present(fact(GONE_PID)), false),
+    ] {
+        let processes = Processes {
+            census: census.clone(),
+            recheck,
+        };
+        let state = &observe_worker_roots(
+            std::slice::from_ref(&root),
+            &processes,
+            &cwd,
+            &current,
+            false,
+        )
+        .0[&root];
+        if available {
+            assert!(state.is_available());
+        } else {
+            assert!(state.is_unknown());
+        }
     }
     Ok(())
 }

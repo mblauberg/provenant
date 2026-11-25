@@ -9,8 +9,27 @@ use provenant_records::custody::Scope;
 use provenant_supervisor::custody::{
     CaptureTotals, ExitObservation, PublicationState, SettlementEvidence,
 };
-use std::{ffi::OsString, path::Path, time::Duration};
+use std::{
+    ffi::OsString,
+    fs,
+    os::unix::fs::DirBuilderExt,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
+/// The production layout for a test attempt: its record directory under
+/// `attempts/<id>` and its temporary scratch under `attempt-scratch/<id>/tmp`.
+/// Fixtures that bind a private Git view must use this, not a record-local tmp.
+pub(crate) fn scratch_layout(state: &Path, id: AttemptId) -> std::io::Result<(PathBuf, PathBuf)> {
+    let attempt = state.join("attempts").join(id.to_string());
+    let temporary = crate::plan::scratch_root(state, id).join("tmp");
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true).mode(0o700);
+    builder.create(&attempt)?;
+    builder.create(&temporary)?;
+    Ok((attempt, temporary))
+}
 
 #[test]
 fn run_store_observation_covers_commits_and_publishes_post_commit_hints() -> TestResult {
@@ -3179,6 +3198,15 @@ fn receipt_prelaunch_cancel_and_deadline_have_distinct_evidence() -> TestResult 
             } else {
                 None
             }
+        );
+        let replayed = store.replay_terminal(id, &call)?;
+        assert_eq!(
+            replayed.cancellation_disposition,
+            record.cancellation_disposition
+        );
+        assert_eq!(
+            replayed.terminal_evidence,
+            Some(TerminalEvidence::ProcessExit)
         );
     }
     Ok(())

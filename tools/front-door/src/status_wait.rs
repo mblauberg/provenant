@@ -203,7 +203,10 @@ pub(crate) struct Reading {
     pub(crate) settle: Settle,
     /// `TARGET STATE [cause]`, bounded; equal lines are one observation.
     pub(crate) line: String,
-    data: Value,
+    /// The full observation this reading was derived from. Crate-visible so a
+    /// journal producer can prove its projected status survives into the
+    /// reading that the wait's human and summary output render.
+    pub(crate) data: Value,
 }
 impl Reading {
     fn done(&self) -> bool {

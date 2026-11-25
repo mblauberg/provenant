@@ -109,6 +109,9 @@ pub enum CwdObservation {
 /// paths remain occupancy evidence regardless of the gap.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OccupancyGap {
+    /// A descriptor or executable query reported that the process no longer
+    /// exists (ESRCH or the platform equivalent). The process holds nothing.
+    Vanished,
     /// Every failed query was a descriptor query refused with EPERM; the
     /// executable and each readable descriptor are in `paths`.
     DescriptorsDenied,
@@ -127,6 +130,7 @@ pub enum OccupancyGap {
 impl OccupancyGap {
     pub fn describe(self) -> &'static str {
         match self {
+            Self::Vanished => "process vanished during the census",
             Self::DescriptorsDenied => "descriptors unreadable (EPERM)",
             Self::ExecutableUnavailable => "executable unavailable",
             Self::DescriptorsUnavailable => "descriptors unavailable",
@@ -137,9 +141,15 @@ impl OccupancyGap {
     }
 
     /// The more serious of two gaps. A permission refusal ranks below other
-    /// failures, so it cannot hide a missing path or unstable observation.
+    /// failures, so it cannot hide a missing path or unstable observation. A
+    /// vanished query cannot override a conflicting observation: the PID
+    /// may have been reused between snapshots.
     pub fn worse(self, other: Self) -> Self {
-        if self == Self::DescriptorsDenied {
+        if self == Self::Vanished {
+            other
+        } else if other == Self::Vanished {
+            self
+        } else if self == Self::DescriptorsDenied {
             other
         } else {
             self

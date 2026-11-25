@@ -1250,6 +1250,87 @@ mod tests {
     }
 
     #[test]
+    fn abandon_with_missing_retained_fence_settles_and_keeps_worktree() -> TestResult {
+        // Spec: docs/specs/supervisor.md#explicit-abandonment
+        use std::os::unix::fs::DirBuilderExt;
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let context = crate::tests::context(temp.path())?;
+        let store = crate::RunStore::open(&context, &call)?;
+        let mut run = crate::tests::input();
+        run.created_at = clock.wall_now()?;
+        let worktree = temp.path().join("checkout/.worktrees/held");
+        run.request.task.writer = Some(crate::WriterRequest {
+            extra: Default::default(),
+            custody_project: Some(context.project_id),
+            project: temp.path().join("checkout"),
+            worktree: worktree.clone(),
+        });
+        store.create(&run, &call)?;
+        let id = run.attempt_id;
+        let record = store.mark_starting(
+            &store.record(id, &call)?,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        store.commit_lost(crate::RunStore::scope(&record), "fixture lost", &call)?;
+        store.set_temporary_retained(id, true, &call)?;
+        // The fixture record names a held writer but its retained fence is gone.
+        assert!(store.writer_fences()?.is_empty());
+        // A private worktree with uncommitted work must survive abandon.
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&worktree)?;
+        std::fs::write(worktree.join("uncommitted.txt"), b"keep me")?;
+        let attempt = store.attempt_dir(id, false)?;
+        crate::artifacts::seal(&attempt, "retained-evidence", b"keep", RECORD_LIMIT)?;
+        let reason = "release stuck writer";
+        let (result, warnings) = provenant_records::warning::capture(|| {
+            store.abandon_settlement(
+                id,
+                reason,
+                &provenant_confinement::worktrees::SystemWorkerObserver,
+                &call,
+            )
+        });
+        assert!(matches!(
+            result?,
+            crate::Reconciled::Abandoned { reason: saved } if saved == reason
+        ));
+        let missing: Vec<_> = warnings
+            .iter()
+            .filter(|warning| {
+                warning.code.as_ref()
+                    == provenant_records::warning::ABANDON_RETAINED_FENCE_MISSING.as_str()
+            })
+            .collect();
+        assert_eq!(missing.len(), 1, "{warnings:?}");
+        assert!(missing[0].message.contains(&id.to_string()));
+        let source = missing[0].source.as_ref().ok_or("missing fence source")?;
+        assert_eq!(source.layer, provenant_records::Layer::Detected);
+        assert!(
+            source
+                .origin
+                .as_deref()
+                .is_some_and(|origin| origin.contains("worktrees")),
+            "{source:?}"
+        );
+        // Abandon never removes the worktree or its uncommitted files.
+        assert_eq!(std::fs::read(worktree.join("uncommitted.txt"))?, b"keep me");
+        assert_eq!(
+            read_sealed(&attempt, "retained-evidence", RECORD_LIMIT)?.as_deref(),
+            Some(b"keep".as_slice())
+        );
+        Ok(())
+    }
+
+    #[test]
     fn stalled_supervisor_is_not_retried_and_is_rechecked() -> TestResult {
         let temp = tempfile::tempdir()?;
         let clock = clock();
@@ -1604,11 +1685,12 @@ mod tests {
         )?;
 
         let listing = store.writer_fence_listing()?;
-        assert_eq!(listing.issues.len(), 1);
-        assert_eq!(
-            listing.issues[0].kind,
-            provenant_supervisor::custody::ReservationIssueKind::LegacyEvidence
-        );
+        // A schema-1 reservation with no live holder is listed for this
+        // version to reconcile, not reported as a previous-version task.
+        assert!(listing.issues.is_empty(), "{listing:?}");
+        assert_eq!(listing.reservations.len(), 1);
+        assert_eq!(listing.reservations[0].scope.attempt, legacy.attempt_id);
+        assert_eq!(listing.reservations[0].live, Some(false));
         let reason = "unresolvable queued route";
         assert!(matches!(
             store.abandon_settlement(
@@ -1626,7 +1708,10 @@ mod tests {
                 ..
             }
         ));
-        assert_eq!(store.writer_fence_listing()?.issues.len(), 1);
+        let listing = store.writer_fence_listing()?;
+        assert!(listing.issues.is_empty(), "{listing:?}");
+        assert_eq!(listing.reservations.len(), 1);
+        assert_eq!(listing.reservations[0].scope.attempt, legacy.attempt_id);
         Ok(())
     }
 
@@ -3433,7 +3518,15 @@ impl crate::RunStore {
         } else if journal.abandonment.is_some() || unfenced {
             None
         } else {
-            return Err(RunError::Validation("retained writer fence missing"));
+            // A terminal attempt can name a retained writer fence whose custody
+            // evidence is gone. Abandon is the operator's way out of a stuck
+            // writer: settle without touching the worktree or its uncommitted
+            // files, and report the missing fence with the slot that held it.
+            let slot = self.attempt_writer_slot(id, call).ok().flatten();
+            if slot.is_some() {
+                warn_retained_fence_missing(id, slot.as_deref());
+            }
+            None
         };
         if declare_lost {
             // Re-read presence after acquiring all native exclusion leases.
@@ -3587,6 +3680,34 @@ fn report_registry_error(attempt: provenant_core::AttemptId, error: &RunError) {
         )
         .subject(format!("attempt {attempt}")),
     );
+}
+
+/// A missing retained fence is accepted with a warning, not a corruption
+/// error. Name the slot that was to hold it so an operator can inspect the
+/// custody registry; nothing here removes the worktree or its uncommitted work.
+/// Spec: docs/specs/supervisor.md#explicit-abandonment
+fn warn_retained_fence_missing(attempt: provenant_core::AttemptId, slot: Option<&std::path::Path>) {
+    use provenant_records::{
+        Layer, Source,
+        warning::{ABANDON_RETAINED_FENCE_MISSING, Warning, warn},
+    };
+    let origin = slot.map(|path| path.display().to_string());
+    let detail = origin.as_deref().unwrap_or("the writer custody registry");
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    let mut warning = Warning::new(
+        ABANDON_RETAINED_FENCE_MISSING,
+        format!(
+            "attempt {attempt} named a retained writer fence that is missing at {detail}; abandonment settles and keeps its worktree and uncommitted files"
+        ),
+    )
+    .subject(format!("attempt {attempt}"));
+    if let Some(origin) = origin {
+        warning = warning.source(Source {
+            layer: Layer::Detected,
+            origin: Some(origin),
+        });
+    }
+    warn(warning);
 }
 
 #[derive(Serialize, Deserialize)]

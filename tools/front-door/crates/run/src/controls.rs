@@ -119,7 +119,7 @@ thread_local! {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum CancelReceipt {
-    /// Queued work ended without reaching a provider.
+    /// The stop ended the attempt without a live provider to act on it.
     Cancelled,
     AlreadyTerminal,
     Requested,
@@ -2617,6 +2617,67 @@ impl RunStore {
             generation: record.generation,
         }
     }
+    /// Settle a Running attempt whose sealed provider exit makes status report
+    /// settling. The provider is gone, so a stop request cannot reach it; when
+    /// no holder can act on the stop and no driver owns settlement, the stop
+    /// commits the attempt terminal from the provider's own captured exit. A
+    /// live holder keeps the ordinary stop path and settles the attempt itself.
+    fn cancel_vanished(
+        &self,
+        record: &AttemptRecord,
+        reason: &str,
+        call: &Request<'_>,
+    ) -> Result<Option<CancelReceipt>> {
+        let id = record.attempt_id;
+        if !matches!(&record.state, AttemptState::Running { .. }) {
+            return Ok(None);
+        }
+        let scope = Self::scope(record);
+        let attempt = self.attempt_dir(id, false)?;
+        let Ok(Some(raw)) = read_sealed(&attempt, "process-exit.json", RECORD_LIMIT) else {
+            return Ok(None);
+        };
+        // Only the exit sealed for this generation proves this provider is gone.
+        let Ok(exit) = crate::db::decode::<provenant_supervisor::custody::StoredExit>(&raw) else {
+            return Ok(None);
+        };
+        if exit.schema_version != 1
+            || exit.scope != scope
+            || (exit.termination.is_none() && !exit.never_spawned)
+        {
+            return Ok(None);
+        }
+        use provenant_supervisor::custody::HolderPresence;
+        if custody::observe_holder(&attempt, scope, &SystemProcessObserver) == HolderPresence::Live
+            || crate::settlement::settlement_owner_live(&attempt, scope, call.clock) == Some(true)
+        {
+            return Ok(None);
+        }
+        // Hold the same lease as settlement while publishing the decision.
+        // A pending terminal intent already belongs to recovery.
+        let Ok(_driver) = attempt.try_lock(
+            std::ffi::OsStr::new("settlement-driver.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+        ) else {
+            return Ok(None);
+        };
+        if read_sealed(&attempt, "terminal-pending.json", TERMINAL_RECORD_LIMIT)?.is_some() {
+            return Ok(None);
+        }
+        // The owner request is durable evidence, not proof of delivery.
+        if custody::request_stop(
+            attempt,
+            scope,
+            record.verified_owner.unwrap_or(self.context.actor_id),
+            StopReason::ExplicitCancellation,
+        )
+        .is_err()
+        {
+            return Ok(None);
+        }
+        self.commit_stopped_after_exit(scope, reason, &exit, call)?;
+        Ok(Some(CancelReceipt::Cancelled))
+    }
     /// Cancel one attempt. Queued work is withdrawn; started work gets a stop
     /// request. A handoff that has not yet published its launch summary is
     /// retried within the call budget.
@@ -2703,6 +2764,14 @@ impl RunStore {
                 drop(publication);
                 id = successor;
                 continue;
+            }
+            if follow_graph_successors
+                && let Some(receipt) = self.cancel_vanished(&current, reason, call)?
+            {
+                drop(publication);
+                let committed = self.record(id, call)?;
+                self.settle_cleanup(&committed, None, call);
+                return self.finish_graph_cancel(id, pending_steer_parent, receipt, call);
             }
             if matches!(&current.state, AttemptState::Terminal { .. }) {
                 // This is an owner intent only. It remains distinct from the
@@ -4216,11 +4285,7 @@ impl RunStore {
         }
         let id = record.attempt_id;
         let scope = Self::scope(record);
-        let path = self
-            .context
-            .state_root
-            .as_path()
-            .join(format!("attempts/{id}/tmp"));
+        let path = crate::plan::scratch_root(self.context.state_root.as_path(), id).join("tmp");
         let listing = match self.writer_fence_listing() {
             Ok(listing) => listing,
             Err(error) => {
@@ -4271,8 +4336,8 @@ impl RunStore {
             && crate::holder::object_import_refused(&directory, scope)?.is_none();
         // An unreadable reservation cannot establish absence of custody.
         if let Some(issue) = listing.issues.first() {
-            let temporary = self.attempt_dir(id, false).and_then(|attempt| {
-                attempt
+            let temporary = self.attempt_scratch_dir(id, false).and_then(|scratch| {
+                scratch
                     .metadata_at(std::ffi::OsStr::new("tmp"), false)
                     .map_err(Into::into)
             });
@@ -4365,15 +4430,31 @@ impl RunStore {
             self.set_temporary_retained(id, false, call)?;
             return Ok(None);
         }
-        let attempt = match self.attempt_dir(id, false).and_then(|attempt| {
-            attempt.metadata_at(std::ffi::OsStr::new("tmp"), false)?;
-            Ok(attempt)
+        let scratch = match self.attempt_scratch_dir(id, false).and_then(|scratch| {
+            match scratch.metadata_at(std::ffi::OsStr::new("tmp"), false) {
+                // Already collected: prune the emptied per-attempt root too.
+                Err(error) if error.is_not_found() => {
+                    crate::retention::collect_empty_scratch_root(&scratch)?;
+                    Err(error.into())
+                }
+                Err(error) => Err(error.into()),
+                Ok(_) => Ok(scratch),
+            }
         }) {
-            Ok(attempt) => attempt,
+            Ok(scratch) => scratch,
             Err(RunError::Filesystem(error)) if error.is_not_found() => {
                 self.set_temporary_retained(id, false, call)?;
                 return Ok(None);
             }
+            Err(error) => {
+                return Ok(Some(Reconciled::TemporaryRetained {
+                    path,
+                    reason: error.to_string().into(),
+                }));
+            }
+        };
+        let attempt = match self.attempt_dir(id, false) {
+            Ok(attempt) => attempt,
             Err(error) => {
                 return Ok(Some(Reconciled::TemporaryRetained {
                     path,
@@ -4400,7 +4481,7 @@ impl RunStore {
             return Ok(None);
         }
         let remove = || -> Result<()> {
-            match attempt.metadata_at(std::ffi::OsStr::new("tmp"), false) {
+            match scratch.metadata_at(std::ffi::OsStr::new("tmp"), false) {
                 Err(error) if error.is_not_found() => return Ok(()),
                 Err(error) => return Err(error.into()),
                 Ok(_) => {}
@@ -4420,11 +4501,12 @@ impl RunStore {
                 Err(error) => return Err(error.into()),
             }
             artifacts::remove_unreserved_terminal_temporary(
-                &attempt,
+                &scratch,
+                &path,
                 &|| !call.cancel.is_cancelled(),
                 &mut 0,
             )?;
-            Ok(())
+            crate::retention::collect_empty_scratch_root(&scratch)
         };
         Ok(Some(match remove() {
             Ok(()) => {
@@ -4472,11 +4554,8 @@ impl RunStore {
             if !self.release_admission(&record, call) {
                 self.set_temporary_retained(id, true, call)?;
                 return Ok(Some(Reconciled::TemporaryRetained {
-                    path: self
-                        .context
-                        .state_root
-                        .as_path()
-                        .join(format!("attempts/{id}/tmp")),
+                    path: crate::plan::scratch_root(self.context.state_root.as_path(), id)
+                        .join("tmp"),
                     reason: TemporaryReason::new(
                         TemporaryReasonKind::Error,
                         "repository admission release remains pending",

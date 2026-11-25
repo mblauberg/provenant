@@ -5469,8 +5469,8 @@ pub(super) fn prepare_candidates_inner(
             push_launch_warning(&mut route, warning);
         }
         // A read-only lane builds in its scratch by design. No writer launch
-        // exports a target; warn if an adapter still points one into attempt tmp,
-        // where nothing preserves or reuses the output.
+        // exports a target; warn if an adapter still points one into the lane's
+        // temporary scratch, where nothing preserves or reuses the output.
         if let Some((_, target_val)) = spec
             .env
             .iter()

@@ -955,6 +955,10 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                 };
                 let attempt_path = edge.roots.state.as_path().join(format!("attempts/{id}"));
                 let attempt = Directory::open_anchor(&attempt_path)?;
+                // Create the scratch tmp the way production does: private and
+                // outside the attempt record dir. A world-readable tmp makes
+                // the private-Git reader refuse the binding (#3947).
+                let temporary = session.store.temporary_path(id, &call)?;
                 let slot_path = edge.roots.state.as_path().join(format!(
                     "worktrees/{}/abandon-fixture",
                     session.context.project_id
@@ -1053,9 +1057,9 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                         PublishMode::Replace,
                     )?
                     .require_durable()?;
-                std::fs::create_dir_all(attempt_path.join("tmp/candidate-0/git-common"))?;
+                std::fs::create_dir_all(temporary.join("candidate-0/git-common"))?;
                 std::fs::write(
-                    attempt_path.join("tmp/candidate-0/git-common/evidence"),
+                    temporary.join("candidate-0/git-common/evidence"),
                     "private objects",
                 )?;
                 let parse = |args: &[&str]| -> Result<Reconcile, Box<dyn std::error::Error>> {
@@ -1073,9 +1077,9 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                     attempt.atomic_write(OsStr::new("launch.json"), ".test-",
                         &serde_json::to_vec(&json!({"schema_version":1,"scope":scope,"requester":session.context.actor_id}))?,
                         PublishMode::NoReplace)?.require_durable()?;
-                    std::fs::create_dir_all(attempt_path.join("tmp/candidate-0/git-objects"))?;
+                    std::fs::create_dir_all(temporary.join("candidate-0/git-objects"))?;
                     std::fs::write(
-                        attempt_path.join("tmp/candidate-0/git-objects/evidence"),
+                        temporary.join("candidate-0/git-objects/evidence"),
                         b"retained objects",
                     )?;
                     attempt
@@ -1086,11 +1090,11 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                                 use std::os::unix::fs::MetadataExt as _;
                                 let identity = |name: &str| -> Result<_, Box<dyn std::error::Error>> {
                                     let metadata = std::fs::metadata(
-                                        attempt_path.join("tmp/candidate-0").join(name),
+                                        temporary.join("candidate-0").join(name),
                                     )?;
                                     Ok(json!({"device": metadata.dev(), "inode": metadata.ino()}))
                                 };
-                                let scratch = std::fs::metadata(attempt_path.join("tmp/candidate-0"))?;
+                                let scratch = std::fs::metadata(temporary.join("candidate-0"))?;
                                 json!({
                                     "schema_version": 4,
                                     "candidate": "candidate-0",
@@ -1146,7 +1150,14 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                         let crate::Command::Output(command) = inv.command else {
                             return Err("output command".into());
                         };
-                        let reply = output_from_session(command, edge, &session, id, &call);
+                        let reply = output_from_session(
+                            command,
+                            edge,
+                            &session,
+                            id,
+                            &call,
+                            inv.globals.full,
+                        );
                         assert_eq!(reply.result.status, Status::Ok, "{}", reply.human);
                         let row = &reply.result.data;
                         assert_eq!(row["state"], "failed");
@@ -1155,7 +1166,7 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                         assert_eq!(
                             row["git_import_failure"]["retained_objects"],
                             json!(provenant_records::StructuredPathWire::from_path(
-                                &attempt_path.join("tmp/candidate-0/git-objects")
+                                &temporary.join("candidate-0/git-objects")
                             )?)
                         );
                         let summary = reply
@@ -1188,11 +1199,11 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                         }
                     }
                     assert_eq!(
-                        std::fs::read(attempt_path.join("tmp/candidate-0/git-objects/evidence"))?,
+                        std::fs::read(temporary.join("candidate-0/git-objects/evidence"))?,
                         b"retained objects"
                     );
                     assert_eq!(
-                        std::fs::read(attempt_path.join("tmp/candidate-0/git-common/evidence"))?,
+                        std::fs::read(temporary.join("candidate-0/git-common/evidence"))?,
                         b"private objects"
                     );
                     session
@@ -1301,11 +1312,7 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                     "same reason is idempotent"
                 );
                 reconcile(parse(&["reconcile", "fence", "--json"])?, edge);
-                assert!(
-                    attempt_path
-                        .join("tmp/candidate-0/git-common/evidence")
-                        .is_file()
-                );
+                assert!(temporary.join("candidate-0/git-common/evidence").is_file());
                 let different = [
                     "reconcile",
                     "--abandon",
@@ -1331,11 +1338,7 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                     &provenant_run::RetentionScan::default(),
                 )?;
                 assert!(collected.attempt_tmp.is_empty());
-                assert!(
-                    attempt_path
-                        .join("tmp/candidate-0/git-common/evidence")
-                        .is_file()
-                );
+                assert!(temporary.join("candidate-0/git-common/evidence").is_file());
                 assert_eq!(
                     std::fs::read_to_string(attempt_path.join("result.md"))?,
                     "retained provider evidence"

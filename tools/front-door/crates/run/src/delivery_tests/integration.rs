@@ -16,8 +16,8 @@ fn terminal_settles_a_private_rewind() -> std::result::Result<(), Box<dyn std::e
     ])?;
     fixture.commit(&fixture.writer.worktree, "new writer base")?;
     let review = fixture.terminal(|| {
-        let attempt = fixture.root.join("attempt");
-        let scratch = attempt.join("tmp/candidate-0");
+        let (attempt, temporary) = fixture.attempt_layout()?;
+        let scratch = temporary.join("candidate-0");
         std::fs::create_dir_all(&scratch)?;
         let executable = provenant_os::git::git_executable().ok_or("Git unavailable")?;
         let runtime = provenant_confinement::UtilityRuntime::new(
@@ -50,11 +50,18 @@ fn terminal_settles_a_private_rewind() -> std::result::Result<(), Box<dyn std::e
     assert!(!review);
     assert!(
         fixture
-            .root
-            .join("attempt/quarantine/manifest.json")
+            .attempt_layout()?
+            .0
+            .join("quarantine/manifest.json")
             .is_file()
     );
-    assert!(fixture.root.join("attempt/writer-terminal.json").exists());
+    assert!(
+        fixture
+            .attempt_layout()?
+            .0
+            .join("writer-terminal.json")
+            .exists()
+    );
     assert_eq!(fixture.prepare()?.head(&fixture.writer)?, previous);
     Ok(())
 }
@@ -111,8 +118,8 @@ fn terminal_settles_and_publishes_rebased_lane()
 
     // Now terminal settles the attempt that rebased its work onto moved_base
     let review = fixture.terminal(|| {
-        let attempt = fixture.root.join("attempt");
-        let scratch = attempt.join("tmp/candidate-0");
+        let (attempt, temporary) = fixture.attempt_layout()?;
+        let scratch = temporary.join("candidate-0");
         std::fs::create_dir_all(&scratch)?;
         let runtime = provenant_confinement::UtilityRuntime::new(
             &executable,
@@ -166,7 +173,13 @@ fn terminal_settles_and_publishes_rebased_lane()
     })?;
 
     assert!(!review);
-    assert!(fixture.root.join("attempt/writer-terminal.json").exists());
+    assert!(
+        fixture
+            .attempt_layout()?
+            .0
+            .join("writer-terminal.json")
+            .exists()
+    );
     let published_head = fixture.prepare()?.head(&fixture.writer)?;
     assert_ne!(published_head, initial_base);
     assert_ne!(published_head, moved_base);
@@ -230,8 +243,8 @@ fn terminal_merges_a_divergent_lane_history_and_publishes_it()
 
     let lane_tip = std::cell::RefCell::new(None);
     let review = fixture.terminal(|| {
-        let attempt = fixture.root.join("attempt");
-        let scratch = attempt.join("tmp/candidate-0");
+        let (attempt, temporary) = fixture.attempt_layout()?;
+        let scratch = temporary.join("candidate-0");
         std::fs::create_dir_all(&scratch)?;
         let runtime = provenant_confinement::UtilityRuntime::new(
             &executable,
@@ -291,7 +304,13 @@ fn terminal_merges_a_divergent_lane_history_and_publishes_it()
     assert!(!review);
     let lane_tip = *lane_tip.borrow();
     let lane_tip = lane_tip.ok_or("lane commit")?;
-    assert!(fixture.root.join("attempt/writer-terminal.json").exists());
+    assert!(
+        fixture
+            .attempt_layout()?
+            .0
+            .join("writer-terminal.json")
+            .exists()
+    );
     let published = fixture.prepare()?.head(&fixture.writer)?;
     let parents = provenant_os::fixture::git_command_at(&executable)
         .env_clear()
@@ -331,11 +350,12 @@ fn private_attempt_git_views_keep_commits_and_staged_paths_separate()
     let repo = runtime.open_repo(&executor, &fixture.writer.project, budget, &cancel)?;
     let worktree = provenant_confinement::verify_worktree(&repo, &fixture.writer.worktree)?;
 
-    let prepare = |name: &str,
+    let prepare = |id: provenant_core::AttemptId,
                    base: GitOid|
      -> std::result::Result<std::path::PathBuf, Box<dyn std::error::Error>> {
-        let attempt_path = fixture.root.join(name);
-        let scratch = attempt_path.join("tmp/candidate-0");
+        let (attempt_path, temporary) =
+            crate::tests::scratch_layout(&fixture.root.join("state"), id)?;
+        let scratch = temporary.join("candidate-0");
         std::fs::create_dir_all(&scratch)?;
         crate::objects::prepare_bound(
             &executable,
@@ -348,8 +368,8 @@ fn private_attempt_git_views_keep_commits_and_staged_paths_separate()
         Ok(scratch)
     };
 
-    let sibling = prepare("sibling-attempt", host_base)?;
-    let parent = prepare("parent-attempt", host_base)?;
+    let sibling = prepare(provenant_core::AttemptId::from_bytes([41; 16]), host_base)?;
+    let parent = prepare(provenant_core::AttemptId::from_bytes([42; 16]), host_base)?;
     std::fs::write(
         fixture.writer.worktree.join("sibling.txt"),
         "sibling staged version\n",
@@ -407,7 +427,7 @@ fn private_attempt_git_views_keep_commits_and_staged_paths_separate()
         &["rev-parse", "HEAD"],
     )?)?;
     assert_ne!(host_tip, host_base);
-    let child = prepare("child-attempt", host_tip)?;
+    let child = prepare(provenant_core::AttemptId::from_bytes([43; 16]), host_tip)?;
     assert_eq!(
         private_git(&fixture, &child, &executable, &["rev-parse", "HEAD"])?,
         host_tip.to_string()

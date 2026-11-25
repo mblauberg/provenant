@@ -63,6 +63,17 @@ status reason, and a stalled custody-path refusal names the remedy (replace a sy
 path inside the attempt directory).
 - Why: a retained writer must not contend with itself or retry an unchanged failure forever.
 
+A lane's temporary scratch directory is never a child of the attempt record directory:
+it lives at `<state>/attempt-scratch/<attempt id>/tmp`. GC, writer-Git reads, disk
+classification and terminal cleanup resolve that sibling root; no fallback resolves the
+old `attempts/<id>/tmp` path. The lane's `provider-state` and its handoff,
+`LaunchPaths::scratch`, and the prompt and durable output paths remain inside the attempt
+directory by design, as do host-written records. A relative write from temporary scratch
+cannot reach them.
+- Why: a lane could otherwise write the attempt's own settlement records by walking up
+  from its scratch, and a foreign record could not be told from settlement's own
+  (#3844, #3947).
+
 A result or handoff a lane leaves group- or other-readable in Provenant's private attempt
 directory is a recoverable condition, not a settlement refusal. Settlement's read of a
 provider-written settlement input — `result.md`, the `handoff.json` snapshot, and the progress
@@ -315,7 +326,10 @@ outcome itself and does not change read-only presence classification.
 `reconcile --abandon` of custody not observed absent, such as a dead guardian with unresolved
 cleanup, first tries the same proof from a fresh census. A proof makes custody quiescent and
 abandonment proceeds; otherwise it refuses and names the blocker, including any live or
-unidentifiable PID or omitted descendants.
+unidentifiable PID or omitted descendants. A terminal writer attempt whose retained fence is
+absent is different: it is still abandonable. Abandon completes the journal, retains the
+worktree and its uncommitted work, and warns with the custody slot that was to hold the fence
+instead of treating the record as corrupt.
 
 An unreadable process alone is not an occupant, but only an explicit host policy may free a
 root. Before any excusal the census computes placement evidence for every root from the

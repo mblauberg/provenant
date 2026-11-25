@@ -14,7 +14,10 @@ fn stopped_head_push_uses_launch_binding_and_keeps_dirty_paths()
     let host = HostDeliveryContext::new(fixture.environment.clone())
         .with_host_state(&fixture.root.join("state"))
         .prepare_stop_publish(&fixture.writer, &request)?;
-    let attempt_path = fixture.root.join("attempt");
+    let (attempt_path, _) = crate::tests::scratch_layout(
+        &fixture.root.join("state"),
+        provenant_core::AttemptId::from_bytes([0x53; 16]),
+    )?;
     provenant_os::fixture::private_state_dir(&attempt_path)?;
     let attempt = provenant_os::fs::Directory::open_anchor(&attempt_path)?;
     let scope = provenant_records::custody::Scope {
@@ -196,7 +199,7 @@ fn local_integration_stop_publication_uses_the_stop_remote()
         }),
         || Ok(()),
     )?;
-    let attempt = provenant_os::fs::Directory::open_anchor(&fixture.root.join("attempt"))?;
+    let attempt = provenant_os::fs::Directory::open_anchor(&fixture.attempt_layout()?.0)?;
     let terminal: writer::WriterTerminal = db::decode(
         &artifacts::read_sealed(&attempt, "writer-terminal.json", RECORD_LIMIT)?
             .ok_or("writer terminal")?,
@@ -247,7 +250,7 @@ fn local_integration_without_stop_publish_leaves_the_stop_remote_absent()
         }),
         || Ok(()),
     )?;
-    let attempt = provenant_os::fs::Directory::open_anchor(&fixture.root.join("attempt"))?;
+    let attempt = provenant_os::fs::Directory::open_anchor(&fixture.attempt_layout()?.0)?;
     let terminal: writer::WriterTerminal = db::decode(
         &artifacts::read_sealed(&attempt, "writer-terminal.json", RECORD_LIMIT)?
             .ok_or("writer terminal")?,
@@ -638,8 +641,7 @@ fn delivery_records_dirty_failure_and_checked_out_integration_after_start()
                 "integration",
             ])?;
         }
-        let path = fixture.root.join("attempt");
-        std::fs::create_dir(&path)?;
+        let (path, _) = fixture.attempt_layout()?;
         let attempt = provenant_os::fs::Directory::open_anchor(&path)?;
         let receipt = deliver_once(
             &host,

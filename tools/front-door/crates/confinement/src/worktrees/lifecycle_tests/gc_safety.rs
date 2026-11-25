@@ -177,9 +177,17 @@ fn removal_preserves_staged_attempt_index_when_native_index_is_clean() -> Result
         .path()
         .join("attempts")
         .join(scope.attempt.to_string());
-    fs::create_dir_all(attempt_path.join("tmp/candidate-0/git-common/refs/heads"))?;
-    fs::create_dir_all(attempt_path.join("tmp/candidate-0/git-objects"))?;
-    let private_refs_path = attempt_path.join("tmp/candidate-0/git-common");
+    // Lane scratch lives beside the attempt record, never inside it (#3947).
+    let scratch_path = test
+        .fixture
+        ._temp
+        .path()
+        .join("attempt-scratch")
+        .join(scope.attempt.to_string());
+    fs::create_dir_all(&attempt_path)?;
+    fs::create_dir_all(scratch_path.join("tmp/candidate-0/git-common/refs/heads"))?;
+    fs::create_dir_all(scratch_path.join("tmp/candidate-0/git-objects"))?;
+    let private_refs_path = scratch_path.join("tmp/candidate-0/git-common");
     fs::write(
         private_refs_path.join("HEAD"),
         format!("ref: {branch_ref}\n"),

@@ -25,7 +25,7 @@ pub(crate) fn record(attempt: &Directory, limits: Option<&LaneLimits>, usage: &m
 }
 
 fn count(attempt: &Directory) -> Option<u64> {
-    let temporary = attempt.open_directory("tmp".as_ref()).ok()?;
+    let temporary = crate::plan::temporary_dir(attempt).ok()?;
     let name = std::ffi::OsStr::new(provenant_config::GH_INVOCATIONS_FILE);
     let counts: Vec<u64> = temporary
         .entries()

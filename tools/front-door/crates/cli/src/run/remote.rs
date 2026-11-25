@@ -2,7 +2,7 @@
 //! and trace facts. Routing, confinement and execution stay on the peer.
 use super::{Edge, Fail, Status};
 use crate::{
-    Output, Part,
+    Output, Part, Tail,
     fabric::{Context, PeerFailure},
 };
 use provenant_core::{AttemptId, CancelToken, Clock, HostId, WaitBudget};
@@ -169,8 +169,8 @@ pub(super) fn read_output_with(
         } if matches!(command.part, Part::Result) => planner_fallback.clone(),
         _ => None,
     };
-    let chunk = if let Some(bytes) = command.tail {
-        collect_tail(chunk, bytes, command.max_bytes, |offset| {
+    let chunk = if let Some(tail) = command.tail_selection() {
+        collect_tail(chunk, tail, command.max_bytes, |offset| {
             let input = OutputInput::Read {
                 extra: Default::default(),
                 target: AttemptTarget {
@@ -198,7 +198,7 @@ pub(super) fn read_output_with(
 /// and refuse a changing artifact rather than combining different digests.
 fn collect_tail(
     mut chunk: OutputResult,
-    tail_bytes: u64,
+    tail: Tail,
     max_bytes: u64,
     mut read: impl FnMut(u64) -> Result<OutputResult, Fail>,
 ) -> Result<OutputResult, Fail> {
@@ -234,10 +234,19 @@ fn collect_tail(
         if matches!(part, OutputPart::Events) {
             let page: Vec<Value> = serde_json::from_slice(&raw).map_err(|_| corrupt())?;
             retained_events.extend(page);
-            let excess = retained_events
-                .len()
-                .saturating_sub(tail_bytes.min(super::TAIL_MAX) as usize);
-            retained_events.drain(..excess);
+            match tail {
+                Tail::Lines(lines) => {
+                    let excess = retained_events.len().saturating_sub(lines as usize);
+                    retained_events.drain(..excess);
+                }
+                Tail::Bytes(bytes) => {
+                    retained = serde_json::to_vec(&retained_events).map_err(io_fail)?;
+                    while retained.len() as u64 > bytes && !retained_events.is_empty() {
+                        retained_events.remove(0);
+                        retained = serde_json::to_vec(&retained_events).map_err(io_fail)?;
+                    }
+                }
+            }
             retained = serde_json::to_vec(&retained_events).map_err(io_fail)?;
             while retained.len() as u64 > max_bytes && !retained_events.is_empty() {
                 retained_events.remove(0);
@@ -249,10 +258,15 @@ fn collect_tail(
             retained.drain(..excess);
         }
         if *eof {
-            let start = super::tail_start_bytes(&retained, tail_bytes);
-            retained.drain(..start);
-            while !retained.is_empty() && retained[0] & 0xc0 == 0x80 {
-                retained.remove(0);
+            if !matches!(part, OutputPart::Events) {
+                let start = match tail {
+                    Tail::Bytes(bytes) => super::tail_start_bytes(&retained, bytes),
+                    Tail::Lines(lines) => super::tail_start_lines(&retained, lines),
+                };
+                retained.drain(..start);
+                while !retained.is_empty() && retained[0] & 0xc0 == 0x80 {
+                    retained.remove(0);
+                }
             }
             let mut result = chunk;
             if let OutputResult::Chunk {

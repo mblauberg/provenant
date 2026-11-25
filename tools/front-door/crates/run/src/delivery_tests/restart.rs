@@ -1101,8 +1101,8 @@ fn terminal_verifies_private_objects_before_publication()
     for corrupt in [false, true] {
         let fixture = PrepareFixture::new()?;
         let result = fixture.terminal(|| {
-            let attempt_path = fixture.root.join("attempt");
-            let scratch = attempt_path.join("tmp/candidate-0");
+            let (attempt_path, temporary) = fixture.attempt_layout()?;
+            let scratch = temporary.join("candidate-0");
             let objects = scratch.join("git-objects");
             std::fs::create_dir_all(objects.join("info"))?;
             let executable = provenant_os::git::git_executable().ok_or("Git unavailable")?;
@@ -1211,7 +1211,13 @@ fn terminal_verifies_private_objects_before_publication()
         });
         if corrupt {
             assert!(result.is_err());
-            assert!(!fixture.root.join("attempt/writer-terminal.json").exists());
+            assert!(
+                !fixture
+                    .attempt_layout()?
+                    .0
+                    .join("writer-terminal.json")
+                    .exists()
+            );
         } else {
             assert!(!result?);
             fixture.lane_git(&["cat-file", "-e", "HEAD:private.txt"])?;

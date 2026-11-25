@@ -1357,7 +1357,10 @@ fn constraints(path: &str) -> Vec<String> {
     if path == "provenant output" {
         return vec![
             "target is NAME[/NODE[#N]]; a node reads its newest settled attempt".into(),
-            format!("tail above {0} lines is clamped to {0}", limits::TAIL_LINES),
+            format!(
+                "--tail N bounds the last N bytes; --tail-lines N bounds the last N lines and clamps above {0}",
+                limits::TAIL_LINES
+            ),
             format!(
                 "a result shows whole up to {} KiB, then its head and tail; at most {} changed paths of {} bytes are named; missing evidence is null",
                 limits::OUTPUT_BYTES / 1024,
@@ -3321,6 +3324,10 @@ mod tests {
         invalid(&["output", attempt, "--tail", "0"]);
         invalid(&["output", attempt, "--max-bytes", "65537"]);
         invalid(&["output", attempt, "--offset", "0", "--tail", "1"]);
+        valid(&["output", attempt, "--tail-lines", "501"]);
+        invalid(&["output", attempt, "--tail-lines", "0"]);
+        invalid(&["output", attempt, "--tail", "1", "--tail-lines", "1"]);
+        invalid(&["output", attempt, "--offset", "0", "--tail-lines", "1"]);
         valid(&["telemetry", "trace", "--peers", "fix-login"]);
     }
     #[test]

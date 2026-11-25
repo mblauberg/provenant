@@ -105,9 +105,12 @@ The loss intent is durable before the attempt is committed `lost`; repeating an
 interrupted abandonment with the same reason finishes it, and an incomplete
 intent stays visibly settling. Abandonment warns and retains all attempt
 evidence, scratch, worktree contents and private Git. A never-dispatched queued
-attempt keeps its evidence-preserving cancellation.
+attempt keeps its evidence-preserving cancellation. A settled writer attempt whose
+retained fence is missing is not corrupt: abandon completes it, leaves the worktree
+and its uncommitted files untouched, and warns (`ABANDON_RETAINED_FENCE_MISSING`)
+with the custody slot that was to hold the fence.
 - Why: an incomplete process census must not become permission to reuse a
-  worktree.
+  worktree; a missing fence must not be the one record an operator cannot release.
 - Owner: `crates/run/src/settlement.rs`, `crates/cli/src/run/reconcile.rs`
 
 ### Guardian holds custody past its owner
@@ -183,8 +186,20 @@ flock stays held through import and [publication](run.md#publication-order). A
 missing or malformed reservation refuses automatic recovery of that attempt;
 [explicit abandonment](#explicit-abandonment) instead requires native exclusion
 and positive worktree non-occupancy. Scratch deletion needs a verified
-settlement commit.
-- Why: a writer must never be freed on a partial or forged settlement.
+settlement commit. A pre-lease reservation whose launch never produced a holder
+remains fenced until reconcile or applied GC obtains writer and holder exclusion.
+They discover reservations even without an indexed attempt. Reconcile recovers
+proven orphans before scanning indexed runs, so a recovered reservation is not
+reported as a missing run. Host-wide GC scans project directories in the shared
+worktree registry alongside its other entries. For an orphan, they withdraw an
+unbound preparation or a bound never-spawned reservation only after proving the
+attempt row absent; a bound record must match its private attempt directory and
+hold its custody lock. An unbound record cannot identify its store, so another
+possible nested store keeps it fenced. Attempt evidence is retained. Any
+unproven case stays fenced, and a holderless legacy reservation is never
+presented as work for a previous version.
+- Why: a writer must never be freed on a partial or forged settlement, and a
+  holderless legacy reservation must not stay fenced with an unreachable remedy.
 
 ### Stable locks and atomic writes
 
@@ -451,7 +466,13 @@ observation, never missing landing proof.
 
 A root is `Free` only when every possible writer was observed completely with
 stable identity; a placed occupant makes it `Live`, and a failed or partial
-query leaves it `Unknown`, never empty. For each unreadable process the census
+query leaves it `Unknown`, never empty. A process that exited during the census
+is not a possible writer: an `ESRCH` (or equivalent vanished) result from an
+executable or descriptor query followed by a recheck finding the process gone
+is absence, not incomplete evidence; a same-identity zombie is also absent. A
+conflicting or reused PID remains uncertain. Every census excludes the calling
+process and its verified descendants, including short-lived children spawned
+for its own work. For each unreadable process the census
 first computes placement evidence for *every* root from its readable cwd and its
 descriptor paths by directory identity, the same `(dev, ino)` ancestor test used
 to place a live path. A cwd equal to or beneath a root is inside it; a cwd of
@@ -494,7 +515,8 @@ configured entries to the matcher it calls.
 Landing and collection require `Free`; the census grants no signal authority.
 - Why: a retained cwd or descriptor survives permission changes, so current
   permissions cannot prove absence, and an excusal must not free a root a
-  process could still hold.
+  process could still hold. Only an explicit exit signal — never a permission
+  denial or a generic read failure — may drop a process from the census.
 - Owner: `crates/confinement/src/worktrees/census.rs`,
   `crates/confinement/src/worktrees/census_excusal.rs`, `crates/os/src/sys/pid.rs`
 

@@ -89,7 +89,7 @@ pub enum CustodyError {
     #[error("record is invalid or belongs to another generation")]
     InvalidRecord,
     #[error(
-        "attempt evidence was written before shared worktree leases and is not upgraded in place; finish or stop that writer on the previous Provenant version, then reconcile it"
+        "attempt evidence was written before shared worktree leases and a holder may still be live; stop that holder and run `provenant reconcile` to clear the reservation"
     )]
     LegacyEvidence,
     #[error("launch handoff is unconfirmed; reservation remains fenced")]
@@ -765,7 +765,7 @@ pub(crate) fn acquire_writer_with_observer(
     };
     reservation.validate()?;
     let siblings = list_writer_reservations_in_slot(&lock_directory)?;
-    if !siblings.issues.is_empty() {
+    if siblings.is_fenced() {
         return Err(CustodyError::Fenced);
     }
     let sibling_present = siblings
@@ -2535,7 +2535,7 @@ pub fn worktree_sharing_guard(
         return Err(CustodyError::InvalidRecord);
     }
     let siblings = list_writer_reservations_in_slot(slot)?;
-    if !siblings.issues.is_empty() {
+    if siblings.is_fenced() {
         return Err(CustodyError::Fenced);
     }
     let sibling_present = siblings
@@ -2783,6 +2783,11 @@ pub struct WriterReservation {
     /// Native presence of the recorded guardian; None means unobservable.
     pub live: Option<bool>,
     pub age: Option<String>,
+    /// Schema-1 evidence with no holder to stop: listed so reconcile and GC
+    /// can clear it, but still fencing until they do. Kept out of the report
+    /// so the stable serialized listing does not grow a policy-only field.
+    #[serde(skip)]
+    pub legacy_fence: bool,
 }
 impl WriterReservation {
     /// The stable lock slot containing this attempt's journal.
@@ -2811,6 +2816,19 @@ fn reservation_holder_live(
         ProcessObservation::Absent => Some(false),
         ProcessObservation::Unknown(_) => None,
     }
+}
+
+/// A pre-lease reservation whose launch never produced a holder has no process
+/// for a previous version to finish. This version can withdraw or settle it
+/// through reconcile, so it is listed as a fence with a current-version remedy
+/// instead of being reported as unresolvable legacy evidence.
+fn holderless_pre_lease_reservation(reservation: &Reservation) -> bool {
+    reservation.guardian.is_none()
+        && reservation.provider.is_none()
+        && matches!(
+            reservation.launch_state,
+            LaunchState::Prepared | LaunchState::NeverSpawned
+        )
 }
 
 fn format_age_ns(modified_ns: i128, now: provenant_core::WallTime) -> String {
@@ -2845,6 +2863,15 @@ pub enum ReservationIssueKind {
 pub struct ReservationListing {
     pub reservations: Vec<WriterReservation>,
     pub issues: Vec<ReservationIssue>,
+}
+impl ReservationListing {
+    /// Whether this listing holds custody evidence that keeps the slot fenced
+    /// until reconcile or GC clears it. Legacy holderless reservations are
+    /// listed rather than reported as issues so recovery can name and withdraw
+    /// them, but they must not open the slot to a new holder first.
+    pub fn is_fenced(&self) -> bool {
+        !self.issues.is_empty() || self.reservations.iter().any(|r| r.legacy_fence)
+    }
 }
 /// Malformed or inaccessible entries are reported without hiding other
 /// reservations. Only supervisor interprets its private reservation format.
@@ -3111,16 +3138,25 @@ pub fn list_writer_reservations_in_slot(slot: &Directory) -> Result<ReservationL
             if attempt != OsStr::new(&reservation.scope.attempt.to_string()) {
                 return Err(CustodyError::InvalidRecord);
             }
-            // Reported with the reservation's other issues, so reconcile warns
-            // and names the attempt instead of leaving it silently fenced.
-            if liveness::is_legacy_record(&child)? {
+            let legacy = liveness::is_legacy_record(&child)?;
+            let holderless = holderless_pre_lease_reservation(&reservation);
+            // A schema-1 record whose launch never produced a holder is stale
+            // evidence this version can reconcile, not work for an older
+            // version. List it so reconcile and GC name the attempt and offer a
+            // remedy this version can carry out. Keep the fence for records
+            // that may still have a live holder.
+            if legacy && !holderless {
                 return Err(CustodyError::LegacyEvidence);
             }
+            let live = if legacy && holderless {
+                Some(false)
+            } else {
+                reservation_holder_live(&reservation, &SystemProcessObserver)
+            };
             let branch = match &reservation.binding {
                 StoredWriterBinding::Worktree { branch, .. } => Some(branch.clone()),
                 _ => None,
             };
-            let live = reservation_holder_live(&reservation, &SystemProcessObserver);
             let age = child
                 .metadata_at(OsStr::new("reservation.json"), false)
                 .ok()
@@ -3132,6 +3168,7 @@ pub fn list_writer_reservations_in_slot(slot: &Directory) -> Result<ReservationL
                 branch,
                 live,
                 age,
+                legacy_fence: legacy && holderless,
             }))
         };
         match entry() {
@@ -3573,6 +3610,56 @@ impl Recovery {
         )?)?;
         indexes::retire_unlaunched_index(&self.directory, &self.reservation)?;
         clear_reservation(&self.directory, self.scope())
+    }
+    /// Withdraw a holderless orphan after Run has proved that no attempt row
+    /// exists while this recovery holds both writer and holder exclusion.
+    /// Bound evidence must still name the exact private attempt directory.
+    pub fn withdraw_orphan(
+        self,
+        attempt: Option<&Directory>,
+        unbound_store_proven: bool,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        clock: &dyn Clock,
+    ) -> Result<bool> {
+        if self.reservation.guardian.is_some()
+            || self.reservation.provider.is_some()
+            || !self.reservation.descendants.is_empty()
+            || self.reservation.omitted_descendants != 0
+        {
+            return Ok(false);
+        }
+        match self.reservation.launch_state {
+            LaunchState::Prepared if unbound_store_proven => {
+                self.withdraw_prepared()?;
+            }
+            LaunchState::NeverSpawned => {
+                let Some(attempt) = attempt else {
+                    return Ok(false);
+                };
+                let metadata = attempt.metadata()?;
+                if self.reservation.attempt_device != Some(metadata.device)
+                    || self.reservation.attempt_inode != Some(metadata.inode)
+                    || self.reservation.unresolved_cleanup
+                    || self.reservation.census_incomplete
+                {
+                    return Ok(false);
+                }
+                let _custody = attempt.lock(
+                    OsStr::new("custody.lock"),
+                    LockMode::Exclusive,
+                    budget,
+                    cancel,
+                    clock,
+                )?;
+                // No provider ran. Retire only a verified private index and keep
+                // all attempt artefacts for inspection.
+                indexes::retire_unlaunched_index(&self.directory, &self.reservation)?;
+                clear_reservation(&self.directory, self.scope())?;
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
     }
     pub fn verify_settlement(&self, attempt: &Directory) -> Result<SettlementCommit> {
         let metadata = attempt.metadata()?;

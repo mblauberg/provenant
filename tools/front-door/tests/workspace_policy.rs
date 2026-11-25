@@ -1822,6 +1822,8 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         ("crates/cli/src/lib.rs", 4000),
         ("crates/cli/src/quota.rs", 7250),
         ("crates/cli/src/run.rs", 2750),
+        // Compact output leads with settlement facts and bounded tails (#3807).
+        ("crates/cli/src/run/output.rs", 2250),
         ("crates/cli/src/run/provider/confinement.rs", 3000),
         // The typed offer-mismatch fact carried into the lane refusal (#3892).
         ("crates/cli/src/run/provider/preparation.rs", 8000),
@@ -1868,7 +1870,8 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         // The #3941 end-to-end settlement test for trailing prose.
         ("crates/run/src/holder.rs", 9500),
         ("crates/run/src/launch.rs", 4250),
-        ("crates/run/src/retention.rs", 5000),
+        // Scratch-root pruning and its pinned-Git invariants (#3947).
+        ("crates/run/src/retention.rs", 5250),
         ("crates/run/src/settlement.rs", 4500),
         ("crates/run/src/store.rs", 2750),
         ("crates/run/src/writer.rs", 4250),

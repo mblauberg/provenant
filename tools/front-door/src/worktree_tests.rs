@@ -650,12 +650,8 @@ fn lane_git(
 ) -> Result<String> {
     let git =
         provenant_os::git::resolve_git_executable(None).ok_or("Git executable unavailable")?;
-    let candidate = context
-        .state_root
-        .as_path()
-        .join("attempts")
-        .join(attempt.to_string())
-        .join("tmp/candidate-0");
+    let candidate =
+        provenant_run::scratch_root(context.state_root.as_path(), attempt).join("tmp/candidate-0");
     let common = candidate.join("git-common");
     let binding = [
         format!("GIT_DIR={}", common.display()),
