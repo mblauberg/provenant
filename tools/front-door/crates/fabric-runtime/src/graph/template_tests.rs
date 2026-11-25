@@ -9,6 +9,7 @@ fn library() -> TemplateLibrary {
 
 fn document(nodes: Vec<GraphNode>) -> GraphDocument {
     GraphDocument {
+        queue: None,
         review: None,
         review_subject_missing: false,
         exclude: Vec::new(),
@@ -1964,4 +1965,95 @@ fn template_precedence_ranks_each_declared_layer_once() {
         super::template::TEMPLATE_PRECEDENCE.0,
         &[Layer::Default, Layer::Host, Layer::Project, Layer::Launch]
     );
+}
+
+#[test]
+fn delivery_contracts_round_trip_and_refuse_execution() {
+    let raw = json!({"id":"repair", "access":"read_only", "prompt":"repair",
+        "escalate":{"ladder":["junior","principal"],"max_ci_rounds":3},
+        "delivery_review":{"shape":"panel","accept_inconclusive_without_blocking":false}});
+    let compiled = Compiler::new(&library()).compile(&raw).unwrap();
+    let wire = serde_json::to_value(&compiled).unwrap();
+    assert_eq!(wire["escalate"], raw["escalate"]);
+    assert_eq!(wire["delivery_review"], raw["delivery_review"]);
+    let decoded: GraphNode = serde_json::from_value(wire).unwrap();
+    assert_eq!(decoded, compiled);
+    let mut graph = document(vec![decoded]);
+    graph.schema_version = 2;
+    graph.queue = Some(QueueKnobs::default());
+    let wire = serde_json::to_value(&graph).unwrap();
+    assert_eq!(wire["queue"]["ci_slots"]["value"], 1);
+    assert_eq!(wire["queue"]["ci_slots"]["layer"], "default");
+    assert_eq!(
+        serde_json::from_value::<GraphDocument>(wire).unwrap(),
+        graph
+    );
+    assert!(matches!(
+        graph.admit(&limits()),
+        Err(AdmissionError::DeliveryQueueUnsupported)
+    ));
+}
+
+#[test]
+fn old_plan_round_trips_without_new_contract_fields() {
+    let graph = document(vec![
+        Compiler::new(&library())
+            .compile(&json!({
+                "id":"task", "access":"read_only", "prompt":"work", "route":{"alias":"senior"}
+            }))
+            .unwrap(),
+    ]);
+    let wire = serde_json::to_value(&graph).unwrap();
+    assert!(wire.get("queue").is_none());
+    assert!(wire["nodes"][0].get("escalate").is_none());
+    assert!(wire["nodes"][0].get("delivery_review").is_none());
+    let decoded: GraphDocument = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(serde_json::to_value(decoded).unwrap(), wire);
+}
+
+#[test]
+fn delivery_loop_must_be_bounded() {
+    let node = Compiler::new(&library())
+        .compile(&json!({
+            "id":"repair", "kind":"loop", "access":"read_only",
+            "loop":{"body":[],"until":"gate","max_rounds":0,
+                    "outcome_edge":{"outcome":"exhausted","node":"park"}}
+        }))
+        .unwrap();
+    let mut graph = document(vec![node]);
+    graph.schema_version = 2;
+    assert!(
+        matches!(graph.admit(&limits()), Err(AdmissionError::Plan(reason)) if reason.contains("max_rounds"))
+    );
+}
+
+#[test]
+fn delivery_settings_require_v2_and_validate_overrides() {
+    let mut graph = document(vec![
+        Compiler::new(&library())
+            .compile(&json!({
+                "id":"task", "access":"read_only", "prompt":"work",
+                "escalate":{"ladder":[], "max_ci_rounds":3}
+            }))
+            .unwrap(),
+    ]);
+    assert!(matches!(
+        graph.admit(&limits()),
+        Err(AdmissionError::Schema(_))
+    ));
+    graph.schema_version = 2;
+    assert!(matches!(
+        graph.admit(&limits()),
+        Err(AdmissionError::Plan(_))
+    ));
+    let mut queue = QueueKnobs::default();
+    queue.ci_slots.value = 0;
+    assert!(queue.validate().is_ok());
+    queue.max_parallel.value = 0;
+    assert!(queue.validate().is_err());
+    assert_eq!(
+        DeliveryReviewSpec::default().shape,
+        provenant_records::graph::ReviewShape::Single
+    );
+    assert!(DeliveryReviewSpec::default().accept_inconclusive_without_blocking);
 }

@@ -90,3 +90,135 @@ pub enum GraphStatus {
     Cancelled,
     Paused,
 }
+
+/// A typed edge selected when a bounded delivery loop settles.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LoopOutcomeEdge {
+    pub outcome: LoopOutcome,
+    pub node: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoopOutcome {
+    Succeeded,
+    Exhausted,
+}
+
+/// Durable loop progress; round counts admitted repair attempts.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeliveryLoopProgress {
+    pub name: String,
+    pub round: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EscalationProgress {
+    /// Zero-based index into the sealed ladder.
+    pub rung: usize,
+    pub cause: EscalationCause,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EscalationCause {
+    NoCommit,
+    UncommittedEdits,
+    ReviewRepair,
+    CiRed,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewShape {
+    #[default]
+    Single,
+    Panel,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HygieneOutcomeKind {
+    Clean,
+    NoCommit,
+    UncommittedEdits,
+    Error,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HygieneOutcome {
+    pub kind: HygieneOutcomeKind,
+    pub before_head: Option<String>,
+    pub after_head: Option<String>,
+    pub handoff: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ParkReason {
+    LoopExhausted,
+    LadderExhausted,
+    NoCommit,
+    UncommittedEdits,
+    CiUnavailable,
+    Conflict,
+    ReviewEvidence,
+    OperationError,
+}
+
+#[cfg(test)]
+mod delivery_contract_tests {
+    use super::*;
+
+    #[test]
+    fn delivery_records_round_trip() {
+        let progress = EscalationProgress {
+            rung: 2,
+            cause: EscalationCause::CiRed,
+        };
+        let wire = serde_json::to_value(&progress).unwrap();
+        assert_eq!(wire["cause"], "ci_red");
+        assert_eq!(
+            serde_json::from_value::<EscalationProgress>(wire).unwrap(),
+            progress
+        );
+        let hygiene = HygieneOutcome {
+            kind: HygieneOutcomeKind::UncommittedEdits,
+            before_head: Some("before".into()),
+            after_head: Some("after".into()),
+            handoff: None,
+        };
+        let wire = serde_json::to_value(&hygiene).unwrap();
+        assert_eq!(wire["kind"], "uncommitted_edits");
+        assert_eq!(
+            serde_json::from_value::<HygieneOutcome>(wire).unwrap(),
+            hygiene
+        );
+        for reason in [
+            ParkReason::LoopExhausted,
+            ParkReason::LadderExhausted,
+            ParkReason::NoCommit,
+            ParkReason::UncommittedEdits,
+            ParkReason::CiUnavailable,
+            ParkReason::Conflict,
+            ParkReason::ReviewEvidence,
+            ParkReason::OperationError,
+        ] {
+            let wire = serde_json::to_value(reason).unwrap();
+            assert_eq!(serde_json::from_value::<ParkReason>(wire).unwrap(), reason);
+        }
+        let round = DeliveryLoopProgress {
+            name: "repair".into(),
+            round: 3,
+        };
+        assert_eq!(
+            serde_json::from_value::<DeliveryLoopProgress>(serde_json::to_value(&round).unwrap())
+                .unwrap(),
+            round
+        );
+    }
+}

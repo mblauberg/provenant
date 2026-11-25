@@ -272,6 +272,8 @@ fn node_bound(
     let ci = matches!(node.condition, Some(GateCondition::Ci { .. }));
     let boundary = gate || node.loop_body.is_some();
     let mut skeleton = NodeProgress {
+        delivery_loop: None,
+        escalation: None,
         extra: Default::default(),
         children: node.composite_members.clone(),
         source_binding: node.source.clone(),

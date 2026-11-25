@@ -947,6 +947,8 @@ pub(super) fn initial_checkpoint(
             .nodes
             .iter()
             .map(|node| NodeProgress {
+                delivery_loop: None,
+                escalation: None,
                 extra: Default::default(),
                 removed_requirements: node.removed_requirements.clone(),
                 children: node.composite_members.clone(),

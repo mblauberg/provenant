@@ -9,6 +9,9 @@ pub struct LoopSpec {
     pub body: Vec<GraphNode>,
     pub until: String,
     pub max_rounds: usize,
+    /// Typed delivery outcome edge; the node id names the loop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome_edge: Option<provenant_records::graph::LoopOutcomeEdge>,
     #[serde(
         default = "default_extension_rounds",
         skip_serializing_if = "is_default_extension_rounds"
@@ -666,6 +669,8 @@ pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
                 return progress;
             }
             let mut fresh = NodeProgress {
+                delivery_loop: None,
+                escalation: None,
                 extra: Default::default(),
                 removed_requirements: n.removed_requirements.clone(),
                 children: n.composite_members.clone(),
