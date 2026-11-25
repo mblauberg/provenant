@@ -1804,6 +1804,7 @@ fn queue_conflict_supersession(
         target: target @ CiTarget::Node {
             node: published, ..
         },
+        ..
     } = condition
     else {
         return None;

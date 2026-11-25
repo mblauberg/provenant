@@ -634,11 +634,6 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
                     .map(|target| (child.id.clone(), (target.to_owned(), extra.clone())))
             })
             .collect();
-        if (!spec.retry_on.is_empty() || spec.selected_publication.is_some())
-            && document.queue.is_none()
-        {
-            return Err("retry_on and selected_publication are queue-only loop contracts".into());
-        }
         let mut retry_nodes = std::collections::BTreeSet::new();
         for retry in &spec.retry_on {
             let Some(gate) = spec.body.iter().find(|member| member.id == *retry) else {
@@ -1161,6 +1156,27 @@ pub(super) fn inactive_round(
         return false;
     };
     let index = positions[previous];
+    if let Some(round) = &node.round
+        && let Some(spec) = plan.nodes[positions[&round.loop_id]].loop_body.as_ref()
+        && !spec.retry_on.is_empty()
+        && !repair::spec_is_repair(spec)
+    {
+        return match checkpoint.nodes[index].state {
+            NodeState::Succeeded => true,
+            NodeState::Failed | NodeState::Blocked | NodeState::Skipped => !plan
+                .nodes
+                .iter()
+                .zip(&checkpoint.nodes)
+                .any(|(candidate, progress)| {
+                    candidate.round.as_ref().is_some_and(|member| {
+                        member.loop_id == round.loop_id
+                            && member.round + 1 == round.round
+                            && member.retry_on
+                    }) && progress.state == NodeState::Failed
+                }),
+            NodeState::Pending | NodeState::Running => false,
+        };
+    }
     match checkpoint.nodes[index].state {
         NodeState::Succeeded => true,
         NodeState::Skipped => {
@@ -1286,13 +1302,25 @@ pub(super) fn handled_gate(checkpoint: &GraphCheckpoint, progress: &NodeProgress
 }
 
 fn passed(node: &PlannedNode, checkpoint: &GraphCheckpoint, plan: &PlannedGraph) -> bool {
-    let gate_passed = checkpoint.nodes.iter().any(|progress| {
-        progress
-            .round
-            .as_ref()
-            .is_some_and(|round| round.loop_id == node.id && round.until)
-            && progress.state == NodeState::Succeeded
-    });
+    let positions: BTreeMap<_, _> = plan
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (node.id.clone(), index))
+        .collect();
+    let gate_passed = checkpoint
+        .nodes
+        .iter()
+        .enumerate()
+        .any(|(index, progress)| {
+            progress
+                .round
+                .as_ref()
+                .is_some_and(|round| round.loop_id == node.id && round.until)
+                && (progress.state == NodeState::Succeeded
+                    || conflict_recovery_round_state(index, plan, checkpoint, &positions)
+                        == Some(ConflictRecoveryRoundState::Succeeded))
+        });
     gate_passed
         && node
             .loop_body
@@ -1319,6 +1347,19 @@ fn failed_member(
     let Some(index) = positions.get(&progress.id) else {
         return true;
     };
+    if plan.nodes[positions[&round.loop_id]]
+        .loop_body
+        .as_ref()
+        .is_none_or(|spec| spec.retry_on.is_empty())
+    {
+        return retryable_round_failure_is_terminal(
+            *index,
+            &round.loop_id,
+            plan,
+            checkpoint,
+            positions,
+        );
+    }
     let triggered = plan
         .nodes
         .iter()
