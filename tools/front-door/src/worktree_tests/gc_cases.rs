@@ -1649,7 +1649,10 @@ pub(super) fn gc_reports_terminal_tmp_details_and_compact_text_count() -> Result
         "provider-history/candidate-0/thread_history_1.sqlite",
     ] {
         let path = attempt.join(name);
-        fs::create_dir_all(path.parent().ok_or("retained parent")?)?;
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path.parent().ok_or("retained parent")?)?;
         if !path.exists() {
             fs::write(&path, format!("retained fixture: {name}\n\0"))?;
         }
@@ -1666,6 +1669,8 @@ pub(super) fn gc_reports_terminal_tmp_details_and_compact_text_count() -> Result
     assert_eq!(removal["path"], temporary.to_str().ok_or("tmp path")?);
     let bytes = removal["bytes"].as_u64().ok_or("tmp bytes")?;
     assert!(bytes >= 8192);
+    assert_eq!(preview["data"]["candidate_progress"]["collected"], 1);
+    assert_eq!(preview["data"]["candidate_progress"]["bytes"], bytes);
     assert!(temporary.exists());
     let text = command(&rig, &["gc", "--dry-run"])?;
     assert_eq!(code(&text), 0);
@@ -1677,6 +1682,15 @@ pub(super) fn gc_reports_terminal_tmp_details_and_compact_text_count() -> Result
         applied["data"]["provider_state"]["attempt_tmp"][0],
         *removal
     );
+    assert_eq!(applied["data"]["candidate_progress"]["collected"], 1);
+    assert_eq!(applied["data"]["candidate_progress"]["bytes"], bytes);
+    let scratch_bytes = applied["data"]["retention_bytes"]
+        .as_array()
+        .ok_or("retention bytes")?
+        .iter()
+        .find(|row| row["class"] == "attempt_scratch")
+        .ok_or("scratch byte observation")?;
+    assert_eq!(scratch_bytes["observation"]["bytes"], bytes);
     assert!(!temporary.exists());
     for (path, bytes) in retained {
         assert_eq!(

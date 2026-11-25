@@ -4292,7 +4292,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
         if self.stop_at_resume()? {
             return Ok(());
         }
-        let report = {
+        let mut report = {
             let deadline = self.deadline;
             let cancel = deadline.cancel();
             let lease = self.lease.as_ref();
@@ -4318,6 +4318,16 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
         if let Some(candidate) = report.interrupted_at.clone() {
             self.stop_at(None, Some(candidate), report.continuation.clone())?;
         }
+        // Scratch runs first and shares this report with provider-state GC.
+        // Preserve its outcomes and diagnostics when the later pass completes.
+        let scratch = &mut self.data.provider_state;
+        report.attempt_tmp.append(&mut scratch.attempt_tmp);
+        report.partial_tmp.append(&mut scratch.partial_tmp);
+        report
+            .scratch_deferred
+            .append(&mut scratch.scratch_deferred);
+        report.kept.append(&mut scratch.kept);
+        report.errors.append(&mut scratch.errors);
         self.data.provider_state = report;
         Ok(())
     }
