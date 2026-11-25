@@ -589,6 +589,16 @@ fn owner_active(attempt: &Directory, journal: &Journal, now: u64) -> Result<bool
     }
 }
 
+/// Whether a settlement owner is active; `None` means ownership is unreadable.
+pub(crate) fn settlement_owner_live(
+    attempt: &Directory,
+    scope: Scope,
+    clock: &dyn Clock,
+) -> Option<bool> {
+    let journal = read(attempt, scope).ok()?;
+    owner_active(attempt, &journal, now_ms(clock).ok()?).ok()
+}
+
 pub(crate) fn refusal(
     attempt: &Directory,
     scope: Scope,
@@ -3021,6 +3031,23 @@ mod tests {
         // Before the stall threshold, even such a holder is waited on.
         waiting(&attempt, scope(), reason, false, &clock)?;
         assert_eq!(read(&attempt, scope())?.recovery_failures, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn settlement_owner_probe_reports_live_free_and_unknown() -> TestResult {
+        let clock = clock();
+        let temp = tempfile::tempdir()?;
+        let attempt = Directory::open_anchor(temp.path())?;
+        assert_eq!(
+            settlement_owner_live(&attempt, scope(), &clock),
+            Some(false)
+        );
+        let driver = Guard::claim(&attempt, scope(), &clock)?.ok_or("driver")?;
+        assert_eq!(settlement_owner_live(&attempt, scope(), &clock), Some(true));
+        drop(driver);
+        std::fs::write(temp.path().join(FILE), b"not a journal")?;
+        assert_eq!(settlement_owner_live(&attempt, scope(), &clock), None);
         Ok(())
     }
 
