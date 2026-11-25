@@ -816,7 +816,7 @@ mod tests {
         let report = f
             .recovery
             .end_recorded_orphans_with(&world, &world, Duration::ZERO)?;
-        assert_eq!(report.stopped, vec![tail]);
+        assert_eq!(report.stopped, vec![tail.clone()]);
         assert!(report.unproven.is_empty() && report.survivors.is_empty());
         assert_eq!(world.signals.borrow().as_slice(), [(84322, false)]);
         // No exit is invented and the reservation stays for the normal proof.
