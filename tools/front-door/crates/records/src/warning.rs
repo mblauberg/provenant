@@ -159,6 +159,9 @@ pub const PRIVATE_GIT_RETAINED: WarningCode = WarningCode("PRIVATE_GIT_RETAINED"
 pub const STRAY_WORK_CHECK_FAILED: WarningCode = WarningCode("STRAY_WORK_CHECK_FAILED");
 /// Stray lane work was observed in the primary checkout.
 pub const STRAY_LANE_WORK: WarningCode = WarningCode("STRAY_LANE_WORK");
+/// The primary checkout moved while the bound branch advanced; the move is not
+/// attributed to the lane and is left intact.
+pub const PRIMARY_MOVED_UNATTRIBUTED: WarningCode = WarningCode("PRIMARY_MOVED_UNATTRIBUTED");
 /// The sandbox was unavailable; the environment fallback was used.
 pub const SANDBOX_UNAVAILABLE: WarningCode = WarningCode("SANDBOX_UNAVAILABLE");
 /// Lane priority was unavailable; the compiled default was used.

@@ -286,22 +286,30 @@ head, and every read-only lane, keeps the fatal mismatch decision.
 ## Stray lane work
 
 A writer's work is the commits on its bound branch. At settlement, once the terminal check
-passes, the host flags stray work only when (a) the primary checkout now sits on a branch that
+passes, the host observes stray work only when (a) the primary checkout now sits on a branch that
 did not exist at launch, or (b) commits reachable from the primary's HEAD or a new or advanced
 local branch are reachable from none of the launch tips, the current remote-tracking tips that
-existed at launch, or any other linked worktree's HEAD. The attempt then settles `review_required`
-with the `stray_work` signal, failed as a graph outcome so dependants stay held, and the reason
-names the branch or commits, the primary checkout and the bound worktree.
+existed at launch, or any other linked worktree's HEAD. How the lane settles depends on where its
+own work is:
+
+- The bound branch tip differs from the tip sealed at launch: the lane worked in the right place.
+  The primary move is not attributed to it, so settlement warns naming the new primary HEAD and
+  the lane still settles `succeeded`. The move is left intact; no `stray_work` signal is raised.
+- The bound branch stayed at base: the work may be in the primary checkout, so the attempt settles
+  `review_required` with the `stray_work` signal, failed as a graph outcome so dependants stay
+  held. The reason names the branch or commits, the primary checkout and the bound worktree.
 
 Nothing else is reported: a primary that merely moved is no finding, and a missing position record
 or a comparison that cannot run warns while the lane still settles. Only host Git facts decide
 this; handoff prose is never parsed. A lane with uncommitted edits keeps its `uncommitted`
-outcome.
+outcome. The reason text states only observed facts and never claims the bound branch gained no
+commits.
 - Why: settlement must not say `succeeded` for a lane whose work sits on a stray branch in the
-  primary checkout while its bound worktree stays at base, nor blame a lane for a pull the owner
-  ran. Fetched tips and other worktrees' heads account for ordinary moves; an owner commit in the
-  primary during an attempt is still flagged, because Git cannot tell it from a lane's. The check
-  asks for review and never refuses a lane.
+  primary checkout while its bound worktree stays at base, nor fail a lane whose bound branch did
+  advance for a primary move another process made. Git cannot attribute that move to any actor, so
+  the bound-branch tip is the evidence: work there means the lane kept to its scope, and the move
+  is surfaced as a warning for the chair. Fetched tips and other worktrees' heads account for
+  ordinary moves. The check asks for review or warns; it never refuses a lane.
 - Owner: `crates/run/src/writer.rs`, `crates/run/src/holder.rs`
 
 ## Guardian loss proof

@@ -1363,6 +1363,37 @@ struct PrimaryPin {
 pub(crate) struct StrayWork {
     /// The finding: the stray branch or commits and where they were made.
     pub note: String,
+    /// The bound branch advanced during the attempt, so the lane's work is on
+    /// the branch it was bound to. A primary move it cannot attribute to the
+    /// lane is then a warning rather than a failed settlement.
+    pub bound_branch_advanced: bool,
+    /// The primary checkout's HEAD at settlement, named in the warning.
+    pub primary_head: String,
+}
+
+/// How settlement treats a primary move that no launch ref, fetched tip or
+/// other worktree accounts for. Work on the bound branch is the lane doing its
+/// job: the move is someone else's and is left intact with a warning. Without
+/// it the work may be in the primary checkout, so the lane is held for review.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum StrayDisposition {
+    Warn { note: String },
+    Review { note: String },
+}
+
+impl StrayWork {
+    pub(crate) fn disposition(self) -> StrayDisposition {
+        if self.bound_branch_advanced {
+            StrayDisposition::Warn {
+                note: format!(
+                    "the primary checkout moved to {} during the attempt; the bound branch advanced, so the move cannot be attributed to this lane and is left intact",
+                    self.primary_head
+                ),
+            }
+        } else {
+            StrayDisposition::Review { note: self.note }
+        }
+    }
 }
 
 /// Commits the report lists and the cap on how many Git is asked for.
@@ -1380,6 +1411,8 @@ struct StrayPlan {
     tips: Vec<GitOid>,
     tip_names: Vec<String>,
     excluded: Vec<GitOid>,
+    bound_branch_advanced: bool,
+    primary_head: String,
 }
 
 fn short_branch(name: &str) -> &str {
@@ -1388,10 +1421,25 @@ fn short_branch(name: &str) -> &str {
 
 impl StrayPlan {
     fn new(
+        branch: &str,
         launch_head: Option<&str>,
         launch: &std::collections::BTreeMap<String, GitOid>,
         now: &crate::objects::PrimaryRefs,
     ) -> Self {
+        // A tip different from the one sealed at launch means the lane put its
+        // work on the branch it was bound to. Git cannot attribute the primary
+        // move to any actor, so this is the evidence that settles the question.
+        let bound_branch_advanced = now
+            .refs
+            .get(branch)
+            .is_some_and(|tip| launch.get(branch) != Some(tip));
+        let primary_head = now.head.map_or_else(
+            || "an unborn HEAD".to_owned(),
+            |head| match now.head_ref.as_deref() {
+                Some(name) => format!("{} ({})", head, short_branch(name)),
+                None => format!("{head} (a detached HEAD)"),
+            },
+        );
         let new_branch = now
             .head_ref
             .as_deref()
@@ -1430,6 +1478,8 @@ impl StrayPlan {
             tips,
             tip_names,
             excluded,
+            bound_branch_advanced,
+            primary_head,
         }
     }
 
@@ -1467,6 +1517,8 @@ impl StrayPlan {
                 findings.join("; "),
                 worktree.display()
             ),
+            bound_branch_advanced: self.bound_branch_advanced,
+            primary_head: self.primary_head.clone(),
         })
     }
 }
@@ -3913,7 +3965,7 @@ impl WriterLaunch {
         let Some((checkout, now)) = self.primary_state(git)? else {
             return Ok(None);
         };
-        let plan = StrayPlan::new(launch_head, launch_refs, &now);
+        let plan = StrayPlan::new(self.branch.as_str(), launch_head, launch_refs, &now);
         let repo = self.worktree.repo();
         let mut excluded = plan.excluded.clone();
         excluded.extend(crate::objects::linked_worktree_heads(git, repo)?);

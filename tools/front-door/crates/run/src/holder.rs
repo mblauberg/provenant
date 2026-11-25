@@ -388,6 +388,143 @@ mod identity_policy_tests {
         Ok(())
     }
 
+    // Spec: docs/specs/run-settlement.md#stray-lane-work
+    #[test]
+    fn committed_writer_succeeds_with_warning_when_primary_moves_independently()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
+        use std::os::unix::fs::DirBuilderExt;
+
+        let fixture = PrepareFixture::new()?;
+        let execution = registered_landed_writer_fixture(&fixture)?;
+        let (clock, cancel) = (crate::tests::clock(), CancelToken::new());
+        let call = crate::tests::call(&clock, &cancel);
+        let store = RunStore::open(&execution, &call)?;
+        let mut run = crate::tests::input();
+        run.request.task.writer = Some(fixture.writer.clone());
+        store.create(&run, &call)?;
+        let id = run.attempt_id;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        let record = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+        let scope = RunStore::scope(&record);
+        let attempt = store.attempt_dir(id, false)?;
+        let mut launch = crate::prepare_writer(
+            &fixture.writer,
+            execution.state_root.as_path(),
+            execution.project_id,
+        )?;
+        launch.snapshot(
+            execution.state_root.as_path(),
+            &attempt,
+            scope,
+            &Policy::default(),
+        )?;
+        let candidate = store.temporary_path(id, &call)?.join("candidate-0");
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&candidate)?;
+        let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+        crate::objects::prepare_bound(
+            &git,
+            launch.worktree.repo(),
+            &attempt,
+            &candidate,
+            launch.branch.as_str(),
+            launch.base,
+        )?;
+        let pin = crate::objects::import_pin(scope.attempt, launch.base);
+        fixture.git(&["update-ref", &pin, &launch.base.to_string()])?;
+        fixture.commit(&fixture.writer.worktree, "writer work")?;
+        let head =
+            crate::objects::resolve_ref(&git, launch.worktree.repo(), launch.branch.as_str())?;
+        assert_ne!(head, launch.base);
+        std::fs::write(
+            candidate.join("git-common").join(launch.branch.as_str()),
+            format!("{head}\n"),
+        )?;
+        fixture.commit(&fixture.writer.project, "independent primary work")?;
+        let primary_head = provenant_os::fixture::git_command_at(&git)
+            .env_clear()
+            .envs(fixture.environment.iter().map(|(key, value)| (key, value)))
+            .current_dir(&fixture.writer.project)
+            .args(["rev-parse", "HEAD"])
+            .output()?;
+        assert!(primary_head.status.success());
+        let primary_head = String::from_utf8(primary_head.stdout)?.trim().to_owned();
+        let (directory, binding) = launch.custody.take().ok_or("writer custody")?;
+        let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
+            directory.try_clone()?,
+            scope,
+            binding,
+            call.lock_budget(),
+            &cancel,
+            &clock,
+        )?;
+        drop(provenant_supervisor::fixture::bind_writer_attempt(
+            lease, &attempt,
+        )?);
+        crate::artifacts::seal(
+            &attempt,
+            "launch.json",
+            &crate::db::bytes(&serde_json::json!({
+                "schema_version": 1, "scope": scope, "requester": execution.actor_id,
+            }))?,
+            RECORD_LIMIT,
+        )?;
+        let mut observed = crate::tests::exit();
+        observed.scope = scope;
+        crate::dispatch_tests::seal_exit(&store, &observed)?;
+        let fake = crate::dispatch_tests::Fake::with_observed(
+            Some(crate::tests::route()),
+            Some(Outcome::Succeeded),
+        )
+        .with_answer(Some(crate::dispatch_tests::DONE_ANSWER.into()), Some(true));
+        let (finished, warnings) = provenant_records::warning::capture(|| {
+            store.finish(id, &attempt, &observed, &fake, &call)
+        });
+        let finished = finished?;
+        assert!(
+            matches!(
+                finished.state,
+                AttemptState::Terminal {
+                    outcome: Outcome::Succeeded,
+                    ..
+                }
+            ),
+            "writer must succeed: {:?}",
+            finished.state
+        );
+        if let AttemptState::Terminal { reason, .. } = &finished.state {
+            let reason = reason.as_deref().ok_or("primary move reason")?;
+            assert!(reason.contains(&primary_head), "{reason}");
+            assert!(!reason.contains("gained no commits"), "{reason}");
+        }
+        assert!(
+            warnings.iter().any(|warning| {
+                warning.code == provenant_records::warning::PRIMARY_MOVED_UNATTRIBUTED.as_str()
+                    && warning.message.contains(&primary_head)
+            }),
+            "warning must identify the primary head: {warnings:?}"
+        );
+        let after = provenant_os::fixture::git_command_at(&git)
+            .env_clear()
+            .envs(fixture.environment.iter().map(|(key, value)| (key, value)))
+            .current_dir(&fixture.writer.project)
+            .args(["rev-parse", "HEAD"])
+            .output()?;
+        assert!(after.status.success());
+        assert_eq!(String::from_utf8(after.stdout)?.trim(), primary_head);
+        Ok(())
+    }
+
     // Spec: docs/specs/run-settlement.md#identity-mismatch-keeps-writer-work
     #[test]
     fn first_settlement_keeps_a_writers_commit_under_a_mismatched_identity()
@@ -3316,9 +3453,11 @@ impl RunStore {
                             None => note,
                         });
                     }
-                    // Work left in the primary checkout (a branch that did not
-                    // exist at launch, or commits nothing else accounts for) is
-                    // not a success, whatever the bound branch holds. Nothing
+                    // An unaccounted move in the primary checkout warns when
+                    // the lane committed on its bound branch: that is work in
+                    // the right place, and Git cannot attribute the move to the
+                    // lane. Without bound-branch commits the work may be in the
+                    // primary checkout, so the lane is held for review. Nothing
                     // here refuses the lane.
                     if decoded.outcome == Outcome::Succeeded {
                         let stray = self.writer_stray(
@@ -3333,9 +3472,26 @@ impl RunStore {
                         let finding = match stray {
                             Ok(None) => None,
                             Ok(Some(stray)) => {
-                                decoded.outcome = Outcome::ReviewRequired;
-                                stray_work = true;
-                                Some(stray.note)
+                                use provenant_records::warning::{
+                                    PRIMARY_MOVED_UNATTRIBUTED, STRAY_LANE_WORK, Warning, warn,
+                                };
+                                // Spec: docs/specs/cli.md#warnings-are-typed-values
+                                let finding = match stray.disposition() {
+                                    crate::writer::StrayDisposition::Warn { note } => {
+                                        warn(Warning::new(
+                                            PRIMARY_MOVED_UNATTRIBUTED,
+                                            note.clone(),
+                                        ));
+                                        note
+                                    }
+                                    crate::writer::StrayDisposition::Review { note } => {
+                                        decoded.outcome = Outcome::ReviewRequired;
+                                        stray_work = true;
+                                        warn(Warning::new(STRAY_LANE_WORK, note.clone()));
+                                        note
+                                    }
+                                };
+                                Some(finding)
                             }
                             Err(error) => {
                                 warn_stray_check(&error);
@@ -3343,9 +3499,6 @@ impl RunStore {
                             }
                         };
                         if let Some(finding) = finding {
-                            use provenant_records::warning::{STRAY_LANE_WORK, Warning, warn};
-                            // Spec: docs/specs/cli.md#warnings-are-typed-values
-                            warn(Warning::new(STRAY_LANE_WORK, finding.clone()));
                             decoded.reason = Some(match decoded.reason.take() {
                                 Some(reason) => format!("{reason}; {finding}"),
                                 None => finding,

@@ -376,7 +376,7 @@ impl LaneRow {
                     Some("the writer has uncommitted changes; preserve or commit the edits")
                 }
                 SettlementReason::StrayWork => Some(
-                    "the primary checkout moved and the bound branch gained no commits; the work may be in the primary checkout",
+                    "the primary checkout moved with work no launch ref or other worktree reaches; the lane's work may be in the primary checkout",
                 ),
                 _ => None,
             };
