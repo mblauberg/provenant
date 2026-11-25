@@ -1572,6 +1572,184 @@ fn unanswered_peer_submission_is_recorded_as_launch_uncertainty() -> Result {
 }
 
 #[test]
+fn remote_smoke_executes_with_and_without_writer_and_stages_fixture() -> Result {
+    let mut rig = TestRig::new()?;
+    let cleanup = rig.process_cleanup();
+    let executor = provenant_os::exec::SystemExecutor::new(1)?;
+    let cancel = provenant_core::CancelToken::new();
+    if let Err(error) = provenant_confinement::permissions::system_backend(
+        &provenant_confinement::permissions::BackendContext {
+            executor: &executor,
+            cancel: &cancel,
+            #[cfg(target_os = "macos")]
+            env: &[],
+        },
+    ) {
+        provenant_test_support::skip_sandbox_dependent_test(error.to_string())?;
+        return Ok(());
+    }
+
+    // Keep the submitted fixture different from the committed source so a
+    // provider reading the checkout instead of its staged file cannot pass.
+    std::fs::write(rig.project.join("fixture.txt"), "smoke base\n")?;
+    support::git(&rig, &["add", "fixture.txt"])?;
+    support::git(&rig, &["commit", "-qm", "smoke base"])?;
+    let base = support::git(&rig, &["rev-parse", "HEAD"])?;
+    std::fs::write(rig.project.join("fixture.txt"), "committed subject\n")?;
+    support::git(&rig, &["commit", "-qam", "smoke subject"])?;
+    let head = support::git(&rig, &["rev-parse", "HEAD"])?;
+    assert_ne!(base, head);
+    assert_eq!(support::git(&rig, &["merge-base", &base, &head])?, base);
+    std::fs::write(rig.project.join("fixture.txt"), "smoke fixture\n")?;
+
+    let bin = rig.root.join("provider/bin");
+    std::fs::create_dir_all(&bin)?;
+    std::fs::write(
+        bin.join("agy"),
+        r##"#!/bin/sh
+if [ "$1" = --version ]; then echo 'agy 1.0.0'; exit 0; fi
+while [ "$#" -gt 0 ] && [ "$1" != --print ]; do shift; done
+[ "$#" -gt 1 ] || exit 2
+shift
+task=${1#Read the file at }
+task=${task% first and treat its full contents as your task instructions.}
+if grep -q 'Read the supplied fixture' "$task"; then
+  fixture=$(sed -n 's/^Supplied fixture for this lane: \(.*\)\. Read it to answer the brief\.$/\1/p' "$task")
+  [ -n "$fixture" ] && [ "$(cat "$fixture")" = 'smoke fixture' ] || exit 3
+fi
+if grep -q 'Review the change at its pinned head through' "$task"; then
+  review_base=$(git rev-parse refs/provenant/review/base) || exit 5
+  review_head=$(git rev-parse HEAD) || exit 6
+  [ "$review_base" = "$SMOKE_EXPECTED_BASE" ] && [ "$review_head" = "$SMOKE_EXPECTED_HEAD" ] || exit 7
+  [ "$review_base" != "$review_head" ] && git merge-base --is-ancestor "$review_base" "$review_head" || exit 8
+fi
+if grep -q 'create exactly one file named smoke.txt' "$task"; then
+  printf 'smoke ok\n' > smoke.txt
+  git add smoke.txt && git commit -qm 'smoke fixture writer' || exit 4
+fi
+printf '%s\n' '{"event":"init","conversation_id":"fixture","init":{"model":"gemini-3.8-flash"}}'
+printf '%s\n' '{"event":"result","result":{"conversation_id":"fixture","status":"SUCCESS","response":"```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: PASS\n```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"fixture complete\",\"remaining\":[],\"decisions\":[],\"verify\":[]}\n```","error":null,"usage":{"input_tokens":0,"output_tokens":0}}}'
+"##,
+    )?;
+    std::fs::set_permissions(bin.join("agy"), std::fs::Permissions::from_mode(0o755))?;
+    std::fs::create_dir_all(rig.home.join("Library/Keychains"))?;
+    std::fs::write(
+        rig.home.join("Library/Keychains/login.keychain-db"),
+        "fixture",
+    )?;
+    rig.env.retain(|(key, _)| key != "PATH");
+    rig.env.push((
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", bin.display()).into(),
+    ));
+    rig.env
+        .push(("SMOKE_EXPECTED_BASE".into(), base.clone().into()));
+    rig.env.push(("SMOKE_EXPECTED_HEAD".into(), head.into()));
+    let peer = loopback_peer(&mut rig)?;
+    let diff_base = format!("diff_base={base}");
+    for (name, writer) in [("smoke-skipped", false), ("smoke-provisioned", true)] {
+        let mut args = vec![
+            "smoke",
+            "--host",
+            "workshop",
+            "--model",
+            "agy/gemini-3.8-flash",
+            "--set",
+            &diff_base,
+        ];
+        if writer {
+            args.extend(["--branch", "smoke/peer-test", "--base", "HEAD"]);
+        } else {
+            args.extend(["--set", "smoke-write=false"]);
+        }
+        args.extend(["--set", "smoke-retry=false", "--set", "smoke-steer=false"]);
+        let (status, launched) = launch_named_and_wait(&rig, &args, name, "30s")?;
+        assert_eq!(status, 0, "{launched}");
+        let settled = tick_until(
+            &rig,
+            name,
+            std::time::Duration::from_secs(60),
+            |checkpoint| {
+                checkpoint["nodes"].as_array().is_some_and(|nodes| {
+                    nodes.iter().all(|node| {
+                        matches!(
+                            node["state"].as_str(),
+                            Some("succeeded" | "skipped" | "failed" | "blocked")
+                        )
+                    })
+                })
+            },
+        )?;
+        let nodes = settled["data"]["checkpoint"]["nodes"]
+            .as_array()
+            .ok_or("nodes")?;
+        let read = nodes
+            .iter()
+            .find(|node| {
+                node["id"]
+                    .as_str()
+                    .is_some_and(|id| id.ends_with("task--read"))
+            })
+            .ok_or("read node")?;
+        assert_eq!(read["state"], "succeeded", "{settled}");
+        let reference = read["attempts"][0]["attempt_ref"]
+            .as_str()
+            .ok_or("read attempt")?;
+        assert!(reference.starts_with(&format!("{peer}/")), "{settled}");
+        let mut lenses = 0;
+        for review in nodes.iter().filter(|node| {
+            node["id"]
+                .as_str()
+                .is_some_and(|id| id.contains("review--"))
+                && node["attempts"]
+                    .as_array()
+                    .is_some_and(|attempts| !attempts.is_empty())
+        }) {
+            let reference = review["attempts"][0]["attempt_ref"]
+                .as_str()
+                .ok_or("review attempt")?;
+            let (host, attempt) = reference.split_once('/').ok_or("review reference")?;
+            assert_eq!(host, peer.to_string());
+            let prompt = std::fs::read_to_string(
+                rig.root
+                    .join("peer-state/attempts")
+                    .join(attempt)
+                    .join("prompt.md"),
+            )?;
+            if prompt.contains("Review the change at its pinned head through") {
+                lenses += 1;
+                // The provider only succeeds after resolving both expected
+                // commits in its own review view and checking ancestry.
+                assert_eq!(review["state"], "succeeded", "{settled}");
+            }
+        }
+        assert_eq!(lenses, 2, "{settled}");
+        let write = nodes
+            .iter()
+            .find(|node| {
+                node["id"]
+                    .as_str()
+                    .is_some_and(|id| id.ends_with("task--write"))
+            })
+            .ok_or("write node")?;
+        assert_eq!(
+            write["state"],
+            if writer { "succeeded" } else { "skipped" },
+            "{settled}"
+        );
+        if writer {
+            let reference = write["attempts"][0]["attempt_ref"]
+                .as_str()
+                .ok_or("writer attempt")?;
+            assert!(reference.starts_with(&format!("{peer}/")), "{settled}");
+        }
+    }
+    rig.assert_v1_root_untouched()?;
+    cleanup.disarm();
+    Ok(())
+}
+
+#[test]
 fn peer_dispatch_launches_a_large_argv_prompt() -> Result {
     let mut rig = TestRig::new()?;
     let cleanup = rig.process_cleanup();
