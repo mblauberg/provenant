@@ -718,10 +718,13 @@ fn remote_smoke_verify_carries_the_writer_branch_and_staged_fixture()
     std::fs::create_dir(&scratch)?;
     let calls = tmp.path().join("calls");
     let launcher = tmp.path().join("provenant");
+    // Check the staged fixture inside the launch, while smoke_project's
+    // ScratchDir is still alive: verify_smoke_with drops it on return and the
+    // directory is removed, so reading the path afterwards would always fail.
     std::fs::write(
         &launcher,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \" $* \" in *' run smoke '*)\n  printf '%s\\n' '{{\"node\":\"smoke/read\"}}' '{{\"node\":\"smoke/review\"}}' '{{\"node\":\"smoke/write\"}}'; printf '%s\\n' '{{\"status\":\"pending\"}}';;\n  *' wait '*|*' status '*) printf '%s\\n' '{{\"status\":\"complete\"}}';;\n  *) exit 77;;\nesac\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nargs=\"$*\"\nproject=\"\"\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    --project) project=\"$2\"; shift 2;;\n    *) shift;;\n  esac\ndone\ncase \" $args \" in\n  *' run smoke '*)\n    [ -n \"$project\" ] || exit 90\n    [ -f \"$project/fixture.txt\" ] || exit 91\n    grep -qx 'smoke fixture' \"$project/fixture.txt\" || exit 92\n    printf '%s\\n' '{{\"node\":\"smoke/read\"}}' '{{\"node\":\"smoke/review\"}}' '{{\"node\":\"smoke/write\"}}'; printf '%s\\n' '{{\"status\":\"pending\"}}';;\n  *' wait '*|*' status '*) printf '%s\\n' '{{\"status\":\"complete\"}}';;\n  *) exit 77;;\nesac\n",
             calls.display()
         ),
     )?;
@@ -757,17 +760,9 @@ fn remote_smoke_verify_carries_the_writer_branch_and_staged_fixture()
     assert!(run.contains(" --branch smoke/"), "{calls}");
     assert!(run.contains(" --base HEAD "), "{calls}");
     assert!(run.contains(" --set diff_base="), "{calls}");
-    let project = run
-        .split_once("--project ")
-        .and_then(|(_, rest)| rest.split_whitespace().next())
-        .ok_or("run names its project")?;
-    // The staged fixture is a real file in the scratch project the peer's
-    // read lane sources; verify its path and content before changing staging.
-    assert_eq!(
-        std::fs::read(std::path::Path::new(project).join("fixture.txt"))?,
-        b"smoke fixture\n",
-        "the smoke fixture is not visible at the path its brief names"
-    );
+    // The launch itself verified that the scratch project it names carries the
+    // staged fixture at the path its brief declares. That check has to happen
+    // during the run: the scratch is removed when verification ends.
     Ok(())
 }
 
