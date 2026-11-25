@@ -506,23 +506,54 @@ pub(super) fn apply_attempt_observation(
                         .iter()
                         .any(|warning| warning.starts_with(FINDINGS_INVALID))
                     && disposition_error.is_none();
-                // A writer that reports success with an unfinished handoff
-                // declared a stop; the one next-step decision answers it.
+                // A lane's outcome is a fact about the work it left and the
+                // handoff it sealed, not the stop path that reported it: commits
+                // ahead of the input head count whether or not they were pushed,
+                // and a done handoff closes the brief. A terminal cause or a
+                // partial signal cannot call a lane with new commits "no work"
+                // (#3988).
                 let handoff = result
                     .as_ref()
                     .and_then(|capture| capture.handoff.as_ref().ok())
                     .and_then(Option::as_ref);
-                let outcome = if matches!(
+                let commits_ahead = node.access == AccessMode::WorktreeWrite
+                    && commit
+                        .as_deref()
+                        .and_then(|head| GitOid::parse(head).ok())
+                        .zip(
+                            progress
+                                .source_commit
+                                .as_deref()
+                                .and_then(|base| GitOid::parse(base).ok()),
+                        )
+                        .is_some_and(|(head, base)| head != base);
+                let handoff_done = handoff.is_some_and(|handoff| !handoff.unfinished());
+                let stop_classifiable = matches!(
                     outcome,
                     AttemptOutcome::Succeeded
                         | AttemptOutcome::ReviewRequired
                         | AttemptOutcome::DeclaredStop
                         | AttemptOutcome::StoppedNoWork
-                ) && launched
+                );
+                let completed_by_evidence = launched
+                    && commits_ahead
+                    && handoff_done
+                    && matches!(
+                        settlement_reason,
+                        None | Some(
+                            provenant_records::run::SettlementReason::Completed
+                                | provenant_records::run::SettlementReason::DeclaredStop
+                                | provenant_records::run::SettlementReason::CompletedBeforeBudget
+                        )
+                    );
+                let outcome = if stop_classifiable
+                    && launched
                     && node.access == AccessMode::WorktreeWrite
                     && handoff.is_some_and(|handoff| handoff.unfinished())
                 {
                     AttemptOutcome::DeclaredStop
+                } else if stop_classifiable && completed_by_evidence {
+                    AttemptOutcome::Succeeded
                 } else {
                     outcome
                 };
@@ -545,17 +576,10 @@ pub(super) fn apply_attempt_observation(
                         AttemptOutcome::StoppedNoWork | AttemptOutcome::DeclaredStop
                     )
                 {
-                    let committed = outcome == AttemptOutcome::DeclaredStop
-                        && commit
-                            .as_deref()
-                            .and_then(|head| GitOid::parse(head).ok())
-                            .zip(
-                                progress
-                                    .source_commit
-                                    .as_deref()
-                                    .and_then(|base| GitOid::parse(base).ok()),
-                            )
-                            .is_some_and(|(head, base)| head != base);
+                    // The observed refs decide committed work, not the stop
+                    // path that classified the outcome: a declared no-work
+                    // with new commits is still committed work.
+                    let committed = commits_ahead;
                     // One rule for every writer stop, committed, clean or with
                     // uncommitted edits: restart in place on the retained
                     // worktree, or return to the chair (see `next_step`).
@@ -572,10 +596,10 @@ pub(super) fn apply_attempt_observation(
                             handoff.status == provenant_records::handoff::HandoffStatus::Blocked
                         }) {
                             bounded(&handoff.note, MAX_ADVANCE_ERROR_BYTES)
-                        } else if outcome == AttemptOutcome::StoppedNoWork {
-                            "writer stopped with no work: no new commit".into()
                         } else if committed {
                             "writer declared stop after committing work".into()
+                        } else if outcome == AttemptOutcome::StoppedNoWork {
+                            "writer stopped with no work: no new commit".into()
                         } else {
                             "writer stopped before finishing".into()
                         },
@@ -634,9 +658,15 @@ pub(super) fn apply_attempt_observation(
                 }
                 compact_findings(&mut outputs, result.as_deref(), &upstream_findings);
                 progress.outputs = Some(outputs);
-                let node_outcome = settlement_reason
-                    .map(|reason| reason.node_outcome(attempt.stop))
-                    .unwrap_or(provenant_records::run::SettlementNodeOutcome::Failed);
+                let node_outcome = if completed_by_evidence {
+                    // Evidence of a done brief with new commits closes the node
+                    // even when the stop path recorded a failing settlement.
+                    provenant_records::run::SettlementNodeOutcome::Succeeded
+                } else {
+                    settlement_reason
+                        .map(|reason| reason.node_outcome(attempt.stop))
+                        .unwrap_or(provenant_records::run::SettlementNodeOutcome::Failed)
+                };
                 let outcome = if matches!(
                     outcome,
                     AttemptOutcome::Succeeded | AttemptOutcome::ReviewRequired
@@ -2270,10 +2300,12 @@ mod tests {
                 Some("stopped_no_work"),
             ),
             (AttemptOutcome::DeclaredStop, None, Some("stopped_no_work")),
+            // A stop path cannot call new commits "no work": the observed head
+            // decides the cause even when the outcome came from the stop path.
             (
                 AttemptOutcome::StoppedNoWork,
                 Some(head),
-                Some("stopped_no_work"),
+                Some("writer_declared_stop"),
             ),
         ] {
             let mut checkpoint =
@@ -2315,6 +2347,85 @@ mod tests {
                 expected,
                 "outcome={outcome:?} commit={commit:?}"
             );
+        }
+    }
+
+    /// Small: commits ahead of the input head and a done handoff finish the
+    /// brief, whatever stop path reported the lane. A stop cause cannot call
+    /// that work "no work" (#3988).
+    #[test]
+    fn pushed_refs_and_done_handoff_outrank_the_stop_path() {
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "graph_id": "writer-refs-outcome",
+            "nodes": [{"id":"one", "access":"worktree_write", "worktree":"/fixture/writer", "write_scope":["src"], "prompt":"do the work",
+                "routes":[{"adapter":"first", "model":"first/model"}]}]
+        }))
+        .unwrap();
+        let limits = crate::config::GraphLimits::default();
+        let (plan, positions) = validate_flat_plan(&document, &limits).unwrap();
+        let base = "1111111111111111111111111111111111111111";
+        let head = "2222222222222222222222222222222222222222";
+        let text = format!(
+            "```handoff\n{}\n```",
+            serde_json::json!({
+                "schema_version": 2, "status": "done", "note": "brief complete",
+                "remaining": [], "decisions": [], "verify": []
+            })
+        );
+        let mut capture = crate::result_capture::ResultCapture::new(None);
+        capture.push(text.as_bytes());
+        let mut result = capture.finish();
+        result.handoff = provenant_records::handoff::Handoff::from_turns(&text, &[]);
+        for (outcome, settlement_reason) in [
+            (
+                AttemptOutcome::DeclaredStop,
+                provenant_records::run::SettlementReason::DeclaredStop,
+            ),
+            (
+                AttemptOutcome::StoppedNoWork,
+                provenant_records::run::SettlementReason::DeclaredStop,
+            ),
+        ] {
+            let mut checkpoint =
+                initial_checkpoint(&document, &plan, "digest".into(), None, None, None);
+            let _ = start(&plan, &positions, &mut checkpoint, &limits);
+            checkpoint.nodes[0].source_commit = Some(base.into());
+            apply_attempt_observation(
+                &plan,
+                &mut checkpoint,
+                &positions,
+                0,
+                &limits,
+                AttemptObservation::Terminal {
+                    attempt_ref: Some("host/attempt".into()),
+                    outcome,
+                    launched: true,
+                    result: Some(Box::new(result.clone())),
+                    result_warning: None,
+                    result_path: None,
+                    branch: None,
+                    commit: Some(head.into()),
+                    stop: None,
+                    settlement_reason: Some(settlement_reason),
+                },
+                ObservationFacts {
+                    route_index: 0,
+                    usage: None,
+                    fallback_evidence: None,
+                    evidence_unreadable: false,
+                    fallback_evidence_retry: None,
+                    fallback_cause: None,
+                    skipped_accounts: Vec::new(),
+                    review_range: ReviewRange::Unknown,
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                checkpoint.nodes[0].attempts[0].outcome,
+                Some(AttemptOutcome::Succeeded),
+                "outcome={outcome:?}"
+            );
+            assert_eq!(checkpoint.nodes[0].advance_error_code, None);
         }
     }
 
