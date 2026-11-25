@@ -3947,7 +3947,7 @@ fn warn_abandon_stale_registration(
     use provenant_records::diagnostic::{Destination, shell_path};
     use provenant_records::warning::{ABANDON_STALE_WORKTREE_REGISTRATION, Warning, warn};
     let repair = shell_path(common, Destination::Local).map_or_else(
-        |_| "git worktree prune".to_owned(),
+        || "git worktree prune".to_owned(),
         |root| format!("git -C {root} worktree prune"),
     );
     // Spec: docs/specs/cli.md#warnings-are-typed-values
