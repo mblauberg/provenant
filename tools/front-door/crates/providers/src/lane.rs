@@ -2379,6 +2379,36 @@ mod tests {
     }
 
     #[test]
+    fn restrictive_gh_wrappers_parse_in_system_shell() -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_config::PrPolicy;
+        let policy = provenant_config::GithubPolicy::default();
+        for pr_policy in [PrPolicy::Never, PrPolicy::Draft] {
+            let script = gh_wrapper(
+                "/usr/bin/gh",
+                None,
+                "'/tmp/gh.count'",
+                &GhShim {
+                    policy: &policy,
+                    budget: 0,
+                    budget_source: "default",
+                    label_ci_warning: false,
+                    pr_policy,
+                    pr_source: "default",
+                },
+            );
+            let output = std::process::Command::new("/bin/sh")
+                .args(["-n", "-c", &script])
+                .output()?;
+            assert!(
+                output.status.success(),
+                "{pr_policy:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn the_gh_wrapper_enforces_the_lane_pull_request_policy()
     -> Result<(), Box<dyn std::error::Error>> {
         use provenant_config::PrPolicy;
