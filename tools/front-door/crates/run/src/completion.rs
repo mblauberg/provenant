@@ -722,6 +722,9 @@ pub struct PreambleExtras {
     pub brief: Option<BriefPreamble>,
     /// Which role this lane plays, for the preamble's role filters.
     pub role: BriefRole,
+    /// The effective `lanes.pr` policy and its source. Writers state it in
+    /// their preamble so the lane knows which pull-request writes are allowed.
+    pub pr_policy: Option<crate::ResolvedPrPolicy>,
 }
 
 /// Format an applied route without repeating a provider already on the model.
@@ -795,8 +798,8 @@ fn slot_guidance(cap: Option<BuildCap>) -> String {
 pub const READING_GUIDANCE: &str = "Reading: locate before you read. Search with line numbers (`rg -n`), then read a bounded range of the lines you need; avoid whole-file `cat` or `sed` reads and unbounded `git diff` or `rg` output. Everything you print stays in your context and is paid for again on every later turn.\n";
 
 /// The text placed before a lane's task: model policy, then for writers
-/// (`ci_scope` is `Some`) the build-slot rule, the CI scope and the gh
-/// budget, then the handoff file and the reading rule.
+/// (`ci_scope` is `Some`) the build-slot rule, the CI scope, the gh budget and
+/// the pull-request policy, then the handoff file and the reading rule.
 pub fn lane_preamble(
     model_guidance: &str,
     limits: &provenant_records::LaneLimits,
@@ -811,10 +814,6 @@ pub fn lane_preamble(
         &PreambleExtras::default(),
     )
 }
-
-/// Which pull request command a lane runs: its own attempt is still running,
-/// so `provenant pr open` (settled attempts only) refuses it.
-const PULL_REQUEST_GUIDANCE: &str = "Pull request: open it from inside the lane with `gh pr create --body-file FILE` against a filled copy of the pull request template; `provenant pr open` is for after settlement, not for a running lane.\n";
 
 pub fn lane_preamble_with(
     model_guidance: &str,
@@ -837,6 +836,7 @@ pub fn lane_preamble_with(
         .unwrap_or_default();
     let writer = ci_scope
         .map(|scope| {
+            let pr = extras.pr_policy.unwrap_or_default().preamble();
             let budget = limits
                 .gh_invocations
                 .as_ref()
@@ -859,7 +859,7 @@ pub fn lane_preamble_with(
                 .map(LaneLocation::preamble)
                 .unwrap_or_default();
             format!(
-                "{location}{verification}In a shared worktree, commit only your own paths with `git commit -- <paths>`; coordinate overlapping edits with the owning lane.\n{}{}{budget}{PULL_REQUEST_GUIDANCE}",
+                "{location}{verification}In a shared worktree, commit only your own paths with `git commit -- <paths>`; coordinate overlapping edits with the owning lane.\n{}{}{budget}{pr}",
                 slot_guidance(extras.build_cap),
                 scope.preamble()
             )

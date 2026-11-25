@@ -2654,6 +2654,7 @@ impl Factory {
                         "budget_policy": policy,
                         "gh_budget": provenant_run::gh_budget(&profile),
                         "ci_scope": provenant_run::ResolvedCiScope::resolve(&profile).receipt(),
+                        "pr_policy": provenant_run::ResolvedPrPolicy::resolve(&profile).receipt(),
                     }));
                 }
             }

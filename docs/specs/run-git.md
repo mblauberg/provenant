@@ -84,5 +84,6 @@ reused only for the delivered head and expected base.
 
 GitHub authority stays the user's. Credential selection has one host seam, a failed mint does not
 fall back, and token bytes are never recorded. Project GitHub policy is an advisory guard, not a
-security boundary.
+security boundary; `lanes.pr` is likewise a tool-policy control on the lane's `gh`, not an
+authority boundary, and host-side publication after settlement is unaffected.
 - Why: a lane must not gain authority through an implicit credential fallback.

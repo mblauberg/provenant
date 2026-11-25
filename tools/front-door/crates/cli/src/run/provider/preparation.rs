@@ -3350,24 +3350,25 @@ pub(super) fn prepare_candidates_inner(
         .flatten();
     // Let the host login lookup diagnose missing credentials, including relocated
     // stores and keychain logins, rather than guessing from the ambient home.
+    let pr_policy = run::ResolvedPrPolicy::resolve(&task.profile);
     let publishing = publishing_requested(
         task.access.network(true) == NetworkAccess::Open,
         &task.profile.knobs,
     );
-    let publishing_gh = if publishing {
-        match publishing_executable(&locate) {
-            Ok(gh) => Some(gh),
-            Err(cause) => {
+    // The PR policy mediates gh independently of whether credentials are published.
+    let policy_gh = match publishing_executable(&locate) {
+        Ok(gh) => Some(gh),
+        Err(cause) => {
+            if publishing {
                 warn(Warning::new(
                     provenant_records::warning::GH_PUBLISHING_UNAVAILABLE,
                     format!("GitHub publishing unavailable: {cause}"),
                 ));
-                None
             }
+            None
         }
-    } else {
-        None
     };
+    let publishing_gh = policy_gh.as_ref().filter(|_| publishing);
     let git_context = task
         .base
         .as_deref()
@@ -3946,8 +3947,7 @@ pub(super) fn prepare_candidates_inner(
     let mut gh_login: super::gh_auth::LoginCache = None;
     // Whether a workflow in this checkout runs on pull request label events;
     // the gh wrapper then says a label change starts CI (#3270).
-    let label_ci_warning =
-        publishing_gh.is_some() && provenant_config::label_events_trigger_ci(&cwd);
+    let label_ci_warning = policy_gh.is_some() && provenant_config::label_events_trigger_ci(&cwd);
     loop {
         if queue.is_empty() {
             let next = if named_pool {
@@ -4922,6 +4922,7 @@ pub(super) fn prepare_candidates_inner(
             build_cap: Some(run::BuildCap::from(&build_class)),
             brief: Some(brief),
             role,
+            pr_policy: Some(pr_policy),
         };
         let text = format!(
             "{}\n{text}",
@@ -5440,7 +5441,7 @@ pub(super) fn prepare_candidates_inner(
                 false,
             );
         }
-        let gh_policy = match publishing_gh
+        let gh_policy = match policy_gh
             .as_ref()
             .map(|_| provenant_config::GithubPolicy::read(&roots.state, project_id))
         {
@@ -5448,7 +5449,7 @@ pub(super) fn prepare_candidates_inner(
             Some(Ok(policy)) => policy,
             // Sandboxed publishing refuses an unreadable policy: its selected
             // credential restrictions cannot be applied.
-            Some(Err(error)) if sandbox.effective => {
+            Some(Err(error)) if sandbox.effective && publishing => {
                 return Err(launch_policy.boundary_error(
                     "PREPARATION_PREPARE_WITH_CREDENTIALS",
                     provenant_records::policy::Facts::violation(error.to_string()),
@@ -5473,11 +5474,10 @@ pub(super) fn prepare_candidates_inner(
             budget: gh_budget.map_or(0, |limit| limit.value),
             budget_source: gh_budget.map_or("default", |limit| limit.source.as_str()),
             label_ci_warning,
+            pr_policy: pr_policy.value,
+            pr_source: pr_policy.source.as_str(),
         };
-        if let Some(gh) = publishing_gh
-            .as_ref()
-            .filter(|_| sandbox.effective && gh_permitted)
-        {
+        if let Some(gh) = publishing_gh.filter(|_| sandbox.effective && gh_permitted) {
             // Resolve the login before composing gh's wrapper: token launches
             // use a private empty config directory, independent of host links.
             gh_attempted = true;
@@ -5509,23 +5509,28 @@ pub(super) fn prepare_candidates_inner(
                 continue;
             }
             gh_selection = super::gh_auth::Selection::new(delivery, true);
-        } else if let Some(gh) = publishing_gh.as_ref().filter(|_| !sandbox.effective) {
-            // An unsandboxed lane keeps the user's own gh login; the counting
-            // wrapper still fronts gh on its PATH. A wrapper that cannot be
-            // installed leaves gh unmediated, which the receipt says. Adapters
-            // may re-point XDG_CONFIG_HOME at private state, so gh is pinned to
-            // the host's own configuration directory in the lane environment
-            // (surviving a PATH that a shell profile reorders) and in the shim.
+        } else if let Some(gh) = policy_gh.as_ref() {
+            // Native lanes retain their ambient login. Sandboxed lanes use
+            // their existing config without receiving a host login here.
             let host_config =
                 super::gh_auth::HostConfig::resolve(&home, &|key| host_provider_var(registry, key));
-            host_config.pin(&mut spec.env);
-            let mediated = match spec.configure_gh_shim(scratch, gh, &host_config.path, &gh_shim) {
+            let gh_config = if sandbox.effective {
+                spec.env
+                    .iter()
+                    .find(|(key, _)| key == "GH_CONFIG_DIR")
+                    .map(|(_, value)| PathBuf::from(value))
+                    .unwrap_or_else(|| home.join(".config/gh"))
+            } else {
+                host_config.pin(&mut spec.env);
+                host_config.path.clone()
+            };
+            let mediated = match spec.configure_gh_shim(scratch, gh, &gh_config, &gh_shim) {
                 Ok(()) => true,
                 Err(error) => {
                     if let provenant_records::policy::Effect::Warn(warning) = launch_policy.check(
                         "PREPARATION_GH_SHIM_NONE",
                         provenant_records::policy::Facts::violation(format!(
-                            "{label}: gh wrapper unavailable, gh runs uncounted: {error}"
+                            "{label}: gh wrapper unavailable, gh runs unmediated: {error}"
                         )),
                     ) {
                         warn(warning);
@@ -5533,10 +5538,14 @@ pub(super) fn prepare_candidates_inner(
                     false
                 }
             };
-            gh_selection = super::gh_auth::Selection::new(
-                super::gh_auth::Delivery::Ambient(host_config),
-                mediated,
-            );
+            if sandbox.effective {
+                gh_selection.mediated = mediated;
+            } else {
+                gh_selection = super::gh_auth::Selection::new(
+                    super::gh_auth::Delivery::Ambient(host_config),
+                    mediated,
+                );
+            }
         }
         if git_context.is_some()
             && let Some(argument) = adapter_spec.and_then(|spec| spec.context_directory_arg)
@@ -5816,18 +5825,17 @@ pub(super) fn prepare_candidates_inner(
         };
         // Resolve gh credentials on the host, where a keychain login is
         // available. The token travels only in the live launch environment.
-        let reader_gh = sandbox.effective
+        let reader_gh = publishing
+            && sandbox.effective
             && github_auth_permitted(&plan, &spec.profile.spec)
             && adapter_spec.is_some_and(|spec| spec.github_auth.is_some());
-        if let Some(gh) = publishing_gh
-            .clone()
-            .or_else(|| reader_gh.then(|| locate("gh").ok()).flatten())
+        if let Some(gh) = policy_gh.as_ref()
             && reader_gh
             && !gh_attempted
         {
             let delivery = match super::gh_auth::inject(
                 &executor,
-                &gh,
+                gh,
                 &home,
                 &|key| host_provider_var(registry, key),
                 cancel,
@@ -5843,9 +5851,15 @@ pub(super) fn prepare_candidates_inner(
                     super::gh_auth::Delivery::None("login lookup failed".into())
                 }
             };
-            gh_selection = super::gh_auth::Selection::new(delivery, false);
+            gh_selection = super::gh_auth::Selection::new(delivery, gh_selection.mediated);
         }
         provider.github_credential = Some(serde_json::from_value(gh_selection.receipt())?);
+        provider.pr_policy = Some(provenant_records::run::PrPolicyReceipt {
+            value: pr_policy.value.as_str().into(),
+            source: pr_policy.source,
+            key: "lanes.pr".into(),
+            extra: Default::default(),
+        });
         if writer.is_some() {
             let scope = run::ResolvedCiScope::resolve(&task.profile);
             provider.ci_scope = Some(provenant_records::run::CiScopeReceipt {

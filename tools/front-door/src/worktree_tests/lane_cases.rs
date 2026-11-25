@@ -438,11 +438,9 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
         }
         let scratch = &confinement.plan.permissions().scratch.path;
         assert_eq!(scratch.join("publishing.gitconfig").exists(), publishing);
-        assert_eq!(scratch.join("bin/gh").exists(), publishing);
-        if publishing {
-            let gh_wrapper = fs::read_to_string(scratch.join("bin/gh"))?;
-            assert!(gh_wrapper.contains(&executable.display().to_string()));
-        }
+        // PR policy mediates gh independently of credential publishing.
+        let gh_wrapper = fs::read_to_string(scratch.join("bin/gh"))?;
+        assert!(gh_wrapper.contains(&executable.display().to_string()));
         assert!(
             launch
                 .environment

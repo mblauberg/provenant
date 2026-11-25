@@ -823,6 +823,8 @@ pub struct RouteRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ci_scope: Option<CiScopeReceipt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_policy: Option<PrPolicyReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox: Option<SandboxModeReceipt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox_admission: Option<SandboxAdmissionReceipt>,
@@ -1129,6 +1131,20 @@ pub struct GitHubCredentialReceipt {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CiScopeReceipt {
+    #[serde(default)]
+    pub value: String,
+    #[serde(default)]
+    pub source: crate::Layer,
+    #[serde(default)]
+    pub key: String,
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
+}
+
+/// The lane's effective pull-request policy and the layer that set it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PrPolicyReceipt {
     #[serde(default)]
     pub value: String,
     #[serde(default)]

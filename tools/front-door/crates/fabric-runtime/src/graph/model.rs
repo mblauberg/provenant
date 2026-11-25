@@ -464,6 +464,10 @@ pub struct AttemptSpec {
     /// inherits the run's and the host's setting. Advisory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ci_scope: Option<String>,
+    /// Pull-request policy for this node: `never`, `draft` or `allowed`.
+    /// Omitted inherits the run's and the host's `lanes.pr` setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr: Option<String>,
     /// The launch layer of the layered brief preamble: a file path carried as
     /// the `lanes.brief_preamble` knob for this node, recorded with its source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -544,6 +548,7 @@ impl AttemptSpec {
             capabilities: self.capabilities.clone(),
             build_heavy: self.build_heavy,
             ci_scope: self.ci_scope.clone(),
+            pr: self.pr.clone(),
             preamble_file: self.preamble_file.clone(),
             preset: self.preset.clone(),
             isolation: self.isolation.clone(),
@@ -617,6 +622,9 @@ impl AttemptSpec {
         if let Some(scope) = &self.ci_scope {
             knobs.push(format!("lanes.ci_scope={scope}"));
         }
+        if let Some(policy) = &self.pr {
+            knobs.push(format!("lanes.pr={policy}"));
+        }
         // The launch layer of the layered brief preamble. Carried as an
         // attempt input so it travels with the sealed graph and is recorded
         // with its source like any other launch knob.
@@ -651,6 +659,7 @@ impl AttemptSpec {
             && self.write_scope.is_empty()
             && self.policy_overrides.is_empty()
             && self.ci_scope.is_none()
+            && self.pr.is_none()
             && self.preamble_file.is_none()
             && self.preset.is_none()
             && self.isolation.is_none()

@@ -178,7 +178,7 @@ site = "cli/src/run/provider/preparation.rs#prepare_candidates"
 boundary = "none"
 strength = "warn"
 knob = "policy.PREPARATION_GITHUB_POLICY_NONE"
-justification = "An unsandboxed lane already holds the user's own gh login; an unreadable GitHub policy warns and its gh wrapper applies no deny list."
+justification = "When GitHub policy is unreadable outside sandboxed publishing, the gh wrapper warns and applies no deny list."
 
 [[rule]]
 code = "PREPARATION_GH_SHIM_NONE"
@@ -186,7 +186,7 @@ site = "cli/src/run/provider/preparation.rs#prepare_candidates"
 boundary = "none"
 strength = "warn"
 knob = "policy.PREPARATION_GH_SHIM_NONE"
-justification = "An unsandboxed lane whose counting gh wrapper cannot be installed runs gh unmediated; the receipt records it as unmediated."
+justification = "A lane whose gh wrapper cannot be installed may run gh unmediated; the receipt records it as unmediated."
 
 [[rule]]
 code = "PREPARATION_PREPARE_WRITER_DEPENDENCIES_NONE"

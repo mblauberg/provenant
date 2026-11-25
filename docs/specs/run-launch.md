@@ -299,6 +299,38 @@ alone, its own token helper entries are appended after the host configuration (a
 entry is filtered, copied or rewritten.
 - Why: lanes are free to see the host's Git settings, not a filtered subset (ADR 0035).
 
+### Lane pull requests
+
+`lanes.pr` resolves to `never` (the default), `draft` or `allowed`, and every
+effective value names the layer that set it. The default is `never`, so a leaf
+implement writer lane in a graph does not open a pull request; the chair owns
+publication after settlement. Host, launch and node settings opt a lane in.
+Set `attempt.pr = "draft"` or `"allowed"` on a graph node, or pass
+`--set attempt.pr=draft` at launch; the node override is reported as the launch
+source and takes precedence over the host setting.
+The provider's `gh` tool enforces the policy before forwarding a command,
+including when `lanes.publish=false`. Publishing controls credential delivery;
+an unsandboxed lane can still access ambient host credentials.
+`never` refuses `gh pr create|edit|close` (and the other PR mutations) and
+mutating forge API calls while leaving reads working. Repository and hostname
+selectors at command boundaries do not change the policy. Explicit GET or HEAD
+requests with query fields
+remain reads. Fields without an explicit method imply POST and are
+refused; `draft` adds `--draft`
+to `pr create`, permits edit, close, comment and review, and refuses promotion,
+merge, reopen, lock, unlock, update-branch, revert and forge writes. Unknown PR
+subcommands are refused under both restrictive policies until classified;
+`allowed` forwards unchanged. A missing or unknown value falls back to `never`.
+The effective value and source appear in the writer preamble, the launch
+receipt and `run --explain`. This is a cooperative policy mediating ordinary
+`gh` use, not a sandbox against a lane deliberately evading it: a lane that runs
+the real `gh` binary or another API
+client directly is outside it, and host-side delivery is unaffected.
+- Why: a leaf implement lane must not open a PR against the wrong base, and a
+  refusal must name the setting that caused it.
+- Owner: `crates/config/src/pr_policy.rs`, `crates/providers/src/lane.rs`,
+  `crates/run/src/completion.rs`, `cli/src/run/provider/preparation.rs`
+
 ### Lane scratch stays outside the attempt record
 
 A lane's temporary directory is `<state>/attempt-scratch/<attempt id>/tmp`: a sibling

@@ -32,6 +32,7 @@ pub use gc::{
 pub use github_policy::{
     DEFAULT_GH_BUDGET, GH_INVOCATIONS_FILE, GithubPolicy, label_events_trigger_ci,
 };
+pub use pr_policy::{KNOB as PR_KNOB, PrPolicy, ResolvedPrPolicy};
 mod harness;
 mod hooks;
 pub use hooks::{hook_plugin_source, lane_hook_settings, registrations as hook_registrations};
@@ -40,6 +41,7 @@ mod knobs;
 mod lane_history;
 mod loader;
 mod managed;
+mod pr_policy;
 pub use harness::{InstallSettings, TargetSettings, apply_install_config_with_domains};
 pub const NATIVE_CAPABILITY_UNAVAILABLE: &str = "native_capability_unavailable";
 pub mod overlays;
