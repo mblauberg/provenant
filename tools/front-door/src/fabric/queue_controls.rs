@@ -1019,7 +1019,7 @@ pub(super) fn checkpoint_has_pending_control(
 /// Validate the internal retry marker emitted only by the durable Accept
 /// workflow. The Accept ledger entry and matching exact-head disposition are
 /// the authority; the marker itself carries no authority.
-pub(super) fn authorize_accept_gate_retry(
+pub(super) fn authorise_accept_gate_retry(
     checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
     graph_id: &str,
     node_id: &str,
@@ -2086,15 +2086,15 @@ mod tests {
             "baseline_generation":2
         });
         let (key, digest) =
-            authorize_accept_gate_retry(&checkpoint, "queue-1", "gate", &marker).unwrap();
+            authorise_accept_gate_retry(&checkpoint, "queue-1", "gate", &marker).unwrap();
         assert!(key.starts_with("accept-gate-"));
         assert!(digest.starts_with("sha256:"));
-        assert!(authorize_accept_gate_retry(&checkpoint, "queue-1", "other", &marker).is_err());
-        assert!(authorize_accept_gate_retry(&checkpoint, "other-graph", "gate", &marker).is_err());
+        assert!(authorise_accept_gate_retry(&checkpoint, "queue-1", "other", &marker).is_err());
+        assert!(authorise_accept_gate_retry(&checkpoint, "other-graph", "gate", &marker).is_err());
 
         let mut stale = marker.clone();
         stale["baseline_generation"] = json!(3);
-        assert!(authorize_accept_gate_retry(&checkpoint, "queue-1", "gate", &stale).is_err());
+        assert!(authorise_accept_gate_retry(&checkpoint, "queue-1", "gate", &stale).is_err());
 
         let mut dropping = saved;
         let mut drop_intent = intent;
@@ -2103,7 +2103,7 @@ mod tests {
         dropping.intents.insert("drop-op".into(), drop_intent);
         let mut fenced = checkpoint;
         save_ledger(&mut fenced, &dropping).unwrap();
-        assert!(authorize_accept_gate_retry(&fenced, "queue-1", "gate", &marker).is_err());
+        assert!(authorise_accept_gate_retry(&fenced, "queue-1", "gate", &marker).is_err());
     }
 
     #[test]

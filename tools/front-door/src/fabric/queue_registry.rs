@@ -114,7 +114,7 @@ pub(super) struct QueueItemMarker {
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct AuthorizedQueueLaunch {
+pub(super) struct AuthorisedQueueLaunch {
     pub queue: QueueRecord,
     pub item: QueueItem,
     pub snapshot_item: QueueSnapshotItem,
@@ -349,7 +349,7 @@ impl QueueRegistry {
     /// Verify that a launch marker and replay request name an already reserved
     /// item in this project and execution directory. Raw queue metadata cannot
     /// enable the queue plan by itself.
-    pub(super) fn authorize_launch(
+    pub(super) fn authorise_launch(
         &self,
         project: &str,
         execution_directory: &str,
@@ -357,7 +357,7 @@ impl QueueRegistry {
         budget: WaitBudget,
         cancel: &CancelToken,
         clock: &dyn Clock,
-    ) -> Result<AuthorizedQueueLaunch, String> {
+    ) -> Result<AuthorisedQueueLaunch, String> {
         let marker: QueueItemMarker = serde_json::from_value(
             request
                 .get("queue_item")
@@ -412,7 +412,7 @@ impl QueueRegistry {
                 .get(item.snapshot_index)
                 .filter(|snapshot| snapshot.identity == item.identity)
                 .ok_or_else(|| "queue snapshot identity is corrupt".to_owned())?;
-            Ok(AuthorizedQueueLaunch {
+            Ok(AuthorisedQueueLaunch {
                 queue: queue.clone(),
                 item: item.clone(),
                 snapshot_item: snapshot_item.clone(),
@@ -429,7 +429,7 @@ impl QueueRegistry {
     )]
     pub(super) fn revalidate_launch(
         &self,
-        authorized: &AuthorizedQueueLaunch,
+        authorised: &AuthorisedQueueLaunch,
         project: &str,
         execution_directory: &str,
         checkpoint_exists: bool,
@@ -440,14 +440,14 @@ impl QueueRegistry {
         self.locked(budget, cancel, clock, |registry| {
             let queue = registry
                 .queues
-                .get(&authorized.queue.queue_id)
+                .get(&authorised.queue.queue_id)
                 .ok_or_else(|| {
                     "queue launch owner disappeared before graph admission".to_owned()
                 })?;
             if queue.project != project.to_ascii_lowercase()
-                || queue.project != authorized.queue.project
-                || queue.tracker != authorized.queue.tracker
-                || queue.submission_digest != authorized.queue.submission_digest
+                || queue.project != authorised.queue.project
+                || queue.tracker != authorised.queue.tracker
+                || queue.submission_digest != authorised.queue.submission_digest
             {
                 return Err("queue launch owner changed before graph admission".into());
             }
@@ -455,7 +455,7 @@ impl QueueRegistry {
                 .queues
                 .values()
                 .flat_map(|current| current.items.iter())
-                .filter(|item| item.graph_id == authorized.item.graph_id)
+                .filter(|item| item.graph_id == authorised.item.graph_id)
                 .count();
             if owners != 1 {
                 return Err("queue graph no longer has one durable launch owner".into());
@@ -464,8 +464,8 @@ impl QueueRegistry {
                 .items
                 .iter()
                 .find(|item| {
-                    item.identity == authorized.item.identity
-                        && item.graph_id == authorized.item.graph_id
+                    item.identity == authorised.item.identity
+                        && item.graph_id == authorised.item.graph_id
                 })
                 .ok_or_else(|| "queue launch item disappeared before graph admission".to_owned())?;
             let state_allowed = launch_state_allowed(item.state, checkpoint_exists);
@@ -475,13 +475,13 @@ impl QueueRegistry {
                 .get(item.snapshot_index)
                 .filter(|snapshot| snapshot.identity == item.identity);
             if !state_allowed
-                || item.snapshot_index != authorized.item.snapshot_index
-                || item.launch_request != authorized.item.launch_request
+                || item.snapshot_index != authorised.item.snapshot_index
+                || item.launch_request != authorised.item.launch_request
                 || item.execution_directory != execution_directory
-                || item.execution_directory != authorized.item.execution_directory
-                || item.adoption != authorized.item.adoption
-                || item.launch_digest != authorized.item.launch_digest
-                || snapshot_item != Some(&authorized.snapshot_item)
+                || item.execution_directory != authorised.item.execution_directory
+                || item.adoption != authorised.item.adoption
+                || item.launch_digest != authorised.item.launch_digest
+                || snapshot_item != Some(&authorised.snapshot_item)
             {
                 return Err("queue launch intent changed before graph admission".into());
             }
@@ -578,7 +578,7 @@ impl QueueRegistry {
                     submission.queue_id
                 ));
             }
-            sanitize_submission(&mut submission)?;
+            sanitise_submission(&mut submission)?;
             validate_submission(&submission)?;
             let items: Vec<QueueItem> = submission
                 .items
@@ -820,7 +820,7 @@ impl QueueRegistry {
         cancel: &CancelToken,
         clock: &dyn Clock,
     ) -> Result<(), String> {
-        let reason = sanitize_persisted_text(reason)?;
+        let reason = sanitise_persisted_text(reason)?;
         self.update_item(
             queue_id,
             identity,
@@ -1293,30 +1293,30 @@ fn is_sha256_digest(value: &str) -> bool {
     })
 }
 
-fn sanitize_submission(submission: &mut QueueSubmission) -> Result<(), String> {
-    submission.snapshot.selector = sanitize_persisted_text(&submission.snapshot.selector)?;
-    submission.snapshot.source = sanitize_persisted_text(&submission.snapshot.source)?;
+fn sanitise_submission(submission: &mut QueueSubmission) -> Result<(), String> {
+    submission.snapshot.selector = sanitise_persisted_text(&submission.snapshot.selector)?;
+    submission.snapshot.source = sanitise_persisted_text(&submission.snapshot.source)?;
     for item in &mut submission.items {
-        item.launch_request = sanitize_persisted_value(&item.launch_request)?;
+        item.launch_request = sanitise_persisted_value(&item.launch_request)?;
         item.adoption = item
             .adoption
             .as_ref()
-            .map(sanitize_persisted_value)
+            .map(sanitise_persisted_value)
             .transpose()?;
     }
     for item in &mut submission.snapshot.items {
-        item.data = sanitize_persisted_value(&item.data)?;
+        item.data = sanitise_persisted_value(&item.data)?;
     }
     Ok(())
 }
 
-fn sanitize_persisted_text(value: &str) -> Result<String, String> {
+fn sanitise_persisted_text(value: &str) -> Result<String, String> {
     let safe = provenant_redact::publication_text(value.as_bytes(), [])
         .map_err(|_| "queue input could not be sanitised for durable storage".to_owned())?;
     String::from_utf8(safe).map_err(|_| "queue input sanitisation produced invalid text".to_owned())
 }
 
-fn sanitize_persisted_value(value: &Value) -> Result<Value, String> {
+fn sanitise_persisted_value(value: &Value) -> Result<Value, String> {
     let encoded = serde_json::to_vec(value)
         .map_err(|_| "queue input could not be encoded for sanitisation".to_owned())?;
     let safe = provenant_redact::publication_text(&encoded, [])

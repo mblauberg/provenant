@@ -1,6 +1,6 @@
 //! Bind one authenticated queue item to the typed delivery graph.
 
-use super::{FacadeError, Factory, queue_registry::AuthorizedQueueLaunch};
+use super::{FacadeError, Factory, queue_registry::AuthorisedQueueLaunch};
 use provenant_fabric_runtime::{
     coordination::facade::NewWorktree,
     graph::{DeliveryAdoptionIntent, EscalateSpec, GraphDocument, GraphNode},
@@ -14,7 +14,7 @@ const CI_FINDINGS_MAX_COUNT: usize = 8;
 
 pub(super) fn bind_item(
     factory: &Factory,
-    launch: &AuthorizedQueueLaunch,
+    launch: &AuthorisedQueueLaunch,
     document: &mut GraphDocument,
     writer_base: Option<&str>,
 ) -> Result<(), FacadeError> {

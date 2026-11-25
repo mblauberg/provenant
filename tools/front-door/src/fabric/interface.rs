@@ -2177,7 +2177,7 @@ impl Factory {
             let execution_directory = self.cwd.to_string_lossy().into_owned();
             Some(
                 registry
-                    .authorize_launch(
+                    .authorise_launch(
                         &project,
                         &execution_directory,
                         &prepared,
@@ -3396,7 +3396,7 @@ impl Factory {
         &self,
         document: GraphDocument,
         input: &Value,
-        queue_launch: Option<&super::queue_registry::AuthorizedQueueLaunch>,
+        queue_launch: Option<&super::queue_registry::AuthorisedQueueLaunch>,
         budget: WaitBudget,
         cancel: &CancelToken,
         announce: Option<super::graph_execution::Announce<'_>>,
@@ -3723,7 +3723,7 @@ impl Factory {
                     ));
                 }
                 let (operation_key, operation_digest) =
-                    super::queue_controls::authorize_accept_gate_retry(
+                    super::queue_controls::authorise_accept_gate_retry(
                         checkpoint, &id, &node, marker,
                     )?;
                 let journal = journal.as_deref_mut().ok_or(FacadeError::StateCorrupt)?;

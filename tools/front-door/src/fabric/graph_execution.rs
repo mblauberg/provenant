@@ -1152,7 +1152,7 @@ impl Factory {
         announce: Option<Announce<'_>>,
         replayed: Option<&mut bool>,
         retry: Option<(&mut super::unified::GraphTarget, &Value)>,
-        queue_launch: Option<&super::queue_registry::AuthorizedQueueLaunch>,
+        queue_launch: Option<&super::queue_registry::AuthorisedQueueLaunch>,
     ) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError> {
         let facts = provenant_confinement::worktrees::RepoFacts::default();
         use provenant_fabric_runtime::coordination::input::ValidateInput;
@@ -1562,8 +1562,8 @@ impl Factory {
         };
         if let Some(document) = &document {
             let mut checkpoint = journal.load(id).map_err(graph_journal_error)?;
-            if let Some(authorized) = queue_launch {
-                if authorized.item.graph_id.as_str() != id {
+            if let Some(authorised) = queue_launch {
+                if authorised.item.graph_id.as_str() != id {
                     return Err(FacadeError::Conflict);
                 }
                 let execution_directory = self.cwd.to_string_lossy();
@@ -1572,7 +1572,7 @@ impl Factory {
                         .map_err(|_| FacadeError::Conflict)?;
                 registry
                     .revalidate_launch(
-                        authorized,
+                        authorised,
                         &self.context.identity.project.to_string(),
                         execution_directory.as_ref(),
                         checkpoint.is_some(),

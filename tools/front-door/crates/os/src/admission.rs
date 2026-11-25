@@ -8,7 +8,7 @@
 //! read-only descriptor. The descriptor is close-on-exec, so only the shim/holder
 //! holds the slot and a daemon or orphaned grandchild never keeps it. The
 //! kernel drops the lock when the process exits, even after SIGKILL.
-use crate::fs::{Directory, FsError, LockGuard, LockMode, Result};
+use crate::fs::{Directory, FsError, LockGuard, LockMode, PublishMode, Result};
 use crate::sys::fs as os;
 use serde::{Deserialize, Serialize};
 use std::ffi::{OsStr, OsString};
@@ -805,7 +805,11 @@ impl AdmissionSlots {
             let holder = read_ci_holder_cap(&self.dir, *index)?;
             if lease_cap.is_some() || locked {
                 active = active.saturating_add(1);
-                active_caps.push(lease_cap.or(holder).unwrap_or_else(legacy_ci_cap));
+                active_caps.push(
+                    lease_cap
+                        .or_else(|| holder.map(|marker| marker.cap))
+                        .unwrap_or_else(legacy_ci_cap),
+                );
             } else if let Some(stale) = holder {
                 let marker = ci_holder_marker(*index);
                 if let Ok(bytes) = self.dir.read_stable(&marker, CI_CAP_MAX_BYTES)
@@ -1127,6 +1131,17 @@ mod tests {
         directory.unlink(OsStr::new("slot-0.lease.json")).unwrap();
         directory.sync().unwrap();
         assert!(slots.try_acquire(1).unwrap().is_some());
+    }
+
+    #[test]
+    fn active_ci_holder_cap_constrains_later_requests() {
+        let _serial = serial();
+        let (_state, slots) = provisioned("ci", 2);
+        let holder = slots.try_acquire_ci(1, "project limit").unwrap().unwrap();
+
+        assert!(slots.try_acquire_ci(2, "launch limit").unwrap().is_none());
+        drop(holder);
+        assert!(slots.try_acquire_ci(2, "launch limit").unwrap().is_some());
     }
 
     #[test]

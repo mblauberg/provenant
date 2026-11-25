@@ -38,7 +38,7 @@ pub(super) fn submit_queue(
     let selector_values =
         selector_values(&request["over"]).map_err(super::interface::graph_input_reason)?;
     let selector =
-        normalize_selector(&selector_values).map_err(super::interface::graph_input_reason)?;
+        normalise_selector(&selector_values).map_err(super::interface::graph_input_reason)?;
     let adoption_number = request.get("pr").and_then(Value::as_u64);
     if request.get("pr").is_some_and(|value| !value.is_null())
         && adoption_number.is_none_or(|number| number == 0)
@@ -583,7 +583,7 @@ fn has_writer_checkout_override(input: &Value) -> bool {
         })
 }
 
-fn normalize_selector(values: &[String]) -> Result<String, String> {
+fn normalise_selector(values: &[String]) -> Result<String, String> {
     let Some(first) = values.first() else {
         return Err("delivery queue requires --over issues:N,M or --over query:SEARCH".into());
     };
