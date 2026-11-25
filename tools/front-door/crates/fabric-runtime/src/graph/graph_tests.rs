@@ -663,6 +663,38 @@ fn separation_run(
 }
 
 #[test]
+fn peer_owned_writer_launches_and_replays_without_a_local_worktree() {
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 2, "graph_id": "peer-writer",
+        "nodes": [{"id":"write", "prompt":"write", "access":"worktree_write",
+            "worktree":"", "route":{"alias":"junior"},
+            "attempt":{"host":"peer", "new_worktree":{"branch":"smoke/test", "base":"HEAD"}}}]
+    }))
+    .unwrap();
+    let mut owner = FakeOwner {
+        observations: [done_as("peer/1")].into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(owner.permissions, vec![(AccessMode::WorktreeWrite, None)]);
+    assert!(owner.provisions.is_empty());
+    assert!(run.checkpoint.nodes[0].writer_binding.is_none());
+    assert_eq!(
+        owner.attempt_specs[0]
+            .as_ref()
+            .unwrap()
+            .new_worktree
+            .as_ref()
+            .unwrap()
+            .branch,
+        "smoke/test"
+    );
+    advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(owner.calls.len(), 1, "replay must not launch again");
+}
+
+#[test]
 fn applied_route_retains_metadata_and_warns_without_dropping_it() {
     let mut owner = FakeOwner {
         observations: [done_as("h/1")].into(),

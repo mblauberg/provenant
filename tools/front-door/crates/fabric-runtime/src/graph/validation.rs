@@ -228,6 +228,19 @@ pub(super) fn validate_schema(document: &GraphDocument) -> Result<(), AdmissionE
     Ok(())
 }
 
+pub(super) fn peer_owned_writer(
+    access: AccessMode,
+    worktree: Option<&str>,
+    attempt: Option<&AttemptSpec>,
+) -> bool {
+    access == AccessMode::WorktreeWrite
+        && worktree.is_none_or(str::is_empty)
+        && attempt.is_some_and(|attempt| {
+            attempt.host.as_deref().is_some_and(|host| !host.is_empty())
+                && attempt.new_worktree.is_some()
+        })
+}
+
 pub(crate) fn validate_access(
     access: AccessMode,
     worktree: Option<&str>,
@@ -576,7 +589,9 @@ pub(super) fn validate_flat_plan(
         // Skipped rows remain in the document for status and explain output,
         // but they do not need launch-time access bindings such as a writer
         // worktree. Active nodes still pass the full access check.
-        if when::holds(&node.when) {
+        if when::holds(&node.when)
+            && !peer_owned_writer(node.access, node.worktree.as_deref(), node.attempt.as_ref())
+        {
             validate_access(node.access, node.worktree.as_deref())
                 .map_err(|reason| node_plan_error(node, reason))?;
         }
@@ -751,6 +766,8 @@ pub(super) fn validate_flat_plan(
             dispositions: node.dispositions.clone(),
             read_roots: node.read_roots.clone(),
             attachments: node.attachments.clone(),
+            fixture: node.fixture.clone(),
+            fixture_bytes: node.fixture_bytes.clone(),
             // An explicit node set wins; a nonempty attempt set stands in for it.
             capabilities: node.capabilities.clone().or_else(|| {
                 node.attempt
@@ -957,7 +974,8 @@ fn attempt_error(node: &GraphNode, spec: &AttemptSpec) -> Option<&'static str> {
             return Some("new worktree cannot override a source binding");
         }
         if provenant_confinement::repo::GitRefName::branch(&new.branch).is_err()
-            || node.worktree.as_deref().is_none_or(|path| path.len() > 251)
+            || (node.worktree.as_deref().is_none_or(|path| path.len() > 251)
+                && !peer_owned_writer(node.access, node.worktree.as_deref(), Some(spec)))
             || provenant_confinement::repo::GitRevision::new(&new.base).is_err()
         {
             return Some("invalid new worktree binding");
@@ -1621,6 +1639,7 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
             }
         } else if document.schema_version >= 2
             && plans::writer(node)
+            && !peer_owned_writer(node.access, node.worktree.as_deref(), node.attempt.as_ref())
             && !progress.writer_binding_pending
         {
             return Err(bad("writer must retain its binding"));

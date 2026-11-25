@@ -249,6 +249,8 @@ pub struct Submitted {
     pub title: Option<String>,
     pub prompt: String,
     pub base: Option<String>,
+    /// Portable fixture bytes staged into the lane's candidate scratch.
+    pub fixture: Option<run::StagedFixture>,
     pub pinned_base: Option<provenant_core::GitOid>,
     pub head: Option<String>,
     /// Original source of a predecessor whose committed head is being retained.
@@ -682,6 +684,7 @@ fn submit_with_launcher(
                 title: task.title,
                 prompt: task.prompt,
                 base: task.base,
+                fixture: task.fixture,
                 pinned_base: task.pinned_base,
                 head: task.head,
                 source_head: task.source_head,

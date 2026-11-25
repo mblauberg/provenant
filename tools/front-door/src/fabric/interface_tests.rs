@@ -1908,6 +1908,27 @@ fn smoke_graph_explains_writer_gating_for_default_remote_and_local() -> Result {
             .contains(&rig.project.to_string_lossy().to_string())
     );
 
+    // A branch gives the peer its own worktree intent, so remote smoke now
+    // runs the writer instead of skipping it, without a caller path.
+    let preview_remote_writer = factory
+        .graph_document(
+            json!({"op":"run", "template":"smoke", "host":"peer-a",
+                "branch":"smoke/peer", "base":"HEAD", "explain":true}),
+            budget,
+            &cancel,
+        )
+        .map_err(|error| format!("remote smoke writer preview: {error:?}"))?;
+    assert!(
+        !skipped_writer(&preview_remote_writer),
+        "a peer-owned worktree must enable the remote write node: {preview_remote_writer}"
+    );
+    let encoded = serde_json::to_string(&preview_remote_writer["document"])?;
+    assert!(
+        !encoded.contains(&rig.project.to_string_lossy().to_string()),
+        "a caller path reached the remote document: {encoded}"
+    );
+    assert!(encoded.contains("smoke/peer"), "{encoded}");
+
     Ok(())
 }
 

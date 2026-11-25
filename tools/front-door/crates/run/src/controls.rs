@@ -3417,6 +3417,7 @@ impl RunStore {
                     build_heavy: task.build_heavy,
                     title: None,
                     base: task.base.clone(),
+                    fixture: task.fixture.clone(),
                     head,
                     source_head,
                     base_ref: task.base_ref.clone(),

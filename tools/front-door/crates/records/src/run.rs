@@ -207,6 +207,32 @@ impl WorkContext {
             && self.pr != Some(0)
     }
 }
+/// A small, portable file staged into a lane's candidate scratch by the host.
+///
+/// Unlike a path grant, the bytes cross a host boundary with the task, so a
+/// peer can stage the same fixture without inheriting a caller-local path.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StagedFixture {
+    /// A plain file name, never a path: the receiving host places it in its
+    /// own candidate scratch.
+    pub name: String,
+    pub content: Vec<u8>,
+}
+
+impl StagedFixture {
+    /// Fixtures are small, text-sized inputs; a larger file belongs in the
+    /// project checkout or the host-written Git context, not on the wire.
+    pub const MAX_BYTES: usize = 64 * 1024;
+
+    pub fn is_valid(&self) -> bool {
+        !self.name.is_empty()
+            && !self.name.contains(['/', '\\'])
+            && self.name != "."
+            && self.name != ".."
+            && self.content.len() <= Self::MAX_BYTES
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -234,6 +260,10 @@ pub struct TaskRequest {
     /// Git base for host-written attempt context.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
+    /// A portable fixture staged into every candidate scratch, so a peer
+    /// places the same bytes as the host without inheriting a caller path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixture: Option<StagedFixture>,
     /// The caller's Git ref, retained for idempotent operation identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_ref: Option<String>,
@@ -3812,6 +3842,7 @@ mod tests {
             head: None,
             source_head: None,
             base: None,
+            fixture: None,
             base_ref: None,
             route: RequestedRoute::Named {
                 extra: Default::default(),

@@ -1567,6 +1567,7 @@ pub(super) fn prepare(
                     "source",
                     "capabilities",
                     "attachments",
+                    "fixture",
                     "read_roots",
                     "composite",
                     "loop",

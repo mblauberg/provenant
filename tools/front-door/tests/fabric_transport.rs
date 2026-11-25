@@ -2595,6 +2595,7 @@ fn seed_attempt_in_state(
                     build_heavy: false,
                     title: None,
                     base: None,
+                    fixture: None,
                     head: None,
                     source_head: None,
                     base_ref: None,

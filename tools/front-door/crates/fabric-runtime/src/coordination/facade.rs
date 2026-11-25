@@ -45,6 +45,9 @@ pub struct SubmittedTask {
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
+    /// A portable fixture carried to the peer and staged in its scratch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixture: Option<provenant_records::run::StagedFixture>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head: Option<String>,
     /// Original writer source, retained when a graph retry starts from a later head.

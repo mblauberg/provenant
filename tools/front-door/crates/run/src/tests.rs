@@ -481,6 +481,7 @@ fn raw_input() -> PreparedRun {
                 build_heavy: false,
                 title: None,
                 base: None,
+                fixture: None,
                 head: None,
                 source_head: None,
                 base_ref: None,

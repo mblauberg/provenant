@@ -1586,10 +1586,20 @@ impl BinaryRunOwner<'_> {
         )
         .map_err(fail_error)?;
         if let Some(host) = host.filter(|host| *host != self.factory.context.identity.host) {
+            // A peer-owned writer carries only a branch and a base ref. It
+            // never carries a caller path or a host filesystem grant.
+            let caller_path = task
+                .worktree
+                .as_deref()
+                .is_some_and(|path| !path.is_empty());
+            let peer_writer = task.access
+                == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
+                && !caller_path
+                && task.new_worktree.is_some();
             if !self.allow_remote
-                || task.access != provenant_fabric_runtime::graph::AccessMode::ReadOnly
-                || task.worktree.is_some()
-                || task.new_worktree.is_some()
+                || (task.access != provenant_fabric_runtime::graph::AccessMode::ReadOnly
+                    && !peer_writer)
+                || caller_path
             {
                 return Err(FacadeError::ConfinementRefused { resource: None });
             }
@@ -1701,6 +1711,7 @@ impl BinaryRunOwner<'_> {
                 settlement_retry_limit,
                 context: task.context,
                 base: task.base,
+                fixture: task.fixture,
                 pinned_base: None,
                 head: task.head,
                 source_head: task.source_head,

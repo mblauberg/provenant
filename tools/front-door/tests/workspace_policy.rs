@@ -1825,8 +1825,8 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         // Compact output leads with settlement facts and bounded tails (#3807).
         ("crates/cli/src/run/output.rs", 2250),
         ("crates/cli/src/run/provider/confinement.rs", 3000),
-        // The typed offer-mismatch fact carried into the lane refusal (#3892).
-        ("crates/cli/src/run/provider/preparation.rs", 8000),
+        // Offer-mismatch refusals and portable fixture staging (#3892, #3979).
+        ("crates/cli/src/run/provider/preparation.rs", 8250),
         ("crates/config/src/loader.rs", 3000),
         ("crates/config/src/managed.rs", 3250),
         ("crates/config/src/ports.rs", 2500),
@@ -1882,7 +1882,8 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         ("src/ci.rs", 2500),
         ("src/fabric/graph_execution.rs", 2750),
         ("src/fabric/interface.rs", 4250),
-        ("src/fabric/owner.rs", 5750),
+        // Peer fixture transport and writer boundary coverage (#3979).
+        ("src/fabric/owner.rs", 6000),
         ("src/fabric/peer.rs", 2500),
         ("src/fabric/run_owner.rs", 3000),
         ("src/fabric/unified.rs", 4500),
