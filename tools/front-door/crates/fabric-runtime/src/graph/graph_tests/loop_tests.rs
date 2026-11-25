@@ -95,6 +95,40 @@ fn queue_loop_can_bind_an_outer_publication_gate() {
     assert!(validate_plan(&expanded).is_ok());
 }
 
+#[test]
+fn loop_body_preserves_an_outer_node_source_and_entry_dependency() {
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 2,
+        "graph_id": "outer-node-source",
+        "nodes": [
+            {"id":"writer", "access":"read_only", "prompt":"write",
+             "route":{"alias":"fixture"}},
+            {"id":"ready", "kind":"gate", "access":"read_only",
+             "depends_on":["writer"], "condition":{"type":"budget"}},
+            {"id":"cycle", "kind":"loop", "access":"read_only",
+             "depends_on":["ready"], "loop":{"max_rounds":1,"until":"done","body":[
+                {"id":"reader", "access":"read_only", "prompt":"read writer output",
+                 "route":{"alias":"fixture"}, "source":{"type":"node","node":"writer"}},
+                {"id":"done", "kind":"gate", "access":"read_only",
+                 "depends_on":["reader"], "condition":{"type":"budget"}}
+             ]}}
+        ]
+    })).unwrap();
+
+    let expanded = loops::expand(&document, &[], &Default::default()).unwrap();
+    let reader = expanded
+        .nodes
+        .iter()
+        .find(|node| node.id == "cycle--r1--reader")
+        .unwrap();
+    assert!(matches!(
+        &reader.source,
+        Some(SourceBinding::Node { node }) if node == "writer"
+    ));
+    assert!(reader.depends_on.contains(&"writer".to_owned()));
+    assert!(reader.depends_on.contains(&"ready".to_owned()));
+}
+
 // Spec: docs/specs/fabric.md#bounded-graphs-and-route-fallback
 #[test]
 fn settled_loop_dependency_does_not_inherit_entry_inputs() {
@@ -288,7 +322,8 @@ fn delivery_loop_exhaustion_parks_once_and_replays_the_same_transition() {
         "schema_version": 2, "graph_id": "delivery-loop-park",
         "nodes": [{"id":"cycle", "kind":"loop", "access":"read_only",
             "loop":{"until":"ci", "max_rounds":1, "body":[
-                {"id":"writer", "access":"worktree_write", "prompt":"repair",
+                {"id":"writer", "access":"worktree_write", "worktree":"/fixture/writer",
+                    "prompt":"repair",
                     "write_scope":["src"], "route":{"alias":"junior"}},
                 {"id":"ci", "kind":"gate", "access":"read_only",
                     "depends_on":["writer"], "condition":{"type":"budget"}}
@@ -1822,16 +1857,35 @@ fn loop_conflict_recovery_is_bounded_and_replays_the_namespaced_target() {
         {"id":"publish","kind":"publish","access":"worktree_write",
          "worktree":"/fixture/writer","depends_on":["hygiene"],
          "source":{"type":"node","node":"hygiene"}},
-        {"id":"delivery","kind":"loop","access":"read_only","depends_on":["publish"],
-            "loop":{"max_rounds":2,"until":"done","body":[
+        {"id":"initial_conflict","kind":"gate","access":"read_only",
+         "depends_on":["publish"],"on_fail":"delivery",
+         "condition":{"type":"conflict","target":{"node":"publish"}}},
+        {"id":"delivery","kind":"loop","access":"read_only",
+         "depends_on":["initial_conflict","publish"],
+            "loop":{"max_rounds":2,"until":"done",
+             "previous_bindings":{"rebase_publish":"publish"},"body":[
                 {"id":"conflict","kind":"gate","access":"read_only","on_fail":"rebase",
-                 "condition":{"type":"conflict","target":{"node":"publish"}}},
+                 "condition":{"type":"conflict","target":{"node":"previous.rebase_publish"}}},
                 {"id":"rebase","access":"worktree_write","worktree":"/fixture/writer",
                  "prompt":"rebase the retained worktree","write_scope":["src"],
                  "route":{"alias":"senior"},"depends_on":["conflict"],
-                 "source":{"type":"head","node":"publish"}},
+                 "source":{"type":"head","node":"previous.rebase_publish"}},
+                {"id":"rebase_hygiene","kind":"hygiene","access":"worktree_write",
+                 "worktree":"/fixture/writer","depends_on":["rebase"],
+                 "source":{"type":"node","node":"rebase"}},
+                {"id":"rebase_publish","kind":"publish","access":"worktree_write",
+                 "worktree":"/fixture/writer","depends_on":["rebase_hygiene"],
+                 "source":{"type":"node","node":"rebase_hygiene"}},
+                {"id":"recheck","kind":"gate","access":"read_only",
+                 "depends_on":["rebase_publish"],
+                 "condition":{"type":"conflict","target":{"node":"rebase_publish"}}},
+                {"id":"fresh_ci","kind":"gate","access":"read_only",
+                 "depends_on":["recheck"],
+                 "condition":{"type":"ci","target":{"node":"rebase_publish"}}},
                 {"id":"done","kind":"gate","access":"read_only",
-                 "depends_on":["rebase"],"condition":{"type":"budget"}}
+                 "depends_on":["conflict"],
+                 "after_settled":["rebase","rebase_hygiene","rebase_publish","recheck","fresh_ci"],
+                 "condition":{"type":"ci","target":{"node":"previous.rebase_publish"}}}
             ]}
         }]
     }))
@@ -1846,6 +1900,36 @@ fn loop_conflict_recovery_is_bounded_and_replays_the_namespaced_target() {
         let conflict = &plan.nodes[positions[&format!("delivery--r{round}--conflict")]];
         let rebase_id = format!("delivery--r{round}--rebase");
         assert_eq!(conflict.on_fail.as_deref(), Some(rebase_id.as_str()));
+        let previous_publish = if round == 1 {
+            "publish".to_owned()
+        } else {
+            format!("delivery--r{}--rebase_publish", round - 1)
+        };
+        assert!(matches!(
+            conflict.condition.as_ref(),
+            Some(GateCondition::Conflict {
+                target: CiTarget::Node { node, .. },
+                ..
+            }) if node == &previous_publish
+        ));
+        assert!(matches!(
+            plan.nodes[positions[&rebase_id]].source.as_ref(),
+            Some(SourceBinding::Head { node }) if node == &previous_publish
+        ));
+        assert!(matches!(
+            plan.nodes[positions[&format!("delivery--r{round}--done")]]
+                .condition
+                .as_ref(),
+            Some(GateCondition::Ci {
+                target: CiTarget::Node { node, .. },
+                ..
+            }) if node == &previous_publish
+        ));
+        let fresh_conflict = &plan.nodes[positions[&format!("delivery--r{round}--recheck")]];
+        assert!(fresh_conflict.on_fail.is_none());
+        assert!(fresh_conflict.round.as_ref().is_some_and(|round| !round.until));
+        let fresh_ci = &plan.nodes[positions[&format!("delivery--r{round}--fresh_ci")]];
+        assert!(fresh_ci.depends_on.contains(&fresh_conflict.id));
     }
 
     let gate_index = positions["delivery--r1--conflict"];
@@ -1882,14 +1966,241 @@ fn loop_conflict_recovery_is_bounded_and_replays_the_namespaced_target() {
         "the rebase writer is inactive when the conflict gate is clear"
     );
 
+    let next_round_conflict = positions["delivery--r2--conflict"];
+    let until_index = positions["delivery--r1--done"];
+    checkpoint.nodes[gate_index].state = NodeState::Failed;
+    checkpoint.nodes[until_index].state = NodeState::Skipped;
+    checkpoint.nodes[positions["delivery--r1--rebase_publish"]].state = NodeState::Succeeded;
+    let fresh_conflict_index = positions["delivery--r1--recheck"];
+    let fresh_ci_index = positions["delivery--r1--fresh_ci"];
+    assert!(
+        !loops::retryable_round_failure_is_terminal(
+            gate_index,
+            "delivery",
+            &plan,
+            &checkpoint,
+            &positions,
+        ),
+        "a failed initial conflict remains nonterminal while fresh CI is pending"
+    );
+    let mut failed_writer = checkpoint.clone();
+    failed_writer.nodes[rebase_index].state = NodeState::Failed;
+    assert!(
+        loops::retryable_round_failure_is_terminal(
+            rebase_index,
+            "delivery",
+            &plan,
+            &failed_writer,
+            &positions,
+        ),
+        "a failed rebase operation is terminal, not a conflict retry"
+    );
+    assert_eq!(
+        dependency_state(
+            &plan.nodes[next_round_conflict],
+            &plan,
+            &checkpoint,
+            &positions,
+        ),
+        Some(NodeState::Pending),
+        "a skipped until waits while the same-round conflict recovery is unresolved"
+    );
+
+    checkpoint.nodes[fresh_conflict_index].state = NodeState::Failed;
+    checkpoint.nodes[fresh_ci_index].state = NodeState::Blocked;
+    let replay: GraphCheckpoint =
+        serde_json::from_value(serde_json::to_value(&checkpoint).unwrap()).unwrap();
+    assert_eq!(
+        dependency_state(&plan.nodes[next_round_conflict], &plan, &replay, &positions),
+        None,
+        "replay activates the next round after its fresh conflict blocks CI"
+    );
+
+    checkpoint.nodes[fresh_conflict_index].state = NodeState::Succeeded;
+    checkpoint.nodes[fresh_ci_index].state = NodeState::Succeeded;
+    assert_eq!(
+        loops::conflict_recovery_round_state(until_index, &plan, &checkpoint, &positions),
+        Some(loops::ConflictRecoveryRoundState::Succeeded),
+        "the fresh CI gate is a successful alternative to the skipped until gate"
+    );
+
+    let final_conflict_index = positions["delivery--r2--recheck"];
+    let final_ci_index = positions["delivery--r2--fresh_ci"];
+    checkpoint.nodes[positions["delivery--r2--conflict"]].state = NodeState::Failed;
+    checkpoint.nodes[final_conflict_index].state = NodeState::Failed;
+    checkpoint.nodes[final_ci_index].state = NodeState::Blocked;
+    assert!(
+        loops::retryable_round_failure_is_terminal(
+            final_conflict_index,
+            "delivery",
+            &plan,
+            &checkpoint,
+            &positions,
+        ),
+        "a failed fresh conflict with no remaining round is terminal"
+    );
+
+    let mut missing_fresh_ci = document.clone();
+    let body = &mut missing_fresh_ci
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "delivery")
+        .unwrap()
+        .loop_body
+        .as_mut()
+        .unwrap()
+        .body;
+    body.retain(|node| node.id != "fresh_ci");
+    body.iter_mut()
+        .find(|node| node.id == "done")
+        .unwrap()
+        .after_settled
+        .retain(|node| node != "fresh_ci");
+    assert!(
+        missing_fresh_ci.admit(&limits).is_err(),
+        "a retryable loop conflict cannot omit CI on the fresh publication"
+    );
+    let mut missing_initial_binding = document.clone();
+    missing_initial_binding
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "delivery")
+        .unwrap()
+        .loop_body
+        .as_mut()
+        .unwrap()
+        .previous_bindings
+        .clear();
+    assert!(
+        missing_initial_binding.admit(&limits).is_err(),
+        "a prior-round publication needs an explicit initial binding"
+    );
+    let mut stale_retry_head = document.clone();
+    let stale_body = &mut stale_retry_head
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "delivery")
+        .unwrap()
+        .loop_body
+        .as_mut()
+        .unwrap()
+        .body;
+    for node in stale_body {
+        if let Some(SourceBinding::Head { node: source }) = node.source.as_mut()
+            && source == "previous.rebase_publish"
+        {
+            *source = "publish".into();
+        }
+        if let Some(
+            GateCondition::Ci {
+                target: CiTarget::Node { node: target, .. },
+                ..
+            }
+            | GateCondition::Conflict {
+                target: CiTarget::Node { node: target, .. },
+                ..
+            },
+        ) = node.condition.as_mut()
+            && target == "previous.rebase_publish"
+        {
+            *target = "publish".into();
+        }
+    }
+    stale_retry_head
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "delivery")
+        .unwrap()
+        .loop_body
+        .as_mut()
+        .unwrap()
+        .previous_bindings
+        .clear();
+    assert!(
+        stale_retry_head.admit(&limits).is_err(),
+        "a later recovery round cannot reuse the outer stale publication"
+    );
+
     let mut cyclic = document;
-    cyclic.nodes[0].loop_body.as_mut().unwrap().body[1]
+    cyclic
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "delivery")
+        .unwrap()
+        .loop_body
+        .as_mut()
+        .unwrap()
+        .body
+        .iter_mut()
+        .find(|node| node.id == "rebase")
+        .unwrap()
         .depends_on
         .push("rebase".into());
     assert!(
         validate_plan(&cyclic).is_err(),
         "an in-loop dependency cycle stays rejected"
     );
+}
+
+#[test]
+fn composite_expansion_namespaces_explicit_loop_initial_bindings() {
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version":2,"graph_id":"nested-loop-binding","nodes":[
+            {"id":"flow","kind":"composite","access":"read_only",
+             "composite":{"nodes":[
+                {"id":"writer","access":"worktree_write","worktree":"/fixture/writer",
+                 "prompt":"write the first change","write_scope":["src"],
+                 "route":{"alias":"senior"}},
+                {"id":"retry","kind":"loop","access":"read_only","depends_on":["writer"],
+                 "loop":{"max_rounds":2,"until":"done",
+                  "previous_bindings":{"writer":"writer"},"body":[
+                    {"id":"writer","access":"worktree_write","worktree":"/fixture/writer",
+                     "prompt":"continue from the prior head","write_scope":["src"],
+                     "route":{"alias":"senior"},
+                     "source":{"type":"node","node":"previous.writer"}},
+                    {"id":"done","kind":"gate","access":"read_only",
+                     "depends_on":["writer"],"condition":{"type":"budget"}}
+                  ]}
+                }
+             ],"exports":[{"node":"writer","outputs":["result"]}]}}
+        ]
+    }))
+    .unwrap();
+    let expanded = loops::expand(
+        &document,
+        &[],
+        &crate::config::GraphLimits::default(),
+    )
+    .unwrap();
+    let loop_node = expanded
+        .nodes
+        .iter()
+        .find(|node| node.id == "flow--retry")
+        .unwrap();
+    assert_eq!(
+        loop_node.loop_body.as_ref().unwrap().previous_bindings["writer"],
+        "flow--writer"
+    );
+    assert!(matches!(
+        expanded
+            .nodes
+            .iter()
+            .find(|node| node.id == "flow--retry--r1--writer")
+            .unwrap()
+            .source
+            .as_ref(),
+        Some(SourceBinding::Node { node }) if node == "flow--writer"
+    ));
+    assert!(matches!(
+        expanded
+            .nodes
+            .iter()
+            .find(|node| node.id == "flow--retry--r2--writer")
+            .unwrap()
+            .source
+            .as_ref(),
+        Some(SourceBinding::Node { node }) if node == "flow--retry--r1--writer"
+    ));
 }
 
 fn integrating_repair(delivery: Option<&str>) -> GraphDocument {

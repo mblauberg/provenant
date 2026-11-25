@@ -1165,9 +1165,10 @@ pub(super) fn validate_delivery_contracts(document: &GraphDocument) -> Result<()
             }
             if let Some(spec) = &node.loop_body {
                 if spec.max_rounds == 0 {
-                    return Err(AdmissionError::Plan(
-                        "loop.max_rounds must be positive".into(),
-                    ));
+                    return Err(AdmissionError::Plan(format!(
+                        "node {}: loop.max_rounds must be positive",
+                        node.id
+                    )));
                 }
                 if let Some(edge) = &spec.outcome_edge
                     && edge.node.trim().is_empty()

@@ -108,7 +108,12 @@ fn hygiene_graph() -> GraphDocument {
 }
 
 fn hygiene_writer_observation() -> AttemptObservation {
-    let mut observation = terminal_with_result(AttemptOutcome::Succeeded, "Writer handoff");
+    let mut observation = terminal_with_result(
+        AttemptOutcome::Succeeded,
+        r#"```handoff
+{"schema_version":2,"status":"stopped_early","note":"Writer output is ready for hygiene","remaining":["Run hygiene"],"decisions":[],"verify":[]}
+```"#,
+    );
     let AttemptObservation::Terminal {
         attempt_ref,
         branch,

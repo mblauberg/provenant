@@ -317,6 +317,14 @@ fn children(
                 .cloned()
                 .unwrap_or_else(|| target.clone());
         }
+        if let Some(loop_spec) = &mut node.loop_body {
+            for initial in loop_spec.previous_bindings.values_mut() {
+                let target = initial.clone();
+                *initial = reference(prefix, &target, &locals, incoming)
+                    .or_else(|| visible_names.get(&target).cloned())
+                    .ok_or("loop previous binding")?;
+            }
+        }
         if let Some(edge) = node
             .loop_body
             .as_mut()

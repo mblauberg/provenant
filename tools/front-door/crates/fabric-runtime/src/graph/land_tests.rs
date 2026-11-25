@@ -166,6 +166,18 @@ impl AttemptOwner for Owner {
         let base = self.history.as_ref().map(|_| REVIEW_BASE.parse().unwrap());
         (base, self.integration_base)
     }
+    fn bind_writer_worktree(
+        &mut self,
+        worktree: &str,
+    ) -> Result<Option<WriterWorktreeBinding>, Self::Error> {
+        Ok(Some(WriterWorktreeBinding {
+            extra: Default::default(),
+            source_directory_identity: None,
+            shared_worktree: None,
+            worktree: worktree.to_owned(),
+            head: self.head.clone().unwrap_or_else(|| WRITE_HEAD.into()),
+        }))
+    }
     fn run_hygiene(
         &mut self,
         request: HygieneRequest<'_>,
@@ -542,7 +554,7 @@ fn bundled_deliver_repairs_findings_before_landing() {
             "with":{"worktree":"/wt/feature","write_scope":["src"]}}))
     .unwrap();
     let mut document: GraphDocument =
-        serde_json::from_value(json!({"schema_version":1,"graph_id":"bundled-deliver",
+        serde_json::from_value(json!({"schema_version":2,"graph_id":"bundled-deliver",
         "context":{"risk_tier":"substantial"},"nodes":[]}))
         .unwrap();
     document.nodes.push(delivery);
@@ -2005,11 +2017,27 @@ fn queue_ci_conflict_after_clear_rebases_republishes_and_rechecks_after_replay()
         .on_fail = Some("ci_repair".into());
     document.nodes.extend(
         serde_json::from_value::<Vec<GraphNode>>(json!([
-            {"id":"ci_repair","access":"worktree_write","worktree":"/wt/feature",
-             "prompt":"Repair CI findings and sweep the whole defect class.",
-             "source":{"type":"head","node":"publish"},"depends_on":["ci","publish"],
-             "inputs":[{"node":"ci","outputs":["findings","commit"]}],
-             "route":{"alias":"senior"}},
+            {"id":"ci_repair","kind":"loop","access":"read_only",
+             "depends_on":["ci","publish"],
+             "loop":{"max_rounds":1,"until":"refresh_ci","body":[
+                {"id":"fix","access":"worktree_write","worktree":"/wt/feature",
+                 "prompt":"Repair CI findings and sweep the whole defect class.",
+                 "source":{"type":"head","node":"publish"},"depends_on":["ci","publish"],
+                 "inputs":[{"node":"ci","outputs":["findings","commit"]}],
+                 "route":{"alias":"senior"}},
+                {"id":"hygiene","kind":"hygiene","access":"worktree_write",
+                 "worktree":"/wt/feature","depends_on":["fix"],
+                 "source":{"type":"node","node":"fix"}},
+                {"id":"refresh","kind":"publish","access":"worktree_write",
+                 "worktree":"/wt/feature","depends_on":["hygiene"],
+                 "source":{"type":"node","node":"hygiene"}},
+                {"id":"refresh_conflict","kind":"gate","access":"read_only",
+                 "depends_on":["refresh"],
+                 "condition":{"type":"conflict","target":{"node":"refresh"}}},
+                {"id":"refresh_ci","kind":"gate","access":"read_only",
+                 "depends_on":["refresh_conflict"],
+                 "condition":{"type":"ci","target":{"node":"refresh"}}}
+             ]}},
             {"id":"hygiene_after_rebase","kind":"hygiene","access":"worktree_write",
              "worktree":"/wt/feature","depends_on":["rebase"],
              "source":{"type":"node","node":"rebase"}},
@@ -2019,20 +2047,53 @@ fn queue_ci_conflict_after_clear_rebases_republishes_and_rechecks_after_replay()
             {"id":"conflict_after_rebase","kind":"gate","access":"read_only",
              "depends_on":["publish_after_rebase"],"on_fail":"rebase_again",
              "condition":{"type":"conflict","target":{"node":"publish_after_rebase"}}},
-            {"id":"rebase_again","access":"worktree_write","worktree":"/wt/feature",
-             "prompt":"Rebase the republished branch.",
-             "source":{"type":"head","node":"publish_after_rebase"},
-             "depends_on":["conflict_after_rebase"],"route":{"alias":"senior"}},
+            {"id":"rebase_again","kind":"loop","access":"read_only",
+             "depends_on":["conflict_after_rebase","publish_after_rebase"],
+             "loop":{"max_rounds":1,"until":"refresh_ci","body":[
+                {"id":"fix","access":"worktree_write","worktree":"/wt/feature",
+                 "prompt":"Rebase the republished branch.",
+                 "source":{"type":"head","node":"publish_after_rebase"},
+                 "depends_on":["conflict_after_rebase","publish_after_rebase"],
+                 "route":{"alias":"senior"}},
+                {"id":"hygiene","kind":"hygiene","access":"worktree_write",
+                 "worktree":"/wt/feature","depends_on":["fix"],
+                 "source":{"type":"node","node":"fix"}},
+                {"id":"refresh","kind":"publish","access":"worktree_write",
+                 "worktree":"/wt/feature","depends_on":["hygiene"],
+                 "source":{"type":"node","node":"hygiene"}},
+                {"id":"refresh_conflict","kind":"gate","access":"read_only",
+                 "depends_on":["refresh"],
+                 "condition":{"type":"conflict","target":{"node":"refresh"}}},
+                {"id":"refresh_ci","kind":"gate","access":"read_only",
+                 "depends_on":["refresh_conflict"],
+                 "condition":{"type":"ci","target":{"node":"refresh"}}}
+             ]}},
             {"id":"ci_after_rebase","kind":"gate","access":"read_only",
              "depends_on":["conflict_after_rebase","publish_after_rebase"],
              "on_fail":"ci_repair_after_rebase",
              "condition":{"type":"ci","target":{"node":"publish_after_rebase"}}},
-            {"id":"ci_repair_after_rebase","access":"worktree_write","worktree":"/wt/feature",
-             "prompt":"Repair CI findings and sweep the whole defect class.",
-             "source":{"type":"head","node":"publish_after_rebase"},
+            {"id":"ci_repair_after_rebase","kind":"loop","access":"read_only",
              "depends_on":["ci_after_rebase","publish_after_rebase"],
-             "inputs":[{"node":"ci_after_rebase","outputs":["findings","commit"]}],
-             "route":{"alias":"senior"}}
+             "loop":{"max_rounds":1,"until":"refresh_ci","body":[
+                {"id":"fix","access":"worktree_write","worktree":"/wt/feature",
+                 "prompt":"Repair CI findings and sweep the whole defect class.",
+                 "source":{"type":"head","node":"publish_after_rebase"},
+                 "depends_on":["ci_after_rebase","publish_after_rebase"],
+                 "inputs":[{"node":"ci_after_rebase","outputs":["findings","commit"]}],
+                 "route":{"alias":"senior"}},
+                {"id":"hygiene","kind":"hygiene","access":"worktree_write",
+                 "worktree":"/wt/feature","depends_on":["fix"],
+                 "source":{"type":"node","node":"fix"}},
+                {"id":"refresh","kind":"publish","access":"worktree_write",
+                 "worktree":"/wt/feature","depends_on":["hygiene"],
+                 "source":{"type":"node","node":"hygiene"}},
+                {"id":"refresh_conflict","kind":"gate","access":"read_only",
+                 "depends_on":["refresh"],
+                 "condition":{"type":"conflict","target":{"node":"refresh"}}},
+                {"id":"refresh_ci","kind":"gate","access":"read_only",
+                 "depends_on":["refresh_conflict"],
+                 "condition":{"type":"ci","target":{"node":"refresh"}}}
+             ]}}
         ]))
         .unwrap(),
     );

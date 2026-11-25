@@ -514,6 +514,24 @@ fn repeat_lowers_a_composite_template_to_a_loop() {
     assert!(matches!(&body[1].source, Some(SourceBinding::Node { node }) if node == "fix"));
     let ids = expanded_ids(vec![node]);
     assert!(ids.contains(&"fix--r2--accepted".to_owned()), "{ids:?}");
+
+    let explicitly_bound = Compiler::new(&bundled)
+        .compile(&json!({
+            "id":"fix", "use":"repair",
+            "repeat":{"until":"accepted", "max_rounds":2,
+                "previous_bindings":{"synthesis":"initial-synthesis"}},
+            "with":{"worktree":"/fixture/writer", "write_scope":["src"],
+                "lenses":["security"]}
+        }))
+        .unwrap();
+    assert_eq!(
+        explicitly_bound
+            .loop_body
+            .as_ref()
+            .unwrap()
+            .previous_bindings["synthesis"],
+        "initial-synthesis"
+    );
 }
 
 #[test]
@@ -868,7 +886,7 @@ fn sealed_old_delivery_plan_replays_unchanged() {
         "graph_id": "legacy",
         "nodes": [{
             "id": "task", "access": "read_only", "prompt": "work",
-            "route": {"alias": "senior"}
+            "route": {"alias": "senior"}, "depends_on": []
         }]
     });
     let decoded: GraphDocument = serde_json::from_value(sealed.clone()).unwrap();
@@ -2148,8 +2166,13 @@ fn template_precedence_ranks_each_declared_layer_once() {
 
 #[test]
 fn delivery_contracts_round_trip_and_admit_execution() {
-    let raw = json!({"id":"repair", "access":"read_only", "prompt":"repair",
-        "route":{"alias":"junior"},
+    let raw = json!({"id":"repair", "kind":"loop", "access":"read_only",
+        "loop":{"body":[
+            {"id":"writer", "access":"worktree_write", "worktree":"/fixture/writer",
+                "prompt":"repair", "route":{"alias":"junior"}},
+            {"id":"done", "kind":"gate", "access":"read_only",
+                "depends_on":["writer"], "condition":{"type":"budget"}}
+        ], "until":"done", "max_rounds":2},
         "escalate":{"ladder":["junior","principal"],"max_ci_rounds":3},
         "delivery_review":{"shape":"panel","accept_inconclusive_without_blocking":false}});
     let compiled = Compiler::new(&library()).compile(&raw).unwrap();
@@ -2357,7 +2380,8 @@ fn bounded_loop_budget_covers_all_rounds_and_admission_rejects_unbounded_cycles(
         .compile(&json!({
             "id":"repair", "kind":"loop", "access":"read_only",
             "loop":{"body":[
-                {"id":"writer", "access":"worktree_write", "prompt":"repair",
+                {"id":"writer", "access":"worktree_write", "worktree":"/fixture/writer",
+                    "prompt":"repair",
                     "write_scope":["src"], "route":{"alias":"junior"}},
                 {"id":"ci", "kind":"gate", "access":"read_only",
                     "depends_on":["writer"], "condition":{"type":"budget"}}

@@ -1575,6 +1575,11 @@ pub(super) fn flatten_fragment(
                 let target = edge.node.clone();
                 edge.node = id(&target);
             }
+            if let Some(loop_spec) = &mut child.loop_body {
+                for initial in loop_spec.previous_bindings.values_mut() {
+                    *initial = id(initial);
+                }
+            }
             for input in &mut child.inputs {
                 input.node = id(&input.node);
             }
