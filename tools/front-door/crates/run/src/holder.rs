@@ -5506,7 +5506,10 @@ mod writer_recovery_tests {
             .map_err(|e| format!("retire clean index: {e}"))?;
         let mut scratch = provenant_os::scratch::Scratch::new(attempt.try_clone()?)?;
         scratch.settle()?;
-        std::fs::remove_dir_all(attempt.current_path()?.join("tmp"))?;
+        // `temporary_path` creates the directory it resolves, so use the pure
+        // path helper to model removal and to assert absence (#3947).
+        let temporary = crate::plan::scratch_root(execution.state_root.as_path(), id).join("tmp");
+        std::fs::remove_dir_all(&temporary)?;
         assert!(!candidate.exists());
         assert!(provenant_supervisor::custody::attempt_index_retired(
             &slot, scope
@@ -5544,7 +5547,7 @@ mod writer_recovery_tests {
         assert!(provenant_supervisor::custody::attempt_index_retired(
             &slot, scope
         )?);
-        assert!(!attempt.current_path()?.join("tmp").exists());
+        assert!(!temporary.exists());
         assert!(store.custody_released(&store.record(id, &call)?, &call)?);
         Ok(())
     }

@@ -627,7 +627,13 @@ fn terminal_resumes_after_branch_publication_before_its_phase_checkpoint()
         std::fs::read(fixture.writer.worktree.join("resumed.txt"))?,
         b"durable branch\n"
     );
-    assert!(fixture.root.join("attempt/writer-terminal.json").is_file());
+    assert!(
+        fixture
+            .attempt_layout()?
+            .0
+            .join("writer-terminal.json")
+            .is_file()
+    );
     Ok(())
 }
 

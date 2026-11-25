@@ -63,6 +63,17 @@ status reason, and a stalled custody-path refusal names the remedy (replace a sy
 path inside the attempt directory).
 - Why: a retained writer must not contend with itself or retry an unchanged failure forever.
 
+A lane's temporary scratch directory is never a child of the attempt record directory:
+it lives at `<state>/attempt-scratch/<attempt id>/tmp`. GC, writer-Git reads, disk
+classification and terminal cleanup resolve that sibling root; no fallback resolves the
+old `attempts/<id>/tmp` path. The lane's `provider-state` and its handoff,
+`LaunchPaths::scratch`, and the prompt and durable output paths remain inside the attempt
+directory by design, as do host-written records. A relative write from temporary scratch
+cannot reach them.
+- Why: a lane could otherwise write the attempt's own settlement records by walking up
+  from its scratch, and a foreign record could not be told from settlement's own
+  (#3844, #3947).
+
 A result or handoff a lane leaves group- or other-readable in Provenant's private attempt
 directory is a recoverable condition, not a settlement refusal. Settlement's read of a
 provider-written settlement input — `result.md`, the `handoff.json` snapshot, and the progress

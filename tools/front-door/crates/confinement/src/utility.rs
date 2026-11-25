@@ -538,9 +538,15 @@ pub struct UtilityRuntime {
 }
 
 /// Where a run's lane scratch and provider state live below the state
-/// directory: lanes write there, and the user's config never should.
+/// directory: lanes write there, and the user's config never should. The
+/// temporary lane scratch now lives in `attempt-scratch/<id>/tmp` (#3947);
+/// `attempts` and `children` remain for retained scratch and provider state.
 pub fn lane_state_roots(state: &Path) -> Vec<PathBuf> {
-    vec![state.join("attempts"), state.join("children")]
+    vec![
+        state.join("attempts"),
+        state.join("children"),
+        state.join("attempt-scratch"),
+    ]
 }
 
 /// Canonical project location and its verified Git origin, when present.
@@ -3785,6 +3791,41 @@ pub(crate) mod tests {
         let staged = link.with_extension("new");
         std::os::unix::fs::symlink(target, &staged)?;
         fs::rename(staged, link)?;
+        Ok(())
+    }
+
+    // Spec: docs/specs/run-launch.md#lane-scratch-stays-outside-the-attempt-record
+    #[test]
+    fn lane_state_roots_cover_launch_scratch_for_transport_refusals() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let state = temp.path().join("state");
+        let scratch =
+            state.join("attempt-scratch/11111111111111111111111111111111/tmp/candidate-0");
+        fs::create_dir_all(&scratch)?;
+        let roots = transport::LaneRoots::new(lane_state_roots(&state));
+        assert!(
+            roots.contains(&scratch),
+            "launch scratch must be lane-writable"
+        );
+
+        let config = scratch.join("evil.gitconfig");
+        fs::write(&config, "")?;
+        let entries = [ConfigEntry {
+            origin: format!("file:{}", config.display()),
+            key: "include.path".into(),
+            value: Some(config.display().to_string()),
+        }];
+        let error = transport::check_listing(
+            &entries,
+            temp.path(),
+            &roots,
+            &ConfigContext::new("test config read", Path::new("/project/.git/config"), None),
+        );
+        assert!(
+            matches!(error, Err(TransportError::LaneConfig { .. })),
+            "a lane-written include under scratch must be refused: {error:?}"
+        );
         Ok(())
     }
 

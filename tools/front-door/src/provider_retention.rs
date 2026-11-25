@@ -625,13 +625,11 @@ pub(crate) fn provider_retention_classes_sweep_host_and_refuse_replaced_roots()
             .is_some_and(|stored| stored.cancelled)
     );
     drop(store);
-    let temporary = candidate
-        .parent()
-        .ok_or("attempt path")?
-        .parent()
-        .ok_or("attempt path")?
-        .join("tmp");
-    fs::DirBuilder::new().mode(0o700).create(&temporary)?;
+    let temporary = child_path.join(format!("attempt-scratch/{attempt}/tmp"));
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&temporary)?;
     fs::write(temporary.join("payload"), vec![1; 8192])?;
     let preview = collect_provider_state(
         &roots,

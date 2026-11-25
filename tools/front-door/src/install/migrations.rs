@@ -18,12 +18,14 @@ use provenant_records::{InstallReceipt, Limits};
 use serde_json::{Value, json};
 use std::ffi::OsStr;
 use std::io::ErrorKind;
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 
 /// Ordered steps for this release. Steps are deleted in the release after the
 /// one that ships them.
 const STEPS: &[&dyn Migration] = &[
     &HostProjectDirs,
+    &AttemptScratchMove,
     &PortSourceSpellings,
     &PortConfigSourceSpellings,
     &RetireWarningMarkers,
@@ -206,6 +208,88 @@ impl Migration for HostProjectDirs {
                 }
                 Ok(_) => report.warnings.push(host_project_clash(&from, &to)),
                 Err(error) => return Err(error.into()),
+            }
+        }
+        report.changed.sort();
+        Ok(report)
+    }
+}
+
+/// Lane scratch used to live at `attempts/<id>/tmp`, inside the attempt record.
+/// Live and retained attempts from an earlier release still hold unimported Git
+/// objects there, so move each one to the sibling scratch root before the new
+/// readers run (#3947). Same volume: rename only, never copy-then-delete. A
+/// conflict leaves both paths and warns, and the step stays pending.
+struct AttemptScratchMove;
+
+impl Migration for AttemptScratchMove {
+    fn id(&self) -> &'static str {
+        "attempt-scratch-move"
+    }
+
+    fn apply(&self, state_root: &Path) -> Result<MigrationReport, MigrationError> {
+        let mut report = MigrationReport::new(self.id());
+        let attempts = state_root.join("attempts");
+        let entries = match std::fs::read_dir(&attempts) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(report),
+            Err(error) => return Err(error.into()),
+        };
+        for entry in entries {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            if provenant_core::AttemptId::parse(&name).is_err() {
+                continue;
+            }
+            let source = entry.path().join("tmp");
+            let metadata = match std::fs::symlink_metadata(&source) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            if !metadata.is_dir() {
+                report.warnings.push(
+                    Warning::new(
+                        MIGRATION_STEP_FAILED,
+                        format!(
+                            "attempt scratch entry {} is not a directory; left in place",
+                            source.display()
+                        ),
+                    )
+                    .subject(source.display().to_string())
+                    .repair("inspect the entry, move any objects you need, then rerun `provenant install`"),
+                );
+                continue;
+            }
+            let target_parent = state_root.join(provenant_run::ATTEMPT_SCRATCH).join(&name);
+            let mut builder = std::fs::DirBuilder::new();
+            builder.recursive(true).mode(0o700);
+            builder.create(&target_parent)?;
+            let target = target_parent.join("tmp");
+            if publish_no_clobber(&source, &target)? {
+                report.changed.push(target.display().to_string());
+            } else {
+                report.warnings.push(
+                    Warning::new(
+                        MIGRATION_STEP_FAILED,
+                        format!(
+                            "attempt scratch clash: {} and {} both exist; both were left in place",
+                            source.display(),
+                            target.display()
+                        ),
+                    )
+                    .subject(source.display().to_string())
+                    .repair(format!(
+                        "compare {} with {}, keep the objects you need, remove the stale path, then rerun `provenant install`",
+                        source.display(),
+                        target.display()
+                    )),
+                );
             }
         }
         report.changed.sort();
@@ -606,13 +690,90 @@ fn read_receipt(state_root: &Path) -> Result<Option<InstallReceipt>, String> {
 #[cfg(test)]
 #[allow(dead_code, unused_imports)]
 mod tests {
-    use super::{PortConfigSourceSpellings, PortSourceSpellings, read_receipt, run_steps};
+    use super::{
+        AttemptScratchMove, PortConfigSourceSpellings, PortSourceSpellings, read_receipt, run_steps,
+    };
     use provenant_records::migrate::{Migration, MigrationError, MigrationReport};
     use provenant_records::warning::{MIGRATION_STEP_FAILED, Warning, capture};
     use provenant_records::{AbsolutePath, FileDigest, InstallReceipt, SourceDigest};
     use serde_json::{Value, json};
     use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Spec: docs/specs/run-launch.md#lane-scratch-stays-outside-the-attempt-record
+    #[test]
+    fn attempt_scratch_move_renames_live_tmp_and_is_idempotent() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let id = provenant_core::AttemptId::from_bytes([7; 16]);
+        let old = root
+            .path()
+            .join("attempts")
+            .join(id.to_string())
+            .join("tmp");
+        std::fs::create_dir_all(&old).expect("old tmp");
+        std::fs::write(old.join("git-objects"), "private objects").expect("write objects");
+        let new = root
+            .path()
+            .join(provenant_run::ATTEMPT_SCRATCH)
+            .join(id.to_string())
+            .join("tmp");
+
+        let report = AttemptScratchMove.apply(root.path()).expect("apply once");
+        assert_eq!(report.id, "attempt-scratch-move");
+        assert_eq!(report.changed, [new.display().to_string()]);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        assert!(!old.exists(), "old tmp was renamed, not copied");
+        assert_eq!(
+            std::fs::read_to_string(new.join("git-objects")).expect("read objects"),
+            "private objects"
+        );
+
+        let again = AttemptScratchMove.apply(root.path()).expect("apply twice");
+        assert!(again.changed.is_empty(), "second run must change nothing");
+        assert!(again.warnings.is_empty(), "{:?}", again.warnings);
+    }
+
+    /// Spec: docs/specs/run-launch.md#lane-scratch-stays-outside-the-attempt-record
+    #[test]
+    fn attempt_scratch_move_conflict_warns_and_leaves_both() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let id = provenant_core::AttemptId::from_bytes([8; 16]);
+        let old = root
+            .path()
+            .join("attempts")
+            .join(id.to_string())
+            .join("tmp");
+        let new = root
+            .path()
+            .join(provenant_run::ATTEMPT_SCRATCH)
+            .join(id.to_string())
+            .join("tmp");
+        std::fs::create_dir_all(&old).expect("old tmp");
+        std::fs::create_dir_all(&new).expect("new tmp");
+        std::fs::write(old.join("old"), "old").expect("write old");
+        std::fs::write(new.join("new"), "new").expect("write new");
+
+        let report = AttemptScratchMove
+            .apply(root.path())
+            .expect("apply conflict");
+        assert!(report.changed.is_empty(), "{:?}", report.changed);
+        assert!(
+            report.warnings.iter().any(|warning| {
+                warning.code.as_ref() == MIGRATION_STEP_FAILED.0
+                    && warning.message.contains(&old.display().to_string())
+            }),
+            "{:?}",
+            report.warnings
+        );
+        assert_eq!(
+            std::fs::read_to_string(old.join("old")).expect("old kept"),
+            "old"
+        );
+        assert_eq!(
+            std::fs::read_to_string(new.join("new")).expect("new kept"),
+            "new"
+        );
+    }
 
     /// Spec: docs/specs/state.md#format-changes-migrate-once-at-install
     #[test]

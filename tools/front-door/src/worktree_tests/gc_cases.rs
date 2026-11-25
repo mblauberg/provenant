@@ -1493,8 +1493,11 @@ pub(super) fn gc_reports_terminal_tmp_details_and_compact_text_count() -> Result
     store.create(&input, &call)?;
     let id = input.attempt_id;
     let attempt = rig.state.join(format!("attempts/{id}"));
-    let temporary = attempt.join("tmp");
-    fs::DirBuilder::new().mode(0o700).create(&temporary)?;
+    let temporary = rig.state.join(format!("attempt-scratch/{id}/tmp"));
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&temporary)?;
     fs::write(temporary.join("payload"), vec![1; 8192])?;
     store.withdraw(
         id,

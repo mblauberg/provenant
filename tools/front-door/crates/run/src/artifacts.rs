@@ -21,41 +21,43 @@ pub(crate) fn subdir(parent: &Directory, name: &OsStr, create: bool) -> Result<D
 /// attempt terminal and unreserved. It checks worktree reservations first,
 /// then holds the attempt's writer lock, which excludes read-only guardians.
 /// It does not hold the worktree writer lock during deletion.
-/// The exception is rooted at the literal tmp entry, never the attempt itself.
+/// The exception is rooted at the literal tmp entry of the per-attempt scratch
+/// root, never the attempt record directory (#3947).
 pub(crate) fn remove_unreserved_terminal_temporary(
-    attempt: &Directory,
+    scratch: &Directory,
+    temporary: &std::path::Path,
     keep_going: &dyn Fn() -> bool,
     reclaimed: &mut u64,
 ) -> provenant_os::fs::Result<u64> {
     if !keep_going() {
         return Err(provenant_os::fs::FsError::Cancelled {
-            path: attempt.anchored_path().join("tmp"),
+            path: temporary.to_owned(),
         });
     }
-    crate::short_temporary::remove(attempt);
+    crate::short_temporary::remove(temporary);
     let name = OsStr::new("tmp");
-    let metadata = match attempt.metadata_at(name, false) {
+    let metadata = match scratch.metadata_at(name, false) {
         Ok(metadata) => metadata,
         Err(error) if error.is_not_found() => return Ok(0),
         Err(error) => return Err(error),
     };
     if metadata.kind != FileKind::Directory {
-        attempt.unlink(name)?;
+        scratch.unlink(name)?;
         *reclaimed = reclaimed.saturating_add(metadata.allocated);
         return Ok(metadata.allocated);
     }
-    attempt.make_owner_accessible_at(name)?;
-    let metadata = attempt.metadata_at(name, false)?;
-    let tree = PayloadTree::claim(attempt, name, &metadata)?;
+    scratch.make_owner_accessible_at(name)?;
+    let metadata = scratch.metadata_at(name, false)?;
+    let tree = PayloadTree::claim(scratch, name, &metadata)?;
     let bytes = metadata
         .allocated
         .saturating_add(remove_payload_contents(&tree, keep_going, reclaimed)?);
     drop(tree);
-    if !attempt.metadata_at(name, false)?.same_identity(&metadata) {
+    if !scratch.metadata_at(name, false)?.same_identity(&metadata) {
         return Err(provenant_os::fs::FsError::PayloadMismatch { name: name.into() });
     }
     // tmp itself is not lock-named, so ordinary removal suffices.
-    attempt.rmdir(name)?;
+    scratch.rmdir(name)?;
     *reclaimed = reclaimed.saturating_add(metadata.allocated);
     Ok(bytes)
 }

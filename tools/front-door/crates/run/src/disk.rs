@@ -73,6 +73,10 @@ fn scan_store(
             if let Some(attempts) = open(root, &name, path, report) {
                 scan_attempts(&attempts, &child, terminal, report);
             }
+        } else if name == crate::plan::ATTEMPT_SCRATCH {
+            if let Some(scratch) = open(root, &name, path, report) {
+                scan_scratch(&scratch, &child, terminal, report);
+            }
         } else if name == "children" {
             if let Some(children) = open(root, &name, path, report) {
                 for child_name in entries(&children, &child, report) {
@@ -234,6 +238,31 @@ fn open(
     }
 }
 
+/// Lane scratch now lives beside `attempts`, keyed by attempt id (#3947).
+fn scan_scratch(
+    scratch: &Directory,
+    child: &Path,
+    terminal: &BTreeMap<String, bool>,
+    report: &mut DiskReport,
+) {
+    for name in entries(scratch, child, report) {
+        let attempt_path = child.join(&name);
+        let Some(attempt) = open(scratch, &name, child, report) else {
+            continue;
+        };
+        let is_terminal = name.to_str().and_then(|name| terminal.get(name)).copied();
+        for part in entries(&attempt, &attempt_path, report) {
+            if part != OsStr::new("tmp") {
+                continue;
+            }
+            let part_path = attempt_path.join(&part);
+            if let Some(index) = report.measure_at("attempt_tmp", &attempt, &part, &part_path) {
+                report.entries[index].leak = is_terminal;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,10 +285,13 @@ mod tests {
         writer.create(&input, &call)?;
         let state = context.state_root.as_path();
         let attempt = state.join(format!("attempts/{}", input.attempt_id));
-        for part in ["tmp", "scratch", "provider-state", "quarantine"] {
+        let temporary = crate::plan::scratch_root(state, input.attempt_id).join("tmp");
+        for part in ["scratch", "provider-state", "quarantine"] {
             fs::create_dir_all(attempt.join(part))?;
             fs::write(attempt.join(part).join("keep"), part)?;
         }
+        fs::create_dir_all(&temporary)?;
+        fs::write(temporary.join("keep"), "tmp")?;
         for name in ["stdout.log", "stderr.log"] {
             fs::write(attempt.join(name), "capture")?;
         }
@@ -285,7 +317,7 @@ mod tests {
                 .entries
                 .iter()
                 .any(|entry| entry.class == "attempt_tmp"
-                    && entry.path == attempt.join("tmp")
+                    && entry.path == temporary
                     && entry.leak == Some(false))
         );
         assert_eq!(
@@ -320,8 +352,8 @@ mod tests {
             WallTime::from_micros(150)?,
             &call,
         )?;
-        fs::create_dir_all(attempt.join("tmp"))?;
-        fs::write(attempt.join("tmp/keep"), "leak")?;
+        fs::create_dir_all(&temporary)?;
+        fs::write(temporary.join("keep"), "leak")?;
         let before = snapshot(state)?;
         let reader = RunStore::open_disk_read_only(&context, &call)?.ok_or("missing store")?;
         let mut report = DiskReport::new(state.to_owned(), 0);
@@ -333,10 +365,10 @@ mod tests {
                 .entries
                 .iter()
                 .any(|entry| entry.class == "attempt_tmp"
-                    && entry.path == attempt.join("tmp")
+                    && entry.path == temporary
                     && entry.leak == Some(true))
         );
-        assert_eq!(fs::read_to_string(attempt.join("tmp/keep"))?, "leak");
+        assert_eq!(fs::read_to_string(temporary.join("keep"))?, "leak");
         Ok(())
     }
 
@@ -411,7 +443,7 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let context = context(temp.path())?;
         let state = context.state_root.as_path();
-        let temporary = state.join("attempts/attempt/tmp");
+        let temporary = state.join("attempt-scratch/attempt/tmp");
         fs::create_dir_all(&temporary)?;
         fs::write(temporary.join("keep"), "unindexed")?;
         let target = temporary.join("candidate-0/target");
