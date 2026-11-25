@@ -570,7 +570,8 @@ fn bounded_recovery_conflict(
             && nodes.iter().any(|terminal| {
                 terminal.round.as_ref().is_some_and(|r| {
                     r.loop_id == round.loop_id && r.round == round.round && r.until
-                }) && ancestors(nodes, positions, &terminal.id).contains(&positions[&ci.id])
+                }) && matches!(&terminal.condition, Some(GateCondition::Verdict { .. }))
+                    && ancestors(nodes, positions, &terminal.id).contains(&positions[&ci.id])
             })
     })
 }
