@@ -24,8 +24,8 @@ pub struct LoopSpec {
     pub decision_session: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub review_repair: bool,
-    /// Typed gates whose failure admits the next bounded repair round. The
-    /// selected gates remain failed in the checkpoint for evidence and replay.
+    /// Typed gates and hygiene outcomes whose failure admits the next bounded
+    /// repair round. Selected triggers remain failed for evidence and replay.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub retry_on: Vec<String>,
     /// Local publication whose exact receipt is exported by a successful loop.
@@ -245,11 +245,18 @@ fn validate_previous_bindings(
         spec.body.iter().map(|member| member.id.clone()).collect();
     let mut references = std::collections::BTreeSet::new();
     let mut published_bindings = std::collections::BTreeSet::new();
+    let mut hygiene_bindings = std::collections::BTreeSet::new();
     for member in &spec.body {
         for input in &member.inputs {
             if let Some(previous) = input.node.strip_prefix("previous.") {
                 if spec.previous_bindings.contains_key(previous) {
                     references.insert(previous.to_owned());
+                }
+                if spec.selected_publication.as_deref() == Some(previous)
+                    && input.outputs.contains(&OutputKind::Branch)
+                    && input.outputs.contains(&OutputKind::Commit)
+                {
+                    published_bindings.insert(previous.to_owned());
                 }
             }
         }
@@ -263,6 +270,11 @@ fn validate_previous_bindings(
             Some(SourceBinding::Node { node: source }) => {
                 if let Some(previous) = source.strip_prefix("previous.") {
                     references.insert(previous.to_owned());
+                    if spec.body.iter().any(|candidate| {
+                        candidate.id == previous && candidate.kind == Some(NodeKind::Hygiene)
+                    }) {
+                        hygiene_bindings.insert(previous.to_owned());
+                    }
                 }
             }
             _ => {}
@@ -316,6 +328,13 @@ fn validate_previous_bindings(
         if published_bindings.contains(body_node) && initial.kind != Some(NodeKind::Publish) {
             return Err(format!(
                 "loop.previous_bindings entry {body_node} must bind a publication node"
+            ));
+        }
+        if hygiene_bindings.contains(body_node)
+            && !matches!(initial.kind, Some(NodeKind::Hygiene | NodeKind::Publish))
+        {
+            return Err(format!(
+                "loop.previous_bindings entry {body_node} must bind hygiene or a publication seed"
             ));
         }
     }
@@ -538,9 +557,9 @@ pub(super) fn check_expanded_ids(
     Ok(())
 }
 
-// Retry gates must control the until gate's success edge. Merely waiting for
-// settlement permits a failed retry gate to be bypassed by a passing until.
-fn retry_gate_controls_until(spec: &LoopSpec, retry: &str) -> bool {
+// Retry triggers must control the until gate's success edge. Merely waiting
+// for settlement permits a failed trigger to be bypassed by a passing until.
+fn retry_trigger_controls_until(spec: &LoopSpec, retry: &str) -> bool {
     let mut pending = vec![spec.until.as_str()];
     let mut seen = std::collections::BTreeSet::new();
     while let Some(id) = pending.pop() {
@@ -701,20 +720,23 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
             let Some(gate) = spec.body.iter().find(|member| member.id == *retry) else {
                 return Err(format!("loop {} retry_on must name a body gate", node.id));
             };
-            if !retry_nodes.insert(retry)
-                || !retry_gate_controls_until(spec, retry)
-                || gate.kind != Some(NodeKind::Gate)
-                || !matches!(
+            let typed_gate = gate.kind == Some(NodeKind::Gate)
+                && matches!(
                     &gate.condition,
                     Some(
                         GateCondition::Ci { .. }
                             | GateCondition::Conflict { .. }
                             | GateCondition::Verdict { .. }
                     )
-                )
+                );
+            let typed_hygiene = gate.kind == Some(NodeKind::Hygiene)
+                && matches!(gate.source.as_ref(), Some(SourceBinding::Node { .. }));
+            if !retry_nodes.insert(retry)
+                || !retry_trigger_controls_until(spec, retry)
+                || !(typed_gate || typed_hygiene)
             {
                 return Err(format!(
-                    "loop {} retry_on must uniquely name typed CI, conflict or verdict gates on the until success path",
+                    "loop {} retry_on must uniquely name typed CI, conflict or verdict gates or sourced hygiene nodes on the until success path",
                     node.id
                 ));
             }
@@ -995,7 +1017,8 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
                     });
                 }
                 if let Some(SourceBinding::Node { node: source }) = &mut child.source {
-                    *source = if let Some(previous) = source.strip_prefix("previous.") {
+                    let previous_source = source.strip_prefix("previous.").map(str::to_owned);
+                    *source = if let Some(previous) = previous_source.as_deref() {
                         previous_round_node(spec, &node.id, round, previous)?
                     } else if spec.body.iter().any(|member| &member.id == source) {
                         id(&node.id, round, source)
@@ -1003,7 +1026,22 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
                         source.clone()
                     };
                     if !child.depends_on.contains(source) {
-                        child.depends_on.push(source.clone());
+                        let waits_for_failed_hygiene = round > 1
+                            && previous_source.as_ref().is_some_and(|previous| {
+                                spec.retry_on.contains(previous)
+                                    && spec.body.iter().any(|member| {
+                                        member.id == *previous
+                                            && member.kind == Some(NodeKind::Hygiene)
+                                    })
+                            })
+                            && !repair::spec_is_repair(spec);
+                        if waits_for_failed_hygiene {
+                            if !child.after_settled.contains(source) {
+                                child.after_settled.push(source.clone());
+                            }
+                        } else {
+                            child.depends_on.push(source.clone());
+                        }
                     }
                 }
                 if let Some(SourceBinding::Head { node: writer }) = &mut child.source {

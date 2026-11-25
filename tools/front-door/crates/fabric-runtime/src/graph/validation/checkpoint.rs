@@ -818,11 +818,10 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                             })
                     }),
                     NodeState::Failed => outcome.is_some_and(|outcome| {
-                        matches!(
-                            outcome.kind,
-                            provenant_records::graph::HygieneOutcomeKind::NoCommit
-                                | provenant_records::graph::HygieneOutcomeKind::UncommittedEdits
-                        )
+                        progress
+                            .outputs
+                            .as_ref()
+                            .is_some_and(|outputs| retryable_hygiene_head_matches(outcome, outputs))
                     }),
                     NodeState::Blocked => {
                         (intent.is_none() && progress.outputs.is_none())
@@ -1057,6 +1056,21 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
     Ok(())
 }
 
+fn retryable_hygiene_head_matches(
+    outcome: &provenant_records::graph::HygieneOutcome,
+    outputs: &super::super::NodeOutputs,
+) -> bool {
+    matches!(
+        outcome.kind,
+        provenant_records::graph::HygieneOutcomeKind::NoCommit
+            | provenant_records::graph::HygieneOutcomeKind::UncommittedEdits
+    ) && outcome
+        .after_head
+        .as_deref()
+        .is_some_and(|head| head.parse::<provenant_core::GitOid>().is_ok())
+        && outputs.commit == outcome.after_head
+}
+
 /// A planner settled by its static fallback: it recorded the reason and
 /// persisted exactly the stage its fallback spec derives from the document.
 fn fallback_settled(
@@ -1101,4 +1115,37 @@ fn valid_delivery_ci_wait(document: &GraphDocument, wait: &DeliveryCiAdmissionWa
         .checked_add(provenant_core::DurationMicros::from_micros(micros))
         .is_ok_and(|deadline| deadline == wait.deadline)
         && wait.wake_at >= wait.started_at
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_hygiene_is_a_source_only_with_its_exact_verified_head() {
+        let head = "a".repeat(40);
+        let outcome = provenant_records::graph::HygieneOutcome {
+            kind: provenant_records::graph::HygieneOutcomeKind::UncommittedEdits,
+            before_head: Some(head.clone()),
+            after_head: Some(head.clone()),
+            handoff: None,
+        };
+        let outputs = NodeOutputs {
+            commit: Some(head.clone()),
+            ..Default::default()
+        };
+        assert!(retryable_hygiene_head_matches(&outcome, &outputs));
+
+        let mut mismatched = outputs.clone();
+        mismatched.commit = Some("b".repeat(40));
+        assert!(!retryable_hygiene_head_matches(&outcome, &mismatched));
+
+        let mut missing_head = outcome.clone();
+        missing_head.after_head = None;
+        assert!(!retryable_hygiene_head_matches(&missing_head, &outputs));
+
+        let mut operation_error = outcome;
+        operation_error.kind = provenant_records::graph::HygieneOutcomeKind::Error;
+        assert!(!retryable_hygiene_head_matches(&operation_error, &outputs));
+    }
 }

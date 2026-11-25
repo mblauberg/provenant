@@ -182,7 +182,7 @@ fn writer_chain_root(
     None
 }
 
-fn publish_source_writer(
+fn publish_source_hygiene(
     nodes: &[PlannedNode],
     positions: &BTreeMap<String, usize>,
     publish_index: usize,
@@ -201,6 +201,18 @@ fn publish_source_writer(
     if hygiene.kind != Some(NodeKind::Hygiene) || !upstream.contains(&hygiene_index) {
         return None;
     }
+    Some(hygiene_index)
+}
+
+fn publish_source_writer(
+    nodes: &[PlannedNode],
+    positions: &BTreeMap<String, usize>,
+    publish_index: usize,
+) -> Option<usize> {
+    let hygiene_index = publish_source_hygiene(nodes, positions, publish_index)?;
+    let publish = nodes.get(publish_index)?;
+    let upstream = ancestors(nodes, positions, &publish.id);
+    let hygiene = &nodes[hygiene_index];
     let writer_id = match hygiene.source.as_ref()? {
         SourceBinding::Node { node } => node,
         _ => return None,
@@ -245,6 +257,73 @@ fn recovery_members(
     members
 }
 
+fn recovery_previous_publication_binding(
+    writer_index: usize,
+    nodes: &[PlannedNode],
+    positions: &BTreeMap<String, usize>,
+) -> bool {
+    let writer = &nodes[writer_index];
+    let Some(round) = writer.round.as_ref() else {
+        return false;
+    };
+    let Some(loop_index) = positions.get(&round.loop_id).copied() else {
+        return false;
+    };
+    let Some(spec) = nodes[loop_index].loop_body.as_ref() else {
+        return false;
+    };
+    let previous_publication = if round.round == 1 {
+        spec.selected_publication
+            .as_ref()
+            .and_then(|local| spec.previous_bindings.get(local))
+            .cloned()
+    } else {
+        spec.selected_publication
+            .as_ref()
+            .map(|local| format!("{}--r{}--{}", round.loop_id, round.round - 1, local))
+    };
+    let Some(previous_publication) = previous_publication else {
+        return false;
+    };
+    let Some(publication_index) = positions.get(&previous_publication).copied() else {
+        return false;
+    };
+    let publication = &nodes[publication_index];
+    publication.kind == Some(NodeKind::Publish)
+        && writer.inputs.iter().any(|input| {
+            input.node == previous_publication
+                && input.outputs.contains(&OutputKind::Branch)
+                && input.outputs.contains(&OutputKind::Commit)
+        })
+        && (writer.depends_on.contains(&previous_publication)
+            || writer.after_settled.contains(&previous_publication))
+}
+
+fn recovery_previous_hygiene_binding<'a>(
+    writer_index: usize,
+    nodes: &'a [PlannedNode],
+    positions: &BTreeMap<String, usize>,
+) -> Option<(&'a str, &'a str)> {
+    let writer = nodes.get(writer_index)?;
+    let round = writer.round.as_ref()?;
+    let loop_index = *positions.get(&round.loop_id)?;
+    let spec = nodes[loop_index].loop_body.as_ref()?;
+    let body_writer = spec.body.iter().find(|member| member.id == round.node_id)?;
+    let SourceBinding::Node { node: source } = body_writer.source.as_ref()? else {
+        return None;
+    };
+    let hygiene_local = source.strip_prefix("previous.")?;
+    if !spec
+        .body
+        .iter()
+        .any(|member| member.id == hygiene_local && member.kind == Some(NodeKind::Hygiene))
+    {
+        return None;
+    }
+    let initial = spec.previous_bindings.get(hygiene_local)?;
+    Some((hygiene_local, initial.as_str()))
+}
+
 fn recovery_source_is_published_head(
     index: usize,
     published_id: &str,
@@ -285,17 +364,94 @@ fn recovery_source_is_published_head(
                     visiting,
                 )
         }),
-        Some(SourceBinding::Node { node }) => positions.get(node).is_some_and(|source| {
-            members.contains(source)
-                && recovery_source_is_published_head(
-                    *source,
-                    published_id,
-                    nodes,
-                    positions,
-                    members,
-                    visiting,
-                )
-        }),
+        Some(SourceBinding::Node { node }) => {
+            let Some(source_index) = positions.get(node).copied() else {
+                visiting.remove(&index);
+                return false;
+            };
+            if node == published_id {
+                recovery_previous_publication_binding(index, nodes, positions)
+                    && recovery_previous_hygiene_binding(index, nodes, positions)
+                        .is_some_and(|(_, initial)| initial == node)
+            } else if members.contains(&source_index) {
+                let same_worktree = nodes[index].worktree == nodes[source_index].worktree;
+                let selected_hygiene = if nodes[source_index].kind == Some(NodeKind::Hygiene) {
+                    let Some(current_round) = nodes[index].round.as_ref() else {
+                        visiting.remove(&index);
+                        return false;
+                    };
+                    let Some(source_round) = nodes[source_index].round.as_ref() else {
+                        visiting.remove(&index);
+                        return false;
+                    };
+                    let Some(loop_index) = positions.get(&current_round.loop_id).copied() else {
+                        visiting.remove(&index);
+                        return false;
+                    };
+                    let Some(spec) = nodes[loop_index].loop_body.as_ref() else {
+                        visiting.remove(&index);
+                        return false;
+                    };
+                    let Some(local_publish) = spec.selected_publication.as_deref() else {
+                        visiting.remove(&index);
+                        return false;
+                    };
+                    let prior_publish = format!(
+                        "{}--r{}--{}",
+                        current_round.loop_id, source_round.round, local_publish
+                    );
+                    positions.get(&prior_publish).is_some_and(|publication| {
+                        source_round.loop_id == current_round.loop_id
+                            && source_round.round + 1 == current_round.round
+                            && spec.retry_on.contains(&source_round.node_id)
+                            && publish_source_hygiene(nodes, positions, *publication)
+                                == Some(source_index)
+                    })
+                } else {
+                    true
+                };
+                same_worktree
+                    && selected_hygiene
+                    && (nodes[source_index].kind != Some(NodeKind::Hygiene)
+                        || recovery_previous_publication_binding(index, nodes, positions))
+                    && recovery_source_is_published_head(
+                        source_index,
+                        published_id,
+                        nodes,
+                        positions,
+                        members,
+                        visiting,
+                    )
+            } else {
+                let Some(current_round) = nodes[index].round.as_ref() else {
+                    visiting.remove(&index);
+                    return false;
+                };
+                let Some(loop_index) = positions.get(&current_round.loop_id).copied() else {
+                    visiting.remove(&index);
+                    return false;
+                };
+                let Some(spec) = nodes[loop_index].loop_body.as_ref() else {
+                    visiting.remove(&index);
+                    return false;
+                };
+                let initial_hygiene = recovery_previous_hygiene_binding(index, nodes, positions)
+                    .map(|(_, initial)| initial);
+                let initial_publication = spec.initial_publication.as_deref();
+                let initial_seed_matches = positions.get(published_id).is_some_and(|publication| {
+                    source_index == *publication
+                        || publish_source_hygiene(nodes, positions, *publication)
+                            == Some(source_index)
+                });
+                current_round.round == 1
+                    && initial_hygiene.is_some_and(|initial| initial == node.as_str())
+                    && initial_publication == Some(published_id)
+                    && initial_seed_matches
+                    && recovery_previous_publication_binding(index, nodes, positions)
+                    && nodes[source_index].kind == Some(NodeKind::Hygiene)
+                    && nodes[source_index].worktree == nodes[index].worktree
+            }
+        }
         _ => false,
     };
     visiting.remove(&index);

@@ -355,6 +355,39 @@ fn node_plan_error(node: &GraphNode, reason: impl std::fmt::Display) -> Admissio
     AdmissionError::Plan(format!("node {}: {reason}", node.id))
 }
 
+fn settled_retry_hygiene_source(
+    node: &GraphNode,
+    source_id: &str,
+    document: &GraphDocument,
+    positions: &std::collections::BTreeMap<String, usize>,
+) -> bool {
+    let Some(round) = node.round.as_ref().filter(|round| round.round > 1) else {
+        return false;
+    };
+    let Some(loop_index) = positions.get(&round.loop_id).copied() else {
+        return false;
+    };
+    let Some(spec) = document.nodes[loop_index].loop_body.as_ref() else {
+        return false;
+    };
+    let Some(source_index) = positions.get(source_id).copied() else {
+        return false;
+    };
+    let source = &document.nodes[source_index];
+    let Some(source_round) = source.round.as_ref() else {
+        return false;
+    };
+    node.after_settled.iter().any(|parent| parent == source_id)
+        && source.kind == Some(NodeKind::Hygiene)
+        && source.worktree == node.worktree
+        && source_round.loop_id == round.loop_id
+        && source_round.round + 1 == round.round
+        && spec.retry_on.contains(&source_round.node_id)
+        && spec.body.iter().any(|member| {
+            member.id == source_round.node_id && member.kind == Some(NodeKind::Hygiene)
+        })
+}
+
 pub(super) fn validate_flat_plan(
     document: &GraphDocument,
     limits: &crate::config::GraphLimits,
@@ -719,10 +752,13 @@ pub(super) fn validate_flat_plan(
             {
                 return Err(node_plan_error(node, "source requires a full commit ID"));
             }
-            Some(SourceBinding::Node { node: source }) if !node.depends_on.contains(source) => {
+            Some(SourceBinding::Node { node: source })
+                if !node.depends_on.contains(source)
+                    && !settled_retry_hygiene_source(node, source, document, &positions) =>
+            {
                 return Err(node_plan_error(
                     node,
-                    "source node must be a direct dependency",
+                    "source node must be a direct dependency or a settled prior retry hygiene result",
                 ));
             }
             Some(SourceBinding::Integration) if document.integration_branch.is_none() => {
