@@ -2839,10 +2839,15 @@ fn record_observed_attempt<R: AttemptOwner, J: GraphJournal>(
         }
         None
     };
+    // A finished task has no follow-up: adopting a successor after success
+    // would hide the successful attempt behind a second, never-launched task
+    // and turn a preparation refusal into the graph's outcome (#3987).
     if let AttemptObservation::Terminal {
         attempt_ref: Some(reference),
+        outcome,
         ..
     } = &observation
+        && *outcome != AttemptOutcome::Succeeded
         && let Some(successor) = owner.continuation(reference).map_err(GraphError::Run)?
     {
         transitions::continue_attempt(&mut *checkpoint, node_index, observation, successor, usage)

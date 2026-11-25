@@ -3191,12 +3191,26 @@ impl RunStore {
         {
             return Err(RunError::Nonterminal);
         }
-        if context.graph_id.is_none()
-            || context.node_id.is_none()
-            || previous.context.as_ref().is_none_or(|previous| {
-                previous.graph_id != context.graph_id || previous.node_id != context.node_id
-            })
-        {
+        let previous_context = previous.context.as_ref();
+        let same_node = context.graph_id.is_some()
+            && context.node_id.is_some()
+            && previous_context.is_some_and(|previous| {
+                previous.graph_id == context.graph_id && previous.node_id == context.node_id
+            });
+        // A new graph can adopt a retained writer worktree whose lane owner
+        // belongs to a finished attempt in an earlier graph. It inherits the
+        // worktree and the writer's own commits, not the earlier graph's source
+        // and head pins: those describe the old graph, not the adopted tree.
+        // Writer identity, terminal custody and the lane-owner chain below stay
+        // authoritative; ordinary same-node retries keep their pin check.
+        let adopted_prior_graph = context.graph_id.is_some()
+            && context.node_id.is_some()
+            && previous_context.is_some_and(|previous| {
+                previous.graph_id.is_some()
+                    && previous.node_id.is_some()
+                    && previous.graph_id != context.graph_id
+            });
+        if !same_node && !adopted_prior_graph {
             return Err(RunError::WriterLineage("graph predecessor context"));
         }
         let request = self.request(previous.attempt_id, call)?;
@@ -3214,10 +3228,11 @@ impl RunStore {
             .as_ref()
             .zip(previous_task.writer.as_ref())
             .is_some_and(|(writer, previous)| equivalent_writer(previous, writer))
-            || task.source_head.is_none()
-            || task.source_head.as_ref() != source
-            || task.head.is_none()
-            || task.head != head
+            || (!adopted_prior_graph
+                && (task.source_head.is_none()
+                    || task.source_head.as_ref() != source
+                    || task.head.is_none()
+                    || task.head != head))
         {
             return Err(RunError::WriterLineage(
                 "graph predecessor writer or source",

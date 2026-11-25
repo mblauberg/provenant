@@ -1836,14 +1836,13 @@ impl RunStore {
             )?;
             return Ok(None);
         }
-        // A naturally finished writer can leave edits for its queued next turn.
-        // The successor retains the same worktree; explicit stops and other
-        // terminal failures must not become automatic continuations.
+        // A writer that stopped without finishing can leave edits for its
+        // queued next turn, reusing the same worktree. A finished task has no
+        // follow-up: creating one after success hides the successful attempt
+        // behind a successor that never launches and fails at preparation
+        // (#3987). Explicit stops and other terminal failures never continue.
         let natural_settlement = terminal_cause.is_none()
-            && matches!(
-                outcome,
-                Outcome::Succeeded | Outcome::ReviewRequired | Outcome::Uncommitted
-            );
+            && matches!(outcome, Outcome::ReviewRequired | Outcome::Uncommitted);
         if terminal_cause != Some(TerminalCause::Steered) && !natural_settlement {
             self.record_steer_not_continued(
                 id,

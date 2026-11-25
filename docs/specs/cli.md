@@ -224,7 +224,11 @@ graph with a live attempt is still listed. The headline leads with the live-lane
 count (`live_lanes` in JSON). One state vocabulary serves the summary, rows and
 `status NAME`: a live attempt is `running`, work waiting for admission or launch
 is `pending`, and a non-live writer keeps its presence label. Human and
-structured output share the selection.
+structured output share the selection. A live attempt always represents its
+node; otherwise the newest attempt that produced a result represents it, so a
+later preparation refusal that never launched cannot hide an earlier
+successful attempt, its result path or its summary. The refusal stays visible
+in the full rows and its own operation outcome.
 
 `status --mine` reads active custody across projects (or one `--project`),
 including attempts nested under the current chair and unattended items open to

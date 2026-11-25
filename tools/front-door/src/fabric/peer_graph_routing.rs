@@ -233,7 +233,16 @@ fn unavailable_steer_session_with_refuse_setting_has_no_successor()
         &call,
     )?;
     let running = fixture.store.record(record.attempt_id, &call)?;
-    publish_success(&fixture.rig, &fixture.store, &running, head, &call)?;
+    // A finished task has no follow-up (#3987). Leave retained edits so this
+    // test still reaches the `refuse` fallback with no provider session.
+    publish_outcome(
+        &fixture.rig,
+        &fixture.store,
+        &running,
+        head,
+        Outcome::Uncommitted,
+        &call,
+    )?;
     let mut settled = fixture.settled.clone();
     settled.attempt_id = record.attempt_id;
     settled.launch = Some(provenant_run::HostLaunchContext {
@@ -266,10 +275,10 @@ fn unavailable_steer_session_with_refuse_setting_has_no_successor()
 }
 
 #[test]
-fn terminal_steer_refusal_settles_without_losing_private_text_or_graph_progress()
+fn a_finished_task_keeps_graph_progress_and_private_steering_text()
 -> Result<(), Box<dyn std::error::Error>> {
     if host_test(
-        "fabric::peer_tests::peer_graph_routing::terminal_steer_refusal_settles_without_losing_private_text_or_graph_progress",
+        "fabric::peer_tests::peer_graph_routing::a_finished_task_keeps_graph_progress_and_private_steering_text",
     )? {
         return Ok(());
     }
@@ -413,11 +422,16 @@ fn terminal_steer_refusal_settles_without_losing_private_text_or_graph_progress(
     );
     assert_eq!(
         status.cause,
-        // docs/specs/fabric.md: with no live session the default
-        // `fresh_with_handoff` fallback starts a successor; the fixture's
-        // successor never launches, so the terminal refusal is retained as
-        // the closed `continuation_refused` cause, not `session_unavailable`.
-        Some(provenant_records::run::SteeringCause::ContinuationRefused)
+        // docs/specs/run-settlement.md#continuation: a finished task admits no
+        // follow-up. The accepted steering resolves as a terminal stop, so no
+        // second attempt can refuse at preparation and hide this success
+        // (#3987).
+        Some(provenant_records::run::SteeringCause::TerminalStop)
+    );
+    assert_eq!(
+        status.successor,
+        None,
+        "a finished task must not create a follow-up attempt (#3987)"
     );
     assert_eq!(status.operations.len(), 1);
     assert_eq!(

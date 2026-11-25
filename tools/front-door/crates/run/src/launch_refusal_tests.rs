@@ -311,13 +311,27 @@ fn git_setup_handoff_maps_to_git_setup_failure_and_remote_remedy()
     );
     assert_eq!(failure, Some(PreparationFailure::AdapterUnavailable));
     assert!(note.is_none());
+    // A writer-lineage mismatch is the production typed preparation refusal:
+    // its note names the retained-worktree repair, never a reconcile (#3987).
+    let lineage = HandOff::TypedLocal {
+        message: "writer lineage mismatch: graph predecessor writer or source".into(),
+        cause: TerminalCause::PreparationRefused,
+    };
+    let (failure, note) = crate::launch::handoff_preparation(
+        &lineage,
+        "launch preparation failed: writer lineage mismatch: graph predecessor writer or source",
+    );
+    assert_eq!(failure, Some(PreparationFailure::GitSetup));
+    let note = note.expect("missing lineage note");
+    assert!(note.contains("retained writer worktree"), "{note}");
+    assert!(!note.contains("provenant reconcile"), "{note}");
     let typed_other = HandOff::TypedLocal {
-        message: "writer lineage".into(),
+        message: "some other typed local refusal".into(),
         cause: TerminalCause::HandoffRefused,
     };
     let (failure, _) = crate::launch::handoff_preparation(
         &typed_other,
-        "launch preparation failed: writer lineage",
+        "launch preparation failed: some other typed local refusal",
     );
     assert_eq!(failure, Some(PreparationFailure::AdapterUnavailable));
     let boundary = HandOff::Boundary {

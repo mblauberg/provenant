@@ -101,7 +101,18 @@ reason implies — declare `ports.git.remote` or set the branch's upstream — i
 operator to run `provenant reconcile`. Remote inference still never guesses a remote.
 - Why: the remedy must repair the step that refused; sending an operator to reconcile a Git
   setup failure hides the actual cause and strands the lane.
-- Owner: `crates/run/src/launch/hand_off.rs`, `crates/run/src/launch.rs`, `crates/records/src/run.rs`
+- A writer-lineage check at launch is the same local preparation step: its
+  refusal is a typed `preparation_refused` outcome whose note names the
+  retained worktree's owner, source and head to check before retrying, never an
+  "invalid run record" or a generic `provenant reconcile` instruction. An
+  unfinished predecessor still refuses at the authority boundary, because no
+  successor may take its worktree. A new graph can adopt a retained writer
+  worktree whose owner, terminal record and released custody match: it inherits
+  the worktree and its commits, not the earlier graph's source and head pins.
+  - Why: a repair must name the step that refused, and adoption must not be
+    refused for commits the writer made after an earlier graph sealed its head.
+  - Owner: `crates/run/src/launch/hand_off.rs`, `crates/run/src/controls.rs`,
+    `crates/records/src/run.rs`
 
 Terminal attempts are immutable. A retry is a new linked attempt, a terminal attempt has at most
 one successor, and a writer is never replayed over its edits.
