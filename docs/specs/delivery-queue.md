@@ -204,9 +204,10 @@ outcomes, so parallel writers do not invent incompatible interfaces.
 ## Shared types
 
 The wire additions require graph `schema_version: 2`; absent fields stay absent
-when an old sealed plan or checkpoint is decoded and encoded. Slice 0 admits no
-new delivery policy for execution: admission returns
-`AdmissionError::DeliveryQueueUnsupported` until the execution slices wire it.
+when an old sealed plan or checkpoint is decoded and encoded. Queue item launch
+remains guarded until authenticated binding and the complete recovery plan are
+wired; the guard must not be removed merely because the individual node types
+can be admitted.
 
 - `GraphNode.loop_body` is serialised as `loop`: its existing `max_rounds` is
   required and positive, and the owning node `id` is the loop name. Optional
@@ -217,7 +218,15 @@ new delivery policy for execution: admission returns
   preceding round's node. Queue conflict recovery uses this binding for both
   the rebase head and its conflict/CI checks, so every retry checks the latest
   published head. Each initial node must be a direct loop dependency, and
-  published-head bindings must name a publication node.
+  published-head bindings must name a publication node. A general recovery loop
+  may name typed CI, conflict and verdict body gates in `retry_on`; only a
+  failed named gate admits another bounded round, and the failed evidence stays
+  in the checkpoint. Its optional `selected_publication` names a body publication:
+  success exports the receipt from the successful round, including its exact
+  head. Consumers must use that receipt and revalidate its head before landing.
+  A queue item composes these graph mechanisms into one recovery owner. Each new
+  repair head returns through hygiene, publication, conflict, CI and review;
+  exhausted or incomplete evidence parks instead of selecting a stale head.
   `NodeProgress.delivery_loop: Option<DeliveryLoopProgress>` persists `name`
   and the number of admitted attempts in `round`.
 - `GraphNode.escalate: Option<EscalateSpec>` contains `ladder: Vec<String>`
