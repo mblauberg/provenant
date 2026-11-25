@@ -19,6 +19,8 @@ pub(crate) mod gc_cleanup;
 pub(crate) mod git_facts;
 mod graph_auto_settle;
 mod graph_document;
+mod queue_registry;
+mod queue_snapshot;
 pub(crate) mod owner;
 mod peer;
 mod peer_source_binding;
