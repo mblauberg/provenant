@@ -203,7 +203,7 @@ pub(super) fn merge_delivery_member(
         method,
         grant,
         reviewed,
-        Some(&pr.base_branch),
+        Some(pr),
     )
 }
 
@@ -214,7 +214,7 @@ fn merge_member_with_queue_policy(
     method: MergeMethod,
     grant: &PublicationGrant,
     reviewed: bool,
-    queue_base: Option<&str>,
+    queue_pr: Option<&EligiblePr>,
 ) -> Result<String, LandingError> {
     let stack = forge.pull_request(number)?.stack;
     if let Some(stack) = &stack {
@@ -233,20 +233,8 @@ fn merge_member_with_queue_policy(
             )));
         }
     }
-    if let Some(base) = queue_base {
-        let current = forge.pull_request(number)?;
-        if current.state != PullRequestState::Open
-            || current.head != head
-            || current.base_branch != base
-        {
-            return Err(LandingError::PullRequestChanged(number));
-        }
-        if current.mergeability != Mergeability::Clean {
-            return Err(LandingError::Pending(format!(
-                "pull request #{number} is not known clean immediately before merge ({:?})",
-                current.mergeability
-            )));
-        }
+    if let Some(pr) = queue_pr {
+        require_queue_mergeability(forge, pr)?;
     }
     let result = if stack.is_some() {
         forge.merge_stack(number, head, method)
@@ -261,11 +249,32 @@ fn merge_member_with_queue_policy(
             // The only 405 this grant may answer. The gate has passed, the
             // member carries independent review evidence, and the owner gave
             // host-layer permission; the admin call still uses their authority.
+            if let Some(pr) = queue_pr {
+                super::gate::require_delivery_queue_ci(forge, pr)?;
+                require_queue_mergeability(forge, pr)?;
+            }
             forge.merge_admin(number, head, method)
         }
         other => other,
     }
 }
+fn require_queue_mergeability(forge: &mut dyn Forge, pr: &EligiblePr) -> Result<(), LandingError> {
+    let current = forge.pull_request(pr.number)?;
+    if current.state != PullRequestState::Open
+        || current.head != pr.head
+        || current.base_branch != pr.base_branch
+    {
+        return Err(LandingError::PullRequestChanged(pr.number));
+    }
+    if current.mergeability != Mergeability::Clean {
+        return Err(LandingError::Pending(format!(
+            "pull request #{} is not known clean immediately before merge ({:?})",
+            pr.number, current.mergeability
+        )));
+    }
+    Ok(())
+}
+
 /// Advance the target from the candidate base with an expected-old-value push.
 pub fn fast_forward(
     repo: &mut dyn Repo,
@@ -346,7 +355,7 @@ pub fn rest_ordered(
             method,
             grant,
             reviewed,
-            delivery_queue.then_some(step.pr.base_branch.as_str()),
+            delivery_queue.then_some(&step.pr),
         )?;
         landed.push(expected.clone());
     }
@@ -493,6 +502,27 @@ mod tests {
             Err(LandingError::UnmetGate(_))
         ));
         assert!(forge.merges.is_empty());
+    }
+
+    #[test]
+    fn delivery_admin_retry_rechecks_ci_after_review_refusal() {
+        use provenant_cli::domains::AdminPublication;
+
+        let (mut forge, _, candidate) = queue_fixture();
+        let pr = &candidate.steps[0].pr;
+        let green = forge.check_runs[&pr.head].clone();
+        let mut red = green.clone();
+        red[0].checks[0].result = GateResult::Failed;
+        forge
+            .check_sequences
+            .insert(pr.head.clone(), [green, red].into());
+        forge.review_required_merge = Some(pr.number);
+        let grant = host_grant(AdminPublication::WhenReviewUnavailable);
+        assert!(matches!(
+            merge_delivery_member(&mut forge, pr, MergeMethod::Merge, &grant, true),
+            Err(LandingError::UnmetGate(_))
+        ));
+        assert!(forge.admin_merges.is_empty());
     }
 
     #[test]
