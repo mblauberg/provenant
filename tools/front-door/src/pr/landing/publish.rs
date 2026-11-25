@@ -245,14 +245,10 @@ fn merge_member_with_queue_policy(
         Err(LandingError::RefusedWith {
             cause: "REVIEW_REQUIRED",
             ..
-        }) if reviewed && grant.allows_review_unavailable() => {
+        }) if reviewed && grant.allows_review_unavailable() && queue_pr.is_none() => {
             // The only 405 this grant may answer. The gate has passed, the
             // member carries independent review evidence, and the owner gave
             // host-layer permission; the admin call still uses their authority.
-            if let Some(pr) = queue_pr {
-                super::gate::require_delivery_queue_ci(forge, pr)?;
-                require_queue_mergeability(forge, pr)?;
-            }
             forge.merge_admin(number, head, method)
         }
         other => other,
@@ -505,22 +501,19 @@ mod tests {
     }
 
     #[test]
-    fn delivery_admin_retry_rechecks_ci_after_review_refusal() {
+    fn delivery_queue_never_uses_admin_review_fallback() {
         use provenant_cli::domains::AdminPublication;
 
         let (mut forge, _, candidate) = queue_fixture();
         let pr = &candidate.steps[0].pr;
-        let green = forge.check_runs[&pr.head].clone();
-        let mut red = green.clone();
-        red[0].checks[0].result = GateResult::Failed;
-        forge
-            .check_sequences
-            .insert(pr.head.clone(), [green, red].into());
         forge.review_required_merge = Some(pr.number);
         let grant = host_grant(AdminPublication::WhenReviewUnavailable);
         assert!(matches!(
             merge_delivery_member(&mut forge, pr, MergeMethod::Merge, &grant, true),
-            Err(LandingError::UnmetGate(_))
+            Err(LandingError::RefusedWith {
+                cause: "REVIEW_REQUIRED",
+                ..
+            })
         ));
         assert!(forge.admin_merges.is_empty());
     }
