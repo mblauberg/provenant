@@ -124,6 +124,12 @@ fn bounded_recovery_retries_only_named_failed_gates() {
     assert!(loops::inactive_round(next, &plan, &checkpoint, &positions));
     checkpoint.nodes[last].state = NodeState::Succeeded;
     assert!(loops::inactive_round(next, &plan, &checkpoint, &positions));
+
+    let mut bypass = document;
+    let last_gate = &mut bypass.nodes[0].loop_body.as_mut().unwrap().body[1];
+    last_gate.depends_on.clear();
+    last_gate.after_settled.push("first".into());
+    assert!(loops::expand(&bypass, &[], &Default::default()).is_err());
 }
 
 #[test]
