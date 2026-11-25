@@ -1089,6 +1089,12 @@ mod tests {
         state: &str,
         outcome: Option<&str>,
     ) -> serde_json::Value {
+        let outcome = outcome.map(|outcome| match outcome {
+            "preparation_refused" => serde_json::json!({
+                "preparation_refused": "preparation_refused"
+            }),
+            outcome => serde_json::json!(outcome),
+        });
         serde_json::json!({
             "launched": launched,
             "key": {"graph_id": "g", "node_id": "n", "route_index": route_index, "attempt": route_index + 1},
@@ -1241,7 +1247,7 @@ mod tests {
     #[test]
     fn proven_preparation_refusal_retries_the_same_route_with_a_bounded_allowance() {
         let node = planned(serde_json::json!({
-            "id": "n", "prompt": "p", "access": "worktree_write",
+            "id": "n", "prompt": "p", "access": "worktree_write", "worktree": "/w",
             "routes": [{"adapter": "a", "model": "a/m"}, {"adapter": "b", "model": "b/m"}]
         }));
         let limits = crate::config::GraphLimits::default();
@@ -1291,7 +1297,7 @@ mod tests {
     #[test]
     fn later_route_index_ignores_same_route_preparation_rows() {
         let node = planned(serde_json::json!({
-            "id": "n", "prompt": "p", "access": "worktree_write",
+            "id": "n", "prompt": "p", "access": "worktree_write", "worktree": "/w",
             "routes": [{"adapter": "a", "model": "a/m"}, {"adapter": "b", "model": "b/m"}]
         }));
         let mut first = attempt(0, false, "terminal", Some("preparation_refused"));

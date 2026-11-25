@@ -257,7 +257,34 @@ fn recovery_source_is_published_head(
         return false;
     }
     let bound = match &nodes[index].source {
-        Some(SourceBinding::Head { node }) => node == published_id,
+        Some(SourceBinding::Head { node }) if node == published_id => true,
+        Some(SourceBinding::Head { node }) => positions.get(node).is_some_and(|source| {
+            let Some(current_round) = nodes[index].round.as_ref() else {
+                return false;
+            };
+            let Some(source_round) = nodes[*source].round.as_ref() else {
+                return false;
+            };
+            if nodes[*source].kind != Some(NodeKind::Publish)
+                || !members.contains(source)
+                || source_round.loop_id != current_round.loop_id
+                || source_round.round + 1 != current_round.round
+            {
+                return false;
+            }
+            let Some(source_writer) = publish_source_writer(nodes, positions, *source) else {
+                return false;
+            };
+            nodes[source_writer].worktree == nodes[index].worktree
+                && recovery_source_is_published_head(
+                    source_writer,
+                    published_id,
+                    nodes,
+                    positions,
+                    members,
+                    visiting,
+                )
+        }),
         Some(SourceBinding::Node { node }) => positions.get(node).is_some_and(|source| {
             members.contains(source)
                 && recovery_source_is_published_head(
@@ -275,17 +302,185 @@ fn recovery_source_is_published_head(
     bound
 }
 
-fn loop_is_at_final_round(gate: &PlannedNode, nodes: &[PlannedNode]) -> bool {
-    let Some(round) = &gate.round else {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct BoundedConflictRecheck {
+    pub(super) loop_id: usize,
+    pub(super) round: usize,
+    pub(super) initial_conflict: usize,
+    pub(super) fresh_conflict: usize,
+    pub(super) fresh_ci: usize,
+}
+
+fn dependency_ancestors(
+    nodes: &[PlannedNode],
+    positions: &BTreeMap<String, usize>,
+    id: &str,
+) -> BTreeSet<usize> {
+    let mut seen = BTreeSet::new();
+    let mut pending: Vec<usize> = positions.get(id).into_iter().copied().collect();
+    while let Some(index) = pending.pop() {
+        for parent in &nodes[index].depends_on {
+            if let Some(parent) = positions.get(parent)
+                && seen.insert(*parent)
+            {
+                pending.push(*parent);
+            }
+        }
+    }
+    seen
+}
+
+/// Find same-round conflict recovery routes that can end successfully only
+/// after checking CI on their fresh publication. The CI dependency is a real
+/// `depends_on` edge so a failed conflict check blocks CI and permits retry.
+pub(super) fn bounded_conflict_rechecks(
+    nodes: &[PlannedNode],
+    positions: &BTreeMap<String, usize>,
+) -> Vec<BoundedConflictRecheck> {
+    let mut rechecks = Vec::new();
+    for (fresh_conflict_index, gate) in nodes.iter().enumerate() {
+        let Some(round) = gate.round.as_ref().filter(|round| !round.until) else {
+            continue;
+        };
+        let Some(GateCondition::Conflict {
+            target: CiTarget::Node {
+                node: published_id, ..
+            },
+            ..
+        }) = gate.condition.as_ref()
+        else {
+            continue;
+        };
+        if gate.on_fail.is_some() {
+            continue;
+        }
+        let Some(published_index) = positions.get(published_id).copied() else {
+            continue;
+        };
+        let published = &nodes[published_index];
+        if published.kind != Some(NodeKind::Publish)
+            || !published.round.as_ref().is_some_and(|published_round| {
+                published_round.loop_id == round.loop_id && published_round.round == round.round
+            })
+        {
+            continue;
+        }
+        let Some(writer_index) = publish_source_writer(nodes, positions, published_index) else {
+            continue;
+        };
+        let writer = &nodes[writer_index];
+        if !writer.round.as_ref().is_some_and(|writer_round| {
+            writer_round.loop_id == round.loop_id && writer_round.round == round.round
+        }) {
+            continue;
+        }
+        let Some(SourceBinding::Head {
+            node: prior_publish,
+        }) = writer.source.as_ref()
+        else {
+            continue;
+        };
+        let Some(prior_publish_index) = positions.get(prior_publish).copied() else {
+            continue;
+        };
+        let prior_round = nodes[prior_publish_index].round.as_ref();
+        let prior_binding_is_current = if round.round == 1 {
+            prior_round.is_none_or(|prior_round| prior_round.loop_id != round.loop_id)
+        } else {
+            prior_round.is_some_and(|prior_round| {
+                prior_round.loop_id == round.loop_id && prior_round.round + 1 == round.round
+            })
+        };
+        if !prior_binding_is_current {
+            continue;
+        }
+        let Some(initial_conflict) = nodes.iter().enumerate().find_map(|(index, prior_gate)| {
+            (prior_gate.round.as_ref().is_some_and(|prior_round| {
+                prior_round.loop_id == round.loop_id && prior_round.round == round.round
+            }) && matches!(
+                prior_gate.condition.as_ref(),
+                Some(GateCondition::Conflict {
+                    target: CiTarget::Node { node, .. },
+                    ..
+                }) if node == prior_publish
+            ) && prior_gate.on_fail.as_ref().is_some_and(|recovery| {
+                positions.get(recovery).is_some_and(|recovery_index| {
+                    recovery_members(*recovery_index, nodes, positions).contains(&writer_index)
+                })
+            }))
+            .then_some(index)
+        }) else {
+            continue;
+        };
+        let conflict_ancestors = ancestors(nodes, positions, &gate.id);
+        if !conflict_ancestors.contains(&published_index)
+            || !conflict_ancestors.contains(&initial_conflict)
+            || !conflict_ancestors.contains(&prior_publish_index)
+        {
+            continue;
+        }
+        let Some(fresh_ci) = nodes.iter().enumerate().find_map(|(index, ci)| {
+            (ci.round.as_ref().is_some_and(|ci_round| {
+                ci_round.loop_id == round.loop_id && ci_round.round == round.round
+            }) && matches!(
+                ci.condition.as_ref(),
+                Some(GateCondition::Ci {
+                    target: CiTarget::Node { node, .. },
+                    ..
+                }) if node == published_id
+            ) && {
+                let ancestors = dependency_ancestors(nodes, positions, &ci.id);
+                ancestors.contains(&fresh_conflict_index) && ancestors.contains(&published_index)
+            })
+            .then_some(index)
+        }) else {
+            continue;
+        };
+        let has_initial_ci_until = nodes.iter().any(|until| {
+            until.round.as_ref().is_some_and(|until_round| {
+                until_round.loop_id == round.loop_id
+                    && until_round.round == round.round
+                    && until_round.until
+            }) && matches!(
+                until.condition.as_ref(),
+                Some(GateCondition::Ci {
+                    target: CiTarget::Node { node, .. },
+                    ..
+                }) if node == prior_publish
+            ) && dependency_ancestors(nodes, positions, &until.id).contains(&initial_conflict)
+                && ancestors(nodes, positions, &until.id).contains(&fresh_ci)
+        });
+        if !has_initial_ci_until {
+            continue;
+        }
+        rechecks.push(BoundedConflictRecheck {
+            loop_id: positions[&round.loop_id],
+            round: round.round,
+            initial_conflict,
+            fresh_conflict: fresh_conflict_index,
+            fresh_ci,
+        });
+    }
+    rechecks
+}
+
+pub(super) fn retryable_conflict_failure(
+    index: usize,
+    nodes: &[PlannedNode],
+    positions: &BTreeMap<String, usize>,
+) -> bool {
+    let Some(round) = nodes[index].round.as_ref() else {
         return false;
     };
-    let last_round = nodes
+    bounded_conflict_rechecks(nodes, positions)
         .iter()
-        .filter_map(|node| node.round.as_ref())
-        .filter(|member| member.loop_id == round.loop_id)
-        .map(|member| member.round)
-        .max();
-    last_round == Some(round.round)
+        .any(|route| {
+            route.loop_id == positions[&round.loop_id]
+                && route.round == round.round
+                && (index == route.initial_conflict
+                    || index == route.fresh_conflict
+                    || index == route.fresh_ci)
+        })
 }
 
 fn recovery_returns_through_fresh_gates(
@@ -386,9 +581,13 @@ pub(super) fn validate_conflict_recovery(
             return Err(invalid());
         }
         let Some(recovery_id) = gate.on_fail.as_deref() else {
-            // A terminal conflict without a repair route is safe only when
-            // bounded loop exhaustion will persist the park transition.
-            if is_conflict && loop_is_at_final_round(gate, nodes) {
+            // A bounded loop recheck has no repair edge of its own: a failed
+            // conflict blocks the same-round CI outcome and activates retry.
+            if is_conflict
+                && bounded_conflict_rechecks(nodes, positions)
+                    .iter()
+                    .any(|route| route.fresh_conflict == positions[&gate.id])
+            {
                 continue;
             }
             return Err(invalid());
@@ -432,6 +631,11 @@ pub(super) fn validate_conflict_recovery(
                     })
             })
             || !recovery_returns_through_fresh_gates(&writers, nodes, positions)
+            || is_conflict
+                && gate.round.is_some()
+                && !bounded_conflict_rechecks(nodes, positions)
+                    .iter()
+                    .any(|route| route.initial_conflict == positions[&gate.id])
         {
             return Err(invalid());
         }

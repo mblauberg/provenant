@@ -1290,13 +1290,36 @@ fn oversized_blocking_findings_remain_retrievable_with_the_verdict() {
     );
 }
 
+fn delivery_review_panel() -> GraphDocument {
+    let panel = json!({
+        "id":"panel",
+        "kind":"composite",
+        "access":"read_only",
+        "composite":{
+            "min_successful":1,
+            "reduce_verdict":true,
+            "nodes":[review("review.tests", "tests"), review("review.correctness", "correctness")],
+            "exports":[
+                {"node":"tests","outputs":["findings","result","verdict"]},
+                {"node":"correctness","outputs":["findings","result","verdict"]}
+            ]
+        },
+        "delivery_review":DeliveryReviewSpec::default()
+    });
+    let mut document: GraphDocument = serde_json::from_value(json!({
+        "schema_version":2,
+        "graph_id":"delivery-review-panel",
+        "nodes":[panel]
+    }))
+    .unwrap();
+    document.queue = Some(QueueKnobs::default());
+    document
+}
+
 #[test]
 fn malformed_composite_delivery_review_parks_failed_and_partial_members_on_replay() {
     for failed_member in [true, false] {
-        let mut document = panel("f0-v0-s0");
-        document.schema_version = 2;
-        document.queue = Some(QueueKnobs::default());
-        document.nodes[0].delivery_review = Some(DeliveryReviewSpec::default());
+        let document = delivery_review_panel();
         let expanded = plans::expand(&document, &[], &[], &plans::generous()).unwrap();
         let (plan, positions) = validate_flat_plan(&expanded, &plans::generous()).unwrap();
         let mut checkpoint = transitions::initial_checkpoint(
@@ -1369,10 +1392,7 @@ fn malformed_composite_delivery_review_parks_failed_and_partial_members_on_repla
         assert!(parked.evidence.iter().any(|entry| entry.starts_with("member ")));
     }
 
-    let mut document = panel("f0-v0-s0");
-    document.schema_version = 2;
-    document.queue = Some(QueueKnobs::default());
-    document.nodes[0].delivery_review = Some(DeliveryReviewSpec::default());
+    let document = delivery_review_panel();
     let expanded = plans::expand(&document, &[], &[], &plans::generous()).unwrap();
     let (plan, positions) = validate_flat_plan(&expanded, &plans::generous()).unwrap();
     let mut checkpoint = transitions::initial_checkpoint(

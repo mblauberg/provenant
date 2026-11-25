@@ -833,7 +833,7 @@ fn graph_pr_body_uses_its_recorded_base_despite_primary_checkout_changes()
 fn queue_publication_branch_is_stable_for_graph_identity()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let fixture = PrepareFixture::new()?;
-    let host = HostDeliveryContext::new(fixture.environment.clone());
+    let host = fixture.prepare()?;
     let first = host.graph_publication_branch_for(&fixture.writer.project, "queue-item-3972")?;
     let replay = host.graph_publication_branch_for(&fixture.writer.project, "queue-item-3972")?;
     let other = host.graph_publication_branch_for(&fixture.writer.project, "queue-item-3973")?;

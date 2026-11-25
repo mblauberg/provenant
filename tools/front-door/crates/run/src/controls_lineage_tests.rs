@@ -2,7 +2,14 @@ use super::*;
 use provenant_confinement::worktrees::{self, WorktreeCreate, WorktreeOrigin, WorktreeOwner};
 use provenant_core::Clock;
 use provenant_os::fixture::run_git;
+use std::os::unix::fs::DirBuilderExt;
 use std::path::Path;
+
+fn create_private_state_root(path: &Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true).mode(0o700);
+    builder.create(path)
+}
 
 /// Initialise `project` with one empty commit, through the scrubbed fixture Git.
 fn init_base_repository(project: &Path) -> std::io::Result<()> {
@@ -22,12 +29,7 @@ fn graph_writer_resume_uses_the_committed_terminal_head_and_original_source()
     let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
     inputs.state_dir = Some(execution.state_root.as_path().into());
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-    std::fs::create_dir_all(roots.state.as_path())?;
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(
-        roots.state.as_path(),
-        std::fs::Permissions::from_mode(0o700),
-    )?;
+    create_private_state_root(roots.state.as_path())?;
     init_base_repository(&project)?;
     let clock = crate::tests::clock();
     let cancel = provenant_core::CancelToken::new();
@@ -228,12 +230,7 @@ fn resume_preserves_explicit_worktrees_and_settled_lane_ownership()
     let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
     inputs.state_dir = Some(execution.state_root.as_path().into());
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-    std::fs::create_dir_all(roots.state.as_path())?;
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(
-        roots.state.as_path(),
-        std::fs::Permissions::from_mode(0o700),
-    )?;
+    create_private_state_root(roots.state.as_path())?;
     init_base_repository(&project)?;
     let clock = crate::tests::clock();
     let cancel = provenant_core::CancelToken::new();
@@ -352,6 +349,7 @@ fn resume_preserves_explicit_worktrees_and_settled_lane_ownership()
             queue_context.node_id = Some("repair".into());
             queue_context.attempt = Some(1);
             queue_context.writer_predecessor = Some(prior);
+            queue_context.graph_template_launch = true;
             queue_context.delivery_queue_writer_adoption = true;
             queue_task.source_head = queue_task
                 .source_head
@@ -545,6 +543,7 @@ fn resume_preserves_explicit_worktrees_and_settled_lane_ownership()
         queue_context.node_id = Some(format!("repair-{index}"));
         queue_context.attempt = Some(1);
         queue_context.writer_predecessor = Some(prior);
+        queue_context.graph_template_launch = true;
         queue_context.delivery_queue_writer_adoption = true;
         let previous_record = store.record(prior, &call)?;
         queue_graph.request.task.source_head = prior_task
@@ -641,12 +640,7 @@ fn resume_refuses_a_worktree_reused_by_another_lane()
     let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
     inputs.state_dir = Some(execution.state_root.as_path().into());
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-    std::fs::create_dir_all(roots.state.as_path())?;
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(
-        roots.state.as_path(),
-        std::fs::Permissions::from_mode(0o700),
-    )?;
+    create_private_state_root(roots.state.as_path())?;
     init_base_repository(&project)?;
     let clock = crate::tests::clock();
     let cancel = provenant_core::CancelToken::new();

@@ -90,6 +90,18 @@ impl AttemptOwner for Owner {
     ) {
         (None, self.integration_base)
     }
+    fn bind_writer_worktree(
+        &mut self,
+        worktree: &str,
+    ) -> Result<Option<WriterWorktreeBinding>, Self::Error> {
+        Ok(Some(WriterWorktreeBinding {
+            extra: Default::default(),
+            source_directory_identity: None,
+            shared_worktree: None,
+            worktree: format!("/fixture/{worktree}"),
+            head: self.commit.clone().unwrap_or_else(|| "a".repeat(40)),
+        }))
+    }
     fn ci_status(&mut self) -> Option<&mut dyn CiStatus> {
         Some(self)
     }
@@ -1019,7 +1031,71 @@ fn queue_published_document() -> GraphDocument {
              "prompt":"Repair CI findings and sweep the whole defect class.",
              "source":{"type":"head","node":"publish"},"depends_on":["ci","publish"],
              "inputs":[{"node":"ci","outputs":["findings","commit"]}],
-             "route":{"adapter":"fixture","model":"fixture/model"}}
+             "route":{"adapter":"fixture","model":"fixture/model"}},
+            {"id":"hygiene_after_rebase","kind":"hygiene","access":"worktree_write","worktree":"lane",
+             "depends_on":["rebase"],"source":{"type":"node","node":"rebase"}},
+            {"id":"publish_after_rebase","kind":"publish","access":"worktree_write","worktree":"lane",
+             "depends_on":["hygiene_after_rebase"],"source":{"type":"node","node":"hygiene_after_rebase"}},
+            {"id":"conflict_after_rebase","kind":"gate","access":"read_only",
+             "depends_on":["publish_after_rebase"],"on_fail":"rebase_again",
+             "condition":{"type":"conflict","target":{"node":"publish_after_rebase"}}},
+            {"id":"ci_after_rebase","kind":"gate","access":"read_only",
+             "depends_on":["conflict_after_rebase"],
+             "condition":{"type":"ci","target":{"node":"publish_after_rebase"}}},
+            {"id":"rebase_again","kind":"loop","access":"read_only",
+             "depends_on":["conflict_after_rebase","publish_after_rebase"],
+             "loop":{"max_rounds":1,"until":"round_ci",
+              "previous_bindings":{"refresh":"publish_after_rebase"},"body":[
+                {"id":"refresh_conflict_initial","kind":"gate","access":"read_only","on_fail":"fix",
+                 "condition":{"type":"conflict","target":{"node":"previous.refresh"}}},
+                {"id":"fix","access":"worktree_write","worktree":"lane","prompt":"rebase the fresh publication",
+                 "source":{"type":"head","node":"previous.refresh"},"depends_on":["refresh_conflict_initial"],
+                 "route":{"adapter":"fixture","model":"fixture/model"}},
+                {"id":"hygiene","kind":"hygiene","access":"worktree_write","worktree":"lane",
+                 "depends_on":["fix"],"source":{"type":"node","node":"fix"}},
+                {"id":"refresh","kind":"publish","access":"worktree_write","worktree":"lane",
+                 "depends_on":["hygiene"],"source":{"type":"node","node":"hygiene"}},
+                {"id":"refresh_conflict","kind":"gate","access":"read_only","depends_on":["refresh"],
+                 "condition":{"type":"conflict","target":{"node":"refresh"}}},
+                {"id":"refresh_ci","kind":"gate","access":"read_only","depends_on":["refresh_conflict"],
+                 "condition":{"type":"ci","target":{"node":"refresh"}}},
+                {"id":"round_ci","kind":"gate","access":"read_only",
+                 "depends_on":["refresh_conflict_initial"],
+                 "after_settled":["fix","hygiene","refresh","refresh_conflict","refresh_ci"],
+                 "condition":{"type":"ci","target":{"node":"previous.refresh"}}}
+             ]}},
+            {"id":"hygiene_after_repair","kind":"hygiene","access":"worktree_write","worktree":"lane",
+             "depends_on":["repair"],"source":{"type":"node","node":"repair"}},
+            {"id":"publish_after_repair","kind":"publish","access":"worktree_write","worktree":"lane",
+             "depends_on":["hygiene_after_repair"],"source":{"type":"node","node":"hygiene_after_repair"}},
+            {"id":"conflict_after_repair","kind":"gate","access":"read_only",
+             "depends_on":["publish_after_repair"],"on_fail":"repair_again",
+             "condition":{"type":"conflict","target":{"node":"publish_after_repair"}}},
+            {"id":"ci_after_repair","kind":"gate","access":"read_only",
+             "depends_on":["conflict_after_repair"],
+             "condition":{"type":"ci","target":{"node":"publish_after_repair"}}},
+            {"id":"repair_again","kind":"loop","access":"read_only",
+             "depends_on":["conflict_after_repair","publish_after_repair"],
+             "loop":{"max_rounds":1,"until":"round_ci",
+              "previous_bindings":{"refresh":"publish_after_repair"},"body":[
+                {"id":"refresh_conflict_initial","kind":"gate","access":"read_only","on_fail":"fix",
+                 "condition":{"type":"conflict","target":{"node":"previous.refresh"}}},
+                {"id":"fix","access":"worktree_write","worktree":"lane","prompt":"repair the fresh publication",
+                 "source":{"type":"head","node":"previous.refresh"},"depends_on":["refresh_conflict_initial"],
+                 "route":{"adapter":"fixture","model":"fixture/model"}},
+                {"id":"hygiene","kind":"hygiene","access":"worktree_write","worktree":"lane",
+                 "depends_on":["fix"],"source":{"type":"node","node":"fix"}},
+                {"id":"refresh","kind":"publish","access":"worktree_write","worktree":"lane",
+                 "depends_on":["hygiene"],"source":{"type":"node","node":"hygiene"}},
+                {"id":"refresh_conflict","kind":"gate","access":"read_only","depends_on":["refresh"],
+                 "condition":{"type":"conflict","target":{"node":"refresh"}}},
+                {"id":"refresh_ci","kind":"gate","access":"read_only","depends_on":["refresh_conflict"],
+                 "condition":{"type":"ci","target":{"node":"refresh"}}},
+                {"id":"round_ci","kind":"gate","access":"read_only",
+                 "depends_on":["refresh_conflict_initial"],
+                 "after_settled":["fix","hygiene","refresh","refresh_conflict","refresh_ci"],
+                 "condition":{"type":"ci","target":{"node":"previous.refresh"}}}
+             ]}}
         ]
     }))
     .unwrap();
@@ -1073,14 +1149,33 @@ fn queue_conflict_recheck_matches_a_bounded_round_and_reactivates_composite_reba
                      "source":{"type":"head","node":"publish"},
                      "route":{"adapter":"fixture","model":"fixture/model"}}
                  ],"exports":[{"node":"fix","outputs":["result"]}]}},
+                {"id":"rebase_hygiene","kind":"hygiene","access":"worktree_write","worktree":"lane",
+                 "depends_on":["rebase"],"source":{"type":"node","node":"rebase"}},
+                {"id":"rebase_publish","kind":"publish","access":"worktree_write","worktree":"lane",
+                 "depends_on":["rebase_hygiene"],"source":{"type":"node","node":"rebase_hygiene"}},
+                {"id":"rebase_conflict","kind":"gate","access":"read_only","depends_on":["rebase_publish"],
+                 "condition":{"type":"conflict","target":{"node":"rebase_publish"}}},
+                {"id":"rebase_ci","kind":"gate","access":"read_only","depends_on":["rebase_conflict"],
+                 "condition":{"type":"ci","target":{"node":"rebase_publish"}}},
                 {"id":"ci_repair","access":"worktree_write","worktree":"lane","prompt":"repair",
                  "source":{"type":"head","node":"publish"},"depends_on":["ci"],
                  "inputs":[{"node":"ci","outputs":["findings","commit"]}],
                  "route":{"adapter":"fixture","model":"fixture/model"}},
+                {"id":"ci_hygiene","kind":"hygiene","access":"worktree_write","worktree":"lane",
+                 "depends_on":["ci_repair"],"source":{"type":"node","node":"ci_repair"}},
+                {"id":"ci_publish","kind":"publish","access":"worktree_write","worktree":"lane",
+                 "depends_on":["ci_hygiene"],"source":{"type":"node","node":"ci_hygiene"}},
+                {"id":"ci_conflict","kind":"gate","access":"read_only","depends_on":["ci_publish"],
+                 "condition":{"type":"conflict","target":{"node":"ci_publish"}}},
+                {"id":"ci_refresh","kind":"gate","access":"read_only","depends_on":["ci_conflict"],
+                 "condition":{"type":"ci","target":{"node":"ci_publish"}}},
                 {"id":"ci","kind":"gate","access":"read_only","depends_on":["conflict"],
                  "on_fail":"ci_repair","condition":{"type":"ci","target":{"node":"publish"}}},
                 {"id":"done","kind":"gate","access":"read_only",
-                 "depends_on":["ci","rebase","ci_repair"],"condition":{"type":"budget"}}
+                 "depends_on":["ci"],
+                 "after_settled":["conflict","rebase","rebase_hygiene","rebase_publish","rebase_conflict",
+                                  "rebase_ci","ci_repair","ci_hygiene","ci_publish","ci_conflict","ci_refresh"],
+                 "condition":{"type":"budget"}}
             ]}
         }))
         .unwrap(),
@@ -1209,13 +1304,25 @@ fn queue_conflict_recheck_replays_into_a_later_recovery_round() {
         serde_json::from_value::<Vec<GraphNode>>(serde_json::json!([
             {"id":"conflict","kind":"gate","access":"read_only","depends_on":["publish"],
              "on_fail":"rebase","condition":{"type":"conflict","target":{"node":"publish"}}},
-            {"id":"rebase","kind":"loop","access":"read_only","depends_on":["conflict"],
-             "loop":{"max_rounds":2,"until":"checked","body":[
+            {"id":"rebase","kind":"loop","access":"read_only","depends_on":["conflict","publish"],
+             "loop":{"max_rounds":2,"until":"round_ci",
+              "previous_bindings":{"republish":"publish"},"body":[
+                {"id":"conflict","kind":"gate","access":"read_only","on_fail":"fix",
+                 "condition":{"type":"conflict","target":{"node":"previous.republish"}}},
                 {"id":"fix","access":"worktree_write","worktree":"lane","prompt":"rebase",
-                 "source":{"type":"head","node":"publish"},
+                 "source":{"type":"head","node":"previous.republish"},"depends_on":["conflict"],
                  "route":{"adapter":"fixture","model":"fixture/model"}},
-                {"id":"checked","kind":"gate","access":"read_only","depends_on":["fix"],
-                 "condition":{"type":"budget"}}
+                {"id":"hygiene","kind":"hygiene","access":"worktree_write","worktree":"lane",
+                 "depends_on":["fix"],"source":{"type":"node","node":"fix"}},
+                {"id":"republish","kind":"publish","access":"worktree_write","worktree":"lane",
+                 "depends_on":["hygiene"],"source":{"type":"node","node":"hygiene"}},
+                {"id":"fresh_conflict","kind":"gate","access":"read_only","depends_on":["republish"],
+                 "condition":{"type":"conflict","target":{"node":"republish"}}},
+                {"id":"fresh_ci","kind":"gate","access":"read_only","depends_on":["fresh_conflict"],
+                 "condition":{"type":"ci","target":{"node":"republish"}}},
+                {"id":"round_ci","kind":"gate","access":"read_only","depends_on":["conflict"],
+                 "after_settled":["fix","hygiene","republish","fresh_conflict","fresh_ci"],
+                 "condition":{"type":"ci","target":{"node":"previous.republish"}}}
              ]}},
             {"id":"ci","kind":"gate","access":"read_only","depends_on":["conflict","publish"],
              "condition":{"type":"ci","target":{"node":"publish"}}}
@@ -1228,7 +1335,8 @@ fn queue_conflict_recheck_replays_into_a_later_recovery_round() {
     let (plan, positions) = validate_flat_plan(&expanded, &limits).unwrap();
     let conflict_index = positions["conflict"];
     let rebase_index = positions["rebase"];
-    let first_until_index = positions["rebase--r1--checked"];
+    let first_until_index = positions["rebase--r1--round_ci"];
+    let second_conflict_index = positions["rebase--r2--conflict"];
     let second_fix_index = positions["rebase--r2--fix"];
     let ci_index = positions["ci"];
     let mut checkpoint = transitions::initial_checkpoint(
@@ -1268,10 +1376,20 @@ fn queue_conflict_recheck_replays_into_a_later_recovery_round() {
     });
     checkpoint.nodes[rebase_index].state = NodeState::Skipped;
     for id in [
+        "rebase--r1--conflict",
         "rebase--r1--fix",
-        "rebase--r1--checked",
+        "rebase--r1--hygiene",
+        "rebase--r1--republish",
+        "rebase--r1--fresh_conflict",
+        "rebase--r1--fresh_ci",
+        "rebase--r1--round_ci",
+        "rebase--r2--conflict",
         "rebase--r2--fix",
-        "rebase--r2--checked",
+        "rebase--r2--hygiene",
+        "rebase--r2--republish",
+        "rebase--r2--fresh_conflict",
+        "rebase--r2--fresh_ci",
+        "rebase--r2--round_ci",
     ] {
         checkpoint.nodes[positions[id]].state = NodeState::Skipped;
     }
@@ -1303,10 +1421,20 @@ fn queue_conflict_recheck_replays_into_a_later_recovery_round() {
     .unwrap();
 
     for id in [
+        "rebase--r1--conflict",
         "rebase--r1--fix",
-        "rebase--r1--checked",
+        "rebase--r1--hygiene",
+        "rebase--r1--republish",
+        "rebase--r1--fresh_conflict",
+        "rebase--r1--fresh_ci",
+        "rebase--r1--round_ci",
+        "rebase--r2--conflict",
         "rebase--r2--fix",
-        "rebase--r2--checked",
+        "rebase--r2--hygiene",
+        "rebase--r2--republish",
+        "rebase--r2--fresh_conflict",
+        "rebase--r2--fresh_ci",
+        "rebase--r2--round_ci",
     ] {
         assert_eq!(checkpoint.nodes[positions[id]].state, NodeState::Pending);
     }
@@ -1338,6 +1466,13 @@ fn queue_conflict_recheck_replays_into_a_later_recovery_round() {
         passed: false,
         reason: Some("CI still reports a conflict".into()),
         on_fail: None,
+    });
+    replay.nodes[second_conflict_index].state = NodeState::Failed;
+    replay.nodes[second_conflict_index].gate = Some(GateResult {
+        extra: Default::default(),
+        passed: false,
+        reason: Some("CONFLICTING at the previous publication".into()),
+        on_fail: Some("rebase--r2--fix".into()),
     });
     assert!(matches!(
         super::transitions::node_action(rebase_index, &plan, &mut replay, &positions),
@@ -1913,16 +2048,28 @@ fn queue_ci_repair_receives_failing_head_findings_and_sweep_instruction() {
     let head = "a".repeat(40);
     let mut failure = observation(CiState::Failed, "failed");
     failure.failed_checks.push(failed_check());
+    let mut green_after_repair = observation(
+        CiState::Passed,
+        "checks passed for the repaired publication",
+    );
+    green_after_repair.head_sha = Some(head.clone());
     let mut owner = Owner {
         branch: Some("delivered/topic".into()),
         commit: Some(head.clone()),
         integration_base: Some("f".repeat(40).parse().unwrap()),
-        conflict_observations: VecDeque::from([ConflictObservation {
-            state: ConflictState::Clear,
-            head_sha: Some(head.clone()),
-            summary: "no merge conflicts".into(),
-        }]),
-        observations: VecDeque::from([failure]),
+        conflict_observations: VecDeque::from([
+            ConflictObservation {
+                state: ConflictState::Clear,
+                head_sha: Some(head.clone()),
+                summary: "no merge conflicts".into(),
+            },
+            ConflictObservation {
+                state: ConflictState::Clear,
+                head_sha: Some(head.clone()),
+                summary: "no merge conflicts after repair".into(),
+            },
+        ]),
+        observations: VecDeque::from([failure, green_after_repair]),
         ..Default::default()
     };
     let mut journal = Journal::default();
@@ -1938,7 +2085,10 @@ fn queue_ci_repair_receives_failing_head_findings_and_sweep_instruction() {
     let repair = &run.checkpoint.nodes[repair_index];
     assert_eq!(repair.state, NodeState::Succeeded);
     assert_eq!(repair.source_commit.as_deref(), Some(head.as_str()));
-    assert_eq!(owner.source_commits, vec![None, Some(head.clone())]);
+    assert_eq!(
+        owner.source_commits,
+        vec![Some(head.clone()), Some(head.clone())]
+    );
     let manifest = repair.attempts[0].input_manifest.as_ref().unwrap();
     assert_eq!(manifest.source_commit.as_deref(), Some(head.as_str()));
     assert_eq!(manifest.inputs.len(), 2);

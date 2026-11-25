@@ -2386,6 +2386,8 @@ impl<'a> Compiler<'a> {
             until: String,
             max_rounds: usize,
             #[serde(default)]
+            previous_bindings: BTreeMap<String, String>,
+            #[serde(default)]
             max_extension_rounds: Option<usize>,
             #[serde(default)]
             review_repair: bool,
@@ -2426,6 +2428,14 @@ impl<'a> Compiler<'a> {
         spec.insert("body".into(), Value::Array(body));
         spec.insert("until".into(), Value::String(repeat.until));
         spec.insert("max_rounds".into(), repeat.max_rounds.into());
+        if !repeat.previous_bindings.is_empty() {
+            let bindings = repeat
+                .previous_bindings
+                .into_iter()
+                .map(|(body_node, initial_node)| (body_node, Value::String(initial_node)))
+                .collect();
+            spec.insert("previous_bindings".into(), Value::Object(bindings));
+        }
         if review_repair {
             if repeat.max_rounds == 0 {
                 return Err("review repair cycles must be at least 1".into());

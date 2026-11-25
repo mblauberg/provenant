@@ -28,10 +28,10 @@ pub(super) fn delivery_matches(
     if outputs.partial
         || outputs.findings_available != Some(true)
         || outputs.verdict_error.is_some()
-        || outputs
-            .findings
-            .iter()
-            .any(|finding| repair::blocking_severity(finding) || repair::blocks_acceptance(finding))
+        || outputs.findings.iter().any(|finding| {
+            severity_class(&finding.severity) == Some(SeverityClass::Blocking)
+                || repair::blocks_acceptance(finding)
+        })
     {
         return false;
     }

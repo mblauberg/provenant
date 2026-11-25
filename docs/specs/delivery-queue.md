@@ -37,7 +37,7 @@ plan and replay semantics; new fields are versioned and validated on admission.
 | --- | --- |
 | `loop` | A named bounded cycle with `max_rounds`, a persisted round and a typed outcome edge. A round is consumed once when its repair attempt is admitted, not on observation or replay. `max_ci_rounds` defaults to 3 CI repair attempts per rung. A red result at that bound advances to the next rung and resets the per-rung count; exhaustion of the final rung parks. A separately authorised edit may extend the bound. Admission budgets the expanded worst case. |
 | `escalate` | Ordered route-tier aliases, default `[junior, senior, principal]`, on a node. The first attempt uses the first rung; a typed hygiene outcome or review repair that remains unsuccessful advances one rung; CI red advances at its per-rung bound, never past the final rung. The final rung's brief permits wider scope within actual authority; strict scope and custody still bind. Persist rung and cause. Exhaustion parks. Route unavailability remains distinct from an unsuccessful attempt. |
-| `review` | `single` (default, one independent review after green CI) or `panel` (one existing review panel after green CI). `accept_inconclusive_without_blocking` defaults to `true`; only a valid, complete structured findings result with no blocking finding qualifies. Missing or malformed evidence parks, never silently accepts. A FAIL or blocking finding routes to repair. |
+| `review` | `single` (default, one independent review after green CI) or `panel` (one existing review panel after green CI). `accept_inconclusive_without_blocking` defaults to `true`; only a valid, complete structured findings result with no blocking finding qualifies. Blocking severity applies even when a finding has no trigger. Missing or malformed evidence parks, never silently accepts. A FAIL or blocking finding routes to repair. |
 | `plan` | Existing sourced boolean; default follows `domains.fabric.implement.plan`. When true, a read-only scope result joins the writer brief; failure or missing required plan parks instead of pretending a plan exists. |
 | `hygiene` | A generic post-writer step runs the configured repository formatter in the retained worktree and commits only its changes. Outputs are `clean`, `no_commit`, `uncommitted_edits` or `error`, with before/after heads and handoff. Check all tracked and untracked edits before formatting; never absorb a writer's edits. Compare the attempt's input and output heads, not merely commits ahead of main. Formatter or commit failure is `error`, not success. The two named non-success outcomes feed escalation; errors park with diagnostics. |
 | `park` | An idempotent ask/inbox request records graph/item/node/attempt, typed reason (`loop_exhausted`, `ladder_exhausted`, `no_commit`, `uncommitted_edits`, `ci_unavailable`, `conflict`, `review_evidence`, `operation_error`), bounded lane handoff, head and evidence references. One open request per parking transition; answer alone neither resumes nor grants landing authority. |
@@ -209,7 +209,13 @@ new delivery policy for execution: admission returns
 - `GraphNode.loop_body` is serialised as `loop`: its existing `max_rounds` is
   required and positive, and the owning node `id` is the loop name. Optional
   `LoopSpec.outcome_edge: LoopOutcomeEdge` has `outcome: LoopOutcome`
-  (`succeeded` or `exhausted`) and target `node: String`.
+  (`succeeded` or `exhausted`) and target `node: String`. Optional
+  `previous_bindings` maps a body node name used as `previous.<name>` to its
+  explicit outer node for round one; later rounds resolve the same name to the
+  preceding round's node. Queue conflict recovery uses this binding for both
+  the rebase head and its conflict/CI checks, so every retry checks the latest
+  published head. Each initial node must be a direct loop dependency, and
+  published-head bindings must name a publication node.
   `NodeProgress.delivery_loop: Option<DeliveryLoopProgress>` persists `name`
   and the number of admitted attempts in `round`.
 - `GraphNode.escalate: Option<EscalateSpec>` contains `ladder: Vec<String>`
