@@ -2196,6 +2196,41 @@ impl Factory {
             ));
         }
         let mut input = self.apply_pr_repair(prepared)?;
+        if let Some(launch) = &queue_launch {
+            let branch = launch
+                .item
+                .adoption
+                .as_ref()
+                .and_then(|adoption| adoption.get("branch"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("queue/{}", launch.item.graph_id));
+            provenant_confinement::repo::GitRefName::branch(&branch)
+                .map_err(|_| FacadeError::StateCorrupt)?;
+            let worktree = if let Some(adoption) = &launch.item.adoption {
+                PathBuf::from(
+                    adoption
+                        .get("worktree")
+                        .and_then(Value::as_str)
+                        .filter(|path| Path::new(path).is_absolute())
+                        .ok_or(FacadeError::StateCorrupt)?,
+                )
+            } else {
+                self.context.project_root.join(
+                    self.context
+                        .port_table
+                        .managed_writer_path(&branch)
+                        .map_err(|_| FacadeError::StateCorrupt)?,
+                )
+            };
+            if input.get("set").is_none_or(Value::is_null) {
+                input["set"] = json!({});
+            }
+            input["set"]
+                .as_object_mut()
+                .ok_or(FacadeError::StateCorrupt)?
+                .insert("worktree".into(), json!(worktree));
+        }
         let raw_owned = input.get("document").cloned();
         let raw = raw_owned.as_ref();
         let mut input_warnings = self.graph_input_warnings(&input)?;
