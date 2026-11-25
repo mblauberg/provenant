@@ -2025,6 +2025,36 @@ mod tests {
     }
 
     #[test]
+    fn planned_escalation_preserves_the_sealed_policy() {
+        let (old_plan, _, _, limits) = fixture();
+        assert!(
+            serde_json::to_value(&old_plan).unwrap()["nodes"][0]
+                .get("escalate")
+                .is_none()
+        );
+        let mut document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version": 2, "graph_id": "delivery-policy",
+            "nodes": [{"id":"repair", "access":"read_only", "prompt":"repair",
+                "route":{"alias":"junior"},
+                "escalate":{"ladder":["junior","senior"], "max_ci_rounds":2}}]
+        }))
+        .unwrap();
+        let (plan, _) = validate_flat_plan(&document, &limits).unwrap();
+        assert_eq!(plan.nodes[0].escalate, document.nodes[0].escalate);
+        assert_eq!(
+            serde_json::to_value(&plan).unwrap()["nodes"][0]["escalate"]["max_ci_rounds"],
+            2
+        );
+        document.nodes[0].escalate = None;
+        let (old_plan, _) = validate_flat_plan(&document, &limits).unwrap();
+        assert!(
+            serde_json::to_value(&old_plan).unwrap()["nodes"][0]
+                .get("escalate")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn shared_worktree_writer_is_admitted_while_sibling_runs() {
         // Spec: docs/specs/supervisor.md#shared-occupancy-removal-never-forces
         let document: GraphDocument = serde_json::from_value(serde_json::json!({
