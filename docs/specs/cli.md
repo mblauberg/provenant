@@ -231,6 +231,8 @@ successful attempt, its result path or its summary. The refusal stays visible
 in the full rows and its own operation outcome. One bounded set of host-wide
 evidence — run store, admission holders, worktree index and process census —
 serves every listed graph, so a `--full` page never repeats those scans per graph.
+The admission summary reuses that holder reading, and the process census is
+taken only when local attempt evidence needs it.
 
 `status --mine` reads active custody across projects (or one `--project`),
 including attempts nested under the current chair and unattended items open to

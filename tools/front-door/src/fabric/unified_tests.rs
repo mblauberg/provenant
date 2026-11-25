@@ -575,6 +575,87 @@ fn listed(name: &str, settled: bool, changed_micros: i64) -> ListedGraph {
     }
 }
 
+// Spec: docs/specs/cli.md#status-selection
+#[test]
+fn full_listing_shares_host_scans_and_lazily_reads_local_census() {
+    use std::cell::{Cell, OnceCell};
+
+    struct Facts {
+        census: OnceCell<Result<(), ()>>,
+    }
+    for local in [false, true] {
+        let store = Cell::new(0);
+        let holders = Cell::new(0);
+        let worktrees = Cell::new(0);
+        let census = Cell::new(0);
+        let enriched = Cell::new(0);
+        let graphs = vec![
+            listed("active", false, 1),
+            listed("history", true, 1),
+            listed("active2", false, 1),
+        ];
+        let mut projections = std::collections::BTreeMap::new();
+        for name in ["active", "history", "active2"] {
+            projections.insert(
+                name.to_owned(),
+                vec![listing_attempt_row(if name == "history" {
+                    "terminal"
+                } else {
+                    "running"
+                })],
+            );
+        }
+        let (listing, facts) = super::listing_with_evidence(
+            graphs,
+            &mut projections,
+            (1, true, 10, None),
+            || {
+                store.set(store.get() + 1);
+                holders.set(holders.get() + 1);
+                worktrees.set(worktrees.get() + 1);
+                Ok(Facts {
+                    census: OnceCell::new(),
+                })
+            },
+            |_, facts| {
+                enriched.set(enriched.get() + 1);
+                if local {
+                    let _ = super::cached_census(&facts.census, || {
+                        census.set(census.get() + 1);
+                        Ok(())
+                    });
+                }
+                Ok(())
+            },
+        );
+        assert_eq!(
+            listing.rows.len(),
+            3,
+            "both liveness and full-page passes ran"
+        );
+        let summary_holders = super::listing_holders(
+            facts,
+            |_| 42,
+            || {
+                holders.set(holders.get() + 1);
+                0
+            },
+        );
+        assert_eq!(summary_holders, 42, "the summary reuses the holder reading");
+        assert_eq!(
+            enriched.get(),
+            3,
+            "each graph was enriched across the two passes"
+        );
+        assert_eq!((store.get(), holders.get(), worktrees.get()), (1, 1, 1));
+        assert_eq!(
+            census.get(),
+            usize::from(local),
+            "the census is lazy and shared across graphs"
+        );
+    }
+}
+
 #[test]
 fn the_listing_never_hides_active_work_and_counts_what_it_omits() {
     let day = provenant_cli::limits::LISTING_SETTLED_SECONDS * 1_000_000;

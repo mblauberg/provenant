@@ -1062,17 +1062,23 @@ impl<'a> StatusFacts<'a> {
     }
 
     fn census(&self) -> Result<&provenant_supervisor::census::Census, ()> {
-        self.local_census
-            .get_or_init(|| {
-                provenant_supervisor::census::ProcessObserver::census(
-                    &provenant_supervisor::census::SystemProcessObserver,
-                    provenant_supervisor::census::MAX_CENSUS_ENTRIES,
-                )
-                .map_err(|_| ())
-            })
-            .as_ref()
+        cached_census(&self.local_census, || {
+            provenant_supervisor::census::ProcessObserver::census(
+                &provenant_supervisor::census::SystemProcessObserver,
+                provenant_supervisor::census::MAX_CENSUS_ENTRIES,
+            )
             .map_err(|_| ())
+        })
+        .as_ref()
+        .map_err(|_| ())
     }
+}
+
+fn cached_census<T>(
+    cell: &std::cell::OnceCell<Result<T, ()>>,
+    read: impl FnOnce() -> Result<T, ()>,
+) -> &Result<T, ()> {
+    cell.get_or_init(read)
 }
 
 /// Enrich graph attempt rows from identity-checked host records using facts
@@ -2658,65 +2664,27 @@ pub(crate) fn graph_listing(
             now,
         );
         let budget = WaitBudget::cli(factory.clock.mono_now(), 55)?;
-        // One set of host-wide facts serves every graph on the page. Reading
-        // the store, admission, worktree index or process census per graph made
-        // `--full` pay the same global scan once per graph. Gathering is lazy
-        // so a store failure stays one graph's evidence problem, as before,
-        // instead of refusing the whole listing.
-        let gathered: std::cell::RefCell<Option<Result<StatusFacts<'_>, FacadeError>>> =
-            std::cell::RefCell::new(None);
-        // Unavailable attempt/peer evidence must not hide a graph: the retained
-        // projection still explicitly marks external facts stale.
-        let enrich = |_name: &str, rows: &mut [Value]| {
-            let mut slot = gathered.borrow_mut();
-            if slot.is_none() {
-                *slot = Some(StatusFacts::gather(
-                    &factory.context,
-                    &factory.clock,
-                    &cancel,
-                ));
-            }
-            let facts = match slot.as_ref() {
-                Some(Ok(facts)) => facts,
-                Some(Err(error)) => return Err(error.clone()),
-                None => return Err(FacadeError::StateCorrupt),
-            };
-            enrich_status_rows_with_facts(rows, &factory.context, &factory.clock, facts, budget)
-        };
-        // Classify liveness before selecting the page. Only active work and
-        // settled graphs still naming a non-terminal attempt can acquire a live
-        // lane, so only those pay for evidence up front. Selecting first would
-        // drop an old settled graph (one outside the window or past the display
-        // limit) before finish_listing can keep its live lane and count it live.
-        let enriched = enrich_liveness_candidates(&mut graphs, &mut projections, enrich);
-        // Settled-but-open graphs are counted in one summary line and hidden
-        // from the default listing; --full (like --all) includes their rows.
-        let settled_count = graphs.iter().filter(|graph| graph.settled).count();
-        let mut listing = select_listing(
+        let (mut finished, gathered) = listing_with_evidence(
             graphs,
-            now,
-            command.all || globals.full,
-            usize::try_from(command.limit).unwrap_or(usize::MAX),
-            command.cursor,
+            &mut projections,
+            (
+                now,
+                command.all || globals.full,
+                usize::try_from(command.limit).unwrap_or(usize::MAX),
+                command.cursor,
+            ),
+            || StatusFacts::gather(&factory.context, &factory.clock, &cancel),
+            |rows, facts| {
+                enrich_status_rows_with_facts(rows, &factory.context, &factory.clock, facts, budget)
+            },
         );
-        // Rows the page will show still need their full evidence for display.
-        // Skip graphs that already received it in the liveness pass.
-        for graph in &mut listing.rows {
-            if enriched.contains(&graph.name) {
-                continue;
-            }
-            let Some(rows) = projections.get_mut(&graph.name) else {
-                continue;
-            };
-            if let Err(error) = enrich(&graph.name, rows) {
-                graph.reason = Some(status_evidence_failure(graph.reason.as_deref(), &error));
-            }
-            graph.digests = super::graph_status::node_digests(rows);
-        }
-        let mut finished = finish_listing(listing, settled_count, command.all || globals.full);
         finished.stranded_work = stranded_work;
         if root.as_path().exists() {
-            finished.admission_holders = provenant_os::admission::all_holders(root.as_path());
+            finished.admission_holders = listing_holders(
+                gathered,
+                |facts| facts.lane_holders,
+                || provenant_os::admission::all_holders(root.as_path()),
+            );
             finished.admission_waiters = provenant_os::admission::all_waiters(root.as_path());
         }
         Ok(finished)
@@ -2963,6 +2931,58 @@ fn status_evidence_failure(reason: Option<&str>, error: &FacadeError) -> String 
             reason.unwrap_or("")
         ),
         1024,
+    )
+}
+
+fn listing_holders<F, H>(
+    facts: Option<Result<F, FacadeError>>,
+    from_facts: impl FnOnce(F) -> H,
+    read: impl FnOnce() -> H,
+) -> H {
+    match facts {
+        Some(Ok(facts)) => from_facts(facts),
+        _ => read(),
+    }
+}
+
+/// Share one fallible host reading across the liveness and page passes. An
+/// evidence failure remains attached to each affected graph, not the listing.
+fn listing_with_evidence<F>(
+    mut graphs: Vec<ListedGraph>,
+    projections: &mut std::collections::BTreeMap<String, Vec<Value>>,
+    selection: (i64, bool, usize, Option<u64>),
+    gather: impl FnOnce() -> Result<F, FacadeError>,
+    enrich_rows: impl Fn(&mut [Value], &F) -> Result<(), FacadeError>,
+) -> (Listing, Option<Result<F, FacadeError>>) {
+    let (now, full, limit, cursor) = selection;
+    let gathered = std::cell::OnceCell::new();
+    let gather = std::cell::RefCell::new(Some(gather));
+    let enrich = |_name: &str, rows: &mut [Value]| {
+        let facts =
+            gathered.get_or_init(|| gather.borrow_mut().take().expect("gathered at most once")());
+        match facts {
+            Ok(facts) => enrich_rows(rows, facts),
+            Err(error) => Err(error.clone()),
+        }
+    };
+    let enriched = enrich_liveness_candidates(&mut graphs, projections, enrich);
+    let settled_count = graphs.iter().filter(|graph| graph.settled).count();
+    let mut listing = select_listing(graphs, now, full, limit, cursor);
+    for graph in &mut listing.rows {
+        if enriched.contains(&graph.name) {
+            continue;
+        }
+        let Some(rows) = projections.get_mut(&graph.name) else {
+            continue;
+        };
+        if let Err(error) = enrich(&graph.name, rows) {
+            graph.reason = Some(status_evidence_failure(graph.reason.as_deref(), &error));
+        }
+        graph.digests = super::graph_status::node_digests(rows);
+    }
+    (
+        finish_listing(listing, settled_count, full),
+        gathered.into_inner(),
     )
 }
 
