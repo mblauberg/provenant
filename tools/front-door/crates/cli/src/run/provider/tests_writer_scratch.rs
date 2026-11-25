@@ -18,6 +18,11 @@ fn writer_access_receipt_for_plan(
 }
 
 #[test]
+fn pr_policy_mediates_gh_when_publishing_is_disabled() -> Result<(), Box<dyn std::error::Error>> {
+    writer_preparation_fixture(false, "pr-policy")
+}
+
+#[test]
 fn writer_plan_stages_scratch_missing_auth() -> Result<(), Box<dyn std::error::Error>> {
     writer_preparation_fixture(false, "missing")
 }
@@ -106,6 +111,7 @@ fn writer_preparation_steps(
         } else {
             match auth_layout {
                 "missing" => "writer_plan_stages_scratch_missing_auth",
+                "pr-policy" => "pr_policy_mediates_gh_when_publishing_is_disabled",
                 "symlink" => "writer_plan_stages_scratch_symlink_auth",
                 "symlink-xdg" => "writer_plan_stages_scratch_symlink_xdg_auth",
                 other => return Err(format!("unknown writer scratch layout {other}").into()),
@@ -1274,7 +1280,7 @@ printf 'agy 1.0.0\n'
     // Exercise the host project policy through preparation and the actual
     // generated shim, with a fake gh so no GitHub access is needed.
     std::fs::create_dir_all(home.join(".config"))?;
-    if auth_layout != "missing" {
+    if auth_layout != "missing" && auth_layout != "pr-policy" {
         let gh_config = base.join("host-gh-config");
         std::fs::create_dir(&gh_config)?;
         // Token launches must not consult even a malformed host configuration.
@@ -1370,6 +1376,55 @@ printf 'agy 1.0.0\n'
         repo_facts: registry.repo_facts.clone(),
         ..registry
     };
+    if auth_layout == "pr-policy" {
+        phase("PR policy without publishing");
+        let mut policy_task = publishing_task.clone();
+        policy_task
+            .profile
+            .knobs
+            .insert("lanes.access".into(), serde_json::json!("host"));
+        policy_task
+            .profile
+            .knobs
+            .insert("lanes.sandbox".into(), serde_json::json!("off"));
+        policy_task
+            .profile
+            .knobs
+            .insert("lanes.publish".into(), serde_json::json!(false));
+        policy_task
+            .profile
+            .knobs
+            .insert("lanes.pr".into(), serde_json::json!("never"));
+        let policy_launch = prepare_with(
+            &publishing_registry,
+            &policy_task,
+            "PR policy fixture",
+            &publishing_paths,
+            None,
+            |name| {
+                Ok(if name == "gh" {
+                    gh.clone()
+                } else {
+                    executable.clone()
+                })
+            },
+            None,
+        )?;
+        assert!(
+            !policy_launch
+                .confinement
+                .as_ref()
+                .is_some_and(|confinement| confinement.sandbox.effective)
+        );
+        let argv = ["/bin/sh".into(), "-c".into(), "gh pr create".into()];
+        let mut options = ExecOptions::new(&argv, &attempt, Duration::from_secs(5));
+        options.env = Some(&policy_launch.environment);
+        let result = executor.execute(options)?;
+        assert_eq!(result.termination, Termination::Exit(2));
+        assert!(String::from_utf8_lossy(&result.stderr.bytes).contains("lanes.pr=never"));
+        assert!(!String::from_utf8_lossy(&result.stdout.bytes).contains("forwarded"));
+        return Ok(());
+    }
     let publishing = prepare_with(
         &publishing_registry,
         &publishing_task,

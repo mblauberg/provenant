@@ -286,7 +286,9 @@ publication after settlement. Host, launch and node settings opt a lane in.
 Set `attempt.pr = "draft"` or `"allowed"` on a graph node, or pass
 `--set attempt.pr=draft` at launch; the node override is reported as the launch
 source and takes precedence over the host setting.
-The provider's `gh` tool enforces the policy before forwarding a command:
+The provider's `gh` tool enforces the policy before forwarding a command,
+including when `lanes.publish=false`. Publishing controls credential delivery;
+an unsandboxed lane can still access ambient host credentials.
 `never` refuses `gh pr create|edit|close` (and the other PR mutations) and
 mutating forge API calls while leaving reads working. Repository flags before
 `pr` do not change the policy. Explicit GET or HEAD requests with query fields
