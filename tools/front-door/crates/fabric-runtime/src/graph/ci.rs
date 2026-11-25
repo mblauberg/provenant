@@ -162,6 +162,7 @@ pub(super) fn validate_target(
 pub(super) enum Evaluation {
     Pending,
     Settled(Option<String>),
+    ParkUnavailable,
 }
 
 pub(super) fn evaluate<O: AttemptOwner>(
@@ -187,6 +188,10 @@ pub(super) fn evaluate<O: AttemptOwner>(
     let max_bytes = failed_checks_max_bytes.unwrap_or_else(default_failed_checks_max_bytes);
     let max_checks = max_failed_checks.unwrap_or_else(default_max_failed_checks);
     let binding = resolve_target(target, checkpoint, delivery_queue);
+    let expected_published_head = binding
+        .as_ref()
+        .and_then(|binding| binding.published_head.as_deref());
+    let queue_published_head_missing = delivery_queue && expected_published_head.is_none();
     let prior = checkpoint.nodes[index].ci.clone();
     let mut host = owner.ci_status();
     let sampled = host
@@ -197,9 +202,13 @@ pub(super) fn evaluate<O: AttemptOwner>(
             stamp
         });
     let mut observation = match (&binding, sampled.as_ref(), host.as_mut()) {
-        (Some(binding), Some(_), Some(host)) => {
-            host.observe_ci(&binding.target, checks, max_bytes, max_checks)
-        }
+        (Some(binding), Some(_), Some(host)) => host.observe_ci(
+            &binding.target,
+            checks,
+            delivery_queue,
+            max_bytes,
+            max_checks,
+        ),
         _ => CiObservation {
             extra: Default::default(),
             state: CiState::Unavailable,
@@ -240,11 +249,14 @@ pub(super) fn evaluate<O: AttemptOwner>(
         observation.state = CiState::Pending;
         observation.failed_checks.clear();
     }
-    if delivery_queue
-        && let Some(expected_head) = binding
-            .as_ref()
-            .and_then(|binding| binding.published_head.as_deref())
-    {
+    if queue_published_head_missing {
+        observation.state = CiState::Pending;
+        observation.summary =
+            "published commit is unavailable; waiting to resolve the exact head".into();
+        observation.head_sha = None;
+        observation.failed_checks.clear();
+        observation.check_names.clear();
+    } else if delivery_queue && let Some(expected_head) = expected_published_head {
         if observation.head_sha.as_deref() != Some(expected_head) {
             let observed_head = observation.head_sha.as_deref().unwrap_or("unavailable");
             observation.state = CiState::Pending;
@@ -282,7 +294,11 @@ pub(super) fn evaluate<O: AttemptOwner>(
         .as_ref()
         .zip(observation.head_sha.as_ref())
         .is_some_and(|(bound, observed)| bound != observed);
-    let head_sha = observation.head_sha.clone().or(bound);
+    let head_sha = if queue_published_head_missing {
+        None
+    } else {
+        observation.head_sha.clone().or(bound)
+    };
     let mut anchor = prior.as_ref().and_then(|e| e.first_observed_stamp.clone());
     let mut reanchors = prior.as_ref().map_or(0, |e| e.clock_reanchors);
     let mut reanchor_reason = prior.as_ref().and_then(|e| e.clock_reanchor_reason.clone());
@@ -352,12 +368,30 @@ pub(super) fn evaluate<O: AttemptOwner>(
         truncated: observation.truncated,
         elapsed_seconds,
     });
-    if !delivery_queue && prior.is_some() && !superseded && elapsed_seconds >= *timeout_seconds {
+    let timed_out = prior.is_some() && !superseded && elapsed_seconds >= *timeout_seconds;
+    if !delivery_queue && timed_out {
         return Ok(Evaluation::Settled(Some(if unscheduled {
             format!("timeout: {NOT_SCHEDULED}")
         } else {
             "timeout".into()
         })));
+    }
+    if delivery_queue && timed_out && state == CiState::Pending {
+        let Some(evidence) = checkpoint.nodes[index].ci.as_mut() else {
+            return Err(format!(
+                "node {}: CI timeout lost its persisted evidence",
+                node.id
+            ));
+        };
+        evidence.summary = bounded(
+            &format!(
+                "CI remained pending through the {} second gate timeout: {}",
+                timeout_seconds, evidence.summary
+            ),
+            OUTPUT_FIELD_BYTES,
+        );
+        evidence.wake_at = None;
+        return Ok(Evaluation::ParkUnavailable);
     }
     Ok(match state {
         CiState::Pending => {
@@ -369,11 +403,7 @@ pub(super) fn evaluate<O: AttemptOwner>(
                 .delay_seconds(pending_observations)
                 .saturating_mul(1_000_000);
             let timeout_micros = timeout_seconds.saturating_mul(1_000_000);
-            let remaining = if delivery_queue {
-                None
-            } else {
-                elapsed_micros.map(|elapsed| timeout_micros.saturating_sub(elapsed))
-            };
+            let remaining = elapsed_micros.map(|elapsed| timeout_micros.saturating_sub(elapsed));
             let duration = provenant_core::DurationMicros::from_micros(
                 remaining.map_or(delay_micros, |remaining| delay_micros.min(remaining)),
             );
@@ -436,20 +466,26 @@ pub(super) fn evaluate_conflict<O: AttemptOwner>(
     let expected_head = binding
         .as_ref()
         .and_then(|binding| binding.published_head.as_deref());
+    let queue_published_head_missing = delivery_queue && expected_head.is_none();
     let head_mismatch =
         expected_head.is_some_and(|expected| observed_head.as_deref() != Some(expected));
-    let state = match (observation.state, observed_head.as_deref()) {
-        (ConflictState::Clear, Some(head))
-            if expected_head.is_none_or(|expected| expected == head) =>
-        {
-            ConflictState::Clear
+    let state = if queue_published_head_missing {
+        observed_head = None;
+        ConflictState::Pending
+    } else {
+        match (observation.state, observed_head.as_deref()) {
+            (ConflictState::Clear, Some(head))
+                if expected_head.is_none_or(|expected| expected == head) =>
+            {
+                ConflictState::Clear
+            }
+            (ConflictState::Conflicting, Some(head))
+                if expected_head.is_none_or(|expected| expected == head) =>
+            {
+                ConflictState::Conflicting
+            }
+            _ => ConflictState::Pending,
         }
-        (ConflictState::Conflicting, Some(head))
-            if expected_head.is_none_or(|expected| expected == head) =>
-        {
-            ConflictState::Conflicting
-        }
-        _ => ConflictState::Pending,
     };
     if let Some(expected_head) = expected_head {
         if observed_head.as_deref() != Some(expected_head) {
@@ -467,7 +503,9 @@ pub(super) fn evaluate_conflict<O: AttemptOwner>(
         state,
         head_sha: observed_head,
         summary: bounded(
-            &if head_mismatch {
+            &if queue_published_head_missing {
+                "published commit is unavailable; waiting for the exact head".to_owned()
+            } else if head_mismatch {
                 format!(
                     "published head {} is not the observed PR head; waiting for publication reconciliation",
                     expected_head.unwrap_or_default()
@@ -555,9 +593,12 @@ fn resolve_target(
     }
 }
 
-pub(super) fn outputs(passed: bool, ci: Option<&CiEvidence>) -> NodeOutputs {
+pub(super) fn outputs(passed: bool, ci: Option<&CiEvidence>, delivery_queue: bool) -> NodeOutputs {
     let mut outputs = gate_outputs(passed);
     outputs.findings_available = Some(ci.is_some_and(|evidence| !evidence.truncated));
+    if delivery_queue {
+        outputs.commit = ci.and_then(|evidence| evidence.head_sha.clone());
+    }
     if let Some(ci) = ci.filter(|_| !passed) {
         outputs.findings = ci
             .failed_checks

@@ -276,6 +276,14 @@ struct StopPublishHost {
     #[serde(skip)]
     lane_path: Option<FilteredLanePath>,
 }
+
+/// Exact host receipt for one graph-owned PR publication.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GraphPublicationReceipt {
+    pub branch: String,
+    pub head: GitOid,
+    pub pull_request: String,
+}
 impl PartialEq for StopPublishHost {
     fn eq(&self, other: &Self) -> bool {
         self.environment == other.environment
@@ -1151,6 +1159,49 @@ impl HostDeliveryContext {
         body: &str,
         forge: &provenant_config::ForgeContext,
     ) -> Result<String> {
+        self.deliver_graph_pr_inner(project, branch, base, None, None, None, body, forge)
+            .map(|receipt| receipt.pull_request)
+    }
+
+    /// Publish an exact writer head on one stable graph-owned branch. The
+    /// writer ref and expected old remote value are checked before the push;
+    /// replay reconciles an already-pushed head and its existing PR.
+    #[allow(clippy::too_many_arguments)]
+    pub fn deliver_graph_pr_at_head(
+        self,
+        project: &Path,
+        writer_branch: &str,
+        base: GitOid,
+        expected_head: GitOid,
+        publication_identity: &str,
+        expected_remote_head: Option<GitOid>,
+        body: &str,
+        forge: &provenant_config::ForgeContext,
+    ) -> Result<GraphPublicationReceipt> {
+        self.deliver_graph_pr_inner(
+            project,
+            writer_branch,
+            base,
+            Some(expected_head),
+            Some(publication_identity),
+            expected_remote_head,
+            body,
+            forge,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn deliver_graph_pr_inner(
+        self,
+        project: &Path,
+        branch: &str,
+        base: GitOid,
+        expected_head: Option<GitOid>,
+        publication_identity: Option<&str>,
+        expected_remote_head: Option<GitOid>,
+        body: &str,
+        forge: &provenant_config::ForgeContext,
+    ) -> Result<GraphPublicationReceipt> {
         let qualified = format!("{}/", forge.remote.value);
         let target = branch.strip_prefix(&qualified).unwrap_or(branch);
         self.check_delivery_branch_with_facts(project, target, forge)?;
@@ -1185,11 +1236,19 @@ impl HostDeliveryContext {
         };
         let head = GitOid::parse(&head)
             .map_err(|error| RunError::delivery(Stage::Head, DeliveryCause::parse(error)))?;
+        if expected_head.is_some_and(|expected| expected != head) {
+            return Err(delivery_refusal(
+                Stage::Head,
+                "graph publication source differs from the sealed hygiene head",
+            ));
+        }
         host.verify_objects(&writer, head, Stage::Head)?;
         host.verify_objects(&writer, base, Stage::Head)?;
         // A local integration ref may belong to a human. Publish a separate
         // graph-owned ref; never push that existing local branch by name.
-        let publication = if local {
+        let publication = if let Some(identity) = publication_identity {
+            Some(host.graph_publication_branch_for(project, identity)?)
+        } else if local {
             Some(host.graph_publication_branch(project, head)?)
         } else {
             None
@@ -1197,7 +1256,15 @@ impl HostDeliveryContext {
         let branch = publication.as_deref().unwrap_or(branch);
         host.refuse_protected_target(&writer, branch, Stage::Push, Some(forge))?;
         let reference = format!("refs/heads/{branch}");
-        if local {
+        if publication_identity.is_some() {
+            host.publish_graph_ref(
+                project,
+                &bound.push_url,
+                &reference,
+                head,
+                expected_remote_head,
+            )?;
+        } else if local {
             host.refuse_remote_symbolic_target(project, &bound.push_url, branch, Stage::Push)?;
             host.command(
                 project,
@@ -1235,37 +1302,50 @@ impl HostDeliveryContext {
             delivery_refusal(Stage::PullRequest, "pull request repository was not bound")
         })?;
         let base_branch = host.pr_base(project, repo)?;
-        if let Some(url) = host.existing_pr(project, repo, branch, head, &base_branch)? {
-            return Ok(url);
-        }
-        let commits = host.commit_range_body(&writer, &format!("{base}..{head}"), body)?;
-        let url = host.command_with_input(
-            project,
-            "gh",
-            &[
-                "pr",
-                "create",
-                "--repo",
-                repo,
-                "--head",
-                branch,
-                "--base",
-                &base_branch,
-                "--title",
-                &format!("Graph delivery {branch}"),
-                "--body-file",
-                "-",
-            ],
-            Stage::PullRequest,
-            commits.as_bytes(),
-        )?;
+        let url = if let Some(url) = host.existing_pr(project, repo, branch, head, &base_branch)? {
+            url
+        } else {
+            let commits = host.commit_range_body(&writer, &format!("{base}..{head}"), body)?;
+            match host.command_with_input(
+                project,
+                "gh",
+                &[
+                    "pr",
+                    "create",
+                    "--repo",
+                    repo,
+                    "--head",
+                    branch,
+                    "--base",
+                    &base_branch,
+                    "--title",
+                    &format!("Graph delivery {branch}"),
+                    "--body-file",
+                    "-",
+                ],
+                Stage::PullRequest,
+                commits.as_bytes(),
+            ) {
+                Ok(url) => url,
+                Err(create_error) => {
+                    match host.existing_pr(project, repo, branch, head, &base_branch) {
+                        Ok(Some(url)) => url,
+                        Ok(None) | Err(_) => return Err(create_error),
+                    }
+                }
+            }
+        };
         if !url.starts_with("https://") || url.lines().count() != 1 {
             return Err(delivery_refusal(
                 Stage::PullRequest,
                 "gh did not return a single https pull request URL",
             ));
         }
-        Ok(url)
+        Ok(GraphPublicationReceipt {
+            branch: branch.to_owned(),
+            head,
+            pull_request: url,
+        })
     }
 
     pub(super) fn graph_publication_branch(&self, project: &Path, head: GitOid) -> Result<String> {
@@ -1338,6 +1418,130 @@ impl HostDeliveryContext {
         }
         crate::artifacts::seal(&directory, &marker, branch.as_bytes(), crate::RECORD_LIMIT)?;
         Ok(branch)
+    }
+
+    pub(super) fn graph_publication_branch_for(
+        &self,
+        project: &Path,
+        identity: &str,
+    ) -> Result<String> {
+        use provenant_core::{CancelToken, Clock, WaitBudget};
+        use provenant_os::{clock::SystemClock, fs::LockMode};
+        use sha2::{Digest, Sha256};
+
+        if identity.trim().is_empty() {
+            return Err(delivery_refusal(
+                Stage::Prepare,
+                "stable graph publication identity is empty",
+            ));
+        }
+        let common = self.common_git_dir(project, Stage::Prepare)?;
+        let directory = Directory::open_anchor(&common)?;
+        let clock = SystemClock;
+        let cancel = CancelToken::new();
+        let _lock = directory.lock(
+            OsStr::new("provenant-graph-publication.lock"),
+            LockMode::Exclusive,
+            WaitBudget::cli(clock.mono_now(), 60)
+                .map_err(|error| RunError::delivery(Stage::Prepare, DeliveryCause::parse(error)))?,
+            &cancel,
+            &clock,
+        )?;
+        let digest = provenant_core::hex(&Sha256::digest(identity.as_bytes()));
+        let branch = format!("provenant/graph/{digest}");
+        let marker = format!("provenant-graph-owner-{digest}.json");
+        if let Some(raw) = crate::artifacts::read_sealed(&directory, &marker, crate::RECORD_LIMIT)?
+            && raw != identity.as_bytes()
+        {
+            return Err(delivery_refusal(
+                Stage::Prepare,
+                "stable graph publication identity marker differs",
+            ));
+        }
+        crate::artifacts::seal(
+            &directory,
+            &marker,
+            identity.as_bytes(),
+            crate::RECORD_LIMIT,
+        )?;
+        Ok(branch)
+    }
+
+    fn publish_graph_ref(
+        &self,
+        project: &Path,
+        push_url: &str,
+        branch: &str,
+        head: GitOid,
+        expected_remote_head: Option<GitOid>,
+    ) -> Result<()> {
+        let stage = Stage::Push;
+        self.refuse_remote_symbolic_target(project, push_url, branch, stage)?;
+        let reference = format!("refs/heads/{branch}");
+        let read_remote = || -> Result<Option<GitOid>> {
+            let raw = self.command(
+                project,
+                "git",
+                &["ls-remote", "--", push_url, &reference],
+                Stage::Verify,
+            )?;
+            let mut refs = raw.lines().filter(|line| !line.trim().is_empty());
+            let Some(line) = refs.next() else {
+                return Ok(None);
+            };
+            if refs.next().is_some() {
+                return Err(delivery_refusal(
+                    Stage::Verify,
+                    "graph publication ref resolved to multiple remote values",
+                ));
+            }
+            let oid = line
+                .split_whitespace()
+                .next()
+                .ok_or_else(|| delivery_refusal(Stage::Verify, "remote ref has no object id"))?;
+            GitOid::parse(oid)
+                .map(Some)
+                .map_err(|error| RunError::delivery(Stage::Verify, DeliveryCause::parse(error)))
+        };
+
+        let current = read_remote()?;
+        if current == Some(head) {
+            return Ok(());
+        }
+        if current != expected_remote_head {
+            return Err(delivery_refusal(
+                Stage::Verify,
+                "graph publication ref differs from the persisted expected remote head",
+            ));
+        }
+        let expected = expected_remote_head.map_or_else(String::new, |oid| oid.to_string());
+        let push = self.command(
+            project,
+            "git",
+            &[
+                "push",
+                "--no-follow-tags",
+                "--recurse-submodules=no",
+                &format!("--force-with-lease={reference}:{expected}"),
+                "--",
+                push_url,
+                &format!("{head}:{reference}"),
+            ],
+            stage,
+        );
+        if let Err(error) = push {
+            if read_remote()? == Some(head) {
+                return Ok(());
+            }
+            return Err(error);
+        }
+        if read_remote()? != Some(head) {
+            return Err(delivery_refusal(
+                Stage::Verify,
+                "verified graph publication ref differs from the intended head",
+            ));
+        }
+        Ok(())
     }
     /// Resolve the concise mode into the existing explicit destination contract.
     /// Integration names are local unless qualified as `<remote>/<branch>`.

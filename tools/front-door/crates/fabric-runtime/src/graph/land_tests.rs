@@ -36,6 +36,7 @@ struct Launch {
 struct Owner {
     launches: Vec<Launch>,
     lands: Vec<(String, String, LandAuthority)>,
+    land_requests: Vec<(String, String, Option<u64>)>,
     /// Observe-only requests while a tier asks: branch and head.
     observed: Vec<(String, String)>,
     /// Whether the chair has merged by hand, which observation reports.
@@ -49,6 +50,8 @@ struct Owner {
     asked: usize,
     /// Every request filed, in order.
     filed: Vec<AskRequest>,
+    /// Writer attempt references excluded from each launched node.
+    distinctions: Vec<(String, Vec<String>)>,
     writer_branch: Option<String>,
     /// The newest commit a writer delivered, which CI reports as the head.
     head: Option<String>,
@@ -66,6 +69,10 @@ struct Owner {
     repair_alternative: bool,
     /// The repository history that proves review carry-over against `TARGET`.
     history: Option<provenant_core::review_cover::history::History>,
+    integration_base: Option<provenant_core::GitOid>,
+    conflict_state: Option<ConflictState>,
+    conflict_head: Option<String>,
+    ci_head: Option<String>,
 }
 impl CiStatus for Owner {
     fn host_stamp(&self) -> Option<CiHostStamp> {
@@ -75,15 +82,22 @@ impl CiStatus for Owner {
             host_monotonic_micros: 1,
         })
     }
-    fn observe_ci(&mut self, _: &str, _: &[String], _: usize, _: usize) -> CiObservation {
+    fn observe_ci(&mut self, _: &str, _: &[String], _: bool, _: usize, _: usize) -> CiObservation {
         CiObservation {
             extra: Default::default(),
             state: CiState::Passed,
             summary: "checks passed".into(),
-            head_sha: self.head.clone(),
+            head_sha: self.ci_head.clone().or_else(|| self.head.clone()),
             failed_checks: Vec::new(),
-            check_names: Vec::new(),
+            check_names: vec!["build".into()],
             truncated: false,
+        }
+    }
+    fn observe_conflict(&mut self, _: &str) -> ConflictObservation {
+        ConflictObservation {
+            state: self.conflict_state.unwrap_or(ConflictState::Clear),
+            head_sha: self.conflict_head.clone().or_else(|| self.head.clone()),
+            summary: "published PR conflict state".into(),
         }
     }
 }
@@ -124,7 +138,34 @@ impl AttemptOwner for Owner {
         Option<provenant_core::GitOid>,
     ) {
         let base = self.history.as_ref().map(|_| REVIEW_BASE.parse().unwrap());
-        (base, None)
+        (base, self.integration_base)
+    }
+    fn run_hygiene(
+        &mut self,
+        request: HygieneRequest<'_>,
+    ) -> Result<HygieneExecution, Self::Error> {
+        Ok(HygieneExecution {
+            outcome: provenant_records::graph::HygieneOutcome {
+                kind: provenant_records::graph::HygieneOutcomeKind::Clean,
+                before_head: Some(request.input_head.to_owned()),
+                after_head: Some(REPAIR_HEAD.into()),
+                handoff: Some("formatter completed".into()),
+            },
+            branch: self.writer_branch.clone(),
+            formatter_source: Some("fixture".into()),
+            diagnostic: None,
+        })
+    }
+    fn publish_delivery(
+        &mut self,
+        request: PublicationRequest<'_>,
+    ) -> Result<Option<DeliveryPublication>, Self::Error> {
+        self.head = Some(request.expected_head.to_owned());
+        Ok(Some(DeliveryPublication {
+            branch: "provenant/graph/g-land".into(),
+            head: request.expected_head.to_owned(),
+            pull_request: "https://example.invalid/pr/7".into(),
+        }))
     }
     fn review_coverage(
         &mut self,
@@ -178,6 +219,11 @@ impl AttemptOwner for Owner {
             .unwrap_or_else(|| crate::config::GraphLand::default().choose(None, tier))
     }
     fn land(&mut self, request: LandRequest<'_>) -> Result<LandObservation, Self::Error> {
+        self.land_requests.push((
+            request.branch.to_owned(),
+            request.head.to_owned(),
+            request.pull_request,
+        ));
         if request.pull_request.is_none() {
             return Ok(LandObservation::Identified { pull_request: 7 });
         }
@@ -232,6 +278,8 @@ impl AttemptOwner for Owner {
         if self.repair_fixture {
             self.repair_prompts.push(input.prompt.to_owned());
         }
+        self.distinctions
+            .push((key.node_id.clone(), input.distinct_from_attempts.to_vec()));
         if self.pending_writer && key.node_id == "write" {
             return Ok(AttemptObservation::Pending {
                 attempt_ref: Some("pending-writer".into()),
@@ -534,6 +582,40 @@ fn document(tier: &str, session: Option<&str>) -> GraphDocument {
     serde_json::from_value(value).unwrap()
 }
 
+fn queue_publish_document(tier: &str) -> GraphDocument {
+    let mut document: GraphDocument = serde_json::from_value(json!({
+        "schema_version":2, "graph_id":"g-land", "integration_branch":"delivery/item",
+        "delivery":"pr", "nodes":[
+            {"id":"write", "access":"worktree_write", "worktree":"/wt/feature",
+             "prompt":"write it", "route":{"alias":"senior"}},
+            {"id":"hygiene", "kind":"hygiene", "access":"worktree_write",
+             "worktree":"/wt/feature", "depends_on":["write"],
+             "source":{"type":"node","node":"write"}},
+            {"id":"publish", "kind":"publish", "access":"worktree_write",
+             "worktree":"/wt/feature", "depends_on":["hygiene"],
+             "source":{"type":"node","node":"hygiene"}},
+            {"id":"conflict", "kind":"gate", "access":"read_only",
+             "depends_on":["publish"],
+             "condition":{"type":"conflict","target":{"node":"publish"}}},
+            {"id":"ci", "kind":"gate", "access":"read_only",
+             "depends_on":["conflict"],
+             "condition":{"type":"ci","target":{"node":"publish"}}},
+            {"id":"review", "access":"read_only", "prompt":"review the published head",
+             "review_base":REVIEW_BASE, "source":{"type":"head","node":"publish"},
+             "distinct_from":"writer",
+             "depends_on":["ci","publish"], "route":{"alias":"senior"}},
+            {"id":"accepted", "kind":"gate", "access":"read_only",
+             "depends_on":["review"], "inputs":[{"node":"review","outputs":["verdict"]}],
+             "condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}},
+            {"id":"land", "kind":"land", "access":"read_only",
+             "depends_on":["accepted"], "land":{"node":"publish","tier":tier}}
+        ]
+    }))
+    .unwrap();
+    document.queue = Some(QueueKnobs::default());
+    document
+}
+
 fn run(document: &GraphDocument, owner: &mut Owner, journal: &mut Journal) -> GraphCheckpoint {
     let mut last = None;
     for _ in 0..12 {
@@ -548,6 +630,200 @@ fn run(document: &GraphDocument, owner: &mut Owner, journal: &mut Journal) -> Gr
 
 fn node<'a>(checkpoint: &'a GraphCheckpoint, id: &str) -> &'a NodeProgress {
     checkpoint.nodes.iter().find(|node| node.id == id).unwrap()
+}
+
+#[test]
+fn queue_head_source_tracks_the_publication_head_and_retained_writer_chain() {
+    let document = queue_publish_document("routine");
+    assert!(validate_plan(&document).is_ok());
+    let mut owner = owner();
+    owner.repair_fixture = true;
+    owner.policy = Some(LandChoice {
+        policy: LandPolicy::Auto,
+        source: Layer::Default,
+    });
+    owner.integration_base = Some(TARGET.parse().unwrap());
+    let checkpoint = run(&document, &mut owner, &mut Journal::default());
+
+    assert!(checkpoint.successful(), "{:?}", checkpoint.nodes);
+    assert_eq!(
+        checkpoint.pull_request.as_deref(),
+        Some("https://example.invalid/pr/7")
+    );
+    let publication = node(&checkpoint, "publish");
+    let receipt = publication
+        .outputs
+        .as_ref()
+        .unwrap()
+        .publication
+        .as_ref()
+        .unwrap();
+    assert_eq!(receipt.branch, "provenant/graph/g-land");
+    assert_eq!(receipt.head, REPAIR_HEAD);
+    let conflict = node(&checkpoint, "conflict").conflict.as_ref().unwrap();
+    assert_eq!(conflict.state, ConflictState::Clear);
+    assert_eq!(conflict.head_sha.as_deref(), Some(REPAIR_HEAD));
+    let ci = node(&checkpoint, "ci");
+    assert_eq!(
+        ci.ci.as_ref().unwrap().head_sha.as_deref(),
+        Some(REPAIR_HEAD)
+    );
+    assert_eq!(
+        ci.outputs.as_ref().unwrap().commit.as_deref(),
+        Some(REPAIR_HEAD)
+    );
+    assert_eq!(
+        node(&checkpoint, "review").source_commit.as_deref(),
+        Some(REPAIR_HEAD)
+    );
+    let review = node(&checkpoint, "review");
+    assert_eq!(
+        review.attempts[0]
+            .input_manifest
+            .as_ref()
+            .unwrap()
+            .source_producer
+            .as_ref()
+            .unwrap()
+            .node_id,
+        "write"
+    );
+    assert_eq!(
+        review.attempts[0]
+            .input_manifest
+            .as_ref()
+            .unwrap()
+            .source_producer
+            .as_ref(),
+        node(&checkpoint, "publish")
+            .delivery_publication
+            .as_ref()
+            .map(|publication| &publication.source_key)
+    );
+    assert_eq!(
+        owner
+            .launches
+            .iter()
+            .find(|launch| launch.node == "review")
+            .unwrap()
+            .worktree
+            .as_deref(),
+        Some("/wt/feature")
+    );
+    assert_eq!(
+        owner
+            .distinctions
+            .iter()
+            .find(|(node, _)| node == "review")
+            .unwrap()
+            .1,
+        vec!["fixture/1".to_owned()]
+    );
+
+    let land = node(&checkpoint, "land");
+    assert_eq!(land.state, NodeState::Succeeded);
+    let record = land.land.as_ref().unwrap();
+    assert_eq!(record.branch, receipt.branch);
+    assert_eq!(record.head, receipt.head);
+    assert_eq!(record.pull_request, Some(7));
+    assert_eq!(
+        owner.land_requests[0],
+        (receipt.branch.clone(), receipt.head.clone(), None)
+    );
+    assert_eq!(
+        owner.land_requests[1],
+        (receipt.branch.clone(), receipt.head.clone(), Some(7))
+    );
+    assert_eq!(owner.lands[0].1, REPAIR_HEAD);
+}
+
+#[test]
+fn queue_repair_writer_may_bind_the_published_head() {
+    let mut document = queue_publish_document("routine");
+    let repair: GraphNode = serde_json::from_value(json!({
+        "id":"rebase", "access":"worktree_write", "worktree":"/wt/feature",
+        "prompt":"rebase the published branch", "route":{"alias":"senior"},
+        "depends_on":["publish"], "source":{"type":"head","node":"publish"}
+    }))
+    .unwrap();
+    let publish = document
+        .nodes
+        .iter()
+        .position(|node| node.id == "publish")
+        .unwrap();
+    document.nodes.insert(publish + 1, repair);
+
+    assert!(validate_plan(&document).is_ok());
+
+    let mut wrong_worktree = document.clone();
+    wrong_worktree
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "rebase")
+        .unwrap()
+        .worktree = Some("/wt/unretained".into());
+    assert!(validate_plan(&wrong_worktree).is_err());
+}
+
+#[test]
+fn queue_land_does_not_run_without_clear_conflict_and_green_ci_on_publish_head() {
+    for mismatch_conflict in [true, false] {
+        let document = queue_publish_document("routine");
+        let mut owner = owner();
+        owner.repair_fixture = true;
+        if mismatch_conflict {
+            owner.conflict_head = Some(WRITE_HEAD.into());
+        } else {
+            owner.ci_head = Some(WRITE_HEAD.into());
+        }
+        let checkpoint = run(&document, &mut owner, &mut Journal::default());
+
+        assert!(owner.land_requests.is_empty());
+        assert!(node(&checkpoint, "land").land.is_none());
+        if mismatch_conflict {
+            assert_eq!(
+                node(&checkpoint, "conflict")
+                    .conflict
+                    .as_ref()
+                    .unwrap()
+                    .state,
+                ConflictState::Pending
+            );
+        } else {
+            assert_eq!(
+                node(&checkpoint, "conflict")
+                    .conflict
+                    .as_ref()
+                    .unwrap()
+                    .state,
+                ConflictState::Clear
+            );
+            assert_eq!(
+                node(&checkpoint, "ci").ci.as_ref().unwrap().state,
+                CiState::Pending
+            );
+        }
+    }
+}
+
+#[test]
+fn queue_land_admission_requires_conflict_ci_and_verdict_after_publish() {
+    let mut document = queue_publish_document("routine");
+    assert!(validate_plan(&document).is_ok());
+
+    document.nodes.retain(|node| node.id != "conflict");
+    document
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "ci")
+        .unwrap()
+        .depends_on = vec!["publish".into()];
+
+    assert!(
+        validate_plan(&document)
+            .err()
+            .is_some_and(|error| error.contains("conflict, CI and verdict gates"))
+    );
 }
 
 #[test]

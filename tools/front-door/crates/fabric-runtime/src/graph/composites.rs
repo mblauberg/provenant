@@ -418,12 +418,13 @@ fn children(
                 }
                 if child.loop_body.is_some()
                     || child.kind == Some(NodeKind::Loop)
-                    || child.on_fail.is_some()
                     || child.delivery.as_ref().is_some_and(|mode| {
                         !matches!(mode, provenant_records::run::DeliveryMode::Integrate(_))
                     })
                 {
-                    return Err("loop body cannot nest loops or route on_fail, and may only deliver by integrate:".into());
+                    return Err(
+                        "loop body cannot nest loops and may only deliver by integrate:".into(),
+                    );
                 }
             }
             spec.body = children(
@@ -575,6 +576,7 @@ fn outputs(
         verdict: None,
         verdict_error: None,
         hygiene: None,
+        publication: None,
         findings: Vec::new(),
         findings_available: None,
         branch: None,

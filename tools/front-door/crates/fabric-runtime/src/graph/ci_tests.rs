@@ -32,6 +32,7 @@ struct Owner {
     branch: Option<String>,
     commit: Option<String>,
     prompts: Vec<String>,
+    source_commits: Vec<Option<String>>,
     park_operations: Vec<String>,
 }
 impl CiStatus for Owner {
@@ -42,7 +43,14 @@ impl CiStatus for Owner {
             host_monotonic_micros: self.monotonic_micros,
         })
     }
-    fn observe_ci(&mut self, target: &str, checks: &[String], _: usize, _: usize) -> CiObservation {
+    fn observe_ci(
+        &mut self,
+        target: &str,
+        checks: &[String],
+        _: bool,
+        _: usize,
+        _: usize,
+    ) -> CiObservation {
         self.targets.push(target.into());
         self.checks.push(checks.to_vec());
         self.observations
@@ -90,11 +98,12 @@ impl AttemptOwner for Owner {
         input: NodeInput<'_>,
         _: &GraphRoute,
         _: AccessMode,
-        _: Option<&str>,
+        source_commit: Option<&str>,
         _: Replay<'_>,
     ) -> Result<AttemptObservation, Self::Error> {
         self.attempts += 1;
         self.prompts.push(input.prompt.into());
+        self.source_commits.push(source_commit.map(str::to_owned));
         Ok(AttemptObservation::Terminal {
             attempt_ref: None,
             outcome: AttemptOutcome::Succeeded,
@@ -632,6 +641,81 @@ fn ci_timeout_without_registered_checks_reports_not_scheduled() {
 }
 
 #[test]
+fn queue_ci_timeout_parks_pending_checks_without_red_or_green_and_replays() {
+    let mut doc = node_target_document();
+    let Some(GateCondition::Ci {
+        timeout_seconds, ..
+    }) = &mut doc.nodes[1].condition
+    else {
+        unreachable!()
+    };
+    *timeout_seconds = 1;
+    let head = "a".repeat(40);
+    let mut owner = Owner {
+        branch: Some("delivered/topic".into()),
+        commit: Some(head),
+        observations: VecDeque::from([
+            observation(CiState::Pending, "awaiting check registration"),
+            observation(CiState::Pending, "still awaiting checks"),
+            observation(CiState::Pending, "still awaiting checks"),
+        ]),
+        ..Default::default()
+    };
+    let mut journal = Journal::default();
+    let first = advance(&doc, &mut owner, &mut journal).unwrap();
+    assert_eq!(first.status, GraphStatus::Pending);
+    assert_eq!(
+        first.checkpoint.nodes[1].ci.as_ref().unwrap().state,
+        CiState::Pending
+    );
+
+    owner.wall_seconds = 1;
+    owner.monotonic_micros = 1_000_000;
+    let timed_out = advance(&doc, &mut owner, &mut journal).unwrap();
+    let node = &timed_out.checkpoint.nodes[1];
+    assert_eq!(node.state, NodeState::Running);
+    assert!(
+        node.gate.is_none(),
+        "pending CI must not manufacture a gate failure or pass"
+    );
+    assert_eq!(node.ci.as_ref().unwrap().state, CiState::Pending);
+    assert!(
+        node.ci
+            .as_ref()
+            .unwrap()
+            .summary
+            .contains("through the 1 second gate timeout")
+    );
+    let park = node.delivery_park.as_ref().unwrap();
+    assert_eq!(
+        park.reason,
+        provenant_records::graph::ParkReason::CiUnavailable
+    );
+    let transition_id = park.transition_id.clone();
+
+    let replay = advance(&doc, &mut owner, &mut journal).unwrap();
+    assert_eq!(
+        replay.checkpoint.nodes[1]
+            .delivery_park
+            .as_ref()
+            .unwrap()
+            .transition_id,
+        transition_id
+    );
+    assert!(owner.park_operations.len() >= 2);
+    assert!(
+        owner
+            .park_operations
+            .iter()
+            .all(|operation| operation == &owner.park_operations[0])
+    );
+    assert_eq!(
+        owner.attempts, 1,
+        "a pending CI timeout must not launch repair"
+    );
+}
+
+#[test]
 fn ci_timeout_ignores_wall_clock_steps_and_reanchors_after_boot() {
     let mut owner = Owner {
         observations: VecDeque::from([
@@ -915,6 +999,52 @@ fn ci_node_target_keeps_a_moved_published_head_pending_even_if_checks_are_green(
 }
 
 #[test]
+fn queue_ci_without_a_published_head_keeps_green_and_red_observations_pending() {
+    for state in [CiState::Passed, CiState::Failed] {
+        let mut doc = node_target_document();
+        doc.nodes[1].on_fail = Some("repair".into());
+        doc.nodes.push(
+            serde_json::from_value(serde_json::json!({
+                "id":"repair","access":"read_only","prompt":"repair",
+                "depends_on":["ci"],"route":{"adapter":"fixture","model":"fixture/model"}
+            }))
+            .unwrap(),
+        );
+        let mut report = registered(
+            state,
+            "checks reported for a branch without a published commit",
+        );
+        if state == CiState::Failed {
+            report.failed_checks.push(failed_check());
+        }
+        let mut owner = Owner {
+            branch: Some("delivered/topic".into()),
+            commit: None,
+            observations: VecDeque::from([report]),
+            ..Default::default()
+        };
+
+        let run = advance(&doc, &mut owner, &mut Journal::default()).unwrap();
+
+        let ci = &run.checkpoint.nodes[1];
+        assert_eq!(ci.state, NodeState::Running);
+        assert!(ci.gate.is_none());
+        assert!(ci.outputs.is_none());
+        assert_eq!(ci.ci.as_ref().unwrap().state, CiState::Pending);
+        assert_eq!(ci.ci.as_ref().unwrap().head_sha, None);
+        assert_eq!(run.checkpoint.nodes[2].state, NodeState::Pending);
+        assert!(
+            owner.targets.is_empty(),
+            "CI must not be queried without a published head to bind"
+        );
+        assert_eq!(
+            owner.attempts, 1,
+            "neither green nor red may launch a repair without the published head"
+        );
+    }
+}
+
+#[test]
 fn a_v1_graph_without_queue_keeps_branch_only_ci_target_semantics() {
     let mut doc = node_target_document();
     doc.schema_version = 1;
@@ -976,6 +1106,50 @@ fn conflict_node_target_does_not_rebase_a_different_head() {
         Some("a".repeat(40))
     );
     assert_eq!(result.checkpoint.nodes[2].state, NodeState::Pending);
+    assert_eq!(owner.attempts, 1);
+}
+
+#[test]
+fn queue_conflict_without_a_published_head_waits_instead_of_rebasing() {
+    let mut doc = node_target_document();
+    doc.nodes[1].condition = Some(GateCondition::Conflict {
+        extra: Default::default(),
+        target: CiTarget::Node {
+            node: "write".into(),
+            extra: Default::default(),
+        },
+    });
+    doc.nodes[1].on_fail = Some("rebase".into());
+    doc.nodes.push(
+        serde_json::from_value(serde_json::json!({
+            "id":"rebase","access":"worktree_write","worktree":"lane",
+            "prompt":"Rebase the retained branch","depends_on":["ci"],
+            "route":{"adapter":"fixture","model":"fixture/model"}
+        }))
+        .unwrap(),
+    );
+    let mut owner = Owner {
+        branch: Some("delivered/topic".into()),
+        commit: None,
+        conflict_observations: VecDeque::from([ConflictObservation {
+            state: ConflictState::Conflicting,
+            head_sha: Some("a".repeat(40)),
+            summary: "branch conflicts".into(),
+        }]),
+        ..Default::default()
+    };
+
+    let run = advance(&doc, &mut owner, &mut Journal::default()).unwrap();
+
+    let conflict = &run.checkpoint.nodes[1];
+    assert_eq!(conflict.state, NodeState::Running);
+    assert!(conflict.gate.is_none());
+    assert_eq!(
+        conflict.conflict.as_ref().unwrap().state,
+        ConflictState::Pending
+    );
+    assert_eq!(conflict.conflict.as_ref().unwrap().head_sha, None);
+    assert_eq!(run.checkpoint.nodes[2].state, NodeState::Pending);
     assert_eq!(owner.attempts, 1);
 }
 
@@ -1259,6 +1433,10 @@ fn ci_failure_findings_reach_repair_input_and_survive_resume() {
     let run = advance(&doc, &mut owner, &mut journal).unwrap();
     let outputs = run.checkpoint.nodes[0].outputs.as_ref().unwrap();
     assert!(
+        outputs.commit.is_none(),
+        "legacy CI gates retain their prior outputs"
+    );
+    assert!(
         outputs.findings[0]
             .summary
             .starts_with("test (job 12345678): assertion failed")
@@ -1277,6 +1455,63 @@ fn ci_failure_findings_reach_repair_input_and_survive_resume() {
         advance(&doc, &mut owner, &mut journal).unwrap().checkpoint,
         run.checkpoint
     );
+}
+
+#[test]
+fn queue_ci_repair_receives_failing_head_findings_and_sweep_instruction() {
+    let mut doc = node_target_document();
+    doc.nodes[1].on_fail = Some("repair".into());
+    doc.nodes.push(
+        serde_json::from_value(serde_json::json!({
+            "id":"repair","access":"read_only","prompt":"Repair the failed CI head.",
+            "source":{"type":"head","node":"write"},"depends_on":["ci"],
+            "inputs":[{"node":"ci","outputs":["findings","commit"]}],
+            "route":{"adapter":"fixture","model":"fixture/model"}
+        }))
+        .unwrap(),
+    );
+    let head = "a".repeat(40);
+    let mut failure = observation(CiState::Failed, "failed");
+    failure.failed_checks.push(failed_check());
+    let mut owner = Owner {
+        branch: Some("delivered/topic".into()),
+        commit: Some(head.clone()),
+        observations: VecDeque::from([failure]),
+        ..Default::default()
+    };
+    let mut journal = Journal::default();
+
+    let run = advance(&doc, &mut owner, &mut journal).unwrap();
+
+    let ci = &run.checkpoint.nodes[1];
+    assert_eq!(
+        ci.outputs.as_ref().unwrap().commit.as_deref(),
+        Some(head.as_str())
+    );
+    assert_eq!(ci.state, NodeState::Failed);
+    let repair = &run.checkpoint.nodes[2];
+    assert_eq!(repair.state, NodeState::Succeeded);
+    assert_eq!(repair.source_commit.as_deref(), Some(head.as_str()));
+    assert_eq!(owner.source_commits, vec![None, Some(head.clone())]);
+    let manifest = repair.attempts[0].input_manifest.as_ref().unwrap();
+    assert_eq!(manifest.source_commit.as_deref(), Some(head.as_str()));
+    assert_eq!(manifest.inputs.len(), 2);
+    assert!(manifest.inputs.iter().any(|input| {
+        input.kind == OutputKind::Findings
+            && input.producer_node == "ci"
+            && input.delivery == InputDelivery::Delivered
+    }));
+    assert!(manifest.inputs.iter().any(|input| {
+        input.kind == OutputKind::Commit
+            && input.producer_node == "ci"
+            && input.commit.as_deref() == Some(head.as_str())
+            && input.delivery == InputDelivery::Delivered
+    }));
+    let prompt = &owner.prompts[1];
+    assert!(prompt.contains(&format!("ci commit: \"{head}\"")));
+    assert!(prompt.contains("12345678"));
+    assert!(prompt.contains("assertion failed"));
+    assert!(prompt.contains("whole defect class"));
 }
 
 #[test]

@@ -71,6 +71,7 @@ impl CiStatus for Owner {
         &mut self,
         _target: &str,
         _checks: &[String],
+        _: bool,
         _: usize,
         _: usize,
     ) -> CiObservation {
