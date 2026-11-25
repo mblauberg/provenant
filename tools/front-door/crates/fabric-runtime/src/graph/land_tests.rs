@@ -344,12 +344,6 @@ impl AttemptOwner for Owner {
         let (result, branch, commit) = match key.node_id.as_str() {
             "write" => (None, self.writer_branch.clone(), Some(WRITE_HEAD)),
             "rebase" => (None, replay.branch.map(str::to_owned), Some(REBASE_HEAD)),
-            _ if self.repair_fixture
-                && access == AccessMode::WorktreeWrite
-                && replay.branch.is_none() =>
-            {
-                (None, self.writer_branch.clone(), Some(WRITE_HEAD))
-            }
             "repair" => (None, replay.branch.map(str::to_owned), Some(REPAIR_HEAD)),
             id if self.repair_fixture && id.ends_with("--fix") => {
                 let mut capture = crate::result_capture::ResultCapture::new(None);
@@ -359,6 +353,12 @@ impl AttemptOwner for Owner {
                     replay.branch.map(str::to_owned),
                     Some(REPAIR_HEAD),
                 )
+            }
+            _ if self.repair_fixture
+                && access == AccessMode::WorktreeWrite
+                && replay.branch.is_none() =>
+            {
+                (None, self.writer_branch.clone(), Some(WRITE_HEAD))
             }
             _ => {
                 let verdict = if self.repair_fixture

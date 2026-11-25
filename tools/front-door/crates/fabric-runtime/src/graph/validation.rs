@@ -389,6 +389,23 @@ pub(super) fn validate_flat_plan(
     document: &GraphDocument,
     limits: &crate::config::GraphLimits,
 ) -> Result<(PlannedGraph, std::collections::BTreeMap<String, usize>), AdmissionError> {
+    validate_flat_plan_inner(document, limits, false)
+}
+
+// The complete expanded graph is validated again with all queue bindings.
+// This preliminary pass checks only the local structure of a loop body.
+pub(super) fn validate_loop_body(
+    document: &GraphDocument,
+    limits: &crate::config::GraphLimits,
+) -> Result<(PlannedGraph, std::collections::BTreeMap<String, usize>), AdmissionError> {
+    validate_flat_plan_inner(document, limits, true)
+}
+
+fn validate_flat_plan_inner(
+    document: &GraphDocument,
+    limits: &crate::config::GraphLimits,
+    isolated_loop_body: bool,
+) -> Result<(PlannedGraph, std::collections::BTreeMap<String, usize>), AdmissionError> {
     if !matches!(document.schema_version, 1 | 2) {
         return Err(AdmissionError::Plan("schema version".into()));
     }
@@ -576,7 +593,7 @@ pub(super) fn validate_flat_plan(
                             && source.worktree.is_some()
                             && source.worktree == node.worktree
                     });
-            if document.queue.is_none()
+            if document.queue.is_none() && !isolated_loop_body
                 || document.integration_branch.is_none()
                 || node.access != AccessMode::WorktreeWrite
                 || node.route.is_some()
