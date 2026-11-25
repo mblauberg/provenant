@@ -30,6 +30,12 @@ pub(crate) struct Entry {
     pub merge: String,
     pub review: Option<String>,
     pub url: String,
+    /// The base commit and branch, so a rate-limited REST subject read can be
+    /// served by this GraphQL row. Older cache entries lack them.
+    #[serde(default)]
+    pub base_ref_oid: String,
+    #[serde(default)]
+    pub base_ref_name: String,
     /// Every reported check in the observer's bucket vocabulary, in rollup
     /// order. Empty when the rollup declared nothing.
     pub checks: Vec<RawCheck>,
@@ -59,11 +65,22 @@ pub(crate) enum Batch {
 
 /// The requested pull requests' facts from the shared cache, else one GraphQL
 /// query, else a batch-level refusal the caller resolves per pull request.
+pub(crate) fn snapshot(state: &Path, project: &Path, numbers: &[u64]) -> Batch {
+    snapshot_with_cache_filter(state, project, numbers, |_| true)
+}
+
+/// Reuse a fresh row only when it satisfies the caller's required fields.
+/// A rejected cached row triggers one GraphQL read, not a second cache lookup.
 #[allow(
     clippy::disallowed_methods,
     reason = "the batch cache TTL boundary owns the wall clock"
 )]
-pub(crate) fn snapshot(state: &Path, project: &Path, numbers: &[u64]) -> Batch {
+fn snapshot_with_cache_filter(
+    state: &Path,
+    project: &Path,
+    numbers: &[u64],
+    accepts: impl Fn(&Entry) -> bool,
+) -> Batch {
     if numbers.is_empty() {
         return Batch::Entries(Vec::new());
     }
@@ -77,7 +94,9 @@ pub(crate) fn snapshot(state: &Path, project: &Path, numbers: &[u64]) -> Batch {
     };
     let ttl = observer::fast_interval(state, project).unwrap_or(Duration::from_secs(5));
     let now = jiff::Timestamp::now();
-    if let Some(entries) = fresh_cache(&dir, numbers, now, ttl) {
+    if let Some(entries) = fresh_cache(&dir, numbers, now, ttl)
+        && entries.iter().all(accepts)
+    {
         return Batch::Entries(entries);
     }
     match read(state, project, &repository, numbers) {
@@ -92,6 +111,16 @@ pub(crate) fn snapshot(state: &Path, project: &Path, numbers: &[u64]) -> Batch {
 /// `snapshot` for exactly one pull request, used when a REST read is limited.
 pub(crate) fn single(state: &Path, project: &Path, number: u64) -> Batch {
     snapshot(state, project, &[number])
+}
+
+/// A single row whose cached form must satisfy the caller's needs.
+pub(crate) fn single_with_cache_filter(
+    state: &Path,
+    project: &Path,
+    number: u64,
+    accepts: impl Fn(&Entry) -> bool,
+) -> Batch {
+    snapshot_with_cache_filter(state, project, &[number], accepts)
 }
 
 /// The canonical repository name, one cheap read shared with every transport.
@@ -286,7 +315,7 @@ fn rollup_query(owner: &str, name: &str, numbers: &[u64]) -> String {
         query.push_str(":pullRequest(number:");
         query.push_str(&number.to_string());
         query.push_str(
-            "){number state isDraft mergeStateStatus reviewDecision url headRefOid statusCheckRollup{contexts(last:100){totalCount nodes{__typename ...on CheckRun{name status conclusion detailsUrl} ...on StatusContext{context state targetUrl}}}}}",
+            "){number state isDraft mergeStateStatus reviewDecision url headRefOid baseRefOid baseRefName statusCheckRollup{contexts(last:100){totalCount nodes{__typename ...on CheckRun{name status conclusion detailsUrl} ...on StatusContext{context state targetUrl}}}}}",
         );
     }
     query.push_str("}}");
@@ -320,6 +349,10 @@ struct Pull {
     url: String,
     #[serde(rename = "headRefOid", default)]
     head: String,
+    #[serde(rename = "baseRefOid", default)]
+    base_ref_oid: String,
+    #[serde(rename = "baseRefName", default)]
+    base_ref_name: String,
     #[serde(rename = "statusCheckRollup", default)]
     rollup: Option<Rollup>,
 }
@@ -346,6 +379,8 @@ fn entry(number: u64, pull: Option<Pull>) -> Entry {
             merge: "unknown".into(),
             review: None,
             url: String::new(),
+            base_ref_oid: String::new(),
+            base_ref_name: String::new(),
             checks: Vec::new(),
             truncated: false,
         };
@@ -376,6 +411,8 @@ fn entry(number: u64, pull: Option<Pull>) -> Entry {
         merge: pull.merge,
         review: pull.review,
         url: pull.url,
+        base_ref_oid: pull.base_ref_oid,
+        base_ref_name: pull.base_ref_name,
         checks: checks.clone(),
         // A node the rollup cannot speak for, or more contexts than one page
         // holds, makes this rollup incomplete; callers then read REST exactly.

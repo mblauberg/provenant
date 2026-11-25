@@ -811,6 +811,7 @@ error_kinds! {
     LaneDepth => "LANE_DEPTH", "Nested lane depth exceeds the configured maximum.";
     QueueFull => "QUEUE_FULL", "The host queue is full.";
     Contention => "CONTENTION", "The run store is contended or the call budget expired.";
+    ForgeQuota => "FORGE_QUOTA", "The forge rate limit is exhausted; retry after the reset it names.";
     Io => "IO", "Filesystem, database or other I/O failed.";
     Unsupported => "UNSUPPORTED", "The route or adapter does not support the requested launch.";
     ContinuationUnsupported => "CONTINUATION_UNSUPPORTED", "The attempt's provider session cannot be continued.";
@@ -922,6 +923,7 @@ impl ErrorKind {
             | Self::Conflict
             | Self::LaneDepth
             | Self::QueueFull
+            | Self::ForgeQuota
             | Self::Unsupported
             | Self::ContinuationUnsupported => "refused",
             _ => "error",

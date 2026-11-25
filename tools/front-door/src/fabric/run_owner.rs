@@ -820,6 +820,7 @@ fn run_kind_next(kind: provenant_run::ErrorKind) -> &'static str {
         | E::DuplicatePacingProfile => {
             "supply the missing lane, parent or account context and retry"
         }
+        E::ForgeQuota => "wait for the forge quota reset named in the refusal, then retry",
         E::Contention | E::Processes | E::MemoryFloor | E::StaleReadiness | E::HostClock => {
             "wait for the named host resource observation to settle, then retry"
         }
