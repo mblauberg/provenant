@@ -808,10 +808,7 @@ pub(in crate::graph) fn validate_checkpoint<R: Error + 'static, J: Error + 'stat
                 && intent.is_none_or(|intent| {
                     !intent.operation_id.is_empty()
                         && intent.input_head.parse::<provenant_core::GitOid>().is_ok()
-                        && intent
-                            .handoff
-                            .as_deref()
-                            .is_none_or(|handoff| valid_hygiene_handoff(handoff))
+                        && intent.handoff.as_deref().is_none_or(valid_hygiene_handoff)
                 })
                 && outcome.is_none_or(|outcome| {
                     outcome.handoff.as_deref().is_none_or(valid_hygiene_handoff)
