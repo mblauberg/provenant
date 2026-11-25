@@ -684,9 +684,9 @@ pub enum RunError {
     ObjectImportLimit(&'static str),
     /// The lane's history forked from the host branch and the configured
     /// history policy retained it. Its commits stay in the attempt's private
-    /// Git; the setting that would publish a host merge names itself here.
+    /// Git; the setting that would publish the lane's history names itself here.
     #[error(
-        "lane history diverged from the host branch; its commits are retained in the attempt's private Git for host recovery; {setting}; set it to allow to publish a host merge"
+        "lane history diverged from the host branch; its commits are retained in the attempt's private Git for host recovery; {setting}; set it to allow to publish the lane's history"
     )]
     PublicationDiverged { setting: String },
     /// A host merge of a diverged lane tip conflicted. The lane's commits stay

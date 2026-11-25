@@ -467,7 +467,9 @@ any number of lanes may hold one worktree, path claims are advisory, and a live
 conflicting writer is not excluded by Provenant. Attempts own separate Git refs,
 indexes and object stores, so a commit cannot take a sibling's staged snapshot.
 Host publication uses expected-old-tip compare-and-swap after verification. A
-diverged lane tip is merged and published when the merge is clean; a conflict,
+diverged lane tip is merged and published when the merge is clean. A lane rewrite
+replaces the unchanged custody-pinned launch tip with a warning and a recovery ref; a later host
+tip takes the merge path regardless of remote-tracking refs. A conflict,
 unrelated histories, a configured merge driver or
 `lanes.history.rebase = "refuse"` retains the lane's private commits and names
 the cause. Each attempt holds its own holder lease;

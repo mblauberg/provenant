@@ -4343,6 +4343,179 @@ fn publication_accepts_a_rebase_onto_the_current_origin_default() -> TestResult 
 }
 
 #[test]
+// Spec: docs/specs/run-settlement.md#settlement
+fn a_force_pushed_rebase_publishes_its_tip_but_a_host_commit_still_refuses() -> TestResult {
+    let fixture = Fixture::new("sha1")?;
+    // The lane launched at a branch containing pre-existing work.
+    let stale_tree = tree_with(&fixture, &[("file", "pre-rebase lane\n")])?;
+    let stale = commit_of(
+        &fixture,
+        stale_tree,
+        Some(fixture.base),
+        "pre-rebase lane head",
+    )?;
+    // origin/main moved on; the lane rebased onto it and force-pushed its branch.
+    let moved = child_of(&fixture, fixture.base, "origin/main moved")?;
+    let rebased_tree = tree_with(&fixture, &[("file", "rebased lane\n")])?;
+    let rebased = commit_of(&fixture, rebased_tree, Some(moved), "rebased lane head")?;
+    update_ref(&fixture, "refs/heads/lane", stale)?;
+    let remote = fixture.root.join("remote.git");
+    git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.root,
+        None,
+        &[
+            "clone",
+            "--bare",
+            fixture.project.to_str().ok_or("project path")?,
+            remote.to_str().ok_or("remote path")?,
+        ],
+    )?;
+    git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &[
+            "remote",
+            "add",
+            "origin",
+            remote.to_str().ok_or("remote path")?,
+        ],
+    )?;
+    update_ref(&fixture, "refs/remotes/origin/lane", stale)?;
+    let (_attempt, scratch) = fixture.prepare_attempt(fixture.import_attempt, stale)?;
+    fixture.git_attempt(
+        &scratch,
+        &[
+            "push",
+            "--force",
+            "origin",
+            &format!("{rebased}:refs/heads/lane"),
+        ],
+    )?;
+    assert_eq!(
+        oid(git(
+            &fixture.git,
+            &fixture.home,
+            &remote,
+            None,
+            &["rev-parse", "refs/heads/lane"]
+        )?)?,
+        rebased
+    );
+    assert_eq!(
+        super::resolve_ref(
+            &fixture.git,
+            fixture.worktree.repo(),
+            "refs/remotes/origin/lane"
+        )?,
+        stale,
+        "a private push must not refresh the host's tracking ref"
+    );
+
+    // The unchanged launch tip belongs to the lane, regardless of the host
+    // tracking ref, so publication replaces it and warns.
+    let (result, warnings) = provenant_records::warning::capture(|| {
+        publish_plain(
+            &fixture.git,
+            fixture.worktree.repo(),
+            super::BranchPublication {
+                branch: "refs/heads/lane",
+                base: stale,
+                launch_ref: None,
+                head: rebased,
+                attempt: fixture.import_attempt,
+                history: LaneHistory::default(),
+            },
+        )
+    });
+    let published = result?;
+    assert_eq!(published.tip, rebased);
+    assert_eq!(published.previous, stale);
+    assert!(
+        !published.merged,
+        "a rewritten tip is published directly, not merged"
+    );
+    assert_eq!(
+        super::resolve_ref(&fixture.git, fixture.worktree.repo(), "refs/heads/lane")?,
+        rebased
+    );
+    assert_eq!(
+        super::resolve_ref(
+            &fixture.git,
+            fixture.worktree.repo(),
+            &format!("refs/provenant/recovery/{stale}")
+        )?,
+        stale,
+        "the displaced tip is retained for host recovery"
+    );
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.message.contains("rewritten")
+                && warning.message.contains(&rebased.to_string())),
+        "publication must warn that history was rewritten: {warnings:?}"
+    );
+
+    update_ref(&fixture, "refs/heads/lane", stale)?;
+    let refuse = LaneHistory {
+        rebase: provenant_config::Setting {
+            value: provenant_config::Rebase::Refuse,
+            source: provenant_records::Layer::Project,
+        },
+        ..LaneHistory::default()
+    };
+    let error = publish_plain(
+        &fixture.git,
+        fixture.worktree.repo(),
+        super::BranchPublication {
+            branch: "refs/heads/lane",
+            base: stale,
+            launch_ref: None,
+            head: rebased,
+            attempt: fixture.import_attempt,
+            history: refuse,
+        },
+    )
+    .expect_err("refuse retains even an unchanged launch tip");
+    assert!(matches!(error, crate::RunError::PublicationDiverged { .. }));
+    assert_eq!(
+        super::resolve_ref(&fixture.git, fixture.worktree.repo(), "refs/heads/lane")?,
+        stale
+    );
+
+    // A matching tracking ref does not authorise replacing a host commit.
+    let host_tree = tree_with(&fixture, &[("file", "host during lane\n")])?;
+    let host = commit_of(&fixture, host_tree, Some(stale), "host commit during lane")?;
+    update_ref(&fixture, "refs/heads/lane", host)?;
+    update_ref(&fixture, "refs/remotes/origin/lane", rebased)?;
+    let refused = publish_plain(
+        &fixture.git,
+        fixture.worktree.repo(),
+        super::BranchPublication {
+            branch: "refs/heads/lane",
+            base: stale,
+            launch_ref: None,
+            head: rebased,
+            attempt: fixture.import_attempt,
+            history: LaneHistory::default(),
+        },
+    )
+    .expect_err("a host commit made during the lane must still refuse");
+    assert!(
+        matches!(refused, crate::RunError::PublicationConflict { .. }),
+        "{refused:?}"
+    );
+    assert_eq!(
+        super::resolve_ref(&fixture.git, fixture.worktree.repo(), "refs/heads/lane")?,
+        host
+    );
+    Ok(())
+}
+
+#[test]
 fn import_sweeps_only_aged_quarantine_and_staging_directories() -> TestResult {
     let fixture = Fixture::new("sha1")?;
     let common = fixture.project.join(".git");

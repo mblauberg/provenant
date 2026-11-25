@@ -15,7 +15,8 @@ terminal cleanup and remain a worktree-removal fence until reconciled; native in
 uses only committed trees and preserves conflicting native staging or operations
 ([lane Git](run.md#lane-git-and-import)). Each attempt publishes only its private ref; a
 sibling-divergent host tip is merged and published when no conflict exists, and otherwise
-retains both commits with the conflict and setting named.
+retains both commits with the conflict and setting named. A lane rewrite replaces its unchanged,
+custody-pinned launch tip with a warning and a recovery ref. A later host tip is merged or refused, regardless of remote-tracking refs.
 - Why: recovery must resume durable effects without racing another driver or losing work.
 
 Settlement decides whether a Git operation is unfinished before it imports objects or
@@ -135,11 +136,14 @@ unrooted setting decides only that observation: `warn` and `off` do not override
 so when `lanes.history.rebase = "allow"` and the host branch's history is unrelated to the lane
 tip, publication still refuses with `PublicationUnrelated`. When a lane's history diverged from
 the host lane branch, publication merges the host branch into the lane tip and publishes the merge
-when it is clean. A real conflict names the files; unrelated
-histories, a configured `merge.*.driver` and a branch rewound behind the pinned launch base are
-typed refusals of their own. Each retains the lane's private history, and
-`lanes.history.rebase = "refuse"` retains a diverged history without attempting a merge. A branch
-rewound behind its launch base is judged before the unrooted tip, so it refuses without first
+when it is clean. When the host branch still equals the custody-pinned launch tip and the lane
+rewrote that tip, publication moves the branch to the lane head with a rewritten-history warning.
+This needs no push or remote-tracking ref: neither a stale nor a matching tracking ref proves who
+owns a later host commit. A host tip advanced since launch instead takes the merge path. A real
+conflict names the files; unrelated histories, a configured `merge.*.driver` and a branch rewound
+behind the pinned launch base are typed refusals of their own. Each retains the lane's private
+history, and `lanes.history.rebase = "refuse"` retains a diverged or rewritten history without
+publishing it. A branch rewound behind its launch base is judged before the unrooted tip, so it refuses without first
 warning about a tip that refusal would supersede. When publication displaces a branch tip that is
 not an ancestor of the new tip, the same Git transaction retains it at
 `refs/provenant/recovery/<displaced-oid>`. Every publication refusal is
