@@ -528,9 +528,8 @@ pub(super) fn receipt_family(model: Option<&str>) -> String {
 }
 
 /// The effort that actually ran, paired with the evidence that justifies it.
-/// A recorded applied effort wins. When an adapter dropped an effort, or no
-/// effort was applied at all, the warning or requested default supplies the
-/// value and its source instead of a bare null.
+/// A recorded applied effort wins. An adapter warning supplies the recorded
+/// applied default or drop; without either, the effort and its source are unknown.
 pub(super) fn receipt_effort(record: &run::AttemptRecord) -> (String, String) {
     let route = record.applied_route.as_ref();
     if let Some(effort) = route
@@ -547,15 +546,6 @@ pub(super) fn receipt_effort(record: &run::AttemptRecord) -> (String, String) {
         // The adapter dropped the requested effort: report the applied value
         // explicitly rather than presenting the requested effort as applied.
         return ("none".into(), source);
-    }
-    let requested = match &record.requested_route {
-        run::RequestedRoute::Model { effort, .. }
-        | run::RequestedRoute::Named { effort, .. }
-        | run::RequestedRoute::Review { effort, .. } => effort.as_deref(),
-        run::RequestedRoute::Adapter { .. } => None,
-    };
-    if let Some(effort) = requested.filter(|value| !value.is_empty()) {
-        return (effort.to_owned(), "requested_route.effort".into());
     }
     ("unknown".into(), "unknown".into())
 }

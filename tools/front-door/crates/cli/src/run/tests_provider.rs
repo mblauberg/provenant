@@ -581,6 +581,28 @@ fn reviewer_receipts_cover_provenance_and_resolution_evidence()
     Ok(())
 }
 #[test]
+fn receipt_never_treats_requested_effort_as_applied_without_evidence()
+-> Result<(), Box<dyn std::error::Error>> {
+    let now = WallTime::from_micros(100)?;
+    let record: run::AttemptRecord = serde_json::from_value(json!({
+        "schema_version": 1, "attempt_id": AttemptId::from_bytes([9; 16]),
+        "key": {"project": provenant_core::ProjectId::from_bytes([3; 16]), "graph": "receipt", "node": "test", "attempt": 1},
+        "project_id": provenant_core::ProjectId::from_bytes([3; 16]),
+        "attempt_number": 1, "revision": 1, "generation": 0,
+        "requested_route": {"kind":"model","provider":"codex","model":"codex/gpt-6.1-sol","effort":"high"},
+        "applied_route": {"provider":"codex","model":"codex/gpt-6.1-sol","effort":null},
+        "authority_digest": provenant_core::Digest::from_bytes([5; 32]), "read_only_writable": [], "protected_paths": [], "trace": {}, "queued_at": now,
+        "state": {"state":"terminal","outcome":"lost","exit_code":null,"finished_at":now,"reason":null},
+        "usage": {}, "prompt": {"path":{"encoding":"utf8","path":"prompt.txt"}, "digest":CanonicalV1::file_digest(b""),"bytes":0,"complete":true,"redacted":false}
+    }))?;
+    let (data, line) = reviewer_receipt(&record, false).unwrap();
+    assert_eq!(data["effort"], "unknown");
+    assert_eq!(data["effort_source"], "unknown");
+    assert!(line.contains("@unknown"));
+    Ok(())
+}
+
+#[test]
 fn receipt_fields_are_sourced_for_opencode_and_codex_lanes()
 -> Result<(), Box<dyn std::error::Error>> {
     fn settled(

@@ -298,7 +298,9 @@ and reviewer attribution. Every receipt names the adapter, model, family,
 effort, `effort_source`, `resolved_from` and role, for both writer and reviewer
 lanes and for every adapter. Family comes from the effective routing catalogue;
 an effort is the applied value, or the value and source recorded when an adapter
-dropped or defaulted it, never a guess from output text. `resolved_from` names
+dropped or defaulted it. A requested effort alone is not evidence of the
+applied effort; without recorded applied or warning evidence, both effort and
+its source are `unknown`. `resolved_from` names
 the recorded launch decision (an explicit pin, a pool, a named route, a
 fallback or a continuation), so dispatched lanes do not collapse to "unknown".
 Ambiguous, running or peer-owned targets are refused; missing evidence stays
