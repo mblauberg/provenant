@@ -46,8 +46,8 @@ plan and replay semantics; new fields are versioned and validated on admission.
 Launch preparation refusals (for example a retained worktree whose writer
 lineage belongs to an earlier graph) are not unsuccessful attempts: reconcile,
 then relaunch up to `domains.fabric.queue.prep_retries` (default 2) before
-parking with `operation_error`. An adopted PR or retained worktree must be
-adoptable by a new item graph without a lineage refusal. Every repair brief
+parking with `operation_error` and a diagnostic even if the host supplies no
+message. An adopted PR or retained worktree must be adoptable by a new item graph without a lineage refusal. Every repair brief
 carries the failing head, the bounded failure excerpt and an instruction to
 sweep the whole defect class (other tests, help text and docs asserting the
 changed behaviour), because single-test repairs dominate observed round counts.

@@ -324,7 +324,7 @@ fn recovery_returns_through_fresh_gates(
                     .map(|(index, _)| index)
                     .collect();
                 conflicts.iter().any(|conflict| {
-                    nodes.iter().enumerate().any(|(ci_index, ci)| {
+                    nodes.iter().any(|ci| {
                         matches!(ci.condition.as_ref(), Some(GateCondition::Ci { .. }))
                             && gate_targets_node(&ci.condition, &publish.id)
                             && ancestors(nodes, positions, &ci.id).contains(&publish_index)

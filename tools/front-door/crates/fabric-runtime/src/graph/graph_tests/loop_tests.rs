@@ -1,4 +1,5 @@
 use super::*;
+use crate::graph::transitions::initial_checkpoint;
 
 fn advance(
     document: &GraphDocument,
@@ -74,7 +75,7 @@ fn extension(
 
 #[test]
 fn queue_loop_can_bind_an_outer_publication_gate() {
-        let mut document: GraphDocument = serde_json::from_value(serde_json::json!({
+    let mut document: GraphDocument = serde_json::from_value(serde_json::json!({
             "schema_version":2, "graph_id":"outer-publication", "integration_branch":"delivery/item", "nodes":[
                 {"id":"writer", "access":"worktree_write", "worktree":"retained",
                  "prompt":"Write", "route":{"alias":"junior"}},
@@ -89,9 +90,9 @@ fn queue_loop_can_bind_an_outer_publication_gate() {
                  ]}}
             ]
         })).unwrap();
-        document.queue = Some(QueueKnobs::default());
-        let expanded = loops::expand(&document, &[], &Default::default()).unwrap();
-        assert!(validate_plan(&expanded).is_ok());
+    document.queue = Some(QueueKnobs::default());
+    let expanded = loops::expand(&document, &[], &Default::default()).unwrap();
+    assert!(validate_plan(&expanded).is_ok());
 }
 
 // Spec: docs/specs/fabric.md#bounded-graphs-and-route-fallback
@@ -147,8 +148,22 @@ fn loop_outcome_edge_validates_target_and_replays_the_selected_branch() {
         .unwrap()
     };
 
-    assert!(loops::expand(&make_document("exhausted", "missing"), &[], &Default::default()).is_err());
-    assert!(loops::expand(&make_document("exhausted", "finished"), &[], &Default::default()).is_err());
+    assert!(
+        loops::expand(
+            &make_document("exhausted", "missing"),
+            &[],
+            &Default::default()
+        )
+        .is_err()
+    );
+    assert!(
+        loops::expand(
+            &make_document("exhausted", "finished"),
+            &[],
+            &Default::default()
+        )
+        .is_err()
+    );
 
     let document = make_document("exhausted", "on_exhausted");
     let expanded = loops::expand(&document, &[], &Default::default()).unwrap();
@@ -253,9 +268,13 @@ fn delivery_loop_exhaustion_parks_once_and_replays_the_same_transition() {
             &mut self,
             request: DeliveryParkRequest<'_>,
         ) -> Result<Option<provenant_core::HumanRequestId>, Infallible> {
-            assert_eq!(request.reason, provenant_records::graph::ParkReason::LoopExhausted);
+            assert_eq!(
+                request.reason,
+                provenant_records::graph::ParkReason::LoopExhausted
+            );
             assert!(request.item.is_none());
-            self.calls.push((request.transition_id.into(), request.operation_id.into()));
+            self.calls
+                .push((request.transition_id.into(), request.operation_id.into()));
             let request_id = *self
                 .effects
                 .entry(request.operation_id.into())
@@ -294,13 +313,12 @@ fn delivery_loop_exhaustion_parks_once_and_replays_the_same_transition() {
         attempt: 1,
         route_index: 0,
     };
-    checkpoint.nodes[loop_index].delivery_loop = Some(
-        provenant_records::graph::DeliveryLoopProgress {
+    checkpoint.nodes[loop_index].delivery_loop =
+        Some(provenant_records::graph::DeliveryLoopProgress {
             name: "cycle".into(),
             round: 1,
             last_attempt: attempt_key.clone(),
-        },
-    );
+        });
     checkpoint.nodes[writer_index].state = NodeState::Succeeded;
     checkpoint.nodes[writer_index].advance_error = Some("repair did not satisfy CI".into());
     let mut writer_outputs = NodeOutputs::default();
@@ -347,39 +365,48 @@ fn delivery_loop_exhaustion_parks_once_and_replays_the_same_transition() {
     )
     .unwrap();
     let pending = checkpoint.nodes[loop_index].delivery_park.as_ref().unwrap();
-    assert_eq!(pending.reason, provenant_records::graph::ParkReason::LoopExhausted);
+    assert_eq!(
+        pending.reason,
+        provenant_records::graph::ParkReason::LoopExhausted
+    );
     assert_eq!(pending.attempt_ref.as_deref(), Some("attempt-1"));
     let expected_head = "a".repeat(40);
     assert_eq!(pending.head.as_deref(), Some(expected_head.as_str()));
     assert_eq!(pending.request_id, None);
     let progress = checkpoint.nodes[loop_index].clone();
-    assert!(loops::validate_progress(
-        &progress,
-        &plan.nodes[loop_index],
-        &checkpoint,
-        &positions,
-        true,
-    )
-    .is_ok());
-    assert!(loops::validate_progress(
-        &progress,
-        &plan.nodes[loop_index],
-        &checkpoint,
-        &positions,
-        false,
-    )
-    .is_err());
+    assert!(
+        loops::validate_progress(
+            &progress,
+            &plan.nodes[loop_index],
+            &checkpoint,
+            &positions,
+            true,
+        )
+        .is_ok()
+    );
+    assert!(
+        loops::validate_progress(
+            &progress,
+            &plan.nodes[loop_index],
+            &checkpoint,
+            &positions,
+            false,
+        )
+        .is_err()
+    );
     let replay: GraphCheckpoint =
         serde_json::from_value(serde_json::to_value(&checkpoint).unwrap()).unwrap();
     let progress = replay.nodes[loop_index].clone();
-    assert!(loops::validate_progress(
-        &progress,
-        &plan.nodes[loop_index],
-        &replay,
-        &positions,
-        true,
-    )
-    .is_ok());
+    assert!(
+        loops::validate_progress(
+            &progress,
+            &plan.nodes[loop_index],
+            &replay,
+            &positions,
+            true,
+        )
+        .is_ok()
+    );
 
     // A crash after filing but before the receipt replays the same operation.
     loops::settle(
@@ -394,30 +421,37 @@ fn delivery_loop_exhaustion_parks_once_and_replays_the_same_transition() {
     )
     .unwrap();
     let completed = checkpoint.nodes[loop_index].delivery_park.as_ref().unwrap();
-    assert_eq!(completed.request_id, Some(provenant_core::HumanRequestId::from_bytes([37; 16])));
+    assert_eq!(
+        completed.request_id,
+        Some(provenant_core::HumanRequestId::from_bytes([37; 16]))
+    );
     assert_eq!(owner.calls.len(), 2);
     assert_eq!(owner.calls[0], owner.calls[1]);
     assert_eq!(owner.effects.len(), 1);
     let progress = checkpoint.nodes[loop_index].clone();
-    assert!(loops::validate_progress(
-        &progress,
-        &plan.nodes[loop_index],
-        &checkpoint,
-        &positions,
-        true,
-    )
-    .is_ok());
+    assert!(
+        loops::validate_progress(
+            &progress,
+            &plan.nodes[loop_index],
+            &checkpoint,
+            &positions,
+            true,
+        )
+        .is_ok()
+    );
     let replay: GraphCheckpoint =
         serde_json::from_value(serde_json::to_value(&checkpoint).unwrap()).unwrap();
     let progress = replay.nodes[loop_index].clone();
-    assert!(loops::validate_progress(
-        &progress,
-        &plan.nodes[loop_index],
-        &replay,
-        &positions,
-        true,
-    )
-    .is_ok());
+    assert!(
+        loops::validate_progress(
+            &progress,
+            &plan.nodes[loop_index],
+            &replay,
+            &positions,
+            true,
+        )
+        .is_ok()
+    );
 
     loops::settle(
         &document,
@@ -639,8 +673,18 @@ fn loop_admission_counts_every_round_before_any_launch() {
         ..Default::default()
     };
     // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
-    let error = advance_with_budget(&document, &mut owner, &mut journal, &limits, &Default::default()).unwrap_err();
-    assert!(matches!(error, GraphError::Candidate(CandidateError::Structural(_))));
+    let error = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut journal,
+        &limits,
+        &Default::default(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        GraphError::Candidate(CandidateError::Structural(_))
+    ));
     assert!(journal.0.is_none());
     assert!(owner.calls.is_empty());
 }
@@ -1397,16 +1441,48 @@ fn loop_default_host_allows_one_to_two_round_extension() {
 #[test]
 fn loop_extension_refusals_keep_the_rule_and_identifier() {
     let mut document = fixture("extend");
-    document.nodes[0].loop_body.as_mut().unwrap().max_extension_rounds = 1;
+    document.nodes[0]
+        .loop_body
+        .as_mut()
+        .unwrap()
+        .max_extension_rounds = 1;
     let limits = crate::config::GraphLimits::default();
     let mut journal = MemoryJournal::default();
-    advance_with_budget(&document, &mut reviews(&["VERDICT: FAIL"]), &mut journal, &limits, &Default::default()).unwrap();
+    advance_with_budget(
+        &document,
+        &mut reviews(&["VERDICT: FAIL"]),
+        &mut journal,
+        &limits,
+        &Default::default(),
+    )
+    .unwrap();
     let mut checkpoint = journal.0.clone().unwrap();
     checkpoint.extensions.push("loop.revise.rounds=2".into());
-    for (value, rule) in [("loop.revise.rounds=02", refusal::ExtensionRule::NonIncreasing), ("loop.revise.rounds=4", refusal::ExtensionRule::MaxExtensionRounds)] {
+    for (value, rule) in [
+        (
+            "loop.revise.rounds=02",
+            refusal::ExtensionRule::NonIncreasing,
+        ),
+        (
+            "loop.revise.rounds=4",
+            refusal::ExtensionRule::MaxExtensionRounds,
+        ),
+    ] {
         let before = checkpoint.clone();
-        let error = match admit_candidate(&document, Some(&checkpoint), &[value.into()], &limits, &Default::default(), None) { Ok(_) => panic!("expected refusal"), Err(error) => error };
-        let CandidateError::Extension(cause) = error else { panic!("expected extension refusal") };
+        let error = match admit_candidate(
+            &document,
+            Some(&checkpoint),
+            &[value.into()],
+            &limits,
+            &Default::default(),
+            None,
+        ) {
+            Ok(_) => panic!("expected refusal"),
+            Err(error) => error,
+        };
+        let CandidateError::Extension(cause) = error else {
+            panic!("expected extension refusal")
+        };
         assert_eq!(cause.rule, rule);
         assert_eq!(cause.loop_id.as_deref(), Some("revise"));
         assert!(!cause.next_action().is_empty());
@@ -1429,10 +1505,18 @@ fn loop_host_ceiling_rejects_third_round_before_saving_and_can_accept() {
     )
     .unwrap();
     let paused = resume_with_budget(
-        &document, &mut reviews(&[]), &mut journal, &limits,
-        &Default::default(), &["loop.revise.rounds=3".into()],
-    ).unwrap();
-    assert_eq!(paused.checkpoint.pause_cause(), Some(PauseCause::StructuralLimit));
+        &document,
+        &mut reviews(&[]),
+        &mut journal,
+        &limits,
+        &Default::default(),
+        &["loop.revise.rounds=3".into()],
+    )
+    .unwrap();
+    assert_eq!(
+        paused.checkpoint.pause_cause(),
+        Some(PauseCause::StructuralLimit)
+    );
     assert_eq!(journal.0.as_ref(), Some(&paused.checkpoint));
     assert!(paused.checkpoint.extensions.is_empty());
     let accepted = extension(
@@ -1759,10 +1843,7 @@ fn loop_conflict_recovery_is_bounded_and_replays_the_namespaced_target() {
     for round in [1, 2] {
         let conflict = &plan.nodes[positions[&format!("delivery--r{round}--conflict")]];
         let rebase_id = format!("delivery--r{round}--rebase");
-        assert_eq!(
-            conflict.on_fail.as_deref(),
-            Some(rebase_id.as_str())
-        );
+        assert_eq!(conflict.on_fail.as_deref(), Some(rebase_id.as_str()));
     }
 
     let gate_index = positions["delivery--r1--conflict"];
@@ -1800,14 +1881,13 @@ fn loop_conflict_recovery_is_bounded_and_replays_the_namespaced_target() {
     );
 
     let mut cyclic = document;
-    cyclic.nodes[0]
-        .loop_body
-        .as_mut()
-        .unwrap()
-        .body[1]
+    cyclic.nodes[0].loop_body.as_mut().unwrap().body[1]
         .depends_on
         .push("rebase".into());
-    assert!(validate_plan(&cyclic).is_err(), "an in-loop dependency cycle stays rejected");
+    assert!(
+        validate_plan(&cyclic).is_err(),
+        "an in-loop dependency cycle stays rejected"
+    );
 }
 
 fn integrating_repair(delivery: Option<&str>) -> GraphDocument {
@@ -2586,8 +2666,15 @@ fn confirmed_should_fix_on_the_default_path_runs_a_repair_writer() {
     let mut journal = MemoryJournal::default();
     let run = advance(&document, &mut owner, &mut journal).unwrap();
     assert!(run.checkpoint.successful());
-    let nodes: Vec<_> = owner.calls.iter().map(|call| call.0.node_id.as_str()).collect();
-    assert_eq!(nodes, vec!["initial", "repair--r1--fix", "repair--r1--check"]);
+    let nodes: Vec<_> = owner
+        .calls
+        .iter()
+        .map(|call| call.0.node_id.as_str())
+        .collect();
+    assert_eq!(
+        nodes,
+        vec!["initial", "repair--r1--fix", "repair--r1--check"]
+    );
     assert_eq!(
         advance(&document, &mut FakeOwner::default(), &mut journal)
             .unwrap()

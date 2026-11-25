@@ -1787,6 +1787,10 @@ fn reset_skipped_conflict_branch(
     Ok(())
 }
 
+fn preparation_exhausted_message(message: Option<String>) -> String {
+    message.unwrap_or_else(|| "Preparation retries exhausted".into())
+}
+
 fn queue_conflict_recheck(
     node_index: usize,
     condition: &GateCondition,
@@ -2232,11 +2236,18 @@ fn advance_gate<R: AttemptOwner, J: GraphJournal>(
             .as_ref()
             .is_some_and(|evidence| evidence.state == CiState::Conflict)
     {
-        queue_conflict_recheck(node_index, condition, plan, positions, checkpoint, wall_now)
-            .map_err(|_| GraphError::BadCheckpoint {
-                node: node.id.clone(),
-                invariant: "queue CI conflict must re-enter its exact published conflict gate",
-            })?;
+        queue_conflict_recheck(
+            node_index,
+            condition,
+            plan,
+            positions,
+            checkpoint,
+            owner.wall_now(),
+        )
+        .map_err(|_| GraphError::BadCheckpoint {
+            node: node.id.clone(),
+            invariant: "queue CI conflict must re-enter its exact published conflict gate",
+        })?;
         asks::refresh_wake(checkpoint);
         journal.save(&*checkpoint).map_err(GraphError::Journal)?;
         return Ok(GateStep::Reschedule);
@@ -4189,6 +4200,7 @@ fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
                                     node: node.id.clone(),
                                     invariant: "preparation retry exhaustion must retain its graph attempt key",
                                 })?;
+                            let message = preparation_exhausted_message(message);
                             let handoff = checkpoint.nodes[node_index]
                                 .handoff
                                 .as_ref()
