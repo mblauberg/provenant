@@ -73,6 +73,16 @@ pub(super) fn default_max_failed_checks() -> usize {
 }
 
 impl CiObservation {
+    /// Carry a forge quota reset independently of the human-readable summary.
+    pub fn set_quota_reset(&mut self, reset: provenant_core::WallTime) {
+        self.extra
+            .insert("quota_reset_at".into(), serde_json::json!(reset));
+    }
+
+    fn quota_reset(&self) -> Option<provenant_core::WallTime> {
+        serde_json::from_value(self.extra.get("quota_reset_at")?.clone()).ok()
+    }
+
     /// Cap the complete canonical JSON array, including names, URLs and escapes.
     /// Both host probes and checkpoint admission use this same boundary.
     pub fn bound_failed_checks(&mut self, max_bytes: usize, max_checks: usize) {
@@ -275,6 +285,11 @@ pub(super) fn evaluate<O: AttemptOwner>(
     // Inspect raw CI text before applying caps so warnings see the complete
     // source; the checkpoint and repair input retain the original bytes.
     observation = prompt_text::normalise(&observation, prompt_text::Context::CiObservation)?;
+    let quota_reset = observation.quota_reset().filter(|reset| {
+        delivery_queue
+            && observation.state == CiState::Pending
+            && wall_now.is_some_and(|now| *reset > now)
+    });
     observation.bound_failed_checks(max_bytes, max_checks);
     if delivery_queue && observation.state == CiState::Passed && observation.check_names.is_empty()
     {
@@ -380,7 +395,7 @@ pub(super) fn evaluate<O: AttemptOwner>(
             "timeout".into()
         })));
     }
-    if delivery_queue && timed_out && state == CiState::Pending {
+    if delivery_queue && timed_out && state == CiState::Pending && quota_reset.is_none() {
         let Some(evidence) = checkpoint.nodes[index].ci.as_mut() else {
             return Err(format!(
                 "node {}: CI timeout lost its persisted evidence",
@@ -416,6 +431,7 @@ pub(super) fn evaluate<O: AttemptOwner>(
                     "node {id}: CI wake deadline passes the last representable wall time; lower ci_poll_backoff"
                 )
             })?;
+            let wake_at = quota_reset.map_or(wake_at, |reset| wake_at.max(reset));
             let progress = &mut checkpoint.nodes[index];
             progress.state = NodeState::Running;
             if let Some(evidence) = progress.ci.as_mut() {
