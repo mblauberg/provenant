@@ -680,6 +680,13 @@ fn advance_gate<R: AttemptOwner, J: GraphJournal>(
         && plan.queue.is_some()
         && reason.is_some()
         && delivery_review_gate_failed(condition, node, plan, checkpoint, positions);
+    let delivery_ci_supersession =
+        if gate_was_evaluated && plan.queue.is_some() && reason.is_some() && node.on_fail.is_some()
+        {
+            queue_conflict_supersession(condition, node_index, positions, checkpoint)
+        } else {
+            None
+        };
     let escalation_cause = if exact_queue_ci_red {
         Some(provenant_records::graph::EscalationCause::CiRed)
     } else if failed_delivery_review {
@@ -700,7 +707,59 @@ fn advance_gate<R: AttemptOwner, J: GraphJournal>(
     if let Some(conflict) = checkpoint.nodes[node_index].conflict.as_mut() {
         conflict.wake_at = None;
     }
+    if let Some(supersession) = &delivery_ci_supersession {
+        checkpoint
+            .record_delivery_ci_supersession(&supersession.node_id, &supersession.head_sha)
+            .map_err(|_| GraphError::BadCheckpoint {
+                node: node.id.clone(),
+                invariant: "queue conflict recovery must record its exact superseded head",
+            })?;
+    }
     asks::refresh_wake(&mut *checkpoint);
+    let conclusive_gate_lease = if gate_was_evaluated && plan.queue.is_some() {
+        match condition {
+            GateCondition::Ci {
+                target:
+                    target @ CiTarget::Node {
+                        node: published, ..
+                    },
+                ..
+            } => {
+                let expected_head = ci::published_head(target, checkpoint, true);
+                checkpoint.nodes[node_index]
+                    .ci
+                    .as_ref()
+                    .filter(|evidence| {
+                        matches!(evidence.state, CiState::Passed | CiState::Failed)
+                            && evidence.head_sha.as_deref().is_some_and(|head| {
+                                expected_head.as_deref() == Some(head)
+                                    && head.parse::<provenant_core::GitOid>().is_ok()
+                            })
+                    })
+                    .and_then(|_| positions.get(published))
+                    .and_then(|index| checkpoint.nodes.get(*index))
+                    .and_then(delivery_ci_lease)
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let ci_lease_to_release = conclusive_gate_lease.or_else(|| {
+        delivery_ci_supersession.as_ref().and_then(|supersession| {
+            positions
+                .get(&supersession.node_id)
+                .and_then(|index| checkpoint.nodes.get(*index))
+                .and_then(delivery_ci_lease)
+                .filter(|lease| lease.head_sha == supersession.head_sha)
+        })
+    });
+    // Persist exact conclusive or supersession evidence before releasing the
+    // matching durable class reservation.
+    journal.save(&*checkpoint).map_err(GraphError::Journal)?;
+    if let Some(lease) = ci_lease_to_release {
+        owner.release_delivery_ci(&lease).map_err(GraphError::Run)?;
+    }
     if matches!(
         escalation,
         Some(transitions::EscalationTransition::Exhausted { .. })
@@ -813,7 +872,6 @@ fn advance_gate<R: AttemptOwner, J: GraphJournal>(
         )?;
         return Ok(GateStep::Next);
     }
-    journal.save(&*checkpoint).map_err(GraphError::Journal)?;
     Ok(GateStep::Next)
 }
 
@@ -1734,4 +1792,48 @@ pub(super) fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
             checkpoint,
         ))));
     }
+}
+
+fn queue_conflict_supersession(
+    condition: &GateCondition,
+    node_index: usize,
+    positions: &std::collections::BTreeMap<String, usize>,
+    checkpoint: &GraphCheckpoint,
+) -> Option<DeliveryCiSupersession> {
+    let GateCondition::Conflict {
+        target: target @ CiTarget::Node {
+            node: published, ..
+        },
+    } = condition
+    else {
+        return None;
+    };
+    let head_sha = ci::published_head(target, checkpoint, true)?;
+    let evidence = checkpoint.nodes.get(node_index)?.conflict.as_ref()?;
+    if evidence.state != ConflictState::Conflicting
+        || evidence.head_sha.as_deref() != Some(head_sha.as_str())
+        || head_sha.parse::<provenant_core::GitOid>().is_err()
+        || !positions.contains_key(published)
+    {
+        return None;
+    }
+    Some(DeliveryCiSupersession {
+        node_id: published.clone(),
+        head_sha,
+    })
+}
+
+fn delivery_ci_lease(progress: &NodeProgress) -> Option<DeliveryCiLease> {
+    progress
+        .delivery_publication
+        .as_ref()
+        .and_then(|publication| publication.ci_admission.as_ref())
+        .and_then(DeliveryCiAdmission::lease)
+        .cloned()
+        .or_else(|| {
+            progress
+                .delivery_adoption()
+                .and_then(|adoption| adoption.ci_admission)
+                .and_then(|admission| admission.lease().cloned())
+        })
 }

@@ -1467,7 +1467,6 @@ pub(super) fn validate_progress(
     plan: &PlannedGraph,
     checkpoint: &GraphCheckpoint,
     positions: &BTreeMap<String, usize>,
-    plan: &PlannedGraph,
     queue: bool,
 ) -> Result<(), ()> {
     if checkpoint.ask_actor.is_none()
