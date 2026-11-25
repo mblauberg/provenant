@@ -742,7 +742,11 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
             let valid_state = match progress.state {
                 NodeState::Pending | NodeState::Skipped => intent.is_none(),
                 NodeState::Running => intent.is_some() && receipt.is_none(),
-                NodeState::Succeeded => receipt.is_some(),
+                NodeState::Succeeded => {
+                    receipt.is_some()
+                        && (document.queue.is_none()
+                            || intent.is_some_and(|intent| intent.ci_admission.is_some()))
+                }
                 NodeState::Blocked => (intent.is_none() && progress.outputs.is_none()) || parked,
                 NodeState::Failed => false,
             };
