@@ -53,10 +53,15 @@ deletion authority: GC revalidates its own conditions.
 Released read-only attempt scratch becomes collectable after `gc.idle`, with no
 branch, PR, graph or worktree condition. Settled writer scratch (`tmp/`) does too
 once the attempt is terminal with its effects complete and no live holder,
-writer slot or Cargo lock holds the files, and sooner when its branch is merged,
-its PR closed, its graph cancelled or superseded or its worktree removed. Live,
-busy and unreleased attempts are never touched, and collection preserves durable
-results, handoffs, logs and process records. After a merge, cleanup targets only
+writer slot, live settlement owner or Cargo lock holds the files, and sooner when
+its branch is merged, its PR closed, its graph cancelled or superseded or its
+worktree removed. A settlement driver keeps the attempt's private Git objects and
+review source checkout busy until its import and final reconciliation finish;
+GC holds the same lease throughout collection and retains scratch until settlement is
+complete, including between retries or when ownership cannot be determined. Existing
+custody failures remain reported when they prevent collection. Live, busy and
+unreleased attempts are never touched, and collection preserves durable results,
+handoffs, logs and process records. After a merge, cleanup targets only
 the merged branch's worktree and attempt scratch.
 
 Lanes do not build. Cargo targets here belong to the chair's warm check, CI or

@@ -74,6 +74,17 @@ cannot reach them.
   from its scratch, and a foreign record could not be told from settlement's own
   (#3844, #3947).
 
+GC holds the settlement driver lease for the entire collection of attempt payloads, so
+claiming a driver and removing its scratch cannot overlap. For a launched attempt GC
+also requires the settlement journal to record completion, including across idle retries;
+unknown ownership or an unreadable journal keeps the payload. A never-launched attempt
+can be collected once its other custody and effects checks pass. The private Git objects
+and review source checkout therefore remain available through import and reconciliation.
+- Why: scratch is outside the attempt record directory, so GC can reach it while
+  settlement still needs it; losing it turns a correct lane into a failed import or
+  a vanished review checkout (#3975).
+- Owner: `crates/run/src/retention.rs`, `crates/run/src/settlement.rs`
+
 A result or handoff a lane leaves group- or other-readable in Provenant's private attempt
 directory is a recoverable condition, not a settlement refusal. Settlement's read of a
 provider-written settlement input — `result.md`, the `handoff.json` snapshot, and the progress
