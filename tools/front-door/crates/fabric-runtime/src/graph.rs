@@ -910,6 +910,10 @@ struct PlannedNode {
     acceptance_checks: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     loop_body: Option<LoopSpec>,
+    // TODO(#3972-s3): select the persisted rung when admitting a repair.
+    // TODO(#3972-s5): hand final-rung exhaustion to the typed park transition.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    escalate: Option<EscalateSpec>,
     #[serde(skip_serializing_if = "Option::is_none")]
     decide: Option<DecideSpec>,
     #[serde(skip_serializing_if = "Option::is_none")]
