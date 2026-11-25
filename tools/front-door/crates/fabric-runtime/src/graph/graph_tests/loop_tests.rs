@@ -96,6 +96,37 @@ fn queue_loop_can_bind_an_outer_publication_gate() {
 }
 
 #[test]
+fn bounded_recovery_retries_only_named_failed_gates() {
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 2, "graph_id": "general-recovery", "nodes": [
+            {"id":"cycle", "kind":"loop", "access":"read_only", "loop": {
+                "max_rounds":2, "until":"last", "retry_on":["first"], "body":[
+                    {"id":"first", "kind":"gate", "access":"read_only",
+                     "condition":{"type":"ci", "target":"main"}},
+                    {"id":"last", "kind":"gate", "access":"read_only", "depends_on":["first"],
+                     "condition":{"type":"ci", "target":"main"}}
+                ]
+            }}
+        ]
+    }))
+    .unwrap();
+    let expanded = loops::expand(&document, &[], &Default::default()).unwrap();
+    let (plan, positions) = validate_flat_plan(&expanded, &Default::default()).unwrap();
+    let mut checkpoint = initial_checkpoint(&expanded, &plan, "digest".into(), None, None, None);
+    let first = positions["cycle--r1--first"];
+    let last = positions["cycle--r1--last"];
+    let next = &plan.nodes[positions["cycle--r2--first"]];
+
+    checkpoint.nodes[first].state = NodeState::Failed;
+    checkpoint.nodes[last].state = NodeState::Blocked;
+    assert!(!loops::inactive_round(next, &plan, &checkpoint, &positions));
+    checkpoint.nodes[first].state = NodeState::Succeeded;
+    assert!(loops::inactive_round(next, &plan, &checkpoint, &positions));
+    checkpoint.nodes[last].state = NodeState::Succeeded;
+    assert!(loops::inactive_round(next, &plan, &checkpoint, &positions));
+}
+
+#[test]
 fn loop_body_preserves_an_outer_node_source_and_entry_dependency() {
     let document: GraphDocument = serde_json::from_value(serde_json::json!({
         "schema_version": 2,
@@ -113,7 +144,8 @@ fn loop_body_preserves_an_outer_node_source_and_entry_dependency() {
                  "depends_on":["reader"], "condition":{"type":"budget"}}
              ]}}
         ]
-    })).unwrap();
+    }))
+    .unwrap();
 
     let expanded = loops::expand(&document, &[], &Default::default()).unwrap();
     let reader = expanded
@@ -1927,7 +1959,12 @@ fn loop_conflict_recovery_is_bounded_and_replays_the_namespaced_target() {
         ));
         let fresh_conflict = &plan.nodes[positions[&format!("delivery--r{round}--recheck")]];
         assert!(fresh_conflict.on_fail.is_none());
-        assert!(fresh_conflict.round.as_ref().is_some_and(|round| !round.until));
+        assert!(
+            fresh_conflict
+                .round
+                .as_ref()
+                .is_some_and(|round| !round.until)
+        );
         let fresh_ci = &plan.nodes[positions[&format!("delivery--r{round}--fresh_ci")]];
         assert!(fresh_ci.depends_on.contains(&fresh_conflict.id));
     }
@@ -2166,12 +2203,7 @@ fn composite_expansion_namespaces_explicit_loop_initial_bindings() {
         ]
     }))
     .unwrap();
-    let expanded = loops::expand(
-        &document,
-        &[],
-        &crate::config::GraphLimits::default(),
-    )
-    .unwrap();
+    let expanded = loops::expand(&document, &[], &crate::config::GraphLimits::default()).unwrap();
     let loop_node = expanded
         .nodes
         .iter()
