@@ -748,8 +748,8 @@ fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
         LateDirty,
     }
     use Marker::{
-        DeliveredSteer, DeliveredSteerAdopted, DeliveredSteerDescendant,
-        DeliveredSteerUnavailable, ExplicitAfterSteer, ExplicitCancel,
+        DeliveredSteer, DeliveredSteerAdopted, DeliveredSteerDescendant, DeliveredSteerUnavailable,
+        ExplicitAfterSteer, ExplicitCancel,
     };
     for (changed, dirty, blocked, shared, budget, marker) in [
         (false, false, false, false, false, Marker::AdmissionSteer),
@@ -1375,9 +1375,8 @@ fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
                     ..
                 } if terminal_cause == steered.then_some(TerminalCause::Steered)
             ));
-            let (child, warnings) = provenant_records::warning::capture(|| {
-                store.prepare_steer_continuation(id, &call)
-            });
+            let (child, warnings) =
+                provenant_records::warning::capture(|| store.prepare_steer_continuation(id, &call));
             if marker == DeliveredSteerUnavailable {
                 assert!(matches!(&child, Err(RunError::SteerSessionUnavailable)));
                 let child = store
@@ -1426,12 +1425,9 @@ fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
                 // The writer's own post-seal commit is a descendant of the
                 // sealed head. The successor must adopt it, keep the source
                 // pin and warn with both ids; any other head stays refused.
-                let current: provenant_core::GitOid = crate::delivery_tests::worktree_git(
-                    &fixture,
-                    &git,
-                    &["rev-parse", "HEAD"],
-                )?
-                .parse()?;
+                let current: provenant_core::GitOid =
+                    crate::delivery_tests::worktree_git(&fixture, &git, &["rev-parse", "HEAD"])?
+                        .parse()?;
                 if marker == DeliveredSteerDescendant {
                     let sealed = shared_head.ok_or("sealed head")?;
                     assert_ne!(current, sealed);
@@ -1445,11 +1441,9 @@ fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
                         .ok_or("no re-pin warning")?;
                     assert!(warning.message.contains(sealed.to_string().as_str()));
                     assert!(warning.message.contains(current.to_string().as_str()));
-                    let prompt =
-                        String::from_utf8(store.artifact_bytes(
-                            &store.record(child, &call)?.prompt,
-                            RECORD_LIMIT,
-                        )?)?;
+                    let prompt = String::from_utf8(
+                        store.artifact_bytes(&store.record(child, &call)?.prompt, RECORD_LIMIT)?,
+                    )?;
                     assert!(prompt.contains(current.to_string().as_str()), "{prompt}");
                 } else {
                     assert_eq!(task.head, shared_head.map(|head| head.to_string()));
