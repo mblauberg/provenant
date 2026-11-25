@@ -288,8 +288,9 @@ Set `attempt.pr = "draft"` or `"allowed"` on a graph node, or pass
 source and takes precedence over the host setting.
 The provider's `gh` tool enforces the policy before forwarding a command:
 `never` refuses `gh pr create|edit|close` (and the other PR mutations) and
-mutating forge API calls while leaving reads working, including explicit GET or HEAD
-requests with query fields. Fields without an explicit method imply POST and are
+mutating forge API calls while leaving reads working. Repository flags before
+`pr` do not change the policy. Explicit GET or HEAD requests with query fields
+remain reads. Fields without an explicit method imply POST and are
 refused; `draft` adds `--draft`
 to `pr create`, permits edit, close, comment and review, and refuses promotion,
 merge, reopen, lock, unlock, update-branch, revert and forge writes. Unknown PR

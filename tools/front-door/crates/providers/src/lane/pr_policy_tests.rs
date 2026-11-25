@@ -198,6 +198,28 @@ fn the_gh_wrapper_enforces_the_lane_pull_request_policy() -> Result<(), Box<dyn 
         assert_eq!(output.termination, Termination::Exit(0), "{command}");
     }
 
+    // Repository flags before the command cannot bypass either policy.
+    for prefix in [
+        vec!["--repo", "o/r"],
+        vec!["--repo=o/r"],
+        vec!["-R", "o/r"],
+        vec!["-Ro/r"],
+    ] {
+        let mut args = prefix;
+        args.extend(["pr", "create", "--title", "x"]);
+        let refused = run("prefix-never", PrPolicy::Never, "host", &args)?;
+        assert_ne!(refused.termination, Termination::Exit(0), "{args:?}");
+        assert!(refused.stdout.bytes.is_empty(), "{args:?}");
+        let draft = run("prefix-draft", PrPolicy::Draft, "host", &args)?;
+        assert_eq!(draft.termination, Termination::Exit(0), "{args:?}");
+        let mut expected = args
+            .iter()
+            .map(|arg| format!("<{arg}>\n"))
+            .collect::<String>();
+        expected.push_str("<--draft>\n");
+        assert_eq!(draft.stdout.bytes, expected.as_bytes(), "{args:?}");
+    }
+
     // draft: creation gains --draft, promotion and forge writes are refused.
     let draft = run(
         "draft",
