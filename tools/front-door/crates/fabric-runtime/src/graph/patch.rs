@@ -389,6 +389,269 @@ pub fn admit_patch(
     admit_patch_for_retry(graph, parent, patch, context, None)
 }
 
+/// Admit a chair disposition for one complete review result at one exact head.
+/// This uses the graph's ordinary expansion revision and idempotency journal,
+/// while leaving the reviewer's original output untouched.
+pub fn admit_delivery_review_disposition(
+    graph: &mut LiveGraph<'_>,
+    expected_revision: u64,
+    node_id: &str,
+    disposition: &DeliveryReviewDisposition,
+    limits: &crate::config::GraphLimits,
+    budget: &crate::config::GraphBudget,
+    requester_path: Option<&[u8]>,
+) -> Result<Admitted, PatchError> {
+    const DISPOSITION_EXTRA: &str = "delivery_review_disposition";
+    let key = disposition.operation_id.to_string();
+    let digest = CanonicalV1::record_digest(
+        "delivery-review-disposition",
+        1,
+        &(expected_revision, node_id, disposition),
+    )
+    .map_err(|error| PatchError::invalid(format!("disposition is not canonical: {error}")))?
+    .to_string();
+    if let Some(record) = graph
+        .checkpoint
+        .expansions
+        .iter()
+        .filter_map(|expansion| expansion.patch.as_ref())
+        .find(|record| record.key.as_deref() == Some(key.as_str()))
+    {
+        return if record.digest == digest {
+            Ok(Admitted {
+                revision: record.revision,
+                replayed: true,
+                added: Vec::new(),
+            })
+        } else {
+            Err(PatchError::new(
+                "idempotency_conflict",
+                format!("idempotency key {key} was used for a different disposition"),
+            ))
+        };
+    }
+    let current = revision(graph.checkpoint);
+    if expected_revision != current {
+        return Err(PatchError::new(
+            "stale_revision",
+            format!("disposition expects revision {expected_revision}, graph is at {current}"),
+        ));
+    }
+    if graph.document.queue.is_none() {
+        return Err(PatchError::new(
+            "conflict",
+            "review disposition requires a delivery queue graph",
+        ));
+    }
+    if disposition.reason.trim().is_empty()
+        || disposition.reason.len() > REASON_BYTES
+        || disposition.reason.contains('\0')
+    {
+        return Err(PatchError::invalid("review disposition reason is invalid"));
+    }
+    scan_for_secrets(&disposition.reason).map_err(PatchError::invalid)?;
+
+    let expanded = plans::expand(
+        graph.document,
+        &graph.checkpoint.extensions,
+        &graph.checkpoint.expansions,
+        limits,
+    )?;
+    let (plan, _) = validate_flat_plan(&expanded, &plans::generous())
+        .map_err(|error| PatchError::invalid(error.to_string()))?;
+    if !plan
+        .nodes
+        .iter()
+        .any(|node| node.id == node_id && node.delivery_review.is_some())
+    {
+        return Err(PatchError::new(
+            "conflict",
+            format!("{node_id} is not a delivery review node"),
+        ));
+    };
+    let progress_index = graph
+        .checkpoint
+        .nodes
+        .iter()
+        .position(|progress| progress.id == node_id)
+        .ok_or_else(|| PatchError::invalid(format!("unknown review node {node_id}")))?;
+    let progress = &graph.checkpoint.nodes[progress_index];
+    let settlement = progress
+        .review_settlement
+        .as_ref()
+        .ok_or_else(|| PatchError::new("conflict", "review node has no settled review proof"))?;
+    let outputs = progress
+        .outputs
+        .as_ref()
+        .ok_or_else(|| PatchError::new("conflict", "review node has no complete output"))?;
+    if progress.state != NodeState::Succeeded
+        || !settlement.independent
+        || settlement.head != disposition.head
+        || settlement.verdict == provenant_records::workflow::ReviewVerdict::Approve
+        || outputs.partial
+        || outputs.findings_available != Some(true)
+        || outputs.verdict_error.is_some()
+        || outputs
+            .verdict
+            .as_deref()
+            .and_then(provenant_records::workflow::ReviewVerdict::from_token)
+            != Some(settlement.verdict)
+    {
+        return Err(PatchError::new(
+            "conflict",
+            "review disposition requires complete independent findings at the exact non-approving head",
+        ));
+    }
+    let approval_gates: BTreeSet<_> = plan
+        .nodes
+        .iter()
+        .filter(|candidate| {
+            candidate.inputs.iter().any(|input| input.node == node_id)
+                && matches!(
+                    candidate.condition.as_ref(),
+                    Some(GateCondition::Verdict { expected, .. })
+                        if provenant_records::workflow::ReviewVerdict::from_token(expected)
+                            == Some(provenant_records::workflow::ReviewVerdict::Approve)
+                )
+        })
+        .map(|gate| gate.id.as_str())
+        .collect();
+    if approval_gates.is_empty() {
+        return Err(PatchError::new(
+            "conflict",
+            "review node does not feed a delivery approval gate",
+        ));
+    }
+    let reviewed_head = disposition.head.to_string();
+    if !graph.checkpoint.nodes.iter().any(|progress| {
+        progress.delivery_park.as_ref().is_some_and(|park| {
+            park.request_id == Some(disposition.request_id)
+                && park.reason == provenant_records::graph::ParkReason::LadderExhausted
+                && park.head.as_deref() == Some(reviewed_head.as_str())
+                && (progress.id == node_id || approval_gates.contains(progress.id.as_str()))
+        })
+    }) {
+        return Err(PatchError::new(
+            "conflict",
+            "review disposition is not bound to the current review-evidence park",
+        ));
+    }
+
+    let next_revision = current
+        .checked_add(1)
+        .ok_or_else(|| PatchError::invalid("graph revision exhausted"))?;
+    let mut extra = provenant_records::ExtraFields::new();
+    extra.insert(
+        DISPOSITION_EXTRA.to_owned(),
+        serde_json::to_value(disposition)
+            .map_err(|error| PatchError::invalid(error.to_string()))?,
+    );
+    extra.insert("delivery_review_node".into(), Value::String(node_id.to_owned()));
+    let expansion = Expansion {
+        extra,
+        retired: None,
+        retry_generation: None,
+        final_result: false,
+        final_fragment: false,
+        floor_warnings: Vec::new(),
+        source: String::new(),
+        nodes: Vec::new(),
+        uses: Vec::new(),
+        patch: Some(PatchRecord {
+            extra: Default::default(),
+            child_receipt: None,
+            revision: next_revision,
+            digest,
+            key: Some(key),
+            parent: None,
+            reason: Some(disposition.reason.clone()),
+            skipped: Vec::new(),
+            replaced: Vec::new(),
+            journaled: false,
+            restart: None,
+        }),
+    };
+    let mut candidate = graph.checkpoint.clone();
+    candidate.nodes[progress_index]
+        .set_delivery_review_disposition(disposition)
+        .map_err(|error| PatchError::invalid(error.to_string()))?;
+    candidate.expansions.push(expansion.clone());
+    let admitted = admit_candidate(
+        graph.document,
+        Some(&candidate),
+        &[],
+        limits,
+        budget,
+        requester_path,
+    )
+    .map_err(|error| {
+        let mut refusal = PatchError::invalid(error.to_string());
+        refusal.candidate = Some(Box::new(error));
+        refusal
+    })?;
+    let revision = commit(
+        graph.checkpoint,
+        expansion,
+        &admitted.expanded,
+        &admitted.plan,
+        limits,
+    );
+    graph.checkpoint.nodes[progress_index]
+        .set_delivery_review_disposition(disposition)
+        .map_err(|error| PatchError::invalid(error.to_string()))?;
+    Ok(Admitted {
+        revision,
+        replayed: false,
+        added: Vec::new(),
+    })
+}
+
+/// Queue review gates that must be reset after admitting a disposition so the
+/// scheduler rechecks the review result and every downstream landing gate.
+pub fn failed_delivery_review_gates(
+    document: &GraphDocument,
+    checkpoint: &GraphCheckpoint,
+    review_node: &str,
+    limits: &crate::config::GraphLimits,
+) -> Result<Vec<String>, PatchError> {
+    if document.queue.is_none() {
+        return Err(PatchError::new(
+            "conflict",
+            "review gate recovery requires a delivery queue graph",
+        ));
+    }
+    let expanded = plans::expand(
+        document,
+        &checkpoint.extensions,
+        &checkpoint.expansions,
+        limits,
+    )?;
+    let (plan, _) = validate_flat_plan(&expanded, &plans::generous())
+        .map_err(|error| PatchError::invalid(error.to_string()))?;
+    let mut gates = Vec::new();
+    for gate in &plan.nodes {
+        let approves_review = gate.inputs.iter().any(|input| input.node == review_node)
+            && matches!(
+                gate.condition.as_ref(),
+                Some(GateCondition::Verdict { expected, .. })
+                    if provenant_records::workflow::ReviewVerdict::from_token(expected)
+                        == Some(provenant_records::workflow::ReviewVerdict::Approve)
+            );
+        if approves_review
+            && checkpoint
+                .nodes
+                .iter()
+                .find(|progress| progress.id == gate.id)
+                .is_some_and(|progress| {
+                    matches!(progress.state, NodeState::Failed | NodeState::Blocked)
+                })
+        {
+            gates.push(gate.id.clone());
+        }
+    }
+    Ok(gates)
+}
+
 fn admit_patch_for_retry(
     graph: &mut LiveGraph<'_>,
     parent: Option<&str>,
@@ -578,7 +841,52 @@ pub fn retry_node_and_dependants(
     brief: Option<&str>,
     context: &PatchContext<'_>,
 ) -> Result<Admitted, PatchError> {
-    retry_node_scope(graph, id, brief, context, true, None, None)
+    retry_node_scope(graph, id, brief, context, true, None, None, None)
+}
+
+/// Redo a queue control's exact target, keyed by its durable operation ID.
+/// The queue ledger validates the input digest before this replay boundary.
+pub fn retry_node_and_dependants_with_key(
+    graph: &mut LiveGraph<'_>,
+    id: &str,
+    brief: Option<&str>,
+    context: &PatchContext<'_>,
+    operation_id: &str,
+    operation_digest: &str,
+) -> Result<Admitted, PatchError> {
+    let reason = format!(
+        "queue control {operation_id} retry node {id} intent {operation_digest}"
+    );
+    if let Some(record) = graph
+        .checkpoint
+        .expansions
+        .iter()
+        .filter_map(|expansion| expansion.patch.as_ref())
+        .find(|record| record.key.as_deref() == Some(operation_id))
+    {
+        return if record.reason.as_deref() == Some(reason.as_str()) {
+            Ok(Admitted {
+                revision: record.revision,
+                replayed: true,
+                added: Vec::new(),
+            })
+        } else {
+            Err(PatchError::new(
+                "idempotency_conflict",
+                format!("idempotency key {operation_id} was used for a different retry"),
+            ))
+        };
+    }
+    retry_node_scope(
+        graph,
+        id,
+        brief,
+        context,
+        true,
+        Some((&reason, None)),
+        None,
+        Some(operation_id),
+    )
 }
 
 /// Redo a settled node or container, retaining prior attempts and journalling the reset.
@@ -589,7 +897,7 @@ pub fn retry_node(
     brief: Option<&str>,
     context: &PatchContext<'_>,
 ) -> Result<Admitted, PatchError> {
-    retry_node_scope(graph, id, brief, context, false, None, None)
+    retry_node_scope(graph, id, brief, context, false, None, None, None)
 }
 
 /// A host restart after a stop uses the same checked, journalled reset as an
@@ -616,6 +924,7 @@ pub(super) fn restart_stopped(
         false,
         Some((&reason, Some(restart))),
         Some(routes),
+        None,
     )
 }
 
@@ -627,6 +936,7 @@ fn retry_node_scope(
     dependants: bool,
     reason: Option<(&str, Option<Restart>)>,
     replacement_routes: Option<&[GraphRoute]>,
+    idempotency_key: Option<&str>,
 ) -> Result<Admitted, PatchError> {
     let normalised_brief = brief
         .map(prompt_text::normalise_prompt_text)
@@ -898,6 +1208,7 @@ fn retry_node_scope(
     let patch = Patch {
         schema_version: PATCH_SCHEMA_VERSION,
         expected_revision: Some(revision(graph.checkpoint)),
+        idempotency_key: idempotency_key.map(str::to_owned),
         reason: Some(
             reason
                 .as_ref()
@@ -1989,6 +2300,7 @@ pub(super) fn correct_review_verdict(
         context,
         false,
         Some((&format!("correct review verdict {id}"), None)),
+        None,
         None,
     )
 }

@@ -1531,6 +1531,70 @@ fn retry_node_and_dependants_resets_consumers_and_preserves_unrelated_work() {
 }
 
 #[test]
+fn keyed_retry_replays_exact_target_after_checkpoint_restart() {
+    let (document, checkpoint, _) = settled();
+    let library = template::TemplateLibrary::bundled();
+    let resolvers = Default::default();
+    let limits = plans::generous();
+    let context = patch::PatchContext {
+        catalogue: None,
+        library: &library,
+        resolvers: &resolvers,
+        journal: None,
+        limits: &limits,
+        worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
+    };
+    let operation_id = provenant_core::OperationId::parse(&"ab".repeat(16)).unwrap();
+    let mut retried = checkpoint;
+    let admitted = patch::retry_node_and_dependants_with_key(
+        &mut patch::LiveGraph {
+            document: &document,
+            checkpoint: &mut retried,
+        },
+        "work",
+        Some("repaired brief"),
+        &context,
+        &operation_id.to_string(),
+        "control-digest",
+    )
+    .unwrap();
+    assert!(!admitted.replayed);
+    let persisted = serde_json::to_value(&retried).unwrap();
+    let mut restored: GraphCheckpoint = serde_json::from_value(persisted).unwrap();
+    let before_replay = restored.clone();
+    let replay = patch::retry_node_and_dependants_with_key(
+        &mut patch::LiveGraph {
+            document: &document,
+            checkpoint: &mut restored,
+        },
+        "work",
+        Some("repaired brief"),
+        &context,
+        &operation_id.to_string(),
+        "control-digest",
+    )
+    .unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.revision, admitted.revision);
+    assert_eq!(restored, before_replay);
+
+    let conflict = patch::retry_node_and_dependants_with_key(
+        &mut patch::LiveGraph {
+            document: &document,
+            checkpoint: &mut restored,
+        },
+        "different-node",
+        None,
+        &context,
+        &operation_id.to_string(),
+        "control-digest",
+    )
+    .unwrap_err();
+    assert_eq!(conflict.code, "idempotency_conflict");
+    assert_eq!(restored, before_replay);
+}
+
+#[test]
 fn planner_patched_loop_body_redo_recovers_after_checkpoint_crash() {
     let document: GraphDocument = serde_json::from_value(json!({
         "schema_version":1,"graph_id":"redo-dynamic-loop-crash","nodes":[
