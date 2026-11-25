@@ -485,6 +485,7 @@ impl RunStore {
                         continuing,
                         _publication,
                         _writer,
+                        _settlement,
                     }) = self.hold_attempt(&record, call)?
                     else {
                         return Ok(());
@@ -883,15 +884,18 @@ pub fn gc_import_pins(
     Ok(eligible.len())
 }
 
-/// Every custody check that protects an attempt's payload: the publication
-/// and writer locks, a live or unknown settlement owner, writer reservations,
-/// abandonment and refused Git imports. `None` means the attempt is pinned,
-/// busy or its directory is gone.
+#[cfg(test)]
+thread_local! {
+    static BEFORE_SETTLEMENT_LEASE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Custody of an attempt's payload throughout retention operations.
 struct Held {
     attempt: Directory,
     continuing: bool,
     _publication: LockGuard,
     _writer: Option<LockGuard>,
+    _settlement: LockGuard,
 }
 
 impl RunStore {
@@ -908,16 +912,22 @@ impl RunStore {
             Err(error) if missing_directory(&error) => return Ok(None),
             Err(error) => return Err(error),
         };
-        // A settlement driver still owns this attempt's import and final
-        // reconciliation. Its private objects and review checkout live in
-        // scratch, so GC must treat the attempt as busy until ownership is
-        // known to be absent. Check before taking
-        // publication.lock: the driver does not hold that lock while importing.
-        if crate::settlement::settlement_owner_live(&run, Self::scope(record), call.clock)
-            != Some(false)
-        {
+        // Keep the driver's lifetime lease until every payload operation ends.
+        // A free lease alone is insufficient: settlement can be between retries.
+        #[cfg(test)]
+        BEFORE_SETTLEMENT_LEASE.with(|hook| {
+            if let Some(hook) = hook.borrow_mut().take() {
+                hook();
+            }
+        });
+        let Some(_settlement) = crate::settlement::collection_lease(
+            &run,
+            Self::scope(record),
+            call.clock,
+            record.provider_launched != Some(false),
+        ) else {
             return Ok(None);
-        }
+        };
         let _publication =
             run.try_lock_existing(OsStr::new("publication.lock"), LockMode::Exclusive)?;
         if record.provider_launched == Some(true)
@@ -997,6 +1007,7 @@ impl RunStore {
             continuing,
             _publication,
             _writer,
+            _settlement,
         }))
     }
 }
@@ -3965,24 +3976,66 @@ mod tests {
         let collection_time = WallTime::from_micros(200 + 31 * DAY_MICROS)?;
         let dir = Directory::open_anchor(&attempt)?;
         let record = store.record(input.attempt_id, &call)?;
-        // The driver owns import and final reconciliation for its whole life.
-        let driver = crate::settlement::Guard::claim(&dir, RunStore::scope(&record), &clock)?
-            .ok_or("settlement claim")?;
-        let busy = store.gc_temporary(
-            &root,
-            &policy,
-            collection_time,
-            false,
-            &call,
-            &RetentionScan::default(),
-        )?;
-        assert!(
-            busy.attempt_tmp.is_empty(),
-            "GC collected scratch under a live settlement driver: {busy:?}"
-        );
-        // The import reads the same private objects after the GC pass.
-        assert_eq!(fs::read(objects.join("private"))?, private);
-        drop(driver);
+        // GC's custody excludes a new claimant until collection has ended.
+        let held = store.hold_attempt(&record, &call)?.ok_or("GC custody")?;
+        assert!(crate::settlement::Guard::claim(&dir, RunStore::scope(&record), &clock)?.is_none());
+        drop(held);
+
+        // Pause the pass after observing a free lease. A driver claims before
+        // GC continues; collection must re-establish custody, not trust the probe.
+        std::thread::scope(|threads| -> TestResult {
+            let (probed_tx, probed_rx) = std::sync::mpsc::channel();
+            let (claimed_tx, claimed_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let path = attempt.clone();
+            let scope = RunStore::scope(&record);
+            let worker = threads.spawn(move || {
+                let dir = Directory::open_anchor(&path).expect("attempt directory");
+                let clock = crate::tests::clock();
+                probed_rx.recv().expect("free lease probe");
+                let driver = crate::settlement::Guard::claim(&dir, scope, &clock)
+                    .expect("claim result")
+                    .expect("settlement claim");
+                claimed_tx.send(()).expect("signal claim");
+                release_rx.recv().expect("release driver");
+                drop(driver);
+            });
+            struct ClearHook;
+            impl Drop for ClearHook {
+                fn drop(&mut self) {
+                    BEFORE_SETTLEMENT_LEASE.with(|hook| {
+                        hook.borrow_mut().take();
+                    });
+                }
+            }
+            let clear_hook = ClearHook;
+            let path = attempt.clone();
+            BEFORE_SETTLEMENT_LEASE.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    let dir = Directory::open_anchor(&path).expect("attempt directory");
+                    let clock = crate::tests::clock();
+                    let free = crate::settlement::collection_lease(&dir, scope, &clock, false)
+                        .expect("free settlement lease");
+                    drop(free);
+                    probed_tx.send(()).expect("signal free lease");
+                    claimed_rx.recv().expect("driver claim");
+                }));
+            });
+            let busy = store.gc_temporary(
+                &root,
+                &policy,
+                collection_time,
+                false,
+                &call,
+                &RetentionScan::default(),
+            )?;
+            assert!(busy.attempt_tmp.is_empty(), "{busy:?}");
+            assert_eq!(fs::read(objects.join("private"))?, private);
+            drop(clear_hook);
+            release_tx.send(())?;
+            worker.join().map_err(|_| "settlement worker panicked")?;
+            Ok(())
+        })?;
 
         let after = store.gc_temporary(
             &root,

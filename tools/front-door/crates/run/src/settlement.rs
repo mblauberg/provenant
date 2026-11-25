@@ -4,7 +4,7 @@ use crate::{
 };
 use provenant_core::retry::Backoff;
 use provenant_core::{ActorId, CancelToken, Clock, DurationMicros, GitOid};
-use provenant_os::fs::{Directory, FsError, LockMode, PublishMode};
+use provenant_os::fs::{Directory, FsError, LockGuard, LockMode, PublishMode};
 use provenant_records::custody::Scope;
 use provenant_supervisor::census::{ProcessIdentity, ProcessObservation, SystemProcessObserver};
 use serde::{Deserialize, Serialize};
@@ -557,18 +557,26 @@ impl std::fmt::Display for Refusal {
     }
 }
 
-/// Refusal observations use the same locks and deadline as a claim, without
-/// changing its retry budget. A free lifetime lease proves a same-process owner
-/// has abandoned its driver, even if Drop could not clear the journal.
-/// Whether a settlement owner may still be driving this attempt (driver lock
-/// held, or a live recorded owner in another process); None when unreadable.
-pub(crate) fn settlement_owner_live(
+/// Hold the driver lease across collection, and require durable completion for
+/// launched attempts so an idle retry cannot lose its input before it claims.
+/// Unreadable ownership or a contended lease conservatively retains the payload.
+pub(crate) fn collection_lease(
     attempt: &Directory,
     scope: Scope,
     clock: &dyn Clock,
-) -> Option<bool> {
+    require_complete: bool,
+) -> Option<LockGuard> {
+    let lease = try_progress_lock(attempt, "settlement-driver.lock").ok()?;
     let journal = read(attempt, scope).ok()?;
-    owner_active(attempt, &journal, now_ms(clock).ok()?).ok()
+    let now = now_ms(clock).ok()?;
+    if (require_complete && journal.phase != Phase::Complete)
+        || journal.owner.as_ref().is_some_and(|owner| {
+            owner.pid != i64::from(std::process::id()) && alive(owner, journal.owner_since_ms, now)
+        })
+    {
+        return None;
+    }
+    Some(lease)
 }
 
 fn owner_active(attempt: &Directory, journal: &Journal, now: u64) -> Result<bool> {
@@ -3017,20 +3025,21 @@ mod tests {
     }
 
     #[test]
-    fn a_settlement_owner_is_live_while_it_holds_the_driver_lock() -> TestResult {
+    fn collection_lease_requires_free_known_ownership() -> TestResult {
         let clock = clock();
         let temp = tempfile::tempdir()?;
         let attempt = Directory::open_anchor(temp.path())?;
-        assert_eq!(
-            settlement_owner_live(&attempt, scope(), &clock),
-            Some(false)
-        );
-        let driver = attempt.try_lock(OsStr::new("settlement-driver.lock"), LockMode::Exclusive)?;
-        assert_eq!(settlement_owner_live(&attempt, scope(), &clock), Some(true));
+        assert!(collection_lease(&attempt, scope(), &clock, true).is_none());
+        let lease = collection_lease(&attempt, scope(), &clock, false).ok_or("free lease")?;
+        assert!(Guard::claim(&attempt, scope(), &clock)?.is_none());
+        drop(lease);
+        let driver = Guard::claim(&attempt, scope(), &clock)?.ok_or("driver")?;
+        assert!(collection_lease(&attempt, scope(), &clock, false).is_none());
         drop(driver);
-        // An unreadable journal is unknown, never "no owner".
+        complete(&attempt, scope())?;
+        assert!(collection_lease(&attempt, scope(), &clock, true).is_some());
         std::fs::write(temp.path().join(FILE), b"not a journal")?;
-        assert_eq!(settlement_owner_live(&attempt, scope(), &clock), None);
+        assert!(collection_lease(&attempt, scope(), &clock, false).is_none());
         Ok(())
     }
 

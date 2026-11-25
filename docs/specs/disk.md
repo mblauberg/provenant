@@ -57,8 +57,8 @@ writer slot, live settlement owner or Cargo lock holds the files, and sooner whe
 its branch is merged, its PR closed, its graph cancelled or superseded or its
 worktree removed. A settlement driver keeps the attempt's private Git objects and
 review source checkout busy until its import and final reconciliation finish;
-GC leaves that scratch in place while the driver holds its lease or settlement
-ownership cannot be determined. Live, busy and unreleased attempts are never
+GC holds the same lease throughout collection and retains scratch until settlement is
+complete, including between retries or when ownership cannot be determined. Live, busy and unreleased attempts are never
 touched, and collection preserves durable
 results, handoffs, logs and process records. After a merge, cleanup targets only
 the merged branch's worktree and attempt scratch.

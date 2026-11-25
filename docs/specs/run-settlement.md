@@ -74,11 +74,12 @@ cannot reach them.
   from its scratch, and a foreign record could not be told from settlement's own
   (#3844, #3947).
 
-While a settlement driver holds its lease, GC treats the attempt as busy: it leaves the
-sibling scratch root alone until import and final reconciliation have finished, so a
-writer's private Git objects and a reviewer's source checkout cannot be collected
-under a live driver. GC also treats ownership as busy when the settlement journal
-or owner probe is unreadable; it can collect only once ownership is known to be free.
+GC holds the settlement driver lease for the entire collection of attempt payloads, so
+claiming a driver and removing its scratch cannot overlap. For a launched attempt GC
+also requires the settlement journal to record completion, including across idle retries;
+unknown ownership or an unreadable journal keeps the payload. A never-launched attempt
+can be collected once its other custody and effects checks pass. The private Git objects
+and review source checkout therefore remain available through import and reconciliation.
 - Why: scratch is outside the attempt record directory, so GC can reach it while
   settlement still needs it; losing it turns a correct lane into a failed import or
   a vanished review checkout (#3975).

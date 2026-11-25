@@ -8292,7 +8292,11 @@ mod writer_recovery_tests {
                 &provenant_records::policy::Policy::default(),
             )?;
             let candidate = store.temporary_path(id, &call)?.join("candidate-0");
-            std::fs::create_dir_all(&candidate)?;
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&candidate)?;
             // Fixture commands must bypass the active lane's private Git binding.
             let git =
                 provenant_os::git::resolve_git_executable(None).ok_or("native Git unavailable")?;
@@ -9090,20 +9094,32 @@ mod writer_recovery_tests {
             } else if mode == "gc_during_import" {
                 // A concurrent GC pass while the settlement driver owns the
                 // retry must not take the private objects the import reads.
-                let driver = crate::settlement::Guard::claim(&attempt, scope, &clock)?
-                    .ok_or("settlement driver claim")?;
                 let root = Directory::open_anchor(execution.state_root.as_path())?;
                 let finished = |_: &AttemptRecord, _: &CanonicalRequest| ScratchOwner::Finished;
                 let policy = ScratchPolicy {
                     owner: Some(&finished),
                     ..ScratchPolicy::new(0)
                 };
+                let collection_time = clock
+                    .wall_now()?
+                    .checked_add(provenant_core::DurationMicros::from_seconds(90 * 86_400)?)?;
+                // A free lease between settlement attempts is not completion.
+                let idle = store.gc_temporary(
+                    &root,
+                    &policy,
+                    collection_time,
+                    false,
+                    &call,
+                    &RetentionScan::default(),
+                )?;
+                assert!(idle.attempt_tmp.is_empty(), "{idle:?}");
+                assert!(candidate.join("git-objects").is_dir());
+                let driver = crate::settlement::Guard::claim(&attempt, scope, &clock)?
+                    .ok_or("settlement driver claim")?;
                 let gc = store.gc_temporary(
                     &root,
                     &policy,
-                    clock
-                        .wall_now()?
-                        .checked_add(provenant_core::DurationMicros::from_seconds(90 * 86_400)?)?,
+                    collection_time,
                     false,
                     &call,
                     &RetentionScan::default(),
@@ -9130,6 +9146,15 @@ mod writer_recovery_tests {
                     )?
                     .require_durable()?;
                 store.finish(id, &attempt, &observed, &providers, &call)?;
+                let (head, _, _) = retained_commit.as_ref().ok_or("private commit")?;
+                assert_eq!(
+                    crate::objects::resolve_ref(
+                        &git,
+                        launch.worktree.repo(),
+                        launch.branch.as_str()
+                    )?,
+                    *head
+                );
             } else {
                 store.finish(id, &attempt, &observed, &providers, &call)?;
             }
