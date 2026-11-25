@@ -1343,7 +1343,7 @@ mod tests {
         let configured = provenant_config::load_with_domains(
             &roots,
             Some(
-                b"schema_version = 1\n[domains.fabric.queue]\nmax_parallel = 7\nci_slots = 0\nprep_retries = 3\n"[..],
+                &b"schema_version = 1\n[domains.fabric.queue]\nmax_parallel = 7\nci_slots = 0\nprep_retries = 3\n"[..],
             ),
             &sections,
         )

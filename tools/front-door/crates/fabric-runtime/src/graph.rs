@@ -4210,7 +4210,8 @@ fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
                                 .outputs
                                 .as_ref()
                                 .and_then(|outputs| outputs.commit.as_deref())
-                                .or(checkpoint.nodes[node_index].source_commit.as_deref());
+                                .or(checkpoint.nodes[node_index].source_commit.as_deref())
+                                .map(str::to_owned);
                             park_delivery_transition(
                                 document,
                                 node_index,
@@ -4218,7 +4219,7 @@ fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
                                 Some(&attempt.key),
                                 attempt.attempt_ref.as_deref(),
                                 &handoff,
-                                head,
+                                head.as_deref(),
                                 &[message],
                                 owner,
                                 journal,
