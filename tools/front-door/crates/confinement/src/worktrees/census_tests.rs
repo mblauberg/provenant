@@ -1156,6 +1156,101 @@ fn a_vanished_descriptor_query_is_absent_but_live_eprem_stays_unknown() -> Resul
     Ok(())
 }
 
+// Spec: docs/specs/supervisor.md#unreadable-processes-need-positive-non-occupancy-evidence
+#[cfg(target_os = "linux")]
+#[test]
+fn vanished_linux_proc_entry_needs_an_absent_identity_recheck() -> Result<(), Box<dyn Error>> {
+    use provenant_os::pid::{OccupancyGap, SystemCwdObserver};
+    use provenant_supervisor::census::{Census, CensusError, ProcessIdentity};
+
+    const GONE_PID: i64 = i32::MAX as i64;
+    struct Processes {
+        census: Census,
+        recheck: ProcessObservation,
+    }
+    impl ProcessObserver for Processes {
+        fn boot_identity(&self) -> Result<String, CensusError> {
+            Ok("boot".into())
+        }
+        fn observe(&self, pid: i64) -> ProcessObservation {
+            if pid == GONE_PID {
+                self.recheck.clone()
+            } else {
+                match self.census.process(pid) {
+                    ProcessLookup::Present(fact) => ProcessObservation::Present(fact.clone()),
+                    _ => ProcessObservation::Absent,
+                }
+            }
+        }
+        fn census(&self, _: usize) -> Result<Census, CensusError> {
+            Ok(self.census.clone())
+        }
+    }
+    struct NativeOccupancy(PathBuf);
+    impl CwdObserver for NativeOccupancy {
+        fn cwd(&self, _: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
+            Ok(CwdObservation::Path(self.0.clone()))
+        }
+        fn occupancy(&self, pid: i64) -> provenant_os::pid::OccupancyObservation {
+            SystemCwdObserver.occupancy(pid)
+        }
+    }
+
+    let temp = tempfile::tempdir()?;
+    let worktree = temp.path().join("worktree");
+    provenant_os::fixture::private_state_dir(&worktree)?;
+    let root = canonicalize(&worktree)?;
+    let cwd = NativeOccupancy(canonicalize(temp.path())?);
+    let fact = |pid: i64| ProcessFact {
+        identity: ProcessIdentity {
+            boot: "boot".into(),
+            pid,
+            native_start: pid as u64,
+            group_id: pid,
+            session_id: pid,
+        },
+        parent_pid: 1,
+        zombie: false,
+        cpu_micros: None,
+        command: None,
+    };
+    let current = fact(100);
+    let census = Census::from_observations(
+        [current.clone()],
+        [(GONE_PID, ObservationIssue::PermissionDenied)],
+        [],
+        true,
+        false,
+        32,
+    )?;
+    // This PID is beyond Linux's supported pid_max: both the executable and
+    // descriptor queries fail, and the missing /proc entry confirms exit.
+    assert_eq!(cwd.occupancy(GONE_PID).gap, Some(OccupancyGap::Vanished));
+    for (recheck, available) in [
+        (ProcessObservation::Absent, true),
+        (ProcessObservation::Present(fact(GONE_PID)), false),
+    ] {
+        let processes = Processes {
+            census: census.clone(),
+            recheck,
+        };
+        let state = &observe_worker_roots(
+            std::slice::from_ref(&root),
+            &processes,
+            &cwd,
+            &current,
+            false,
+        )
+        .0[&root];
+        if available {
+            assert!(state.is_available());
+        } else {
+            assert!(state.is_unknown());
+        }
+    }
+    Ok(())
+}
+
 /// The native census over injected process and directory observations,
 /// with landing's demand for a complete census.
 struct InjectedCensus {

@@ -421,7 +421,9 @@ fn occupancy_snapshot_while(pid: i32, keep_going: &dyn Fn() -> bool) -> Occupanc
             }
         }
         Err(gap) => {
-            if !exe_known {
+            // A missing /proc entry explains the failed executable lookup;
+            // it is not a conflicting observation of a live process.
+            if !exe_known && gap != OccupancyGap::Vanished {
                 snapshot.note(OccupancyGap::ExecutableUnavailable);
             }
             snapshot.note(gap);
