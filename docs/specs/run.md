@@ -278,6 +278,13 @@ stop left committed work: `writer_declared_stop` when the head moved past its so
 a new route in a fresh session on the retained worktree. A junior route escalates to senior;
 otherwise a declared route not yet launched is used, and an alias route may resolve again.
 
+A lane's graph outcome is classified from evidence, not from the stop path that reported it:
+commits ahead of the node's input head count whether or not they were pushed, and a sealed `done`
+handoff closes the brief. Neither a terminal cause nor a partial signal may call a lane with new
+commits `stopped_no_work`; with a done handoff and a moved head the node succeeds even when a stop
+was recorded. The same observed refs decide the advance code: `writer_declared_stop` when a stop
+left new commits, `stopped_no_work` only when it left none.
+
 With no different route, a stop that can continue on its own route (`stopped_early`,
 `lane_token_lost`, `context_handoff`) takes the same route with a fresh session on the
 retained worktree and branch, briefed with the previous handoff. That fallback is bounded by
