@@ -194,6 +194,10 @@ fn terminal_read_only_review_reservation_is_not_a_custody_fence() -> TestResult 
         finished_at: record.queued_at,
         reason: Some("handoff malformed".into()),
     };
+    // Admitted attempts have generation >= 1: custody acquisition refuses a
+    // generation-0 reservation. Match production layout so the fixture leaves
+    // a real read-only reservation behind (#3844).
+    record.generation = 1;
     let attempt = store.attempt_dir(record.attempt_id, false)?;
     let scope = RunStore::scope(&record);
     let lease = provenant_supervisor::custody::acquire_reader(
