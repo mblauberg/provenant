@@ -1215,7 +1215,7 @@ fn queue_conflict_recheck_matches_a_bounded_round_and_reactivates_composite_reba
                     {"id":"fix","access":"worktree_write","worktree":"lane","prompt":"rebase",
                      "source":{"type":"head","node":"publish"},
                      "route":{"adapter":"fixture","model":"fixture/model"}}
-                 ],"exports":[{"node":"fix","outputs":["result"]}]}},
+                 ],"exports":[{"node":"fix","outputs":["result","branch","commit"]}]}},
                 {"id":"rebase_hygiene","kind":"hygiene","access":"worktree_write","worktree":"lane",
                  "depends_on":["rebase"],"source":{"type":"node","node":"rebase"}},
                 {"id":"rebase_publish","kind":"publish","access":"worktree_write","worktree":"lane",

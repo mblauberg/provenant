@@ -79,7 +79,7 @@ pub(super) fn launch_retry_due(
     Ok(clock.wall_now()? >= wake_at)
 }
 
-pub(super) fn graph_wait_needs_refresh(
+pub(in crate::fabric) fn graph_wait_needs_refresh(
     wake: crate::status_wait::ObservationWake,
     launch_retry_due: bool,
 ) -> bool {
@@ -117,7 +117,7 @@ fn interval_micros(interval: std::time::Duration) -> u64 {
     u64::try_from(interval.as_micros()).unwrap_or(u64::MAX)
 }
 
-pub(super) fn next_remote_deadline(
+pub(in crate::fabric) fn next_remote_deadline(
     previous: Option<u64>,
     remote_pending: bool,
     remote_due: bool,
@@ -263,7 +263,7 @@ fn wait_graph_updates<C: provenant_core::Clock + ?Sized>(
 
 /// Observe a submitted graph within the caller's original wait budget.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn wait_submission<C: provenant_core::Clock + ?Sized>(
+pub(in crate::fabric) fn wait_submission<C: provenant_core::Clock + ?Sized>(
     run: provenant_fabric_runtime::graph::GraphRun,
     wait: WaitBudget,
     clock: &C,

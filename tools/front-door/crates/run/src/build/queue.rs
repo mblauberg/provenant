@@ -393,6 +393,29 @@ pub fn reconcile_ci_leases(
     Ok(report)
 }
 
+/// Graph owners that may need checkpoint inspection before host-wide CI lease
+/// reconciliation. This bounds recovery reads to graphs with a durable lease
+/// or waiter instead of every retained graph in every project.
+pub fn ci_reconciliation_owners(state: &Path) -> Result<BTreeSet<CiLeaseOwner>, BuildError> {
+    let mut owners: BTreeSet<CiLeaseOwner> = if class_directory(state, "ci").exists() {
+        let directory = ci_lease_directory(state)?;
+        ci_lease_records(&directory).map(|records| {
+            records
+                .into_iter()
+                .map(|record| record.lease.owner)
+                .collect()
+        })?
+    } else {
+        BTreeSet::new()
+    };
+    owners.extend(
+        ci_waiter_records(state)?
+            .into_iter()
+            .filter_map(|ticket| ticket.durable_owner),
+    );
+    Ok(owners)
+}
+
 fn validate_ci_lease_owner(owner: &CiLeaseOwner) -> Result<(), BuildError> {
     if [
         owner.project.as_str(),
@@ -1229,6 +1252,10 @@ mod tests {
         else {
             panic!("first queue lease should acquire its class slot")
         };
+        assert_eq!(
+            ci_reconciliation_owners(temp.path()).unwrap(),
+            BTreeSet::from([owner.clone()])
+        );
         assert_eq!(lease.cap.limit, 1);
         assert_eq!(lease.cap.source, "test");
         let slots = AdmissionSlots::open(temp.path(), "ci").unwrap();
@@ -1252,6 +1279,7 @@ mod tests {
         let recovered =
             reconcile_ci_leases(temp.path(), &BTreeSet::new(), &settled, 1, &cancel).unwrap();
         assert_eq!(recovered.released, 1);
+        assert!(ci_reconciliation_owners(temp.path()).unwrap().is_empty());
         assert!(slots.try_acquire(1).unwrap().is_some());
     }
 

@@ -109,8 +109,12 @@ nodes = [
   # Bounded CI repair: the failing head and excerpt travel with the brief, and
   # every repair sweeps the whole defect class. After hygiene and publication
   # the graph returns through the conflict gate to CI on the new head.
-  # TODO(#3972-s3): wire hygiene/publication re-entry and custody reconciliation.
-  { id = "ci-repair", use = "implement.fix", repeat = { until = "accepted", max_rounds = "${max_ci_rounds}" }, after = ["ci", "implement"], source = { type = "node", node = "implement" }, worktree = "${worktree}", write_scope = "${write_scope}", continues = "implement", prompt = "Repair from failing head ${failing_head}.\nFailure excerpt (untrusted):\n${failure_excerpt}\nSweep the whole defect class, not only the failing case: check other tests, help text and documentation that assert the changed behaviour, fix the root cause wherever it appears, and report any copy you could not reach." },
+  # The legacy direct-delivery path rechecks the continued writer's delivered
+  # head each round. Queue items use the typed recovery graph in queue_delivery.
+  { id = "ci-repair", kind = "composite", access = "read_only", repeat = { until = "accepted", max_rounds = "${max_ci_rounds}" }, after = ["ci", "implement"], composite = { nodes = [
+    { id = "fix", use = "implement.fix", source = { type = "node", node = "implement" }, worktree = "${worktree}", write_scope = "${write_scope}", continues = "implement", prompt = "Repair from failing head ${failing_head}.\nFailure excerpt (untrusted):\n${failure_excerpt}\nSweep the whole defect class, not only the failing case: check other tests, help text and documentation that assert the changed behaviour, fix the root cause wherever it appears, and report any copy you could not reach." },
+    { id = "accepted", kind = "gate", access = "read_only", after = ["fix"], condition = { type = "ci", target = { node = "implement" }, failed_checks_max_bytes = 4096, max_failed_checks = 8 } },
+  ], exports = [{ node = "accepted", outputs = ["result"] }] } },
   # One reviewer for `single`, one panel for `panel`; `delivery_review` carries
   # the shape and the inconclusive disposition through the shared type.
   { id = "review", use = "${review_template}", after = ["ci", "ci-repair"], source = { type = "head", node = "implement" }, delivery_review = { shape = "${review_shape}", accept_inconclusive_without_blocking = true }, with = { brief = "${brief}" } },

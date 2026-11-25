@@ -867,11 +867,31 @@ fn reconcile_ci_class(
     let mut active = BTreeSet::new();
     let mut conclusive = BTreeSet::new();
     let mut wait_seconds = 0;
+    let lease_owners = match provenant_run::build::queue::ci_reconciliation_owners(
+        resolved.roots.state.as_path(),
+    ) {
+        Ok(owners) => owners,
+        Err(error) => {
+            report.warnings.push(format!(
+                "delivery CI lease owners could not be enumerated; orphaned lease recovery remains uncertain: {error}"
+            ));
+            BTreeSet::new()
+        }
+    };
     for binding in projects {
         let project = binding.project_id();
-        let Ok(ids) = FileJournal::graph_ids(&resolved.roots.state, project) else {
+        let Ok(mut ids) = FileJournal::pending_graph_ids(&resolved.roots.state, project) else {
             continue;
         };
+        let project_name = project.to_string();
+        ids.extend(
+            lease_owners
+                .iter()
+                .filter(|owner| owner.project == project_name)
+                .map(|owner| owner.graph_id.clone()),
+        );
+        ids.sort();
+        ids.dedup();
         for graph_id in ids {
             let Ok(Some(execution)) =
                 FileJournal::execution(&resolved.roots.state, project, &graph_id)
