@@ -706,6 +706,72 @@ fn smoke_verify_gives_the_review_a_non_empty_range() -> Result<(), Box<dyn std::
 }
 
 #[test]
+fn remote_smoke_verify_carries_the_writer_branch_and_staged_fixture()
+-> Result<(), Box<dyn std::error::Error>> {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::tempdir()?;
+    let state = tmp.path().join("state");
+    provenant_os::fixture::private_state_dir(&state)?;
+    let scratch = tmp.path().join("scratch");
+    std::fs::create_dir(&scratch)?;
+    let calls = tmp.path().join("calls");
+    let launcher = tmp.path().join("provenant");
+    std::fs::write(
+        &launcher,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \" $* \" in *' run smoke '*)\n  printf '%s\\n' '{{\"node\":\"smoke/read\"}}' '{{\"node\":\"smoke/review\"}}' '{{\"node\":\"smoke/write\"}}'; printf '%s\\n' '{{\"status\":\"pending\"}}';;\n  *' wait '*|*' status '*) printf '%s\\n' '{{\"status\":\"complete\"}}';;\n  *) exit 77;;\nesac\n",
+            calls.display()
+        ),
+    )?;
+    std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755))?;
+    let runner = UpgradeRunner {
+        executor: provenant_os::exec::SystemExecutor::new(1)?,
+        environment: std::env::vars_os().collect(),
+        cwd: tmp.path().to_owned(),
+    };
+    let output = verify_smoke_with(
+        &runner,
+        &launcher,
+        &state,
+        &scratch,
+        &cli::Upgrade {
+            yes: false,
+            from_source: None,
+            hosts: "all".into(),
+            verify: true,
+            verify_only: false,
+            dry_run: false,
+            host: Some("peer-a".into()),
+            route: None,
+            set: Vec::new(),
+        },
+    )?;
+    assert!(output.contains("\"node\":\"smoke/write\""), "{output}");
+    assert!(output.contains("complete"), "{output}");
+    let calls = std::fs::read_to_string(&calls)?;
+    let run = calls.lines().next().ok_or("run call")?;
+    assert!(run.contains(" run smoke "), "{calls}");
+    assert!(run.contains(" --host peer-a "), "{calls}");
+    assert!(run.contains(" --branch smoke/"), "{calls}");
+    assert!(run.contains(" --base HEAD "), "{calls}");
+    assert!(run.contains(" --set diff_base="), "{calls}");
+    let project = run
+        .split_once("--project ")
+        .and_then(|(_, rest)| rest.split_whitespace().next())
+        .ok_or("run names its project")?;
+    // The staged fixture is a real file in the scratch project the peer's
+    // read lane sources; verify its path and content before changing staging.
+    assert_eq!(
+        std::fs::read(std::path::Path::new(project).join("fixture.txt"))?,
+        b"smoke fixture\n",
+        "the smoke fixture is not visible at the path its brief names"
+    );
+    Ok(())
+}
+
+#[test]
 fn failed_smoke_node_is_reported_by_verify() -> Result<(), Box<dyn std::error::Error>> {
     // Spec: docs/specs/fabric.md#bundled-template-declarations — a failed
     // smoke node is reported by its own node id, including the retry-route

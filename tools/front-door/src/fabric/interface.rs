@@ -2880,15 +2880,72 @@ impl Factory {
             // A peer-owned writer is provisioned from a branch and a base ref,
             // never from a caller path. Drop the host path while retaining the
             // branch intent so the peer can create its own worktree.
+            if is_remote {
+                parameters["worktree"] = json!("");
+            }
+            let requested = parameters.get("smoke-write").is_some();
+            let write_disabled = requested && parameters["smoke-write"] == json!(false);
+            // A remote launch carries no caller worktree. Provision a scratch
+            // branch from a sourced default so verification exercises the
+            // remote writer even when the caller supplies no --branch; an
+            // explicit --branch/--base or --set write_attempt still wins.
+            if is_remote
+                && !write_disabled
+                && !parameters
+                    .get("write_attempt")
+                    .and_then(|attempt| attempt.get("new_worktree"))
+                    .is_some()
+            {
+                let branch = input
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .filter(|name| !name.is_empty())
+                    .map(|name| format!("smoke/{name}"))
+                    .unwrap_or_else(|| "smoke/verify".to_owned());
+                let explicit_base = input
+                    .get("base")
+                    .and_then(Value::as_str)
+                    .filter(|base| !base.is_empty())
+                    .map(str::to_owned);
+                let base = explicit_base.as_deref().unwrap_or(DEFAULT_WRITER_BASE);
+                let mut attempt = parameters
+                    .get("write_attempt")
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
+                let object = attempt.as_object_mut().ok_or_else(|| {
+                    FacadeError::invalid(InvalidInputDetail::Field("write_attempt".into()))
+                })?;
+                let mut provision = json!({"branch":branch,"base":base});
+                if explicit_base.is_none() {
+                    provision["default_base"] = json!(true);
+                }
+                object.insert("new_worktree".into(), provision);
+                parameters["write_attempt"] = attempt;
+                input_warnings.push(format!(
+                    "remote smoke writer uses scratch branch {branch} from {base} (source: default smoke placement); pass --branch B --base REF to override"
+                ));
+            }
+            // A bundled smoke review needs a fixed, non-empty range. When no
+            // launch bound diff_base, use the checkout's first parent and name
+            // the source, so a manual smoke does not fail on an empty range.
+            if parameters
+                .get("diff_base")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .is_empty()
+                && let Some(git) = provenant_os::git::git_executable()
+                && let Ok(base) = provenant_run::resolve_git_base(&git, &self.cwd, "HEAD^")
+            {
+                parameters["diff_base"] = json!(base);
+                input_warnings.push(format!(
+                    "smoke review uses base {base} (source: checkout first parent); pass --set diff_base=BASE to override"
+                ));
+            }
             let peer_owned_writer = is_remote
                 && parameters
                     .get("write_attempt")
                     .and_then(|attempt| attempt.get("new_worktree"))
                     .is_some();
-            if is_remote {
-                parameters["worktree"] = json!("");
-            }
-            let requested = parameters.get("smoke-write").is_some();
             if !requested {
                 let worktree = parameters
                     .get("worktree")
@@ -2898,10 +2955,10 @@ impl Factory {
                     json!(peer_owned_writer || (!is_remote && !worktree.is_empty()));
             }
             if parameters["smoke-write"] != json!(true) {
-                let reason = if is_remote {
-                    "remote placement needs --branch B to provision a peer-owned worktree; caller paths are not accepted"
-                } else if requested {
+                let reason = if requested {
                     "smoke-write is not enabled"
+                } else if is_remote {
+                    "remote placement needs --branch B to provision a peer-owned worktree; caller paths are not accepted"
                 } else {
                     "no writer worktree supplied; pass --worktree PATH or --branch B to run it"
                 };

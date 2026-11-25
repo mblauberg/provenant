@@ -12,9 +12,9 @@ exports = [
 ]
 
 [parameters]
-worktree = { type = "string", default = "", doc = "Scratch worktree for the writer node (--worktree, or --branch to create one); without one the writer node is skipped and reported." }
-write_attempt = { type = "table", default = {}, doc = "Attempt settings for the writer node, such as a new worktree; bound from --branch and --base." }
-smoke-write = { type = "boolean", default = false, doc = "Whether to run the write node; enabled by a local worktree or a peer-owned branch." }
-diff_base = { type = "string", default = "", doc = "Commit the review nodes compare against; a launch supplies the fixture's base. Empty leaves the review nodes unbound, so the per-node no-base refusal applies." }
+worktree = { type = "string", default = "", doc = "Scratch worktree for the writer node (--worktree, or --branch to create one). A remote launch never carries a caller path; it provisions its own worktree from a branch." }
+write_attempt = { type = "table", default = {}, doc = "Attempt settings for the writer node, such as a new worktree; bound from --branch and --base, or from the remote launch's sourced scratch branch." }
+smoke-write = { type = "boolean", default = false, doc = "Whether to run the write node; enabled by a local worktree or a peer-owned branch. A remote launch provisions a scratch branch from a sourced default so the writer runs unless it is explicitly disabled." }
+diff_base = { type = "string", default = "", doc = "Commit the review nodes compare against; a launch supplies the fixture's base. Empty binds the checkout's first parent as a fixed range with a warning, so review never fails on an empty range." }
 smoke-retry = { type = "boolean", default = true, doc = "Whether to run the retry-route probe, which checks a free-capable route for the retry path without retrying a node; disable with --set smoke-retry=false." }
 smoke-steer = { type = "boolean", default = true, doc = "Whether to run the steer-route probe, which checks a free-capable route for the steer path without steering a lane; disable with --set smoke-steer=false." }

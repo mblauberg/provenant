@@ -1867,11 +1867,13 @@ fn smoke_graph_explains_writer_gating_for_default_remote_and_local() -> Result {
             &cancel,
         )
         .map_err(|error| format!("default smoke preview: {error:?}"))?;
-    let preview_remote = factory.graph_document(
-            json!({"op":"run", "template":"smoke", "host":"peer-a", "set":{"worktree":rig.project}, "explain":true}),
+    let preview_remote = factory
+        .graph_document(
+            json!({"op":"run", "template":"smoke", "host":"peer-a", "explain":true}),
             budget,
             &cancel,
-        ).map_err(|error| format!("remote smoke preview: {error:?}"))?;
+        )
+        .map_err(|error| format!("remote smoke preview: {error:?}"))?;
     let preview_local = factory
         .graph_document(
             json!({"op":"run", "template":"smoke", "set":{"worktree":rig.project}, "explain":true}),
@@ -1897,10 +1899,36 @@ fn smoke_graph_explains_writer_gating_for_default_remote_and_local() -> Result {
                 .as_str()
                 .is_some_and(|reason| reason.contains("smoke-write"))
     }));
-    assert!(skipped_writer(&preview_remote));
+    // A remote launch has no caller worktree, so the facade provisions the
+    // writer from a sourced scratch branch and the peer exercises it.
     assert!(
-        !serde_json::to_string(&preview_remote["document"])?
-            .contains(&rig.project.to_string_lossy().to_string())
+        !skipped_writer(&preview_remote),
+        "remote smoke must run its writer from a sourced default: {preview_remote}"
+    );
+    let remote_encoded = serde_json::to_string(&preview_remote["document"])?;
+    assert!(
+        !remote_encoded.contains(&rig.project.to_string_lossy().to_string()),
+        "a caller path reached the remote document: {remote_encoded}"
+    );
+    assert!(
+        remote_encoded.contains("smoke/"),
+        "the remote writer has no sourced scratch branch: {remote_encoded}"
+    );
+    // A caller worktree is still refused on the remote boundary: only branch
+    // and base intent may name a worktree the peer creates in its own clone.
+    let caller_path = factory
+        .graph_document(
+            json!({"op":"run", "template":"smoke", "host":"peer-a",
+                "worktree":rig.project, "explain":true}),
+            budget,
+            &cancel,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&caller_path, FacadeError::InvalidInput {
+            detail: Some(InvalidInputDetail::Field(field)),
+        } if field.as_str() == "worktree"),
+        "a remote smoke caller path must be refused: {caller_path:?}"
     );
     assert!(!skipped_writer(&preview_local));
     assert!(
@@ -1928,6 +1956,27 @@ fn smoke_graph_explains_writer_gating_for_default_remote_and_local() -> Result {
         "a caller path reached the remote document: {encoded}"
     );
     assert!(encoded.contains("smoke/peer"), "{encoded}");
+
+    // An explicit disable still skips the remote writer, with that reason.
+    let preview_remote_disabled = factory
+        .graph_document(
+            json!({"op":"run", "template":"smoke", "host":"peer-a",
+                "set":{"smoke-write":false}, "explain":true}),
+            budget,
+            &cancel,
+        )
+        .map_err(|error| format!("disabled remote smoke preview: {error:?}"))?;
+    assert!(skipped_writer(&preview_remote_disabled));
+    assert!(
+        preview_remote_disabled["warnings"]
+            .as_array()
+            .is_some_and(|warnings| warnings.iter().any(|warning| {
+                warning
+                    .as_str()
+                    .is_some_and(|text| text.contains("smoke-write is not enabled"))
+            })),
+        "the skipped remote writer must name its reason: {preview_remote_disabled}"
+    );
 
     Ok(())
 }
