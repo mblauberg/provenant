@@ -356,6 +356,9 @@ settlement to release the steered attempt's custody: steering stays queued and
 the reaction is retried, never dropped. A custody or writer-lineage check that
 fails while admitting a steer continuation is a typed continuation refusal, not
 an "invalid run record": the accepted text and the settled attempt stay intact.
+When that writer committed after the predecessor was sealed, admission re-pins
+to the descendant under the same lane custody and warns with both ids; a head
+that moved elsewhere stays a refusal that leaves the graph needing retry.
 An explicit stop of an attempt holding accepted steering resolves it as not
 continued (`terminal_stop`). When placement or
 the run owner is temporarily unavailable, the graph journal persists a bounded
