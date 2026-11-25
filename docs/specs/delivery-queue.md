@@ -43,6 +43,15 @@ plan and replay semantics; new fields are versioned and validated on admission.
 | `park` | An idempotent ask/inbox request records graph/item/node/attempt, typed reason (`loop_exhausted`, `ladder_exhausted`, `no_commit`, `uncommitted_edits`, `ci_unavailable`, `conflict`, `review_evidence`, `operation_error`), bounded lane handoff, head and evidence references. One open request per parking transition; answer alone neither resumes nor grants landing authority. |
 | Queue | `max_parallel` bounds active item graphs; `ci_slots` configures the `ci` admission class. Both have effective values and source. Zero CI slots uses the existing admission convention of disabling the cap. A cap wait is visible, bounded and warns before proceeding under the existing advisory admission policy; it cannot bypass an independent hard boundary. |
 
+Launch preparation refusals (for example a retained worktree whose writer
+lineage belongs to an earlier graph) are not unsuccessful attempts: reconcile,
+then relaunch up to `domains.fabric.queue.prep_retries` (default 2) before
+parking with `operation_error`. An adopted PR or retained worktree must be
+adoptable by a new item graph without a lineage refusal. Every repair brief
+carries the failing head, the bounded failure excerpt and an instruction to
+sweep the whole defect class (other tests, help text and docs asserting the
+changed behaviour), because single-test repairs dominate observed round counts.
+
 Why: bounded retries, explicit evidence and durable decisions make replay safe
 and let a project change policy without replacing the engine. The issue’s original
 “escalates once, then parks” acceptance case applies to a two-rung ladder; the
