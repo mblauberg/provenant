@@ -92,9 +92,9 @@ pub(in crate::fabric) fn graph_wait_needs_refresh(
 }
 
 #[derive(Default)]
-struct GraphObservationHistory {
+pub(super) struct GraphObservationHistory {
     remote_source_seen: bool,
-    reader_woken: bool,
+    pub(super) reader_woken: bool,
 }
 impl GraphObservationHistory {
     fn record(
@@ -108,7 +108,7 @@ impl GraphObservationHistory {
         remote_pending
     }
 
-    fn report(&self, observation: &crate::status_wait::LocalObservation) -> String {
+    pub(super) fn report(&self, observation: &crate::status_wait::LocalObservation) -> String {
         observation.report(self.remote_source_seen)
     }
 }
@@ -134,7 +134,7 @@ pub(in crate::fabric) fn next_remote_deadline(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn wait_graph_updates<C: provenant_core::Clock + ?Sized>(
+pub(super) fn wait_graph_updates<C: provenant_core::Clock + ?Sized>(
     mut run: provenant_fabric_runtime::graph::GraphRun,
     wait: WaitBudget,
     clock: &C,

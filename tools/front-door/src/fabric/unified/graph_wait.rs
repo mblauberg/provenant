@@ -236,7 +236,7 @@ fn local_status_rows(
     Ok(rows)
 }
 
-fn missing_graph_context(error: &(dyn std::error::Error + 'static)) -> bool {
+pub(super) fn missing_graph_context(error: &(dyn std::error::Error + 'static)) -> bool {
     matches!(
         error.downcast_ref::<provenant_cli::fabric::EdgeError>(),
         Some(provenant_cli::fabric::EdgeError::Invalid)

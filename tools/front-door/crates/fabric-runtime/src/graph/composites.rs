@@ -292,6 +292,7 @@ fn children(
             && !source.starts_with("previous.")
         {
             *source = reference(prefix, source, &locals, incoming)
+                .or_else(|| visible_names.get(source).cloned())
                 .unwrap_or_else(|| scoped(prefix, source));
         }
         if let Some(SourceBinding::Head { node: writer }) = &mut node.source {
