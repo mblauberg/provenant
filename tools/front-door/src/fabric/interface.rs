@@ -2190,10 +2190,33 @@ impl Factory {
         } else {
             None
         };
-        if queue_launch.is_some() {
-            return Err(graph_input_reason(
-                super::queue_dispatch::TYPED_BINDER_UNAVAILABLE_REASON,
-            ));
+        let queue_replay_digest = queue_launch
+            .as_ref()
+            .map(|_| submission_digest(&prepared, None, None))
+            .transpose()?;
+        if let (Some(launch), Some(digest)) = (&queue_launch, &queue_replay_digest)
+            && let Some(execution) = FileJournal::execution(
+                &self.context.roots.state,
+                self.context.identity.project,
+                &launch.item.graph_id,
+            )
+            .map_err(graph_journal_error)?
+        {
+            if execution.document.replay_digest() != Some(digest.as_str()) {
+                return Err(FacadeError::Conflict);
+            }
+            let run = self.graph(
+                GraphInput::Status {
+                    extra: Default::default(),
+                    id: launch.item.graph_id.clone(),
+                },
+                budget,
+                cancel,
+            )?;
+            let mut result = encode(run)?;
+            result["timed_out"] = json!(false);
+            result["named"] = json!({"requested":launch.item.graph_id, "graph":launch.item.graph_id, "replayed":true});
+            return Ok(result);
         }
         let mut input = self.apply_pr_repair(prepared)?;
         if let Some(launch) = &queue_launch {
@@ -2379,9 +2402,20 @@ impl Factory {
         // Its read-only members read that base; only a writer that names no base
         // falls back to the caller checkout, and only then does a read-only
         // source pin still apply to it.
+        let mut queue_base_input = None;
+        if let Some(launch) = &queue_launch
+            && launch.item.adoption.is_none()
+        {
+            let mut selection = input.clone();
+            // The managed item checkout does not exist yet. Resolve the same
+            // default base as an explicitly provisioned branch, then pin that
+            // one commit into both the item branch and worktree intent.
+            selection["branch"] = json!(format!("queue/{}", launch.item.graph_id));
+            queue_base_input = Some(selection);
+        }
         let writer_base = if writer_launch {
             Some(resolve_writer_base(
-                input,
+                queue_base_input.as_ref().unwrap_or(input),
                 &self.context.project_root,
                 &self.cwd,
                 self.context.roots.state.as_path(),
@@ -2505,8 +2539,10 @@ impl Factory {
         if let Some(subject) = &review_subject {
             identity_input["review_subject"] = json!({"base":subject.base,"head":subject.head});
         }
-        let digest =
-            submission_digest(&identity_input, source_commit.as_deref(), Some(&templates))?;
+        let digest = match queue_replay_digest {
+            Some(digest) => digest,
+            None => submission_digest(&identity_input, source_commit.as_deref(), Some(&templates))?,
+        };
         let explain = input["explain"] == true;
         let (generated_id, taken) = if explain {
             (
@@ -2644,17 +2680,12 @@ impl Factory {
             .map(|config| (&config.domains.fabric.queue, &config.origins));
         seal_document_queue(&mut document, queue_config, read_config_error.as_deref())?;
         if let Some(launch) = &queue_launch {
-            // These values come from registry custody, never from the marker in
-            // the submitted JSON. Replays retain the same policy and identity.
-            document.queue = Some(launch.queue.knobs.clone());
-            document
-                .set_queue_ci_wait(&launch.queue.cap_wait)
-                .map_err(|_| FacadeError::StateCorrupt)?;
-            document
-                .context
-                .get_or_insert_with(Default::default)
-                .work_item = Some(launch.item.identity.item.clone());
-            document.schema_version = document.schema_version.max(2);
+            super::queue_delivery::bind_item(
+                self,
+                launch,
+                &mut document,
+                writer_base.as_ref().and_then(|base| base.commit.as_deref()),
+            )?;
         }
         // Template compilation selected a schema before document metadata was
         // applied; a retained review base requires the schema-2 representation.
@@ -4145,7 +4176,7 @@ fn typed_binding(
 /// The host digest of a launch: everything the caller chose except the name and
 /// how long to wait, the effective templates it runs, and the commit the launch
 /// started from. Equal digests are the same launch.
-fn submission_digest(
+pub(super) fn submission_digest(
     input: &Value,
     source_commit: Option<&str>,
     templates: Option<&Value>,

@@ -144,11 +144,13 @@ shipped value and source. The `deliver` composite exposes `review_shape`
 `failing_head`/`failure_excerpt` repair inputs. `widen_final_rung_brief` and
 `repair_brief` produce the final-rung and repair brief text: the sweep-the-class
 instruction is always carried by a repair brief, and untrusted heads and
-excerpts are bounded before they enter it. Hygiene, publication and conflict
-observation are role-marked seam nodes in the composite (`delivery-hygiene`,
-`delivery-publish`, `delivery-conflict`): the shared `GateCondition` has no
-variant for them, so execution slices bind by identity rather than a new leaf
-field on the composite.
+excerpts are bounded before they enter it. An authenticated queue item binds its
+compiled delivery template to typed hygiene, publication and conflict nodes,
+then to one bounded recovery owner. A normal item provisions its managed branch
+at one pinned base; an adopted item seeds its existing PR and retained worktree.
+Both seal the registry's queue knobs, CI wait source and work-item identity into
+their graph. Replays identify the item by its authenticated persisted request
+and resume the sealed graph without re-resolving templates or a moving base.
 
 The new default removes today's pre-CI `findings-panel` and post-CI
 `review-panel` pair in `assets/templates/composites.toml`: a clean item costs
@@ -202,10 +204,9 @@ outcomes, so parallel writers do not invent incompatible interfaces.
 ## Shared types
 
 The wire additions require graph `schema_version: 2`; absent fields stay absent
-when an old sealed plan or checkpoint is decoded and encoded. Queue item launch
-remains guarded until authenticated binding and the complete recovery plan are
-wired; the guard must not be removed merely because the individual node types
-can be admitted.
+when an old sealed plan or checkpoint is decoded and encoded. A queue item is
+bound only after registry authentication of its persisted launch intent; static
+admission checks the resulting typed graph before execution.
 
 - `GraphNode.loop_body` is serialised as `loop`: its existing `max_rounds` is
   required and positive, and the owning node `id` is the loop name. Optional

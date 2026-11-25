@@ -54,10 +54,7 @@ pub(super) fn reconcile_controls_before_tick(
             let Ok(Some((execution, _checkpoint))) = snapshot else {
                 continue;
             };
-            if execution.document.graph_id != item.graph_id
-                || execution.document.queue.is_none()
-                || execution.directory != Path::new(item.execution_directory.as_str())
-            {
+            if !matches_item_execution(&queue.queue_id, item, &execution).unwrap_or(false) {
                 continue;
             }
             if let Err(error) =
@@ -261,6 +258,39 @@ fn factory_for(
     Ok((factory, budget))
 }
 
+fn item_request(queue_id: &str, item: &QueueItem) -> Result<serde_json::Value, String> {
+    let marker = super::queue_registry::QueueItemMarker {
+        queue_id: queue_id.to_owned(),
+        identity: item.identity.clone(),
+        graph_id: item.graph_id.clone(),
+        launch_digest: item.launch_digest.clone(),
+    };
+    let mut request = item.launch_request.clone();
+    request["queue_item"] = serde_json::to_value(marker).map_err(|error| error.to_string())?;
+    Ok(request)
+}
+
+fn matches_item_execution(
+    queue_id: &str,
+    item: &QueueItem,
+    execution: &provenant_fabric_runtime::graph::GraphExecution,
+) -> Result<bool, String> {
+    let request = item_request(queue_id, item)?;
+    let prepared = super::interface::launch_input(&request).map_err(|error| error.to_string())?;
+    let digest = super::interface::submission_digest(&prepared, None, None)
+        .map_err(|error| error.to_string())?;
+    Ok(execution.document.graph_id == item.graph_id
+        && execution.document.queue.is_some()
+        && execution.document.replay_digest() == Some(digest.as_str())
+        && execution
+            .document
+            .context
+            .as_ref()
+            .and_then(|context| context.work_item.as_deref())
+            == Some(item.identity.item.as_str())
+        && execution.directory == Path::new(item.execution_directory.as_str()))
+}
+
 fn observe_item(
     factory: &Factory,
     registry: &QueueRegistry,
@@ -281,10 +311,7 @@ fn observe_item(
         }
         return Ok(());
     };
-    if execution.document.graph_id != item.graph_id
-        || execution.document.queue.is_none()
-        || execution.directory != Path::new(item.execution_directory.as_str())
-    {
+    if !matches_item_execution(&queue.queue_id, item, &execution)? {
         return Err("persisted graph does not match its reserved queue identity".into());
     }
     super::queue_controls::reconcile_pending(factory, &item.graph_id, budget, cancel)
@@ -295,6 +322,9 @@ fn observe_item(
     let Some((execution, checkpoint)) = snapshot else {
         return Err("queue graph checkpoint disappeared during reconciliation".into());
     };
+    if !matches_item_execution(&queue.queue_id, item, &execution)? {
+        return Err("persisted graph changed its reserved queue identity".into());
+    }
     match super::graph_status::graph_snapshot(checkpoint).status {
         GraphStatus::Cancelled => registry.mark_terminal(
             &queue.queue_id,
@@ -350,10 +380,7 @@ fn launch_item(
         FileJournal::read_status_snapshot(&factory.context.roots.state, project, &item.graph_id)
             .map_err(|error| error.to_string())?
     {
-        if execution.document.graph_id != item.graph_id
-            || execution.document.queue.is_none()
-            || execution.directory != Path::new(item.execution_directory.as_str())
-        {
+        if !matches_item_execution(queue_id, item, &execution)? {
             return Err("persisted graph does not match its reserved queue identity".into());
         }
         let outcome = match super::graph_status::graph_snapshot(checkpoint).status {
@@ -383,40 +410,31 @@ fn launch_item(
         }
         return Ok(QueueLaunchDisposition::Observed);
     }
-    let marker = super::queue_registry::QueueItemMarker {
-        queue_id: queue_id.to_owned(),
-        identity: item.identity.clone(),
-        graph_id: item.graph_id.clone(),
-        launch_digest: item.launch_digest.clone(),
-    };
-    let mut request = item.launch_request.clone();
-    request["queue_item"] = serde_json::to_value(marker).map_err(|error| error.to_string())?;
+    let request = item_request(queue_id, item)?;
     let receipt = match factory.graph_document_announcing(request, budget, cancel, None) {
         Ok(receipt) => receipt,
-        Err(error) if super::queue_dispatch::is_binder_unavailable(&error) => {
+        Err(error) if super::queue_dispatch::deterministic_launch_refusal(&error).is_some() => {
+            let reason = super::queue_dispatch::deterministic_launch_refusal(&error)
+                .ok_or_else(|| "static refusal could not be classified".to_owned())?;
             match FileJournal::read_status_snapshot(
                 &factory.context.roots.state,
                 project,
                 &item.graph_id,
             ) {
                 Ok(None) => {
-                    let reason = super::queue_dispatch::TYPED_BINDER_UNAVAILABLE_REASON.to_owned();
                     registry.mark_launch_unavailable(
                         queue_id,
                         &item.identity,
                         &item.graph_id,
-                        &reason,
+                        reason,
                         budget,
                         cancel,
                         &factory.clock,
                     )?;
-                    return Ok(QueueLaunchDisposition::Unavailable(reason));
+                    return Ok(QueueLaunchDisposition::Unavailable(reason.to_owned()));
                 }
                 _ => {
-                    return Err(format!(
-                        "{}; checkpoint absence could not be proved",
-                        super::queue_dispatch::TYPED_BINDER_UNAVAILABLE_REASON
-                    ));
+                    return Err(format!("{reason}; checkpoint absence could not be proved"));
                 }
             }
         }
@@ -612,6 +630,55 @@ fn exact_ci_result(
 #[cfg(test)]
 mod tests {
     use super::{BTreeSet, lease_owner, mark_superseded_lease};
+
+    #[test]
+    fn scheduler_requires_the_reserved_item_replay_identity() {
+        use super::*;
+        use serde_json::json;
+
+        let mut item = QueueItem {
+            identity: super::super::queue_registry::QueueIdentity::new(
+                "project", "github", "issue-1",
+            )
+            .unwrap(),
+            graph_id: "item-1".into(),
+            snapshot_index: 0,
+            launch_request: json!({"op":"run", "template":"deliver", "name":"item-1", "brief":"fix"}),
+            execution_directory: "/repo".into(),
+            adoption: None,
+            launch_digest: format!("sha256:{}", "a".repeat(64)),
+            state: QueueItemState::Launching,
+            terminal_outcome: None,
+            unavailable_reason: None,
+            overflow_reason: None,
+        };
+        let request = item_request("queue-1", &item).unwrap();
+        let prepared = super::super::interface::launch_input(&request).unwrap();
+        let digest = super::super::interface::submission_digest(&prepared, None, None).unwrap();
+        let mut document: provenant_fabric_runtime::graph::GraphDocument =
+            serde_json::from_value(json!({
+                "schema_version":2, "graph_id":"item-1", "nodes":[],
+                "context":{"work_item":"issue-1"}
+            }))
+            .unwrap();
+        document.queue = Some(provenant_fabric_runtime::graph::QueueKnobs::default());
+        document.set_replay_digest(&digest);
+        let mut execution = provenant_fabric_runtime::graph::GraphExecution {
+            peer_origin_context: None,
+            peer_submission_digest: None,
+            requester_path: None,
+            extra: Default::default(),
+            bases: None,
+            directory: "/repo".into(),
+            document,
+        };
+        assert!(matches_item_execution("queue-1", &item, &execution).unwrap());
+        item.launch_digest = format!("sha256:{}", "b".repeat(64));
+        assert!(!matches_item_execution("queue-1", &item, &execution).unwrap());
+        item.launch_digest = format!("sha256:{}", "a".repeat(64));
+        execution.document.context.as_mut().unwrap().work_item = Some("other".into());
+        assert!(!matches_item_execution("queue-1", &item, &execution).unwrap());
+    }
 
     #[test]
     fn exact_supersession_overrides_active_lease_classification() {
