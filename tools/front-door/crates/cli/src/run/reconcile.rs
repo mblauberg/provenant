@@ -252,6 +252,17 @@ pub(super) fn reconcile_inner(
         ));
     }
     let session = open(edge, &request(&clock, &cancel)?)?;
+    if command.targets.is_empty() {
+        for path in session
+            .store
+            .recover_orphan_reservations(false, &request(&clock, &cancel)?)?
+        {
+            human.push_str(&format!(
+                "recovered orphan writer reservation: {}\n",
+                path.display()
+            ));
+        }
+    }
     let listing = session.store.writer_fence_listing();
     let mut reservations = match listing {
         Ok(listing) => listing,
@@ -279,6 +290,14 @@ pub(super) fn reconcile_inner(
     reservations.issues.dedup_by(|left, right| {
         left.reservation == right.reservation && left.reason == right.reason
     });
+    for reservation in &reservations.reservations {
+        if reservation.legacy_fence {
+            human.push_str(&format!(
+                "warning: writer reservation remains fenced: {}\n",
+                reservation.reservation.display()
+            ));
+        }
+    }
     for issue in &reservations.issues {
         human.push_str(&format!(
             "warning: writer reservation requires recovery: {}: {}\n",

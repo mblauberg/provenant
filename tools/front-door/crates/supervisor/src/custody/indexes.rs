@@ -282,8 +282,10 @@ pub(super) fn retire_unlaunched_index(
     evidence: &Directory,
     reservation: &Reservation,
 ) -> Result<()> {
-    if reservation.launch_state != LaunchState::Prepared
-        || reservation.guardian.is_some()
+    if !matches!(
+        reservation.launch_state,
+        LaunchState::Prepared | LaunchState::NeverSpawned
+    ) || reservation.guardian.is_some()
         || reservation.provider.is_some()
         || !reservation.descendants.is_empty()
     {

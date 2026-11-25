@@ -3611,6 +3611,56 @@ impl Recovery {
         indexes::retire_unlaunched_index(&self.directory, &self.reservation)?;
         clear_reservation(&self.directory, self.scope())
     }
+    /// Withdraw a holderless orphan after Run has proved that no attempt row
+    /// exists while this recovery holds both writer and holder exclusion.
+    /// Bound evidence must still name the exact private attempt directory.
+    pub fn withdraw_orphan(
+        self,
+        attempt: Option<&Directory>,
+        unbound_store_proven: bool,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        clock: &dyn Clock,
+    ) -> Result<bool> {
+        if self.reservation.guardian.is_some()
+            || self.reservation.provider.is_some()
+            || !self.reservation.descendants.is_empty()
+            || self.reservation.omitted_descendants != 0
+        {
+            return Ok(false);
+        }
+        match self.reservation.launch_state {
+            LaunchState::Prepared if unbound_store_proven => {
+                self.withdraw_prepared()?;
+            }
+            LaunchState::NeverSpawned => {
+                let Some(attempt) = attempt else {
+                    return Ok(false);
+                };
+                let metadata = attempt.metadata()?;
+                if self.reservation.attempt_device != Some(metadata.device)
+                    || self.reservation.attempt_inode != Some(metadata.inode)
+                    || self.reservation.unresolved_cleanup
+                    || self.reservation.census_incomplete
+                {
+                    return Ok(false);
+                }
+                let _custody = attempt.lock(
+                    OsStr::new("custody.lock"),
+                    LockMode::Exclusive,
+                    budget,
+                    cancel,
+                    clock,
+                )?;
+                // No provider ran. Retire only a verified private index and keep
+                // all attempt artefacts for inspection.
+                indexes::retire_unlaunched_index(&self.directory, &self.reservation)?;
+                clear_reservation(&self.directory, self.scope())?;
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
     pub fn verify_settlement(&self, attempt: &Directory) -> Result<SettlementCommit> {
         let metadata = attempt.metadata()?;
         if self.reservation.attempt_device != Some(metadata.device)

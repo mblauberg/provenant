@@ -2062,7 +2062,7 @@ impl RunStore {
             if slot.is_some() {
                 match self.writer_fence_listing() {
                     Ok(listing) => {
-                        if !listing.issues.is_empty() {
+                        if listing.is_fenced() {
                             remove_import_pin = false;
                         }
                     }

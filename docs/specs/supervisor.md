@@ -184,9 +184,14 @@ missing or malformed reservation refuses automatic recovery of that attempt;
 [explicit abandonment](#explicit-abandonment) instead requires native exclusion
 and positive worktree non-occupancy. Scratch deletion needs a verified
 settlement commit. A pre-lease reservation whose launch never produced a holder
-is stale evidence: listing reports it as a fence that reconcile and GC can
-clear with a command this version accepts, never as work for a previous
-version.
+remains fenced until reconcile or applied GC obtains writer and holder exclusion.
+They discover reservations even without an indexed attempt. For an orphan,
+they withdraw an unbound preparation or a bound never-spawned reservation only
+after proving the attempt row absent; a bound record must match its private attempt directory and
+hold its custody lock. An unbound record cannot identify its store, so another
+possible nested store keeps it fenced. Attempt evidence is retained. Any
+unproven case stays fenced, and a holderless legacy reservation is never
+presented as work for a previous version.
 - Why: a writer must never be freed on a partial or forged settlement, and a
   holderless legacy reservation must not stay fenced with an unreachable remedy.
 
