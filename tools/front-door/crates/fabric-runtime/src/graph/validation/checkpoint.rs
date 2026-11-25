@@ -40,6 +40,20 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
         .enumerate()
         .map(|(i, node)| (node.id.clone(), i))
         .collect();
+    let mut superseded_owners = std::collections::BTreeSet::new();
+    if checkpoint.delivery_ci_superseded.iter().any(|record| {
+        plan.queue.is_none()
+            || record.head_sha.parse::<provenant_core::GitOid>().is_err()
+            || !positions
+                .get(&record.node_id)
+                .is_some_and(|index| plan.nodes[*index].kind == Some(NodeKind::Publish))
+            || !superseded_owners.insert(&record.node_id)
+    }) {
+        return Err(GraphError::BadCheckpoint {
+            node: plan.graph_id.clone(),
+            invariant: "delivery CI supersession must identify unique exact queue publication heads",
+        });
+    }
     let active_expansions = checkpoint
         .nodes
         .iter()
@@ -445,8 +459,15 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
             ));
         }
         if node.loop_body.is_some() {
-            loops::validate_progress(progress, node, checkpoint, &positions, plan.queue.is_some())
-                .map_err(|_| bad("loop progress must match round state"))?;
+            loops::validate_progress(
+                progress,
+                node,
+                checkpoint,
+                &positions,
+                plan,
+                plan.queue.is_some(),
+            )
+            .map_err(|_| bad("loop progress must match round state"))?;
             continue;
         }
         if node.composite.is_some() {
@@ -545,8 +566,137 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
             }
         }
         if node.kind == Some(NodeKind::Publish) {
+            if let Some(adoption_intent) = node.delivery_adoption.as_ref() {
+                let adoption = progress.delivery_adoption();
+                let receipt = adoption.as_ref().and_then(|record| record.receipt.as_ref());
+                let queue = document.queue.as_ref();
+                let valid_adoption = adoption.as_ref().is_none_or(|record| {
+                    record.matches_intent(adoption_intent)
+                        && record
+                            .ci_admission_wait
+                            .as_ref()
+                            .is_none_or(|wait| valid_delivery_ci_wait(document, wait))
+                        && record.error.as_ref().is_none_or(|error| {
+                            error.len() <= 1024 && !error.chars().any(char::is_control)
+                        })
+                        && match (&record.ci_admission, &record.receipt, queue) {
+                            (None, None, Some(_)) => true,
+                            (None, Some(_), Some(_)) => record.ci_admission_wait.is_some(),
+                            (Some(DeliveryCiAdmission::Held { lease }), Some(_), Some(queue)) => {
+                                !lease.id.is_empty()
+                                    && lease.project == adoption_intent.project
+                                    && lease.graph_id == plan.graph_id
+                                    && lease.node_id == node.id
+                                    && lease.head_sha == adoption_intent.head
+                                    && lease.ci_slots == queue.ci_slots
+                            }
+                            (
+                                Some(DeliveryCiAdmission::Overflow { ci_slots, .. }),
+                                Some(_),
+                                Some(queue),
+                            ) => {
+                                ci_slots == &queue.ci_slots
+                                    || ci_slots == &QueueKnobs::default().ci_slots
+                            }
+                            (
+                                Some(DeliveryCiAdmission::Unavailable { reason }),
+                                Some(_),
+                                Some(_),
+                            ) => !reason.trim().is_empty() && reason.len() <= 1024,
+                            _ => false,
+                        }
+                });
+                let valid_output = match (receipt, progress.outputs.as_ref()) {
+                    (Some(receipt), Some(outputs)) => {
+                        outputs.publication.as_ref() == Some(receipt)
+                            && outputs.branch.as_ref() == Some(&receipt.branch)
+                            && outputs.commit.as_ref() == Some(&receipt.head)
+                    }
+                    (Some(_), None)
+                        if progress.state == NodeState::Running
+                            && adoption.as_ref().is_some_and(|record| {
+                                record.ci_admission.is_none() && record.ci_admission_wait.is_some()
+                            }) =>
+                    {
+                        true
+                    }
+                    (None, None) => true,
+                    _ => false,
+                };
+                let valid_state = match progress.state {
+                    NodeState::Pending | NodeState::Skipped => {
+                        !progress.has_delivery_adoption() && progress.outputs.is_none()
+                    }
+                    NodeState::Running => {
+                        adoption.is_some()
+                            && progress.outputs.is_none()
+                            && (receipt.is_none()
+                                || receipt.is_some()
+                                    && adoption.as_ref().is_some_and(|record| {
+                                        record.ci_admission.is_none()
+                                            && record.ci_admission_wait.is_some()
+                                    }))
+                    }
+                    NodeState::Succeeded => {
+                        receipt.is_some()
+                            && adoption
+                                .as_ref()
+                                .is_some_and(|record| record.ci_admission.is_some())
+                    }
+                    NodeState::Blocked => {
+                        parked
+                            && adoption.is_some()
+                            && receipt.is_none()
+                            && progress.outputs.is_none()
+                    }
+                    NodeState::Failed => false,
+                };
+                if !progress.attempts.is_empty()
+                    || progress.delivery_publication.is_some()
+                    || !valid_adoption
+                    || !valid_output
+                    || !valid_state
+                {
+                    return Err(bad(
+                        "adoption intent, verified receipt, CI admission and exact-head outputs must match node state",
+                    ));
+                }
+                continue;
+            }
+            if progress.has_delivery_adoption() {
+                return Err(bad(
+                    "adoption progress requires an adoption publication node",
+                ));
+            }
             let intent = progress.delivery_publication.as_ref();
             let receipt = intent.and_then(|intent| intent.receipt.as_ref());
+            let valid_ci_admission = intent.is_none_or(|intent| {
+                intent
+                    .ci_admission_wait
+                    .as_ref()
+                    .is_none_or(|wait| valid_delivery_ci_wait(document, wait))
+                    && match (&intent.ci_admission, document.queue.as_ref()) {
+                        (None, None | Some(_)) => true,
+                        (Some(DeliveryCiAdmission::Held { lease }), Some(queue)) => {
+                            !lease.id.is_empty()
+                                && lease.project.trim() != ""
+                                && lease.graph_id == plan.graph_id
+                                && lease.node_id == node.id
+                                && lease.head_sha == intent.input_head
+                                && lease.ci_slots == queue.ci_slots
+                        }
+                        (Some(DeliveryCiAdmission::Overflow { ci_slots, .. }), Some(queue)) => {
+                            ci_slots == &queue.ci_slots
+                                || ci_slots == &QueueKnobs::default().ci_slots
+                        }
+                        (Some(DeliveryCiAdmission::Unavailable { reason }), Some(_)) => {
+                            !reason.trim().is_empty()
+                                && reason.len() <= 1024
+                                && !reason.chars().any(char::is_control)
+                        }
+                        _ => false,
+                    }
+            });
             let valid_intent = intent.is_none_or(|intent| {
                 !intent.operation_id.is_empty()
                     && intent.operation_id.len() <= 256
@@ -599,7 +749,12 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                 NodeState::Blocked => (intent.is_none() && progress.outputs.is_none()) || parked,
                 NodeState::Failed => false,
             };
-            if !progress.attempts.is_empty() || !valid_intent || !valid_output || !valid_state {
+            if !progress.attempts.is_empty()
+                || !valid_intent
+                || !valid_ci_admission
+                || !valid_output
+                || !valid_state
+            {
                 return Err(bad(
                     "publication intent, exact-head receipt and park must match its state",
                 ));
@@ -895,4 +1050,20 @@ fn fallback_settled(
                 .iter()
                 .any(|expansion| expansion.source == node.id && *expansion == derived)
         })
+}
+
+fn valid_delivery_ci_wait(document: &GraphDocument, wait: &DeliveryCiAdmissionWait) -> bool {
+    if document.queue.is_none()
+        || !(1..=14_400).contains(&wait.policy.value)
+        || super::super::delivery_ci_wait_policy(document) != wait.policy
+    {
+        return false;
+    }
+    let Ok(micros) = i64::try_from(wait.policy.value.saturating_mul(1_000_000)) else {
+        return false;
+    };
+    wait.started_at
+        .checked_add(provenant_core::DurationMicros::from_micros(micros))
+        .is_ok_and(|deadline| deadline == wait.deadline)
+        && wait.wake_at >= wait.started_at
 }
