@@ -884,9 +884,9 @@ pub fn gc_import_pins(
 }
 
 /// Every custody check that protects an attempt's payload: the publication
-/// and writer locks, a live settlement owner, writer reservations, abandonment
-/// and refused Git imports. `None` means the attempt is pinned, busy or its
-/// directory is gone.
+/// and writer locks, a live or unknown settlement owner, writer reservations,
+/// abandonment and refused Git imports. `None` means the attempt is pinned,
+/// busy or its directory is gone.
 struct Held {
     attempt: Directory,
     continuing: bool,
@@ -910,11 +910,11 @@ impl RunStore {
         };
         // A settlement driver still owns this attempt's import and final
         // reconciliation. Its private objects and review checkout live in
-        // scratch, so GC must treat the attempt as busy until the driver is
-        // done. Check before taking publication.lock: the driver does not hold
-        // that lock while importing, so it cannot fence us here itself.
+        // scratch, so GC must treat the attempt as busy until ownership is
+        // known to be absent. Check before taking
+        // publication.lock: the driver does not hold that lock while importing.
         if crate::settlement::settlement_owner_live(&run, Self::scope(record), call.clock)
-            == Some(true)
+            != Some(false)
         {
             return Ok(None);
         }
@@ -3993,6 +3993,49 @@ mod tests {
             &RetentionScan::default(),
         )?;
         assert_eq!(after.attempt_tmp.len(), 1, "{after:?}");
+        assert!(!temporary.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn gc_preserves_scratch_when_settlement_ownership_is_unknown() -> TestResult {
+        let (_temp, context, store, input, attempt) = seeded()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let temporary = scratch_root_of(&attempt).join("tmp");
+        fs::DirBuilder::new().mode(0o700).create(&temporary)?;
+        fs::write(temporary.join("payload"), b"settlement scratch")?;
+        withdraw(&store, &input, &call)?;
+        let journal = attempt.join("settlement-progress.json");
+        fs::write(&journal, b"not a journal")?;
+        let finished = |_: &AttemptRecord, _: &CanonicalRequest| ScratchOwner::Finished;
+        let policy = ScratchPolicy {
+            owner: Some(&finished),
+            ..ScratchPolicy::new(0)
+        };
+        let root = Directory::open_anchor(context.state_root.as_path())?;
+        let collection_time = WallTime::from_micros(200 + 31 * DAY_MICROS)?;
+        let report = store.gc_temporary(
+            &root,
+            &policy,
+            collection_time,
+            false,
+            &call,
+            &RetentionScan::default(),
+        )?;
+        assert!(report.attempt_tmp.is_empty(), "{report:?}");
+        assert_eq!(fs::read(temporary.join("payload"))?, b"settlement scratch");
+
+        fs::remove_file(journal)?;
+        let report = store.gc_temporary(
+            &root,
+            &policy,
+            collection_time,
+            false,
+            &call,
+            &RetentionScan::default(),
+        )?;
+        assert_eq!(report.attempt_tmp.len(), 1, "{report:?}");
         assert!(!temporary.exists());
         Ok(())
     }

@@ -77,7 +77,8 @@ cannot reach them.
 While a settlement driver holds its lease, GC treats the attempt as busy: it leaves the
 sibling scratch root alone until import and final reconciliation have finished, so a
 writer's private Git objects and a reviewer's source checkout cannot be collected
-under a live driver.
+under a live driver. GC also treats ownership as busy when the settlement journal
+or owner probe is unreadable; it can collect only once ownership is known to be free.
 - Why: scratch is outside the attempt record directory, so GC can reach it while
   settlement still needs it; losing it turns a correct lane into a failed import or
   a vanished review checkout (#3975).
