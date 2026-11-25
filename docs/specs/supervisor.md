@@ -149,7 +149,10 @@ action. The bounded observation is persisted in the process exit so status can
 still name survivors after the guardian is gone; an owner found only by its
 open descriptor is reported as ownership unproven. An open path is not proof of
 lock ownership; unknown holders stay explicit uncertainty; a timeout alone
-never authorises settlement or an unrelated signal.
+never authorises settlement or an unrelated signal. This observation covers the
+custody writer-lock path, not arbitrary repository locks, and cannot be persisted
+when the guardian dies before publishing an exit. An unrecorded, unsandboxed
+detached process may therefore be neither reaped nor reported.
 - Why: a leftover descendant could still write the worktree, and a chair
   cannot clean up what status no longer names.
 

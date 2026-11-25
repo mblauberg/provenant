@@ -22,7 +22,7 @@ const GC_SELECTION_SNAPSHOT_LIMIT: u64 = 1024 * 1024;
 const MAX_GC_SELECTION_SNAPSHOTS: usize = 64;
 /// Reads of one name that may each meet a concurrent atomic replacement.
 const REPLACEMENT_READS: usize = 16;
-/// Serialises record replacement in a binding directory.
+/// Serialises record publication, replacement and removal in a binding directory.
 const BINDING_LOCK: &str = "project-binding.lock";
 
 /// A canonical Git common directory, or the canonical directory for a
@@ -303,9 +303,7 @@ pub fn lookup_gc_project(
         Err(error) => return Err(error.into()),
     };
     verify_directory(&directory, &registry_path.join(&name))?;
-    let Some((bytes, metadata)) =
-        read_record_with_metadata(&directory, OsStr::new(RECORD), RECORD_LIMIT, |_| true)?
-    else {
+    let Some((bytes, metadata)) = read_binding_record_with_metadata(&directory)? else {
         return Ok(GcProjectStatus::Excluded);
     };
     let record = decode_binding_record(&bytes)?;
@@ -1067,6 +1065,18 @@ fn create_binding(
     }
     let directory = projects.open_verified_directory(&name)?;
     verify_directory(&directory, &projects_path.join(&name))?;
+    // A first publisher can race both hint replacement and removal as soon as
+    // its record is visible. Hold the same lock through publication and readback.
+    let clock = provenant_os::clock::SystemClock::new();
+    let budget =
+        WaitBudget::cli(clock.mono_now(), 5).map_err(|_| ConfigError::InvalidProjectBinding)?;
+    let _lock = directory.lock(
+        OsStr::new(BINDING_LOCK),
+        LockMode::Exclusive,
+        budget,
+        &provenant_core::CancelToken::new(),
+        &clock,
+    )?;
     let record = ProjectBindingRecord {
         schema_version: 1,
         project,
@@ -1150,9 +1160,15 @@ fn verify_directory(directory: &Directory, path: &Path) -> Result<(), ConfigErro
 /// read once more under the writers' lock in shared mode. Replacement takes
 /// that lock, so it already exists then and a lookup creates no state.
 fn read_binding_record(directory: &Directory) -> Result<Option<Vec<u8>>, ConfigError> {
+    Ok(read_binding_record_with_metadata(directory)?.map(|(bytes, _)| bytes))
+}
+
+fn read_binding_record_with_metadata(
+    directory: &Directory,
+) -> Result<Option<(Vec<u8>, Metadata)>, ConfigError> {
     match read_record_attempts(directory, OsStr::new(RECORD), RECORD_LIMIT, |_| true)? {
         RecordRead::Absent => Ok(None),
-        RecordRead::Read(bytes, _) => Ok(Some(bytes)),
+        RecordRead::Read(bytes, metadata) => Ok(Some((bytes, metadata))),
         RecordRead::KeptChanging => {
             let clock = provenant_os::clock::SystemClock::new();
             let budget = WaitBudget::cli(clock.mono_now(), 5)
@@ -1164,14 +1180,13 @@ fn read_binding_record(directory: &Directory) -> Result<Option<Vec<u8>>, ConfigE
                 &provenant_core::CancelToken::new(),
                 &clock,
             )?;
-            read_record(directory, OsStr::new(RECORD), RECORD_LIMIT, |_| true)
+            read_record_with_metadata(directory, OsStr::new(RECORD), RECORD_LIMIT, |_| true)
         }
     }
 }
 
 /// A binding record that must already be published in this directory. Its
-/// callers either hold the binding lock or publish the record only once, so
-/// they never need the shared-lock read.
+/// callers hold the binding lock, so they never need the shared-lock read.
 fn published_record(directory: &Directory) -> Result<Vec<u8>, ConfigError> {
     read_record(directory, OsStr::new(RECORD), RECORD_LIMIT, |_| true)?
         .ok_or(ConfigError::InvalidProjectBinding)
@@ -1974,6 +1989,51 @@ mod tests {
     }
 
     // Spec: docs/specs/state.md#configuration
+    #[test]
+    fn first_publication_waits_for_binding_mutations() {
+        let temp = tempdir();
+        let roots = roots(&temp);
+        let common = canonical_base(&temp).join("repo/.git");
+        fs::create_dir_all(&common).unwrap();
+        let state = Directory::open_anchor(roots.state.as_path()).unwrap();
+        let projects = open_or_create_projects(&state).unwrap();
+        let projects_path = roots.state.as_path().join(PROJECTS_DIR);
+        let name = OsString::from(binding_id(&common).to_string());
+        projects.mkdir(&name, 0o700).unwrap();
+        let directory = projects.open_verified_directory(&name).unwrap();
+        let guard = directory
+            .try_lock(OsStr::new(BINDING_LOCK), LockMode::Exclusive)
+            .unwrap();
+        let (started, ready) = std::sync::mpsc::channel();
+        let (finished, result) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                started.send(()).unwrap();
+                finished
+                    .send(create_binding(&projects, &projects_path, common))
+                    .unwrap();
+            });
+            ready.recv().unwrap();
+            assert!(
+                result
+                    .recv_timeout(std::time::Duration::from_millis(100))
+                    .is_err()
+            );
+            assert!(
+                directory
+                    .metadata_at(OsStr::new(RECORD), false)
+                    .unwrap_err()
+                    .is_not_found()
+            );
+            drop(guard);
+            result
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap()
+                .unwrap();
+        });
+    }
+
+    // Spec: docs/specs/state.md#configuration
     // Writers bind with a primary checkout hint, and a hint update replaces
     // the record by rename while others read it. No reader or binder may see
     // that replacement as invalid state.
@@ -2016,6 +2076,8 @@ mod tests {
                                 },
                             };
                             seen.push(binding.project_id());
+                            // GC reads the same record together with its metadata.
+                            let _ = lookup_gc_project(roots, binding.project_id())?;
                             for listed in registered_projects(roots)? {
                                 seen.push(listed.project_id());
                             }

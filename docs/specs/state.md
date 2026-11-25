@@ -174,7 +174,9 @@ Redaction is owned by [supervisor](supervisor.md#disclosure-and-safe-git-evidenc
 Project binding directories must be owned by the current user and private from
 group and other users. A permission or ownership failure carries a local repair
 diagnostic; malformed bindings and filesystem errors keep their own causes, and
-lookup never repairs state. A binding record can be forgotten when its common
+lookup never repairs state. First publication, hint replacement and removal share
+a binding lock; contended readers, including GC, retry under its shared side.
+A binding record can be forgotten when its common
 directory is gone: the smoke verifier cleans up its scratch binding at exit, and
 GC retires a vanished binding once its record has been idle for `gc.idle`. The
 private host-project directory stays for a later bind. Peer status and events
