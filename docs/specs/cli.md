@@ -296,7 +296,9 @@ reports its effective bound in `tail` for bytes or `tail_lines` for lines, with
 A receipt identifies a settled local attempt and reports only supported route
 and reviewer attribution. Every receipt names the adapter, model, family,
 effort, `effort_source`, `resolved_from` and role, for both writer and reviewer
-lanes and for every adapter. Family comes from the effective routing catalogue;
+lanes and for every adapter. Family for both the applied model and observed
+reviewer comes from the effective routing catalogue at output time, including
+discovery and host and project overlays;
 an effort is the applied value, or the value and source recorded when an adapter
 dropped or defaulted it. A requested effort alone is not evidence of the
 applied effort; without recorded applied or warning evidence, both effort and

@@ -516,9 +516,11 @@ pub(super) fn receipt_model(adapter: Option<&str>, model: Option<&str>) -> Optio
     })
 }
 
-pub(super) fn receipt_family(model: Option<&str>) -> String {
-    provenant_routing::Catalogue::bundled()
-        .ok()
+pub(super) fn receipt_family(
+    catalogue: Option<&provenant_routing::Catalogue>,
+    model: Option<&str>,
+) -> String {
+    catalogue
         .and_then(|catalogue| {
             ModelId::parse(model?)
                 .ok()
@@ -601,6 +603,7 @@ pub(super) fn receipt_resolution(record: &run::AttemptRecord) -> String {
 pub(super) fn reviewer_receipt(
     record: &provenant_records::run::AttemptRecord,
     writer: bool,
+    catalogue: Option<&provenant_routing::Catalogue>,
 ) -> Result<(Value, String), Fail> {
     use provenant_records::run::AttemptState;
     if !matches!(record.state, AttemptState::Terminal { .. }) {
@@ -622,14 +625,14 @@ pub(super) fn reviewer_receipt(
     let qualified_model =
         route.and_then(|r| receipt_model(r.provider.as_deref(), r.model.as_deref()));
     let (effort, effort_source) = receipt_effort(record);
-    let family = receipt_family(qualified_model.as_deref());
+    let family = receipt_family(catalogue, qualified_model.as_deref());
     let resolved_from = receipt_resolution(record);
     let reviewer = run::fact(record.clone())?.reviewer;
     let reviewer_model = record
         .observed_route
         .as_ref()
         .and_then(|route| receipt_model(route.provider.as_deref(), route.model.as_deref()));
-    let reviewer_family = receipt_family(reviewer_model.as_deref());
+    let reviewer_family = receipt_family(catalogue, reviewer_model.as_deref());
     let provenance = reviewer
         .as_ref()
         .map_or("unknown", |reviewer| match reviewer.provenance {
@@ -758,7 +761,8 @@ fn output_read_part(
     let part = match command.part {
         Part::Receipt => {
             let task = session.store.request(record.attempt_id, call)?.task;
-            return reviewer_receipt(&record, task.writer.is_some());
+            let catalogue = crate::model_discovery::effective(edge.roots).ok();
+            return reviewer_receipt(&record, task.writer.is_some(), catalogue.as_ref());
         }
         Part::Result => run::ArtifactPart::Result,
         Part::Prompt => run::ArtifactPart::Prompt,

@@ -4060,6 +4060,54 @@ fn receipt_output_carries_catalogue_family_and_role_for_opencode_lane() -> Resul
     Ok(())
 }
 
+fn receipt_families_follow_effective_catalogue_overrides() -> Result {
+    let (rig, record) = persisted_attempt_with(
+        "codex",
+        "codex/gpt-6.1-sol",
+        ("work", "fixture"),
+        b"{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}\n",
+        b"",
+        0,
+        PersistedAttemptOptions {
+            writer: true,
+            ..Default::default()
+        },
+    )?;
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version = 1\n[gc]\nfree_floor = '1B'\n[[catalogue.models]]\nmodel = 'codex/gpt-6.1-sol'\nfamily = 'owner-family'\nevidence_ref = 'owner fact'\nefforts = ['low', 'medium', 'high', 'xhigh', 'max']\n",
+    )?;
+    let output = rig.command(&[
+        "output",
+        &record.key.to_string(),
+        "--part",
+        "receipt",
+        "--json",
+    ])?;
+    assert_eq!(
+        code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    let data: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(data["data"]["family"], "owner-family");
+    assert_eq!(data["data"]["reviewer"]["family"], "owner-family");
+    assert!(
+        data["data"]["receipt"]
+            .as_str()
+            .ok_or("receipt")?
+            .contains("owner-family")
+    );
+    assert!(
+        data["data"]["reviewer_provenance"]
+            .as_str()
+            .ok_or("provenance")?
+            .contains("owner-family")
+    );
+    Ok(())
+}
+
 fn receipt_output_classifies_writers_and_refuses_running_attempts() -> Result {
     for options in [
         PersistedAttemptOptions {
@@ -6639,6 +6687,10 @@ fn main() -> ExitCode {
             (
                 "receipt_output_carries_catalogue_family_and_role_for_opencode_lane",
                 receipt_output_carries_catalogue_family_and_role_for_opencode_lane,
+            ),
+            (
+                "receipt_families_follow_effective_catalogue_overrides",
+                receipt_families_follow_effective_catalogue_overrides,
             ),
             (
                 "receipt_output_classifies_writers_and_refuses_running_attempts",

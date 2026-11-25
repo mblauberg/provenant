@@ -455,6 +455,7 @@ fn codex_rollout_error_reaches_the_decoded_reason() {
 #[test]
 fn reviewer_receipts_cover_provenance_and_resolution_evidence()
 -> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = provenant_routing::Catalogue::bundled()?;
     let now = WallTime::from_micros(100)?;
     let mut record: run::AttemptRecord = serde_json::from_value(json!({
         "schema_version": 1, "attempt_id": AttemptId::from_bytes([1; 16]),
@@ -467,7 +468,7 @@ fn reviewer_receipts_cover_provenance_and_resolution_evidence()
         "state": {"state":"terminal","outcome":"lost","exit_code":null,"finished_at":now,"reason":null},
         "usage": {}, "prompt": {"path":{"encoding":"utf8","path":"prompt.txt"}, "digest":CanonicalV1::file_digest(b""),"bytes":0,"complete":true,"redacted":false}
     }))?;
-    let (data, line) = reviewer_receipt(&record, false).unwrap();
+    let (data, line) = reviewer_receipt(&record, false, Some(&catalogue)).unwrap();
     assert_eq!(data["resolved_from"], "explicit");
     assert_eq!(data["reviewer"]["provenance"], "unknown");
     assert_eq!(data["reviewer"]["actor_id"], "unknown");
@@ -497,12 +498,14 @@ fn reviewer_receipts_cover_provenance_and_resolution_evidence()
         )
     );
     record.verified_owner = Some(ActorId::from_bytes([6; 16]));
-    let unobserved = reviewer_receipt(&record, false).unwrap().0;
+    let unobserved = reviewer_receipt(&record, false, Some(&catalogue))
+        .unwrap()
+        .0;
     assert_eq!(unobserved["reviewer"]["provenance"], "unknown");
     assert_ne!(unobserved["reviewer"]["actor_id"], "unknown");
     record.observed_route = record.applied_route.clone();
     let observed_fact = run::fact(record.clone())?.reviewer.ok_or("reviewer fact")?;
-    let observed = reviewer_receipt(&record, false).unwrap();
+    let observed = reviewer_receipt(&record, false, Some(&catalogue)).unwrap();
     assert_eq!(observed.0["reviewer"]["provenance"], "observed");
     assert_eq!(
         observed.0["reviewer"]["actor_id"],
@@ -514,26 +517,30 @@ fn reviewer_receipts_cover_provenance_and_resolution_evidence()
         observed_fact.actor_id
     )));
     record.applied_route.as_mut().unwrap().model = Some("gpt-6.1-sol".into());
-    let (writer_data, writer_line) = reviewer_receipt(&record, true).unwrap();
+    let (writer_data, writer_line) = reviewer_receipt(&record, true, Some(&catalogue)).unwrap();
     assert_eq!(writer_data["role"], "writer");
     assert_eq!(writer_data["family"], "openai");
     assert!(writer_line.starts_with("Writer: codex/gpt-6.1-sol@high (openai;"));
     record.applied_route.as_mut().unwrap().effort = None;
     assert!(
-        reviewer_receipt(&record, false)
+        reviewer_receipt(&record, false, Some(&catalogue))
             .unwrap()
             .1
             .contains("@unknown")
     );
     record.applied_route.as_mut().unwrap().model = Some("codex/uncatalogued".into());
-    let unknown_family = reviewer_receipt(&record, false).unwrap().0;
+    let unknown_family = reviewer_receipt(&record, false, Some(&catalogue))
+        .unwrap()
+        .0;
     assert_eq!(unknown_family["family"], "unknown");
     assert_eq!(unknown_family["resolved_from"], "unknown");
     record.skipped_routes.push(serde_json::from_value(
         json!({"route":"codex/gpt-6.1-sol","kind":"unavailable","detail":"unavailable"}),
     )?);
     assert_eq!(
-        reviewer_receipt(&record, false).unwrap().0["resolved_from"],
+        reviewer_receipt(&record, false, Some(&catalogue))
+            .unwrap()
+            .0["resolved_from"],
         "unknown"
     );
     record.applied_route.as_mut().unwrap().model = Some("codex/gpt-6.1-sol".into());
@@ -545,17 +552,23 @@ fn reviewer_receipts_cover_provenance_and_resolution_evidence()
     )?);
     // An unavailable candidate is still a pool selection, not a fallback.
     assert_eq!(
-        reviewer_receipt(&record, false).unwrap().0["resolved_from"],
+        reviewer_receipt(&record, false, Some(&catalogue))
+            .unwrap()
+            .0["resolved_from"],
         "pool junior"
     );
     record.applied_route.as_mut().unwrap().model = Some("codex/other".into());
     assert_eq!(
-        reviewer_receipt(&record, false).unwrap().0["resolved_from"],
+        reviewer_receipt(&record, false, Some(&catalogue))
+            .unwrap()
+            .0["resolved_from"],
         "unknown"
     );
     record.applied_route = None;
     record.observed_route = None;
-    let unknown = reviewer_receipt(&record, false).unwrap().0;
+    let unknown = reviewer_receipt(&record, false, Some(&catalogue))
+        .unwrap()
+        .0;
     for field in [
         "adapter",
         "model",
@@ -568,14 +581,16 @@ fn reviewer_receipts_cover_provenance_and_resolution_evidence()
     }
     record.applied_route = Some(Default::default());
     assert_eq!(
-        reviewer_receipt(&record, false).unwrap().0["model"],
+        reviewer_receipt(&record, false, Some(&catalogue))
+            .unwrap()
+            .0["model"],
         "unknown"
     );
     record.state = run::AttemptState::Running {
         extra: Default::default(),
         child_wait: None,
     };
-    let refused = reviewer_receipt(&record, false).unwrap_err();
+    let refused = reviewer_receipt(&record, false, Some(&catalogue)).unwrap_err();
     assert_eq!(refused.status, Status::Refused);
     assert_eq!(refused.kind, ErrorKind::Nonterminal);
     Ok(())
@@ -583,6 +598,7 @@ fn reviewer_receipts_cover_provenance_and_resolution_evidence()
 #[test]
 fn receipt_never_treats_requested_effort_as_applied_without_evidence()
 -> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = provenant_routing::Catalogue::bundled()?;
     let now = WallTime::from_micros(100)?;
     let record: run::AttemptRecord = serde_json::from_value(json!({
         "schema_version": 1, "attempt_id": AttemptId::from_bytes([9; 16]),
@@ -595,7 +611,7 @@ fn receipt_never_treats_requested_effort_as_applied_without_evidence()
         "state": {"state":"terminal","outcome":"lost","exit_code":null,"finished_at":now,"reason":null},
         "usage": {}, "prompt": {"path":{"encoding":"utf8","path":"prompt.txt"}, "digest":CanonicalV1::file_digest(b""),"bytes":0,"complete":true,"redacted":false}
     }))?;
-    let (data, line) = reviewer_receipt(&record, false).unwrap();
+    let (data, line) = reviewer_receipt(&record, false, Some(&catalogue)).unwrap();
     assert_eq!(data["effort"], "unknown");
     assert_eq!(data["effort_source"], "unknown");
     assert!(line.contains("@unknown"));
@@ -605,6 +621,7 @@ fn receipt_never_treats_requested_effort_as_applied_without_evidence()
 #[test]
 fn receipt_fields_are_sourced_for_opencode_and_codex_lanes()
 -> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = provenant_routing::Catalogue::bundled()?;
     fn settled(
         attempt: u8,
         requested: Value,
@@ -645,7 +662,7 @@ fn receipt_fields_are_sourced_for_opencode_and_codex_lanes()
             }
         }),
     )?;
-    let (data, line) = reviewer_receipt(&opencode, false).unwrap();
+    let (data, line) = reviewer_receipt(&opencode, false, Some(&catalogue)).unwrap();
     assert_eq!(data["adapter"], "opencode");
     assert_eq!(data["model"], "opencode/opencode-go/hy4-flash-free");
     assert_eq!(data["family"], "tencent");
@@ -678,7 +695,7 @@ fn receipt_fields_are_sourced_for_opencode_and_codex_lanes()
             "effort": "high", "source": "pin"
         }),
     )?;
-    let (data, _) = reviewer_receipt(&codex, true).unwrap();
+    let (data, _) = reviewer_receipt(&codex, true, Some(&catalogue)).unwrap();
     assert_eq!(data["adapter"], "codex");
     assert_eq!(data["family"], "openai");
     assert_eq!(data["effort"], "high");
