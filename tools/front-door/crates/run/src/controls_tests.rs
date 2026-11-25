@@ -595,6 +595,9 @@ fn steered_claude_without_a_session_starts_a_fresh_turn() -> TestResult {
     exit.scope = RunStore::scope(&running);
     crate::dispatch_tests::seal_exit(&store, &exit)?;
     let mut publication = crate::tests::publication();
+    // A finished task has no follow-up (#3987). Keep this writer unsettled so
+    // the test still reaches the no-session continuation path it pins.
+    publication.outcome = Outcome::Uncommitted;
     publication.resolved_route = Some(route.clone());
     publication.applied_route = Some(route.clone());
     publication.observed_route = Some(route.clone());
@@ -602,7 +605,7 @@ fn steered_claude_without_a_session_starts_a_fresh_turn() -> TestResult {
     assert!(matches!(
         store.record(id, &call)?.state,
         AttemptState::Terminal {
-            outcome: Outcome::Succeeded,
+            outcome: Outcome::Uncommitted,
             terminal_cause: None,
             ..
         }
@@ -1109,6 +1112,11 @@ fn terminal_proof_revises_live_resume_without_losing_acknowledgement() -> TestRe
         parent_exit.scope = RunStore::scope(&parent_running);
         crate::dispatch_tests::seal_exit(&store, &parent_exit)?;
         let mut parent_publication = crate::tests::publication();
+        // A finished task has no follow-up (#3987). This test pins how a
+        // terminal proof revises the successor's live acknowledgement, so the
+        // parent must stay continuable: leave retained edits for its queued
+        // turn instead of publishing success.
+        parent_publication.outcome = Outcome::Uncommitted;
         parent_publication.session = Some("fixture-session".into());
         parent_publication.resolved_route = Some(route.clone());
         parent_publication.applied_route = Some(route.clone());
@@ -2095,6 +2103,10 @@ fn graph_cancel_and_steer_admission_have_one_ordered_winner() -> TestResult {
         exit.scope = RunStore::scope(&running);
         crate::dispatch_tests::seal_exit(&store, &exit)?;
         let mut publication = crate::tests::publication();
+        // A finished task has no follow-up (#3987). Keep the parent
+        // continuable so this test still exercises the ordering race between
+        // admitting its queued successor and cancelling the graph.
+        publication.outcome = Outcome::Uncommitted;
         publication.started_at = running.started_at;
         publication.finished_at = call.clock.wall_now()?;
         publication.session = Some("fixture-session".into());
@@ -2428,6 +2440,9 @@ fn steered_writer_continuation_waits_for_custody_and_stop_resolves_it() -> TestR
         exit.scope = RunStore::scope(&running);
         crate::dispatch_tests::seal_exit(&store, &exit)?;
         let mut publication = crate::tests::publication();
+        // A finished task has no follow-up (#3987). Leave retained edits so
+        // the queued turn still reaches the custody gate this test pins.
+        publication.outcome = Outcome::Uncommitted;
         publication.started_at = running.started_at;
         publication.finished_at = call.clock.wall_now()?;
         publication.session = Some("fixture-session".into());
@@ -2544,6 +2559,9 @@ fn steer_session_disagreement_keeps_accepted_text_and_refuses_fresh_fallback() -
     exit.scope = RunStore::scope(&running);
     crate::dispatch_tests::seal_exit(&store, &exit)?;
     let mut publication = crate::tests::publication();
+    // A finished task has no follow-up (#3987). Keep the session disagreement
+    // reachable by leaving retained edits for the queued turn.
+    publication.outcome = Outcome::Uncommitted;
     publication.session = Some("live-session".into());
     running = store.publish_terminal(id, running.revision, &publication, &exit, &call)?;
     assert!(matches!(running.state, AttemptState::Terminal { .. }));
@@ -2642,6 +2660,9 @@ fn first_frame_identity_mismatch_without_session_event_fences_natural_steer() ->
     exit.scope = RunStore::scope(&running);
     crate::dispatch_tests::seal_exit(&store, &exit)?;
     let mut publication = crate::tests::publication();
+    // A finished task has no follow-up (#3987). Leave retained edits so the
+    // first-frame identity fence is still evaluated for the queued turn.
+    publication.outcome = Outcome::Uncommitted;
     publication.session = Some("session-from-final-decoder".into());
     running = store.publish_terminal(id, running.revision, &publication, &exit, &call)?;
     assert!(matches!(running.state, AttemptState::Terminal { .. }));
