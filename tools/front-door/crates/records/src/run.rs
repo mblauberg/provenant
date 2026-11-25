@@ -1584,9 +1584,7 @@ impl TerminalCause {
             Self::TokenBudget => "token budget exhausted; provenant output ID",
             Self::SettlementFailure => "settlement failed; provenant output ID",
             Self::ProviderEarlyStop => "provider stopped early; provenant output ID",
-            Self::ProviderStalled => {
-                "provider stalled (no output past threshold); provenant output ID"
-            }
+            Self::ProviderStalled => "provider stalled (no output); provenant output ID",
             Self::FreePoolQuota => "free-pool quota exhausted; provenant output ID",
             Self::CommandUnavailable => "command unavailable; provenant output ID",
             Self::HostNativeUnconfigured => "host-native unconfigured; provenant output ID",

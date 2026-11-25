@@ -2748,7 +2748,7 @@ fn stall_age_comes_only_from_output_and_live_presence() -> TestResult {
     let store = RunStore::open(&context, &call)?;
     let run = crate::tests::input();
     store.create(&run, &call)?;
-    let mut record = store.mark_starting(
+    store.mark_starting(
         &store.record(run.attempt_id, &call)?,
         &crate::tests::route(),
         &[],
@@ -2756,6 +2756,11 @@ fn stall_age_comes_only_from_output_and_live_presence() -> TestResult {
         None,
         &call,
     )?;
+    // Silence is reported only for a running attempt with live custody; a
+    // starting attempt has not handed off to a provider yet.
+    let mut record = store
+        .claim(run.attempt_id, &clock, &call)?
+        .ok_or("not admitted")?;
     let last = WallTime::from_micros(1_000_000)?;
     let now = WallTime::from_micros(32_000_000)?;
     record.last_output_at = Some(last);

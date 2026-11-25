@@ -313,11 +313,13 @@ fn provider_stall_threshold_and_policy_are_overridable_with_a_source() {
         config.origins["providers.fixture-provider.stall_after_seconds"],
         Origin::User { .. }
     ));
+    // The compact agent-facing surface documents named adapters, not arbitrary
+    // provider ids; check the new knobs against one of those adapters.
     assert!(crate::knobs::documented_field(
-        "providers.fixture-provider.stall_after_seconds"
+        "providers.codex.stall_after_seconds"
     ));
     assert!(crate::knobs::documented_field(
-        "providers.fixture-provider.stall_policy"
+        "providers.codex.stall_policy"
     ));
 
     let defaults = load::<&[u8]>(&roots(), None).unwrap();
