@@ -2474,12 +2474,24 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
     ) -> Result<Option<provenant_fabric_runtime::graph::DeliveryPublication>, Self::Error> {
         self.execute_delivery_publication_inner(&request).map(Some)
     }
+    fn seed_delivery_adoption(
+        &mut self,
+        request: provenant_fabric_runtime::graph::DeliveryAdoptionRequest<'_>,
+    ) -> Result<Option<provenant_fabric_runtime::graph::DeliveryPublication>, Self::Error> {
+        super::queue_adoption::revalidate(self.factory, &request, self.budget, self.cancel)
+            .map(Some)
+            .map_err(|reason| FacadeError::DispatchRefused {
+                fact: None,
+                disk: None,
+                reason: format!("cannot adopt pull request into queue item: {reason}"),
+            })
+    }
     fn admit_delivery_ci(
         &mut self,
         graph_id: &str,
         node_id: &str,
         head_sha: &str,
-        limit: usize,
+        ci_slots: &provenant_records::Sourced<usize>,
     ) -> Result<provenant_fabric_runtime::graph::DeliveryCiAdmission, Self::Error> {
         let owner = provenant_run::build::queue::CiLeaseOwner {
             project: self.factory.context.identity.project.to_string(),
@@ -2490,7 +2502,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         Ok(crate::admit::acquire_delivery_ci_lease(
             self.factory.context.roots.state.as_path(),
             owner,
-            limit,
+            ci_slots,
             self.factory.context.config.graph.launch_wait_seconds,
             self.cancel,
         ))
