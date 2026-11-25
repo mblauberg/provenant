@@ -2683,11 +2683,35 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         &mut self,
         request: provenant_fabric_runtime::graph::LandRequest<'_>,
     ) -> Result<provenant_fabric_runtime::graph::LandObservation, Self::Error> {
+        let execution = match provenant_fabric_runtime::graph::FileJournal::execution(
+            &self.factory.context.roots.state,
+            self.factory.context.identity.project,
+            request.graph_id,
+        ) {
+            Ok(Some(execution)) => execution,
+            Ok(None) => {
+                return Ok(provenant_fabric_runtime::graph::LandObservation::Pending {
+                    reason: format!(
+                        "cannot verify delivery queue policy for graph {}: saved execution is missing",
+                        request.graph_id
+                    ),
+                });
+            }
+            Err(error) => {
+                return Ok(provenant_fabric_runtime::graph::LandObservation::Pending {
+                    reason: format!(
+                        "cannot verify delivery queue policy for graph {}: {error}",
+                        request.graph_id
+                    ),
+                });
+            }
+        };
         // Graph landing submits through the one landing owner.
         Ok(crate::pr::land::graph_land(
             &self.factory.cwd,
             self.factory.context.roots.state.as_path(),
             &request,
+            execution.document.queue.is_some(),
             self.factory.workers,
         ))
     }

@@ -22,6 +22,8 @@ pub struct Request<'a> {
     pub approvals: Approvals<'a>,
     /// Heads and bases the caller pinned; an unpinned member lands as found.
     pub pins: &'a BTreeMap<u64, Pin>,
+    /// Queue items require fresh exact-head CI and a clean forge state at merge.
+    pub delivery_queue: bool,
 }
 #[derive(Debug, Default)]
 pub struct Report {
@@ -517,7 +519,7 @@ fn run_inner(
                 let checks = unmet.clone();
                 return cleanup_unpublished(Err(LandingError::UnmetGate(checks)), repo, &candidate);
             }
-            let decision = cleanup_unpublished(
+            let mut decision = cleanup_unpublished(
                 publish::decide_strategy(
                     forge,
                     request.target,
@@ -528,6 +530,23 @@ fn run_inner(
                 repo,
                 &candidate,
             )?;
+            if request.delivery_queue
+                && decision.mode == PublishMode::FastForward
+                && request.settings.publish == provenant_cli::domains::Publication::Auto
+            {
+                decision.mode = PublishMode::RestOrdered;
+                decision.reason =
+                    "delivery queue requires a forge merge bound to the current head".into();
+            }
+            if request.delivery_queue && decision.mode != PublishMode::RestOrdered {
+                return cleanup_unpublished(
+                    Err(LandingError::Refused(
+                        "delivery queue landing requires forge match-head publication".into(),
+                    )),
+                    repo,
+                    &candidate,
+                );
+            }
             let revalidated = publish::revalidate_with_reasons(
                 forge,
                 &mut request.approvals.at(repo, &candidate.base.clone()),
@@ -612,6 +631,7 @@ fn run_inner(
                         &candidate,
                         request.settings.method,
                         &request.policy.publication,
+                        request.delivery_queue,
                         &mut progress,
                         &mut |number| {
                             attempt.dispatched.get_or_insert_default().push(number);
@@ -861,6 +881,7 @@ pub(super) mod tests {
             &mut alarms,
             Request {
                 pins: &Default::default(),
+                delivery_queue: false,
                 approvals: Approvals::forge(),
                 numbers: &[],
                 target: "main",
@@ -1257,6 +1278,7 @@ pub(super) mod tests {
                 checks: vec![CheckEvidence {
                     name: "ci-status".into(),
                     issuer: None,
+                    app_id: None,
                     result: GateResult::Passed,
                 }],
                 issuer: None,
@@ -1544,6 +1566,7 @@ pub(super) mod tests {
             &mut FakeAlarms::default(),
             Request {
                 pins: &Default::default(),
+                delivery_queue: false,
                 approvals: Approvals::forge(),
                 numbers: &[1],
                 target: "main",
@@ -1704,6 +1727,7 @@ pub(super) mod tests {
             &mut FakeAlarms::default(),
             Request {
                 pins: &Default::default(),
+                delivery_queue: false,
                 approvals: Approvals::forge(),
                 numbers: &[1],
                 target: "main",
@@ -1735,6 +1759,7 @@ pub(super) mod tests {
             &mut alarms,
             Request {
                 pins: &Default::default(),
+                delivery_queue: false,
                 approvals: Approvals::forge(),
                 numbers: &[1],
                 target: "main",
@@ -3008,6 +3033,7 @@ pub(super) mod tests {
             &mut FakeAlarms::default(),
             Request {
                 pins: &Default::default(),
+                delivery_queue: false,
                 approvals: Approvals::forge(),
                 numbers: &[1, 2],
                 target: "main",
@@ -3068,6 +3094,7 @@ pub(super) mod tests {
         head_evidence.checks.push(CheckEvidence {
             name: "ci-status".into(),
             issuer: None,
+            app_id: None,
             result: GateResult::Passed,
         });
         forge.check_runs.insert(head, vec![head_evidence]);
@@ -3151,6 +3178,7 @@ pub(super) mod tests {
             &mut FakeAlarms::default(),
             Request {
                 pins: &Default::default(),
+                delivery_queue: false,
                 approvals: Approvals::forge(),
                 numbers: &[1, 2],
                 target: "main",
@@ -3208,6 +3236,7 @@ pub(super) mod tests {
             &mut FakeAlarms::default(),
             Request {
                 pins: &Default::default(),
+                delivery_queue: false,
                 approvals: Approvals::forge(),
                 numbers: &[1, 2],
                 target: "main",
@@ -3296,6 +3325,7 @@ pub(super) mod tests {
                 &mut alarms,
                 Request {
                     pins: &Default::default(),
+                    delivery_queue: false,
                     approvals: Approvals::forge(),
                     numbers: &[1],
                     target: "main",
