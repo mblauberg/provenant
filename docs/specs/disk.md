@@ -145,7 +145,9 @@ A census cut short by its bound or the sweep deadline is reported incomplete;
 an undecided candidate is kept, never treated as free. The report names how
 many settled candidates the pass decided, collected and deferred, with the
 known bytes reclaimed and the bytes still retained, or unknown when retained
-bytes were not measured. A preview labels reclaimable bytes and candidates it
+bytes were not measured. Deferred paths and byte observations refer to
+`attempt-scratch/<attempt-id>/tmp`; custody locks remain with the attempt record.
+A preview labels reclaimable bytes and candidates it
 would collect; a class not reached is reported as unmeasured. Partially removed
 bytes count as reclaimed, never as retained.
 - Why: a large or abandoned sweep must not prevent later collection, and a

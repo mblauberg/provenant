@@ -5000,21 +5000,21 @@ mod gc_preview_tests {
         let mut state = provenant_run::ProviderStateGc::default();
         for (index, bytes) in [(0, 4096), (1, 8192)] {
             state.attempt_tmp.push(provenant_run::AttemptTmpRemoval {
-                path: PathBuf::from(format!("/attempts/{index}/tmp")),
+                path: PathBuf::from(format!("/attempt-scratch/{index}/tmp")),
                 bytes,
             });
         }
         state.partial_tmp.push(provenant_run::AttemptTmpRemoval {
-            path: PathBuf::from("/attempts/2/tmp"),
+            path: PathBuf::from("/attempt-scratch/2/tmp"),
             bytes: 1024,
         });
         state.scratch_deferred.extend([
             provenant_run::DeferredScratch {
-                path: PathBuf::from("/attempts/2/tmp"),
+                path: PathBuf::from("/attempt-scratch/2/tmp"),
                 bytes: Some(512),
             },
             provenant_run::DeferredScratch {
-                path: PathBuf::from("/attempts/undecided/tmp"),
+                path: PathBuf::from("/attempt-scratch/undecided/tmp"),
                 bytes: None,
             },
         ]);

@@ -721,7 +721,13 @@ impl RunStore {
                     *tightened = parent.join(&*tightened);
                 }
                 if scratch.is_some() && report.attempt_tmp.len() == first_scratch {
-                    let temporary = attempt_path.join("tmp");
+                    let temporary = self
+                        .context
+                        .state_root
+                        .as_path()
+                        .join(crate::plan::ATTEMPT_SCRATCH)
+                        .join(&id)
+                        .join("tmp");
                     if !std::fs::symlink_metadata(&temporary)
                         .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
                     {

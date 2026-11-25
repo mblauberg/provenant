@@ -1499,8 +1499,11 @@ pub(super) fn gc_bounded_passes_collect_settled_scratch_and_keep_busy_custody() 
         input.request.task.writer = None;
         input.created_at = provenant_core::WallTime::from_micros(1)?;
         store.create(&input, &call)?;
-        let tmp = rig.state.join(format!("attempts/{}/tmp", input.attempt_id));
-        fs::DirBuilder::new().mode(0o700).create(&tmp)?;
+        let tmp = provenant_run::scratch_root(&rig.state, input.attempt_id).join("tmp");
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&tmp)?;
         fs::write(tmp.join("payload"), [1_u8; 8192])?;
         store.withdraw(
             input.attempt_id,
@@ -1523,7 +1526,11 @@ pub(super) fn gc_bounded_passes_collect_settled_scratch_and_keep_busy_custody() 
         census_roots.len() >= scratch.len(),
         "the census must see settled attempts"
     );
-    let held_attempt = Directory::open_anchor(scratch[0].parent().ok_or("attempt")?)?;
+    let held_id = scratch[0]
+        .parent()
+        .and_then(|root| root.file_name())
+        .ok_or("scratch attempt id")?;
+    let held_attempt = Directory::open_anchor(&rig.state.join("attempts").join(held_id))?;
     let held = held_attempt.try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)?;
     let mut previous = scratch.len();
     let mut saw_progress = false;
@@ -1547,10 +1554,26 @@ pub(super) fn gc_bounded_passes_collect_settled_scratch_and_keep_busy_custody() 
             first_scratch_report = Some(report.clone());
         }
         if progress["deferred"].as_u64().unwrap_or(0) > 0 {
-            saw_deferred = true;
             assert!(
                 progress["deferred_bytes"].is_null()
                     || progress["deferred_bytes"]
+                        .as_u64()
+                        .is_some_and(|bytes| bytes >= 8192),
+                "retained bytes are measured or explicitly unknown: {report}"
+            );
+        }
+        if let Some(deferred) = report["data"]["provider_state"]["scratch_deferred"]
+            .as_array()
+            .and_then(|entries| {
+                entries
+                    .iter()
+                    .find(|entry| entry["path"] == scratch[0].to_string_lossy().as_ref())
+            })
+        {
+            saw_deferred = true;
+            assert!(
+                deferred["bytes"].is_null()
+                    || deferred["bytes"]
                         .as_u64()
                         .is_some_and(|bytes| bytes >= 8192),
                 "retained bytes are measured or explicitly unknown: {report}"
