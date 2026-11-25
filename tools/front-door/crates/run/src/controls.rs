@@ -2624,22 +2624,27 @@ impl RunStore {
     /// live holder keeps the ordinary stop path and settles the attempt itself.
     fn cancel_vanished(
         &self,
-        id: AttemptId,
+        record: &AttemptRecord,
         reason: &str,
         call: &Request<'_>,
     ) -> Result<Option<CancelReceipt>> {
-        let record = self.record(id, call)?;
+        let id = record.attempt_id;
         if !matches!(&record.state, AttemptState::Running { .. }) {
             return Ok(None);
         }
-        let scope = Self::scope(&record);
+        let scope = Self::scope(record);
         let attempt = self.attempt_dir(id, false)?;
-        let Some(raw) = read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)? else {
+        let Ok(Some(raw)) = read_sealed(&attempt, "process-exit.json", RECORD_LIMIT) else {
             return Ok(None);
         };
         // Only the exit sealed for this generation proves this provider is gone.
-        let exit: provenant_supervisor::custody::StoredExit = crate::db::decode(&raw)?;
-        if exit.scope != scope {
+        let Ok(exit) = crate::db::decode::<provenant_supervisor::custody::StoredExit>(&raw) else {
+            return Ok(None);
+        };
+        if exit.schema_version != 1
+            || exit.scope != scope
+            || (exit.termination.is_none() && !exit.never_spawned)
+        {
             return Ok(None);
         }
         use provenant_supervisor::custody::HolderPresence;
@@ -2648,14 +2653,28 @@ impl RunStore {
         {
             return Ok(None);
         }
-        // Keep the owner's request as the disposition evidence. No holder
-        // exists to deliver it to, so the sealed exit carries the outcome.
-        let _ = custody::request_stop(
+        // Hold the same lease as settlement while publishing the decision.
+        // A pending terminal intent already belongs to recovery.
+        let Ok(_driver) = attempt.try_lock(
+            std::ffi::OsStr::new("settlement-driver.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+        ) else {
+            return Ok(None);
+        };
+        if read_sealed(&attempt, "terminal-pending.json", TERMINAL_RECORD_LIMIT)?.is_some() {
+            return Ok(None);
+        }
+        // The owner request is durable evidence, not proof of delivery.
+        if custody::request_stop(
             attempt,
             scope,
             record.verified_owner.unwrap_or(self.context.actor_id),
             StopReason::ExplicitCancellation,
-        );
+        )
+        .is_err()
+        {
+            return Ok(None);
+        }
         self.commit_stopped_after_exit(scope, reason, &exit, call)?;
         Ok(Some(CancelReceipt::Cancelled))
     }
@@ -2687,13 +2706,6 @@ impl RunStore {
         let mut pending_steer_parent = None;
         loop {
             let record = self.record(id, call)?;
-            // A sealed exit makes a Running attempt report as settling and
-            // leaves no provider to act on the stop. Settle it here unless a
-            // holder or driver still owns settlement, so stop never leaves
-            // the graph pending behind a vanished process.
-            if let Some(receipt) = self.cancel_vanished(id, reason, call)? {
-                return self.finish_graph_cancel(id, pending_steer_parent, receipt, call);
-            }
             if let AttemptState::Queued { .. } = record.state {
                 let now = call
                     .clock
@@ -2752,6 +2764,14 @@ impl RunStore {
                 drop(publication);
                 id = successor;
                 continue;
+            }
+            if follow_graph_successors
+                && let Some(receipt) = self.cancel_vanished(&current, reason, call)?
+            {
+                drop(publication);
+                let committed = self.record(id, call)?;
+                self.settle_cleanup(&committed, None, call);
+                return self.finish_graph_cancel(id, pending_steer_parent, receipt, call);
             }
             if matches!(&current.state, AttemptState::Terminal { .. }) {
                 // This is an owner intent only. It remains distinct from the

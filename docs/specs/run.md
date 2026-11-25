@@ -243,12 +243,14 @@ A delivered steer may preserve committed work while its authorised intent still 
 current explicit owner cancellation separately permits preservation under proven quiescent
 custody, including after an earlier steer or natural exit, and vetoes continuation without
 changing the provider's sealed stop cause. A replacement request invalidates an in-flight
-preservation token. A stop requested after a natural exit does not turn the finished attempt
-into a cancellation. A Running attempt whose sealed provider exit makes status report `settling`
-has a provider that can no longer act on a stop intent: when no holder or settlement driver is
-live, the stop settles it as cancelled from the provider's own exit, keeping that exit, the
-handoff and every captured artifact as evidence. A live holder still gets the ordinary stop
-request and settles the attempt itself; an active settlement driver keeps ownership of it.
+preservation token. An attempt stop requested after a natural exit does not turn the finished
+attempt into a cancellation. For graph stop, a Running attempt whose sealed provider exit makes
+status report `settling` has a provider that can no longer act on a stop intent: when no holder
+or settlement driver is live, the stop settles it as cancelled from the provider's own exit,
+keeping that exit, the handoff and every captured artifact as evidence. The owner stop does not
+prove delivery to the exited provider. Publication and crash replay retain that distinction.
+A live holder still gets the ordinary stop request and settles the attempt itself; an active
+settlement driver or an already sealed terminal intent keeps ownership of it.
 - Why: every stop reader needs the same meaning, and a steer must never cancel the work it
   intends to continue.
 - Owner: `crates/supervisor/src/custody.rs`, `crates/run/src/settlement.rs`

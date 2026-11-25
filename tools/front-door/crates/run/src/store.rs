@@ -722,12 +722,29 @@ impl RunStore {
                 else {
                     return Err(RunError::Conflict);
                 };
+                let owner_stopped_after_exit = outcome == Outcome::Cancelled
+                    && pending.terminal_evidence == Some(TerminalEvidence::ProcessExit)
+                    && matches!(
+                        pending.cancellation_disposition,
+                        Some(
+                            CancellationDisposition::Unknown
+                                | CancellationDisposition::AcknowledgedIneffective
+                        )
+                    )
+                    && matches!(
+                        provenant_supervisor::custody::read_stop_intent(&dir, Self::scope(&current)),
+                        Ok(provenant_supervisor::custody::StopIntentState::Requested(request))
+                            if request.reason == provenant_supervisor::machine::StopReason::ExplicitCancellation
+                                && request.requester == current.verified_owner.unwrap_or(self.context.actor_id)
+                    );
                 if (outcome == Outcome::Cancelled
+                    && !owner_stopped_after_exit
                     && !stored.never_spawned
                     && stored.cancel_delivered_before_exit != Some(true)
                     && !(pending.terminal_evidence == Some(TerminalEvidence::ImportCancellation)
                         && import_cancelled(&dir, Self::scope(&current))?))
                     || (outcome == Outcome::Cancelled
+                        && !owner_stopped_after_exit
                         && stored.never_spawned
                         && stored.stop_reason
                             != Some(
@@ -1695,7 +1712,8 @@ impl RunStore {
             next.cancellation_disposition = Some(CancellationDisposition::ImportEffective);
         } else if publication.outcome == Outcome::Cancelled
             && publication.terminal_cause != Some(TerminalCause::Steered)
-            && (!launched || cancellation_delivered == Some(true))
+            && ((!launched && next.terminal_evidence != Some(TerminalEvidence::ProcessExit))
+                || cancellation_delivered == Some(true))
         {
             next.cancellation_disposition = Some(CancellationDisposition::Effective);
         } else {
@@ -1939,7 +1957,7 @@ impl RunStore {
             session: old.session.clone(),
             partial_signals: old.partial_signals.clone(),
         };
-        let committed = self.commit_terminal(
+        self.commit_terminal(
             old,
             revision,
             &publication,
@@ -1947,10 +1965,9 @@ impl RunStore {
             outcome_exit,
             !exit.never_spawned,
             exit.cancel_delivered_before_exit,
-            false,
+            true,
             call,
         )?;
-        self.settle_cleanup(&committed, None, call);
         Ok(())
     }
 

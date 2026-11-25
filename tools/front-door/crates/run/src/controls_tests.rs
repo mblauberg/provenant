@@ -1999,6 +1999,7 @@ fn stop_settles_a_sealed_running_attempt_without_a_holder() -> TestResult {
         crate::artifacts::read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_some(),
         "sealed exit was discarded"
     );
+    assert_eq!(store.replay_terminal(id, &call)?.state, settled.state);
     assert_eq!(
         store.cancel_graph(id, "stop the vanished provider again", &call)?,
         (id, CancelReceipt::AlreadyTerminal)
