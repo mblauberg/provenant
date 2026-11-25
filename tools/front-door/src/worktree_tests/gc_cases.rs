@@ -103,6 +103,10 @@ pub(super) fn gc_cleanup_below_floor_starts_a_sweep() -> Result {
         fixture.settled.clone(),
         None::<provenant_run::WriterDeliveryReceipt>,
     ))?;
+    let before = fs::read_to_string(state.join("tick").join("gc-sweep-epoch"))
+        .ok()
+        .and_then(|epoch| epoch.trim().parse::<u64>().ok())
+        .unwrap_or(0);
     // Drive the production entry point with the rig's installed environment;
     // no volume has u64::MAX bytes free, so the real measurement is below it.
     let cleanup = command(&fixture.rig, &["internal", "lane-cleanup", &request])?;
@@ -117,10 +121,16 @@ pub(super) fn gc_cleanup_below_floor_starts_a_sweep() -> Result {
         "{}",
         String::from_utf8_lossy(&cleanup.stderr.bytes)
     );
-    let progress = state.join("tick").join("gc-progress.json");
-    let record: Value = serde_json::from_slice(&fs::read(&progress)?)?;
-    assert_eq!(record["trigger"], "scheduled", "{record}");
-    assert_eq!(record["released"], true, "{record}");
+    // A completed sweep clears its progress record; the sweep lease epoch is
+    // the durable evidence that a sweep acquired the lease and ran.
+    let epoch = fs::read_to_string(state.join("tick").join("gc-sweep-epoch"))?;
+    assert!(
+        epoch
+            .trim()
+            .parse::<u64>()
+            .is_ok_and(|epoch| epoch > before),
+        "sweep epoch did not advance past {before}: {epoch:?}"
+    );
     Ok(())
 }
 
