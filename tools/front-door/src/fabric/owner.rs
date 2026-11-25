@@ -5549,44 +5549,51 @@ mod peer_capture_tests {
             route_index: 0,
             attempt,
         };
-        let node = |worktree: Option<&str>, spec: &graph::AttemptSpec| graph::NodeInput {
-            writer_dirty_preflight: false,
-            review_launch: false,
-            require_skill_location: false,
-            settlement_retries: None,
-            prior_attempts: &[],
-            family_peers: &[],
-            context: provenant_records::run::WorkContext {
-                graph_id: Some("peer-writer-boundary".into()),
-                node_id: Some("write".into()),
-                attempt: Some(1),
-                ..Default::default()
-            },
-            read_roots: &[],
-            attachments: &[],
-            worktree,
-            fixture: None,
-            fixture_bytes: None,
-            capabilities: None,
-            capability_sources: None,
-            attempt: Some(spec),
-            distinct_from_attempts: &[],
-            require_distinct: false,
-            source_commit: None,
-            review_base: None,
-            title: "write",
-            prompt: "write",
-            required_verdict: None,
-            deadline_seconds: None,
-            inputs_dir: None,
-        };
-        let replay = |actor: &str| graph::Replay {
-            delivery: None,
-            branch: None,
-            fast_forward_only: false,
-            stored_ref: None,
-            launch_actor: actor,
-        };
+        fn node<'a>(
+            worktree: Option<&'a str>,
+            spec: &'a graph::AttemptSpec,
+        ) -> graph::NodeInput<'a> {
+            graph::NodeInput {
+                writer_dirty_preflight: false,
+                review_launch: false,
+                require_skill_location: false,
+                settlement_retries: None,
+                prior_attempts: &[],
+                family_peers: &[],
+                context: provenant_records::run::WorkContext {
+                    graph_id: Some("peer-writer-boundary".into()),
+                    node_id: Some("write".into()),
+                    attempt: Some(1),
+                    ..Default::default()
+                },
+                read_roots: &[],
+                attachments: &[],
+                worktree,
+                fixture: None,
+                fixture_bytes: None,
+                capabilities: None,
+                capability_sources: None,
+                attempt: Some(spec),
+                distinct_from_attempts: &[],
+                require_distinct: false,
+                source_commit: None,
+                review_base: None,
+                title: "write",
+                prompt: "write",
+                required_verdict: None,
+                deadline_seconds: None,
+                inputs_dir: None,
+            }
+        }
+        fn replay(actor: &str) -> graph::Replay<'_> {
+            graph::Replay {
+                delivery: None,
+                branch: None,
+                fast_forward_only: false,
+                stored_ref: None,
+                launch_actor: actor,
+            }
+        }
         // A caller path is sender-local and never crosses to the peer.
         let caller = owner
             .observe_or_start(
