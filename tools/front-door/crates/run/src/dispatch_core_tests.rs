@@ -198,7 +198,17 @@ fn terminal_read_only_review_reservation_is_not_a_custody_fence() -> TestResult 
     // generation-0 reservation. Match production layout so the fixture leaves
     // a real read-only reservation behind (#3844).
     record.generation = 1;
+    record.provider_launched = Some(true);
     let attempt = store.attempt_dir(record.attempt_id, false)?;
+    // Production hand-off creates the attempt's custody lock before the
+    // guardian takes a reservation. A launched review without that lock is a
+    // broken fixture, not custody evidence: custody_released must see a real
+    // hand-off layout before #3844's read-only release rule can be pinned.
+    let custody = attempt.try_lock(
+        std::ffi::OsStr::new("custody.lock"),
+        provenant_os::fs::LockMode::Exclusive,
+    )?;
+    drop(custody);
     let scope = RunStore::scope(&record);
     let lease = provenant_supervisor::custody::acquire_reader(
         attempt.try_clone()?,
