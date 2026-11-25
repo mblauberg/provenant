@@ -188,6 +188,8 @@ pub(super) fn revalidate(
         cancel,
         &factory.clock,
     )?;
+    let persisted: AdoptedPullRequest = serde_json::from_value(persisted)
+        .map_err(|_| "persisted queue adoption intent is invalid".to_owned())?;
     if !intent_matches(&persisted, intent) {
         return Err("adoption request differs from its authenticated queue intent".into());
     }
