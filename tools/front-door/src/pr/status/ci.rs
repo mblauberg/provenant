@@ -1,7 +1,9 @@
 //! Exact-head observations for deterministic graph gates.
 use super::{Check, encode, mark_conflict, required_checks, summarise_ci};
 use crate::pr::observer::{Check as Observed, Observer};
-use provenant_fabric_runtime::graph::{CiFailedCheck, CiObservation, CiState};
+use provenant_fabric_runtime::graph::{
+    CiFailedCheck, CiObservation, CiState, ConflictObservation, ConflictState,
+};
 use serde::Deserialize;
 use std::{path::Path, time::Duration};
 
@@ -47,6 +49,77 @@ pub(super) fn observe(
     });
     result.bound_failed_checks(failed_checks_max_bytes, max_failed_checks);
     result
+}
+
+/// Read mergeability before CI so a conflict is routed to rebase immediately.
+pub(super) fn observe_conflict(state: &Path, project: &Path, target: &str) -> ConflictObservation {
+    let read = |args: &[&str]| {
+        super::super::successful(
+            super::super::forge_execute(
+                state,
+                project,
+                args,
+                &provenant_config::ports::Request::within(READ_BUDGET),
+                false,
+                None,
+            )
+            .ok()?,
+        )
+        .ok()
+    };
+    observe_conflict_with(target, &read)
+}
+
+fn observe_conflict_with(
+    target: &str,
+    read: &dyn Fn(&[&str]) -> Option<Vec<u8>>,
+) -> ConflictObservation {
+    let unavailable = || ConflictObservation {
+        state: ConflictState::Unavailable,
+        head_sha: None,
+        summary: "mergeability observation unavailable".into(),
+    };
+    let Some(before) = resolve_head(target, read) else {
+        return unavailable();
+    };
+    let Some(mergeability) = mergeable(target, &before, read) else {
+        return ConflictObservation {
+            head_sha: Some(before.sha),
+            summary: "mergeability observation unavailable".into(),
+            ..unavailable()
+        };
+    };
+    let Some(after) = resolve_head(target, read) else {
+        return ConflictObservation {
+            head_sha: Some(before.sha),
+            summary: "target head unavailable after reading mergeability".into(),
+            ..unavailable()
+        };
+    };
+    if after != before {
+        return ConflictObservation {
+            state: ConflictState::Pending,
+            head_sha: Some(after.sha),
+            summary: format!(
+                "head superseded {} -> {}; waiting for mergeability",
+                before.sha, after.sha
+            ),
+        };
+    }
+    let (state, summary) = match mergeability.as_str() {
+        "MERGEABLE" => (ConflictState::Clear, "pull request is mergeable"),
+        "CONFLICTING" => (
+            ConflictState::Conflicting,
+            "pull request conflicts with its base",
+        ),
+        "UNKNOWN" => (ConflictState::Pending, "mergeability is still unknown"),
+        _ => return unavailable(),
+    };
+    ConflictObservation {
+        state,
+        head_sha: Some(before.sha),
+        summary: summary.into(),
+    }
 }
 
 fn policy_target(
@@ -184,6 +257,7 @@ fn observe_with(
             })
             .map(|evidence| CiFailedCheck {
                 extra: Default::default(),
+                job_id: evidence.job_id,
                 name: evidence.name,
                 url: evidence.url,
                 excerpt: evidence.excerpt,
@@ -324,7 +398,7 @@ mod tests {
 
     fn checks(sha: &str, status: &str, conclusion: Option<&str>) -> serde_json::Value {
         json!([{"check_runs":[{
-            "name":"build","head_sha":sha,"status":status,"conclusion":conclusion,
+            "id":1234,"name":"build","head_sha":sha,"status":status,"conclusion":conclusion,
             "details_url":"https://github.com/owner/repo/actions/runs/1",
             "output":{"title":"Build failed","summary":"error: expected a value","text":"src/main.rs:12"}
         }]}])
@@ -358,6 +432,7 @@ mod tests {
         assert_eq!(observation.check_names, ["build"]);
         assert_eq!(observation.failed_checks.len(), 1);
         assert_eq!(observation.failed_checks[0].name, "build");
+        assert_eq!(observation.failed_checks[0].job_id.as_deref(), Some("1234"));
         assert!(
             observation.failed_checks[0]
                 .url
@@ -555,14 +630,14 @@ mod tests {
     }
 
     #[test]
-    fn ci_probe_reports_a_conflicting_pr_instead_of_waiting_for_checks() {
+    fn ci_probe_reports_a_conflicting_pr_before_using_check_results() {
         for (check_pages, mergeable, expected) in [
             (json!([{"check_runs":[]}]), "CONFLICTING", CiState::Conflict),
             (json!([{"check_runs":[]}]), "MERGEABLE", CiState::Pending),
             (
                 checks(OLD, "completed", Some("failure")),
                 "CONFLICTING",
-                CiState::Failed,
+                CiState::Conflict,
             ),
         ] {
             let read = |args: &[&str]| {
@@ -594,6 +669,57 @@ mod tests {
                 _ => {}
             }
         }
+    }
+
+    #[test]
+    fn conflict_probe_maps_unknown_to_pending_and_binds_the_read_head() {
+        for (mergeability, expected) in [
+            ("CONFLICTING", ConflictState::Conflicting),
+            ("MERGEABLE", ConflictState::Clear),
+            ("UNKNOWN", ConflictState::Pending),
+        ] {
+            let reads = RefCell::new(Vec::new());
+            let read = |args: &[&str]| {
+                reads.borrow_mut().push(args.join(" "));
+                let value = if args
+                    .ends_with(&["--json", "headRefOid,headRepository,headRepositoryOwner"])
+                {
+                    pull(OLD)
+                } else if args.ends_with(&["--json", "mergeable"]) {
+                    json!({"mergeable":mergeability})
+                } else {
+                    return None;
+                };
+                serde_json::to_vec(&value).ok()
+            };
+            let observation = observe_conflict_with("123", &read);
+            assert_eq!(observation.state, expected);
+            assert_eq!(observation.head_sha.as_deref(), Some(OLD));
+            assert!(
+                !reads
+                    .borrow()
+                    .iter()
+                    .any(|call| call.contains("check-runs"))
+            );
+        }
+
+        let heads = Cell::new(0);
+        let read = |args: &[&str]| {
+            let value =
+                if args.ends_with(&["--json", "headRefOid,headRepository,headRepositoryOwner"]) {
+                    let count = heads.get();
+                    heads.set(count + 1);
+                    pull(if count == 0 { OLD } else { NEW })
+                } else if args.ends_with(&["--json", "mergeable"]) {
+                    json!({"mergeable":"CONFLICTING"})
+                } else {
+                    return None;
+                };
+            serde_json::to_vec(&value).ok()
+        };
+        let moved = observe_conflict_with("123", &read);
+        assert_eq!(moved.state, ConflictState::Pending);
+        assert_eq!(moved.head_sha.as_deref(), Some(NEW));
     }
 
     #[test]

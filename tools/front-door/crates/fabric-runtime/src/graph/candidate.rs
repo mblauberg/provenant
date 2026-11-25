@@ -48,9 +48,6 @@ impl CandidateError {
     fn from_admission(error: AdmissionError) -> Self {
         match error {
             AdmissionError::CloudPlacementRemoved => Self::CloudPlacementRemoved,
-            AdmissionError::DeliveryQueueUnsupported => {
-                Self::Plan("delivery queue contracts are not yet supported".into())
-            }
             AdmissionError::Cycle { node } => Self::Cycle { node },
             AdmissionError::WriterWorktree { node } => Self::WriterWorktree { node },
             AdmissionError::Schema(reason) => Self::Schema(reason),

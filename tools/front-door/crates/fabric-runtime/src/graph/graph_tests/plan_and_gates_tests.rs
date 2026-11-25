@@ -64,6 +64,128 @@ fn plan_fragment_target_is_checked_before_expansion_is_published() {
 }
 
 #[test]
+fn queue_gates_require_a_published_node_binding() {
+    for kind in ["ci", "conflict"] {
+        let mut document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version": 2, "graph_id": "published-head", "nodes": [{
+                "id":"gate", "kind":"gate", "access":"read_only",
+                "condition":{"type":kind, "target":"feature/example"}
+            }]
+        })).unwrap();
+        assert!(validate_plan(&document).is_ok());
+        document.queue = Some(QueueKnobs::default());
+        assert!(validate_plan(&document).is_err());
+    }
+}
+
+#[test]
+fn hygiene_is_bound_to_its_direct_writer_worktree() {
+    let mut document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 2, "graph_id": "hygiene-binding", "nodes": [
+            {"id":"writer", "prompt":"Write", "access":"worktree_write",
+             "worktree":"retained", "route":{"alias":"junior"}},
+            {"id":"hygiene", "kind":"hygiene", "access":"worktree_write",
+             "worktree":"retained", "depends_on":["writer"],
+             "source":{"type":"node", "node":"writer"}}
+        ]
+    })).unwrap();
+    assert!(validate_plan(&document).is_ok());
+    document.nodes[1].worktree = Some("other".into());
+    assert!(validate_plan(&document).is_err());
+}
+
+fn hygiene_graph() -> GraphDocument {
+    serde_json::from_value(serde_json::json!({
+        "schema_version": 2, "graph_id": "hygiene-scheduler", "nodes": [
+            {"id":"writer", "prompt":"Write", "access":"worktree_write",
+             "worktree":"retained", "route":{"alias":"junior"}},
+            {"id":"hygiene", "kind":"hygiene", "access":"worktree_write",
+             "worktree":"retained", "depends_on":["writer"],
+             "source":{"type":"node", "node":"writer"}}
+        ]
+    }))
+    .unwrap()
+}
+
+fn hygiene_writer_observation() -> AttemptObservation {
+    let mut observation = terminal_with_result(AttemptOutcome::Succeeded, "Writer handoff");
+    let AttemptObservation::Terminal {
+        attempt_ref,
+        branch,
+        commit,
+        ..
+    } = &mut observation
+    else {
+        unreachable!()
+    };
+    *attempt_ref = Some("host/attempt-1".into());
+    *branch = Some("retained-branch".into());
+    *commit = Some("b".repeat(40));
+    observation
+}
+
+#[test]
+fn hygiene_scheduler_runs_after_writer_and_publishes_its_typed_head() {
+    let document = hygiene_graph();
+    let mut owner = FakeOwner {
+        observations: VecDeque::from([hygiene_writer_observation()]),
+        hygiene_outcomes: VecDeque::from([provenant_records::graph::HygieneOutcome {
+            kind: provenant_records::graph::HygieneOutcomeKind::Clean,
+            before_head: Some("b".repeat(40)),
+            after_head: Some("c".repeat(40)),
+            handoff: None,
+        }]),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    let hygiene = &run.checkpoint.nodes[1];
+    assert_eq!(hygiene.state, NodeState::Succeeded);
+    assert_eq!(owner.hygiene_calls, 1);
+    assert_eq!(owner.hygiene_requests[0].1, "a".repeat(40));
+    assert_eq!(owner.hygiene_requests[0].2, "b".repeat(40));
+    let outputs = hygiene.outputs.as_ref().unwrap();
+    assert_eq!(
+        outputs.hygiene.as_ref().unwrap().kind,
+        provenant_records::graph::HygieneOutcomeKind::Clean
+    );
+    assert_eq!(outputs.commit.as_deref(), Some("c".repeat(40).as_str()));
+    assert_eq!(outputs.branch.as_deref(), Some("retained-branch"));
+    assert!(outputs.hygiene.as_ref().unwrap().handoff.is_some());
+    let replay = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(replay.checkpoint, run.checkpoint);
+    assert_eq!(owner.hygiene_calls, 1);
+}
+
+#[test]
+fn hygiene_error_park_replays_the_saved_transition_once() {
+    let document = hygiene_graph();
+    let request_id = provenant_core::HumanRequestId::from_bytes([77; 16]);
+    let mut owner = FakeOwner {
+        observations: VecDeque::from([hygiene_writer_observation()]),
+        hygiene_outcomes: VecDeque::from([provenant_records::graph::HygieneOutcome {
+            kind: provenant_records::graph::HygieneOutcomeKind::Error,
+            before_head: Some("b".repeat(40)),
+            after_head: Some("b".repeat(40)),
+            handoff: None,
+        }]),
+        park_receipt: Some(request_id),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let first = advance(&document, &mut owner, &mut journal).unwrap();
+    let park = first.checkpoint.nodes[1].delivery_park.as_ref().unwrap();
+    assert_eq!(park.reason, provenant_records::graph::ParkReason::OperationError);
+    assert_eq!(park.request_id, Some(request_id));
+    assert_eq!(owner.hygiene_calls, 1);
+    assert_eq!(owner.park_calls.len(), 1);
+    let replay = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(replay.checkpoint, first.checkpoint);
+    assert_eq!(owner.hygiene_calls, 1);
+    assert_eq!(owner.park_calls.len(), 1);
+}
+
+#[test]
 fn gate_verdict_fixture_is_attempt_less_and_replays() {
     let document: GraphDocument = serde_json::from_value(serde_json::json!({
         "schema_version": 1, "graph_id": "g-test", "nodes": [
@@ -121,6 +243,7 @@ fn verdict_gate_matches_review_tokens() {
             gate_failure(
                 &condition,
                 &plan.nodes[1],
+                &plan,
                 &checkpoint,
                 &positions,
                 &Default::default()
@@ -141,12 +264,34 @@ fn verdict_gate_matches_review_tokens() {
         gate_failure(
             &condition,
             &plan.nodes[1],
+            &plan,
             &checkpoint,
             &positions,
             &Default::default()
         )
         .is_none()
     );
+}
+
+#[test]
+fn delivery_gate_accepts_only_complete_nonblocking_review_evidence() {
+    let (document, mut owner) = verdict_fixture(VerdictThreshold::All, &[Some("PASS")]);
+    let mut checkpoint = advance(&document, &mut owner, &mut MemoryJournal::default())
+        .unwrap()
+        .checkpoint;
+    let (mut plan, positions) = validate_plan(&document).unwrap();
+    plan.nodes[0].delivery_review = Some(DeliveryReviewSpec::default());
+    let condition = GateCondition::Verdict {
+        extra: Default::default(),
+        expected: "VERDICT: PASS".into(),
+        threshold: VerdictThreshold::All,
+    };
+    let output = checkpoint.nodes[0].outputs.as_mut().unwrap();
+    output.verdict = Some("VERDICT: INCONCLUSIVE".into());
+    output.findings_available = Some(true);
+    assert!(gate_failure(&condition, &plan.nodes[1], &plan, &checkpoint, &positions, &Default::default()).is_none());
+    checkpoint.nodes[0].outputs.as_mut().unwrap().findings_available = None;
+    assert!(gate_failure(&condition, &plan.nodes[1], &plan, &checkpoint, &positions, &Default::default()).is_some());
 }
 
 #[test]

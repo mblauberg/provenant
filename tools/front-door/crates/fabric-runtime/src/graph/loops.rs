@@ -30,6 +30,124 @@ fn is_default_extension_rounds(value: &usize) -> bool {
     *value == 5
 }
 
+pub(super) fn tier_route(base: Option<&GraphRoute>, alias: &str) -> GraphRoute {
+    let mut route = base.cloned().unwrap_or_default();
+    route.model = None;
+    route.name = None;
+    route.adapter = None;
+    route.alias = Some(alias.to_owned());
+    route.tier = Some(alias.to_owned());
+    route
+}
+
+/// Nearest writer ancestor through delivery gates, hygiene and publication
+/// nodes. Dependencies are traversed breadth-first; ties use plan order so the
+/// most recently declared upstream writer owns the route.
+pub(super) fn nearest_writer_ancestor(node_index: usize, plan: &PlannedGraph) -> Option<usize> {
+    let node = plan.nodes.get(node_index)?;
+    let mut frontier: Vec<usize> = node
+        .dependencies()
+        .filter_map(|dependency| {
+            plan.nodes
+                .iter()
+                .position(|candidate| candidate.id == *dependency)
+        })
+        .collect();
+    let mut visited = std::collections::BTreeSet::new();
+    while !frontier.is_empty() {
+        frontier.sort_unstable();
+        frontier.dedup();
+        frontier.retain(|index| visited.insert(*index));
+        if let Some(writer) = frontier
+            .iter()
+            .rev()
+            .copied()
+            .find(|index| plans::writer(&plan.nodes[*index]))
+        {
+            return Some(writer);
+        }
+        frontier = frontier
+            .into_iter()
+            .flat_map(|index| {
+                plan.nodes[index]
+                    .dependencies()
+                    .filter_map(|dependency| {
+                        plan.nodes
+                            .iter()
+                            .position(|candidate| candidate.id == *dependency)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+    }
+    None
+}
+
+pub(super) fn escalation_owner<'a>(
+    node_index: usize,
+    plan: &'a PlannedGraph,
+) -> Option<(usize, &'a EscalateSpec)> {
+    let node = plan.nodes.get(node_index)?;
+    if let Some(round) = &node.round
+        && let Some((index, owner)) = plan
+            .nodes
+            .iter()
+            .enumerate()
+            .find(|(_, candidate)| candidate.id == round.loop_id)
+        && let Some(spec) = owner.escalate.as_ref()
+    {
+        return Some((index, spec));
+    }
+    if plans::writer(node)
+        && let Some(spec) = node.escalate.as_ref()
+    {
+        return Some((node_index, spec));
+    }
+    let writer_index = nearest_writer_ancestor(node_index, plan)?;
+    let writer = &plan.nodes[writer_index];
+    if let Some(round) = &writer.round
+        && let Some((owner_index, owner)) = plan
+            .nodes
+            .iter()
+            .enumerate()
+            .find(|(_, candidate)| candidate.id == round.loop_id)
+        && let Some(spec) = owner.escalate.as_ref()
+    {
+        return Some((owner_index, spec));
+    }
+    writer.escalate.as_ref().map(|spec| (writer_index, spec))
+}
+
+pub(super) fn escalation_rung(
+    node_index: usize,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+) -> Option<usize> {
+    let (owner, spec) = escalation_owner(node_index, plan)?;
+    let rung = checkpoint
+        .nodes
+        .get(owner)?
+        .escalation
+        .as_ref()
+        .map_or(0, |state| state.rung);
+    (rung < spec.ladder.len()).then_some(rung)
+}
+
+pub(super) fn delivery_route(
+    node_index: usize,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+) -> Option<(GraphRoute, usize)> {
+    let node = plan.nodes.get(node_index)?;
+    if node.access != AccessMode::WorktreeWrite || node.kind == Some(NodeKind::Hygiene) {
+        return None;
+    }
+    let (_, spec) = escalation_owner(node_index, plan)?;
+    let rung = escalation_rung(node_index, plan, checkpoint)?;
+    let alias = spec.ladder.get(rung)?;
+    Some((tier_route(node.routes.first(), alias), rung))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopRound {
     #[serde(flatten)]
@@ -297,6 +415,22 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
     }) {
         return Err("dependency".into());
     }
+    let outcome_edges: Vec<_> = document
+        .nodes
+        .iter()
+        .filter_map(|node| {
+            node.loop_body
+                .as_ref()?
+                .outcome_edge
+                .as_ref()
+                .map(|edge| (node.id.clone(), edge.node.clone()))
+        })
+        .collect();
+    for (loop_id, target) in &outcome_edges {
+        if target == loop_id || !declared.contains(target) {
+            return Err("loop outcome edge target must name a graph node outside its body".into());
+        }
+    }
     expanded_node_count(document, extensions)?;
     let mut expanded = document.clone();
     expanded.nodes.clear();
@@ -305,7 +439,19 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
             if node.kind == Some(NodeKind::Loop) {
                 return Err("loop requires a body".into());
             }
-            expanded.nodes.push(node.clone());
+            let mut node = node.clone();
+            if let Some(escalation) = &node.escalate
+                && node.access == AccessMode::WorktreeWrite
+                && let Some(alias) = escalation.ladder.first()
+            {
+                let base = node
+                    .route
+                    .as_ref()
+                    .or_else(|| node.routes.as_ref().and_then(|routes| routes.first()));
+                node.route = Some(tier_route(base, alias));
+                node.routes = None;
+            }
+            expanded.nodes.push(node);
             continue;
         };
         if node.kind != Some(NodeKind::Loop)
@@ -328,6 +474,21 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
         }
         let rounds = allowance(node, extensions);
         let mut body = spec.body.clone();
+        for child in &mut body {
+            if child.access != AccessMode::WorktreeWrite {
+                continue;
+            }
+            if let Some(escalation) = child.escalate.as_ref().or(node.escalate.as_ref())
+                && let Some(alias) = escalation.ladder.first()
+            {
+                let base = child
+                    .route
+                    .as_ref()
+                    .or_else(|| child.routes.as_ref().and_then(|routes| routes.first()));
+                child.route = Some(tier_route(base, alias));
+                child.routes = None;
+            }
+        }
         let mut writer = None;
         for child in &mut body {
             if child.id.starts_with("previous.") {
@@ -517,6 +678,24 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
                         target.clone()
                     };
                 }
+                if let Some(GateCondition::Conflict {
+                    target: CiTarget::Node { node: target, .. },
+                    ..
+                }) = &mut child.condition
+                {
+                    *target = if let Some(previous) = target.strip_prefix("previous.") {
+                        if round == 1 {
+                            return Err(
+                                "previous conflict target requires an initial node binding".into(),
+                            );
+                        }
+                        id(&node.id, round - 1, previous)
+                    } else if spec.body.iter().any(|node| &node.id == target) {
+                        id(&node.id, round, target)
+                    } else {
+                        target.clone()
+                    };
+                }
                 if child.depends_on.is_empty() && child.after_settled.is_empty() {
                     if round == 1 {
                         child.depends_on.extend(node.depends_on.clone());
@@ -607,7 +786,33 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
         boundary.depends_on.push(id(&node.id, rounds, &spec.until));
         expanded.nodes.push(boundary);
     }
+    for (loop_id, target_id) in outcome_edges {
+        let target = expanded
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == target_id)
+            .ok_or_else(|| {
+                "loop outcome edge target must name a graph node outside its body".to_owned()
+            })?;
+        if !target.depends_on.contains(&loop_id) {
+            target.depends_on.push(loop_id);
+        }
+    }
     Ok(expanded)
+}
+
+/// The selected branch, if `parent` is the loop boundary for `child`.
+pub(super) fn outcome_edge_for(
+    child: &PlannedNode,
+    parent: &PlannedNode,
+) -> Option<provenant_records::graph::LoopOutcome> {
+    parent
+        .loop_body
+        .as_ref()?
+        .outcome_edge
+        .as_ref()
+        .filter(|edge| edge.node == child.id)
+        .map(|edge| edge.outcome)
 }
 
 pub(super) fn inactive_round(
@@ -671,6 +876,9 @@ pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
             let mut fresh = NodeProgress {
                 delivery_loop: None,
                 escalation: None,
+                delivery_hygiene: None,
+                delivery_park: None,
+                conflict: None,
                 extra: Default::default(),
                 removed_requirements: n.removed_requirements.clone(),
                 children: n.composite_members.clone(),
@@ -758,6 +966,7 @@ pub(super) fn validate_progress(
     node: &PlannedNode,
     checkpoint: &GraphCheckpoint,
     positions: &BTreeMap<String, usize>,
+    queue: bool,
 ) -> Result<(), ()> {
     if checkpoint.ask_actor.is_none()
         || !progress.attempts.is_empty()
@@ -803,6 +1012,25 @@ pub(super) fn validate_progress(
         let expected = repair::terminal_outputs(node, checkpoint, positions, passed);
         progress.outputs == Some(expected)
     };
+    let park_pending = queue
+        && progress.delivery_park.as_ref().is_some_and(|park| {
+            park.reason == provenant_records::graph::ParkReason::LoopExhausted
+                && park.request_id.is_none()
+        });
+    let park_received = queue
+        && progress.delivery_park.as_ref().is_some_and(|park| {
+            park.reason == provenant_records::graph::ParkReason::LoopExhausted
+                && park.request_id.is_some()
+        });
+    let park_valid = match progress.delivery_park.as_ref() {
+        None => true,
+        Some(park) => {
+            queue
+                && park.reason == provenant_records::graph::ParkReason::LoopExhausted
+                && (park.request_id.is_none() && progress.state == NodeState::Running
+                    || park.request_id.is_some() && progress.state == NodeState::Blocked)
+        }
+    };
     let valid = match progress.state {
         NodeState::Succeeded => {
             !failed && settled && (passed || accepted || clean) && matches_output(true)
@@ -812,6 +1040,7 @@ pub(super) fn validate_progress(
                 && matches_output(false)
         }
         NodeState::Pending => progress.outputs.is_none(),
+        NodeState::Blocked if park_received => matches_output(false),
         NodeState::Blocked | NodeState::Skipped => {
             progress.outputs.is_none()
                 && node.depends_on.iter().any(|parent| {
@@ -821,9 +1050,10 @@ pub(super) fn validate_progress(
                     )
                 })
         }
-        NodeState::Running => false,
+        NodeState::Running => park_pending && settled && matches_output(false),
     };
     let valid = valid
+        && park_valid
         && (!repair::is_repair(node)
             || match (&progress.gate, progress.state) {
                 (Some(gate), NodeState::Succeeded | NodeState::Failed) => {
@@ -831,6 +1061,7 @@ pub(super) fn validate_progress(
                         && gate.on_fail == node.on_fail
                         && gate.reason.is_none() == gate.passed
                 }
+                (None, NodeState::Running) if park_pending => true,
                 (None, NodeState::Pending | NodeState::Skipped | NodeState::Blocked) => true,
                 _ => false,
             });
@@ -838,6 +1069,7 @@ pub(super) fn validate_progress(
 }
 
 pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
+    document: &GraphDocument,
     index: usize,
     spec: &LoopSpec,
     plan: &PlannedGraph,
@@ -847,6 +1079,22 @@ pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
     journal: &mut J,
 ) -> Result<Option<String>, GraphError<R::Error, J::Error>> {
     let node = &plan.nodes[index];
+    if let Some(park) = checkpoint.nodes[index].delivery_park.clone() {
+        super::park_delivery_transition(
+            document,
+            index,
+            park.reason,
+            park.attempt_key.as_ref(),
+            park.attempt_ref.as_deref(),
+            &park.handoff,
+            park.head.as_deref(),
+            &park.evidence,
+            owner,
+            journal,
+            checkpoint,
+        )?;
+        return Ok(None);
+    }
     let mut external = node.clone();
     external
         .depends_on
@@ -884,9 +1132,26 @@ pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
         .rev()
         .find_map(|e| e.strip_prefix(&format!("loop.{}.decision=", node.id)))
         .map(str::to_owned);
+    let queue_exhausted = document.queue.is_some()
+        && settled
+        && !passed
+        && !clean
+        && decision.as_deref() != Some("accept");
+    let mut loop_evidence: Vec<String> = if queue_exhausted {
+        body.iter()
+            .filter_map(|progress| progress.advance_error.clone())
+            .take(8)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    if queue_exhausted && loop_evidence.is_empty() {
+        loop_evidence.push(format!("bounded repair loop reached {rounds} rounds"));
+    }
     let state = if failed
         || decision.as_deref() == Some("stop")
         || repair::is_repair(node) && settled && !passed && !clean
+        || queue_exhausted
     {
         Some(NodeState::Failed)
     } else if passed || clean && settled || decision.as_deref() == Some("accept") && settled {
@@ -918,6 +1183,70 @@ pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
         checkpoint.nodes[index].loop_cause = None;
         refresh_pause(checkpoint);
         journal.save(checkpoint).map_err(GraphError::Journal)?;
+        if queue_exhausted
+            && checkpoint.nodes[index]
+                .delivery_park
+                .as_ref()
+                .is_none_or(|park| {
+                    park.reason == provenant_records::graph::ParkReason::LoopExhausted
+                })
+        {
+            let attempt_key = checkpoint.nodes[index]
+                .delivery_loop
+                .as_ref()
+                .map(|progress| progress.last_attempt.clone());
+            let source_index = attempt_key.as_ref().and_then(|key| {
+                plan.nodes
+                    .iter()
+                    .position(|candidate| candidate.id == key.node_id)
+            });
+            let source = source_index.and_then(|source_index| checkpoint.nodes.get(source_index));
+            let attempt_ref = attempt_key.as_ref().and_then(|key| {
+                source?
+                    .recorded_attempts()
+                    .find(|attempt| &attempt.key == key)
+                    .and_then(|attempt| attempt.attempt_ref.clone())
+            });
+            let head = source.and_then(|progress| {
+                progress
+                    .outputs
+                    .as_ref()
+                    .and_then(|outputs| outputs.commit.clone())
+                    .or_else(|| {
+                        progress
+                            .delivery_hygiene
+                            .as_ref()
+                            .and_then(|hygiene| hygiene.outcome.as_ref())
+                            .and_then(|outcome| outcome.after_head.clone())
+                    })
+            });
+            let handoff = source
+                .and_then(|progress| {
+                    progress
+                        .handoff
+                        .as_ref()
+                        .map(|handoff| handoff.note.clone())
+                })
+                .or_else(|| {
+                    source
+                        .and_then(|progress| progress.delivery_hygiene.as_ref())
+                        .and_then(|hygiene| hygiene.handoff.clone())
+                })
+                .unwrap_or_else(|| format!("loop {} exhausted after {rounds} rounds", node.id));
+            super::park_delivery_transition(
+                document,
+                index,
+                provenant_records::graph::ParkReason::LoopExhausted,
+                attempt_key.as_ref(),
+                attempt_ref.as_deref(),
+                &handoff,
+                head.as_deref(),
+                &loop_evidence,
+                owner,
+                journal,
+                checkpoint,
+            )?;
+        }
     } else if settled && dependency_state(node, plan, checkpoint, positions).is_none() {
         if checkpoint.nodes[index].loop_pause.is_none() {
             checkpoint.nodes[index].loop_pause_code = Some("loop_paused".into());

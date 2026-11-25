@@ -197,12 +197,13 @@ pub fn locate_request(
 /// Construct the inbox operation for one persisted delivery parking transition.
 /// The caller must persist and reuse `operation_id` and the complete input on
 /// replay; the inbox binds that ID to the content and returns the same receipt.
-/// TODO(#3972-s3): persist the transition and reconcile its receipt on tick.
+/// TODO(#3972-queue): attach a sealed tracker item when queue admission supplies one.
 pub fn delivery_park(
     session: String,
     operation_id: OperationId,
     work: RequestWork,
-    item: &str,
+    item: Option<&str>,
+    attempt_key: Option<&provenant_records::graph::AttemptKey>,
     reason: provenant_records::graph::ParkReason,
     handoff: &str,
     evidence: &[String],
@@ -214,8 +215,8 @@ pub fn delivery_park(
             .node
             .as_deref()
             .is_none_or(|node| node.trim().is_empty())
-        || work.attempt_id.is_none()
-        || item.trim().is_empty()
+        || (work.attempt_id.is_none() && attempt_key.is_none())
+        || item.is_some_and(|item| item.trim().is_empty())
     {
         return Err(InboxError::Invalid("delivery park identity"));
     }
@@ -227,6 +228,9 @@ pub fn delivery_park(
     let handoff = &handoff[..end];
     let body = serde_json::json!({
         "item": item,
+        "item_pending": item.is_none(),
+        "graph_id": work.graph,
+        "attempt_key": attempt_key,
         "reason": reason,
         "handoff": handoff,
         "handoff_truncated": truncated,

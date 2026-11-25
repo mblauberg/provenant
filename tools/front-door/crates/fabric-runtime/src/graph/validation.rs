@@ -4,6 +4,8 @@ pub(super) fn nodes_have_v2(nodes: &[GraphNode]) -> bool {
     nodes.iter().any(|node| {
         node.escalate.is_some()
             || node.delivery_review.is_some()
+            || node.kind == Some(NodeKind::Hygiene)
+            || matches!(node.condition, Some(GateCondition::Conflict { .. }))
             || node
                 .loop_body
                 .as_ref()
@@ -54,6 +56,8 @@ fn value_has_v2(value: &serde_json::Value) -> bool {
         serde_json::Value::Object(map) => {
             map.contains_key("escalate")
                 || map.contains_key("delivery_review")
+                || map.get("kind").and_then(serde_json::Value::as_str) == Some("hygiene")
+                || map.get("type").and_then(serde_json::Value::as_str) == Some("conflict")
                 || map.contains_key("outcome_edge")
                 || map.contains_key("family_group")
                 || map.contains_key("review_base")
@@ -412,6 +416,12 @@ pub(super) fn validate_flat_plan(
             return Err(node_plan_error(node, reason));
         }
         plans::validate_spec(node).map_err(|reason| node_plan_error(node, reason))?;
+        if node.delivery_review.is_some() && node.access != AccessMode::ReadOnly {
+            return Err(node_plan_error(
+                node,
+                "delivery review requires read-only access",
+            ));
+        }
         let is_composite = node.kind == Some(NodeKind::Composite);
         if is_composite != node.composite.is_some() {
             return Err(node_plan_error(
@@ -444,9 +454,37 @@ pub(super) fn validate_flat_plan(
             ));
         }
         land::validate_node(node).map_err(|reason| node_plan_error(node, reason))?;
+        let is_hygiene = node.kind == Some(NodeKind::Hygiene);
+        if is_hygiene {
+            let writer = match &node.source {
+                Some(SourceBinding::Node { node: source }) if node.depends_on.contains(source) => {
+                    positions.get(source).map(|index| &document.nodes[*index])
+                }
+                _ => None,
+            };
+            if node.access != AccessMode::WorktreeWrite
+                || node.route.is_some()
+                || node.routes.is_some()
+                || node.attempt.is_some()
+                || !node.prompt.is_empty()
+                || node.delivery.is_some()
+                || node.required_verdict.is_some()
+                || writer.is_none_or(|writer| {
+                    writer.access != AccessMode::WorktreeWrite
+                        || !matches!(writer.kind, None | Some(NodeKind::Task))
+                        || writer.worktree.is_none()
+                        || writer.worktree != node.worktree
+                })
+            {
+                return Err(node_plan_error(
+                    node,
+                    "hygiene requires a direct writer source and its retained worktree, with no agent configuration",
+                ));
+            }
+        }
         let is_gate = node.kind == Some(NodeKind::Gate);
         if is_gate != node.condition.is_some()
-            || !is_gate && node.loop_body.is_none() && node.on_fail.is_some()
+            || !is_gate && !is_hygiene && node.loop_body.is_none() && node.on_fail.is_some()
             || is_gate
                 && (node.route.is_some()
                     || node.routes.is_some()
@@ -510,8 +548,30 @@ pub(super) fn validate_flat_plan(
                 }
                 ci::validate_target(target, node, document)
                     .map_err(|reason| node_plan_error(node, reason))?;
+                if document.queue.is_some() && !matches!(target, CiTarget::Node { .. }) {
+                    return Err(node_plan_error(
+                        node,
+                        "delivery CI requires a published node target",
+                    ));
+                }
                 if !(1..=604800).contains(timeout_seconds) || !node.inputs.is_empty() {
                     return Err(node_plan_error(node, "invalid CI gate target or timeout"));
+                }
+            }
+            Some(GateCondition::Conflict { target, .. }) => {
+                ci::validate_target(target, node, document)
+                    .map_err(|reason| node_plan_error(node, reason))?;
+                if document.queue.is_some() && !matches!(target, CiTarget::Node { .. }) {
+                    return Err(node_plan_error(
+                        node,
+                        "delivery conflict gate requires a published node target",
+                    ));
+                }
+                if !node.inputs.is_empty() {
+                    return Err(node_plan_error(
+                        node,
+                        "conflict gate has no selected inputs",
+                    ));
                 }
             }
             Some(GateCondition::Budget { .. }) if !node.inputs.is_empty() => {
@@ -612,7 +672,13 @@ pub(super) fn validate_flat_plan(
         if document.delivery == Some(DeliveryMode::Pr) && node.delivery == Some(DeliveryMode::Pr) {
             return Err(node_plan_error(node, "graph PR is exclusive with node PRs"));
         }
-        if !is_gate && !is_loop && !is_composite && !is_decide && !is_land && node.prompt.is_empty()
+        if !is_gate
+            && !is_loop
+            && !is_composite
+            && !is_decide
+            && !is_land
+            && !is_hygiene
+            && node.prompt.is_empty()
             || plans::prompt(node).len() > limits.node_prompt_bytes
         {
             return Err(node_plan_error(node, "prompt size"));
@@ -631,7 +697,9 @@ pub(super) fn validate_flat_plan(
         }
 
         let routes = match (&node.route, &node.routes) {
-            (None, None) if is_gate || is_loop || is_composite || is_decide || is_land => {
+            (None, None)
+                if is_gate || is_loop || is_composite || is_decide || is_land || is_hygiene =>
+            {
                 Vec::new()
             }
             (Some(route), None) => vec![route.clone()],
@@ -792,6 +860,7 @@ pub(super) fn validate_flat_plan(
             acceptance_checks: node.acceptance_checks.clone(),
             loop_body: node.loop_body.clone(),
             escalate: node.escalate.clone(),
+            delivery_review: node.delivery_review.clone(),
             decide: node.decide.clone(),
             continues: node.continues.clone(),
             land: node.land.clone(),
@@ -803,7 +872,8 @@ pub(super) fn validate_flat_plan(
                     | NodeKind::Loop
                     | NodeKind::Composite
                     | NodeKind::Decide
-                    | NodeKind::Land,
+                    | NodeKind::Land
+                    | NodeKind::Hygiene,
                 ) => node.kind,
                 _ => None,
             },
@@ -942,6 +1012,7 @@ pub(super) fn validate_flat_plan(
             integration_branch: document.integration_branch.clone(),
             delivery: document.delivery.clone(),
             decision_session: document.decision_session.clone(),
+            queue: document.queue.clone(),
             schema_version: document.schema_version,
             graph_id: document.graph_id.clone(),
             nodes: topological_nodes,
@@ -1479,8 +1550,13 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                 "worktree must match expanded plan",
             ),
             (
-                progress.attempts.len() > node.routes.len(),
-                "attempt count must not exceed configured routes",
+                progress.attempts.len()
+                    > node.routes.len().saturating_add(
+                        plan.queue
+                            .as_ref()
+                            .map_or(0, |queue| queue.prep_retries.value),
+                    ),
+                "attempt count must not exceed configured routes and preparation retries",
             ),
             (
                 progress
@@ -1494,22 +1570,67 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                 return Err(bad(invariant));
             }
         }
+        let parked = if let Some(park) = &progress.delivery_park {
+            let valid = plan.queue.is_some()
+                && !park.operation_id.is_empty()
+                && park.operation_id == park.transition_id
+                && park.operation_id.len() <= 256
+                && park.handoff.len() <= 1024
+                && park.evidence.len() <= 8
+                && park.evidence.iter().all(|entry| entry.len() <= 512)
+                && park
+                    .attempt_key
+                    .as_ref()
+                    .is_none_or(|key| key.graph_id == plan.graph_id)
+                && park
+                    .head
+                    .as_deref()
+                    .is_none_or(|head| head.parse::<provenant_core::GitOid>().is_ok())
+                && matches!(
+                    (progress.state, park.request_id.is_some()),
+                    (NodeState::Running, false) | (NodeState::Blocked, true)
+                );
+            if !valid {
+                return Err(bad(
+                    "delivery park intent and receipt must match the graph and state",
+                ));
+            }
+            true
+        } else {
+            false
+        };
         if let Some(condition) = &node.condition {
             let valid = match (&progress.gate, progress.state) {
                 (None, NodeState::Pending | NodeState::Blocked | NodeState::Skipped) => {
-                    progress.outputs.is_none() && progress.ci.is_none()
+                    progress.outputs.is_none()
+                        && progress.ci.is_none()
+                        && progress.conflict.is_none()
                 }
                 (None, NodeState::Running) => {
-                    matches!(node.condition, Some(GateCondition::Ci { .. }))
+                    ((matches!(node.condition, Some(GateCondition::Ci { .. }))
                         && progress.ci.as_ref().is_some_and(|ci| {
                             ci.state == CiState::Pending
                                 && ci.wake_at.is_some()
                                 && ci.pending_observations > 0
-                        })
+                        }))
+                        || (matches!(node.condition, Some(GateCondition::Conflict { .. }))
+                            && progress.conflict.as_ref().is_some_and(|conflict| {
+                                conflict.state == ConflictState::Pending
+                                    && conflict.wake_at.is_some()
+                                    && conflict.pending_observations > 0
+                            })))
                         && progress.outputs.is_none()
                         && dependency_state(node, plan, checkpoint, &positions).is_none()
                 }
-                (Some(result), NodeState::Succeeded | NodeState::Failed) => {
+                (
+                    Some(result),
+                    NodeState::Succeeded
+                    | NodeState::Failed
+                    | NodeState::Running
+                    | NodeState::Blocked,
+                ) if !matches!(progress.state, NodeState::Running | NodeState::Blocked)
+                    || parked =>
+                {
                     let mut expected = if matches!(condition, GateCondition::Ci { .. }) {
                         ci::outputs(result.passed, progress.ci.as_ref())
                     } else {
@@ -1524,15 +1645,41 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                     {
                         expected.findings_available = None;
                     }
-                    result.passed == (progress.state == NodeState::Succeeded)
-                        && result.passed == result.reason.is_none()
+                    (if parked {
+                        !result.passed
+                    } else {
+                        result.passed == (progress.state == NodeState::Succeeded)
+                    }) && result.passed == result.reason.is_none()
                         && result.on_fail == node.on_fail
                         && progress.outputs == Some(expected)
                         && dependency_state(node, plan, checkpoint, &positions).is_none()
                 }
                 _ => false,
             };
+            let bound_head_valid = if plan.queue.is_some() && progress.gate.is_some() {
+                let (target, observed) = match condition {
+                    GateCondition::Ci { target, .. } => (
+                        Some(target),
+                        progress.ci.as_ref().and_then(|ci| ci.head_sha.as_ref()),
+                    ),
+                    GateCondition::Conflict { target, .. } => (
+                        Some(target),
+                        progress
+                            .conflict
+                            .as_ref()
+                            .and_then(|conflict| conflict.head_sha.as_ref()),
+                    ),
+                    _ => (None, None),
+                };
+                target.is_none_or(|target| {
+                    ci::published_head(target, checkpoint, true).as_ref() == observed
+                        && observed.is_some()
+                })
+            } else {
+                true
+            };
             if !valid
+                || !bound_head_valid
                 || (progress.state != NodeState::Running
                     && progress.ci.as_ref().is_some_and(|ci| ci.wake_at.is_some()))
                 || progress
@@ -1546,12 +1693,31 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                 || (matches!(node.condition, Some(GateCondition::Ci { .. }))
                     && progress.gate.is_some()
                     && progress.ci.is_none())
+                || (progress.conflict.is_some()
+                    && !matches!(node.condition, Some(GateCondition::Conflict { .. })))
+                || (matches!(node.condition, Some(GateCondition::Conflict { .. }))
+                    && progress.gate.as_ref().is_some_and(|gate| {
+                        progress.conflict.as_ref().is_none_or(|conflict| {
+                            conflict.wake_at.is_some()
+                                || conflict.head_sha.as_deref().is_none_or(|head| {
+                                    head.parse::<provenant_core::GitOid>().is_err()
+                                })
+                                || if gate.passed {
+                                    conflict.state != ConflictState::Clear
+                                } else {
+                                    conflict.state != ConflictState::Conflicting
+                                }
+                        })
+                    }))
             {
                 return Err(bad(
                     "gate evidence must match state, dependencies and condition",
                 ));
             }
-        } else if progress.gate.is_some() && !repair::is_repair(node) || progress.ci.is_some() {
+        } else if progress.gate.is_some() && !repair::is_repair(node)
+            || progress.ci.is_some()
+            || progress.conflict.is_some()
+        {
             return Err(bad("only gate nodes may carry gate or CI evidence"));
         }
         if !when::holds(&node.when) {
@@ -1580,7 +1746,7 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
             ));
         }
         if node.loop_body.is_some() {
-            loops::validate_progress(progress, node, checkpoint, &positions)
+            loops::validate_progress(progress, node, checkpoint, &positions, plan.queue.is_some())
                 .map_err(|_| bad("loop progress must match round state"))?;
             continue;
         }
@@ -1679,6 +1845,51 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                 return Err(bad("resolved source commit must match its binding"));
             }
         }
+        if node.kind == Some(NodeKind::Hygiene) {
+            let intent = progress.delivery_hygiene.as_ref();
+            let outcome = intent.and_then(|intent| intent.outcome.as_ref());
+            let output = progress
+                .outputs
+                .as_ref()
+                .and_then(|outputs| outputs.hygiene.as_ref());
+            let valid = progress.attempts.is_empty()
+                && intent.is_none_or(|intent| {
+                    !intent.operation_id.is_empty()
+                        && intent.input_head.parse::<provenant_core::GitOid>().is_ok()
+                })
+                && output == outcome
+                && match progress.state {
+                    NodeState::Pending | NodeState::Skipped => {
+                        intent.is_none() && progress.outputs.is_none()
+                    }
+                    NodeState::Running => intent.is_some(),
+                    NodeState::Succeeded => outcome.is_some_and(|outcome| {
+                        outcome.kind == provenant_records::graph::HygieneOutcomeKind::Clean
+                    }),
+                    NodeState::Failed => outcome.is_some_and(|outcome| {
+                        matches!(
+                            outcome.kind,
+                            provenant_records::graph::HygieneOutcomeKind::NoCommit
+                                | provenant_records::graph::HygieneOutcomeKind::UncommittedEdits
+                        )
+                    }),
+                    NodeState::Blocked => {
+                        (intent.is_none() && progress.outputs.is_none())
+                            || (outcome.is_some_and(|outcome| {
+                                outcome.kind == provenant_records::graph::HygieneOutcomeKind::Error
+                            }) && progress
+                                .delivery_park
+                                .as_ref()
+                                .is_some_and(|park| park.request_id.is_some()))
+                    }
+                };
+            if !valid {
+                return Err(bad(
+                    "hygiene intent, outcome and park receipt must match its state",
+                ));
+            }
+            continue;
+        }
         if node.condition.is_some() {
             continue;
         }
@@ -1693,6 +1904,32 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                 ));
             }
             previous_number = attempt.key.attempt;
+        }
+        let escalation_policy = plans::writer(node)
+            .then(|| loops::escalation_owner(index, plan).map(|(_, spec)| spec))
+            .flatten();
+        let preparation_refused = |attempt: &GraphAttempt| {
+            plan.queue.is_some()
+                && attempt.state == AttemptState::Terminal
+                && !attempt.launched
+                && attempt.host_refused_before_acceptance
+                && attempt
+                    .outcome
+                    .is_some_and(|outcome| matches!(outcome, AttemptOutcome::PreparationRefused(_)))
+        };
+        if progress
+            .attempts
+            .iter()
+            .filter(|attempt| preparation_refused(attempt))
+            .count()
+            > plan
+                .queue
+                .as_ref()
+                .map_or(0, |queue| queue.prep_retries.value.saturating_add(1))
+        {
+            return Err(bad(
+                "preparation refusals must respect the sealed retry bound",
+            ));
         }
         for (index, attempt) in progress.attempts.iter().enumerate() {
             if document.schema_version >= 2 && attempt.input_manifest.is_none() {
@@ -1729,10 +1966,25 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                     ));
                 }
             }
+            let expected_route_index = if index == 0 {
+                0
+            } else {
+                let previous = &progress.attempts[index - 1];
+                usize::from(previous.key.route_index) + usize::from(!preparation_refused(previous))
+            };
+            let route_matches = match (escalation_policy, attempt.escalation_rung) {
+                (Some(policy), Some(rung)) => policy.ladder.get(rung).is_some_and(|alias| {
+                    node.routes
+                        .get(expected_route_index)
+                        .is_some_and(|route| attempt.route == loops::tier_route(Some(route), alias))
+                }),
+                (None, None) => node.routes.get(expected_route_index) == Some(&attempt.route),
+                _ => false,
+            };
             if attempt.key.graph_id != plan.graph_id
                 || attempt.key.node_id != node.id
-                || usize::from(attempt.key.route_index) != index
-                || attempt.route != node.routes[index]
+                || usize::from(attempt.key.route_index) != expected_route_index
+                || !route_matches
                 || (attempt.review_substitution
                     && (index == 0
                         || !(review_substitution(node, &progress.attempts[index - 1])
@@ -1746,7 +1998,8 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                 || (attempt.state == AttemptState::Terminal) != attempt.outcome.is_some()
                 || (index + 1 < progress.attempts.len()
                     && (attempt.state != AttemptState::Terminal
-                        || !(review_substitution(node, attempt)
+                        || !(preparation_refused(attempt)
+                            || review_substitution(node, attempt)
                             || attempt.outcome.is_some_and(|outcome| {
                                 fallback_candidate(outcome, node.access, attempt.launched)
                             }))))
@@ -1771,11 +2024,21 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
             NodeState::Running => match last {
                 Some(attempt) if attempt.state != AttemptState::Terminal => true,
                 Some(attempt) => {
-                    (review_substitution(node, attempt)
-                        || attempt.outcome.is_some_and(|outcome| {
-                            fallback_candidate(outcome, node.access, attempt.launched)
-                        }))
-                        && progress.attempts.len() < node.routes.len()
+                    (preparation_refused(attempt)
+                        && progress
+                            .attempts
+                            .iter()
+                            .filter(|attempt| preparation_refused(attempt))
+                            .count()
+                            <= plan
+                                .queue
+                                .as_ref()
+                                .map_or(0, |queue| queue.prep_retries.value))
+                        || ((review_substitution(node, attempt)
+                            || attempt.outcome.is_some_and(|outcome| {
+                                fallback_candidate(outcome, node.access, attempt.launched)
+                            }))
+                            && usize::from(attempt.key.route_index) + 1 < node.routes.len())
                 }
                 // Writer binding and provisioning wait before the first
                 // attempt exists. Only the bounded contention state emitted by
@@ -1826,13 +2089,15 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                         ) => true,
                         Some(outcome) if outcome != AttemptOutcome::Succeeded => {
                             !fallback_candidate(outcome, node.access, attempt.launched)
-                                || progress.attempts.len() == node.routes.len()
+                                || usize::from(attempt.key.route_index) + 1 == node.routes.len()
                         }
                         _ => false,
                     }
             }),
         };
-        if !state_is_consistent {
+        if !state_is_consistent
+            && !(parked && last.is_none_or(|attempt| attempt.state == AttemptState::Terminal))
+        {
             return Err(bad(
                 "node state must agree with terminal attempt outcome or validated planner fallback",
             ));

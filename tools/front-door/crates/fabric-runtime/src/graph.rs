@@ -20,7 +20,7 @@ use thiserror::Error;
 
 mod asks;
 mod ci;
-pub use ci::{CiFailedCheck, CiTarget};
+pub use ci::{CiFailedCheck, CiTarget, ConflictEvidence, ConflictObservation, ConflictState};
 mod budget;
 mod candidate;
 mod canonical;
@@ -108,16 +108,18 @@ pub use model::*;
 /// `plan.review` frames the subject rather than reviewing it.
 pub fn is_review_node(node: &GraphNode) -> bool {
     node.access == AccessMode::ReadOnly
-        && (node.role.as_deref().is_some_and(|role| {
-            role == "lens" || role.starts_with("lens.") || role.starts_with("review.")
-        }) || matches!(
-            node.review_behaviour,
-            Some(
-                template::ReviewBehaviour::Lens
-                    | template::ReviewBehaviour::Verify
-                    | template::ReviewBehaviour::Synthesis
-            )
-        ))
+        && (node.delivery_review.is_some()
+            || node.role.as_deref().is_some_and(|role| {
+                role == "lens" || role.starts_with("lens.") || role.starts_with("review.")
+            })
+            || matches!(
+                node.review_behaviour,
+                Some(
+                    template::ReviewBehaviour::Lens
+                        | template::ReviewBehaviour::Verify
+                        | template::ReviewBehaviour::Synthesis
+                )
+            ))
 }
 
 pub(crate) use next_attempt::*;
@@ -326,6 +328,15 @@ pub const UPSTREAM_INPUT_LIST_LIMIT: usize = 64;
 /// Narrow read-only host interface for CI checks.
 pub trait CiStatus {
     fn host_stamp(&self) -> Option<CiHostStamp>;
+    /// Observe PR mergeability before the graph waits on CI for the same head.
+    /// Hosts without this probe fail closed as unavailable.
+    fn observe_conflict(&mut self, _target: &str) -> ConflictObservation {
+        ConflictObservation {
+            state: ConflictState::Unavailable,
+            head_sha: None,
+            summary: "mergeability observation unavailable".into(),
+        }
+    }
     fn observe_ci(
         &mut self,
         target: &str,
@@ -333,6 +344,51 @@ pub trait CiStatus {
         failed_checks_max_bytes: usize,
         max_failed_checks: usize,
     ) -> CiObservation;
+}
+
+/// The host work required by one persisted hygiene node. Identity and the
+/// attempt's input head are sealed in the checkpoint before this call.
+pub struct HygieneRequest<'a> {
+    pub graph_id: &'a str,
+    pub node_id: &'a str,
+    pub operation_id: &'a str,
+    pub source_node: &'a str,
+    pub source_key: &'a AttemptKey,
+    pub source_attempt: &'a str,
+    pub worktree: &'a str,
+    pub worktree_identity: Option<&'a provenant_records::run::SourceIdentity>,
+    pub input_head: &'a str,
+    pub expected_head: &'a str,
+    pub handoff: Option<&'a str>,
+}
+
+/// Typed result plus a bounded operator diagnostic for an unsuccessful
+/// formatter or commit operation.
+pub struct HygieneExecution {
+    pub outcome: provenant_records::graph::HygieneOutcome,
+    pub branch: Option<String>,
+    pub formatter_source: Option<String>,
+    pub diagnostic: Option<String>,
+}
+
+/// Persisted input to one parking transition. The host files an inbox request
+/// with `operation_id`, whose immutable payload includes every field here.
+pub struct DeliveryParkRequest<'a> {
+    pub transition_id: &'a str,
+    pub operation_id: &'a str,
+    pub graph_id: &'a str,
+    /// The queue lane supplies a sealed tracker item when it exists. Until
+    /// then the inbox request identifies the graph separately.
+    pub item: Option<&'a str>,
+    pub node_id: &'a str,
+    pub attempt_key: Option<&'a AttemptKey>,
+    pub attempt_ref: Option<&'a str>,
+    pub repository: Option<&'a str>,
+    pub session: Option<&'a str>,
+    pub reason: provenant_records::graph::ParkReason,
+    pub handoff: &'a str,
+    pub head: Option<&'a str>,
+    pub evidence: &'a [String],
 }
 
 /// `observe_or_start` must be idempotent by `AttemptKey`. It starts the run
@@ -510,6 +566,36 @@ pub trait AttemptOwner {
 
     /// The actor this owner submits as, recorded before the first submit.
     fn actor(&self) -> String;
+
+    /// Run the configured formatter against the retained writer checkout.
+    /// The caller persists `operation_id` and `input_head` before this effect;
+    /// owners must reconcile that identity before retrying an uncertain commit.
+    fn run_hygiene(
+        &mut self,
+        _request: HygieneRequest<'_>,
+    ) -> Result<HygieneExecution, Self::Error> {
+        Ok(HygieneExecution {
+            outcome: provenant_records::graph::HygieneOutcome {
+                kind: provenant_records::graph::HygieneOutcomeKind::Error,
+                before_head: None,
+                after_head: None,
+                handoff: None,
+            },
+            branch: None,
+            formatter_source: None,
+            diagnostic: Some("host does not implement delivery hygiene".into()),
+        })
+    }
+
+    /// File one durable inbox request for a delivery transition. `None` means
+    /// no receipt was established; the persisted intent remains pending and is
+    /// replayed under the same operation identity.
+    fn park_delivery(
+        &mut self,
+        _request: DeliveryParkRequest<'_>,
+    ) -> Result<Option<provenant_core::HumanRequestId>, Self::Error> {
+        Ok(None)
+    }
 
     /// File the ask as an open inbox request, idempotently by the graph
     /// instance and ask ID: a repeat returns the request it filed first, with
@@ -856,6 +942,8 @@ struct PlannedGraph {
     delivery: Option<provenant_records::run::DeliveryMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     decision_session: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    queue: Option<QueueKnobs>,
     schema_version: u64,
     graph_id: String,
     nodes: Vec<PlannedNode>,
@@ -920,6 +1008,8 @@ struct PlannedNode {
     // TODO(#3972-s5): hand final-rung exhaustion to the typed park transition.
     #[serde(skip_serializing_if = "Option::is_none")]
     escalate: Option<EscalateSpec>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    delivery_review: Option<DeliveryReviewSpec>,
     #[serde(skip_serializing_if = "Option::is_none")]
     decide: Option<DecideSpec>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1006,6 +1096,7 @@ fn node_context(plan: &PlannedGraph, node: &PlannedNode) -> provenant_records::r
         budget_sources: context.budget_sources.clone(),
         graph_template_launch: false,
         writer_predecessor: None,
+        delivery_queue_writer_adoption: false,
         extra: Default::default(),
         risk_tier: context
             .risk_tier
@@ -1659,27 +1750,58 @@ fn advance_gate<R: AttemptOwner, J: GraphJournal>(
             replan_error = Some("full panel replan required: repaired commit unavailable".into());
         }
     }
+    let gate_was_evaluated = !growth && replan_error.is_none();
     let reason = if growth || replan_error.is_some() {
         replan_error
-    } else if matches!(condition, GateCondition::Ci { .. }) {
+    } else if matches!(
+        condition,
+        GateCondition::Ci { .. } | GateCondition::Conflict { .. }
+    ) {
         if observed_ci.contains(&node.id) {
             return Ok(GateStep::Next);
         }
         let wall_now = owner.wall_now();
-        if owner.respect_ci_wake()
-            && checkpoint.nodes[node_index]
+        let wake_at = if matches!(condition, GateCondition::Conflict { .. }) {
+            checkpoint.nodes[node_index]
+                .conflict
+                .as_ref()
+                .and_then(|conflict| conflict.wake_at)
+        } else {
+            checkpoint.nodes[node_index]
                 .ci
                 .as_ref()
                 .and_then(|ci| ci.wake_at)
-                .is_some_and(|wake| wall_now.is_none_or(|now| now < wake))
+        };
+        if owner.respect_ci_wake()
+            && wake_at.is_some_and(|wake| wall_now.is_none_or(|now| now < wake))
         {
             return Ok(GateStep::Next);
         }
         let backoff = owner.ci_poll_backoff(&node.id);
         observed_ci.insert(node.id.clone());
-        match ci::evaluate(node_index, node, &mut *checkpoint, owner, wall_now, backoff)
-            .map_err(GraphError::Refused)?
-        {
+        let evaluation = if matches!(condition, GateCondition::Conflict { .. }) {
+            ci::evaluate_conflict(
+                plan.queue.is_some(),
+                node_index,
+                node,
+                &mut *checkpoint,
+                owner,
+                wall_now,
+                backoff,
+            )
+        } else {
+            ci::evaluate(
+                plan.queue.is_some(),
+                node_index,
+                node,
+                &mut *checkpoint,
+                owner,
+                wall_now,
+                backoff,
+            )
+        }
+        .map_err(GraphError::Refused)?;
+        match evaluation {
             ci::Evaluation::Pending => {
                 asks::refresh_wake(&mut *checkpoint);
                 journal.save(&*checkpoint).map_err(GraphError::Journal)?;
@@ -1688,15 +1810,167 @@ fn advance_gate<R: AttemptOwner, J: GraphJournal>(
             ci::Evaluation::Settled(reason) => reason,
         }
     } else {
-        gate_failure(condition, node, &*checkpoint, &*positions, effective_budget)
+        gate_failure(
+            condition,
+            node,
+            &*plan,
+            &*checkpoint,
+            &*positions,
+            effective_budget,
+        )
     };
+    let exact_queue_ci_red = gate_was_evaluated
+        && plan.queue.is_some()
+        && reason.is_some()
+        && matches!(condition, GateCondition::Ci { .. })
+        && match condition {
+            GateCondition::Ci { target, .. } => checkpoint.nodes[node_index]
+                .ci
+                .as_ref()
+                .is_some_and(|evidence| {
+                    evidence.state == CiState::Failed
+                        && !evidence.failed_checks.is_empty()
+                        && ci::published_head(target, checkpoint, true).as_deref()
+                            == evidence.head_sha.as_deref()
+                }),
+            _ => false,
+        };
+    let failed_delivery_review = gate_was_evaluated
+        && plan.queue.is_some()
+        && reason.is_some()
+        && delivery_review_gate_failed(condition, node, plan, checkpoint, positions);
+    let escalation_cause = if exact_queue_ci_red {
+        Some(provenant_records::graph::EscalationCause::CiRed)
+    } else if failed_delivery_review {
+        Some(provenant_records::graph::EscalationCause::ReviewRepair)
+    } else {
+        None
+    };
+    let escalation = escalation_cause.and_then(|cause| {
+        transitions::advance_delivery_escalation(node_index, plan, checkpoint, cause)
+    });
     apply_gate_result(
         &mut checkpoint.nodes[node_index],
         reason,
         node.on_fail.clone(),
         matches!(condition, GateCondition::Ci { .. }),
     );
+    if let Some(conflict) = checkpoint.nodes[node_index].conflict.as_mut() {
+        conflict.wake_at = None;
+    }
     asks::refresh_wake(&mut *checkpoint);
+    if matches!(
+        escalation,
+        Some(transitions::EscalationTransition::Exhausted { .. })
+    ) {
+        let (escalation_owner, _) =
+            loops::escalation_owner(node_index, plan).ok_or_else(|| GraphError::BadCheckpoint {
+                node: node.id.clone(),
+                invariant: "exhausted CI escalation must retain its owner policy",
+            })?;
+        let attempt_key = checkpoint.nodes[escalation_owner]
+            .escalation
+            .as_ref()
+            .map(|state| state.transition_attempt.clone())
+            .ok_or_else(|| GraphError::BadCheckpoint {
+                node: node.id.clone(),
+                invariant: "exhausted CI escalation must retain its repair identity",
+            })?;
+        let repair_progress = checkpoint
+            .nodes
+            .iter()
+            .find(|progress| progress.id == attempt_key.node_id);
+        let attempt_ref = repair_progress.and_then(|progress| {
+            progress
+                .attempts
+                .iter()
+                .find(|attempt| attempt.key == attempt_key)
+                .and_then(|attempt| attempt.attempt_ref.clone())
+        });
+        let handoff = repair_progress
+            .and_then(|progress| progress.handoff.as_ref())
+            .map(|handoff| handoff.note.clone())
+            .unwrap_or_else(|| "delivery repair ladder exhausted".into());
+        let cause = escalation_cause.ok_or_else(|| GraphError::BadCheckpoint {
+            node: node.id.clone(),
+            invariant: "exhausted escalation must retain its cause",
+        })?;
+        let (head, mut evidence) = match cause {
+            provenant_records::graph::EscalationCause::CiRed => {
+                let head = match condition {
+                    GateCondition::Ci { target, .. } => {
+                        ci::published_head(target, checkpoint, true)
+                    }
+                    _ => None,
+                }
+                .ok_or_else(|| GraphError::BadCheckpoint {
+                    node: node.id.clone(),
+                    invariant: "exhausted CI escalation must retain its published head",
+                })?;
+                let mut evidence = checkpoint.nodes[node_index]
+                    .ci
+                    .as_ref()
+                    .map(|ci| vec![ci.summary.clone()])
+                    .unwrap_or_default();
+                if let Some(ci) = &checkpoint.nodes[node_index].ci {
+                    evidence.extend(ci.failed_checks.iter().map(|check| {
+                        format!(
+                            "job {}: {} {} {}",
+                            check.job_id.as_deref().unwrap_or("unknown"),
+                            check.name,
+                            check.url.as_deref().unwrap_or(""),
+                            check.excerpt
+                        )
+                    }));
+                }
+                (Some(head), evidence)
+            }
+            provenant_records::graph::EscalationCause::ReviewRepair => {
+                let head = node.inputs.iter().find_map(|input| {
+                    checkpoint.nodes[positions[&input.node]]
+                        .source_commit
+                        .clone()
+                });
+                let mut evidence = vec!["delivery review did not approve the repair".into()];
+                for input in &node.inputs {
+                    if let Some(outputs) = checkpoint.nodes[positions[&input.node]].outputs.as_ref()
+                    {
+                        if let Some(verdict) = outputs.verdict.as_deref() {
+                            evidence.push(format!("{} verdict: {verdict}", input.node));
+                        }
+                        evidence.extend(outputs.findings.iter().map(|finding| {
+                            format!(
+                                "{} finding {}: {} ({})",
+                                input.node, finding.id, finding.summary, finding.severity
+                            )
+                        }));
+                    }
+                }
+                (head, evidence)
+            }
+            _ => {
+                return Err(GraphError::BadCheckpoint {
+                    node: node.id.clone(),
+                    invariant: "unsupported escalation cause reached ladder exhaustion",
+                });
+            }
+        };
+        evidence.push(format!("escalation cause: {cause:?}"));
+        park_delivery_transition(
+            document,
+            node_index,
+            provenant_records::graph::ParkReason::LadderExhausted,
+            Some(&attempt_key),
+            attempt_ref.as_deref(),
+            &handoff,
+            head.as_deref(),
+            &evidence,
+            owner,
+            journal,
+            checkpoint,
+        )?;
+        return Ok(GateStep::Next);
+    }
     journal.save(&*checkpoint).map_err(GraphError::Journal)?;
     Ok(GateStep::Next)
 }
@@ -2535,6 +2809,9 @@ fn observe_attempt<R: AttemptOwner, J: GraphJournal>(
             family_peers,
             context: provenant_records::run::WorkContext {
                 tier: route.tier.clone().or_else(|| route.alias.clone()),
+                delivery_queue_writer_adoption: plan.queue.is_some()
+                    && node.access == AccessMode::WorktreeWrite
+                    && checkpoint.nodes[node_index].writer_binding.is_some(),
                 // The work key's attempt: one-based launch order
                 // within the node, never reused.
                 attempt: Some(key.attempt),
@@ -3004,6 +3281,24 @@ fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
     let mut observed_ci = observed_ci_in;
     let mut stopped_children = std::collections::BTreeSet::new();
     'schedule: loop {
+        for node_index in 0..checkpoint.nodes.len() {
+            let Some(park) = checkpoint.nodes[node_index].delivery_park.clone() else {
+                continue;
+            };
+            park_delivery_transition(
+                document,
+                node_index,
+                park.reason,
+                park.attempt_key.as_ref(),
+                park.attempt_ref.as_deref(),
+                &park.handoff,
+                park.head.as_deref(),
+                &park.evidence,
+                owner,
+                journal,
+                &mut checkpoint,
+            )?;
+        }
         if apply_pending_cancellation(document, &mut checkpoint, journal, &mut resume)? {
             continue 'schedule;
         }
@@ -3158,6 +3453,9 @@ fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
             &mut stopped_children,
         )?;
         for node_index in 0..plan.nodes.len() {
+            if checkpoint.nodes[node_index].delivery_park.is_some() {
+                continue;
+            }
             if apply_pending_cancellation(document, &mut checkpoint, journal, &mut resume)? {
                 continue 'schedule;
             }
@@ -3200,6 +3498,17 @@ fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
                         &mut checkpoint,
                         journal,
                     )?;
+                    if park_malformed_composite_delivery_review(
+                        document,
+                        node_index,
+                        &plan,
+                        &positions,
+                        owner,
+                        journal,
+                        &mut checkpoint,
+                    )? {
+                        continue;
+                    }
                     continue;
                 }
                 transitions::NodeAction::Loop(spec) => {
@@ -3214,6 +3523,7 @@ fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
                         .all(|n| n.state.settled());
                     if (structural_pause.is_none() || terminal_decision || body_settled)
                         && let Some(extension) = loops::settle(
+                            document,
                             node_index,
                             spec,
                             &plan,
@@ -3311,6 +3621,18 @@ fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
                         GateStep::Reschedule => continue 'schedule,
                     }
                 }
+                transitions::NodeAction::Hygiene => {
+                    advance_hygiene(
+                        document,
+                        node_index,
+                        &plan,
+                        &positions,
+                        &mut checkpoint,
+                        owner,
+                        journal,
+                    )?;
+                    continue;
+                }
                 transitions::NodeAction::Attempt => {}
             }
             if checkpoint.nodes[node_index].retry.is_none()
@@ -3372,6 +3694,10 @@ fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
                     node,
                     &checkpoint.nodes[node_index],
                     limits,
+                    document
+                        .queue
+                        .as_ref()
+                        .map(|queue| queue.prep_retries.value),
                     owner,
                     owner.wall_now(),
                 )
@@ -3391,14 +3717,48 @@ fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
                         break;
                     }
                     NextAttempt::Fail { code, message } => {
-                        fail_node(
-                            &mut checkpoint.nodes[node_index],
-                            code.map(Into::into),
-                            message,
-                        );
+                        if code.as_deref() == Some("prep_retries_exhausted") {
+                            let attempt = checkpoint.nodes[node_index]
+                                .attempts
+                                .last()
+                                .cloned()
+                                .ok_or_else(|| GraphError::BadCheckpoint {
+                                    node: node.id.clone(),
+                                    invariant: "preparation retry exhaustion must retain its graph attempt key",
+                                })?;
+                            let handoff = checkpoint.nodes[node_index]
+                                .handoff
+                                .as_ref()
+                                .and_then(|handoff| serde_json::to_string(handoff).ok())
+                                .unwrap_or_else(|| message.clone());
+                            let head = checkpoint.nodes[node_index]
+                                .outputs
+                                .as_ref()
+                                .and_then(|outputs| outputs.commit.as_deref())
+                                .or(checkpoint.nodes[node_index].source_commit.as_deref());
+                            park_delivery_transition(
+                                document,
+                                node_index,
+                                provenant_records::graph::ParkReason::OperationError,
+                                Some(&attempt.key),
+                                attempt.attempt_ref.as_deref(),
+                                &handoff,
+                                head,
+                                &[message],
+                                owner,
+                                journal,
+                                &mut checkpoint,
+                            )?;
+                        } else {
+                            fail_node(
+                                &mut checkpoint.nodes[node_index],
+                                code.map(Into::into),
+                                message,
+                            );
+                            journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                        }
                         checkpoint.nodes[node_index].fallback_evidence_retry = None;
                         asks::refresh_wake(&mut checkpoint);
-                        journal.save(&checkpoint).map_err(GraphError::Journal)?;
                         break;
                     }
                     NextAttempt::None => break,
@@ -3407,15 +3767,23 @@ fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
                         settlement_retries,
                     } => (route_index, settlement_retries),
                 };
-                let route = node
-                    .routes
-                    .get(route_index)
-                    .ok_or_else(|| GraphError::BadCheckpoint {
-                        node: node.id.clone(),
-                        invariant: "attempt route index must name a configured route",
-                    })?
-                    .clone();
-                let key = transitions::attempt_key(&plan, node_index, &checkpoint, route_index)
+                let (route, key_route_index) = if let Some((route, _rung)) =
+                    loops::delivery_route(node_index, &plan, &checkpoint)
+                {
+                    (route, 0)
+                } else {
+                    (
+                        node.routes
+                            .get(route_index)
+                            .ok_or_else(|| GraphError::BadCheckpoint {
+                                node: node.id.clone(),
+                                invariant: "attempt route index must name a configured route",
+                            })?
+                            .clone(),
+                        route_index,
+                    )
+                };
+                let key = transitions::attempt_key(&plan, node_index, &checkpoint, key_route_index)
                     .map_err(|error| GraphError::Invalid(error.into()))?;
 
                 // A resume under tighter limits admits no new launch: a saved
@@ -3574,6 +3942,54 @@ fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
                         quota_redraw,
                     } => (settled_result, should_continue, quota_redraw),
                 };
+                let progress = &checkpoint.nodes[node_index];
+                let malformed_delivery_review = plan.queue.is_some()
+                    && node.delivery_review.is_some()
+                    && progress.attempts.last().is_some_and(|attempt| {
+                        attempt.key == key && attempt.state == AttemptState::Terminal
+                    })
+                    && review::malformed_delivery_evidence_error(
+                        progress.advance_error_code.as_deref(),
+                    );
+                if malformed_delivery_review {
+                    let progress = &checkpoint.nodes[node_index];
+                    let attempt_ref = progress
+                        .attempts
+                        .last()
+                        .filter(|attempt| attempt.key == key)
+                        .and_then(|attempt| attempt.attempt_ref.clone());
+                    let handoff = progress
+                        .handoff
+                        .as_ref()
+                        .map(|handoff| handoff.note.clone())
+                        .unwrap_or_else(|| {
+                            "delivery review returned malformed or incomplete evidence".into()
+                        });
+                    let head = progress.source_commit.clone();
+                    let mut evidence = progress
+                        .advance_error_code
+                        .iter()
+                        .chain(progress.advance_error.iter())
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    if let Some(outputs) = &progress.outputs {
+                        evidence.extend(outputs.warnings.iter().cloned());
+                    }
+                    park_delivery_transition(
+                        document,
+                        node_index,
+                        provenant_records::graph::ParkReason::ReviewEvidence,
+                        Some(&key),
+                        attempt_ref.as_deref(),
+                        &handoff,
+                        head.as_deref(),
+                        &evidence,
+                        owner,
+                        journal,
+                        &mut checkpoint,
+                    )?;
+                    continue 'schedule;
+                }
                 if quota_redraw {
                     transitions::redraw_quota_alias(
                         document,
@@ -3733,6 +4149,445 @@ fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
             checkpoint,
         ))));
     }
+}
+
+fn delivery_text(value: &str, max_bytes: usize) -> String {
+    let mut end = value.len().min(max_bytes);
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_owned()
+}
+
+fn delivery_operation(
+    domain: &str,
+    prefix: &str,
+    value: &impl Serialize,
+) -> Result<String, CanonicalError> {
+    let digest = CanonicalV1::record_digest(domain, 1, value)?;
+    Ok(format!(
+        "{prefix}-{}",
+        provenant_core::hex(digest.as_bytes())
+    ))
+}
+
+/// Persist the parking identity before opening the inbox, then replay the same
+/// immutable operation until a receipt is recorded.
+pub(super) fn park_delivery_transition<R: AttemptOwner, J: GraphJournal>(
+    document: &GraphDocument,
+    node_index: usize,
+    reason: provenant_records::graph::ParkReason,
+    attempt_key: Option<&AttemptKey>,
+    attempt_ref: Option<&str>,
+    handoff: &str,
+    head: Option<&str>,
+    evidence: &[String],
+    owner: &mut R,
+    journal: &mut J,
+    checkpoint: &mut GraphCheckpoint,
+) -> Result<(), GraphError<R::Error, J::Error>> {
+    let node_id = checkpoint
+        .nodes
+        .get(node_index)
+        .map(|node| node.id.clone())
+        .ok_or_else(|| GraphError::BadCheckpoint {
+            node: document.graph_id.clone(),
+            invariant: "delivery park node index must exist",
+        })?;
+    let bounded_handoff = delivery_text(handoff, 1024);
+    let bounded_evidence: Vec<String> = evidence
+        .iter()
+        .take(8)
+        .map(|entry| delivery_text(entry, 512))
+        .collect();
+    let identity = serde_json::json!({
+        "graph": document.graph_id,
+        "node": node_id,
+        "reason": reason,
+        "attempt_key": attempt_key,
+        "attempt_ref": attempt_ref,
+        "head": head,
+        "handoff": bounded_handoff,
+        "evidence": bounded_evidence,
+    });
+    let operation_id =
+        delivery_operation("delivery-park", "park", &identity).map_err(GraphError::Canonical)?;
+    let transition_id = operation_id.clone();
+
+    if let Some(existing) = checkpoint.nodes[node_index].delivery_park.as_ref() {
+        if existing.transition_id != transition_id {
+            return Err(GraphError::BadCheckpoint {
+                node: node_id,
+                invariant: "one graph node cannot replace a persisted delivery park transition",
+            });
+        }
+        if existing.request_id.is_some() {
+            if checkpoint.nodes[node_index].state != NodeState::Blocked {
+                checkpoint.nodes[node_index].state = NodeState::Blocked;
+                journal.save(checkpoint).map_err(GraphError::Journal)?;
+            }
+            return Ok(());
+        }
+    } else {
+        checkpoint.nodes[node_index].delivery_park = Some(DeliveryParkProgress {
+            transition_id: transition_id.clone(),
+            operation_id: operation_id.clone(),
+            item: None,
+            attempt_key: attempt_key.cloned(),
+            attempt_ref: attempt_ref.map(str::to_owned),
+            reason,
+            handoff: bounded_handoff.clone(),
+            head: head.map(str::to_owned),
+            evidence: bounded_evidence.clone(),
+            request_id: None,
+        });
+        checkpoint.nodes[node_index].state = NodeState::Running;
+        journal.save(checkpoint).map_err(GraphError::Journal)?;
+    }
+
+    let request_id = owner
+        .park_delivery(DeliveryParkRequest {
+            transition_id: &transition_id,
+            operation_id: &operation_id,
+            graph_id: &document.graph_id,
+            // TODO(#3972-queue): consume the sealed tracker item identity.
+            item: None,
+            node_id: &node_id,
+            attempt_key,
+            attempt_ref,
+            repository: None,
+            session: document.decision_session.as_deref(),
+            reason,
+            handoff: &bounded_handoff,
+            head,
+            evidence: &bounded_evidence,
+        })
+        .map_err(GraphError::Run)?;
+    if let Some(request_id) = request_id {
+        let park = checkpoint.nodes[node_index]
+            .delivery_park
+            .as_mut()
+            .ok_or_else(|| GraphError::BadCheckpoint {
+                node: node_id.clone(),
+                invariant: "delivery park intent must remain persisted until receipt",
+            })?;
+        park.request_id = Some(request_id);
+        checkpoint.nodes[node_index].state = NodeState::Blocked;
+        journal.save(checkpoint).map_err(GraphError::Journal)?;
+    }
+    Ok(())
+}
+
+fn advance_hygiene<R: AttemptOwner, J: GraphJournal>(
+    document: &GraphDocument,
+    node_index: usize,
+    plan: &PlannedGraph,
+    positions: &std::collections::BTreeMap<String, usize>,
+    checkpoint: &mut GraphCheckpoint,
+    owner: &mut R,
+    journal: &mut J,
+) -> Result<(), GraphError<R::Error, J::Error>> {
+    let node = plan
+        .nodes
+        .get(node_index)
+        .ok_or_else(|| GraphError::BadCheckpoint {
+            node: document.graph_id.clone(),
+            invariant: "hygiene node index must exist",
+        })?;
+    if let Some(park) = checkpoint.nodes[node_index].delivery_park.clone() {
+        return park_delivery_transition(
+            document,
+            node_index,
+            park.reason,
+            park.attempt_key.as_ref(),
+            park.attempt_ref.as_deref(),
+            &park.handoff,
+            park.head.as_deref(),
+            &park.evidence,
+            owner,
+            journal,
+            checkpoint,
+        );
+    }
+    let source_id = match &node.source {
+        Some(SourceBinding::Node { node }) => node,
+        _ => {
+            return Err(GraphError::BadCheckpoint {
+                node: node.id.clone(),
+                invariant: "hygiene requires its validated direct writer source",
+            });
+        }
+    };
+    let source_index = *positions
+        .get(source_id)
+        .ok_or_else(|| GraphError::BadCheckpoint {
+            node: node.id.clone(),
+            invariant: "hygiene writer source must exist",
+        })?;
+    let source_progress = &checkpoint.nodes[source_index];
+    let source_attempt = source_progress
+        .recorded_attempts()
+        .filter(|attempt| attempt.state == AttemptState::Terminal)
+        .next_back()
+        .ok_or_else(|| GraphError::BadCheckpoint {
+            node: node.id.clone(),
+            invariant: "hygiene requires a terminal writer attempt",
+        })?;
+    let input_head = source_attempt
+        .input_manifest
+        .as_ref()
+        .and_then(|manifest| manifest.source_commit.as_deref())
+        .or(source_progress.source_commit.as_deref())
+        .ok_or_else(|| GraphError::BadCheckpoint {
+            node: node.id.clone(),
+            invariant: "hygiene writer attempt must retain its input head",
+        })?;
+    let source_outputs =
+        source_progress
+            .outputs
+            .as_ref()
+            .ok_or_else(|| GraphError::BadCheckpoint {
+                node: node.id.clone(),
+                invariant: "hygiene writer must retain its outputs",
+            })?;
+    let expected_head = source_outputs
+        .commit
+        .as_deref()
+        .or(source_progress.source_commit.as_deref())
+        .ok_or_else(|| GraphError::BadCheckpoint {
+            node: node.id.clone(),
+            invariant: "hygiene writer must retain its output head",
+        })?;
+    let writer_binding =
+        source_progress
+            .writer_binding
+            .as_ref()
+            .ok_or_else(|| GraphError::BadCheckpoint {
+                node: node.id.clone(),
+                invariant: "hygiene writer must retain its verified worktree binding",
+            })?;
+    let worktree = writer_binding.worktree.clone();
+    let worktree_identity = writer_binding.source_directory_identity.clone();
+    let source_key = source_attempt.key.clone();
+    let source_attempt_ref =
+        source_attempt
+            .attempt_ref
+            .clone()
+            .ok_or_else(|| GraphError::BadCheckpoint {
+                node: node.id.clone(),
+                invariant: "hygiene requires the accepted writer attempt reference",
+            })?;
+    let input_head = input_head.to_owned();
+    let expected_head = expected_head.to_owned();
+    let source_branch = source_outputs.branch.clone();
+    let handoff = source_progress
+        .handoff
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|_| GraphError::BadCheckpoint {
+            node: node.id.clone(),
+            invariant: "hygiene handoff must be serializable",
+        })?;
+
+    if checkpoint.nodes[node_index].delivery_hygiene.is_none() {
+        let operation_id = delivery_operation(
+            "delivery-hygiene",
+            "hygiene",
+            &serde_json::json!({
+                "graph": document.graph_id,
+                "node": node.id,
+                "source_attempt": source_key,
+                "input_head": input_head,
+                "expected_head": expected_head,
+            }),
+        )
+        .map_err(GraphError::Canonical)?;
+        checkpoint.nodes[node_index].delivery_hygiene = Some(DeliveryHygieneProgress {
+            operation_id,
+            input_head: input_head.clone(),
+            handoff: handoff.clone(),
+            outcome: None,
+        });
+        checkpoint.nodes[node_index].state = NodeState::Running;
+        journal.save(checkpoint).map_err(GraphError::Journal)?;
+    }
+
+    let intent = checkpoint.nodes[node_index]
+        .delivery_hygiene
+        .as_ref()
+        .ok_or_else(|| GraphError::BadCheckpoint {
+            node: node.id.clone(),
+            invariant: "hygiene intent must be saved before execution",
+        })?;
+    if intent.input_head != input_head || intent.handoff != handoff {
+        return Err(GraphError::BadCheckpoint {
+            node: node.id.clone(),
+            invariant: "hygiene replay must retain its original writer input and handoff",
+        });
+    }
+    let operation_id = intent.operation_id.clone();
+    let intent_handoff = intent.handoff.clone();
+    let intent_input_head = intent.input_head.clone();
+    if let Some(outcome) = intent.outcome.clone() {
+        if outcome.kind != provenant_records::graph::HygieneOutcomeKind::Error {
+            return Ok(());
+        }
+        let evidence = checkpoint.nodes[node_index]
+            .advance_error
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        return park_delivery_transition(
+            document,
+            node_index,
+            provenant_records::graph::ParkReason::OperationError,
+            Some(&source_key),
+            Some(&source_attempt_ref),
+            intent_handoff.as_deref().unwrap_or(""),
+            outcome.after_head.as_deref(),
+            &evidence,
+            owner,
+            journal,
+            checkpoint,
+        );
+    }
+
+    let mut execution = owner
+        .run_hygiene(HygieneRequest {
+            graph_id: &document.graph_id,
+            node_id: &node.id,
+            operation_id: &operation_id,
+            source_node: source_id,
+            source_key: &source_key,
+            source_attempt: &source_attempt_ref,
+            worktree: &worktree,
+            worktree_identity: worktree_identity.as_ref(),
+            input_head: &intent_input_head,
+            expected_head: &expected_head,
+            handoff: intent_handoff.as_deref(),
+        })
+        .map_err(GraphError::Run)?;
+    execution.outcome.handoff = intent_handoff.clone();
+    if execution.outcome.kind == provenant_records::graph::HygieneOutcomeKind::Clean
+        && execution.outcome.after_head.is_none()
+    {
+        execution.outcome.kind = provenant_records::graph::HygieneOutcomeKind::Error;
+        execution.diagnostic = Some("hygiene completed without a verified output head".into());
+    }
+    let outcome = execution.outcome;
+    let formatter_warnings = execution
+        .formatter_source
+        .iter()
+        .map(|source| format!("delivery hygiene formatter source: {source}"))
+        .collect();
+    {
+        let progress = &mut checkpoint.nodes[node_index];
+        progress
+            .delivery_hygiene
+            .as_mut()
+            .ok_or_else(|| GraphError::BadCheckpoint {
+                node: node.id.clone(),
+                invariant: "hygiene intent must remain persisted during execution",
+            })?
+            .outcome = Some(outcome.clone());
+        progress.outputs = Some(NodeOutputs {
+            schema_version: 2,
+            hygiene: Some(outcome.clone()),
+            branch: execution.branch.or(source_branch),
+            commit: outcome.after_head.clone(),
+            warnings: formatter_warnings,
+            ..Default::default()
+        });
+    }
+    match outcome.kind {
+        provenant_records::graph::HygieneOutcomeKind::Clean => {
+            let progress = &mut checkpoint.nodes[node_index];
+            progress.state = NodeState::Succeeded;
+            progress.advance_error = None;
+            progress.advance_error_code = None;
+            journal.save(checkpoint).map_err(GraphError::Journal)?;
+        }
+        kind @ (provenant_records::graph::HygieneOutcomeKind::NoCommit
+        | provenant_records::graph::HygieneOutcomeKind::UncommittedEdits) => {
+            let cause = if kind == provenant_records::graph::HygieneOutcomeKind::NoCommit {
+                provenant_records::graph::EscalationCause::NoCommit
+            } else {
+                provenant_records::graph::EscalationCause::UncommittedEdits
+            };
+            let (error_code, error_message) =
+                if kind == provenant_records::graph::HygieneOutcomeKind::NoCommit {
+                    (
+                        "hygiene_no_commit",
+                        "writer produced no commit beyond its input head",
+                    )
+                } else {
+                    (
+                        "hygiene_uncommitted_edits",
+                        "writer worktree still contains tracked or untracked edits",
+                    )
+                };
+            {
+                let progress = &mut checkpoint.nodes[node_index];
+                progress.state = NodeState::Failed;
+                progress.advance_error_code = Some(error_code.into());
+                progress.advance_error = Some(error_message.into());
+            }
+            let escalation =
+                transitions::advance_delivery_escalation(node_index, plan, checkpoint, cause);
+            if matches!(
+                escalation,
+                Some(transitions::EscalationTransition::Exhausted { .. })
+            ) {
+                let park_node = loops::escalation_owner(node_index, plan)
+                    .map_or(node_index, |(owner_index, _)| owner_index);
+                let evidence = vec![error_message.to_owned()];
+                park_delivery_transition(
+                    document,
+                    park_node,
+                    provenant_records::graph::ParkReason::LadderExhausted,
+                    Some(&source_key),
+                    Some(&source_attempt_ref),
+                    handoff.as_deref().unwrap_or(""),
+                    outcome.after_head.as_deref(),
+                    &evidence,
+                    owner,
+                    journal,
+                    checkpoint,
+                )?;
+            } else {
+                journal.save(checkpoint).map_err(GraphError::Journal)?;
+            }
+        }
+        provenant_records::graph::HygieneOutcomeKind::Error => {
+            let evidence = {
+                let progress = &mut checkpoint.nodes[node_index];
+                progress.state = NodeState::Running;
+                progress.advance_error_code = Some("hygiene_operation_error".into());
+                progress.advance_error = execution
+                    .diagnostic
+                    .as_deref()
+                    .map(|diagnostic| delivery_text(diagnostic, 1024))
+                    .or_else(|| Some("formatter or formatter commit failed".into()));
+                progress.advance_error.iter().cloned().collect::<Vec<_>>()
+            };
+            journal.save(checkpoint).map_err(GraphError::Journal)?;
+            park_delivery_transition(
+                document,
+                node_index,
+                provenant_records::graph::ParkReason::OperationError,
+                Some(&source_key),
+                Some(&source_attempt_ref),
+                intent_handoff.as_deref().unwrap_or(""),
+                outcome.after_head.as_deref(),
+                &evidence,
+                owner,
+                journal,
+                checkpoint,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 /// Effect driver: load the checkpoint, collect host facts, apply the pure
@@ -4155,6 +5010,7 @@ fn gate_outputs(passed: bool) -> NodeOutputs {
         compact_disposition_findings: None,
         full_disposition_findings: None,
         verdict_error: None,
+        hygiene: None,
         schema_version: 2,
         decide_outcome: None,
         result: None,
@@ -4169,9 +5025,176 @@ fn gate_outputs(passed: bool) -> NodeOutputs {
     }
 }
 
+fn delivery_review_gate_failed(
+    condition: &GateCondition,
+    gate: &PlannedNode,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &std::collections::BTreeMap<String, usize>,
+) -> bool {
+    use provenant_records::workflow::ReviewVerdict;
+    let GateCondition::Verdict { expected, .. } = condition else {
+        return false;
+    };
+    if ReviewVerdict::from_token(expected) != Some(ReviewVerdict::Approve) || gate.inputs.is_empty()
+    {
+        return false;
+    }
+    let mut failed_review = false;
+    for input in &gate.inputs {
+        let Some(&index) = positions.get(&input.node) else {
+            return false;
+        };
+        let Some(policy) = plan.nodes[index].delivery_review.as_ref() else {
+            return false;
+        };
+        let progress = &checkpoint.nodes[index];
+        if progress.state != NodeState::Succeeded {
+            return false;
+        }
+        let Some(outputs) = progress.outputs.as_ref() else {
+            return false;
+        };
+        let Some(verdict) = outputs
+            .verdict
+            .as_deref()
+            .and_then(ReviewVerdict::from_token)
+        else {
+            return false;
+        };
+        if outputs.partial
+            || outputs.findings_available != Some(true)
+            || outputs.verdict_error.is_some()
+        {
+            return false;
+        }
+        if !review::delivery_matches(policy, outputs, expected) {
+            if verdict == ReviewVerdict::Approve {
+                return false;
+            }
+            failed_review = true;
+        }
+    }
+    failed_review
+}
+
+fn park_malformed_composite_delivery_review<R: AttemptOwner, J: GraphJournal>(
+    document: &GraphDocument,
+    node_index: usize,
+    plan: &PlannedGraph,
+    positions: &std::collections::BTreeMap<String, usize>,
+    owner: &mut R,
+    journal: &mut J,
+    checkpoint: &mut GraphCheckpoint,
+) -> Result<bool, GraphError<R::Error, J::Error>> {
+    let Some(node) = plan.nodes.get(node_index) else {
+        return Err(GraphError::BadCheckpoint {
+            node: document.graph_id.clone(),
+            invariant: "composite delivery review index must match the planned graph",
+        });
+    };
+    let Some(progress) = checkpoint.nodes.get(node_index) else {
+        return Err(GraphError::BadCheckpoint {
+            node: node.id.clone(),
+            invariant: "composite delivery review requires its checkpoint row",
+        });
+    };
+    if document.queue.is_none() || !review::malformed_composite_delivery_evidence(node, progress) {
+        return Ok(false);
+    }
+
+    let writer = loops::nearest_writer_ancestor(node_index, plan)
+        .and_then(|index| checkpoint.nodes.get(index));
+    let attempt = writer.and_then(|progress| {
+        progress
+            .attempts
+            .iter()
+            .rev()
+            .find(|attempt| attempt.state == AttemptState::Terminal)
+            .cloned()
+    });
+    let head = writer
+        .and_then(|progress| {
+            progress
+                .outputs
+                .as_ref()
+                .and_then(|outputs| outputs.commit.as_deref())
+                .or(progress.source_commit.as_deref())
+        })
+        .or_else(|| {
+            checkpoint.nodes[node_index]
+                .source_commit
+                .as_deref()
+                .or_else(|| {
+                    checkpoint.nodes[node_index]
+                        .outputs
+                        .as_ref()
+                        .and_then(|outputs| outputs.commit.as_deref())
+                })
+        })
+        .map(str::to_owned);
+    let handoff = writer
+        .and_then(|progress| progress.handoff.as_ref())
+        .map(|handoff| handoff.note.clone())
+        .unwrap_or_else(|| {
+            "delivery review composite returned malformed or partial evidence".into()
+        });
+    let progress = &checkpoint.nodes[node_index];
+    let mut evidence = vec![format!(
+        "delivery review boundary {} settled {:?}",
+        node.id, progress.state
+    )];
+    if let Some(code) = &progress.advance_error_code {
+        evidence.push(format!("boundary error code: {code}"));
+    }
+    if let Some(error) = &progress.advance_error {
+        evidence.push(format!("boundary error: {error}"));
+    }
+    for member_id in &node.composite_members {
+        let Some(&member_index) = positions.get(member_id) else {
+            continue;
+        };
+        let member = &checkpoint.nodes[member_index];
+        let partial = member
+            .outputs
+            .as_ref()
+            .is_some_and(|outputs| outputs.partial || outputs.findings_available != Some(true));
+        if member.state != NodeState::Succeeded || partial {
+            let detail = member
+                .advance_error
+                .as_deref()
+                .unwrap_or("incomplete panel member evidence");
+            evidence.push(format!("member {member_id} {:?}: {detail}", member.state));
+        }
+    }
+    if let Some(outputs) = &progress.outputs {
+        if let Some(verdict) = &outputs.verdict {
+            evidence.push(format!("aggregate verdict: {verdict}"));
+        }
+        evidence.extend(outputs.warnings.iter().cloned());
+    }
+    park_delivery_transition(
+        document,
+        node_index,
+        provenant_records::graph::ParkReason::ReviewEvidence,
+        attempt.as_ref().map(|attempt| &attempt.key),
+        attempt
+            .as_ref()
+            .and_then(|attempt| attempt.attempt_ref.as_deref()),
+        &handoff,
+        head.as_deref(),
+        &evidence,
+        owner,
+        journal,
+        checkpoint,
+    )?;
+    Ok(true)
+}
+
 fn gate_failure(
     condition: &GateCondition,
     node: &PlannedNode,
+    plan: &PlannedGraph,
     checkpoint: &GraphCheckpoint,
     positions: &std::collections::BTreeMap<String, usize>,
     budget: &crate::config::GraphBudget,
@@ -4195,9 +5218,14 @@ fn gate_failure(
                 .inputs
                 .iter()
                 .filter(|input| {
-                    checkpoint.nodes[positions[&input.node]]
-                        .outputs
-                        .as_ref()
+                    let index = positions[&input.node];
+                    let outputs = checkpoint.nodes[index].outputs.as_ref();
+                    if let Some(policy) = &plan.nodes[index].delivery_review {
+                        return outputs.is_some_and(|outputs| {
+                            review::delivery_matches(policy, outputs, expected)
+                        });
+                    }
+                    outputs
                         .and_then(|outputs| outputs.verdict.as_ref())
                         .is_some_and(|actual| {
                             use provenant_records::workflow::ReviewVerdict;
@@ -4220,7 +5248,9 @@ fn gate_failure(
             };
             (!passed).then(|| format!("verdict threshold not met: {matched}/{total} matched"))
         }
-        GateCondition::Ci { .. } => unreachable!("CI is observed by the host"),
+        GateCondition::Ci { .. } | GateCondition::Conflict { .. } => {
+            unreachable!("CI and conflict gates are observed by the host")
+        }
         GateCondition::Budget { .. } => {
             // An explicit check must fail closed even if admission only warns.
             let mut budget = budget.clone();

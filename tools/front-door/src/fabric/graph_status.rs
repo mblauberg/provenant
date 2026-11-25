@@ -125,6 +125,8 @@ fn selected_attempt<'a>(node: &Value, rows: &'a [Value]) -> Option<&'a Value> {
 
 /// Select each node's current attempt once, or the explicitly selected older
 /// attempt. Node state owns settlement; a previous attempt cannot settle it.
+// TODO(#3972-queue): expose item phase, head, round, rung, wait and parked handoff on the queue board.
+// Queue controls must target a recorded revision and reconcile their receipts.
 pub(crate) fn node_digests(rows: &[Value]) -> Vec<NodeDigest> {
     let nodes: Vec<_> = rows.iter().filter(|row| row["kind"] == "node").collect();
     let selected: Vec<_> = if nodes.is_empty() {
