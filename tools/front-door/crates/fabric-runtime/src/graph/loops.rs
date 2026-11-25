@@ -24,6 +24,13 @@ pub struct LoopSpec {
     pub decision_session: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub review_repair: bool,
+    /// Typed gates whose failure admits the next bounded repair round. The
+    /// selected gates remain failed in the checkpoint for evidence and replay.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retry_on: Vec<String>,
+    /// Local publication whose exact receipt is exported by a successful loop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_publication: Option<String>,
 }
 
 fn default_extension_rounds() -> usize {
@@ -161,6 +168,8 @@ pub struct LoopRound {
     pub round: usize,
     pub node_id: String,
     pub until: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub retry_on: bool,
     pub previous_gate: Option<String>,
 }
 
@@ -625,6 +634,44 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
                     .map(|target| (child.id.clone(), (target.to_owned(), extra.clone())))
             })
             .collect();
+        if (!spec.retry_on.is_empty() || spec.selected_publication.is_some())
+            && document.queue.is_none()
+        {
+            return Err("retry_on and selected_publication are queue-only loop contracts".into());
+        }
+        let mut retry_nodes = std::collections::BTreeSet::new();
+        for retry in &spec.retry_on {
+            let Some(gate) = spec.body.iter().find(|member| member.id == *retry) else {
+                return Err(format!("loop {} retry_on must name a body gate", node.id));
+            };
+            if !retry_nodes.insert(retry)
+                || gate.kind != Some(NodeKind::Gate)
+                || !matches!(
+                    &gate.condition,
+                    Some(
+                        GateCondition::Ci { .. }
+                            | GateCondition::Conflict { .. }
+                            | GateCondition::Verdict { .. }
+                    )
+                )
+            {
+                return Err(format!(
+                    "loop {} retry_on must uniquely name typed CI, conflict or verdict gates",
+                    node.id
+                ));
+            }
+        }
+        if let Some(publication) = spec.selected_publication.as_deref()
+            && !spec
+                .body
+                .iter()
+                .any(|member| member.id == publication && member.kind == Some(NodeKind::Publish))
+        {
+            return Err(format!(
+                "loop {} selected_publication must name a typed publication in its body",
+                node.id
+            ));
+        }
         let external_head_sources: BTreeMap<_, _> = body
             .iter()
             .filter_map(|child| {
@@ -827,6 +874,7 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
                     round,
                     node_id: local.clone(),
                     until: local == spec.until,
+                    retry_on: spec.retry_on.iter().any(|retry| retry == &local),
                     previous_gate: (round > 1).then(|| id(&node.id, round - 1, &spec.until)),
                 });
                 child.depends_on = child
@@ -866,7 +914,12 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
                         child.depends_on.extend(node.depends_on.clone());
                         child.after_settled.extend(node.after_settled.clone());
                     } else {
-                        child.depends_on.push(id(&node.id, round - 1, &spec.until));
+                        let previous = id(&node.id, round - 1, &spec.until);
+                        if spec.retry_on.is_empty() || repair::spec_is_repair(spec) {
+                            child.depends_on.push(previous);
+                        } else {
+                            child.after_settled.push(previous);
+                        }
                     }
                 }
                 if child.source.is_none()
@@ -976,6 +1029,7 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
                             .contains_key(input.node.trim_start_matches("previous."))
                 });
                 for input in &mut child.inputs {
+                    let previous_round_input = input.node.starts_with("previous.");
                     input.node = if let Some(previous) = input.node.strip_prefix("previous.") {
                         previous_round_node(spec, &node.id, round, previous)?
                     } else if spec.body.iter().any(|body| body.id == input.node) {
@@ -988,7 +1042,14 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
                     if !child.depends_on.contains(&input.node)
                         && !child.after_settled.contains(&input.node)
                     {
-                        child.depends_on.push(input.node.clone());
+                        if previous_round_input
+                            && !spec.retry_on.is_empty()
+                            && !repair::spec_is_repair(spec)
+                        {
+                            child.after_settled.push(input.node.clone());
+                        } else {
+                            child.depends_on.push(input.node.clone());
+                        }
                     }
                 }
                 if repair::spec_is_repair(spec) && child.repair_lens.is_some() {
@@ -1216,12 +1277,83 @@ pub(super) fn round_failure_edge(child: &PlannedNode, parent: &PlannedNode) -> b
 pub(super) fn handled_gate(checkpoint: &GraphCheckpoint, progress: &NodeProgress) -> bool {
     progress.state == NodeState::Failed
         && progress.round.as_ref().is_some_and(|r| {
-            r.until
+            (r.until || r.retry_on)
                 && checkpoint
                     .nodes
                     .iter()
                     .any(|n| n.id == r.loop_id && checkpoint.node_successful(n))
         })
+}
+
+fn passed(node: &PlannedNode, checkpoint: &GraphCheckpoint, plan: &PlannedGraph) -> bool {
+    let gate_passed = checkpoint.nodes.iter().any(|progress| {
+        progress
+            .round
+            .as_ref()
+            .is_some_and(|round| round.loop_id == node.id && round.until)
+            && progress.state == NodeState::Succeeded
+    });
+    gate_passed
+        && node
+            .loop_body
+            .as_ref()
+            .and_then(|spec| spec.selected_publication.as_deref())
+            .is_none_or(|_| repair::selected_publication(node, checkpoint, plan).is_some())
+}
+
+fn failed_member(
+    progress: &NodeProgress,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &BTreeMap<String, usize>,
+) -> bool {
+    if !matches!(progress.state, NodeState::Failed | NodeState::Blocked) {
+        return false;
+    }
+    let Some(round) = progress.round.as_ref() else {
+        return true;
+    };
+    if round.until || round.retry_on && progress.state == NodeState::Failed {
+        return false;
+    }
+    let Some(index) = positions.get(&progress.id) else {
+        return true;
+    };
+    let triggered = plan
+        .nodes
+        .iter()
+        .zip(&checkpoint.nodes)
+        .any(|(gate, evidence)| {
+            gate.round.as_ref().is_some_and(|member| {
+                member.loop_id == round.loop_id && member.round == round.round && member.retry_on
+            }) && evidence.state == NodeState::Failed
+                && (gate.id == progress.id
+                    || progress.state == NodeState::Blocked
+                        && descendant_of(&plan.nodes[*index], &gate.id, plan, positions))
+        });
+    !triggered
+}
+
+fn descendant_of(
+    node: &PlannedNode,
+    ancestor: &str,
+    plan: &PlannedGraph,
+    positions: &BTreeMap<String, usize>,
+) -> bool {
+    let mut pending = node.dependencies().cloned().collect::<Vec<_>>();
+    let mut visited = std::collections::BTreeSet::new();
+    while let Some(parent) = pending.pop() {
+        if parent == ancestor {
+            return true;
+        }
+        if !visited.insert(parent.clone()) {
+            continue;
+        }
+        if let Some(index) = positions.get(&parent) {
+            pending.extend(plan.nodes[*index].dependencies().cloned());
+        }
+    }
+    false
 }
 
 pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
@@ -1334,6 +1466,7 @@ pub(super) fn validate_progress(
     node: &PlannedNode,
     checkpoint: &GraphCheckpoint,
     positions: &BTreeMap<String, usize>,
+    plan: &PlannedGraph,
     queue: bool,
 ) -> Result<(), ()> {
     if checkpoint.ask_actor.is_none()
@@ -1362,23 +1495,10 @@ pub(super) fn validate_progress(
 
     let clean = repair::clean_start(node, checkpoint, positions);
     let escalated = repair::escalation(node, checkpoint, positions);
-    let passed = body
+    let passed = passed(node, checkpoint, plan);
+    let failed = body
         .iter()
-        .any(|n| n.round.as_ref().is_some_and(|r| r.until) && n.state == NodeState::Succeeded);
-    let failed = checkpoint
-        .nodes
-        .iter()
-        .enumerate()
-        .any(|(index, progress)| {
-            progress.round.as_ref().is_some_and(|round| {
-                round.loop_id == node.id
-                    && !round.until
-                    && matches!(progress.state, NodeState::Failed | NodeState::Blocked)
-                    && retryable_round_failure_is_terminal(
-                        index, &node.id, plan, checkpoint, positions,
-                    )
-            })
-        });
+        .any(|progress| failed_member(progress, plan, checkpoint, positions));
     let settled = body.iter().all(|n| n.state.settled());
     let accepted = checkpoint
         .extensions
@@ -1386,8 +1506,9 @@ pub(super) fn validate_progress(
     let stopped = checkpoint
         .extensions
         .contains(&format!("loop.{}.decision=stop", node.id));
+    let queue_exhausted = queue && settled && !passed && !clean && !accepted;
     let matches_output = |passed| {
-        let expected = repair::terminal_outputs(node, checkpoint, positions, passed);
+        let expected = repair::terminal_outputs(node, checkpoint, positions, plan, passed);
         progress.outputs == Some(expected)
     };
     let park_pending = queue
@@ -1414,7 +1535,11 @@ pub(super) fn validate_progress(
             !failed && settled && (passed || accepted || clean) && matches_output(true)
         }
         NodeState::Failed => {
-            (failed || stopped || escalated.is_some() || repair::is_repair(node) && settled)
+            (failed
+                || stopped
+                || escalated.is_some()
+                || repair::is_repair(node) && settled
+                || queue_exhausted)
                 && matches_output(false)
         }
         NodeState::Pending => progress.outputs.is_none(),
@@ -1493,25 +1618,12 @@ pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
         .iter()
         .filter(|n| n.round.as_ref().is_some_and(|r| r.loop_id == node.id))
         .collect();
-    let failed = body.iter().any(|n| {
-        matches!(n.state, NodeState::Failed | NodeState::Blocked)
-            && !n.round.as_ref().is_some_and(|r| r.until)
-    });
+    let failed = body
+        .iter()
+        .any(|progress| failed_member(progress, plan, checkpoint, positions));
     let clean = repair::clean_start(node, checkpoint, positions);
     let escalation = repair::escalation(node, checkpoint, positions);
-    let passed = checkpoint
-        .nodes
-        .iter()
-        .enumerate()
-        .any(|(index, progress)| {
-            progress.round.as_ref().is_some_and(|round| {
-                round.loop_id == node.id
-                    && round.until
-                    && (progress.state == NodeState::Succeeded
-                        || conflict_recovery_round_state(index, plan, checkpoint, positions)
-                            == Some(ConflictRecoveryRoundState::Succeeded))
-            })
-        });
+    let passed = passed(node, checkpoint, plan);
     let settled = body.iter().all(|n| n.state.settled());
     let rounds = body
         .iter()
@@ -1552,8 +1664,13 @@ pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
         None
     };
     if let Some(state) = state {
-        let outputs =
-            repair::terminal_outputs(node, checkpoint, positions, state == NodeState::Succeeded);
+        let outputs = repair::terminal_outputs(
+            node,
+            checkpoint,
+            positions,
+            plan,
+            state == NodeState::Succeeded,
+        );
         let progress = &mut checkpoint.nodes[index];
         progress.state = state;
         progress.outputs = Some(outputs);

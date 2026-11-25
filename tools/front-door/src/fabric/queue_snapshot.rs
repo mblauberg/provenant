@@ -1,6 +1,6 @@
 //! Resolve delivery selectors to bounded, immutable tracker snapshots.
-use provenant_config::{Forge, ForgeOperation, ForgePort, PortBackend, PortTable};
 use super::queue_registry::{QueueIdentity, QueueSnapshot, QueueSnapshotItem};
+use provenant_config::{Forge, ForgeOperation, ForgePort, PortBackend, PortTable};
 use provenant_core::{CancelToken, Clock};
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, path::Path, time::Duration};
@@ -24,7 +24,8 @@ fn parse_selector(values: &[String]) -> Result<(Selector, String), String> {
     };
     if let Some(first_numbers) = first.strip_prefix("issues:") {
         let mut numbers = Vec::new();
-        for value in std::iter::once(first_numbers).chain(values.iter().skip(1).map(String::as_str)) {
+        for value in std::iter::once(first_numbers).chain(values.iter().skip(1).map(String::as_str))
+        {
             if value.is_empty() {
                 continue;
             }
@@ -40,18 +41,31 @@ fn parse_selector(values: &[String]) -> Result<(Selector, String), String> {
             }
         }
         if numbers.is_empty() || numbers.len() > MAX_ITEMS {
-            return Err(format!("delivery issue selection requires 1..={MAX_ITEMS} items"));
+            return Err(format!(
+                "delivery issue selection requires 1..={MAX_ITEMS} items"
+            ));
         }
-        let selector = format!("issues:{}", numbers.iter().map(u64::to_string).collect::<Vec<_>>().join(","));
+        let selector = format!(
+            "issues:{}",
+            numbers
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        );
         return Ok((Selector::Issues(numbers), selector));
     }
     if let Some(query) = first.strip_prefix("query:") {
         if values.len() != 1 {
-            return Err("tracker query must be one --over value; quote it to preserve spaces".into());
+            return Err(
+                "tracker query must be one --over value; quote it to preserve spaces".into(),
+            );
         }
         let query = query.trim();
         if query.is_empty() || query.len() > MAX_QUERY_BYTES || query.contains('\0') {
-            return Err(format!("tracker query must contain 1..={MAX_QUERY_BYTES} bytes"));
+            return Err(format!(
+                "tracker query must contain 1..={MAX_QUERY_BYTES} bytes"
+            ));
         }
         return Ok((Selector::Query(query.to_owned()), format!("query:{query}")));
     }
@@ -128,12 +142,7 @@ pub(super) fn resolve_snapshot(
                 .collect::<Result<Vec<_>, _>>()?
         }
         Selector::Query(query_text) => {
-            query_snapshot(
-                &mut forge,
-                request,
-                &repository,
-                query_text,
-            )?
+            query_snapshot(&mut forge, request, &repository, query_text)?
         }
     };
     if raw.is_empty() {
@@ -151,9 +160,13 @@ pub(super) fn resolve_snapshot(
             let number = issue["number"]
                 .as_u64()
                 .ok_or("tracker issue has no number")?;
-            let node_id = issue["id"].as_str().ok_or("tracker issue has no global id")?;
+            let node_id = issue["id"]
+                .as_str()
+                .ok_or("tracker issue has no global id")?;
             if !seen.insert(node_id.to_owned()) {
-                return Err(format!("tracker selector returned issue #{number} more than once"));
+                return Err(format!(
+                    "tracker selector returned issue #{number} more than once"
+                ));
             }
             Ok(QueueSnapshotItem {
                 identity: QueueIdentity::new(project_id, &tracker, node_id)?,
@@ -217,16 +230,22 @@ fn query_snapshot(
         }
         for node in nodes {
             if node["__typename"] != "Issue" {
-                return Err("tracker query returned a non-issue result despite the issue filter".into());
+                return Err(
+                    "tracker query returned a non-issue result despite the issue filter".into(),
+                );
             }
             issues.push(checked_issue(node, repository, None)?);
         }
         if issues.len() > MAX_ITEMS {
-            return Err(format!("tracker query returned more than {MAX_ITEMS} issues"));
+            return Err(format!(
+                "tracker query returned more than {MAX_ITEMS} issues"
+            ));
         }
         if page["pageInfo"]["hasNextPage"] == Value::Bool(false) {
             if issues.len() as u64 != issue_count {
-                return Err("tracker query result was incomplete despite the final-page marker".into());
+                return Err(
+                    "tracker query result was incomplete despite the final-page marker".into(),
+                );
             }
             return Ok(issues);
         }
@@ -251,7 +270,10 @@ fn query_snapshot(
     Err("tracker query snapshot exceeded its bounded pagination".into())
 }
 
-#[allow(clippy::disallowed_methods, reason = "tracker request owns its absolute deadline")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "tracker request owns its absolute deadline"
+)]
 fn request(cancel: &CancelToken, budget: Duration) -> provenant_config::ports::Request {
     let budget = budget.min(MAX_READ_BUDGET);
     let deadline = std::time::Instant::now()
@@ -260,7 +282,11 @@ fn request(cancel: &CancelToken, budget: Duration) -> provenant_config::ports::R
     provenant_config::ports::Request::new(deadline, cancel.clone())
 }
 
-fn checked_issue(issue: &Value, repository: &str, expected_number: Option<u64>) -> Result<Value, String> {
+fn checked_issue(
+    issue: &Value,
+    repository: &str,
+    expected_number: Option<u64>,
+) -> Result<Value, String> {
     let issue_repository = issue["repository"]["nameWithOwner"]
         .as_str()
         .ok_or("tracker issue has no repository identity")?;
@@ -270,7 +296,9 @@ fn checked_issue(issue: &Value, repository: &str, expected_number: Option<u64>) 
     if !issue_repository.eq_ignore_ascii_case(repository)
         || expected_number.is_some_and(|expected| expected != number)
     {
-        return Err("tracker issue identity does not match the selected repository and number".into());
+        return Err(
+            "tracker issue identity does not match the selected repository and number".into(),
+        );
     }
     for field in ["id", "title", "url", "state"] {
         if issue[field].as_str().is_none() {
@@ -279,7 +307,9 @@ fn checked_issue(issue: &Value, repository: &str, expected_number: Option<u64>) 
     }
     let body = issue["body"].as_str().unwrap_or_default();
     if body.len() > MAX_RESULT_BYTES {
-        return Err(format!("tracker issue #{number} body exceeds the snapshot limit"));
+        return Err(format!(
+            "tracker issue #{number} body exceeds the snapshot limit"
+        ));
     }
     Ok(json!({
         "id": issue["id"],
@@ -297,11 +327,18 @@ fn response_json(status: Option<u16>, bytes: &[u8]) -> Result<Value, String> {
         return Err("tracker response exceeds the snapshot limit".into());
     }
     if status.is_some_and(|status| !(200..300).contains(&status)) {
-        return Err(format!("tracker returned HTTP status {}", status.unwrap_or_default()));
+        return Err(format!(
+            "tracker returned HTTP status {}",
+            status.unwrap_or_default()
+        ));
     }
     let value: Value = serde_json::from_slice(bytes)
         .map_err(|error| format!("invalid tracker response: {error}"))?;
-    if value.get("errors").and_then(Value::as_array).is_some_and(|errors| !errors.is_empty()) {
+    if value
+        .get("errors")
+        .and_then(Value::as_array)
+        .is_some_and(|errors| !errors.is_empty())
+    {
         return Err("tracker query returned GraphQL errors".into());
     }
     value
@@ -323,9 +360,9 @@ fn valid_repository(value: &str) -> bool {
     !owner.is_empty()
         && !name.is_empty()
         && !name.contains('/')
-        && value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'/')
-        })
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'/'))
 }
 
 #[cfg(test)]

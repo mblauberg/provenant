@@ -450,6 +450,11 @@ fn children(
                 depth_bound,
                 nodes_bound,
             )?;
+            for seed in spec.initial_heads.values_mut() {
+                *seed = reference(prefix, seed, &locals, incoming)
+                    .or_else(|| visible_names.get(seed).cloned())
+                    .unwrap_or_else(|| scoped(prefix, seed));
+            }
         }
         if (node.kind == Some(NodeKind::Composite)) != node.composite.is_some() {
             return Err("composite requires nodes and exports".into());

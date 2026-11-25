@@ -1833,7 +1833,9 @@ pub(crate) fn unified_graph_command(
             if action == provenant_cli::QueueControlAction::Fix
                 && resolved_brief.as_deref().is_none_or(str::is_empty)
             {
-                return Err(std::io::Error::other("queue fix requires --brief or --brief-file").into());
+                return Err(
+                    std::io::Error::other("queue fix requires --brief or --brief-file").into(),
+                );
             }
         }
         let selectors: Vec<(String, Option<&str>)> = if targets.is_empty() {
@@ -2245,13 +2247,7 @@ pub(crate) fn unified_graph_steer(
                 graph_id: Some(resolved.graph.clone()),
             };
             let proof = (!selected_settled).then(|| {
-                super::steer::verified_target(
-                    &factory,
-                    &resolved,
-                    &checkpoint,
-                    budget,
-                    &cancel,
-                )
+                super::steer::verified_target(&factory, &resolved, &checkpoint, budget, &cancel)
             });
             if selected_settled
                 || matches!(proof.as_ref(), Some(super::steer::TargetProof::Settled))
@@ -2271,17 +2267,16 @@ pub(crate) fn unified_graph_steer(
                     budget,
                     &cancel,
                 )?;
-                return Ok(SteerResult::Queued(json!({"queue_control": result["queue_control"], "result": result})));
+                return Ok(SteerResult::Queued(
+                    json!({"queue_control": result["queue_control"], "result": result}),
+                ));
             }
             if matches!(proof.as_ref(), Some(super::steer::TargetProof::Conflict)) {
                 return Ok(SteerResult::Refused(
                     "queue fix requires one verified current live attempt",
                 ));
             }
-            let node_id = resolved
-                .node
-                .as_deref()
-                .ok_or(FacadeError::StateCorrupt)?;
+            let node_id = resolved.node.as_deref().ok_or(FacadeError::StateCorrupt)?;
             let receipt = super::queue_controls::queue_live_fix(
                 &factory,
                 &resolved.graph,

@@ -706,10 +706,19 @@ pub(super) fn terminal_outputs(
     node: &PlannedNode,
     checkpoint: &GraphCheckpoint,
     positions: &BTreeMap<String, usize>,
+    plan: &PlannedGraph,
     passed: bool,
 ) -> NodeOutputs {
     let mut outputs = gate_outputs(passed);
-    if passed || !is_repair(node) {
+    if passed {
+        if let Some(publication) = selected_publication(node, checkpoint, plan) {
+            outputs.publication = Some(publication.clone());
+            outputs.branch = Some(publication.branch);
+            outputs.commit = Some(publication.head);
+        }
+        return outputs;
+    }
+    if !is_repair(node) {
         return outputs;
     }
     let latest = checkpoint
@@ -752,6 +761,56 @@ pub(super) fn terminal_outputs(
         outputs.repair_items.clone_from(&writer.repair_items);
     }
     outputs
+}
+
+pub(super) fn selected_publication(
+    node: &PlannedNode,
+    checkpoint: &GraphCheckpoint,
+    plan: &PlannedGraph,
+) -> Option<DeliveryPublication> {
+    let spec = node.loop_body.as_ref()?;
+    let local = spec.selected_publication.as_deref()?;
+    let passed_round = checkpoint
+        .nodes
+        .iter()
+        .filter_map(|progress| {
+            let round = progress.round.as_ref()?;
+            (round.loop_id == node.id && round.until && progress.state == NodeState::Succeeded)
+                .then_some(round.round)
+        })
+        .max()?;
+    let (member, progress) =
+        plan.nodes
+            .iter()
+            .zip(&checkpoint.nodes)
+            .find(|(member, progress)| {
+                member.round.as_ref().is_some_and(|round| {
+                    round.loop_id == node.id
+                        && round.round == passed_round
+                        && round.node_id == local
+                }) && progress.state == NodeState::Succeeded
+            })?;
+    if member.kind != Some(NodeKind::Publish) {
+        return None;
+    }
+    let receipt = if let Some(intent) = member.delivery_adoption.as_ref() {
+        let adoption = progress.delivery_adoption()?;
+        if !adoption.matches_intent(intent) || adoption.ci_admission.is_none() {
+            return None;
+        }
+        adoption.receipt?
+    } else {
+        progress.delivery_publication.as_ref()?.receipt.clone()?
+    };
+    let outputs = progress.outputs.as_ref()?;
+    (outputs.publication.as_ref() == Some(&receipt)
+        && outputs.branch.as_deref() == Some(receipt.branch.as_str())
+        && outputs.commit.as_deref() == Some(receipt.head.as_str())
+        && receipt.head.parse::<provenant_core::GitOid>().is_ok()
+        && !receipt.branch.trim().is_empty()
+        && !receipt.pull_request.trim().is_empty()
+        && checkpoint.pull_request.as_deref() == Some(receipt.pull_request.as_str()))
+    .then_some(receipt)
 }
 
 #[cfg(test)]

@@ -917,6 +917,7 @@ pub(super) fn initial_checkpoint(
         pull_request: None,
         schema_version: 2,
         cancelled: false,
+        delivery_ci_superseded: Vec::new(),
         cancel_reason: None,
         integration_pin: None,
         pause: None,
@@ -1692,6 +1693,19 @@ pub(super) fn dependency_state(
         .any(|parent| !checkpoint.nodes[positions[parent]].state.settled());
     let mut skipped = false;
     let mut blocked = false;
+    let queue_retry_loop = node
+        .loop_body
+        .as_ref()
+        .is_some_and(|spec| !spec.retry_on.is_empty());
+    let queue_recovery_triggered = queue_retry_loop
+        && node.depends_on.iter().any(|parent| {
+            let index = positions[parent];
+            plan.nodes[index].on_fail.as_deref() == Some(node.id.as_str())
+                && matches!(
+                    checkpoint.nodes[index].state,
+                    NodeState::Failed | NodeState::Blocked
+                )
+        });
     if node
         .after_expansion
         .iter()
@@ -1777,9 +1791,11 @@ pub(super) fn dependency_state(
                 skipped = true
             }
             NodeState::Failed if recovery => {}
+            NodeState::Blocked if recovery && queue_retry_loop => {}
             NodeState::Failed if plan.nodes[index].on_fail.is_some() => skipped = true,
             NodeState::Failed | NodeState::Blocked => blocked = true,
-            NodeState::Succeeded if recovery => skipped = true,
+            NodeState::Succeeded if recovery && !queue_recovery_triggered => skipped = true,
+            NodeState::Succeeded if recovery => {}
             NodeState::Skipped => skipped = true,
             NodeState::Pending | NodeState::Running => waiting = true,
             NodeState::Succeeded => {}

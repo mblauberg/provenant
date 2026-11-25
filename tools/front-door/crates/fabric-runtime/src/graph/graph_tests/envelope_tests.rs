@@ -542,6 +542,7 @@ host_refused_before_acceptance: false,
         pull_request: Some(worst(OUTPUT_FIELD_BYTES)),
         integration_pin: Some("1".repeat(64)),
         cancelled: true,
+        delivery_ci_superseded: Vec::new(),
         cancel_reason: Some(worst(MAX_CANCEL_REASON_BYTES)),
         pause: Some(
             provenant_records::pause::Pause::new(

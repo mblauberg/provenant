@@ -78,6 +78,8 @@ pub(super) fn is_false(value: &bool) -> bool {
     !value
 }
 
+pub const QUEUE_CI_WAIT_KEY: &str = "queue_ci_wait";
+
 /// Config keys for the sealed delivery queue settings.
 pub const QUEUE_MAX_PARALLEL_KEY: &str = "domains.fabric.queue.max_parallel";
 pub const QUEUE_CI_SLOTS_KEY: &str = "domains.fabric.queue.ci_slots";
@@ -787,6 +789,9 @@ pub struct GraphNode {
     pub escalate: Option<EscalateSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery_review: Option<DeliveryReviewSpec>,
+    /// Untrusted facts for a host-verified queue PR adoption seed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_adoption: Option<DeliveryAdoptionIntent>,
     /// The step to take after a stop with a given cause instead of the stop
     /// table's default (`docs/specs/run.md#what-follows-a-stop`).
     #[serde(default, skip_serializing_if = "provenant_records::OnStop::is_empty")]
@@ -1183,6 +1188,25 @@ pub(super) fn validate_delivery_contracts(document: &GraphDocument) -> Result<()
 }
 
 impl GraphDocument {
+    /// The authenticated queue item's sourced CI lease wait, when present.
+    /// Kept in document extras so older non-queue constructors remain stable.
+    pub fn queue_ci_wait(&self) -> Option<provenant_records::Sourced<u64>> {
+        self.extra
+            .get(QUEUE_CI_WAIT_KEY)
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok())
+    }
+
+    /// Seal the queue registry's sourced CI wait into the persisted document.
+    pub fn set_queue_ci_wait(
+        &mut self,
+        wait: &provenant_records::Sourced<u64>,
+    ) -> Result<(), serde_json::Error> {
+        self.extra
+            .insert(QUEUE_CI_WAIT_KEY.into(), serde_json::to_value(wait)?);
+        Ok(())
+    }
+
     /// The host digest of the input that created this graph. A named `run` whose
     /// input has the same digest finds this graph instead of starting another.
     pub fn replay_digest(&self) -> Option<&str> {
@@ -1710,10 +1734,79 @@ pub struct DeliveryPublicationProgress {
     /// Expected old graph-owned remote head; `None` means it must not exist.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_remote_head: Option<String>,
+    /// Durable host-class reservation written before the external publication
+    /// effect; a missing field in an older checkpoint remains absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ci_admission: Option<DeliveryCiAdmission>,
+    /// Durable retry state for bounded, nonblocking host CI admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ci_admission_wait: Option<DeliveryCiAdmissionWait>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receipt: Option<DeliveryPublication>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+/// Host admission token retained with publication intent for replay and cleanup.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeliveryCiLease {
+    pub id: String,
+    pub slot: u64,
+    pub project: String,
+    pub graph_id: String,
+    pub node_id: String,
+    pub head_sha: String,
+    /// The effective shared CI class cap and its sealed source.
+    pub ci_slots: provenant_records::Sourced<usize>,
+}
+
+/// Exact published head made obsolete by a durable queue conflict recovery.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeliveryCiSupersession {
+    pub node_id: String,
+    pub head_sha: String,
+}
+
+/// Sourced wait window retained while a queue publication waits for CI capacity.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeliveryCiAdmissionWait {
+    pub started_at: provenant_core::WallTime,
+    pub deadline: provenant_core::WallTime,
+    pub wake_at: provenant_core::WallTime,
+    pub policy: provenant_records::Sourced<u64>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub clock_missing: bool,
+}
+
+fn default_delivery_ci_slots() -> provenant_records::Sourced<usize> {
+    QueueKnobs::default().ci_slots
+}
+
+/// Queue CI admission outcome, sealed before publication. Overflow remains
+/// advisory and is retained so status can explain why the cap was exceeded.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum DeliveryCiAdmission {
+    Held {
+        lease: DeliveryCiLease,
+    },
+    Overflow {
+        waited_millis: u64,
+        #[serde(default = "default_delivery_ci_slots")]
+        ci_slots: provenant_records::Sourced<usize>,
+    },
+    Unavailable {
+        reason: String,
+    },
+}
+
+impl DeliveryCiAdmission {
+    pub fn lease(&self) -> Option<&DeliveryCiLease> {
+        match self {
+            Self::Held { lease } => Some(lease),
+            Self::Overflow { .. } | Self::Unavailable { .. } => None,
+        }
+    }
 }
 
 /// A durable park intent, completed when the inbox returns its request ID.
@@ -1742,6 +1835,44 @@ pub struct ReviewSettlement {
     pub verdict: provenant_records::workflow::ReviewVerdict,
     /// The reviewer is a separate read-only lane, not a writer continuation.
     pub independent: bool,
+}
+
+/// A chair's reasoned disposition of valid review evidence for one exact head.
+/// It is stored on the reviewed node and never replaces the reviewer output.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeliveryReviewDisposition {
+    pub operation_id: provenant_core::OperationId,
+    pub request_id: provenant_core::HumanRequestId,
+    pub answer_id: provenant_core::HumanAnswerId,
+    pub head: provenant_core::GitOid,
+    pub reason: String,
+}
+
+const DELIVERY_REVIEW_DISPOSITION_KEY: &str = "delivery_review_disposition";
+
+impl NodeProgress {
+    /// Read the typed chair disposition retained in the forward-compatible
+    /// progress extras. Malformed or future data never counts as approval.
+    pub fn delivery_review_disposition(&self) -> Option<DeliveryReviewDisposition> {
+        self.extra
+            .get(DELIVERY_REVIEW_DISPOSITION_KEY)
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok())
+    }
+
+    /// Store a validated disposition without changing the original review
+    /// output or its exact-head settlement.
+    pub fn set_delivery_review_disposition(
+        &mut self,
+        disposition: &DeliveryReviewDisposition,
+    ) -> Result<(), serde_json::Error> {
+        self.extra.insert(
+            DELIVERY_REVIEW_DISPOSITION_KEY.to_owned(),
+            serde_json::to_value(disposition)?,
+        );
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2142,6 +2273,9 @@ pub struct GraphCheckpoint {
     /// Durable admission fence. Resume observes the same attempt keys.
     #[serde(default)]
     pub cancelled: bool,
+    /// Exact-head evidence that permits replay-safe release after conflict recovery.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delivery_ci_superseded: Vec<DeliveryCiSupersession>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cancel_reason: Option<String>,
     /// Why the graph waits for the chair, with the cause typed.
@@ -2600,6 +2734,33 @@ pub struct UnknownUsageEvent {
 }
 
 impl GraphCheckpoint {
+    /// Record the exact queue publication head settled by conflict recovery.
+    pub fn record_delivery_ci_supersession(
+        &mut self,
+        node_id: &str,
+        head_sha: &str,
+    ) -> Result<(), &'static str> {
+        if node_id.is_empty() || head_sha.parse::<provenant_core::GitOid>().is_err() {
+            return Err("delivery CI supersession must identify a node and exact Git head");
+        }
+        if let Some(existing) = self
+            .delivery_ci_superseded
+            .iter()
+            .find(|record| record.node_id == node_id)
+        {
+            return if existing.head_sha == head_sha {
+                Ok(())
+            } else {
+                Err("one publication node cannot supersede multiple exact CI heads")
+            };
+        }
+        self.delivery_ci_superseded.push(DeliveryCiSupersession {
+            node_id: node_id.to_owned(),
+            head_sha: head_sha.to_owned(),
+        });
+        Ok(())
+    }
+
     /// Pause the graph for the chair. The reason is cut to its bound.
     pub fn set_pause(&mut self, cause: provenant_records::pause::PauseCause, reason: &str) {
         let reason = bounded(reason, provenant_records::pause::PAUSE_REASON_BYTES);

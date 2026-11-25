@@ -531,6 +531,31 @@ fn next_wake(checkpoint: &GraphCheckpoint) -> Option<WallTime> {
                         .map(|retry| retry.wake_at)
                 }),
         )
+        .chain(
+            checkpoint
+                .nodes
+                .iter()
+                .filter(|node| node.state == NodeState::Running)
+                .filter_map(|node| {
+                    node.delivery_publication
+                        .as_ref()
+                        .filter(|progress| progress.ci_admission.is_none())
+                        .and_then(|progress| progress.ci_admission_wait.as_ref())
+                        .map(|wait| wait.wake_at)
+                }),
+        )
+        .chain(
+            checkpoint
+                .nodes
+                .iter()
+                .filter(|node| node.state == NodeState::Running)
+                .filter_map(|node| {
+                    node.delivery_adoption()
+                        .filter(|progress| progress.ci_admission.is_none())
+                        .and_then(|progress| progress.ci_admission_wait)
+                        .map(|wait| wait.wake_at)
+                }),
+        )
         .min()
 }
 
