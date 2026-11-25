@@ -23,6 +23,11 @@ pub const FALLBACK_ROW_BYTES: usize = 200;
 
 /// `output` shows a result whole up to this size; above it, head and tail.
 pub const OUTPUT_BYTES: usize = 12 * 1024;
+/// The opening of a bounded result kept for context.
+pub const FINAL_HEAD_BYTES: usize = 1024;
+/// The end of a bounded result: a whole sealed handoff plus the final message
+/// and verdict that precede it.
+pub const FINAL_TAIL_BYTES: usize = OUTPUT_BYTES + 4 * 1024;
 /// Changed paths `output` names, and the longest path it prints.
 pub const OUTPUT_PATHS: usize = 8;
 pub const PATH_BYTES: usize = 120;
@@ -34,7 +39,8 @@ pub fn reference() -> String {
     format!(
         "default output shows {SUMMARY_ROWS} summary rows of at most {SUMMARY_ROW_BYTES} bytes, \
          action rows first; --full shows everything; output shows a result whole up to \
-         {} KiB, then its head and tail; --json is never abbreviated",
-        OUTPUT_BYTES / 1024
+         {} KiB, then a short head and a tail that keeps the final message, verdict and sealed handoff; \
+         --json is never abbreviated",
+        (FINAL_HEAD_BYTES + FINAL_TAIL_BYTES) / 1024
     )
 }

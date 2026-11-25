@@ -227,8 +227,9 @@ pub(super) fn output_summary(data: &Value, text: &str, headed: bool) -> crate::S
     summary(data, text, headed, true)
 }
 
-/// The compact default view: verdict, findings and verify first, with the
-/// host-fact narration and lane prose available through `--full`.
+/// The compact default view: verdict, findings and verify first, then a
+/// bounded view of the result that keeps its final message and sealed handoff
+/// and marks the omitted middle; host facts remain behind `--full`.
 /// Spec: docs/specs/lane-contracts.md#result-projection
 pub(super) fn output_summary_default(data: &Value, text: &str, headed: bool) -> crate::Summary {
     summary(data, text, headed, false)
@@ -266,6 +267,45 @@ pub fn finding_human_line(finding: &Value) -> String {
         line.push_str(&format!(" (fix: {fix})"));
     }
     line
+}
+
+/// The bounded view of a result. A verdict and the sealed handoff live at the
+/// end of the lane's final message, so a compact read must keep that end and
+/// truncate the middle instead of the tail. The marker names the omitted bytes
+/// and points at `--full` for the complete text.
+/// Spec: docs/specs/cli.md#output-references-and-bounded-tails
+fn final_result_view(text: &str) -> String {
+    let final_head = crate::limits::FINAL_HEAD_BYTES;
+    let final_tail = crate::limits::FINAL_TAIL_BYTES;
+    if text.len() <= final_head + final_tail {
+        return text.to_owned();
+    }
+    let mut head = final_head.min(text.len());
+    while !text.is_char_boundary(head) {
+        head -= 1;
+    }
+    if let Some(cut) = text[..head].rfind('\n') {
+        head = cut + 1;
+    }
+    let mut tail = text.len().saturating_sub(final_tail);
+    while !text.is_char_boundary(tail) {
+        tail += 1;
+    }
+    if let Some(cut) = text[tail..].find('\n') {
+        let snap = tail + cut + 1;
+        // Only snap forward when a whole line follows; the last newline ends
+        // the final line and snapping there would drop the handoff.
+        if snap < text.len() {
+            tail = snap;
+        }
+    }
+    let omitted = tail.saturating_sub(head);
+    format!(
+        "{}[... {} bytes omitted; use --full for all of it ...]\n{}",
+        &text[..head],
+        omitted,
+        &text[tail..]
+    )
 }
 
 fn summary(data: &Value, text: &str, headed: bool, full: bool) -> crate::Summary {
@@ -454,10 +494,13 @@ fn summary(data: &Value, text: &str, headed: bool, full: bool) -> crate::Summary
         lines.push(format!("changed files ({total}): {listed}{more}"));
     }
     // Other parts are the requested bytes, not narration: a transcript or a
-    // stderr read still shows its text in the compact view. A result's prose
-    // is lane narration and belongs behind --full; the compact view keeps the
-    // structured facts above. An empty result repeats its diagnostic as text,
-    // already carried by the settlement line, so render it only once.
+    // stderr read still shows its text in the compact view. A result's final
+    // message and sealed handoff live at its end, so the bounded view keeps
+    // both ends and marks the middle it omitted; a driver parsing the default
+    // output must never lose the verdict or the handoff. An empty result
+    // repeats its diagnostic as text, already carried by the settlement line,
+    // so render it only once.
+    // Spec: docs/specs/cli.md#output-references-and-bounded-tails
     if !headed {
         let body = if full {
             text.to_owned()
@@ -465,8 +508,13 @@ fn summary(data: &Value, text: &str, headed: bool, full: bool) -> crate::Summary
             crate::head_and_tail(text, limits::OUTPUT_BYTES)
         };
         lines.extend(body.lines().map(str::to_owned));
-    } else if full && data["reason"].as_str() != Some(text.trim()) {
-        lines.extend(text.lines().map(str::to_owned));
+    } else if data["reason"].as_str() != Some(text.trim()) {
+        let body = if full {
+            text.to_owned()
+        } else {
+            final_result_view(text)
+        };
+        lines.extend(body.lines().map(str::to_owned));
     }
     crate::Summary { lines, omitted: 0 }
 }
@@ -1945,26 +1993,57 @@ mod tests {
         );
     }
 
+    // Spec: docs/specs/cli.md#output-references-and-bounded-tails
+    #[test]
+    fn default_result_keeps_the_final_message_and_sealed_handoff() {
+        let verdict = "VERDICT: PASS";
+        let handoff = "```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"finished\",\"remaining\":[],\"decisions\":[],\"verify\":[]}\n```";
+        // A long middle must be omitted, never the end a driver parses.
+        let text = format!(
+            "the opening of the final message\n{}\n{verdict}\n{handoff}\n",
+            "x".repeat(20_000)
+        );
+        let data = json!({
+            "state": "succeeded",
+            "selected": {"verdict": verdict, "findings": [], "findings_available": true},
+            "handoff": {"Ok": {"schema_version":2,"status":"done","note":"finished","remaining":[],"decisions":[],"verify":[]}}
+        });
+        let compact = output_summary_default(&data, &text, true);
+        let rendered = compact.lines.join("\n");
+        assert!(
+            rendered.lines().any(|line| line.starts_with(verdict)),
+            "the bounded result cut the final verdict line: {rendered}"
+        );
+        assert!(
+            rendered.contains("```handoff"),
+            "the bounded result cut the sealed handoff: {rendered}"
+        );
+        assert!(
+            rendered.contains("bytes omitted"),
+            "a bounded result must name its omitted middle: {rendered}"
+        );
+    }
+
     // Spec: docs/specs/lane-contracts.md#result-projection
     #[test]
-    fn compact_result_omits_lane_prose_and_keeps_non_result_parts() {
+    fn compact_result_keeps_non_result_parts_and_structured_facts() {
         let data = json!({
             "state": "succeeded",
             "selected": {"verdict": "PASS", "findings": [], "findings_available": true}
         });
-        let prose = "a long lane narrative the chair must not read by default";
+        let prose = "a lane narrative a reader can skip past in the structured facts";
         let compact = output_summary_default(&data, prose, true);
-        assert!(
-            !compact.lines.iter().any(|line| line.contains(prose)),
-            "the compact result embedded narration: {:?}",
-            compact.lines
-        );
         assert!(
             compact
                 .lines
                 .iter()
                 .any(|line| line.starts_with("settlement:")),
             "{:?}",
+            compact.lines
+        );
+        assert!(
+            compact.lines.iter().any(|line| line.contains(prose)),
+            "a bounded result must keep its final message: {:?}",
             compact.lines
         );
         // A transcript or stderr read is the requested bytes, not narration.
