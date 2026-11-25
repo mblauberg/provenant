@@ -2372,11 +2372,14 @@ impl Factory {
             )
             .map_err(graph_patch_error)?
         };
+        // Borrow the optional base: the prompt binding below still needs it
+        // after the document has been given its own copy.
         if review_launch
-            && let Some(base) =
-                resolved_review_base.filter(|base| Some(base) != resolved_head.as_ref())
+            && let Some(base) = resolved_review_base
+                .as_deref()
+                .filter(|base| Some(*base) != resolved_head.as_deref())
         {
-            document.review_base = Some(base);
+            document.review_base = Some(base.to_owned());
             document.schema_version = document.schema_version.max(2);
         }
         if review_subject

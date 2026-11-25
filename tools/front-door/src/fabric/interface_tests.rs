@@ -92,6 +92,10 @@ fn review_preamble_names_the_host_pinned_base_without_a_remote_default_ref() -> 
     assert!(prompt.contains(&head), "{prompt}");
     assert!(prompt.contains("authoritative"), "{prompt}");
     assert!(prompt.contains(provenant_run::REVIEW_BASE_REF), "{prompt}");
+    assert_eq!(
+        response["document"]["review_base"], base,
+        "the document and the prompt must name the same host-pinned base"
+    );
     Ok(())
 }
 
