@@ -537,6 +537,7 @@ impl Owner<'_> {
                 gate: &gate,
                 shadow: self.shadow,
                 state: self.state,
+                delivery_queue: record.request.delivery_queue,
                 approvals: Approvals::new(&settings.approval_sources, &reviews)
                     .governed(settings.approval_tier, &exempt, None)
                     .with_carry(self.state, &settings.approval_carry)
@@ -1236,6 +1237,7 @@ mod tests {
                 &mut world.gate,
                 &mut world.alarms,
                 driver::Request {
+                    delivery_queue: false,
                     numbers: &[1],
                     target: &snapshot.target,
                     settings: &world.settings,

@@ -255,8 +255,8 @@ struct RestPull {
     state: String,
     head: RestBranch,
     base: RestBranch,
-    #[allow(dead_code)]
     mergeable_state: Option<String>,
+    mergeable: Option<bool>,
     merged_at: Option<String>,
     #[serde(default)]
     closed_at: Option<String>,
