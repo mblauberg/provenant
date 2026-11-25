@@ -326,6 +326,8 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
         .map(|node| {
             let boundary = node.condition.is_some() || node.loop_body.is_some();
             NodeProgress {
+                delivery_loop: None,
+                escalation: None,
                 children_cancelled: false,
                 detached_from_graph_cancel: false,
                 subtree_cancel: None,

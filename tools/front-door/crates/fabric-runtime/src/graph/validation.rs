@@ -2,7 +2,13 @@ use super::*;
 
 pub(super) fn nodes_have_v2(nodes: &[GraphNode]) -> bool {
     nodes.iter().any(|node| {
-        node.review_base.is_some()
+        node.escalate.is_some()
+            || node.delivery_review.is_some()
+            || node
+                .loop_body
+                .as_ref()
+                .is_some_and(|spec| spec.outcome_edge.is_some())
+            || node.review_base.is_some()
             || node.family_group.is_some()
             || node
                 .inputs
@@ -46,7 +52,10 @@ pub(super) fn nodes_have_v2(nodes: &[GraphNode]) -> bool {
 fn value_has_v2(value: &serde_json::Value) -> bool {
     match value {
         serde_json::Value::Object(map) => {
-            map.contains_key("family_group")
+            map.contains_key("escalate")
+                || map.contains_key("delivery_review")
+                || map.contains_key("outcome_edge")
+                || map.contains_key("family_group")
                 || map.contains_key("review_base")
                 || map
                     .get("required_outputs")
@@ -70,7 +79,7 @@ pub fn minimum_schema_version(document: &GraphDocument) -> u32 {
 }
 
 pub(super) fn document_requires_review_fields(document: &GraphDocument) -> bool {
-    document.review_base.is_some() || nodes_have_v2(&document.nodes)
+    document.queue.is_some() || document.review_base.is_some() || nodes_have_v2(&document.nodes)
 }
 
 pub(super) fn supplied_kinds(node: &GraphNode) -> Vec<OutputKind> {
@@ -219,7 +228,7 @@ pub(super) fn validate_output_kinds(document: &GraphDocument) -> Result<(), Admi
 }
 
 pub(super) fn validate_schema(document: &GraphDocument) -> Result<(), AdmissionError> {
-    let has_v2 = document.review_base.is_some() || nodes_have_v2(&document.nodes);
+    let has_v2 = document_requires_review_fields(document);
     // Version 2 is a superset: it may omit every v2 field, but version 1
     // cannot carry one.
     if !matches!(document.schema_version, 1 | 2) || document.schema_version == 1 && has_v2 {

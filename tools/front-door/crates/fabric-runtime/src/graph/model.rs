@@ -78,6 +78,101 @@ pub(super) fn is_false(value: &bool) -> bool {
     !value
 }
 
+/// Config keys for the sealed delivery queue settings.
+pub const QUEUE_MAX_PARALLEL_KEY: &str = "domains.fabric.queue.max_parallel";
+pub const QUEUE_CI_SLOTS_KEY: &str = "domains.fabric.queue.ci_slots";
+pub const QUEUE_PREP_RETRIES_KEY: &str = "domains.fabric.queue.prep_retries";
+
+/// Effective values and their sources, sealed before queue admission.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QueueKnobs {
+    pub max_parallel: provenant_records::Sourced<usize>,
+    pub ci_slots: provenant_records::Sourced<usize>,
+    pub prep_retries: provenant_records::Sourced<usize>,
+}
+
+impl Default for QueueKnobs {
+    fn default() -> Self {
+        fn shipped(value: usize) -> provenant_records::Sourced<usize> {
+            provenant_records::Sourced {
+                value,
+                source: provenant_records::Source {
+                    layer: provenant_records::Layer::Default,
+                    origin: None,
+                },
+            }
+        }
+        Self {
+            max_parallel: shipped(4),
+            ci_slots: shipped(1),
+            prep_retries: shipped(2),
+        }
+    }
+}
+
+impl QueueKnobs {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.max_parallel.value == 0 {
+            return Err("queue.max_parallel must be positive");
+        }
+        Ok(())
+    }
+}
+
+/// Ordered route-tier aliases. Rung zero is the first attempt.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct EscalateSpec {
+    pub ladder: Vec<String>,
+    pub max_ci_rounds: usize,
+}
+
+impl Default for EscalateSpec {
+    fn default() -> Self {
+        Self {
+            ladder: ["junior", "senior", "principal"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            max_ci_rounds: 3,
+        }
+    }
+}
+
+impl EscalateSpec {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.ladder.is_empty()
+            || self
+                .ladder
+                .iter()
+                .any(|alias| provenant_core::valid_name(alias).is_none())
+        {
+            return Err("escalate.ladder must contain route-tier aliases");
+        }
+        if self.max_ci_rounds == 0 {
+            return Err("escalate.max_ci_rounds must be positive");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DeliveryReviewSpec {
+    pub shape: provenant_records::graph::ReviewShape,
+    pub accept_inconclusive_without_blocking: bool,
+}
+
+impl Default for DeliveryReviewSpec {
+    fn default() -> Self {
+        Self {
+            shape: Default::default(),
+            accept_inconclusive_without_blocking: true,
+        }
+    }
+}
+
 /// Host retry policy sealed with the attempt before a launch can fail.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaunchRetryPolicy {
@@ -144,6 +239,8 @@ pub(super) fn canonical_len<T: Serialize>(value: &T) -> usize {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphDocument {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue: Option<QueueKnobs>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_base: Option<String>,
     /// Review resolution inputs retained with the submitted graph.
@@ -686,6 +783,10 @@ fn graph_node_extra<'de, D: serde::Deserializer<'de>>(
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphNode {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escalate: Option<EscalateSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_review: Option<DeliveryReviewSpec>,
     /// The step to take after a stop with a given cause instead of the stop
     /// table's default (`docs/specs/run.md#what-follows-a-stop`).
     #[serde(default, skip_serializing_if = "provenant_records::OnStop::is_empty")]
@@ -1006,6 +1107,8 @@ pub enum GraphOutputField {
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum AdmissionError {
+    #[error("delivery queue contracts are not yet supported")]
+    DeliveryQueueUnsupported,
     #[error("{0}")]
     Schema(String),
     #[error("{0}")]
@@ -1027,6 +1130,53 @@ pub enum AdmissionError {
         field: GraphOutputField,
         reason: String,
     },
+}
+
+pub(super) fn validate_delivery_contracts(document: &GraphDocument) -> Result<(), AdmissionError> {
+    if let Some(queue) = &document.queue {
+        queue
+            .validate()
+            .map_err(|reason| AdmissionError::Plan(reason.into()))?;
+    }
+    fn check_nodes(nodes: &[GraphNode]) -> Result<bool, AdmissionError> {
+        let mut present = false;
+        for node in nodes {
+            if let Some(escalate) = &node.escalate {
+                escalate
+                    .validate()
+                    .map_err(|reason| AdmissionError::Plan(reason.into()))?;
+                present = true;
+            }
+            present |= node.delivery_review.is_some();
+            if let Some(spec) = &node.loop_body {
+                if let Some(edge) = &spec.outcome_edge {
+                    if spec.max_rounds == 0 {
+                        return Err(AdmissionError::Plan(
+                            "loop.max_rounds must be positive".into(),
+                        ));
+                    }
+                    if edge.node.trim().is_empty() {
+                        return Err(AdmissionError::Plan(
+                            "loop outcome edge requires a node".into(),
+                        ));
+                    }
+                    present = true;
+                }
+                present |= check_nodes(&spec.body)?;
+            }
+            if let Some(spec) = &node.composite {
+                present |= check_nodes(&spec.nodes)?;
+            }
+            if let Some(fallback) = node.plan.as_ref().and_then(|plan| plan.fallback.as_ref()) {
+                present |= check_nodes(&fallback.nodes)?;
+            }
+        }
+        Ok(present)
+    }
+    if check_nodes(&document.nodes)? || document.queue.is_some() {
+        return Err(AdmissionError::DeliveryQueueUnsupported);
+    }
+    Ok(())
 }
 
 impl GraphDocument {
@@ -1083,6 +1233,7 @@ impl GraphDocument {
         limits: &crate::config::GraphLimits,
     ) -> Result<Self, AdmissionError> {
         validate_schema(self)?;
+        validate_delivery_contracts(self)?;
         let expansion_limits = expansion_safety_limits(limits);
         let expanded = loops::expand(self, &[], &expansion_limits)?;
         // Refused at admission only. A graph persisted before the removal
@@ -2044,6 +2195,10 @@ impl NodeDecisionCause {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeProgress {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_loop: Option<provenant_records::graph::DeliveryLoopProgress>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escalation: Option<provenant_records::graph::EscalationProgress>,
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
     /// Direct children of a composite, whose individual evidence stays available.

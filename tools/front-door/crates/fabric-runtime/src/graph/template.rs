@@ -84,6 +84,7 @@ pub fn separate_document_fields(node: &mut Value) -> Result<(), String> {
     if let Some(fields) = node.as_object_mut() {
         for key in [
             "schema_version",
+            "queue",
             "graph_id",
             "templates",
             "integration_branch",
