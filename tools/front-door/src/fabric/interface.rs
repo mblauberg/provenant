@@ -1658,6 +1658,7 @@ impl Factory {
                 None => json!({"use":"task"}),
             }
         };
+        // TODO(#3972-queue): resolve `deliver --over` to a persisted item snapshot before compiling item graphs.
         let library = self.template_library(Some(&inline))?;
         let template_name = input
             .get("template")

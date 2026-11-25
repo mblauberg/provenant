@@ -1856,7 +1856,8 @@ fn delivery_park_replays_one_request_and_binds_its_transition() {
         "session-a".into(),
         OperationId::parse("park-transition-1").unwrap(),
         work,
-        "issue-42",
+        Some("issue-42"),
+        None,
         provenant_records::graph::ParkReason::ReviewEvidence,
         &"x".repeat(2000),
         &["evidence-1".into()],
@@ -1883,4 +1884,49 @@ fn delivery_park_replays_one_request_and_binds_its_transition() {
         service.execute(changed, &f.cancel).unwrap_err().code(),
         "operation_conflict"
     );
+}
+
+#[test]
+fn delivery_park_replays_a_prelaunch_refusal_with_its_graph_attempt_key() {
+    let f = Fixture::new();
+    let key = provenant_records::graph::AttemptKey {
+        extra: Default::default(),
+        retry_generation: Some(2),
+        previous_attempt_ref: None,
+        graph_id: "graph-preparation".into(),
+        node_id: "writer".into(),
+        attempt: 3,
+        route_index: 0,
+    };
+    let input = delivery_park(
+        "session-a".into(),
+        OperationId::parse("park-preparation-1").unwrap(),
+        RequestWork {
+            extra: Default::default(),
+            graph: key.graph_id.clone(),
+            node: Some(key.node_id.clone()),
+            attempt_id: None,
+            repository: None,
+            head: None,
+        },
+        None,
+        Some(&key),
+        provenant_records::graph::ParkReason::OperationError,
+        "preparation was refused before provider acceptance",
+        &["retained writer reconciliation failed".into()],
+    )
+    .unwrap();
+    let lookup = |_: &RequestWork, _: &Request<'_>| Ok(WorkCoverage::Verified);
+    let service = f.service().with_work_lookup(&lookup);
+    let first = receipt(service.execute(input.clone(), &f.cancel).unwrap());
+    assert_eq!(
+        receipt(service.execute(input.clone(), &f.cancel).unwrap()),
+        first
+    );
+    let stored = item(&f, first.request_id);
+    let body: serde_json::Value = serde_json::from_str(&stored.request.request.body).unwrap();
+    assert_eq!(body["item_pending"], true);
+    assert_eq!(body["attempt_key"]["graph_id"], "graph-preparation");
+    assert_eq!(body["attempt_key"]["attempt"], 3);
+    assert_eq!(body["reason"], "operation_error");
 }

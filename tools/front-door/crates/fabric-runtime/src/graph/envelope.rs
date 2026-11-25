@@ -270,10 +270,44 @@ fn node_bound(
     let expands = plans::agent(node);
     let gate = node.condition.is_some();
     let ci = matches!(node.condition, Some(GateCondition::Ci { .. }));
+    let conflict = matches!(node.condition, Some(GateCondition::Conflict { .. }));
+    let node_index = plan
+        .nodes
+        .iter()
+        .position(|candidate| candidate.id == node.id);
+    let escalation_policy =
+        node_index.and_then(|index| loops::escalation_owner(index, plan).map(|(_, policy)| policy));
+    let escalation_owner = node_index.and_then(|index| {
+        loops::escalation_owner(index, plan)
+            .filter(|(owner, _)| *owner == index)
+            .map(|(_, policy)| policy)
+    });
+    let worst_attempt_key = AttemptKey {
+        extra: Default::default(),
+        retry_generation: Some(u64::MAX),
+        previous_attempt_ref: Some(String::new()),
+        graph_id: plan.graph_id.clone(),
+        node_id: node.id.clone(),
+        attempt: u32::MAX,
+        route_index: u16::MAX,
+    };
     let boundary = gate || node.loop_body.is_some();
     let mut skeleton = NodeProgress {
-        delivery_loop: None,
-        escalation: None,
+        delivery_loop: node.loop_body.as_ref().map(|spec| {
+            provenant_records::graph::DeliveryLoopProgress {
+                name: node.id.clone(),
+                round: loop_rounds.max(spec.max_rounds),
+                last_attempt: worst_attempt_key.clone(),
+            }
+        }),
+        escalation: escalation_owner.map(|_| provenant_records::graph::EscalationProgress {
+            rung: usize::MAX,
+            cause: provenant_records::graph::EscalationCause::UncommittedEdits,
+            transition_attempt: worst_attempt_key.clone(),
+        }),
+        delivery_hygiene: None,
+        delivery_park: None,
+        conflict: None,
         extra: Default::default(),
         children: node.composite_members.clone(),
         source_binding: node.source.clone(),
@@ -406,6 +440,7 @@ fn node_bound(
                 compact_disposition_findings: None,
                 full_disposition_findings: None,
                 verdict_error: Some(String::new()),
+                hygiene: None,
                 schema_version: 2,
                 decide_outcome: None,
                 result: Some(ResultOutput {
@@ -587,6 +622,10 @@ fn node_bound(
                 .saturating_add(OUTPUT_FIELD_BYTES + 512);
         }
     }
+    if conflict {
+        // Exact head, summary, poll deadline and count survive a pending replay.
+        bytes = bytes.saturating_add(OUTPUT_FIELD_BYTES + 128);
+    }
     if plans::writer(node) {
         bytes = bytes.saturating_add(6 * 4096 + 256);
     }
@@ -627,7 +666,22 @@ fn node_bound(
             bytes += MAX_FINDINGS * (64 + 12);
         }
     }
+    let attempt_rows_per_route = plan
+        .queue
+        .as_ref()
+        .map_or(1, |queue| queue.prep_retries.value.saturating_add(1));
     for route in &node.routes {
+        let attempt_route = if plans::writer(node) {
+            escalation_policy
+                .into_iter()
+                .flat_map(|policy| policy.ladder.iter())
+                .map(|alias| loops::tier_route(Some(route), alias))
+                .chain(std::iter::once(route.clone()))
+                .max_by_key(|candidate| canonical_len(candidate))
+                .unwrap_or_else(|| route.clone())
+        } else {
+            route.clone()
+        };
         let attempt = GraphAttempt {
             placement_host: None,
             placement_host_id: None,
@@ -637,14 +691,16 @@ fn node_bound(
             launched: false,
             key: AttemptKey {
                 extra: Default::default(),
-                retry_generation: None,
-                previous_attempt_ref: None,
-                graph_id: plan.graph_id.clone(),
-                node_id: node.id.clone(),
-                attempt: u32::MAX,
-                route_index: u16::MAX,
+                retry_generation: worst_attempt_key.retry_generation,
+                previous_attempt_ref: worst_attempt_key.previous_attempt_ref.clone(),
+                graph_id: worst_attempt_key.graph_id.clone(),
+                node_id: worst_attempt_key.node_id.clone(),
+                attempt: worst_attempt_key.attempt,
+                route_index: worst_attempt_key.route_index,
             },
-            route: route.clone(),
+            escalation_rung: (plans::writer(node) && escalation_policy.is_some())
+                .then_some(usize::MAX),
+            route: attempt_route,
             state: AttemptState::Unresolved,
             // The longest stop cause name.
             stop: Some(provenant_records::StopCause::HostNativeUnconfigured),
@@ -674,7 +730,7 @@ fn node_bound(
             .map(|input| input.outputs.len())
             .sum::<usize>()
             .min(MANIFEST_INPUT_LIMIT);
-        bytes += canonical_len(&attempt)
+        let attempt_row_bound = canonical_len(&attempt)
             + 2 * HOST_ID_BYTES
             + NOTE_BYTES
             + 1
@@ -687,6 +743,7 @@ fn node_bound(
                 .map(|id| canonical_len(id) + 1)
                 .sum::<usize>()
             + selections * 768;
+        bytes = bytes.saturating_add(attempt_row_bound.saturating_mul(attempt_rows_per_route));
     }
     bytes
 }

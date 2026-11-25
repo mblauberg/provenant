@@ -212,6 +212,19 @@ pub(super) fn apply_attempt_observation(
     facts: ObservationFacts,
 ) -> Result<AppliedObservation, &'static str> {
     let node = &plan.nodes[node_index];
+    let admitted = match &observation {
+        AttemptObservation::Pending { .. } => true,
+        AttemptObservation::Unknown { .. } => false,
+        AttemptObservation::Terminal { launched, .. } => *launched,
+    };
+    if admitted
+        && let Some(key) = checkpoint.nodes[node_index]
+            .attempts
+            .last()
+            .map(|attempt| attempt.key.clone())
+    {
+        record_delivery_loop_attempt(node_index, plan, checkpoint, &key);
+    }
     let writer_attempts: std::collections::BTreeSet<_> = plan
         .nodes
         .iter()
@@ -949,6 +962,9 @@ pub(super) fn initial_checkpoint(
             .map(|node| NodeProgress {
                 delivery_loop: None,
                 escalation: None,
+                delivery_hygiene: None,
+                delivery_park: None,
+                conflict: None,
                 extra: Default::default(),
                 removed_requirements: node.removed_requirements.clone(),
                 children: node.composite_members.clone(),
@@ -1296,6 +1312,9 @@ pub(super) fn begin_attempt(
         .is_some_and(|attempt| {
             review_substitution(node, attempt) || review_preparation_substitution(node, attempt)
         });
+    let escalation_rung = plans::writer(node)
+        .then(|| loops::escalation_rung(node_index, plan, checkpoint))
+        .flatten();
     checkpoint.nodes[node_index].fallback_evidence_retry = None;
     checkpoint.nodes[node_index].attempts.push(GraphAttempt {
         // Persist placement before the launch can lose its reply.
@@ -1310,6 +1329,7 @@ pub(super) fn begin_attempt(
         placement_host_id,
         review_substitution,
         key: key.clone(),
+        escalation_rung,
         route: route.clone(),
         state: AttemptState::Starting,
         stop: None,
@@ -1347,6 +1367,180 @@ pub(super) fn begin_attempt(
     }
     // A retry must not replay the preceding attempt's family snapshot.
     checkpoint.nodes[node_index].separation = None;
+}
+
+/// Count an admitted repair once by its durable WorkKey identity. Preparation
+/// refusals do not reach this transition; accepted pending and launched
+/// terminal observations do.
+pub(super) fn record_delivery_loop_attempt(
+    node_index: usize,
+    plan: &PlannedGraph,
+    checkpoint: &mut GraphCheckpoint,
+    key: &AttemptKey,
+) {
+    let Some(round) = plan.nodes[node_index].round.as_ref() else {
+        return;
+    };
+    if plan.nodes[node_index].access != AccessMode::WorktreeWrite {
+        return;
+    }
+    if key.graph_id != plan.graph_id || key.node_id != plan.nodes[node_index].id {
+        return;
+    }
+    let Some(loop_index) = plan.nodes.iter().position(|node| node.id == round.loop_id) else {
+        return;
+    };
+    let progress = &mut checkpoint.nodes[loop_index];
+    if let Some(saved) = &progress.delivery_loop {
+        if &saved.last_attempt == key {
+            return;
+        }
+        // Expanded rounds are topological, while distinct attempts on the
+        // same node are ordered by their durable one-based attempt number.
+        // This accepts a later same-node repair and fences replay of older keys.
+        let Some(last_index) = plan
+            .nodes
+            .iter()
+            .position(|node| node.id == saved.last_attempt.node_id)
+        else {
+            return;
+        };
+        if node_index < last_index
+            || node_index == last_index && key.attempt <= saved.last_attempt.attempt
+        {
+            return;
+        }
+    }
+    let next_round = progress
+        .delivery_loop
+        .as_ref()
+        .map_or(1, |saved| saved.round.saturating_add(1));
+    progress.delivery_loop = Some(provenant_records::graph::DeliveryLoopProgress {
+        name: round.loop_id.clone(),
+        round: next_round,
+        last_attempt: key.clone(),
+    });
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum EscalationTransition {
+    AlreadyApplied { rung: usize },
+    WithinRung,
+    Advanced { rung: usize },
+    Exhausted { rung: usize },
+}
+
+fn escalation_transition_attempt(
+    node_index: usize,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+) -> Option<provenant_records::graph::AttemptKey> {
+    let node = plan.nodes.get(node_index)?;
+    if plans::writer(node) {
+        return checkpoint
+            .nodes
+            .get(node_index)?
+            .attempts
+            .last()
+            .map(|attempt| attempt.key.clone());
+    }
+
+    if let Some(round) = &node.round {
+        let owner_index = plan
+            .nodes
+            .iter()
+            .position(|candidate| candidate.id == round.loop_id)?;
+        if let Some(writer_index) = loops::nearest_writer_ancestor(node_index, plan)
+            && plan.nodes[writer_index]
+                .round
+                .as_ref()
+                .is_some_and(|writer_round| {
+                    writer_round.loop_id == round.loop_id && writer_round.round == round.round
+                })
+            && let Some(attempt) = checkpoint
+                .nodes
+                .get(writer_index)?
+                .recorded_attempts()
+                .next_back()
+        {
+            return Some(attempt.key.clone());
+        }
+        let key = checkpoint
+            .nodes
+            .get(owner_index)?
+            .delivery_loop
+            .as_ref()?
+            .last_attempt
+            .clone();
+        let writer = plan
+            .nodes
+            .iter()
+            .find(|candidate| candidate.id == key.node_id)?;
+        let writer_round = writer.round.as_ref()?;
+        return (writer_round.loop_id == round.loop_id && writer_round.round == round.round)
+            .then_some(key);
+    }
+
+    let writer_index = loops::nearest_writer_ancestor(node_index, plan)?;
+    checkpoint
+        .nodes
+        .get(writer_index)?
+        .recorded_attempts()
+        .next_back()
+        .map(|attempt| attempt.key.clone())
+}
+
+/// Persist one unsuccessful delivery outcome. CI red spends the per-rung
+/// admitted-repair allowance; hygiene and review failures advance immediately.
+pub(super) fn advance_delivery_escalation(
+    node_index: usize,
+    plan: &PlannedGraph,
+    checkpoint: &mut GraphCheckpoint,
+    cause: provenant_records::graph::EscalationCause,
+) -> Option<EscalationTransition> {
+    let (owner, spec) = loops::escalation_owner(node_index, plan)?;
+    let transition_attempt = escalation_transition_attempt(node_index, plan, checkpoint)?;
+    let saved = checkpoint.nodes[owner].escalation.as_ref();
+    if saved.is_some_and(|state| state.transition_attempt == transition_attempt) {
+        return Some(EscalationTransition::AlreadyApplied {
+            rung: saved.map_or(0, |state| state.rung),
+        });
+    }
+    let rounds = checkpoint.nodes[owner]
+        .delivery_loop
+        .as_ref()
+        .map_or(0, |progress| progress.round);
+    if cause == provenant_records::graph::EscalationCause::CiRed && rounds < spec.max_ci_rounds {
+        let progress = &mut checkpoint.nodes[owner];
+        let rung = progress.escalation.as_ref().map_or(0, |state| state.rung);
+        progress.escalation = Some(provenant_records::graph::EscalationProgress {
+            rung,
+            cause,
+            transition_attempt,
+        });
+        return Some(EscalationTransition::WithinRung);
+    }
+    let progress = &mut checkpoint.nodes[owner];
+    let rung = progress.escalation.as_ref().map_or(0, |state| state.rung);
+    let next = rung.saturating_add(1);
+    if next < spec.ladder.len() {
+        progress.escalation = Some(provenant_records::graph::EscalationProgress {
+            rung: next,
+            cause,
+            transition_attempt,
+        });
+        if let Some(loop_progress) = &mut progress.delivery_loop {
+            loop_progress.round = 0;
+        }
+        Some(EscalationTransition::Advanced { rung: next })
+    } else {
+        progress.escalation = Some(provenant_records::graph::EscalationProgress {
+            rung,
+            cause,
+            transition_attempt,
+        });
+        Some(EscalationTransition::Exhausted { rung })
+    }
 }
 
 pub(super) fn apply_input_manifest(
@@ -1542,6 +1736,26 @@ pub(super) fn dependency_state(
     }
     for parent in &node.depends_on {
         let index = positions[parent];
+        if let Some(expected) = loops::outcome_edge_for(node, &plan.nodes[index]) {
+            match checkpoint.nodes[index].state {
+                NodeState::Pending | NodeState::Running => waiting = true,
+                NodeState::Succeeded if checkpoint.nodes[index].outputs.is_some() => {
+                    if expected != provenant_records::graph::LoopOutcome::Succeeded {
+                        skipped = true;
+                    }
+                }
+                NodeState::Failed | NodeState::Blocked
+                    if checkpoint.nodes[index].outputs.is_some() =>
+                {
+                    if expected != provenant_records::graph::LoopOutcome::Exhausted {
+                        skipped = true;
+                    }
+                }
+                NodeState::Skipped => skipped = true,
+                NodeState::Succeeded | NodeState::Failed | NodeState::Blocked => blocked = true,
+            }
+            continue;
+        }
         if loops::round_failure_edge(node, &plan.nodes[index])
             && checkpoint.nodes[index].state == NodeState::Failed
         {
@@ -1600,6 +1814,7 @@ pub(super) enum NodeAction<'a> {
     Loop(&'a LoopSpec),
     Decide(&'a DecideSpec),
     Land(&'a LandSpec),
+    Hygiene,
     Gate(&'a GateCondition),
     Attempt,
 }
@@ -1669,6 +1884,9 @@ pub(super) fn node_action<'a>(
     }
     if let Some(spec) = &node.land {
         return NodeAction::Land(spec);
+    }
+    if node.kind == Some(NodeKind::Hygiene) {
+        return NodeAction::Hygiene;
     }
     if let Some(condition) = &node.condition {
         return NodeAction::Gate(condition);
@@ -2067,6 +2285,46 @@ mod tests {
         (plan, positions, checkpoint, limits)
     }
 
+    fn delivery_loop_fixture() -> (
+        PlannedGraph,
+        std::collections::BTreeMap<String, usize>,
+        GraphCheckpoint,
+        crate::config::GraphLimits,
+    ) {
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version": 2,
+            "graph_id": "delivery-loop",
+            "nodes": [{
+                "id": "cycle", "kind": "loop", "access": "read_only",
+                "escalate": {"ladder": ["junior", "senior"], "max_ci_rounds": 1},
+                "loop": {"until": "ci", "max_rounds": 2, "body": [
+                    {"id": "repair", "access": "worktree_write", "prompt": "repair",
+                        "write_scope": ["src"], "route": {"alias": "junior"}},
+                    {"id": "ci", "kind": "gate", "access": "read_only",
+                        "depends_on": ["repair"], "condition": {"type": "budget"}}
+                ]}
+            }]
+        }))
+        .unwrap();
+        let limits = crate::config::GraphLimits::default();
+        let expanded = loops::expand(&document, &[], &limits).unwrap();
+        let (plan, positions) = validate_flat_plan(&expanded, &limits).unwrap();
+        let checkpoint = initial_checkpoint(&expanded, &plan, "digest".into(), None, None, None);
+        (plan, positions, checkpoint, limits)
+    }
+
+    fn attempt_key(plan: &PlannedGraph, node_id: &str, attempt: u32) -> AttemptKey {
+        AttemptKey {
+            extra: Default::default(),
+            retry_generation: None,
+            previous_attempt_ref: None,
+            graph_id: plan.graph_id.clone(),
+            node_id: node_id.into(),
+            attempt,
+            route_index: 0,
+        }
+    }
+
     fn start(
         plan: &PlannedGraph,
         positions: &std::collections::BTreeMap<String, usize>,
@@ -2119,6 +2377,239 @@ mod tests {
             serde_json::to_value(&old_plan).unwrap()["nodes"][0]
                 .get("escalate")
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn escalation_owner_walks_through_hygiene_and_publication_dependencies() {
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version": 2, "graph_id": "delivery-ancestor-route",
+            "nodes": [
+                {"id":"writer", "access":"worktree_write", "worktree":"/fixture/writer",
+                    "write_scope":["src"], "prompt":"repair", "route":{"alias":"junior"},
+                    "escalate":{"ladder":["junior","senior"], "max_ci_rounds":1}},
+                {"id":"hygiene", "access":"read_only", "prompt":"hygiene",
+                    "route":{"alias":"junior"}, "depends_on":["writer"]},
+                {"id":"publish", "access":"read_only", "prompt":"publish",
+                    "route":{"alias":"junior"}, "depends_on":["hygiene"]},
+                {"id":"ci", "kind":"gate", "access":"read_only",
+                    "depends_on":["publish"], "condition":{"type":"budget"}}
+            ]
+        }))
+        .unwrap();
+        let limits = crate::config::GraphLimits::default();
+        let (plan, positions) = validate_flat_plan(&document, &limits).unwrap();
+
+        assert_eq!(
+            loops::nearest_writer_ancestor(positions["ci"], &plan),
+            Some(positions["writer"])
+        );
+        assert_eq!(
+            loops::escalation_owner(positions["ci"], &plan)
+                .map(|(index, _)| plan.nodes[index].id.as_str()),
+            Some("writer")
+        );
+    }
+
+    #[test]
+    fn loop_attempts_are_counted_once_and_older_replays_cannot_reopen_rounds() {
+        let (plan, positions, mut checkpoint, _) = delivery_loop_fixture();
+        let owner = positions["cycle"];
+        let first_node = "cycle--r1--repair";
+        let second_node = "cycle--r2--repair";
+        let first = attempt_key(&plan, first_node, 1);
+        let second = attempt_key(&plan, second_node, 2);
+
+        record_delivery_loop_attempt(positions[first_node], &plan, &mut checkpoint, &first);
+        assert_eq!(
+            checkpoint.nodes[owner]
+                .delivery_loop
+                .as_ref()
+                .unwrap()
+                .round,
+            1
+        );
+        record_delivery_loop_attempt(positions[first_node], &plan, &mut checkpoint, &first);
+        assert_eq!(
+            checkpoint.nodes[owner]
+                .delivery_loop
+                .as_ref()
+                .unwrap()
+                .round,
+            1
+        );
+
+        record_delivery_loop_attempt(positions[second_node], &plan, &mut checkpoint, &second);
+        assert_eq!(
+            checkpoint.nodes[owner]
+                .delivery_loop
+                .as_ref()
+                .unwrap()
+                .round,
+            2
+        );
+        record_delivery_loop_attempt(positions[first_node], &plan, &mut checkpoint, &first);
+        let saved = checkpoint.nodes[owner].delivery_loop.as_ref().unwrap();
+        assert_eq!(saved.round, 2);
+        assert_eq!(saved.last_attempt, second);
+    }
+
+    #[test]
+    fn later_admitted_attempt_on_the_same_loop_node_counts_once() {
+        let (plan, positions, mut checkpoint, _) = delivery_loop_fixture();
+        let owner = positions["cycle"];
+        let writer = "cycle--r1--repair";
+        let first = attempt_key(&plan, writer, 1);
+        let second = attempt_key(&plan, writer, 2);
+
+        record_delivery_loop_attempt(positions[writer], &plan, &mut checkpoint, &first);
+        record_delivery_loop_attempt(positions[writer], &plan, &mut checkpoint, &second);
+        assert_eq!(
+            checkpoint.nodes[owner]
+                .delivery_loop
+                .as_ref()
+                .unwrap()
+                .round,
+            2
+        );
+        assert_eq!(
+            checkpoint.nodes[owner]
+                .delivery_loop
+                .as_ref()
+                .unwrap()
+                .last_attempt,
+            second
+        );
+
+        record_delivery_loop_attempt(positions[writer], &plan, &mut checkpoint, &first);
+        record_delivery_loop_attempt(positions[writer], &plan, &mut checkpoint, &second);
+        assert_eq!(
+            checkpoint.nodes[owner]
+                .delivery_loop
+                .as_ref()
+                .unwrap()
+                .round,
+            2
+        );
+    }
+
+    #[test]
+    fn red_at_ci_limit_advances_once_then_exhausts_the_final_rung() {
+        use provenant_records::graph::EscalationCause;
+        let (plan, positions, mut checkpoint, _) = delivery_loop_fixture();
+        let owner = positions["cycle"];
+        let first_writer = "cycle--r1--repair";
+        let first_gate = positions["cycle--r1--ci"];
+        let first = attempt_key(&plan, first_writer, 1);
+        record_delivery_loop_attempt(positions[first_writer], &plan, &mut checkpoint, &first);
+
+        assert_eq!(
+            advance_delivery_escalation(first_gate, &plan, &mut checkpoint, EscalationCause::CiRed),
+            Some(EscalationTransition::Advanced { rung: 1 })
+        );
+        assert_eq!(
+            checkpoint.nodes[owner]
+                .delivery_loop
+                .as_ref()
+                .unwrap()
+                .round,
+            0
+        );
+        assert_eq!(
+            loops::delivery_route(positions["cycle--r2--repair"], &plan, &checkpoint)
+                .map(|(route, rung)| (route.alias, rung)),
+            Some((Some("senior".into()), 1))
+        );
+        assert_eq!(
+            advance_delivery_escalation(first_gate, &plan, &mut checkpoint, EscalationCause::CiRed),
+            Some(EscalationTransition::AlreadyApplied { rung: 1 })
+        );
+
+        let second_writer = "cycle--r2--repair";
+        let second_gate = positions["cycle--r2--ci"];
+        let second = attempt_key(&plan, second_writer, 2);
+        record_delivery_loop_attempt(positions[second_writer], &plan, &mut checkpoint, &second);
+        assert_eq!(
+            advance_delivery_escalation(
+                second_gate,
+                &plan,
+                &mut checkpoint,
+                EscalationCause::CiRed
+            ),
+            Some(EscalationTransition::Exhausted { rung: 1 })
+        );
+        assert_eq!(
+            advance_delivery_escalation(
+                second_gate,
+                &plan,
+                &mut checkpoint,
+                EscalationCause::CiRed
+            ),
+            Some(EscalationTransition::AlreadyApplied { rung: 1 })
+        );
+    }
+
+    #[test]
+    fn failed_review_repair_advances_once_then_exhausts_on_replay() {
+        use provenant_records::graph::EscalationCause;
+        let (plan, positions, mut checkpoint, _) = delivery_loop_fixture();
+        let owner = positions["cycle"];
+        let first_writer = "cycle--r1--repair";
+        let first_gate = positions["cycle--r1--ci"];
+        let first = attempt_key(&plan, first_writer, 1);
+        record_delivery_loop_attempt(positions[first_writer], &plan, &mut checkpoint, &first);
+
+        assert_eq!(
+            advance_delivery_escalation(
+                first_gate,
+                &plan,
+                &mut checkpoint,
+                EscalationCause::ReviewRepair,
+            ),
+            Some(EscalationTransition::Advanced { rung: 1 })
+        );
+        let saved = checkpoint.nodes[owner].escalation.as_ref().unwrap();
+        assert_eq!(saved.cause, EscalationCause::ReviewRepair);
+        assert_eq!(saved.transition_attempt, first);
+        assert_eq!(
+            advance_delivery_escalation(
+                first_gate,
+                &plan,
+                &mut checkpoint,
+                EscalationCause::ReviewRepair,
+            ),
+            Some(EscalationTransition::AlreadyApplied { rung: 1 })
+        );
+
+        let second_writer = "cycle--r2--repair";
+        let second_gate = positions["cycle--r2--ci"];
+        let second = attempt_key(&plan, second_writer, 2);
+        record_delivery_loop_attempt(positions[second_writer], &plan, &mut checkpoint, &second);
+        assert_eq!(
+            advance_delivery_escalation(
+                second_gate,
+                &plan,
+                &mut checkpoint,
+                EscalationCause::ReviewRepair,
+            ),
+            Some(EscalationTransition::Exhausted { rung: 1 })
+        );
+        assert_eq!(
+            checkpoint.nodes[owner]
+                .escalation
+                .as_ref()
+                .unwrap()
+                .transition_attempt,
+            second
+        );
+        assert_eq!(
+            advance_delivery_escalation(
+                second_gate,
+                &plan,
+                &mut checkpoint,
+                EscalationCause::ReviewRepair,
+            ),
+            Some(EscalationTransition::AlreadyApplied { rung: 1 })
         );
     }
 

@@ -507,7 +507,8 @@ fn next_wake(checkpoint: &GraphCheckpoint) -> Option<WallTime> {
                 .filter(|node| node.state == NodeState::Running)
                 .filter_map(|node| {
                     let ci = node.ci.as_ref().and_then(|ci| ci.wake_at);
-                    ci.or_else(|| node.land.as_ref().and_then(|land| land.wake_at))
+                    ci.or_else(|| node.conflict.as_ref().and_then(|conflict| conflict.wake_at))
+                        .or_else(|| node.land.as_ref().and_then(|land| land.wake_at))
                 }),
         )
         // A node waiting on its own bounded launch retry also owes the tick a
@@ -925,6 +926,7 @@ fn decision_outputs(ask_id: &str, outcome: DecideOutcome) -> NodeOutputs {
         compact_disposition_findings: None,
         full_disposition_findings: None,
         verdict_error: None,
+        hygiene: None,
         schema_version: 2,
         decide_outcome: Some(outcome.clone()),
         result: Some(ResultOutput {

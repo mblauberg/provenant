@@ -116,6 +116,11 @@ struct FakeOwner {
     fallback_custody_pending: bool,
     fail_fallback_evidence: bool,
     fallback_cause: Option<provenant_records::RouteExclusionReason>,
+    hygiene_outcomes: VecDeque<provenant_records::graph::HygieneOutcome>,
+    hygiene_calls: usize,
+    hygiene_requests: Vec<(String, String, String)>,
+    park_calls: Vec<String>,
+    park_receipt: Option<provenant_core::HumanRequestId>,
 }
 
 /// An inbox reply from `chair`, choosing `option` or sending `text`.
@@ -303,6 +308,31 @@ impl AttemptOwner for FakeOwner {
     }
     fn actor(&self) -> String {
         self.actor.clone()
+    }
+    fn run_hygiene(
+        &mut self,
+        request: HygieneRequest<'_>,
+    ) -> Result<HygieneExecution, Self::Error> {
+        self.hygiene_calls += 1;
+        self.hygiene_requests.push((
+            request.operation_id.to_owned(),
+            request.input_head.to_owned(),
+            request.expected_head.to_owned(),
+        ));
+        let outcome = self.hygiene_outcomes.pop_front().ok_or(NoObservation)?;
+        Ok(HygieneExecution {
+            outcome,
+            branch: Some("retained-branch".into()),
+            formatter_source: Some("repository".into()),
+            diagnostic: None,
+        })
+    }
+    fn park_delivery(
+        &mut self,
+        request: DeliveryParkRequest<'_>,
+    ) -> Result<Option<provenant_core::HumanRequestId>, Self::Error> {
+        self.park_calls.push(request.operation_id.to_owned());
+        Ok(self.park_receipt.clone())
     }
     fn file_ask(&mut self, filing: AskFiling<'_>) -> Result<AskFiled, Self::Error> {
         let id = &filing.ask.ask_id;

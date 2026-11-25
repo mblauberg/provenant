@@ -463,6 +463,7 @@ pub fn run(class: &str, command: &[OsString], env: &[(OsString, OsString)]) -> i
             command: Some(child_command.clone()),
             wait_seconds,
         };
+        // TODO(#3972-queue): persist and reconcile the CI lease from publication through a conclusive observation.
         match queue::admit(&request) {
             Ok(Admitted::Held { guard, .. }) => held_guard = Some(guard),
             Ok(Admitted::Overflow { .. }) => warn_slot_unavailable(

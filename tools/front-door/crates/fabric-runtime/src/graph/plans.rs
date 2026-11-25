@@ -1073,7 +1073,13 @@ fn prepare_nested(
     // Write scope is optional review metadata; all agents carry acceptance prose.
     if !matches!(
         child.kind,
-        Some(NodeKind::Gate | NodeKind::Decide | NodeKind::Composite | NodeKind::Loop)
+        Some(
+            NodeKind::Gate
+                | NodeKind::Decide
+                | NodeKind::Composite
+                | NodeKind::Loop
+                | NodeKind::Hygiene
+        )
     ) {
         if child.prompt.trim().is_empty()
             || child.acceptance_checks.is_empty()
@@ -1560,6 +1566,14 @@ pub(super) fn flatten_fragment(
                     export.node = id(&export.node);
                 }
             }
+            if let Some(edge) = child
+                .loop_body
+                .as_mut()
+                .and_then(|spec| spec.outcome_edge.as_mut())
+            {
+                let target = edge.node.clone();
+                edge.node = id(&target);
+            }
             for input in &mut child.inputs {
                 input.node = id(&input.node);
             }
@@ -1569,10 +1583,16 @@ pub(super) fn flatten_fragment(
             {
                 *source = id(source);
             }
-            if let Some(GateCondition::Ci {
-                target: CiTarget::Node { node: target, .. },
-                ..
-            }) = &mut child.condition
+            if let Some(
+                GateCondition::Ci {
+                    target: CiTarget::Node { node: target, .. },
+                    ..
+                }
+                | GateCondition::Conflict {
+                    target: CiTarget::Node { node: target, .. },
+                    ..
+                },
+            ) = &mut child.condition
             {
                 *target = id(target);
             }
@@ -2135,7 +2155,9 @@ pub(super) fn fallback_expansion(
                 if child.composite.is_none()
                     && !matches!(
                         child.kind,
-                        Some(NodeKind::Gate | NodeKind::Decide | NodeKind::Land)
+                        Some(
+                            NodeKind::Gate | NodeKind::Decide | NodeKind::Land | NodeKind::Hygiene
+                        )
                     )
                 {
                     child.require_skill_location |= require_skill_location;

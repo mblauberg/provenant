@@ -18,6 +18,7 @@ impl GraphJournal for Journal {
 #[derive(Default)]
 struct Owner {
     observations: VecDeque<CiObservation>,
+    conflict_observations: VecDeque<ConflictObservation>,
     targets: Vec<String>,
     checks: Vec<Vec<String>>,
     attempts: usize,
@@ -31,6 +32,7 @@ struct Owner {
     branch: Option<String>,
     commit: Option<String>,
     prompts: Vec<String>,
+    park_operations: Vec<String>,
 }
 impl CiStatus for Owner {
     fn host_stamp(&self) -> Option<CiHostStamp> {
@@ -46,6 +48,12 @@ impl CiStatus for Owner {
         self.observations
             .pop_front()
             .expect("CI fixture observation")
+    }
+    fn observe_conflict(&mut self, target: &str) -> ConflictObservation {
+        self.targets.push(target.into());
+        self.conflict_observations
+            .pop_front()
+            .expect("conflict fixture observation")
     }
 }
 impl AttemptOwner for Owner {
@@ -99,6 +107,13 @@ impl AttemptOwner for Owner {
             settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
             stop: None,
         })
+    }
+    fn park_delivery(
+        &mut self,
+        request: DeliveryParkRequest<'_>,
+    ) -> Result<Option<provenant_core::HumanRequestId>, Self::Error> {
+        self.park_operations.push(request.operation_id.to_owned());
+        Ok(None)
     }
 }
 
@@ -167,6 +182,163 @@ fn ci_outcomes_are_recorded_and_fail_closed() {
         );
         assert_eq!(owner.targets.len(), 1);
     }
+}
+
+#[test]
+fn ci_without_a_published_head_or_registered_checks_remains_pending() {
+    for (state, head) in [
+        (CiState::NotScheduled, Some("a".repeat(40))),
+        (CiState::Unavailable, None),
+    ] {
+        let mut result = observation(state, "waiting for head or checks");
+        result.head_sha = head;
+        let mut owner = Owner {
+            branch: Some("delivered/topic".into()),
+            commit: Some("a".repeat(40)),
+            observations: VecDeque::from([result]),
+            ..Default::default()
+        };
+        let run = advance(&node_target_document(), &mut owner, &mut Journal::default()).unwrap();
+        let node = &run.checkpoint.nodes[1];
+        assert_eq!(node.state, NodeState::Running);
+        assert!(node.gate.is_none());
+        assert_eq!(node.ci.as_ref().unwrap().state, CiState::Pending);
+        assert!(node.ci.as_ref().unwrap().wake_at.is_some());
+    }
+}
+
+fn conflict_document() -> GraphDocument {
+    serde_json::from_value(serde_json::json!({
+        "schema_version":2,
+        "graph_id":"g-conflict",
+        "nodes":[{
+            "id":"conflict",
+            "kind":"gate",
+            "access":"read_only",
+            "condition":{"type":"conflict","target":"feature/example"},
+            "on_fail":"rebase"
+        },{
+            "id":"rebase",
+            "access":"worktree_write",
+            "worktree":"retained",
+            "prompt":"Rebase the retained branch",
+            "depends_on":["conflict"],
+            "route":{"adapter":"fixture","model":"fixture/model"}
+        }]
+    }))
+    .unwrap()
+}
+
+#[test]
+fn conflict_gate_only_routes_definite_conflicts_and_replays_pending_heads() {
+    let head = "a".repeat(40);
+    let mut owner = Owner {
+        tick: true,
+        wall_seconds: 100,
+        backoff: CiPollBackoff {
+            initial_seconds: 60,
+            max_seconds: 60,
+        },
+        conflict_observations: VecDeque::from([
+            ConflictObservation {
+                state: ConflictState::Pending,
+                head_sha: None,
+                summary: "published head not visible".into(),
+            },
+            ConflictObservation {
+                state: ConflictState::Pending,
+                head_sha: Some(head.clone()),
+                summary: "mergeability is still unknown".into(),
+            },
+            ConflictObservation {
+                state: ConflictState::Conflicting,
+                head_sha: Some(head.clone()),
+                summary: "pull request conflicts with its base".into(),
+            },
+        ]),
+        ..Default::default()
+    };
+    let mut journal = Journal::default();
+    let first = advance(&conflict_document(), &mut owner, &mut journal).unwrap();
+    let progress = &first.checkpoint.nodes[0];
+    assert_eq!(progress.state, NodeState::Running);
+    assert!(progress.gate.is_none());
+    assert!(progress.outputs.is_none());
+    assert_eq!(
+        progress.conflict.as_ref().unwrap().state,
+        ConflictState::Pending
+    );
+    assert_eq!(progress.conflict.as_ref().unwrap().head_sha, None);
+    let deadline = first.checkpoint.wake_at.unwrap();
+    let encoded = serde_json::to_vec(&first.checkpoint).unwrap();
+    journal.0 = Some(serde_json::from_slice(&encoded).unwrap());
+
+    // A tick before the wake leaves the pending observation intact.
+    let early = advance(&conflict_document(), &mut owner, &mut journal).unwrap();
+    assert_eq!(early.checkpoint.wake_at, Some(deadline));
+    assert_eq!(owner.targets.len(), 1);
+
+    owner.wall_seconds = 160;
+    let second = advance(&conflict_document(), &mut owner, &mut journal).unwrap();
+    assert_eq!(second.checkpoint.nodes[0].state, NodeState::Running);
+    assert_eq!(
+        second.checkpoint.nodes[0]
+            .conflict
+            .as_ref()
+            .unwrap()
+            .head_sha,
+        Some(head.clone())
+    );
+    assert_eq!(second.checkpoint.nodes[0].gate, None);
+
+    owner.wall_seconds = 220;
+    let final_run = advance(&conflict_document(), &mut owner, &mut journal).unwrap();
+    let conflict = &final_run.checkpoint.nodes[0];
+    assert_eq!(conflict.state, NodeState::Failed);
+    assert_eq!(
+        conflict.gate.as_ref().unwrap().on_fail.as_deref(),
+        Some("rebase")
+    );
+    assert_eq!(
+        conflict.gate.as_ref().unwrap().reason.as_deref(),
+        Some("conflicting; next: rebase the branch onto its base and push")
+    );
+    assert_eq!(
+        conflict.conflict.as_ref().unwrap().state,
+        ConflictState::Conflicting
+    );
+    assert_eq!(final_run.checkpoint.nodes[1].state, NodeState::Succeeded);
+    assert_eq!(owner.attempts, 1);
+    assert_eq!(owner.prompts, ["Rebase the retained branch"]);
+}
+
+#[test]
+fn clear_conflict_gate_passes_and_unavailable_is_pending() {
+    let mut owner = Owner {
+        conflict_observations: VecDeque::from([
+            ConflictObservation {
+                state: ConflictState::Unavailable,
+                head_sha: None,
+                summary: "mergeability unavailable".into(),
+            },
+            ConflictObservation {
+                state: ConflictState::Clear,
+                head_sha: Some("a".repeat(40)),
+                summary: "pull request is mergeable".into(),
+            },
+        ]),
+        ..Default::default()
+    };
+    let mut journal = Journal::default();
+    let waiting = advance(&conflict_document(), &mut owner, &mut journal).unwrap();
+    assert_eq!(waiting.checkpoint.nodes[0].state, NodeState::Running);
+    assert_eq!(
+        waiting.checkpoint.nodes[0].conflict.as_ref().unwrap().state,
+        ConflictState::Pending
+    );
+    let finished = advance(&conflict_document(), &mut owner, &mut journal).unwrap();
+    assert_eq!(finished.checkpoint.nodes[0].state, NodeState::Succeeded);
+    assert!(finished.checkpoint.nodes[0].gate.as_ref().unwrap().passed);
 }
 
 #[test]
@@ -680,15 +852,17 @@ fn ci_validation_rejects_bad_targets_and_timeouts() {
 }
 
 fn node_target_document() -> GraphDocument {
-    serde_json::from_value(serde_json::json!({
-        "schema_version":1, "graph_id":"node-ci", "nodes":[
+    let mut document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version":2, "graph_id":"node-ci", "nodes":[
             {"id":"write","access":"worktree_write","worktree":"lane","prompt":"write",
              "delivery":"pr","route":{"adapter":"fixture","model":"fixture/model"}},
             {"id":"ci","kind":"gate","access":"read_only","depends_on":["write"],
              "condition":{"type":"ci","target":{"node":"write"}}}
         ]
     }))
-    .unwrap()
+    .unwrap();
+    document.queue = Some(QueueKnobs::default());
+    document
 }
 
 #[test]
@@ -718,15 +892,104 @@ fn ci_node_target_resolves_delivered_branch_and_records_head() {
 }
 
 #[test]
+fn ci_node_target_keeps_a_moved_published_head_pending_even_if_checks_are_green() {
+    let mut green = observation(CiState::Passed, "green for a different head");
+    green.head_sha = Some("b".repeat(40));
+    let mut owner = Owner {
+        branch: Some("delivered/topic".into()),
+        commit: Some("a".repeat(40)),
+        observations: VecDeque::from([green]),
+        ..Default::default()
+    };
+    let result = advance(&node_target_document(), &mut owner, &mut Journal::default()).unwrap();
+    let ci = result.checkpoint.nodes[1].ci.as_ref().unwrap();
+    assert_eq!(result.checkpoint.nodes[1].state, NodeState::Running);
+    assert!(result.checkpoint.nodes[1].gate.is_none());
+    assert_eq!(ci.state, CiState::Pending);
+    assert_eq!(ci.head_sha.as_deref(), Some("a".repeat(40).as_str()));
+    assert!(
+        ci.summary
+            .contains("waiting for publication reconciliation")
+    );
+    assert!(ci.failed_checks.is_empty());
+}
+
+#[test]
+fn a_v1_graph_without_queue_keeps_branch_only_ci_target_semantics() {
+    let mut doc = node_target_document();
+    doc.schema_version = 1;
+    doc.queue = None;
+    let mut owner = Owner {
+        branch: Some("delivered/topic".into()),
+        commit: None,
+        observations: VecDeque::from([observation(CiState::Passed, "green")]),
+        ..Default::default()
+    };
+    let result = advance(&doc, &mut owner, &mut Journal::default()).unwrap();
+    assert_eq!(result.checkpoint.nodes[1].state, NodeState::Succeeded);
+    assert_eq!(
+        result.checkpoint.nodes[1].ci.as_ref().unwrap().state,
+        CiState::Passed
+    );
+}
+
+#[test]
+fn conflict_node_target_does_not_rebase_a_different_head() {
+    let mut doc = node_target_document();
+    doc.schema_version = 2;
+    doc.nodes[1].condition = Some(GateCondition::Conflict {
+        extra: Default::default(),
+        target: CiTarget::Node {
+            node: "write".into(),
+            extra: Default::default(),
+        },
+    });
+    doc.nodes[1].on_fail = Some("rebase".into());
+    doc.nodes.push(
+        serde_json::from_value(serde_json::json!({
+            "id":"rebase","access":"worktree_write","worktree":"lane",
+            "prompt":"Rebase the retained branch","depends_on":["ci"],
+            "route":{"adapter":"fixture","model":"fixture/model"}
+        }))
+        .unwrap(),
+    );
+    let mut owner = Owner {
+        branch: Some("delivered/topic".into()),
+        commit: Some("a".repeat(40)),
+        conflict_observations: VecDeque::from([ConflictObservation {
+            state: ConflictState::Conflicting,
+            head_sha: Some("b".repeat(40)),
+            summary: "conflicting old branch head".into(),
+        }]),
+        ..Default::default()
+    };
+    let result = advance(&doc, &mut owner, &mut Journal::default()).unwrap();
+    let conflict = &result.checkpoint.nodes[1];
+    assert_eq!(conflict.state, NodeState::Running);
+    assert!(conflict.gate.is_none());
+    assert_eq!(
+        conflict.conflict.as_ref().unwrap().state,
+        ConflictState::Pending
+    );
+    assert_eq!(
+        conflict.conflict.as_ref().unwrap().head_sha,
+        Some("a".repeat(40))
+    );
+    assert_eq!(result.checkpoint.nodes[2].state, NodeState::Pending);
+    assert_eq!(owner.attempts, 1);
+}
+
+#[test]
 fn ci_node_target_requires_a_delivered_branch_and_upstream_dependency() {
     let doc = node_target_document();
     let mut owner = Owner::default();
     let result = advance(&doc, &mut owner, &mut Journal::default()).unwrap();
-    assert_eq!(result.checkpoint.nodes[1].state, NodeState::Failed);
+    assert_eq!(result.checkpoint.nodes[1].state, NodeState::Running);
     assert_eq!(
         result.checkpoint.nodes[1].ci.as_ref().unwrap().state,
-        CiState::Unavailable
+        CiState::Pending
     );
+    assert!(result.checkpoint.nodes[1].gate.is_none());
     assert!(owner.targets.is_empty());
     let mut doc = doc;
     doc.nodes[1].depends_on.clear();
@@ -830,10 +1093,144 @@ fn ci_tick_gates_node_target_and_new_head_resets_backoff() {
 fn failed_check() -> CiFailedCheck {
     CiFailedCheck {
         extra: Default::default(),
+        job_id: Some("12345678".into()),
         name: "test".into(),
         url: Some("https://checks/1".into()),
         excerpt: "assertion failed".into(),
     }
+}
+
+#[test]
+fn failed_job_identity_is_kept_only_when_bounded_and_numeric() {
+    let mut observation = observation(CiState::Failed, "failed");
+    let mut check = failed_check();
+    check.job_id = Some("7x".into());
+    observation.failed_checks.push(check);
+    observation.bound_failed_checks(256, 1);
+    assert!(observation.truncated);
+    assert_eq!(observation.failed_checks[0].job_id, None);
+    assert!(canonical_len(&observation.failed_checks) <= 256);
+
+    let json = serde_json::to_value(failed_check()).unwrap();
+    assert_eq!(json["job_id"], "12345678");
+}
+
+#[test]
+fn only_complete_delivery_review_failures_advance_the_ladder() {
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 2,
+        "graph_id": "review-escalation",
+        "queue": QueueKnobs::default(),
+        "nodes": [{
+            "id": "review",
+            "access": "read_only",
+            "prompt": "review the repair",
+            "route": {"alias": "senior"},
+            "delivery_review": {}
+        }, {
+            "id": "gate",
+            "kind": "gate",
+            "access": "read_only",
+            "depends_on": ["review"],
+            "inputs": [{"node": "review", "outputs": ["verdict"]}],
+            "condition": {"type": "verdict", "expected": "VERDICT: PASS", "threshold": "all"}
+        }]
+    }))
+    .unwrap();
+    let (plan, positions) = validate_plan(&document).unwrap();
+    let mut checkpoint = transitions::initial_checkpoint(
+        &document,
+        &plan,
+        "review-escalation-digest".into(),
+        None,
+        None,
+        None,
+    );
+    checkpoint.nodes[0].state = NodeState::Succeeded;
+    checkpoint.nodes[0].outputs = Some(NodeOutputs {
+        verdict: Some("VERDICT: FAIL".into()),
+        findings_available: Some(true),
+        ..Default::default()
+    });
+
+    assert!(delivery_review_gate_failed(
+        plan.nodes[1].condition.as_ref().unwrap(),
+        &plan.nodes[1],
+        &plan,
+        &checkpoint,
+        &positions,
+    ));
+
+    checkpoint.nodes[0]
+        .outputs
+        .as_mut()
+        .unwrap()
+        .findings_available = None;
+    assert!(!delivery_review_gate_failed(
+        plan.nodes[1].condition.as_ref().unwrap(),
+        &plan.nodes[1],
+        &plan,
+        &checkpoint,
+        &positions,
+    ));
+}
+
+#[test]
+fn ladder_exhaustion_park_replay_reuses_one_operation_identity() {
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 2,
+        "graph_id": "park-replay",
+        "queue": QueueKnobs::default(),
+        "nodes": [{"id":"park", "access":"read_only", "prompt":"park", "route":{"alias":"senior"}}]
+    }))
+    .unwrap();
+    let (plan, _) = validate_plan(&document).unwrap();
+    let mut checkpoint = transitions::initial_checkpoint(
+        &document,
+        &plan,
+        "park-replay-digest".into(),
+        None,
+        None,
+        None,
+    );
+    let attempt_key = AttemptKey {
+        extra: Default::default(),
+        retry_generation: None,
+        previous_attempt_ref: None,
+        graph_id: document.graph_id.clone(),
+        node_id: "repair".into(),
+        attempt: 1,
+        route_index: 0,
+    };
+    let mut owner = Owner::default();
+    let mut journal = Journal::default();
+    let head = "a".repeat(40);
+
+    for _ in 0..2 {
+        park_delivery_transition(
+            &document,
+            0,
+            provenant_records::graph::ParkReason::LadderExhausted,
+            Some(&attempt_key),
+            Some("attempt-ref"),
+            "the repair ladder is exhausted",
+            Some(head.as_str()),
+            &["final review failed".into()],
+            &mut owner,
+            &mut journal,
+            &mut checkpoint,
+        )
+        .unwrap();
+    }
+
+    assert_eq!(owner.park_operations.len(), 2);
+    assert_eq!(owner.park_operations[0], owner.park_operations[1]);
+    let saved = checkpoint.nodes[0].delivery_park.as_ref().unwrap();
+    assert_eq!(
+        saved.reason,
+        provenant_records::graph::ParkReason::LadderExhausted
+    );
+    assert_eq!(saved.operation_id, owner.park_operations[0]);
 }
 
 // Spec: docs/specs/fabric.md#checkpoint-envelope
@@ -864,7 +1261,7 @@ fn ci_failure_findings_reach_repair_input_and_survive_resume() {
     assert!(
         outputs.findings[0]
             .summary
-            .starts_with("test: assertion failed")
+            .starts_with("test (job 12345678): assertion failed")
     );
     assert!(
         serde_json::to_string(&run.checkpoint)
@@ -872,6 +1269,7 @@ fn ci_failure_findings_reach_repair_input_and_survive_resume() {
             .contains(secret)
     );
     assert!(owner.prompts[0].contains(secret));
+    assert!(owner.prompts[0].contains("12345678"));
     assert_eq!(outputs.findings[0].url.as_deref(), Some("https://checks/1"));
     assert!(owner.prompts[0].contains("assertion failed"));
     assert!(owner.prompts[0].contains("https://checks/1"));

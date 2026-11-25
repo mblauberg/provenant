@@ -112,6 +112,8 @@ pub enum LoopOutcome {
 pub struct DeliveryLoopProgress {
     pub name: String,
     pub round: usize,
+    /// The WorkKey identity whose admission consumed the latest round.
+    pub last_attempt: AttemptKey,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,6 +122,8 @@ pub struct EscalationProgress {
     /// Zero-based index into the sealed ladder.
     pub rung: usize,
     pub cause: EscalationCause,
+    /// Repair identity that produced this cause; repeated observations are no-ops.
+    pub transition_attempt: AttemptKey,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,6 +183,15 @@ mod delivery_contract_tests {
         let progress = EscalationProgress {
             rung: 2,
             cause: EscalationCause::CiRed,
+            transition_attempt: AttemptKey {
+                extra: Default::default(),
+                retry_generation: None,
+                previous_attempt_ref: None,
+                graph_id: "g".into(),
+                node_id: "fix".into(),
+                attempt: 3,
+                route_index: 0,
+            },
         };
         let wire = serde_json::to_value(&progress).unwrap();
         assert_eq!(wire["cause"], "ci_red");
@@ -214,6 +227,15 @@ mod delivery_contract_tests {
         let round = DeliveryLoopProgress {
             name: "repair".into(),
             round: 3,
+            last_attempt: AttemptKey {
+                extra: Default::default(),
+                retry_generation: None,
+                previous_attempt_ref: None,
+                graph_id: "g".into(),
+                node_id: "fix".into(),
+                attempt: 3,
+                route_index: 0,
+            },
         };
         assert_eq!(
             serde_json::from_value::<DeliveryLoopProgress>(serde_json::to_value(&round).unwrap())

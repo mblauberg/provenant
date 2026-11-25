@@ -439,6 +439,15 @@ pub(crate) fn observe_ci(
     )
 }
 
+/// Observe mergeability before a graph waits on CI for the same published head.
+pub(crate) fn observe_conflict(
+    state: &Path,
+    project: &Path,
+    target: &str,
+) -> provenant_fabric_runtime::graph::ConflictObservation {
+    ci::observe_conflict(state, project, target)
+}
+
 /// The longest check name a status or failure line carries.
 const CHECK_NAME_BYTES: usize = 120;
 /// The longest check link a failure line carries. A longer link is dropped,
@@ -463,20 +472,19 @@ fn display_check_url(url: &str) -> Option<String> {
     .then(|| url.to_owned())
 }
 
-/// A conflicting pull request never starts CI, so say so rather than report
-/// its checks as missing. A settled result keeps its state.
+/// Report conflicts even if a check result exists: the conflict gate runs
+/// before CI and routes the retained writer to rebase.
 fn mark_conflict(
     observation: &mut provenant_fabric_runtime::graph::CiObservation,
     read_mergeable: impl FnOnce() -> Option<String>,
 ) {
     use provenant_fabric_runtime::graph::CiState;
-    if !matches!(observation.state, CiState::Passed | CiState::Failed)
-        && read_mergeable().as_deref() == Some("CONFLICTING")
-    {
+    if read_mergeable().as_deref() == Some("CONFLICTING") {
         observation.state = CiState::Conflict;
-        observation
-            .summary
-            .push_str(" next: rebase the branch onto its base and push");
+        observation.failed_checks.clear();
+        observation.summary =
+            "pull request conflicts with its base; next: rebase the branch onto its base and push"
+                .into();
     }
 }
 

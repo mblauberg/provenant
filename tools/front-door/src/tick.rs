@@ -738,6 +738,7 @@ fn tick(
     let clock = SystemClock;
     let now = clock.wall_now()?;
     let settlement = Task::run("settlement", || reap_projects(&resolved));
+    // TODO(#3972-queue): schedule due item graphs under the queue concurrency policy.
     let graphs =
         crate::fabric::tick_graphs(&resolved, now, workers).unwrap_or_else(|error| Graphs {
             advanced: 0,
