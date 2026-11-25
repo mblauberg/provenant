@@ -281,10 +281,11 @@ exports without inventing an attempt identity, `output GRAPH/NODE` selects a
 composite explicitly, and a bare graph with several top-level nodes is
 ambiguous and lists them. Offsets and limits count bytes; a page that splits a
 UTF-8 character returns lossless base64 and advances by the bytes returned.
-The bounded default view never cuts the end of a result: it keeps a short opening and a tail large
-enough for the final message, its verdict line and the whole sealed handoff, and names the bytes it
-omitted from the middle. A driver parsing `output` without `--full` can therefore rely on the final
-VERDICT line and the handoff block being present. `--full` still prints the whole result.
+The default view shows a bounded page, keeping its opening and tail and naming any omitted middle.
+A result may span pages or exceed that view. `output TARGET --final --to FILE` collects the complete
+sealed lane result into FILE, including its final message and handoff, checking page identity as it
+reads. It replaces FILE and reports the written byte count; it requires a settled lane attempt.
+`--full` prints the selected page with host facts.
 `--tail N` bounds the last N bytes; `--tail-lines N` bounds the last N lines and
 is clamped to the shared line bound in every reader, including peer, composite
 and event reads. A non-applicable header is omitted, never printed as

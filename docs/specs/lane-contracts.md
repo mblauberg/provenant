@@ -108,8 +108,8 @@ consumed by `output`, `result` and `status --full`. It presents bounded `HostFac
 unknown, and Git, CI and scope evidence state the same; shared-worktree Git facts describe the
 worktree, not child authorship. The lane's handoff and verify are claims, never host attestations,
 and are labelled as claims when rendered. The default view leads with settlement, verdict, findings and
-verify, then a bounded view of the result that keeps both ends: the final message, the verdict line and
-the sealed handoff block survive, and the omitted middle is named rather than cut from the tail. Host
+verify, then a bounded view of the selected result page with both ends and an omitted-middle marker.
+`output --final --to FILE` exports the complete sealed lane result across pages for automation. Host
 facts sit behind `--full`, and a non-applicable fact is omitted rather than printed as unavailable.
 `--tail N` returns at most N bytes and `--tail-lines N` at most N
 lines, clamped to the shared line bound for attempts, peers, composites and events. Human output

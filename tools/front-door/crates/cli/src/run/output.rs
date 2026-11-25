@@ -106,6 +106,7 @@ pub fn render_output(command: Output, read: Result<(Value, String), Fail>, full:
     let headed = matches!(command.part, Part::Result);
     let warn_human = headed && !command.path && command.to.is_none();
     let to = command.to.clone();
+    let final_result = command.final_result;
     let mut out = reply(
         "output",
         read.and_then(|(mut data, mut text)| {
@@ -157,6 +158,9 @@ pub fn render_output(command: Output, read: Result<(Value, String), Fail>, full:
                 let written_path = std::fs::canonicalize(path).map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
                 data["to"] = json!(provenant_records::StructuredPathWire::from_path(&written_path).map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?);
                 data["written"] = json!(bytes.len());
+                if final_result {
+                    data["bytes"] = json!({"encoding": "utf8", "data": ""});
+                }
                 text = format!("wrote {} bytes to {}\n", bytes.len(), path.display());
             }
             Ok((data, text))
@@ -202,7 +206,13 @@ pub fn output_from_session(
     call: &run::Request<'_>,
     full: bool,
 ) -> Reply {
-    let read = output_read(command.clone(), edge, session, attempt, call);
+    let read = if command.final_result {
+        collect_final(&command, |page| {
+            output_read(page, edge, session, attempt, call)
+        })
+    } else {
+        output_read(command.clone(), edge, session, attempt, call)
+    };
     render_output(command, read, full)
 }
 
@@ -211,13 +221,116 @@ pub fn output_from_host(
     command: Output,
     host: provenant_core::HostId,
     attempt: provenant_core::AttemptId,
-    read: impl FnMut(
+    mut read: impl FnMut(
         provenant_fabric_runtime::coordination::facade::OutputInput,
-    ) -> Result<provenant_fabric_runtime::coordination::facade::OutputResult, Fail>,
+    )
+        -> Result<provenant_fabric_runtime::coordination::facade::OutputResult, Fail>,
     full: bool,
 ) -> Reply {
-    let result = remote::read_output_with(&command, host, attempt, read);
+    let result = if command.final_result {
+        collect_final(&command, |page| {
+            remote::read_output_with(&page, host, attempt, &mut read)
+        })
+    } else {
+        remote::read_output_with(&command, host, attempt, read)
+    };
     render_output(command, result, full)
+}
+
+/// Collect a sealed result by stable, contiguous pages before writing the file.
+pub fn collect_final(
+    command: &Output,
+    mut read: impl FnMut(Output) -> Result<(Value, String), Fail>,
+) -> Result<(Value, String), Fail> {
+    if !matches!(command.part, Part::Result) {
+        return Err(Fail::new(
+            Status::Invalid,
+            ErrorKind::Invalid,
+            "--final requires --part result",
+        ));
+    }
+    let corrupt = || {
+        Fail::new(
+            Status::Error,
+            ErrorKind::StateCorrupt,
+            "final result changed or returned an invalid page",
+        )
+    };
+    let mut page = command.clone();
+    page.final_result = false;
+    page.to = None;
+    page.offset = 0;
+    let mut bytes = Vec::new();
+    let mut first = None;
+    let mut digest = None;
+    let mut attempt = None;
+    loop {
+        let (data, _) = read(page.clone())?;
+        if matches!(
+            data["state"].as_str(),
+            Some("queued" | "starting" | "running" | "settling")
+        ) {
+            return Err(Fail::new(
+                Status::Invalid,
+                ErrorKind::Invalid,
+                "--final requires a settled result",
+            ));
+        }
+        let page_attempt = data["attempt_id"].as_str().ok_or_else(|| {
+            Fail::new(
+                Status::Invalid,
+                ErrorKind::Invalid,
+                "--final needs a lane attempt",
+            )
+        })?;
+        if attempt
+            .as_deref()
+            .is_some_and(|expected| expected != page_attempt)
+        {
+            return Err(corrupt());
+        }
+        attempt = Some(page_attempt.to_owned());
+        let page_digest = data
+            .get("digest")
+            .filter(|d| !d.is_null())
+            .ok_or_else(corrupt)?;
+        if digest
+            .as_ref()
+            .is_some_and(|expected| expected != page_digest)
+        {
+            return Err(corrupt());
+        }
+        digest = Some(page_digest.clone());
+        let offset = data["offset"].as_u64().ok_or_else(corrupt)?;
+        let next = data["next_offset"].as_u64().ok_or_else(corrupt)?;
+        let chunk = chunk_bytes(&data).ok_or_else(corrupt)?;
+        if offset != page.offset || next != offset + chunk.len() as u64 {
+            return Err(corrupt());
+        }
+        bytes.extend_from_slice(&chunk);
+        if bytes.len() > provenant_records::run::RESULT_LIMIT as usize {
+            return Err(corrupt());
+        }
+        let eof = data["eof"].as_bool().ok_or_else(corrupt)?;
+        if first.is_none() {
+            first = Some(data);
+        }
+        if eof {
+            break;
+        }
+        if next <= offset {
+            return Err(corrupt());
+        }
+        page.offset = next;
+    }
+    let mut data = first.ok_or_else(corrupt)?;
+    data["next_offset"] = json!(bytes.len());
+    data["length"] = json!(bytes.len());
+    data["eof"] = json!(true);
+    data["clipped"] = json!(false);
+    data["bytes"] =
+        json!(provenant_fabric_runtime::coordination::facade::OutputBytes::from_bytes(bytes));
+    Ok((data, String::new()))
 }
 
 /// What an agent needs from a read: how the attempt settled, what it changed,
@@ -228,8 +341,8 @@ pub(super) fn output_summary(data: &Value, text: &str, headed: bool) -> crate::S
 }
 
 /// The compact default view: verdict, findings and verify first, then a
-/// bounded view of the result that keeps its final message and sealed handoff
-/// and marks the omitted middle; host facts remain behind `--full`.
+/// bounded view of the result page with a head and tail, marking the omitted
+/// middle; host facts remain behind `--full`.
 /// Spec: docs/specs/lane-contracts.md#result-projection
 pub(super) fn output_summary_default(data: &Value, text: &str, headed: bool) -> crate::Summary {
     summary(data, text, headed, false)
@@ -269,10 +382,8 @@ pub fn finding_human_line(finding: &Value) -> String {
     line
 }
 
-/// The bounded view of a result. A verdict and the sealed handoff live at the
-/// end of the lane's final message, so a compact read must keep that end and
-/// truncate the middle instead of the tail. The marker names the omitted bytes
-/// and points at `--full` for the complete text.
+/// A bounded view of a result page. The marker names omitted bytes; `--final`
+/// exports the complete sealed result across pages.
 /// Spec: docs/specs/cli.md#output-references-and-bounded-tails
 fn final_result_view(text: &str) -> String {
     let final_head = crate::limits::FINAL_HEAD_BYTES;
@@ -495,9 +606,8 @@ fn summary(data: &Value, text: &str, headed: bool, full: bool) -> crate::Summary
     }
     // Other parts are the requested bytes, not narration: a transcript or a
     // stderr read still shows its text in the compact view. A result's final
-    // message and sealed handoff live at its end, so the bounded view keeps
-    // both ends and marks the middle it omitted; a driver parsing the default
-    // output must never lose the verdict or the handoff. An empty result
+    // message may span pages, so the compact view keeps both ends of this page
+    // and marks the middle it omitted. An empty result
     // repeats its diagnostic as text, already carried by the settlement line,
     // so render it only once.
     // Spec: docs/specs/cli.md#output-references-and-bounded-tails
@@ -1397,6 +1507,7 @@ mod tests {
                 target: "repair/writer#2".parse().unwrap(),
                 part: crate::Part::Result,
                 to: None,
+                final_result: false,
                 path: false,
                 offset: 0,
                 tail: None,
@@ -1433,6 +1544,7 @@ mod tests {
             target: "repair/writer#2".parse().unwrap(),
             part: crate::Part::Result,
             to: None,
+            final_result: false,
             path: false,
             offset: 0,
             tail: None,
@@ -1594,6 +1706,7 @@ mod tests {
             target: "repair/writer#2".parse().unwrap(),
             part: crate::Part::Result,
             to: None,
+            final_result: false,
             path: false,
             offset: 0,
             tail: None,
@@ -1663,6 +1776,7 @@ mod tests {
             target: "repair/writer#2".parse().unwrap(),
             part: crate::Part::Result,
             to: None,
+            final_result: false,
             path: false,
             offset: 0,
             tail: None,
@@ -1995,7 +2109,45 @@ mod tests {
 
     // Spec: docs/specs/cli.md#output-references-and-bounded-tails
     #[test]
-    fn default_result_keeps_the_final_message_and_sealed_handoff() {
+    fn final_export_preserves_the_complete_result_across_pages() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("result.md");
+        let command = crate::Output {
+            target: "repair/writer#2".parse().unwrap(),
+            part: crate::Part::Result,
+            to: Some(path.clone()),
+            final_result: true,
+            path: false,
+            offset: 0,
+            tail: None,
+            tail_lines: None,
+            max_bytes: 65536,
+        };
+        let text = format!(
+            "opening é\n{}\nVERDICT: PASS\n```handoff\n{{\"schema_version\":2,\"status\":\"done\",\"note\":\"finished\",\"remaining\":[],\"decisions\":[],\"verify\":[]}}\n```\n",
+            "x".repeat(140_000)
+        );
+        let bytes = text.as_bytes();
+        let collected = super::collect_final(&command, |page| {
+            let start = page.offset as usize;
+            let end = (start + page.max_bytes as usize).min(bytes.len());
+            Ok((
+                json!({
+                    "state":"succeeded", "part":"result", "attempt_id":"fixture", "digest":"same",
+                    "offset":start, "next_offset":end, "eof":end == bytes.len(),
+                    "bytes":provenant_fabric_runtime::coordination::facade::OutputBytes::from_bytes(bytes[start..end].to_vec())
+                }),
+                String::new(),
+            ))
+        });
+        let reply = super::render_output(command, collected, false);
+        assert!(reply.result.error.is_none(), "{:?}", reply.result.error);
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
+
+    // Spec: docs/specs/cli.md#output-references-and-bounded-tails
+    #[test]
+    fn default_result_keeps_the_end_of_a_bounded_page() {
         let verdict = "VERDICT: PASS";
         let handoff = "```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"finished\",\"remaining\":[],\"decisions\":[],\"verify\":[]}\n```";
         // A long middle must be omitted, never the end a driver parses.
@@ -2164,6 +2316,7 @@ mod tests {
             target: "repair/writer#2".parse().unwrap(),
             part: crate::Part::Result,
             to: None,
+            final_result: false,
             path: false,
             offset: 0,
             tail: None,

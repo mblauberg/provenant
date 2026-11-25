@@ -812,6 +812,9 @@ pub struct Output {
     /// Print the attempt's artifact path for this part instead of its content
     #[arg(long, conflicts_with_all = ["to", "offset", "tail", "tail_lines", "max_bytes"])]
     pub path: bool,
+    /// Write the complete final result to --to FILE, paging through the sealed artifact
+    #[arg(long = "final", requires = "to", conflicts_with_all = ["path", "offset", "tail", "tail_lines", "max_bytes"])]
+    pub final_result: bool,
     /// Byte offset to start from
     #[arg(long, default_value = "0", conflicts_with_all = ["tail", "tail_lines"])]
     pub offset: u64,

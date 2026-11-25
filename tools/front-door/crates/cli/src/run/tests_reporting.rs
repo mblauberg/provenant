@@ -291,6 +291,7 @@ fn output_retains_safe_refusal_remedies() -> Result<(), Box<dyn std::error::Erro
                 target: crate::Target::parse("g/n").expect("fixture target"),
                 part: Part::Result,
                 to: None,
+                final_result: false,
                 path: false,
                 offset: 0,
                 tail: None,
