@@ -1,4 +1,5 @@
-### Fixed
+## Fixes
+### Pipelines and graphs
 
 - Delivery queue CI leases can be reacquired after release and uncapped requests can start without an existing waiter directory. (#3972)
 - Parked delivery transitions persist their updated wake time for restart recovery. (#3972)
