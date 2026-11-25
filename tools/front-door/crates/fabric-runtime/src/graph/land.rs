@@ -162,7 +162,7 @@ fn ancestors(
     seen
 }
 
-fn delivery_root_writer(
+fn writer_chain_root(
     nodes: &[PlannedNode],
     positions: &BTreeMap<String, usize>,
     mut writer: usize,
@@ -170,9 +170,7 @@ fn delivery_root_writer(
     for _ in 0..nodes.len() {
         let node = &nodes[writer];
         let Some(parent) = node.continues.as_deref() else {
-            return (plans::writer(node)
-                && matches!(node.delivery, Some(DeliveryMode::Pr | DeliveryMode::Push)))
-            .then_some(writer);
+            return plans::writer(node).then_some(writer);
         };
         let parent_index = *positions.get(parent)?;
         let parent_node = &nodes[parent_index];
@@ -210,11 +208,158 @@ fn publish_source_writer(
     let writer_index = *positions.get(writer_id)?;
     if !upstream.contains(&writer_index)
         || !plans::writer(&nodes[writer_index])
-        || delivery_root_writer(nodes, positions, writer_index).is_none()
+        || writer_chain_root(nodes, positions, writer_index).is_none()
     {
         return None;
     }
     Some(writer_index)
+}
+
+fn recovery_members(
+    root: usize,
+    nodes: &[PlannedNode],
+    positions: &BTreeMap<String, usize>,
+) -> BTreeSet<usize> {
+    let mut members = BTreeSet::new();
+    let mut pending = vec![root];
+    while let Some(index) = pending.pop() {
+        if !members.insert(index) {
+            continue;
+        }
+        let node = &nodes[index];
+        pending.extend(
+            node.composite_members
+                .iter()
+                .chain(&node.after_expansion)
+                .filter_map(|id| positions.get(id).copied()),
+        );
+        if node.loop_body.is_some() {
+            pending.extend(nodes.iter().enumerate().filter_map(|(index, member)| {
+                member
+                    .round
+                    .as_ref()
+                    .is_some_and(|round| round.loop_id == node.id)
+                    .then_some(index)
+            }));
+        }
+    }
+    members
+}
+
+fn recovery_source_is_published_head(
+    index: usize,
+    published_id: &str,
+    nodes: &[PlannedNode],
+    positions: &BTreeMap<String, usize>,
+    members: &BTreeSet<usize>,
+    visiting: &mut BTreeSet<usize>,
+) -> bool {
+    if !members.contains(&index) || !visiting.insert(index) {
+        return false;
+    }
+    let bound = match &nodes[index].source {
+        Some(SourceBinding::Head { node }) => node == published_id,
+        Some(SourceBinding::Node { node }) => positions.get(node).is_some_and(|source| {
+            members.contains(source)
+                && recovery_source_is_published_head(
+                    *source,
+                    published_id,
+                    nodes,
+                    positions,
+                    members,
+                    visiting,
+                )
+        }),
+        _ => false,
+    };
+    visiting.remove(&index);
+    bound
+}
+
+/// Queue conflict recovery must rebase the exact published head on its
+/// retained writer worktree. Compound recovery targets are inspected after
+/// composites and bounded loops have been expanded.
+pub(super) fn validate_conflict_recovery(
+    nodes: &[PlannedNode],
+    positions: &BTreeMap<String, usize>,
+    queue_enabled: bool,
+) -> Result<(), String> {
+    if !queue_enabled {
+        return Ok(());
+    }
+    for gate in nodes {
+        let published_id = match &gate.condition {
+            Some(GateCondition::Conflict {
+                target: CiTarget::Node { node, .. },
+                ..
+            }) => node,
+            Some(GateCondition::Conflict { .. }) => {
+                return Err(format!(
+                    "node {}: queue conflict gate requires a published node and retained-worktree rebase",
+                    gate.id
+                ));
+            }
+            _ => continue,
+        };
+        let invalid = || {
+            format!(
+                "node {}: queue conflict recovery must rebase its published head in the retained worktree",
+                gate.id
+            )
+        };
+        let Some(recovery_id) = gate.on_fail.as_deref() else {
+            return Err(invalid());
+        };
+        let Some(published_index) = positions.get(published_id).copied() else {
+            return Err(invalid());
+        };
+        let published = &nodes[published_index];
+        if published.kind != Some(NodeKind::Publish) {
+            return Err(invalid());
+        }
+        let Some(published_writer) = publish_source_writer(nodes, positions, published_index)
+        else {
+            return Err(invalid());
+        };
+        let Some(retained_worktree) = nodes[published_writer].worktree.as_deref() else {
+            return Err(invalid());
+        };
+        let Some(recovery_index) = positions.get(recovery_id).copied() else {
+            return Err(invalid());
+        };
+        let recovery = &nodes[recovery_index];
+        let members = recovery_members(recovery_index, nodes, positions);
+        let writers: Vec<_> = members
+            .iter()
+            .copied()
+            .filter(|index| plans::writer(&nodes[*index]))
+            .collect();
+        if writers.is_empty()
+            || writers.iter().any(|index| {
+                !recovery_source_is_published_head(
+                    *index,
+                    published_id,
+                    nodes,
+                    positions,
+                    &members,
+                    &mut BTreeSet::new(),
+                )
+            })
+            || writers.iter().any(|index| {
+                nodes[*index].worktree.as_deref() != Some(retained_worktree)
+                    || gate.round.as_ref().is_some_and(|gate_round| {
+                        recovery.loop_body.is_none()
+                            && nodes[*index].round.as_ref().is_none_or(|round| {
+                                round.loop_id != gate_round.loop_id
+                                    || round.round != gate_round.round
+                            })
+                    })
+            })
+        {
+            return Err(invalid());
+        }
+    }
+    Ok(())
 }
 
 /// Checks that need the whole acyclic plan.
@@ -732,7 +877,7 @@ pub(super) fn chain_attempts(
         let Some(writer_index) = positions.get(&published_writer.id).copied() else {
             return Vec::new();
         };
-        let Some(root_index) = delivery_root_writer(&plan.nodes, positions, writer_index) else {
+        let Some(root_index) = writer_chain_root(&plan.nodes, positions, writer_index) else {
             return Vec::new();
         };
         let published_ancestors = ancestors(&plan.nodes, positions, writer);

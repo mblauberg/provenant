@@ -476,6 +476,16 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
         }
         let rounds = allowance(node, extensions);
         let mut body = spec.body.clone();
+        let external_head_sources: BTreeMap<_, _> = body
+            .iter()
+            .filter_map(|child| {
+                let Some(SourceBinding::Head { node: source }) = &child.source else {
+                    return None;
+                };
+                (!spec.body.iter().any(|member| &member.id == source))
+                    .then(|| (child.id.clone(), source.clone()))
+            })
+            .collect();
         for child in &mut body {
             if child.access != AccessMode::WorktreeWrite {
                 continue;
@@ -622,6 +632,13 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
             for child in &spec.body {
                 let mut child = child.clone();
                 let local = child.id.clone();
+                if child.source.is_none()
+                    && let Some(source) = external_head_sources.get(&local)
+                {
+                    child.source = Some(SourceBinding::Head {
+                        node: source.clone(),
+                    });
+                }
                 child.id = id(&node.id, round, &local);
                 child.round = Some(LoopRound {
                     extra: Default::default(),

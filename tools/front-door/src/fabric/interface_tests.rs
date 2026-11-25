@@ -1,5 +1,21 @@
 include!("interface_implement_invariants.rs");
 #[test]
+fn route_overrides_skip_host_owned_delivery_nodes() {
+    use provenant_fabric_runtime::graph::GraphNode;
+    let choice = super::RouteChoice::parse(&json!("writer=junior")).unwrap();
+    for kind in ["hygiene", "publish"] {
+        let mut node: GraphNode = serde_json::from_value(json!({
+            "id":kind, "kind":kind, "access":"worktree_write", "worktree":"retained"
+        }))
+        .unwrap();
+        super::override_tier(&mut node, &choice);
+        super::override_launch(&mut node, &json!({"model":"openai/gpt-5"})).unwrap();
+        assert!(node.route.is_none());
+        assert!(node.routes.is_none());
+    }
+}
+
+#[test]
 fn tier_override_preserves_leaf_family_constraints() {
     use provenant_fabric_runtime::graph::GraphNode;
     let override_route = super::RouteChoice::Alias("senior".into());
