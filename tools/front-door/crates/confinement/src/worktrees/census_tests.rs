@@ -896,6 +896,45 @@ fn land_worker_census_excludes_verified_ancestors_and_the_callers_children()
         cwds.0.insert(110, root.clone());
         assert_eq!(observe(&cwds, true), before_child);
     }
+    // Descendant exclusion is scoped to run admission, matching ancestor
+    // exclusion: an ordinary census still names the caller's child as a
+    // writer, while a land census treats it as part of the caller.
+    {
+        let processes = Processes(Census::from_observations(
+            facts.clone(),
+            [],
+            [],
+            true,
+            false,
+            32,
+        )?);
+        let mut cwds = Cwds(
+            facts
+                .iter()
+                .map(|fact| (fact.identity.pid, outside.clone()))
+                .collect(),
+        );
+        cwds.0.insert(110, root.clone()); // verified child of the caller
+        let observe = |ancestors| {
+            observe_worker_roots(
+                std::slice::from_ref(&root),
+                &processes,
+                &cwds,
+                &current,
+                ancestors,
+            )
+            .0[&root]
+                .clone()
+        };
+        assert!(
+            observe(false).is_observed(),
+            "ordinary census must name the caller's child"
+        );
+        assert!(
+            observe(true).is_available(),
+            "land census must exclude the caller's child"
+        );
+    }
     for ambiguity in [
         "equal_stamp",
         "younger_parent",

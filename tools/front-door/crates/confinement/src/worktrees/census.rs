@@ -1671,17 +1671,20 @@ pub(super) fn observe_worker_holders_while(
             child = parent;
         }
     }
-    // The caller's own children are part of the caller, not independent
-    // writers. A short-lived child spawned for a probe can vanish while its
-    // descriptors are read, so it must not turn a free worktree Unknown. Only
-    // descendants whose full parent chain is present and verified are
-    // excluded; an ambiguous chain keeps the process in the census.
-    for fact in census.facts() {
-        if !within_budget() {
-            return (states, holders, details, taints);
-        }
-        if census.ancestry(&fact.identity, &current.identity) == Ancestry::Yes {
-            excluded.insert(fact.identity.clone());
+    // Exclusion of the caller's own process tree is scoped to run admission,
+    // just like the ancestor walk above. During landing a short-lived child
+    // spawned for a probe can vanish while its descriptors are read, so it must
+    // not turn a free worktree Unknown; an ordinary census still names it as a
+    // real writer. Only descendants whose full parent chain is present and
+    // verified are excluded; an ambiguous chain keeps the process in the census.
+    if ancestors {
+        for fact in census.facts() {
+            if !within_budget() {
+                return (states, holders, details, taints);
+            }
+            if census.ancestry(&fact.identity, &current.identity) == Ancestry::Yes {
+                excluded.insert(fact.identity.clone());
+            }
         }
     }
     // Custody is decided per root. A gap that could hide a process anywhere
