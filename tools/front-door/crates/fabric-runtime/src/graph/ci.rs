@@ -285,18 +285,6 @@ pub(super) fn evaluate<O: AttemptOwner>(
     // Inspect raw CI text before applying caps so warnings see the complete
     // source; the checkpoint and repair input retain the original bytes.
     observation = prompt_text::normalise(&observation, prompt_text::Context::CiObservation)?;
-    let quota_reset = observation
-        .quota_reset()
-        .or_else(|| {
-            prior.as_ref().and_then(|evidence| {
-                serde_json::from_value(evidence.extra.get("quota_reset_at")?.clone()).ok()
-            })
-        })
-        .filter(|reset| {
-            delivery_queue
-                && observation.state == CiState::Pending
-                && wall_now.is_some_and(|now| *reset > now)
-        });
     observation.bound_failed_checks(max_bytes, max_checks);
     if delivery_queue && observation.state == CiState::Passed && observation.check_names.is_empty()
     {
@@ -313,6 +301,18 @@ pub(super) fn evaluate<O: AttemptOwner>(
             "CI reported failure without bounded job evidence; waiting for usable check details"
                 .into();
     }
+    let quota_reset = observation
+        .quota_reset()
+        .or_else(|| {
+            prior.as_ref().and_then(|evidence| {
+                serde_json::from_value(evidence.extra.get("quota_reset_at")?.clone()).ok()
+            })
+        })
+        .filter(|reset| {
+            delivery_queue
+                && observation.state == CiState::Pending
+                && wall_now.is_none_or(|now| *reset > now)
+        });
     // The gate stays bound to the last known head: an observation without a
     // SHA keeps it, and only a different known SHA supersedes it.
     let bound = prior.as_ref().and_then(|prior| prior.head_sha.clone());

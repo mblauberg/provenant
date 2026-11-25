@@ -24,6 +24,7 @@ struct Owner {
     attempts: usize,
     deliveries: usize,
     wall_seconds: i64,
+    wall_unavailable: bool,
     monotonic_micros: u64,
     boot: String,
     tick: bool,
@@ -71,6 +72,9 @@ impl AttemptOwner for Owner {
         provenant_config::PortTable::builtin().worktree_layout
     }
     fn wall_now(&self) -> Option<provenant_core::WallTime> {
+        if self.wall_unavailable {
+            return None;
+        }
         provenant_core::WallTime::from_micros(self.wall_seconds.saturating_mul(1_000_000)).ok()
     }
     fn ci_poll_backoff(&self, node_id: &str) -> CiPollBackoff {
@@ -720,8 +724,9 @@ fn queue_quota_reset_defers_timeout_across_restart() {
         }]),
         observations: VecDeque::from([
             limited,
-            observation(CiState::Pending, "forge unavailable"),
-            observation(CiState::Pending, "forge unavailable"),
+            observation(CiState::Failed, "failure has no details"),
+            observation(CiState::Failed, "failure has no details"),
+            observation(CiState::Failed, "failure has no details"),
         ]),
         tick: true,
         ..Default::default()
@@ -736,6 +741,14 @@ fn queue_quota_reset_defers_timeout_across_restart() {
     // An explicit advance can probe early and fail to retrieve a fresh reset.
     // The persisted reset still protects the gate through that observation.
     owner.tick = false;
+    owner.wall_unavailable = true;
+    assert!(advance(&doc, &mut owner, &mut journal).is_err());
+    assert!(
+        journal.0.as_ref().unwrap().nodes[ci_index]
+            .delivery_park
+            .is_none()
+    );
+    owner.wall_unavailable = false;
     let early = advance(&doc, &mut owner, &mut journal).unwrap();
     assert!(early.checkpoint.nodes[ci_index].delivery_park.is_none());
     assert_eq!(early.checkpoint.wake_at.unwrap().as_micros(), 10_000_000);
