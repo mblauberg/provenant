@@ -25,18 +25,21 @@ fn tier_override_preserves_leaf_family_constraints() {
 fn pinned_review_prompt_says_the_subject_is_checked_out_in_the_working_directory() {
     use provenant_fabric_runtime::graph::{GraphNode, SourceBinding};
     let head = "1111111111111111111111111111111111111111";
+    let base = "2222222222222222222222222222222222222222";
     let mut node: GraphNode = serde_json::from_value(json!({
         "id": "review", "access": "read_only", "prompt": "review the subject",
         "review_behaviour": "lens",
     }))
     .unwrap();
-    super::bind_submission_subject(&mut node, head);
+    super::bind_submission_subject(&mut node, Some(base), head);
     assert_eq!(
         node.source,
         Some(SourceBinding::Commit {
             commit: head.into()
         })
     );
+    assert!(node.prompt.contains(base), "{}", node.prompt);
+    assert!(node.prompt.contains("authoritative"), "{}", node.prompt);
     assert!(
         node.prompt.contains(&format!(
             "already checked out at {head} in your working directory"
@@ -50,6 +53,50 @@ fn pinned_review_prompt_says_the_subject_is_checked_out_in_the_working_directory
         "{}",
         node.prompt
     );
+}
+
+#[test]
+// Spec: docs/specs/run-launch.md#inputs-and-resources
+fn review_preamble_names_the_host_pinned_base_without_a_remote_default_ref() -> Result {
+    let rig = crate::worktree_tests::repository()?;
+    let factory = factory(&rig)?;
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+    // The fixture carries no remote-tracking ref, so a reviewer cannot confirm
+    // the base with `git merge-base origin/<default> HEAD` (#3977).
+    assert!(
+        crate::worktree_tests::git(
+            &rig,
+            &["for-each-ref", "--format=%(refname)", "refs/remotes"]
+        )?
+        .is_empty(),
+        "the fixture must have no remote default ref"
+    );
+    let base = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+    std::fs::write(rig.project.join("subject.txt"), "subject\n")?;
+    crate::worktree_tests::git(&rig, &["add", "subject.txt"])?;
+    crate::worktree_tests::git(&rig, &["commit", "-qm", "subject"])?;
+    let head = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+    let response = factory.graph_document(
+        json!({
+            "op":"run", "template":"review", "brief":"Review", "explain":true,
+            "set":{"subject":head,"review_base":base},
+        }),
+        budget,
+        &cancel,
+    )?;
+    let prompt = response["document"]["nodes"][0]["prompt"]
+        .as_str()
+        .ok_or("review node prompt")?;
+    assert!(prompt.contains(&base), "{prompt}");
+    assert!(prompt.contains(&head), "{prompt}");
+    assert!(prompt.contains("authoritative"), "{prompt}");
+    assert!(prompt.contains(provenant_run::REVIEW_BASE_REF), "{prompt}");
+    assert_eq!(
+        response["document"]["review_base"], base,
+        "the document and the prompt must name the same host-pinned base"
+    );
+    Ok(())
 }
 
 #[test]

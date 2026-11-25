@@ -335,11 +335,15 @@ refuses the launch.
 
 A review launch pinned to a pull-request head binds that head as its node source. The host materialises
 an attempt-private, read-only detached view of the commit and launches the review lane with that view
-as its working directory. The lane's prompt states that the subject is already checked out there at
-the requested head and forbids checking out, switching or resetting any other checkout, including the
-project's primary; a pinned review never needs to touch the primary checkout.
+as its working directory. The view carries a named ref, `refs/provenant/review/base`, at the
+host-supplied base, even when the source checkout has no remote default ref. The lane's prompt names
+that base and head, states that both are authoritative, and forbids fetching, confirming either
+commit against a remote default ref, or checking out, switching or resetting any other checkout,
+including the project's primary; a pinned review never needs to touch the primary checkout.
 - Why: a host-access lane can still reach the primary, so a model told only a SHA checks it out there
-  itself, leaving the primary detached and displacing concurrent writers (#3943).
+  itself, leaving the primary detached and displacing concurrent writers (#3943). A detached view has
+  no `origin/<default>` ref and the lane cannot fetch, so a reviewer asked to confirm the host's merge
+  base goes `inconclusive` unless the base is shipped and declared authoritative (#3977).
 
 Unreadable required host inputs reject an attempt before launch, and a pinned source view reports
 its failure without exposing captured contents or credentials.

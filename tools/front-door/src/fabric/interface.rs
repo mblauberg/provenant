@@ -596,7 +596,11 @@ fn override_launch(
     Ok(())
 }
 
-fn bind_submission_subject(node: &mut provenant_fabric_runtime::graph::GraphNode, head: &str) {
+fn bind_submission_subject(
+    node: &mut provenant_fabric_runtime::graph::GraphNode,
+    base: Option<&str>,
+    head: &str,
+) {
     // An explicit composite source is inherited by its members. Loops resolve
     // their own subjects as writers advance, rather than freezing every round.
     if node.source.is_some() || node.loop_body.is_some() {
@@ -604,16 +608,33 @@ fn bind_submission_subject(node: &mut provenant_fabric_runtime::graph::GraphNode
     }
     if let Some(composite) = &mut node.composite {
         for child in &mut composite.nodes {
-            bind_submission_subject(child, head);
+            bind_submission_subject(child, base, head);
         }
     } else if node.review_behaviour.is_some() {
         // The subject is materialised as an attempt-private detached view that
         // becomes the lane's working directory (#3714). Say so explicitly: a
         // host-access lane can still reach the primary checkout, and a model
         // told only about a SHA will check it out there itself (#3943).
-        node.prompt.push_str(&format!(
-            "\n\nWhen a review range is supplied, the host pins its commits and supplies Git context. The subject is already checked out at {head} in your working directory, a dedicated read-only detached view; read it there. Do not check out, switch or reset any other checkout, including the project's primary checkout, and do not fetch."
-        ));
+        // The base is authoritative too: the detached view carries no remote
+        // default ref and the lane cannot fetch, so a reviewer must not try to
+        // confirm the merge base against one (#3977).
+        let mut paragraph = format!(
+            "\n\nWhen a review range is supplied, the host pins its commits and supplies Git context. The subject is already checked out at {head} in your working directory, a dedicated read-only detached view; read it there. The host-supplied head at {head} is authoritative"
+        );
+        if let Some(base) = base {
+            paragraph.push_str(&format!(
+                ", as is the host-supplied base at {base}; the base is available as the named ref {} in your working directory. Do not fetch or try to confirm either commit against a remote default ref, which this view does not carry",
+                provenant_run::REVIEW_BASE_REF
+            ));
+        } else {
+            paragraph.push_str(
+                "; do not fetch or check out another commit to confirm it, which this view cannot do",
+            );
+        }
+        paragraph.push_str(
+            ". Do not check out, switch or reset any other checkout, including the project's primary checkout.",
+        );
+        node.prompt.push_str(&paragraph);
         node.source = Some(provenant_fabric_runtime::graph::SourceBinding::Commit {
             commit: head.into(),
         });
@@ -1711,7 +1732,7 @@ impl Factory {
         override_launch(&mut typed, input)?;
         if let Some(subject) = &review_subject {
             if subject.base != subject.head {
-                bind_submission_subject(&mut typed, &subject.head);
+                bind_submission_subject(&mut typed, Some(subject.base.as_str()), &subject.head);
                 bind_review_base(&mut typed, &subject.base);
             }
             if let Some(warning) = &subject.warning {
@@ -2351,11 +2372,14 @@ impl Factory {
             )
             .map_err(graph_patch_error)?
         };
+        // Borrow the optional base: the prompt binding below still needs it
+        // after the document has been given its own copy.
         if review_launch
-            && let Some(base) =
-                resolved_review_base.filter(|base| Some(base) != resolved_head.as_ref())
+            && let Some(base) = resolved_review_base
+                .as_deref()
+                .filter(|base| Some(*base) != resolved_head.as_deref())
         {
-            document.review_base = Some(base);
+            document.review_base = Some(base.to_owned());
             document.schema_version = document.schema_version.max(2);
         }
         if review_subject
@@ -2426,7 +2450,7 @@ impl Factory {
         }
         if let Some(head) = &resolved_head {
             for node in &mut document.nodes {
-                bind_submission_subject(node, head);
+                bind_submission_subject(node, resolved_review_base.as_deref(), head);
             }
             document.schema_version = document.schema_version.max(u64::from(
                 provenant_fabric_runtime::graph::minimum_schema_version(&document),
