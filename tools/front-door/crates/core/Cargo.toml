@@ -1,6 +1,6 @@
 [package]
 name = "provenant-core"
-version = "2.9.5"
+version = "2.9.6"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
