@@ -1528,6 +1528,7 @@ pub(super) fn gc_bounded_passes_collect_settled_scratch_and_keep_busy_custody() 
     let mut previous = scratch.len();
     let mut saw_progress = false;
     let mut saw_deferred = false;
+    let mut first_scratch_report = None;
     let mut last_report = Value::Null;
     for _ in 0..30 {
         let output = command(&rig, &["gc", "--apply", "--idle", "0", "--json"])?;
@@ -1542,6 +1543,9 @@ pub(super) fn gc_bounded_passes_collect_settled_scratch_and_keep_busy_custody() 
             "busy custody must remain protected: {report}"
         );
         let progress = &report["data"]["candidate_progress"];
+        if progress.is_object() && first_scratch_report.is_none() {
+            first_scratch_report = Some(report.clone());
+        }
         if progress["deferred"].as_u64().unwrap_or(0) > 0 {
             saw_deferred = true;
             assert!(
@@ -1561,7 +1565,7 @@ pub(super) fn gc_bounded_passes_collect_settled_scratch_and_keep_busy_custody() 
     }
     assert!(
         saw_progress && saw_deferred && previous == 1,
-        "bounded passes must collect every available candidate: remaining={previous}, progress={saw_progress}, deferred={saw_deferred}, last report={last_report}"
+        "bounded passes must collect every available candidate: remaining={previous}, progress={saw_progress}, deferred={saw_deferred}, first scratch report={first_scratch_report:?}, last report={last_report}"
     );
     drop(held);
     for _ in 0..30 {
