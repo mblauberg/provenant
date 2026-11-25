@@ -7,8 +7,7 @@ fn seal_progress_handoff(
     attempt: &provenant_os::fs::Directory,
     progress: &serde_json::Value,
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
-    let handoff =
-        provenant_records::handoff::Handoff::from_json(&serde_json::to_vec(progress)?)?;
+    let handoff = provenant_records::handoff::Handoff::from_json(&serde_json::to_vec(progress)?)?;
     let stored: provenant_records::handoff::HandoffResult = Ok(Some(handoff));
     crate::artifacts::seal(
         attempt,
@@ -313,44 +312,42 @@ fn settlement_finish_case(
         launch.branch.as_str(),
         launch.base,
     )?;
-    let private_git =
-        |args: &[&str]| -> std::result::Result<String, Box<dyn std::error::Error>> {
-            let argv: Vec<OsString> = std::iter::once(git.as_os_str().to_owned())
-                .chain(args.iter().map(|arg| OsString::from(*arg)))
-                .collect();
-            let mut environment: Vec<(OsString, OsString)> = [
-                ("PATH", "/usr/bin:/bin"),
-                ("GIT_CONFIG_NOSYSTEM", "1"),
-                ("GIT_CONFIG_GLOBAL", "/dev/null"),
-            ]
-            .into_iter()
-            .map(|(key, value)| (key.into(), value.into()))
+    let private_git = |args: &[&str]| -> std::result::Result<String, Box<dyn std::error::Error>> {
+        let argv: Vec<OsString> = std::iter::once(git.as_os_str().to_owned())
+            .chain(args.iter().map(|arg| OsString::from(*arg)))
             .collect();
-            environment.extend([
-                (
-                    "GIT_DIR".into(),
-                    candidate.join("git-common").into_os_string(),
-                ),
-                (
-                    "GIT_COMMON_DIR".into(),
-                    candidate.join("git-common").into_os_string(),
-                ),
-                (
-                    "GIT_OBJECT_DIRECTORY".into(),
-                    candidate.join("git-objects").into_os_string(),
-                ),
-            ]);
-            let mut options =
-                ExecOptions::new(&argv, &fixture.writer.worktree, Duration::from_secs(5));
-            options.env = Some(&environment);
-            let output = SystemExecutor::new(1)?.execute(options)?;
-            assert!(
-                output.termination == Termination::Exit(0),
-                "{case}: {}",
-                String::from_utf8_lossy(&output.stderr.bytes)
-            );
-            Ok(String::from_utf8(output.stdout.bytes)?.trim().to_owned())
-        };
+        let mut environment: Vec<(OsString, OsString)> = [
+            ("PATH", "/usr/bin:/bin"),
+            ("GIT_CONFIG_NOSYSTEM", "1"),
+            ("GIT_CONFIG_GLOBAL", "/dev/null"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.into(), value.into()))
+        .collect();
+        environment.extend([
+            (
+                "GIT_DIR".into(),
+                candidate.join("git-common").into_os_string(),
+            ),
+            (
+                "GIT_COMMON_DIR".into(),
+                candidate.join("git-common").into_os_string(),
+            ),
+            (
+                "GIT_OBJECT_DIRECTORY".into(),
+                candidate.join("git-objects").into_os_string(),
+            ),
+        ]);
+        let mut options = ExecOptions::new(&argv, &fixture.writer.worktree, Duration::from_secs(5));
+        options.env = Some(&environment);
+        let output = SystemExecutor::new(1)?.execute(options)?;
+        assert!(
+            output.termination == Termination::Exit(0),
+            "{case}: {}",
+            String::from_utf8_lossy(&output.stderr.bytes)
+        );
+        Ok(String::from_utf8(output.stdout.bytes)?.trim().to_owned())
+    };
     let staged_file = fixture.writer.worktree.join("base.txt");
     if private_staged {
         std::fs::write(&staged_file, staged_contents)?;
@@ -374,8 +371,7 @@ fn settlement_finish_case(
             "-z".into(),
         ]
         .into();
-        let mut options =
-            ExecOptions::new(&argv, &fixture.writer.project, Duration::from_secs(5));
+        let mut options = ExecOptions::new(&argv, &fixture.writer.project, Duration::from_secs(5));
         options.env = Some(&fixture.environment);
         let output = SystemExecutor::new(1)?.execute(options)?;
         assert!(
@@ -703,8 +699,7 @@ fn budget_warning_records_the_steer_refusal_for_lane_providers()
         };
         holder.budget_warning(&context.encode()?, 450_000, 500_000)?;
         let warning: serde_json::Value = serde_json::from_slice(
-            &read_sealed(&attempt, "budget-warning.json", RECORD_LIMIT)?
-                .ok_or("budget warning")?,
+            &read_sealed(&attempt, "budget-warning.json", RECORD_LIMIT)?.ok_or("budget warning")?,
         )?;
         assert_eq!(warning["tokens"], 450_000);
         assert_eq!(warning["budget"], 500_000);
@@ -750,9 +745,7 @@ fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
         // The outcome commits on the outcome-only pass; the worktree turns dirty before the quiet pass delivers.
         LateDirty,
     }
-    use Marker::{
-        DeliveredSteer, DeliveredSteerUnavailable, ExplicitAfterSteer, ExplicitCancel,
-    };
+    use Marker::{DeliveredSteer, DeliveredSteerUnavailable, ExplicitAfterSteer, ExplicitCancel};
     for (changed, dirty, blocked, shared, budget, marker) in [
         (false, false, false, false, false, Marker::AdmissionSteer),
         (false, false, false, false, false, Marker::AdmissionCancel),
@@ -897,9 +890,7 @@ fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
                 | Marker::Deadline
         ) {
             use provenant_supervisor::census::{ProcessObservation, SystemProcessObserver};
-            let mut provider = match SystemProcessObserver
-                .observe(i64::from(std::process::id()))
-            {
+            let mut provider = match SystemProcessObserver.observe(i64::from(std::process::id())) {
                 ProcessObservation::Present(fact) if !fact.zombie => fact.identity,
                 observation => {
                     return Err(format!("fixture process unavailable: {observation:?}").into());
@@ -968,8 +959,7 @@ fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
                 )?;
             }
             let saved: provenant_supervisor::custody::StopIntent = crate::db::decode(
-                &read_sealed(&attempt, "stop-intent.json", RECORD_LIMIT)?
-                    .ok_or("cancel marker")?,
+                &read_sealed(&attempt, "stop-intent.json", RECORD_LIMIT)?.ok_or("cancel marker")?,
             )?;
             assert_eq!(
                 saved.reason,
@@ -2279,9 +2269,7 @@ enum BudgetStopCase {
     SymlinkObjects,
 }
 
-fn budget_stop_case(
-    case: BudgetStopCase,
-) -> std::result::Result<(), Box<dyn std::error::Error>> {
+fn budget_stop_case(case: BudgetStopCase) -> std::result::Result<(), Box<dyn std::error::Error>> {
     use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
     let fixture = PrepareFixture::new()?;
     let execution = registered_landed_writer_fixture(&fixture)?;
@@ -2481,9 +2469,8 @@ fn budget_stop_case(
         // The lane commits in its private Git, as a native session does.
         let native =
             provenant_os::git::resolve_git_executable(None).ok_or("native Git unavailable")?;
-        let private = |args: &[&str]| {
-            crate::delivery_tests::private_git(&fixture, &candidate, &native, args)
-        };
+        let private =
+            |args: &[&str]| crate::delivery_tests::private_git(&fixture, &candidate, &native, args);
         private(&["add", "budget-work.txt"])?;
         private(&["commit", "-m", "Native lane work"])?;
         let head = crate::objects::private_tip(
@@ -2545,8 +2532,8 @@ fn budget_stop_case(
         let recovery =
             custody::acquire_recovery(directory, scope, call.lock_budget(), &cancel, &clock)?;
         assert_eq!(recovery.observe(), custody::RecoveryState::Absent);
-        let mut settlement = crate::settlement::Guard::claim(&attempt, scope, &clock)?
-            .ok_or("settlement claim")?;
+        let mut settlement =
+            crate::settlement::Guard::claim(&attempt, scope, &clock)?.ok_or("settlement claim")?;
         let result = launch.terminal(
             execution.state_root.as_path(),
             &attempt,
@@ -2624,8 +2611,8 @@ fn budget_stop_case(
         let recovery =
             custody::acquire_recovery(directory, scope, call.lock_budget(), &cancel, &clock)?;
         assert_eq!(recovery.observe(), custody::RecoveryState::Absent);
-        let mut settlement = crate::settlement::Guard::claim(&attempt, scope, &clock)?
-            .ok_or("settlement claim")?;
+        let mut settlement =
+            crate::settlement::Guard::claim(&attempt, scope, &clock)?.ok_or("settlement claim")?;
         let private_index = std::fs::read(candidate.join("git-common/index"))?;
         let source = crate::objects::bound_source(&attempt)?.ok_or("private source")?;
         let private_head = crate::objects::private_tip(&source, launch.branch.as_str())?;
@@ -2680,8 +2667,7 @@ fn budget_stop_case(
             .current_path()?
             .join(id.to_string())
             .join("reservation.json");
-        let mut reservation: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&path)?)?;
+        let mut reservation: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
         reservation["launch_state"] = "spawned".into();
         reservation["unresolved_cleanup"] = true.into();
         reservation["boot"] = guardian.identity.boot.clone().into();
@@ -2691,8 +2677,8 @@ fn budget_stop_case(
         let recovery =
             custody::acquire_recovery(directory, scope, call.lock_budget(), &cancel, &clock)?;
         assert_ne!(recovery.observe(), custody::RecoveryState::Absent);
-        let mut settlement = crate::settlement::Guard::claim(&attempt, scope, &clock)?
-            .ok_or("settlement claim")?;
+        let mut settlement =
+            crate::settlement::Guard::claim(&attempt, scope, &clock)?.ok_or("settlement claim")?;
         let private_index = std::fs::read(candidate.join("git-common/index"))?;
         let private_head = crate::objects::private_tip(
             &crate::objects::bound_source(&attempt)?.ok_or("private source")?,
@@ -2977,11 +2963,8 @@ fn budget_stop_case(
         ])?;
         assert_eq!(finished.head, Some(published));
         assert!(
-            provenant_os::fixture::run_git(
-                &fixture.writer.worktree,
-                &["status", "--porcelain"]
-            )?
-            .is_empty()
+            provenant_os::fixture::run_git(&fixture.writer.worktree, &["status", "--porcelain"])?
+                .is_empty()
         );
         if matches!(case, BudgetStopCase::Native { dirty: false }) {
             assert_eq!(
@@ -3119,8 +3102,8 @@ fn settlement_import_cancellation_preserves_provider_exit_ordering()
             &cancel,
             &clock,
         )?;
-        let mut recovery = provenant_supervisor::fixture::bind_writer_attempt(lease, &attempt)?
-            .into_recovery()?;
+        let mut recovery =
+            provenant_supervisor::fixture::bind_writer_attempt(lease, &attempt)?.into_recovery()?;
         recovery.prepare_settlement()?;
         let mut observed = crate::tests::exit();
         observed.scope = scope;
@@ -3336,9 +3319,7 @@ fn settlement_publish_diverged_branch_reports_error()
     settlement_fault_modes(&["publish_diverged"])
 }
 
-fn settlement_fault_modes(
-    modes: &[&str],
-) -> std::result::Result<(), Box<dyn std::error::Error>> {
+fn settlement_fault_modes(modes: &[&str]) -> std::result::Result<(), Box<dyn std::error::Error>> {
     for &mode in modes {
         use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
         use std::ffi::OsStr;
@@ -3492,11 +3473,8 @@ fn settlement_fault_modes(
         let mut advanced_tip = None;
         if mode.starts_with("publish_") {
             fixture.commit(&fixture.writer.worktree, "Lane head")?;
-            let head = crate::objects::resolve_ref(
-                &git,
-                launch.worktree.repo(),
-                launch.branch.as_str(),
-            )?;
+            let head =
+                crate::objects::resolve_ref(&git, launch.worktree.repo(), launch.branch.as_str())?;
             published_head = Some(head);
             std::fs::write(
                 candidate.join("git-common/refs/heads/lane"),
@@ -3530,8 +3508,8 @@ fn settlement_fault_modes(
             &cancel,
             &clock,
         )?;
-        let mut recovery = provenant_supervisor::fixture::bind_writer_attempt(lease, &attempt)?
-            .into_recovery()?;
+        let mut recovery =
+            provenant_supervisor::fixture::bind_writer_attempt(lease, &attempt)?.into_recovery()?;
         recovery.prepare_settlement()?;
         if mode == "held_import_success" {
             store.record_worktree_settlement(
@@ -3601,8 +3579,7 @@ fn settlement_fault_modes(
                 *attempt == id
                     && matches!(
                         state,
-                        crate::Reconciled::Finished
-                            | crate::Reconciled::WriterLeaseReleased { .. }
+                        crate::Reconciled::Finished | crate::Reconciled::WriterLeaseReleased { .. }
                     )
             }));
             assert!(
@@ -3619,11 +3596,7 @@ fn settlement_fault_modes(
                 bytes
             );
             assert_eq!(
-                crate::objects::resolve_ref(
-                    &git,
-                    launch.worktree.repo(),
-                    launch.branch.as_str()
-                )?,
+                crate::objects::resolve_ref(&git, launch.worktree.repo(), launch.branch.as_str())?,
                 launch.base
             );
             assert!(
@@ -3678,11 +3651,7 @@ fn settlement_fault_modes(
             );
             store.settle_recovered(&attempt, recovery)?;
             assert_eq!(
-                crate::objects::resolve_ref(
-                    &git,
-                    launch.worktree.repo(),
-                    launch.branch.as_str()
-                )?,
+                crate::objects::resolve_ref(&git, launch.worktree.repo(), launch.branch.as_str())?,
                 advanced_tip.ok_or("advanced tip")?
             );
             assert!(
@@ -3736,9 +3705,7 @@ fn settlement_fault_modes(
                         launch_ref: None,
                         head: published_head.ok_or("lane head")?,
                         attempt: id,
-                        history: provenant_config::LaneHistory::resolve(
-                            &run.request.task.profile,
-                        ),
+                        history: provenant_config::LaneHistory::resolve(&run.request.task.profile,),
                     },
                     |_| Ok(()),
                 )
@@ -3781,11 +3748,7 @@ fn settlement_fault_modes(
             );
             let (head, _, _) = retained_commit.as_ref().ok_or("retained commit")?;
             assert_eq!(
-                crate::objects::resolve_ref(
-                    &git,
-                    launch.worktree.repo(),
-                    launch.branch.as_str()
-                )?,
+                crate::objects::resolve_ref(&git, launch.worktree.repo(), launch.branch.as_str())?,
                 *head
             );
             store
@@ -4066,11 +4029,7 @@ fn settlement_fault_modes(
                 bytes
             );
             assert_eq!(
-                crate::objects::resolve_ref(
-                    &git,
-                    launch.worktree.repo(),
-                    launch.branch.as_str()
-                )?,
+                crate::objects::resolve_ref(&git, launch.worktree.repo(), launch.branch.as_str())?,
                 launch.base
             );
             assert_eq!(
@@ -4237,11 +4196,7 @@ fn settlement_fault_modes(
             store.finish(id, &attempt, &observed, &providers, &call)?;
             let (head, _, _) = retained_commit.as_ref().ok_or("private commit")?;
             assert_eq!(
-                crate::objects::resolve_ref(
-                    &git,
-                    launch.worktree.repo(),
-                    launch.branch.as_str()
-                )?,
+                crate::objects::resolve_ref(&git, launch.worktree.repo(), launch.branch.as_str())?,
                 *head
             );
         } else {
