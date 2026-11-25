@@ -34,9 +34,9 @@ still be released. Boundary refusals and uncertain withdrawals authorise no othe
 
 A writer continuation keeps predecessor work and the original review diff base. Budgets survive
 resumption and terminal receipts stay immutable. Recovery reopens selected consumers without
-restarting unrelated work. A graph-wide retry with no work left to resume and no extension must
-select a node or refuse with the node retry command. Pending work and budget extensions stay
-resumable even when an advisory node failed.
+restarting unrelated work. A graph-wide retry with no work left to resume and no extension selects
+the only node when the graph has exactly one, and otherwise refuses with the node retry command.
+Pending work and budget extensions stay resumable even when an advisory node failed.
 
 Lowered host structural limits pause an unchanged graph on resume or graph-wide retry, saving the
 structural-limit pause; only a changed candidate refuses admission. The pause admits no new launch

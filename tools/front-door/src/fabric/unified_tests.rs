@@ -575,6 +575,119 @@ fn listed(name: &str, settled: bool, changed_micros: i64) -> ListedGraph {
     }
 }
 
+// Spec: docs/specs/cli.md#status-selection
+#[test]
+fn full_listing_shares_host_scans_and_lazily_reads_local_census() {
+    use std::cell::{Cell, OnceCell};
+
+    struct Facts {
+        census: OnceCell<Result<(), ()>>,
+    }
+    for local in [false, true] {
+        let store = Cell::new(0);
+        let holders = Cell::new(0);
+        let worktrees = Cell::new(0);
+        let census = Cell::new(0);
+        let enriched = Cell::new(0);
+        let graphs = vec![
+            listed("active", false, 1),
+            listed("history", true, 1),
+            listed("active2", false, 1),
+        ];
+        let mut projections = std::collections::BTreeMap::new();
+        for name in ["active", "history", "active2"] {
+            projections.insert(
+                name.to_owned(),
+                vec![listing_attempt_row(if name == "history" {
+                    "terminal"
+                } else {
+                    "running"
+                })],
+            );
+        }
+        let (listing, facts) = super::listing_with_evidence(
+            graphs,
+            &mut projections,
+            (1, true, 10, None),
+            || {
+                store.set(store.get() + 1);
+                holders.set(holders.get() + 1);
+                worktrees.set(worktrees.get() + 1);
+                Ok(Facts {
+                    census: OnceCell::new(),
+                })
+            },
+            |_, facts| {
+                enriched.set(enriched.get() + 1);
+                if local {
+                    let _ = super::cached_census(&facts.census, || {
+                        census.set(census.get() + 1);
+                        Ok(())
+                    });
+                }
+                Ok(())
+            },
+        );
+        assert_eq!(
+            listing.rows.len(),
+            3,
+            "both liveness and full-page passes ran"
+        );
+        let summary_holders = super::listing_holders(
+            facts,
+            |_| 42,
+            || {
+                holders.set(holders.get() + 1);
+                0
+            },
+        );
+        assert_eq!(summary_holders, 42, "the summary reuses the holder reading");
+        assert_eq!(
+            enriched.get(),
+            3,
+            "each graph was enriched across the two passes"
+        );
+        assert_eq!((store.get(), holders.get(), worktrees.get()), (1, 1, 1));
+        assert_eq!(
+            census.get(),
+            usize::from(local),
+            "the census is lazy and shared across graphs"
+        );
+    }
+}
+
+#[test]
+fn listing_shares_failed_host_scan_across_both_passes() {
+    let scans = std::cell::Cell::new(0);
+    let graphs = vec![listed("active", false, 1), listed("history", true, 1)];
+    let mut projections = std::collections::BTreeMap::new();
+    projections.insert("active".to_owned(), vec![listing_attempt_row("running")]);
+    projections.insert("history".to_owned(), vec![listing_attempt_row("terminal")]);
+
+    let (listing, facts) = super::listing_with_evidence(
+        graphs,
+        &mut projections,
+        (1, true, 10, None),
+        || {
+            scans.set(scans.get() + 1);
+            Err::<(), _>(FacadeError::Timeout)
+        },
+        |_, _| Ok(()),
+    );
+
+    assert_eq!(scans.get(), 1, "a failed scan is shared, not retried");
+    assert!(matches!(facts, Some(Err(FacadeError::Timeout))));
+    assert_eq!(listing.rows.len(), 2);
+    for graph in listing.rows {
+        assert!(
+            graph
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("status evidence unavailable"))
+        );
+    }
+}
+
 #[test]
 fn the_listing_never_hides_active_work_and_counts_what_it_omits() {
     let day = provenant_cli::limits::LISTING_SETTLED_SECONDS * 1_000_000;
@@ -2647,4 +2760,60 @@ fn state_ranking_and_predicates_behave_consistently() {
         assert!(!StateRank::of(state).needs_attention());
         assert!(!StateRank::of(state).is_live());
     }
+}
+
+// Spec: docs/specs/cli.md#output-references-and-bounded-tails
+#[test]
+fn settled_lane_output_skips_stale_failure_rows() {
+    let settled: GraphCheckpoint = serde_json::from_value(json!({
+        "schema_version":2,"graph_id":"settled-review","plan_digest":"digest","nodes":[
+            {"id":"review","state":"succeeded","worktree":null,"attempts":[],
+             "outputs":{"schema_version":2,"result":null,"verdict":"VERDICT: PASS",
+                        "findings":[],"branch":null,"commit":null,"warnings":[]}}
+        ]
+    }))
+    .expect("settled review checkpoint");
+    let progress = settled.nodes.first().expect("review node");
+    assert!(
+        !super::output_needs_graph_failures(false, progress),
+        "a settled review lane with a result must not append failure rows"
+    );
+
+    // An explicit attempt read never appends the graph's failure rows either.
+    assert!(!super::output_needs_graph_failures(true, progress));
+
+    // A failed settled lane's retained result is still its answer.
+    let mut failed = settled.clone();
+    failed.nodes[0].state = NodeState::Failed;
+    assert!(
+        !super::output_needs_graph_failures(false, &failed.nodes[0]),
+        "a failed settled lane with a result must not append failure rows"
+    );
+
+    // Failed work without a result still needs its diagnostics.
+    failed.nodes[0].outputs = None;
+    assert!(super::output_needs_graph_failures(false, &failed.nodes[0]));
+
+    // Unsettled work still needs its diagnostics, even after a prior result.
+    let mut running = settled;
+    running.nodes[0].state = NodeState::Running;
+    assert!(super::output_needs_graph_failures(false, &running.nodes[0]));
+}
+
+// Spec: docs/specs/cli.md#output-references-and-bounded-tails
+#[test]
+fn settled_lane_output_ignores_unfinished_sibling() {
+    let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
+        "schema_version":2,"graph_id":"review-panel","plan_digest":"digest","nodes":[
+            {"id":"review","state":"failed","worktree":null,"attempts":[],
+             "outputs":{"schema_version":2,"result":null,"verdict":"VERDICT: FAIL",
+                        "findings":[],"branch":null,"commit":null,"warnings":[]}},
+            {"id":"sibling","state":"running","worktree":null,"attempts":[]}
+        ]
+    }))
+    .expect("review panel checkpoint");
+    assert!(
+        !super::output_needs_graph_failures(false, &checkpoint.nodes[0]),
+        "a settled lane's retained output must not acquire stale failure rows while a sibling runs"
+    );
 }

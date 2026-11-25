@@ -341,6 +341,12 @@ pub enum InvalidInputDetail {
     UnresolvableBase(String),
     /// A launch input check that is not tied to one document field.
     InputReason(String),
+    /// A pinned review head that is not the pull request's current head. Both
+    /// ids are approved facts, and the field is the flag the caller set.
+    StaleHead {
+        supplied: String,
+        current: String,
+    },
     Field(String),
     FieldDecode {
         field: String,
@@ -376,6 +382,7 @@ impl InvalidInputDetail {
             | Self::Field(text)
             | Self::FieldTitle(text)
             | Self::Configuration(text) => vec![text],
+            Self::StaleHead { supplied, current } => vec![supplied, current],
             Self::RetryNode { graph, node } => vec![graph, node],
             Self::Parameter(refusal) => refusal.strings_mut(),
             Self::FieldDecode { field, .. } | Self::FieldTooLarge { field, .. } => vec![field],
@@ -413,6 +420,9 @@ impl InvalidInputDetail {
             Self::TemplateInvalid => Some("invalid input field `templates`: template could not be loaded or validated".into()),
             Self::Schema => Some("graph document schema_version is invalid".into()),
             Self::UnresolvableBase(name) => Some(format!("unresolvable base `{name}`")),
+            Self::StaleHead { supplied, current } => Some(format!(
+                "invalid input field `--head`: {supplied} is not the pull request's head (forge reports {current})"
+            )),
             Self::InputReason(reason) => Some(reason.clone()),
             Self::InputUnreadable => {
                 Some("input file is unreadable or is not a regular file".into())
@@ -971,6 +981,17 @@ impl FacadeError {
                 });
                 projected = projected.detail(refusal.to_string())
                     .next(next);
+            }
+            Self::InvalidInput { detail: Some(detail @ InvalidInputDetail::StaleHead { supplied, .. }) }
+            | Self::GraphRelayRefused { detail: Some(detail @ InvalidInputDetail::StaleHead { supplied, .. }), .. } => {
+                let text = detail.safe_text().unwrap_or_default();
+                // The caller pinned the head they just pushed; the forge still
+                // reports its predecessor. Name the pinned head in the repair:
+                // rerunning with the forge's stale head would repeat the review
+                // of the wrong commit once the push becomes visible.
+                projected = projected.detail(text).next(format!(
+                    "the pinned head is stale; rerun with --head {supplied} once the push is visible"
+                ));
             }
             Self::InvalidInput { detail: Some(detail) } | Self::GraphRelayRefused { detail: Some(detail), .. } => {
                 if let Some(detail) = detail.safe_text() {

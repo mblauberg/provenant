@@ -1539,14 +1539,17 @@ impl Factory {
             let mut retry_changed = false;
             if let Some((target, request)) = retry {
                 let brief_given = request.get("brief").is_some_and(|v| !v.is_null());
-                let node_given = target.node.is_some();
-                retry_changed = brief_given || node_given || !extensions.is_empty();
                 self.prepare_retry(
                     target,
                     request,
                     document,
                     checkpoint.as_mut().ok_or(FacadeError::NotFound)?,
                 )?;
+                // Read the target after preparation: a settled one-node graph
+                // infers its node there, and that retry must be staged as a
+                // changed candidate rather than admitted as a running no-op.
+                let node_given = target.node.is_some();
+                retry_changed = brief_given || node_given || !extensions.is_empty();
             }
             let candidate = match checkpoint.as_ref().filter(|_| !retry_changed) {
                 Some(checkpoint) => provenant_fabric_runtime::graph::admit_running_candidate(
