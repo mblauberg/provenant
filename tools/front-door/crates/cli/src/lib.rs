@@ -1420,18 +1420,23 @@ mod tests {
 
     // Spec: docs/specs/fabric.md#session-ready-steering
     #[test]
-    fn steer_help_names_providers_that_keep_or_restart_the_session() {
+    fn steer_help_explains_queued_delivery_and_fallback() {
         let mut model = command_model();
         let steer = model.find_subcommand_mut("steer").expect("steer grammar");
         let help = steer.render_long_help().to_string();
-        for provider in ["claude", "codex", "cursor", "agy", "opencode"] {
-            assert!(help.contains(provider), "help must name {provider}: {help}");
+        for contract in [
+            "next turn without interrupting the running attempt",
+            "resumes the retained session",
+            "fresh_with_handoff",
+            "accepted brief, prior handoff and queued steering text",
+            "refuse rejects unsupported routes up front",
+            "leaves unavailable sessions without a successor",
+        ] {
+            assert!(
+                help.contains(contract),
+                "help must explain {contract}: {help}"
+            );
         }
-        for restart in ["command", "host-native"] {
-            assert!(help.contains(restart), "help must name {restart}: {help}");
-        }
-        assert!(help.contains("keep that session"), "{help}");
-        assert!(help.contains("restart fresh"), "{help}");
     }
 
     #[test]

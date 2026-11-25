@@ -139,9 +139,8 @@ pub(crate) fn advance_graphs_after_settlement(
                 if config.domains.fabric.steer.fallback
                     == provenant_fabric_runtime::config::SteerFallback::FreshWithHandoff
                 {
-                    // The fallback is announced before the live attempt is
-                    // interrupted (in deliver_steer); no second, after-the-fact
-                    // warning is needed here.
+                    // A steer is queued without interrupting the live attempt,
+                    // so there is no pre-interrupt announcement to repeat here.
                     store.prepare_fresh_steer_continuation(settled.attempt_id, &call)
                 } else {
                     Err(error)
@@ -253,7 +252,16 @@ fn steer_refusal_cause(
         provenant_run::RunError::SteerSessionMismatch => Some(SteeringCause::SessionMismatch),
         provenant_run::RunError::ContinuationRefused { .. }
         | provenant_run::RunError::RecordedRefusal(_)
-        | provenant_run::RunError::WriterLineage(_) => Some(SteeringCause::ContinuationRefused),
+        | provenant_run::RunError::WriterLineage(_)
+        | provenant_run::RunError::WriterSourceMismatch { .. }
+        | provenant_run::RunError::WriterHeadNotLaneBranch
+        | provenant_run::RunError::AttemptReservationRetained => {
+            // A custody or writer-lineage check failing after a steer is not a
+            // corrupt record. Recording it as a typed continuation refusal
+            // keeps the accepted text and the settled attempt intact instead
+            // of propagating an "invalid run record" failure into the graph.
+            Some(SteeringCause::ContinuationRefused)
+        }
         _ => None,
     }
 }

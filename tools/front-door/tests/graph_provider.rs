@@ -672,9 +672,27 @@ fn fixture() -> Result {
                 .map(PathBuf::from)
                 .ok_or("steer fixture readiness file")?;
             fs::write(ready, b"ready")?;
-            // The graph steer must stop this fresh Codex process and resume
-            // the same thread after settlement.
-            std::thread::park_timeout(std::time::Duration::from_secs(120));
+            let go = prompt
+                .lines()
+                .find_map(|line| line.strip_prefix("STEER_GO_FILE: "))
+                .map(PathBuf::from)
+                .ok_or("steer fixture go file")?;
+            // Wait until the test has queued its steer. A steer never
+            // interrupts this process; finish the turn naturally so settlement
+            // delivers the queued text as the next turn on the retained thread.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while !go.exists() {
+                if std::time::Instant::now() >= deadline {
+                    return Err("steer fixture go file never written".into());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            for frame in [
+                json!({"type":"item.completed","item":{"type":"agent_message","text":format!("finished in the first turn{DONE_FENCE}")}}),
+                json!({"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}),
+            ] {
+                writeln!(io::stdout(), "{frame}")?;
+            }
         }
         return Ok(());
     }
@@ -1014,9 +1032,11 @@ fn public_implement_steers_and_resumes_the_same_local_codex_session() -> Result 
     assert_eq!(code(&base), 0, "{base:?}");
     let base = std::str::from_utf8(&base.stdout.bytes)?.trim().to_owned();
     let ready = rig.root.join("steer-session-ready");
+    let go = rig.root.join("steer-session-go");
     let brief = format!(
-        "fixture public steer continuation\nSTEER_READY_FILE: {}\n",
-        ready.display()
+        "fixture public steer continuation\nSTEER_READY_FILE: {}\nSTEER_GO_FILE: {}\n",
+        ready.display(),
+        go.display()
     );
     let (launch, value) = rig.launch(&[
         "implement",
@@ -1097,6 +1117,10 @@ fn public_implement_steers_and_resumes_the_same_local_codex_session() -> Result 
     );
     assert!(!receipt.to_string().contains("STEER_NOTE"), "{receipt}");
 
+    // The steer is queued and the first attempt is still running. Let it finish
+    // its turn naturally; the queued text reaches the successor at settlement.
+    fs::write(&go, b"go")?;
+
     let waited = rig.command(&["wait", &graph, "--timeout", "60s", "--json"])?;
     let wait_result = support::last_json_record(&waited.stdout.bytes)?;
     assert_eq!(code(&waited), 0, "{wait_result}");
@@ -1164,6 +1188,19 @@ fn public_implement_steers_and_resumes_the_same_local_codex_session() -> Result 
             .parse()?;
         let request = store.request(id, &call)?;
         let record = store.record(id, &call)?;
+        if ordinal == 0 {
+            assert!(
+                matches!(
+                    &record.state,
+                    provenant_run::AttemptState::Terminal {
+                        outcome: provenant_run::Outcome::Uncommitted,
+                        terminal_cause: None,
+                        ..
+                    }
+                ),
+                "the natural first turn must retain its uncommitted work: {record:?}"
+            );
+        }
         let context = request.task.context.as_ref().ok_or("graph context")?;
         assert!(context.graph_template_launch, "{request:?}");
         assert_eq!(

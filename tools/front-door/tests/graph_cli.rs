@@ -2975,41 +2975,111 @@ fn steer_graph_and_node_refuse_an_unlaunched_attempt_before_reading_stdin() -> R
     journal.save(&checkpoint)?;
     drop(journal);
     // Spec: docs/specs/fabric.md#session-ready-steering
-    // The default `lanes.steer_settled=queue` keeps the note for the next
-    // follow-up and names it in the output instead of refusing.
+    // The node's graph is now complete: no future attempt can read the note.
+    // Steer refuses with a typed cause and a new-round command instead of
+    // reporting a queued follow-up that will never run.
     let (output, value) =
         rig.run(&["steer", "steer-ambiguous/accept", "--brief", "amended work"])?;
-    assert!(output.status.success(), "{value}");
-    assert_eq!(value["status"], "ok", "{value}");
-    assert_eq!(value["data"]["queued"], true, "{value}");
-    assert_eq!(
-        value["data"]["follow_up"], "steer-ambiguous/accept",
+    assert!(!output.status.success(), "{value}");
+    assert_eq!(value["status"], "refused", "{value}");
+    assert_eq!(value["error"]["code"], "steer_graph_complete", "{value}");
+    assert!(
+        value["error"]["repair"]
+            .as_str()
+            .is_some_and(|repair| repair.contains("provenant run implement --worktree")),
         "{value}"
     );
-    // The queued note reaches the follow-up as a scoped shared note.
-    let (output, notes) = rig.run(&[
-        "notes",
-        "read",
-        "--scope",
-        "steer-ambiguous/accept",
-        "--replay",
-    ])?;
-    assert!(output.status.success(), "{notes}");
-    let events = notes["data"]["events"].as_array().ok_or("notes events")?;
+    let human = rig
+        .human_command()
+        .args(["steer", "steer-ambiguous/accept", "--brief", "amended work"])
+        .output()?;
+    assert!(!human.status.success(), "{human:?}");
+    // Non-JSON refusals are rendered on stderr, not stdout.
+    let text = String::from_utf8_lossy(&human.stderr);
     assert!(
-        events.iter().any(|event| {
-            event["detail"]["text"]
-                .as_str()
-                .is_some_and(|text| text.contains("amended work"))
-        }),
-        "{notes}"
+        text.contains("has no further attempt")
+            && text.contains("provenant run implement --worktree"),
+        "{text}"
+    );
+    Ok(())
+}
+
+// Spec: docs/specs/fabric.md#session-ready-steering
+// Invariant: a node-scoped steer at a settled node refuses with a next step
+// even when a sibling is still running. A sibling's turn cannot read this
+// node's note, so graph-wide "unfinished" is not a follow-up for the target.
+#[test]
+fn steer_at_a_settled_node_refuses_even_while_a_sibling_is_running() -> Result {
+    let rig = GraphProject::new()?;
+    let document = json!({"schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":"steer-sibling","nodes":[
+        {"id":"done","kind":"gate","access":"read_only","condition":{"type":"budget"}},
+        {"id":"live","kind":"gate","access":"read_only","condition":{"type":"budget"}}
+    ]});
+    let path = rig.document(&document)?;
+    let output = rig.command().args(["run", "--file"]).arg(path).output()?;
+    assert!(output.status.success(), "{output:?}");
+    use provenant_core::{CancelToken, Clock, RootInputs, StateRoot, WaitBudget};
+    use provenant_fabric_runtime::graph::{AttemptState, FileJournal, GraphJournal, NodeState};
+    let checkpoint_path = graph_records(&rig.state())?
+        .into_iter()
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| name == "graph-steer-sibling.json")
+        })
+        .ok_or("checkpoint")?;
+    let mut inputs = RootInputs::new(rig.temp.path().to_path_buf(), rig.root.clone());
+    inputs.state_dir = Some(rig.state());
+    let state = StateRoot::resolve(&inputs, &provenant_os::fs::SystemPathResolver)?;
+    let project = checkpoint_path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .ok_or("project id")?
+        .parse()?;
+    let execution = FileJournal::execution(&state, project, "steer-sibling")?.ok_or("execution")?;
+    let mut checkpoint =
+        FileJournal::read_checkpoint(&state, project, "steer-sibling")?.ok_or("checkpoint")?;
+    let attempt = json!({"key":{"graph_id":"steer-sibling","node_id":"done","route_index":0,"attempt":1},
+        "launched":false,"route":{"alias":"senior"},"state":"starting","attempt_ref":null,
+        "outcome":null,"launch_actor":"fixture"});
+    checkpoint.nodes[0].state = NodeState::Succeeded;
+    checkpoint.nodes[0].attempts = serde_json::from_value(json!([attempt]))?;
+    checkpoint.nodes[0].attempts[0].state = AttemptState::Terminal;
+    checkpoint.nodes[0].attempts[0].outcome =
+        Some(provenant_fabric_runtime::graph::AttemptOutcome::Succeeded);
+    // A sibling still running keeps the graph unfinished, but cannot read the
+    // settled node's steering note.
+    checkpoint.nodes[1].state = NodeState::Running;
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = CancelToken::new();
+    let mut journal = FileJournal::open(
+        &state,
+        project,
+        "steer-sibling",
+        WaitBudget::cli(clock.mono_now(), 5)?,
+        &cancel,
+        &clock,
+    )?;
+    journal.bind(execution)?;
+    journal.save(&checkpoint)?;
+    drop(journal);
+
+    let (output, value) = rig.run(&["steer", "steer-sibling/done", "--brief", "amended work"])?;
+    assert!(!output.status.success(), "{value}");
+    assert_eq!(value["status"], "refused", "{value}");
+    assert_eq!(value["error"]["code"], "steer_graph_complete", "{value}");
+    assert!(
+        value["error"]["repair"]
+            .as_str()
+            .is_some_and(|repair| repair.contains("steer-sibling/done")),
+        "{value}"
     );
     Ok(())
 }
 
 // Spec: docs/specs/fabric.md#session-ready-steering
 #[test]
-fn steer_on_a_settled_lane_warns_without_effect_when_configured() -> Result {
+fn steer_on_a_complete_graph_refuses_even_when_warn_is_configured() -> Result {
     let rig = GraphProject::new()?;
     let path = rig.document(&json!({"schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":"steer-settled-warn","nodes":[{"id":"accept","kind":"gate","access":"read_only","condition":{"type":"budget"}}]}))?;
     let output = rig.command().args(["run", "--file"]).arg(path).output()?;
@@ -3062,24 +3132,24 @@ fn steer_on_a_settled_lane_warns_without_effect_when_configured() -> Result {
     journal.bind(execution)?;
     journal.save(&checkpoint)?;
     drop(journal);
+    // A completed graph has no follow-up to warn about: the steer is refused
+    // before either settled mode can accept text nothing will read.
     let (output, value) = rig.run(&[
         "steer",
         "steer-settled-warn/accept",
         "--brief",
         "ignored steer note",
     ])?;
-    assert!(output.status.success(), "{value}");
-    assert_eq!(value["status"], "ok", "{value}");
-    assert_eq!(value["data"]["queued"], false, "{value}");
+    assert!(!output.status.success(), "{value}");
+    assert_eq!(value["status"], "refused", "{value}");
+    assert_eq!(value["error"]["code"], "steer_graph_complete", "{value}");
     assert!(
-        value["warnings"].as_array().is_some_and(|warnings| {
-            warnings
-                .iter()
-                .any(|warning| warning["code"] == "STEER_TARGET_SETTLED")
-        }),
+        value["error"]["repair"]
+            .as_str()
+            .is_some_and(|repair| repair.contains("provenant run implement --worktree")),
         "{value}"
     );
-    // warn mode writes no note for the follow-up.
+    // No note is written for a follow-up that will never run.
     let (output, notes) = rig.run(&[
         "notes",
         "read",

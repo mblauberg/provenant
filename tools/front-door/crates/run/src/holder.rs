@@ -1836,11 +1836,14 @@ impl RunStore {
             )?;
             return Ok(None);
         }
-        // A natural success can race with the interrupt publication. If any
-        // other typed stop or terminal outcome won, keep the accepted text for
-        // inspection but do not turn that stop into an automatic continuation.
+        // A naturally finished writer can leave edits for its queued next turn.
+        // The successor retains the same worktree; explicit stops and other
+        // terminal failures must not become automatic continuations.
         let natural_settlement = terminal_cause.is_none()
-            && matches!(outcome, Outcome::Succeeded | Outcome::ReviewRequired);
+            && matches!(
+                outcome,
+                Outcome::Succeeded | Outcome::ReviewRequired | Outcome::Uncommitted
+            );
         if terminal_cause != Some(TerminalCause::Steered) && !natural_settlement {
             self.record_steer_not_continued(
                 id,
@@ -1935,7 +1938,15 @@ impl RunStore {
     ) -> Result<()> {
         let id = record.attempt_id;
         let session = record.session.as_deref();
-        if session.is_none() && !fresh_with_handoff {
+        let unsupported = record.applied_route.as_ref().is_some_and(|route| {
+            route.host_native.is_some()
+                || route
+                    .provider
+                    .as_deref()
+                    .and_then(provenant_records::AdapterSpec::get)
+                    .is_some_and(|spec| !spec.launch.control.lane.continues())
+        });
+        if (session.is_none() || unsupported) && !fresh_with_handoff {
             return Err(RunError::SteerSessionUnavailable);
         }
         let ready = self.steer_session_ready(id, call)?;
@@ -5849,6 +5860,17 @@ mod writer_recovery_tests {
                     &capture,
                     &call
                 )?);
+                if steered {
+                    // A steer never interrupts a running attempt. Model the
+                    // steered stop as an independent custody request so the
+                    // settlement arbitration cases below keep their coverage.
+                    provenant_supervisor::custody::request_stop(
+                        attempt.try_clone()?,
+                        scope,
+                        execution.actor_id,
+                        StopReason::Steered,
+                    )?;
+                }
                 if marker == DeliveredSteerUnavailable {
                     // The delivered stop remains durable while readiness can no
                     // longer prove that the prior provider session is resumable.

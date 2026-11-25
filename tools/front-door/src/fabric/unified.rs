@@ -1904,9 +1904,50 @@ enum SteerResult {
     Queued(Value),
     Pending(Value),
     Refused(&'static str),
+    NoTurn,
+    /// The target's graph will run no further attempt; no future turn can read
+    /// the steering text, so it must be refused with a way to start a round.
+    CompleteRefused {
+        message: String,
+        repair: String,
+    },
     SettledQueued(Value),
     SettledWarned(Value),
     Unsupported(provenant_records::control::ControlReceipt),
+}
+
+/// Whether a steer can still be read by a future attempt. A node-scoped steer
+/// needs a follow-up for that node, not merely a live sibling: a settled node
+/// with no continuation of its own refuses even while another node runs. A
+/// graph-scoped steer keeps the whole-graph "unfinished" test used by graph
+/// status, including a delivery the graph still owes.
+fn graph_steer_has_follow_up(
+    checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
+    resolved: &Resolved,
+) -> bool {
+    if checkpoint.cancelled {
+        return false;
+    }
+    if checkpoint
+        .nodes
+        .iter()
+        .filter(|node| {
+            resolved
+                .node
+                .as_deref()
+                .is_none_or(|id| node.id.as_str() == id)
+        })
+        .any(|node| {
+            node.expansion_pause.is_some()
+                || matches!(node.state, NodeState::Pending | NodeState::Running)
+        })
+    {
+        return true;
+    }
+    resolved.node.is_none()
+        && checkpoint.delivery_required
+        && !checkpoint.delivered
+        && checkpoint.successful()
 }
 
 /// What a steer aimed at an already settled lane does (`lanes.steer_settled`).
@@ -1970,16 +2011,31 @@ fn settled_steer_result(
     factory: &super::Factory,
     args: &provenant_cli::inbox::Steer,
     resolved: &Resolved,
+    checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
     already_normalised: Option<String>,
 ) -> Result<SteerResult, Box<dyn std::error::Error>> {
     use provenant_fabric_runtime::notes::{Host, Input, Scope};
 
-    let (mode, source) = steer_settled_setting(factory);
     let target = args.target.to_string();
     let follow_up = match &resolved.node {
         Some(node) => format!("{}/{}", resolved.graph, node),
         None => resolved.graph.clone(),
     };
+    // A settled target can keep a note only when another attempt for that same
+    // target will run to read it. A live sibling does not read a node's note,
+    // nor does a completed graph: the note would be written but nothing starts.
+    // Refuse with a typed cause and a command that opens a new round.
+    if !graph_steer_has_follow_up(checkpoint, resolved) {
+        return Ok(SteerResult::CompleteRefused {
+            message: format!(
+                "{target} has no further attempt; steering would be accepted but never read"
+            ),
+            repair: format!(
+                "start a new round on the same worktree with `provenant run implement --worktree WORKTREE --brief-file FILE` (or `provenant retry {follow_up} --brief-file FILE`)"
+            ),
+        });
+    }
+    let (mode, source) = steer_settled_setting(factory);
     match mode {
         SteerSettledMode::Warn => {
             provenant_records::warning::warn(
@@ -2066,7 +2122,7 @@ pub(crate) fn unified_graph_steer(
         let (resolved, checkpoint) =
             resolve_with_checkpoint(&factory, &args.target, Want::Attempt { settled: false })?;
         if super::steer::selected_is_settled(&resolved, &checkpoint) {
-            return settled_steer_result(&factory, args, &resolved, None);
+            return settled_steer_result(&factory, args, &resolved, &checkpoint, None);
         }
         let project = factory.context.identity.project;
         let work_key = resolved
@@ -2156,7 +2212,13 @@ pub(crate) fn unified_graph_steer(
             };
         match super::steer::verified_target(&factory, &resolved, &current, budget, &cancel) {
             super::steer::TargetProof::Settled => {
-                return settled_steer_result(&factory, args, &resolved, Some(text.clone()));
+                return settled_steer_result(
+                    &factory,
+                    args,
+                    &resolved,
+                    &current,
+                    Some(text.clone()),
+                );
             }
             super::steer::TargetProof::Conflict => {
                 return Ok(SteerResult::Refused(
@@ -2174,6 +2236,7 @@ pub(crate) fn unified_graph_steer(
                 }
                 Ok(_) => return Err(FacadeError::StateCorrupt.into()),
                 Err(error) if super::steer::steer_delivery_unavailable(&error) => {}
+                Err(error) if error.code() == "steer_no_turn" => return Ok(SteerResult::NoTurn),
                 Err(provenant_fabric_runtime::relay::ServiceError::InboxOwner { .. }) => {
                     return Ok(SteerResult::Refused(
                         "the verified inbox owner refused steering",
@@ -2280,6 +2343,22 @@ pub(crate) fn unified_graph_steer(
             "steer_target_refused",
             message,
             "amend the brief and retry with `provenant steer <target> --brief-file FILE`",
+            globals,
+        ),
+        Ok(SteerResult::NoTurn) => crate::fail(
+            "steer",
+            provenant_records::Outcome::Refused,
+            "steer_no_turn",
+            "the attempt has no graph continuation turn for steering",
+            "start a new graph round with the instruction in its brief",
+            globals,
+        ),
+        Ok(SteerResult::CompleteRefused { message, repair }) => crate::fail(
+            "steer",
+            provenant_records::Outcome::Refused,
+            "steer_graph_complete",
+            &message,
+            &repair,
             globals,
         ),
         Ok(SteerResult::Unsupported(receipt)) => {
