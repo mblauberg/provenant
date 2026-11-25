@@ -912,22 +912,6 @@ impl RunStore {
             Err(error) if missing_directory(&error) => return Ok(None),
             Err(error) => return Err(error),
         };
-        // Keep the driver's lifetime lease until every payload operation ends.
-        // A free lease alone is insufficient: settlement can be between retries.
-        #[cfg(test)]
-        BEFORE_SETTLEMENT_LEASE.with(|hook| {
-            if let Some(hook) = hook.borrow_mut().take() {
-                hook();
-            }
-        });
-        let Some(_settlement) = crate::settlement::collection_lease(
-            &run,
-            Self::scope(record),
-            call.clock,
-            record.provider_launched != Some(false),
-        ) else {
-            return Ok(None);
-        };
         let _publication =
             run.try_lock_existing(OsStr::new("publication.lock"), LockMode::Exclusive)?;
         if record.provider_launched == Some(true)
@@ -1002,6 +986,22 @@ impl RunStore {
                 "payload retained: custody proof unavailable",
             ));
         }
+        // Keep the driver's lifetime lease until every payload operation ends.
+        // A free lease alone is insufficient: settlement can be between retries.
+        #[cfg(test)]
+        BEFORE_SETTLEMENT_LEASE.with(|hook| {
+            if let Some(hook) = hook.borrow_mut().take() {
+                hook();
+            }
+        });
+        let Some(_settlement) = crate::settlement::collection_lease(
+            &run,
+            Self::scope(record),
+            call.clock,
+            record.provider_launched != Some(false),
+        ) else {
+            return Ok(None);
+        };
         Ok(Some(Held {
             attempt,
             continuing,
@@ -3177,6 +3177,25 @@ mod tests {
         assert_eq!(
             fs::read_to_string(attempt.join("process-exit.json"))?,
             "exit evidence"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn missing_release_receipt_is_reported_before_incomplete_settlement() -> TestResult {
+        let (_temp, _context, store, input, _attempt) = seeded()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let mut record = withdraw(&store, &input, &call)?;
+        record.provider_launched = Some(true);
+        let error = match store.hold_attempt(&record, &call) {
+            Err(error) => error,
+            Ok(_) => return Err("missing release receipt was not reported".into()),
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("attempt release receipt unavailable")
         );
         Ok(())
     }
