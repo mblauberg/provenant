@@ -4929,7 +4929,11 @@ mod tests {
     fn age_collection_keeps_unimported_git_until_custody_is_proven() -> TestResult {
         let pair = pair()?;
         let temporary = scratch_root_of(&pair.older).join("tmp");
-        fs::create_dir_all(&temporary)?;
+        // Run-store scratch is private in production; match that mode here.
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&temporary)?;
         fs::write(temporary.join("objects"), "unlanded work")?;
         fs::write(pair.older.join("writer-objects.json"), "{}")?;
         let (clock, cancel) = (clock(), CancelToken::new());
@@ -4952,7 +4956,12 @@ mod tests {
     #[test]
     fn payload_pressure_never_evicts_private_git_or_dry_runs() -> TestResult {
         let pair = pair()?;
-        fs::create_dir_all(scratch_root_of(&pair.older).join("tmp"))?;
+        // Run-store scratch is private in production; a non-private root makes
+        // the measurement report an unsafe path and blocks cap eviction.
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(scratch_root_of(&pair.older).join("tmp"))?;
         fs::write(pair.older.join("writer-objects.json"), "{}")?;
         let preview = payload(&pair, 1_000, 8 * DAY_MICROS, true, true)?;
         assert_eq!(preview.evicted.len(), 1, "{preview:?}");
