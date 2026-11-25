@@ -321,8 +321,10 @@ fn delivery_loop_exhaustion_parks_once_and_replays_the_same_transition() {
         });
     checkpoint.nodes[writer_index].state = NodeState::Succeeded;
     checkpoint.nodes[writer_index].advance_error = Some("repair did not satisfy CI".into());
-    let mut writer_outputs = NodeOutputs::default();
-    writer_outputs.commit = Some("a".repeat(40));
+    let writer_outputs = NodeOutputs {
+        commit: Some("a".repeat(40)),
+        ..Default::default()
+    };
     checkpoint.nodes[writer_index].outputs = Some(writer_outputs);
     checkpoint.nodes[writer_index].attempts.push(GraphAttempt {
         extra: Default::default(),

@@ -2543,7 +2543,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         } else {
             provenant_os::git::repository_path(
                 &self.factory.context.project_root,
-                provenant_os::git::RepositoryPath::CommonDirectory,
+                provenant_os::git::RepositoryPath::CommonDir,
             )
             .map_err(|_| FacadeError::io("locate delivery park repository"))?
         };
@@ -3253,7 +3253,10 @@ impl BoundGraphOwner<'_> {
         let ports = provenant_config::PortTable::read_for(
             Some(&project_directory),
             self.factory.context.roots.state.as_path(),
-        )?;
+        )
+        .map_err(|error| {
+            FacadeError::io_failure("read delivery formatter configuration", None, Some(&error))
+        })?;
         let sourced_format = ports.verify_format();
         let formatter_source = format!(
             "{}{}",
@@ -3510,9 +3513,6 @@ impl BoundGraphOwner<'_> {
             "Delivery queue graph {}\n\nNode {} published clean head {}.",
             request.graph_id, request.node_id, request.expected_head
         );
-        let git = provenant_os::git::git_executable()
-            .and_then(|git| git.to_str().map(str::to_owned))
-            .ok_or_else(|| FacadeError::io("locate git for delivery publication"))?;
         let host_delivery =
             provenant_run::HostDeliveryContext::capture().with_repo_facts(&self.repo_facts);
         let receipt = provenant_confinement::worktrees::with_context_using_workers_and_facts(
@@ -3772,7 +3772,7 @@ impl BoundGraphOwner<'_> {
         }
         let state = self.factory.context.roots.state.as_path();
         let checkpoint = provenant_fabric_runtime::graph::FileJournal::read_checkpoint(
-            state,
+            &self.factory.context.roots.state,
             self.factory.context.identity.project,
             &key.graph_id,
         )
@@ -3817,7 +3817,9 @@ impl BoundGraphOwner<'_> {
         {
             return Err(FacadeError::Conflict);
         }
-        let Some(worktree_owner) = load_owner(&launch.worktree).map_err(run_error)? else {
+        let Some(worktree_owner) = load_owner(&launch.worktree)
+            .map_err(|error| run_error(provenant_run::RunError::Writer(error)))?
+        else {
             return Ok(None);
         };
         if worktree_owner.origin != WorktreeOrigin::Lane {

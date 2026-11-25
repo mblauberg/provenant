@@ -198,6 +198,10 @@ pub fn locate_request(
 /// The caller must persist and reuse `operation_id` and the complete input on
 /// replay; the inbox binds that ID to the content and returns the same receipt.
 /// TODO(#3972-queue): attach a sealed tracker item when queue admission supplies one.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "parking records the complete delivery context"
+)]
 pub fn delivery_park(
     session: String,
     operation_id: OperationId,

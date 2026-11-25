@@ -2,7 +2,7 @@ use super::{
     LandingError,
     approval::{Approver, Decision},
     model::*,
-    ports::{Forge, MergeTree, Mergeability, PullRequestState, Repo},
+    ports::{Forge, MergeTree, PullRequestState, Repo},
 };
 use provenant_core::{Clock, MonoTime};
 
@@ -233,6 +233,7 @@ pub fn build_candidate(
 )]
 mod tests {
     use super::*;
+    use crate::pr::landing::ports::Mergeability;
     use crate::pr::landing::{
         approval::Approvals,
         fakes::{FakeForge, FakeRepo},

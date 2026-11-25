@@ -1169,12 +1169,12 @@ pub(super) fn validate_delivery_contracts(document: &GraphDocument) -> Result<()
                         "loop.max_rounds must be positive".into(),
                     ));
                 }
-                if let Some(edge) = &spec.outcome_edge {
-                    if edge.node.trim().is_empty() {
-                        return Err(AdmissionError::Plan(
-                            "loop outcome edge requires a node".into(),
-                        ));
-                    }
+                if let Some(edge) = &spec.outcome_edge
+                    && edge.node.trim().is_empty()
+                {
+                    return Err(AdmissionError::Plan(
+                        "loop outcome edge requires a node".into(),
+                    ));
                 }
                 check_nodes(&spec.body)?;
             }
