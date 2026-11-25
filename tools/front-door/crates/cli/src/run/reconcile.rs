@@ -151,6 +151,18 @@ pub(super) fn reconcile_inner(
         ));
     }
     let session = open(edge, &request(&clock, &cancel)?)?;
+    let mut human = String::new();
+    if command.targets.is_empty() {
+        for path in session
+            .store
+            .recover_orphan_reservations(false, &request(&clock, &cancel)?)?
+        {
+            human.push_str(&format!(
+                "recovered orphan writer reservation: {}\n",
+                path.display()
+            ));
+        }
+    }
     let (attempts, truncated) = if command.targets.is_empty() {
         let call = request(&clock, &cancel)?;
         let mut attempts = session.store.open_attempts_readonly(SCAN + 1, &call)?;
@@ -172,7 +184,6 @@ pub(super) fn reconcile_inner(
         (attempts, false)
     };
     let mut rows = Vec::new();
-    let mut human = String::new();
     for run in attempts {
         let registry = Registry {
             roots: Some(edge.roots),
@@ -250,18 +261,6 @@ pub(super) fn reconcile_inner(
         human.push_str(&format!(
             "more than {SCAN} open attempts; name the rest as targets\n"
         ));
-    }
-    let session = open(edge, &request(&clock, &cancel)?)?;
-    if command.targets.is_empty() {
-        for path in session
-            .store
-            .recover_orphan_reservations(false, &request(&clock, &cancel)?)?
-        {
-            human.push_str(&format!(
-                "recovered orphan writer reservation: {}\n",
-                path.display()
-            ));
-        }
     }
     let listing = session.store.writer_fence_listing();
     let mut reservations = match listing {

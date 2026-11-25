@@ -298,10 +298,8 @@ fn orphan_reservations_recovered_by(command: &[&str]) -> Result {
     let prepared = slot.join("04040404040404040404040404040404");
     let mismatch = slot.join("05050505050505050505050505050505");
     let source: Value = serde_json::from_slice(&fs::read(evidence.join("reservation.json"))?)?;
-    for (path, id, is_prepared) in [
-        (&prepared, "04040404040404040404040404040404", true),
-        (&mismatch, "05050505050505050505050505050505", false),
-    ] {
+    let guardian = fs::read(evidence.join("guardian-lock.json"))?;
+    let make_reservation = |path: &std::path::Path, id: &str, is_prepared: bool| -> Result {
         fs::DirBuilder::new().mode(0o700).create(path)?;
         let metadata = fs::metadata(path)?;
         let mut reservation = source.clone();
@@ -324,16 +322,23 @@ fn orphan_reservations_recovered_by(command: &[&str]) -> Result {
             .mode(0o600)
             .open(path.join("reservation.json"))?
             .write_all(&serde_json::to_vec(&reservation)?)?;
-        fs::copy(
-            evidence.join("guardian-lock.json"),
-            path.join("guardian-lock.json"),
-        )?;
-    }
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path.join("guardian-lock.json"))?
+            .write_all(&guardian)?;
+        Ok(())
+    };
+    make_reservation(&prepared, "04040404040404040404040404040404", true)?;
+    // The host worktree registry also contains a removal ledger.
+    fs::write(rig.state.join("worktrees/removed.jsonl"), b"")?;
     let output = rig.command(command)?;
     assert_eq!(
         code(&output),
         0,
-        "{}",
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout.bytes),
         String::from_utf8_lossy(&output.stderr.bytes)
     );
     assert!(
@@ -344,6 +349,15 @@ fn orphan_reservations_recovered_by(command: &[&str]) -> Result {
     assert!(
         !prepared.join("reservation.json").exists(),
         "unbound preparation must be recovered"
+    );
+    make_reservation(&mismatch, "05050505050505050505050505050505", false)?;
+    let output = rig.command(command)?;
+    assert_eq!(
+        code(&output),
+        if command[0] == "reconcile" { 1 } else { 0 },
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout.bytes),
+        String::from_utf8_lossy(&output.stderr.bytes)
     );
     assert!(
         mismatch.join("reservation.json").exists(),

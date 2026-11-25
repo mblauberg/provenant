@@ -2624,6 +2624,13 @@ impl crate::RunStore {
             };
             for name in root.entries()? {
                 let name = name?;
+                if name
+                    .to_str()
+                    .and_then(|name| ProjectId::parse(name).ok())
+                    .is_none()
+                {
+                    continue;
+                }
                 let project = root.open_verified_directory(&name)?;
                 let path = self.writer_registry.join("worktrees").join(&name);
                 let mut listing = provenant_supervisor::custody::list_writer_reservations(&project)
