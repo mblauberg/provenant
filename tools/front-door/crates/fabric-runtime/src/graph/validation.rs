@@ -791,6 +791,7 @@ pub(super) fn validate_flat_plan(
             write_scope: node.write_scope.clone(),
             acceptance_checks: node.acceptance_checks.clone(),
             loop_body: node.loop_body.clone(),
+            escalate: node.escalate.clone(),
             decide: node.decide.clone(),
             continues: node.continues.clone(),
             land: node.land.clone(),
