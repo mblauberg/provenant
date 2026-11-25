@@ -893,6 +893,7 @@ fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
             marker,
             DeliveredSteer
                 | DeliveredSteerUnavailable
+                | DeliveredSteerDescendant
                 | ExplicitCancel
                 | ExplicitAfterSteer
                 | Marker::Deadline
