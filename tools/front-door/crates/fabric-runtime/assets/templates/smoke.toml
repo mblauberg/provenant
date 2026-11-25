@@ -14,7 +14,7 @@ exports = [
 [parameters]
 worktree = { type = "string", default = "", doc = "Scratch worktree for the writer node (--worktree, or --branch to create one); without one the writer node is skipped and reported." }
 write_attempt = { type = "table", default = {}, doc = "Attempt settings for the writer node, such as a new worktree; bound from --branch and --base." }
-smoke-write = { type = "boolean", default = false, doc = "Whether to run the write node; enabled when worktree is provided and local." }
+smoke-write = { type = "boolean", default = false, doc = "Whether to run the write node; enabled by a local worktree or a peer-owned branch." }
 diff_base = { type = "string", default = "", doc = "Commit the review nodes compare against; a launch supplies the fixture's base. Empty leaves the review nodes unbound, so the per-node no-base refusal applies." }
 smoke-retry = { type = "boolean", default = true, doc = "Whether to run the retry-route probe, which checks a free-capable route for the retry path without retrying a node; disable with --set smoke-retry=false." }
 smoke-steer = { type = "boolean", default = true, doc = "Whether to run the steer-route probe, which checks a free-capable route for the steer path without steering a lane; disable with --set smoke-steer=false." }

@@ -1252,6 +1252,12 @@ impl Factory {
                     .peer_host(name)
                     .ok_or(FacadeError::UnknownHost)?
             };
+            if host == local
+                && node.access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
+                && node.worktree.as_deref().is_none_or(str::is_empty)
+            {
+                return Err(FacadeError::WorktreeNotApplicable);
+            }
             if host != local {
                 // A peer never accepts a caller path. It may provision a writer
                 // itself from a branch and a base ref, which carry no path.

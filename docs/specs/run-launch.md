@@ -190,7 +190,8 @@ control (access mode, worktree, branch, base or write scope) and the first one g
 the refusal; the bundled `smoke` template is the exception for worktree and branch/base, which
 bind to its write node only. Remote placement takes no caller path: a caller `worktree` is refused,
 but `--branch` with an optional `--base` is carried as peer-owned worktree intent so the peer
-creates the writer in its own clone. A graph reader without an explicit worktree or attempt
+creates the writer in its own clone. The sender's graph does not bind or provision a local
+worktree for that writer; its checkpoint retains the peer provisioning intent for replay. A graph reader without an explicit worktree or attempt
 directory uses its selected project as its source; `upgrade --verify` selects a temporary
 committed scratch project for its smoke graph. A node may name a small project-relative fixture;
 the host stages its bytes with the task, so a peer places the same file in its own candidate

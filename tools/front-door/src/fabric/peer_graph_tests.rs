@@ -405,7 +405,8 @@ fn peer_placed_smoke_reader_carries_its_fixture_to_the_remote_attempt() -> TestR
     let head = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
     let input = serde_json::from_value(json!({
         "op":"submit", "operation_id":"peer-smoke-reader-fixture",
-        "origin_work_key":origin_key(),
+        "origin_work_key":provenant_records::WorkKey::new(
+            provenant_core::ProjectId::from_bytes([77; 16]), "origin-graph", "read", 1)?,
         "task":{"prompt":"Read the supplied fixture and report its single stated fact.",
             "access":"read_only", "head":head,
             "fixture":{"name":"fixture.txt","content":b"smoke fixture\n".to_vec()},

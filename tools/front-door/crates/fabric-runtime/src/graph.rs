@@ -1795,6 +1795,11 @@ fn bind_expanded_writer<R: AttemptOwner, J: GraphJournal>(
     if checkpoint.nodes[node_index].state == NodeState::Skipped {
         return Ok(LoopStep::Proceed);
     }
+    // A pathless writer with peer provisioning intent is bound by the receiving
+    // host, not by this scheduler's local worktree owner.
+    if validation::peer_owned_writer(node.access, node.worktree.as_deref(), node.attempt.as_ref()) {
+        return Ok(LoopStep::Proceed);
+    }
     if plans::writer(node)
         && checkpoint.nodes[node_index].writer_binding.is_none()
         && checkpoint.nodes[node_index].attempts.is_empty()
@@ -2561,7 +2566,7 @@ fn observe_attempt<R: AttemptOwner, J: GraphJournal>(
                 .writer_binding
                 .as_ref()
                 .map(|binding| binding.worktree.as_str())
-                .or(node.worktree.as_deref())
+                .or(node.worktree.as_deref().filter(|path| !path.is_empty()))
         },
         Replay {
             delivery: land::delivery(node),

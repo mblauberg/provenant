@@ -676,7 +676,12 @@ pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
                     _ => None,
                 },
                 writer_binding: None,
-                writer_binding_pending: plans::writer(n),
+                writer_binding_pending: plans::writer(n)
+                    && !super::validation::peer_owned_writer(
+                        n.access,
+                        n.worktree.as_deref(),
+                        n.attempt.as_ref(),
+                    ),
                 review_base: None,
                 review_base_pending: n.access == AccessMode::ReadOnly && n.review_base.is_some(),
                 owner_notified: false,

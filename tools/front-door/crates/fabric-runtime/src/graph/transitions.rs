@@ -899,7 +899,12 @@ pub(super) fn initial_checkpoint(
                     _ => None,
                 },
                 writer_binding: None,
-                writer_binding_pending: plans::writer(node),
+                writer_binding_pending: plans::writer(node)
+                    && !super::validation::peer_owned_writer(
+                        node.access,
+                        node.worktree.as_deref(),
+                        node.attempt.as_ref(),
+                    ),
                 review_base: None,
                 review_base_pending: node.access == AccessMode::ReadOnly
                     && node.review_base.is_some(),

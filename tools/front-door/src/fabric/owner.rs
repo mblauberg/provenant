@@ -5605,7 +5605,7 @@ mod peer_capture_tests {
                 replay(&actor),
             )
             .unwrap_err();
-        assert_eq!(caller.code(), "worktree_not_applicable", "{caller:?}");
+        assert_eq!(caller.code(), "WORKTREE_NOT_APPLICABLE", "{caller:?}");
         // Branch and base intent carry no path, so the peer provisions the
         // writer in its own clone instead of refusing the boundary. The launch
         // may fail downstream without a live provider, but never at this gate.
@@ -5620,7 +5620,7 @@ mod peer_capture_tests {
             Ok(_) => {}
             Err(error) => assert_ne!(
                 error.code(),
-                "worktree_not_applicable",
+                "WORKTREE_NOT_APPLICABLE",
                 "branch intent must reach the peer: {error:?}"
             ),
         }
