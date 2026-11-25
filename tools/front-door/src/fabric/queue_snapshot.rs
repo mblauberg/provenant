@@ -6,6 +6,8 @@ use serde_json::{Value, json};
 use std::{collections::BTreeSet, path::Path, time::Duration};
 
 const MAX_ITEMS: usize = 256;
+const SEARCH_PAGE_SIZE: usize = 100;
+const SEARCH_PAGE_LIMIT: usize = MAX_ITEMS.div_ceil(SEARCH_PAGE_SIZE);
 const MAX_QUERY_BYTES: usize = 1024;
 const MAX_RESULT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_READ_BUDGET: Duration = Duration::from_secs(60);
@@ -126,40 +128,12 @@ pub(super) fn resolve_snapshot(
                 .collect::<Result<Vec<_>, _>>()?
         }
         Selector::Query(query_text) => {
-            let query = format!(
-                "query {{ search(type: ISSUE, first: {MAX_ITEMS}, query: {}) {{ issueCount pageInfo {{ hasNextPage }} nodes {{ __typename ... on Issue {{ id number title body state url repository {{ nameWithOwner }} }} }} }} }}",
-                graphql_string(&format!("repo:{repository} is:issue {query_text}"))?
-            );
-            let response = forge
-                .request(ForgeOperation::Graphql { query }, request.remaining())
-                .map_err(|error| format!("cannot resolve tracker query snapshot: {error}"))?;
-            let data = response_json(response.status, &response.body)?;
-            let search = data
-                .get("search")
-                .and_then(Value::as_object)
-                .ok_or("tracker query response has no search result")?;
-            if search["pageInfo"]["hasNextPage"] != Value::Bool(false) {
-                return Err(format!(
-                    "tracker query exceeds one complete page of {MAX_ITEMS} issues; narrow the query"
-                ));
-            }
-            let nodes = search["nodes"]
-                .as_array()
-                .ok_or("tracker query response has no issue list")?;
-            if nodes.len() > MAX_ITEMS {
-                return Err(format!("tracker query returned more than {MAX_ITEMS} issues"));
-            }
-            let mut issues = Vec::with_capacity(nodes.len());
-            for node in nodes {
-                if node["__typename"] != "Issue" {
-                    continue;
-                }
-                issues.push(checked_issue(node, &repository, None)?);
-            }
-            if search["issueCount"].as_u64().is_none() {
-                return Err("tracker query response has no issue count".into());
-            }
-            issues
+            query_snapshot(
+                &mut forge,
+                request,
+                &repository,
+                query_text,
+            )?
         }
     };
     if raw.is_empty() {
@@ -197,6 +171,84 @@ pub(super) fn resolve_snapshot(
         resolved_at,
         items,
     })
+}
+
+fn query_snapshot(
+    forge: &mut ForgePort,
+    request: &provenant_config::ports::Request,
+    repository: &str,
+    query_text: &str,
+) -> Result<Vec<Value>, String> {
+    let search = graphql_string(&format!("repo:{repository} is:issue {query_text}"))?;
+    let mut cursor: Option<String> = None;
+    let mut cursors = BTreeSet::new();
+    let mut issues = Vec::new();
+    for page_number in 0..SEARCH_PAGE_LIMIT {
+        let first = (MAX_ITEMS - issues.len()).min(SEARCH_PAGE_SIZE);
+        let after = cursor
+            .as_deref()
+            .map(graphql_string)
+            .transpose()?
+            .unwrap_or_else(|| "null".into());
+        let query = format!(
+            "query {{ search(type: ISSUE, first: {first}, after: {after}, query: {search}) {{ issueCount pageInfo {{ hasNextPage endCursor }} nodes {{ __typename ... on Issue {{ id number title body state url repository {{ nameWithOwner }} }} }} }} }}"
+        );
+        let response = forge
+            .request(ForgeOperation::Graphql { query }, request.remaining())
+            .map_err(|error| format!("cannot resolve tracker query snapshot: {error}"))?;
+        let data = response_json(response.status, &response.body)?;
+        let page = data
+            .get("search")
+            .and_then(Value::as_object)
+            .ok_or("tracker query response has no search result")?;
+        let issue_count = page["issueCount"]
+            .as_u64()
+            .ok_or("tracker query response has no issue count")?;
+        if issue_count > MAX_ITEMS as u64 {
+            return Err(format!(
+                "tracker query matches more than {MAX_ITEMS} issues; narrow the query"
+            ));
+        }
+        let nodes = page["nodes"]
+            .as_array()
+            .ok_or("tracker query response has no issue list")?;
+        if nodes.len() > first {
+            return Err("tracker query returned more nodes than requested".into());
+        }
+        for node in nodes {
+            if node["__typename"] != "Issue" {
+                return Err("tracker query returned a non-issue result despite the issue filter".into());
+            }
+            issues.push(checked_issue(node, repository, None)?);
+        }
+        if issues.len() > MAX_ITEMS {
+            return Err(format!("tracker query returned more than {MAX_ITEMS} issues"));
+        }
+        if page["pageInfo"]["hasNextPage"] == Value::Bool(false) {
+            if issues.len() as u64 != issue_count {
+                return Err("tracker query result was incomplete despite the final-page marker".into());
+            }
+            return Ok(issues);
+        }
+        if page["pageInfo"]["hasNextPage"] != Value::Bool(true) {
+            return Err("tracker query response has no valid pagination state".into());
+        }
+        if page_number + 1 == SEARCH_PAGE_LIMIT {
+            return Err(format!(
+                "tracker query exceeds the {MAX_ITEMS}-issue snapshot limit; narrow the query"
+            ));
+        }
+        let next = page["pageInfo"]["endCursor"]
+            .as_str()
+            .filter(|value| !value.is_empty() && value.len() <= 512)
+            .ok_or("tracker query has another page but no valid cursor")?
+            .to_owned();
+        if !cursors.insert(next.clone()) {
+            return Err("tracker query repeated a pagination cursor".into());
+        }
+        cursor = Some(next);
+    }
+    Err("tracker query snapshot exceeded its bounded pagination".into())
 }
 
 #[allow(clippy::disallowed_methods, reason = "tracker request owns its absolute deadline")]
