@@ -285,6 +285,11 @@ pub struct GhShim<'a> {
     /// A workflow in this repository runs on pull request label events, so a
     /// label change starts CI: say so when a command changes labels.
     pub label_ci_warning: bool,
+    /// The lane's pull-request policy, enforced before the wrapper forwards a
+    /// command. The resolver supplies it from `lanes.pr`.
+    pub pr_policy: provenant_config::PrPolicy,
+    /// The layer that set `lanes.pr`, named in a refusal.
+    pub pr_source: &'a str,
 }
 
 impl Default for GhShim<'static> {
@@ -300,6 +305,8 @@ impl Default for GhShim<'static> {
             budget: provenant_config::DEFAULT_GH_BUDGET,
             budget_source: "default",
             label_ci_warning: false,
+            pr_policy: provenant_config::PrPolicy::Never,
+            pr_source: "default",
         }
     }
 }
@@ -867,10 +874,47 @@ fn gh_wrapper(gh: &str, gh_config: Option<&str>, counter: &str, shim: &GhShim<'_
         }
         guard.push_str("      case \"$value\" in *,*) value=${value#*,} ;; *) break ;; esac\n    done\n    shift\n  done\n}\ncheck_labels \"$@\"\n");
     }
+    guard.push_str(&pr_policy_guard(shim.pr_policy, shim.pr_source));
     let config = gh_config
         .map(|config| format!("GH_CONFIG_DIR={config}\nexport GH_CONFIG_DIR\n"))
         .unwrap_or_default();
     format!("#!/bin/sh\n{guard}{config}exec {} \"$@\"\n", quote(gh))
+}
+
+/// Shell that enforces the lane's `lanes.pr` policy before the real `gh` runs.
+/// `never` refuses every PR mutation and forge API write; `draft` permits only
+/// `pr create` and adds `--draft` when absent; `allowed` adds nothing. Messages
+/// name the knob and the layer that set it so a refusal is actionable.
+fn pr_policy_guard(policy: provenant_config::PrPolicy, source: &str) -> String {
+    use provenant_config::PrPolicy;
+    if policy == PrPolicy::Allowed {
+        return String::new();
+    }
+    // A mutating `gh api` call is a forge write. Reads (GET/HEAD, no field
+    // flags) continue to work so the lane can still inspect pull requests.
+    let mut guard = String::from(
+        "provenant_forge_write() {\n  [ \"$1\" = api ] || return 1\n  shift\n  while [ \"$#\" -gt 0 ]; do\n    case \"$1\" in\n      -f|-F|--field|--raw-field|--input|--field=*|--raw-field=*|--input=*) return 0 ;;\n      -X|--method) shift; [ \"$#\" -gt 0 ] || return 1\n        case \"$1\" in GET|HEAD|get|head) ;; *) return 0 ;; esac ;;\n      --method=*) case \"${1#--method=}\" in GET|HEAD|get|head) ;; *) return 0 ;; esac ;;\n      -X*) case \"${1#-X}\" in GET|HEAD|get|head) ;; *) return 0 ;; esac ;;\n    esac\n    shift\n  done\n  return 1\n}\n",
+    );
+    match policy {
+        PrPolicy::Never => {
+            let message = quote(&format!(
+                "error: provenant: pull request and forge writes are refused (lanes.pr=never, source: {source}); the chair publishes after settlement"
+            ));
+            guard.push_str(&format!(
+                "case \"$1 $2\" in\n  'pr create'|'pr edit'|'pr close'|'pr ready'|'pr reopen'|'pr merge'|'pr comment'|'pr review')\n    printf '%s\\n' {message} >&2\n    exit 2 ;;\nesac\nif provenant_forge_write \"$@\"; then\n  printf '%s\\n' {message} >&2\n  exit 2\nfi\n"
+            ));
+        }
+        PrPolicy::Draft => {
+            let message = quote(&format!(
+                "error: provenant: this lane may open only draft pull requests (lanes.pr=draft, source: {source}); promotion, merge and forge writes are refused"
+            ));
+            guard.push_str(&format!(
+                "case \"$1 $2\" in\n  'pr create')\n    provenant_has_draft=false\n    for provenant_arg in \"$@\"; do\n      case $provenant_arg in\n        --draft) provenant_has_draft=true ;;\n      esac\n    done\n    if [ \"$provenant_has_draft\" = false ]; then set -- \"$@\" --draft; fi ;;\n  'pr ready'|'pr merge'|'pr reopen')\n    printf '%s\\n' {message} >&2\n    exit 2 ;;\nesac\nif provenant_forge_write \"$@\"; then\n  printf '%s\\n' {message} >&2\n  exit 2\nfi\n"
+            ));
+        }
+        PrPolicy::Allowed => {}
+    }
+    guard
 }
 
 /// Canonical runtime paths supplied by the composition edge.
@@ -2314,6 +2358,8 @@ mod tests {
                     budget: 0,
                     budget_source: "default",
                     label_ci_warning: false,
+                    pr_policy: provenant_config::PrPolicy::Allowed,
+                    pr_source: "default",
                 },
             ),
         )?;
@@ -2366,6 +2412,122 @@ mod tests {
     }
 
     #[test]
+    fn the_gh_wrapper_enforces_the_lane_pull_request_policy()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_config::PrPolicy;
+        use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
+        use std::{fs, os::unix::fs::PermissionsExt, time::Duration};
+        let temp = tempfile::tempdir()?;
+        let real_gh = temp.path().join("real-gh");
+        fs::write(&real_gh, "#!/bin/sh\nprintf '<%s>\\n' \"$@\"\n")?;
+        fs::set_permissions(&real_gh, fs::Permissions::from_mode(0o700))?;
+        let policy = provenant_config::GithubPolicy::default();
+        let executor = SystemExecutor::new(1)?;
+        let run = |name: &str,
+                   value: PrPolicy,
+                   source: &str,
+                   args: &[&str]|
+         -> Result<_, Box<dyn std::error::Error>> {
+            let shim = temp.path().join(name);
+            let counter = temp.path().join(format!("{name}.count"));
+            fs::write(
+                &shim,
+                gh_wrapper(
+                    real_gh.to_str().unwrap(),
+                    None,
+                    &quote(counter.to_str().unwrap()),
+                    &GhShim {
+                        policy: &policy,
+                        budget: 0,
+                        budget_source: "default",
+                        label_ci_warning: false,
+                        pr_policy: value,
+                        pr_source: source,
+                    },
+                ),
+            )?;
+            fs::set_permissions(&shim, fs::Permissions::from_mode(0o700))?;
+            let argv: Vec<_> = std::iter::once(shim.as_os_str().to_owned())
+                .chain(args.iter().map(OsString::from))
+                .collect();
+            Ok(executor.execute(ExecOptions::new(&argv, temp.path(), Duration::from_secs(5)))?)
+        };
+
+        // never: every PR mutation and forge write is refused, reads proceed.
+        for args in [
+            vec!["pr", "create", "--title", "x"],
+            vec!["pr", "edit", "42", "--title", "x"],
+            vec!["pr", "close", "42"],
+            vec![
+                "api",
+                "-X",
+                "POST",
+                "repos/o/r/pulls/1/comments",
+                "-f",
+                "body=x",
+            ],
+        ] {
+            let output = run("never", PrPolicy::Never, "host", &args)?;
+            assert_ne!(output.termination, Termination::Exit(0), "{args:?}");
+            assert!(output.stdout.bytes.is_empty(), "{args:?}");
+            let stderr = String::from_utf8_lossy(&output.stderr.bytes);
+            assert!(stderr.contains("lanes.pr=never"), "{stderr}");
+            assert!(stderr.contains("source: host"), "{stderr}");
+        }
+        let read = run("never", PrPolicy::Never, "host", &["pr", "view", "42"])?;
+        assert_eq!(read.termination, Termination::Exit(0));
+        assert_eq!(read.stdout.bytes, b"<pr>\n<view>\n<42>\n");
+        let api_read = run(
+            "never",
+            PrPolicy::Never,
+            "host",
+            &["api", "repos/o/r/pulls/1"],
+        )?;
+        assert_eq!(api_read.termination, Termination::Exit(0));
+
+        // draft: creation gains --draft, promotion and forge writes are refused.
+        let draft = run(
+            "draft",
+            PrPolicy::Draft,
+            "launch",
+            &["pr", "create", "--title", "x"],
+        )?;
+        assert_eq!(draft.termination, Termination::Exit(0));
+        assert_eq!(
+            draft.stdout.bytes,
+            b"<pr>\n<create>\n<--title>\n<x>\n<--draft>\n"
+        );
+        let already = run(
+            "draft",
+            PrPolicy::Draft,
+            "launch",
+            &["pr", "create", "--draft"],
+        )?;
+        assert_eq!(already.termination, Termination::Exit(0));
+        assert_eq!(already.stdout.bytes, b"<pr>\n<create>\n<--draft>\n");
+        let promote = run("draft", PrPolicy::Draft, "launch", &["pr", "ready", "42"])?;
+        assert_ne!(promote.termination, Termination::Exit(0));
+
+        // allowed: PR writes and forge writes forward unchanged.
+        let allowed = run(
+            "allowed",
+            PrPolicy::Allowed,
+            "default",
+            &["pr", "create", "--title", "x"],
+        )?;
+        assert_eq!(allowed.termination, Termination::Exit(0));
+        assert_eq!(allowed.stdout.bytes, b"<pr>\n<create>\n<--title>\n<x>\n");
+        let api_write = run(
+            "allowed",
+            PrPolicy::Allowed,
+            "default",
+            &["api", "-X", "POST", "repos/o/r/issues"],
+        )?;
+        assert_eq!(api_write.termination, Termination::Exit(0));
+        Ok(())
+    }
+
+    #[test]
     fn gh_budget_warns_and_calls_continue_after_the_threshold()
     -> Result<(), Box<dyn std::error::Error>> {
         use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
@@ -2389,6 +2551,8 @@ mod tests {
                     budget: 2,
                     budget_source: "launch",
                     label_ci_warning: false,
+                    pr_policy: provenant_config::PrPolicy::Allowed,
+                    pr_source: "default",
                 },
             ),
         )?;
@@ -2436,6 +2600,8 @@ mod tests {
                         budget: 0,
                         budget_source: "launch",
                         label_ci_warning,
+                        pr_policy: provenant_config::PrPolicy::Allowed,
+                        pr_source: "default",
                     },
                 ),
             )?;
@@ -2509,6 +2675,8 @@ mod tests {
                     budget: 100,
                     budget_source: "default",
                     label_ci_warning: false,
+                    pr_policy: provenant_config::PrPolicy::Allowed,
+                    pr_source: "default",
                 },
             );
             assert!(

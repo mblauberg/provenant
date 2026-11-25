@@ -191,8 +191,12 @@ withholds host token variables, `injected` passes only the selected token, `ambi
 preserves the host environment and pins `GH_CONFIG_DIR` to the host's gh directory (as gh
 resolves it) in the lane environment and `gh` shim, because an adapter may re-point the
 lane's `XDG_CONFIG_HOME`. The receipt's `detail` names the directory and the setting that
-chose it. A lane opens its own pull request with `gh pr create --body-file`;
-`provenant pr open` needs a settled attempt.
+chose it. A lane's pull requests follow `lanes.pr` (default `never`, so a leaf
+implement lane does not open one): the provider's `gh` tool refuses PR writes
+and mutating forge calls under `never`, forces drafts under `draft`, and only
+forwards unchanged under `allowed`. The value and its source appear in the
+preamble and launch receipt. `provenant pr open` needs a settled attempt and is
+a host operation, not a lane one.
 - Why: untrusted lane state must not alter shared Git or publish over another writer.
 
 ## Writer pin and re-pin

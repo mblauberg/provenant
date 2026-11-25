@@ -3350,6 +3350,7 @@ pub(super) fn prepare_candidates_inner(
         .flatten();
     // Let the host login lookup diagnose missing credentials, including relocated
     // stores and keychain logins, rather than guessing from the ambient home.
+    let pr_policy = run::ResolvedPrPolicy::resolve(&task.profile);
     let publishing = publishing_requested(
         task.access.network(true) == NetworkAccess::Open,
         &task.profile.knobs,
@@ -4901,6 +4902,7 @@ pub(super) fn prepare_candidates_inner(
             build_cap: Some(run::BuildCap::from(&build_class)),
             brief: Some(brief),
             role,
+            pr_policy: Some(pr_policy),
         };
         let text = format!(
             "{}\n{text}",
@@ -5450,6 +5452,8 @@ pub(super) fn prepare_candidates_inner(
             budget: gh_budget.map_or(0, |limit| limit.value),
             budget_source: gh_budget.map_or("default", |limit| limit.source.as_str()),
             label_ci_warning,
+            pr_policy: pr_policy.value,
+            pr_source: pr_policy.source.as_str(),
         };
         if let Some(gh) = publishing_gh
             .as_ref()
@@ -5823,6 +5827,12 @@ pub(super) fn prepare_candidates_inner(
             gh_selection = super::gh_auth::Selection::new(delivery, false);
         }
         provider.github_credential = Some(serde_json::from_value(gh_selection.receipt())?);
+        provider.pr_policy = Some(provenant_records::run::PrPolicyReceipt {
+            value: pr_policy.value.as_str().into(),
+            source: pr_policy.source,
+            key: "lanes.pr".into(),
+            extra: Default::default(),
+        });
         if writer.is_some() {
             let scope = run::ResolvedCiScope::resolve(&task.profile);
             provider.ci_scope = Some(provenant_records::run::CiScopeReceipt {

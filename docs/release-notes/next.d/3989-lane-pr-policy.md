@@ -1,0 +1,3 @@
+## Fixes
+### Lanes
+- A new sourced knob `lanes.pr = never | draft | allowed` governs pull-request writes from a lane. It defaults to `never`, so a leaf implement writer lane no longer opens a PR (including against the wrong base); the chair publishes after settlement. The lane's `gh` tool refuses `pr create|edit|close` and mutating forge calls under `never`, adds `--draft` to `pr create` under `draft`, and forwards unchanged under `allowed`. The effective value and its source appear in the writer preamble, the launch receipt and `run --explain`. Set it with `provenant config set lanes.pr draft` or `--set lanes.pr=allowed`. The control applies to the lane's tool policy, not to host-side delivery. [#3989](https://github.com/mblauberg/provenant/issues/3989)
