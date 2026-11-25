@@ -625,6 +625,29 @@ fn node(id: &str, route: GraphRoute) -> GraphNode {
     }
 }
 
+#[test]
+fn ci_admission_wait_retains_bounded_deadline_across_restart() {
+    let mut document = graph(Vec::new());
+    document.queue_ci_wait = Some(provenant_records::Sourced {
+        value: 55,
+        source: provenant_records::Source {
+            layer: provenant_records::Layer::Default,
+            origin: None,
+        },
+    });
+    let now = provenant_core::WallTime::from_micros(10_000_000).unwrap();
+    let wait = start_delivery_ci_wait::<FakeOwner, MemoryJournal>(&document, "publish", Some(now))
+        .unwrap();
+    let restored: DeliveryCiAdmissionWait =
+        serde_json::from_value(serde_json::to_value(&wait).unwrap()).unwrap();
+    assert_eq!(restored.deadline.as_micros(), 65_000_000);
+    let before = provenant_core::WallTime::from_micros(64_500_000).unwrap();
+    let wake = delivery_ci_wait_retry_at(&restored, before);
+    assert_eq!(wake, restored.deadline);
+    assert!(!delivery_ci_wait_expired(&restored, Some(before)));
+    assert!(delivery_ci_wait_expired(&restored, Some(wake)));
+}
+
 fn graph(nodes: Vec<GraphNode>) -> GraphDocument {
     GraphDocument {
         queue_ci_wait: None,

@@ -3424,7 +3424,7 @@ fn advance_hygiene<R: AttemptOwner, J: GraphJournal>(
 }
 
 const DELIVERY_CI_WAIT_MAX_SECONDS: u64 = 14_400;
-const DELIVERY_CI_RETRY_MICROS: i64 = 1_000_000;
+const DELIVERY_CI_RETRY_MICROS: u64 = 1_000_000;
 
 // A resumed publication must compare against the last receipt for this
 // branch, including an authenticated adopted PR seed.
@@ -3505,8 +3505,10 @@ fn start_delivery_ci_wait<R: AttemptOwner, J: GraphJournal>(
             invariant: "queue CI admission wait must be bounded to 1..=14400 seconds",
         });
     }
-    let started_at = wall_now.unwrap_or_else(|| provenant_core::WallTime::from_micros(0));
-    let micros = i64::try_from(policy.value.saturating_mul(1_000_000)).unwrap_or(i64::MAX);
+    let started_at = wall_now.unwrap_or_else(|| {
+        provenant_core::WallTime::from_micros(0).expect("Unix epoch is representable")
+    });
+    let micros = policy.value * 1_000_000;
     let deadline = started_at
         .checked_add(DurationMicros::from_micros(micros))
         .map_err(|_| GraphError::BadCheckpoint {

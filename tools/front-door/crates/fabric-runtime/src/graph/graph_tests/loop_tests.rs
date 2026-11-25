@@ -2260,6 +2260,7 @@ fn loop_conflict_recovery_is_bounded_and_replays_the_namespaced_target() {
         &plan.nodes[loop_index],
         &checkpoint,
         &positions,
+        &plan,
         false,
     ));
     assert!(

@@ -231,50 +231,49 @@ pub fn try_admit_ci_lease(
     let at_head =
         request.limit == 0 || tickets.first().is_some_and(|ticket| ticket.id == waiter_id);
 
-    if at_head {
-        if let Some(guard) = slots
+    if at_head
+        && let Some(guard) = slots
             .try_acquire_ci(request.limit, &request.limit_source)
             .map_err(unavailable)?
-        {
-            let Some(registry) = try_lock_ci_lease_registry(&directory)? else {
-                drop(guard);
-                return Ok(CiLeaseAttempt::Waiting);
-            };
-            if let Some(lease) = find_ci_lease_in(&directory, &owner)? {
-                remove_ci_waiter(request.state, &owner)?;
-                drop(registry);
-                drop(guard);
-                return Ok(CiLeaseAttempt::Held { lease });
-            }
-            let lease = CiAdmissionLease {
-                id: ci_lease_id(&owner)?,
-                slot: guard.index(),
-                owner: owner.clone(),
-                cap: provenant_os::admission::AdmissionCap {
-                    limit: request.limit,
-                    source: request.limit_source.clone(),
-                },
-            };
-            let bytes = serde_json::to_vec(&CiLeaseRecord {
-                schema: 1,
-                lease: lease.clone(),
-            })
-            .map_err(unavailable)?;
-            directory
-                .atomic_write(
-                    &ci_lease_marker(lease.slot),
-                    ".ci-lease-",
-                    &bytes,
-                    PublishMode::NoReplace,
-                )
-                .map_err(unavailable)?
-                .require_durable()
-                .map_err(unavailable)?;
+    {
+        let Some(registry) = try_lock_ci_lease_registry(&directory)? else {
+            drop(guard);
+            return Ok(CiLeaseAttempt::Waiting);
+        };
+        if let Some(lease) = find_ci_lease_in(&directory, &owner)? {
             remove_ci_waiter(request.state, &owner)?;
             drop(registry);
             drop(guard);
             return Ok(CiLeaseAttempt::Held { lease });
         }
+        let lease = CiAdmissionLease {
+            id: ci_lease_id(&owner)?,
+            slot: guard.index(),
+            owner: owner.clone(),
+            cap: provenant_os::admission::AdmissionCap {
+                limit: request.limit,
+                source: request.limit_source.clone(),
+            },
+        };
+        let bytes = serde_json::to_vec(&CiLeaseRecord {
+            schema: 1,
+            lease: lease.clone(),
+        })
+        .map_err(unavailable)?;
+        directory
+            .atomic_write(
+                &ci_lease_marker(lease.slot),
+                ".ci-lease-",
+                &bytes,
+                PublishMode::NoReplace,
+            )
+            .map_err(unavailable)?
+            .require_durable()
+            .map_err(unavailable)?;
+        remove_ci_waiter(request.state, &owner)?;
+        drop(registry);
+        drop(guard);
+        return Ok(CiLeaseAttempt::Held { lease });
     }
 
     if allow_overflow {

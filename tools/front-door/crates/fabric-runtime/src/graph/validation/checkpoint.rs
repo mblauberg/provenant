@@ -1114,9 +1114,7 @@ fn valid_delivery_ci_wait(document: &GraphDocument, wait: &DeliveryCiAdmissionWa
     {
         return false;
     }
-    let Ok(micros) = i64::try_from(wait.policy.value.saturating_mul(1_000_000)) else {
-        return false;
-    };
+    let micros = wait.policy.value * 1_000_000;
     wait.started_at
         .checked_add(provenant_core::DurationMicros::from_micros(micros))
         .is_ok_and(|deadline| deadline == wait.deadline)
