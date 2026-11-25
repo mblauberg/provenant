@@ -283,6 +283,9 @@ entry is filtered, copied or rewritten.
 effective value names the layer that set it. The default is `never`, so a leaf
 implement writer lane in a graph does not open a pull request; the chair owns
 publication after settlement. Host, launch and node settings opt a lane in.
+Set `attempt.pr = "draft"` or `"allowed"` on a graph node, or pass
+`--set attempt.pr=draft` at launch; the node override is reported as the launch
+source and takes precedence over the host setting.
 The provider's `gh` tool enforces the policy before forwarding a command:
 `never` refuses `gh pr create|edit|close` (and the other PR mutations) and
 mutating forge API calls while leaving reads working, including explicit GET or HEAD

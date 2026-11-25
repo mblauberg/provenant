@@ -1,0 +1,1 @@
+- Graph nodes can opt in to pull-request writes with `attempt.pr = "draft"` or `"allowed"`, including via `--set attempt.pr=draft`. The effective policy reports its launch source and travels with the node to a peer. [#3989](https://github.com/mblauberg/provenant/issues/3989)
