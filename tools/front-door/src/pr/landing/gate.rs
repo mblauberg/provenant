@@ -445,6 +445,7 @@ pub fn execute_commands(
         checks.push(CheckEvidence {
             name: command.clone(),
             issuer: None,
+            app_id: None,
             result: verdict,
         });
         if !passed {
@@ -544,6 +545,72 @@ fn ci_outstanding(
         pending
             || (policy.mode == PrCiMode::Always && runs.iter().all(|run| run.checks.is_empty())),
     )
+}
+
+/// Require the saved check policy to pass on the PR's current head itself.
+/// Queue landing uses this after candidate checks and again for each member
+/// immediately before its match-head merge.
+pub(super) fn require_delivery_queue_ci(
+    forge: &mut dyn Forge,
+    pr: &EligiblePr,
+) -> Result<(), LandingError> {
+    let required = match forge.required_ci_policy(&pr.base_branch) {
+        Ok(Some(required)) => required,
+        Ok(None) => {
+            return Err(LandingError::Pending(format!(
+                "required CI policy is unavailable for base {}",
+                pr.base_branch
+            )));
+        }
+        Err(error) => {
+            return Err(LandingError::Pending(format!(
+                "could not read required CI policy for base {}: {error}",
+                pr.base_branch
+            )));
+        }
+    };
+    let observations = forge.checks(&pr.head).map_err(|error| {
+        LandingError::Pending(format!(
+            "could not observe CI for current pull request head {}: {error}",
+            pr.head
+        ))
+    })?;
+    let checks: Vec<_> = observations
+        .iter()
+        .flat_map(|observation| {
+            observation.checks.iter().map(|check| CiCheck {
+                head: observation.commit.clone(),
+                name: check.name.clone(),
+                bucket: match &check.result {
+                    GateResult::Passed => "pass",
+                    GateResult::Failed => "fail",
+                    GateResult::Pending => "pending",
+                    GateResult::Skipped | GateResult::Neutral => "skipping",
+                    GateResult::Missing => "missing",
+                }
+                .into(),
+                app: check.app_id,
+            })
+        })
+        .collect();
+    let required: Vec<_> = required
+        .into_iter()
+        .map(|check| Required {
+            name: check.name,
+            app: check.app_id,
+        })
+        .collect();
+    match ci_completion(&pr.head, &checks, &required) {
+        CiCompletion::Green => Ok(()),
+        CiCompletion::Failed => Err(LandingError::UnmetGate(format!(
+            "required CI failed on current pull request head {}",
+            pr.head
+        ))),
+        CiCompletion::Pending | CiCompletion::Unavailable => Err(LandingError::Pending(format!(
+            "required CI is absent, stale or inconclusive on current pull request head {}",
+            pr.head
+        ))),
+    }
 }
 
 /// Follow the configured pull-request CI evidence policy without bypassing forge requirements.

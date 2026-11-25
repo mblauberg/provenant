@@ -2,7 +2,7 @@ use super::{
     LandingError,
     approval::{Approver, Decision},
     model::*,
-    ports::{Forge, MergeTree, PullRequestState, Repo},
+    ports::{Forge, MergeTree, Mergeability, PullRequestState, Repo},
 };
 use provenant_core::{Clock, MonoTime};
 
@@ -245,6 +245,7 @@ mod tests {
             base_branch: branch.into(),
             author: author.into(),
             state: PullRequestState::Open,
+            mergeability: Mergeability::Unknown,
             merged_commit: None,
             stack: None,
             draft: false,
