@@ -2204,7 +2204,7 @@ fn delivery_contracts_round_trip_and_admit_execution() {
 #[test]
 fn compiler_lowers_and_admits_a_queue_delivery_composite() {
     let composite = Compiler::new(&library())
-        .compile(&json!({
+        .compile(&serde_json::from_str::<serde_json::Value>(r#"{
             "id": "delivery",
             "kind": "composite",
             "access": "read_only",
@@ -2307,7 +2307,7 @@ fn compiler_lowers_and_admits_a_queue_delivery_composite() {
                 ],
                 "exports":[{"node":"accept", "outputs":["verdict"]}]
             }
-        }))
+        }"#).unwrap())
         .unwrap();
     let mut graph = document(vec![composite]);
     graph.schema_version = 2;
