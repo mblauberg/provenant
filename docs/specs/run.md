@@ -161,8 +161,12 @@ Git configuration; confinement protects the repository's shared Git state.
 Import uses Git's quarantined receive and verification, and publication compare-and-swaps the
 host branch against the tip it observed. A lane whose history diverged from the branch is merged
 by the host and published when the merge is clean and `lanes.history.rebase` is `allow` (the
-default). A real conflict, unrelated histories, a configured merge driver, or `rebase = refuse`
-retains the lane's private Git and names the cause and the setting; a branch rewound behind the
+default). A lane that rewrote and force-pushed its own branch so that the pushed upstream tip is
+its final head instead moves the host branch to that head with a rewritten-history warning; the
+displaced tip is retained at `refs/provenant/recovery/<oid>` in the same ref transaction. A host
+commit made during the lane is not that pushed tip and still takes the merge path. A real
+conflict, unrelated histories, a configured merge driver, or `rebase = refuse` retains the lane's
+private Git and names the cause and the setting; a branch rewound behind the
 pinned launch base is refused rather than fast-forwarded over, and is judged before the unrooted
 tip. `lanes.history.unrooted_tip` judges the lane head before any merge runs, so a merge cannot
 supply ancestry the head lacks; its `warn` and `off` values never override an unrelated-history

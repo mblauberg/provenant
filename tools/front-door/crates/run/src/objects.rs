@@ -710,6 +710,32 @@ fn known_ancestor(
     Ok(None)
 }
 
+/// Whether the judged lane head is the tip of the branch the writer pushed
+/// upstream. A writer that rebased and force-pushed its own branch leaves the
+/// remote-tracking ref at its new head while the host branch still points at the
+/// displaced tip. That rewrite is the lane's own work, not a host commit gained
+/// during the lane, so publication moves the host branch to the pushed head
+/// instead of merging the displaced commits back into it.
+fn pushed_upstream_tip(
+    git: &Path,
+    repo: &VerifiedRepo,
+    head: GitOid,
+    branch: &str,
+) -> Result<bool> {
+    let short = branch.strip_prefix("refs/heads/").unwrap_or(branch);
+    let pattern = format!("refs/remotes/*/{short}");
+    let refs = execute(
+        git,
+        repo.common_git_dir(),
+        repo.root_path(),
+        &args(&["for-each-ref", "--format=%(objectname)", &pattern]),
+        None,
+    )?;
+    Ok(String::from_utf8_lossy(&refs)
+        .lines()
+        .any(|line| GitOid::parse(line.trim()).is_ok_and(|oid| oid == head)))
+}
+
 pub(crate) struct BranchPublication<'a> {
     pub branch: &'a str,
     pub base: GitOid,
@@ -947,13 +973,21 @@ pub(crate) fn publish_branch(
             }
         }
     }
-    let (target, merged) = if contains_head {
+    let (target, merged, rewritten) = if contains_head {
         // The branch already contains the lane head, so publishing changes
         // nothing.
-        (current, false)
+        (current, false, false)
     } else if current == base || advances_current {
         // Fast-forward from the launch base or from later lane commits.
-        (head, false)
+        (head, false, false)
+    } else if history.rebase.value == Rebase::Allow && pushed_upstream_tip(git, repo, head, branch)?
+    {
+        // The lane rewrote its branch, force-pushed it and left the upstream ref
+        // at its new head. Moving the host branch there is not a merge: the
+        // displaced tip is the lane's own superseded commits, and the CAS below
+        // retains them for host recovery. A host commit made during the lane is
+        // not the pushed tip, so it still takes the merge/refusal path.
+        (head, false, true)
     } else {
         match history.rebase.value {
             Rebase::Refuse => {
@@ -962,7 +996,7 @@ pub(crate) fn publish_branch(
                 });
             }
             Rebase::Allow => match host_merge(git, repo, current, head)? {
-                HostMerge::Merged(target) => (target, true),
+                HostMerge::Merged(target) => (target, true, false),
                 HostMerge::Conflict(conflicting_files) => {
                     return Err(RunError::PublicationConflict {
                         conflicting_files,
@@ -982,19 +1016,21 @@ pub(crate) fn publish_branch(
             },
         }
     };
-    if merged {
+    if merged || rewritten {
         use provenant_records::warning::{LANE_HISTORY_PUBLICATION_ADJUSTED, Warning, warn};
         // Spec: docs/specs/cli.md#warnings-are-typed-values
-        warn(
-            Warning::new(
-                LANE_HISTORY_PUBLICATION_ADJUSTED,
-                format!(
-                    "lane history on {branch} diverged from the host branch; published a host merge of {head} and {current} as {target}; {}; set {REBASE} to refuse to retain the lane's private history instead",
-                    history.rebase.setting(REBASE),
-                ),
+        let message = if rewritten {
+            format!(
+                "lane history on {branch} was rewritten and force-pushed; published the pushed tip {head} over the displaced host tip {current}; {}; set {REBASE} to refuse to retain the lane's private history instead",
+                history.rebase.setting(REBASE),
             )
-            .subject(branch.to_owned()),
-        );
+        } else {
+            format!(
+                "lane history on {branch} diverged from the host branch; published a host merge of {head} and {current} as {target}; {}; set {REBASE} to refuse to retain the lane's private history instead",
+                history.rebase.setting(REBASE),
+            )
+        };
+        warn(Warning::new(LANE_HISTORY_PUBLICATION_ADJUSTED, message).subject(branch.to_owned()));
     }
     // The ancestor the publication established is the one judged on the lane
     // head before any host merge. A merge adds the host branch as a parent, so

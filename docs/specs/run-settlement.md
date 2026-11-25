@@ -15,7 +15,9 @@ terminal cleanup and remain a worktree-removal fence until reconciled; native in
 uses only committed trees and preserves conflicting native staging or operations
 ([lane Git](run.md#lane-git-and-import)). Each attempt publishes only its private ref; a
 sibling-divergent host tip is merged and published when no conflict exists, and otherwise
-retains both commits with the conflict and setting named.
+retains both commits with the conflict and setting named. A lane's own force-pushed rewrite whose
+head is the pushed upstream tip moves the branch to that head with a warning and a recovery ref
+instead of merging the displaced tip.
 - Why: recovery must resume durable effects without racing another driver or losing work.
 
 Settlement decides whether a Git operation is unfinished before it imports objects or
@@ -135,10 +137,15 @@ unrooted setting decides only that observation: `warn` and `off` do not override
 so when `lanes.history.rebase = "allow"` and the host branch's history is unrelated to the lane
 tip, publication still refuses with `PublicationUnrelated`. When a lane's history diverged from
 the host lane branch, publication merges the host branch into the lane tip and publishes the merge
-when it is clean. A real conflict names the files; unrelated
+when it is clean. When the lane itself rewrote and force-pushed its branch so that the pushed
+upstream tip equals the final head, publication moves the host branch to that head with a
+rewritten-history warning instead — the displaced tip is the lane's own superseded work, not a
+host commit gained during the lane; a host commit made during the lane is not the pushed tip and
+still takes the merge path. A real conflict names the files; unrelated
 histories, a configured `merge.*.driver` and a branch rewound behind the pinned launch base are
 typed refusals of their own. Each retains the lane's private history, and
-`lanes.history.rebase = "refuse"` retains a diverged history without attempting a merge. A branch
+`lanes.history.rebase = "refuse"` retains a diverged history without attempting a merge; the
+force-pushed rewrite is likewise not accepted under `refuse`. A branch
 rewound behind its launch base is judged before the unrooted tip, so it refuses without first
 warning about a tip that refusal would supersede. When publication displaces a branch tip that is
 not an ancestor of the new tip, the same Git transaction retains it at
