@@ -68,7 +68,7 @@ disallowed_methods = "deny"
 [package]
 name = "provenant"
 autotests = false
-version = "2.9.7"
+version = "2.9.8"
 default-run = "provenant"
 edition.workspace = true
 rust-version.workspace = true

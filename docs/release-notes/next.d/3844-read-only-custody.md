@@ -1,7 +1,0 @@
-## Fixes
-
-### Lanes and settlement
-
-- A terminal read-only review whose guardian left a reservation no longer keeps custody uncertain. `provenant reconcile` and `provenant stop` settle it with a typed warning naming the retained slot instead of re-recording the same fence on every pass, after the custody lock is confirmed free. A live lock, writer reservation or retained import still fences. (#3844)
-
-- Released terminal read-only reservations no longer prevent cache cleanup or retention, and lane scratch now lives alongside temporary files outside attempt records. (#3844)
