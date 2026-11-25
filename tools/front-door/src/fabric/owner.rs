@@ -4812,6 +4812,7 @@ mod journal_error_tests {
             context: Default::default(),
             read_roots: &[],
             attachments: &[],
+            worktree: None,
             fixture: None,
             fixture_bytes: None,
             capabilities: None,
@@ -4989,6 +4990,7 @@ mod journal_error_tests {
             },
             read_roots: &[],
             attachments: &[],
+            worktree: None,
             fixture: None,
             fixture_bytes: None,
             capabilities: None,
@@ -5463,6 +5465,146 @@ mod peer_capture_tests {
                 }),
                 Err(FacadeError::StateCorrupt)
             ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    // Spec: docs/specs/run-launch.md#writer-binding — a remote writer is
+    // provisioned from a branch and a base ref in the peer's own clone; a caller
+    // worktree path is refused before it can cross the host boundary.
+    fn peer_bound_writer_refuses_a_caller_path_but_carries_branch_intent()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if super::super::peer_tests::host_test(
+            "fabric::owner::peer_capture_tests::peer_bound_writer_refuses_a_caller_path_but_carries_branch_intent",
+        )? {
+            return Ok(());
+        }
+        use provenant_fabric_runtime::graph::{self, AttemptOwner};
+        let rig = crate::worktree_tests::repository()?;
+        let host = provenant_core::HostId::from_bytes([2; 16]);
+        std::fs::write(
+            rig.state.join("config.toml"),
+            format!(
+                "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.fabric.peers.peer]\nhost='{host}'\ndestination='fixture'\n"
+            ),
+        )?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let factory = Factory {
+            context: Context::open(roots, &rig.home, &rig.project)?,
+            project_attribution: false,
+            clock: SystemClock,
+            backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?,
+            home: rig.home.clone(),
+            cwd: rig.project.clone(),
+            assets: rig.project.clone(),
+            host_launch: None,
+            workers: &FreeWorkers,
+        };
+        let cancel = CancelToken::new();
+        let mut owner = BoundGraphOwner {
+            writer_launch_budget: None,
+            admission_timeout: None,
+            launch_warnings: Vec::new(),
+            repo_facts: Default::default(),
+            factory: &factory,
+            integration_base: None,
+            integration_branch: None,
+            network: None,
+            capability_overrides: Default::default(),
+            exclude: Vec::new(),
+            budget: WaitBudget::cli(factory.clock.mono_now(), 30)?,
+            cancel: &cancel,
+            prices: None,
+            tick: false,
+        };
+        let actor = owner.actor();
+        let route: graph::GraphRoute =
+            serde_json::from_value(serde_json::json!({"alias":"junior"}))?;
+        let new_worktree: provenant_fabric_runtime::coordination::facade::NewWorktree =
+            serde_json::from_value(serde_json::json!({"branch":"peer-writer","base":"HEAD"}))?;
+        let spec = graph::AttemptSpec {
+            host: Some("peer".into()),
+            new_worktree: Some(new_worktree),
+            ..Default::default()
+        };
+        let key = |attempt: u16| graph::AttemptKey {
+            extra: Default::default(),
+            retry_generation: None,
+            previous_attempt_ref: None,
+            graph_id: "peer-writer-boundary".into(),
+            node_id: "write".into(),
+            route_index: 0,
+            attempt,
+        };
+        let node = |worktree: Option<&str>, spec: &graph::AttemptSpec| graph::NodeInput {
+            writer_dirty_preflight: false,
+            review_launch: false,
+            require_skill_location: false,
+            settlement_retries: None,
+            prior_attempts: &[],
+            family_peers: &[],
+            context: provenant_records::run::WorkContext {
+                graph_id: Some("peer-writer-boundary".into()),
+                node_id: Some("write".into()),
+                attempt: Some(1),
+                ..Default::default()
+            },
+            read_roots: &[],
+            attachments: &[],
+            worktree,
+            fixture: None,
+            fixture_bytes: None,
+            capabilities: None,
+            capability_sources: None,
+            attempt: Some(spec),
+            distinct_from_attempts: &[],
+            require_distinct: false,
+            source_commit: None,
+            review_base: None,
+            title: "write",
+            prompt: "write",
+            required_verdict: None,
+            deadline_seconds: None,
+            inputs_dir: None,
+        };
+        let replay = |actor: &str| graph::Replay {
+            delivery: None,
+            branch: None,
+            fast_forward_only: false,
+            stored_ref: None,
+            launch_actor: actor,
+        };
+        // A caller path is sender-local and never crosses to the peer.
+        let caller = owner
+            .observe_or_start(
+                &key(1),
+                node(Some("/caller/checkout"), &spec),
+                &route,
+                graph::AccessMode::WorktreeWrite,
+                None,
+                replay(&actor),
+            )
+            .unwrap_err();
+        assert_eq!(caller.code(), "worktree_not_applicable", "{caller:?}");
+        // Branch and base intent carry no path, so the peer provisions the
+        // writer in its own clone instead of refusing the boundary. The launch
+        // may fail downstream without a live provider, but never at this gate.
+        match owner.observe_or_start(
+            &key(2),
+            node(None, &spec),
+            &route,
+            graph::AccessMode::WorktreeWrite,
+            None,
+            replay(&actor),
+        ) {
+            Ok(_) => {}
+            Err(error) => assert_ne!(
+                error.code(),
+                "worktree_not_applicable",
+                "branch intent must reach the peer: {error:?}"
+            ),
         }
         Ok(())
     }

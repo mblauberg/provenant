@@ -3847,6 +3847,7 @@ mod provisioned_writer_submission_tests {
                 },
                 read_roots: &[],
                 attachments: &[],
+                worktree: None,
                 fixture: None,
                 fixture_bytes: None,
                 capabilities: None,

@@ -2665,6 +2665,10 @@ pub struct NodeInput<'a> {
     pub context: provenant_records::run::WorkContext,
     pub read_roots: &'a [String],
     pub attachments: &'a [String],
+    /// The graph node's declared worktree path. A caller path is sender-local
+    /// and must not cross a peer boundary; a peer-owned writer names only a
+    /// branch and a base ref in its attempt spec, never a path.
+    pub worktree: Option<&'a str>,
     /// Project-relative fixture the host stages into the lane's scratch.
     pub fixture: Option<&'a str>,
     /// Already-staged fixture bytes carried across a peer boundary.

@@ -98,6 +98,7 @@ extend: Vec::new(),
         // stays queued after admission.
         provenant_cli::run::with_deferred_provider_launch(|| bound.observe_or_start(&key, graph::NodeInput { writer_dirty_preflight: false, review_launch: false,
         attachments: &[], capabilities: None, capability_sources: None, attempt: None, require_skill_location: false, settlement_retries: None, review_base: None,
+        worktree: None,
         fixture: None,
         fixture_bytes: None,
             prior_attempts: prior, family_peers: peers, context: graph_test_context(&key), read_roots: &[],
@@ -645,6 +646,7 @@ fn graph_submission_pins_the_integration_base_across_replay()
     let actor = bound.actor();
     bound.observe_or_start(&key, graph::NodeInput { writer_dirty_preflight: false, review_launch: false,
         attachments: &[], capabilities: None, capability_sources: None, attempt: None, require_skill_location: false, settlement_retries: None, review_base: None,
+        worktree: None,
         fixture: None,
         fixture_bytes: None,
         prior_attempts: &[], family_peers: &[], context: graph_test_context(&key), read_roots: &[],
@@ -673,6 +675,7 @@ fn graph_submission_pins_the_integration_base_across_replay()
     let actor = bound.actor();
     bound.observe_or_start(&second, graph::NodeInput { writer_dirty_preflight: false, review_launch: false,
         attachments: &[], capabilities: None, capability_sources: None, attempt: None, require_skill_location: false, settlement_retries: None, review_base: None,
+        worktree: None,
         fixture: None,
         fixture_bytes: None,
         prior_attempts: &[], family_peers: &[], context: graph_test_context(&second), read_roots: &[],

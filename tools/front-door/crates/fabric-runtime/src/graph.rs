@@ -2533,6 +2533,7 @@ fn observe_attempt<R: AttemptOwner, J: GraphJournal>(
             },
             read_roots: &node.read_roots,
             attachments: &node.attachments,
+            worktree: node.worktree.as_deref(),
             fixture: node.fixture.as_deref(),
             fixture_bytes: node.fixture_bytes.as_ref(),
             capabilities: node.capabilities.as_deref(),

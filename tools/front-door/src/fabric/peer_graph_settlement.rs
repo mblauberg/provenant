@@ -81,6 +81,7 @@ fn graph_review_launch_submits_pinned_source_and_base() -> Result<(), Box<dyn st
             graph::NodeInput {
                 writer_dirty_preflight: false, review_launch: false,
                 attachments: &[],
+                worktree: None,
                 fixture: None,
                 fixture_bytes: None,
                 capabilities: None,
@@ -225,6 +226,7 @@ fn child_launch_refuses_credential_and_state_roots_at_the_host()
                 graph::NodeInput {
                     writer_dirty_preflight: false, review_launch: false,
                     attachments: &[],
+                    worktree: None,
                     fixture: None,
                     fixture_bytes: None,
                     capabilities: None,
@@ -364,6 +366,7 @@ fn pinned_review_range_survives_moved_ref_and_another_checkout()
     let node = || graph::NodeInput {
         writer_dirty_preflight: false, review_launch: false,
         attachments: &[],
+        worktree: None,
         fixture: None,
         fixture_bytes: None,
         capabilities: None,
@@ -652,6 +655,7 @@ fn integrating_graph_writer_refuses_a_source_outside_the_pinned_base()
             graph::NodeInput {
                 writer_dirty_preflight: false, review_launch: false,
                 attachments: &[],
+                worktree: None,
                 fixture: None,
                 fixture_bytes: None,
                 capabilities: None,
