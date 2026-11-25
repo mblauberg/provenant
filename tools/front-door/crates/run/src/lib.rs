@@ -71,7 +71,8 @@ pub use controls::{
 #[cfg(any(test, feature = "fixture"))]
 pub use delivery::forge_for;
 pub use delivery::{
-    FilteredLanePath, ForgeOnce, GraphPublicationReceipt, HostDeliveryContext, resolve_forge,
+    FilteredLanePath, ForgeOnce, GraphAdoptionTarget, GraphPublicationReceipt, HostDeliveryContext,
+    resolve_forge,
 };
 pub use git_context::{
     GitContext, ReviewDiffContext, continuation_history, ensure_local_branch,

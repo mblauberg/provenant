@@ -344,10 +344,16 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                 ) if !matches!(progress.state, NodeState::Running | NodeState::Blocked)
                     || parked =>
                 {
-                    let mut expected = if matches!(condition, GateCondition::Ci { .. }) {
-                        ci::outputs(result.passed, progress.ci.as_ref(), plan.queue.is_some())
-                    } else {
-                        gate_outputs(result.passed)
+                    let mut expected = match condition {
+                        GateCondition::Ci { .. } => {
+                            ci::outputs(result.passed, progress.ci.as_ref(), plan.queue.is_some())
+                        }
+                        GateCondition::Conflict { .. }
+                            if ci::conflict_details_requested(plan, &node.id) =>
+                        {
+                            ci::conflict_outputs(result.passed, progress.conflict.as_ref())
+                        }
+                        _ => gate_outputs(result.passed),
                     };
                     // Older checkpoints lack availability evidence; retain
                     // that unknown state rather than reconstructing it.
@@ -697,6 +703,14 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                         _ => false,
                     }
             });
+            let adopted_target = intent.and_then(|intent| {
+                super::super::prior_publication_adoption(
+                    plan,
+                    checkpoint,
+                    index,
+                    &intent.source_branch,
+                )
+            });
             let valid_intent = intent.is_none_or(|intent| {
                 !intent.operation_id.is_empty()
                     && intent.operation_id.len() <= 256
@@ -726,10 +740,20 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                         .next_back()
                     && !intent.writer_branch.is_empty()
                     && document.integration_branch.as_deref() == Some(intent.source_branch.as_str())
+                    && adopted_target.is_none_or(|adoption| {
+                        intent.writer_branch == adoption.branch
+                            && intent.expected_remote_head.is_some()
+                            && intent.integration_base == adoption.head
+                    })
                     && intent.receipt.as_ref().is_none_or(|receipt| {
                         receipt.head == intent.input_head
-                            && !receipt.branch.is_empty()
-                            && !receipt.pull_request.is_empty()
+                            && adopted_target.map_or_else(
+                                || !receipt.branch.is_empty() && !receipt.pull_request.is_empty(),
+                                |adoption| {
+                                    receipt.branch == adoption.branch
+                                        && receipt.pull_request == adoption.pull_request_url
+                                },
+                            )
                     })
             });
             let valid_output = match (receipt, progress.outputs.as_ref()) {

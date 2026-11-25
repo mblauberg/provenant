@@ -384,8 +384,9 @@ pub struct HygieneExecution {
 }
 
 /// Host publication of one clean hygiene head. `source_branch` is the sealed
-/// graph integration branch; `expected_remote_head` is the prior receipt for
-/// this stable graph-owned branch, or `None` when it must not yet exist.
+/// graph integration branch. `expected_remote_head` is the persisted lease for
+/// the destination ref; an initial graph-owned ref has no prior head. An
+/// adopted target keeps publishing to its authenticated PR branch and URL.
 pub struct PublicationRequest<'a> {
     pub graph_id: &'a str,
     pub node_id: &'a str,
@@ -398,6 +399,7 @@ pub struct PublicationRequest<'a> {
     pub worktree_identity: Option<&'a provenant_records::run::SourceIdentity>,
     pub writer_branch: &'a str,
     pub source_branch: &'a str,
+    pub adoption: Option<&'a DeliveryAdoptionIntent>,
     pub expected_head: &'a str,
     pub expected_remote_head: Option<&'a str>,
     pub integration_base: &'a str,
@@ -3419,6 +3421,31 @@ fn prior_publication_head(
         .map(|receipt| receipt.head.clone())
 }
 
+fn prior_publication_adoption<'a>(
+    plan: &'a PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    before: usize,
+    branch: &str,
+) -> Option<&'a DeliveryAdoptionIntent> {
+    plan.nodes
+        .iter()
+        .zip(&checkpoint.nodes)
+        .take(before)
+        .rev()
+        .find_map(|(node, progress)| {
+            let intent = node.delivery_adoption.as_ref()?;
+            let adoption = progress.delivery_adoption()?;
+            (node.kind == Some(NodeKind::Publish)
+                && intent.branch == branch
+                && progress.state == NodeState::Succeeded
+                && adoption.matches_intent(intent)
+                && adoption.ci_admission.is_some()
+                && adoption.receipt.is_some()
+                && prior_publication_head(node, progress, branch).is_some())
+            .then_some(intent)
+        })
+}
+
 fn delivery_ci_wait_policy(document: &GraphDocument) -> provenant_records::Sourced<u64> {
     document
         .queue_ci_wait()
@@ -3700,8 +3727,20 @@ fn advance_publish<R: AttemptOwner, J: GraphJournal>(
         }
     }
 
-    // TODO(#3972-queue): bind the stable queue item identity once the queue
-    // owner supplies it; graph_id is the current durable publication scope.
+    let adoption = prior_publication_adoption(plan, checkpoint, node_index, &source_branch);
+    if adoption.is_some_and(|intent| {
+        intent.branch != writer_branch
+            || expected_remote_head.is_none()
+            || intent.head != integration_base
+    }) {
+        return Err(GraphError::BadCheckpoint {
+            node: node.id.clone(),
+            invariant: "adopted publication must retain its authenticated PR branch, base head and expected remote head",
+        });
+    }
+
+    // Fresh publications use a graph-owned remote ref. An adopted publication
+    // is separately bound below to its authenticated PR branch and URL.
     let publication_identity = document.graph_id.as_str();
     let intent_value = serde_json::json!({
         "graph": document.graph_id,
@@ -3712,6 +3751,16 @@ fn advance_publish<R: AttemptOwner, J: GraphJournal>(
         "source_attempt": writer_attempt_ref,
         "writer_branch": writer_branch,
         "source_branch": source_branch,
+        "adoption": adoption.map(|intent| serde_json::json!({
+            "operation_id": intent.operation_id,
+            "pull_request": intent.pull_request,
+            "pull_request_url": intent.pull_request_url,
+            "branch": intent.branch,
+            "repository": intent.repository,
+            "base_repository": intent.base_repository,
+            "base_branch": intent.base_branch,
+            "head": intent.head,
+        })),
         "head": expected_head,
         "integration_base": integration_base,
         "expected_remote_head": expected_remote_head,
@@ -3893,6 +3942,7 @@ fn advance_publish<R: AttemptOwner, J: GraphJournal>(
         worktree_identity: writer_identity.as_ref(),
         writer_branch: &writer_branch,
         source_branch: &source_branch,
+        adoption,
         expected_head: &input_head,
         expected_remote_head: expected_remote_head.as_deref(),
         integration_base: &integration_base,
@@ -3901,12 +3951,21 @@ fn advance_publish<R: AttemptOwner, J: GraphJournal>(
         Ok(Some(receipt))
             if !receipt.branch.trim().is_empty()
                 && receipt.branch.len() <= outputs::OUTPUT_FIELD_BYTES
-                && receipt
-                    .branch
-                    .strip_prefix("provenant/graph/")
-                    .is_some_and(|suffix| {
-                        suffix.len() == 64 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
-                    })
+                && adoption.map_or_else(
+                    || {
+                        receipt
+                            .branch
+                            .strip_prefix("provenant/graph/")
+                            .is_some_and(|suffix| {
+                                suffix.len() == 64
+                                    && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+                            })
+                    },
+                    |intent| {
+                        receipt.branch == intent.branch
+                            && receipt.pull_request == intent.pull_request_url
+                    },
+                )
                 && !receipt.branch.chars().any(char::is_whitespace)
                 && receipt.head == input_head
                 && receipt.head.parse::<provenant_core::GitOid>().is_ok()

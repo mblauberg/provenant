@@ -3505,6 +3505,27 @@ impl BoundGraphOwner<'_> {
             .map(|head| head.parse::<provenant_core::GitOid>())
             .transpose()
             .map_err(|_| FacadeError::StateCorrupt)?;
+        let adoption_target = if let Some(adoption) = request.adoption {
+            if adoption.branch != request.writer_branch
+                || adoption.branch != request.source_branch
+                || adoption.worktree != request.worktree
+                || request.worktree_identity != Some(&adoption.source_directory_identity)
+                || adoption.head != request.integration_base
+                || expected_remote_head.is_none()
+            {
+                return Err(FacadeError::Conflict);
+            }
+            Some(provenant_run::GraphAdoptionTarget {
+                repository: &adoption.repository,
+                pull_request: adoption.pull_request,
+                pull_request_url: &adoption.pull_request_url,
+                branch: &adoption.branch,
+                base_repository: &adoption.base_repository,
+                base_branch: &adoption.base_branch,
+            })
+        } else {
+            None
+        };
         let scope_attempt = provenant_core::AttemptId::from_bytes(
             provenant_os::fs::entropy_128().map_err(|_| FacadeError::StateCorrupt)?,
         );
@@ -3639,9 +3660,19 @@ impl BoundGraphOwner<'_> {
                             "retained writer changed while publication custody was acquired".into(),
                         );
                     }
-                    host_delivery
-                        .clone()
-                        .deliver_graph_pr_at_head(
+                    let delivery = host_delivery.clone();
+                    match adoption_target {
+                        Some(target) => delivery.update_adopted_graph_pr_at_head(
+                            &project_directory,
+                            expected_head,
+                            expected_remote_head.ok_or_else(|| {
+                                "adopted publication has no persisted expected remote head"
+                                    .to_owned()
+                            })?,
+                            &target,
+                            &forge,
+                        ),
+                        None => delivery.deliver_graph_pr_at_head(
                             &project_directory,
                             request.writer_branch,
                             integration_base,
@@ -3650,8 +3681,9 @@ impl BoundGraphOwner<'_> {
                             expected_remote_head,
                             &body,
                             &forge,
-                        )
-                        .map_err(|error| error.to_string())
+                        ),
+                    }
+                    .map_err(|error| error.to_string())
                 })();
                 Ok(prepared)
             },
@@ -3666,6 +3698,13 @@ impl BoundGraphOwner<'_> {
             disk: None,
             reason: delivery_hygiene_text(&reason, 1024),
         })?;
+        if request.adoption.is_some_and(|adoption| {
+            receipt.branch != adoption.branch
+                || receipt.pull_request != adoption.pull_request_url
+                || receipt.head != expected_head
+        }) {
+            return Err(FacadeError::Conflict);
+        }
         Ok(provenant_fabric_runtime::graph::DeliveryPublication {
             branch: receipt.branch,
             head: receipt.head.to_string(),

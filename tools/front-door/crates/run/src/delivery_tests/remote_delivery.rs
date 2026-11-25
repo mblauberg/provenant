@@ -922,6 +922,109 @@ fn queue_publication_pushes_the_formatter_head_without_moving_integration_branch
 }
 
 #[test]
+fn adopted_graph_publication_updates_the_existing_pr_under_its_head_lease()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    let expected_remote_head = fixture
+        .git_text(&["rev-parse", "refs/heads/lane"])?
+        .parse::<GitOid>()?;
+    fixture.git(&["push", "origin", "lane:refs/heads/lane"])?;
+    fixture.commit(&fixture.writer.worktree, "repair adopted pull request")?;
+    let expected_head = fixture
+        .git_text(&[
+            "-C",
+            fixture.writer.worktree.to_str().ok_or("writer worktree")?,
+            "rev-parse",
+            "HEAD",
+        ])?
+        .parse::<GitOid>()?;
+    fixture.git(&[
+        "config",
+        &format!(
+            "url.{}.insteadOf",
+            fixture.root.join("remote.git").display()
+        ),
+        "https://github.com/fixture/repo.git",
+    ])?;
+    let git = provenant_os::git::git_executable().ok_or("git")?;
+    let wrapper = fixture.root.join("git-wrapper");
+    fixture.executable(
+        &wrapper,
+        &format!(
+            "#!/bin/sh\nif [ \"$5\" = remote ] && [ \"$6\" = get-url ]; then printf 'https://github.com/fixture/repo.git\\n'; exit 0; fi\nexec '{}' \"$@\"\n",
+            git.display()
+        ),
+    )?;
+    let gh = fixture.root.join("gh");
+    fixture.executable(
+        &gh,
+        &format!(
+            r#"#!/bin/sh
+cd "$(dirname "$0")" || exit 1
+if [ "$1" = repo ]; then printf '{{"defaultBranchRef":{{"name":"main"}}}}\n'; exit 0; fi
+if [ "$1" = pr ] && [ "$2" = view ]; then
+  count=0
+  [ ! -f views ] || count=$(cat views)
+  count=$((count + 1))
+  printf '%s\n' "$count" > views
+  if [ "$count" -eq 1 ]; then oid={old_head}; else oid={new_head}; fi
+  printf '{{"url":"https://github.com/fixture/repo/pull/17","state":"OPEN","headRefName":"lane","headRefOid":"%s","headRepository":{{"nameWithOwner":"fixture/repo"}},"baseRefName":"main","baseRepository":{{"nameWithOwner":"fixture/repo"}}}}\n' "$oid"
+  exit 0
+fi
+if [ "$1" = pr ] && [ "$2" = create ]; then touch created; exit 91; fi
+exit 1
+"#,
+            old_head = expected_remote_head,
+            new_head = expected_head,
+        ),
+    )?;
+    let mut environment = fixture.environment.clone();
+    environment.push(("PROVENANT_GIT".into(), wrapper.into_os_string()));
+    environment.retain(|(key, _)| key != "PATH");
+    environment.push((
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", fixture.root.display()).into(),
+    ));
+
+    let url = "https://github.com/fixture/repo/pull/17";
+    let receipt = HostDeliveryContext::new(environment).update_adopted_graph_pr_at_head(
+        &fixture.writer.project,
+        expected_head,
+        expected_remote_head,
+        &GraphAdoptionTarget {
+            repository: "fixture/repo",
+            pull_request: 17,
+            pull_request_url: url,
+            branch: "lane",
+            base_repository: "fixture/repo",
+            base_branch: "main",
+        },
+        &crate::forge_for("origin", "main", &[]),
+    )?;
+
+    let remote_head = fixture.git_text(&[
+        "--git-dir",
+        fixture
+            .root
+            .join("remote.git")
+            .to_str()
+            .ok_or("bare remote")?,
+        "rev-parse",
+        "refs/heads/lane",
+    ])?;
+    assert_eq!(receipt.branch, "lane");
+    assert_eq!(receipt.head, expected_head);
+    assert_eq!(receipt.pull_request, url);
+    assert_eq!(remote_head.parse::<GitOid>()?, expected_head);
+    assert!(!fixture.root.join("created").exists());
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("views"))?.trim(),
+        "2"
+    );
+    Ok(())
+}
+
+#[test]
 fn graph_pr_refreshes_forged_target_and_refuses_failed_fetch()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let mut fixture = PrepareFixture::new()?;

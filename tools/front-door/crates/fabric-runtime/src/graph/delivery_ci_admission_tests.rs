@@ -119,3 +119,22 @@ fn adopted_publication_is_the_expected_head_for_a_republish() {
         None
     );
 }
+
+#[test]
+fn conflict_gate_exposes_bounded_exact_head_evidence_for_repair() {
+    let head = "d".repeat(40);
+    let evidence = ci::ConflictEvidence {
+        state: ci::ConflictState::Conflicting,
+        head_sha: Some(head.clone()),
+        summary: "conflict at the base branch".into(),
+        wake_at: None,
+        pending_observations: 0,
+        ci_rechecks: 0,
+    };
+    let outputs = ci::conflict_outputs(false, Some(&evidence));
+    assert_eq!(outputs.commit.as_deref(), Some(head.as_str()));
+    let text = &outputs.result.as_ref().unwrap().excerpt;
+    assert!(text.contains("Conflicting"));
+    assert!(text.contains(&head));
+    assert!(text.contains("untrusted") || text.contains("Untrusted"));
+}

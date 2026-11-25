@@ -282,12 +282,28 @@ struct StopPublishHost {
     lane_path: Option<FilteredLanePath>,
 }
 
-/// Exact host receipt for one graph-owned PR publication.
+/// Exact host receipt for one graph PR publication.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GraphPublicationReceipt {
     pub branch: String,
     pub head: GitOid,
     pub pull_request: String,
+}
+
+/// Authenticated target details for updating an adopted pull request in place.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GraphAdoptionTarget<'a> {
+    pub repository: &'a str,
+    pub pull_request: u64,
+    pub pull_request_url: &'a str,
+    pub branch: &'a str,
+    pub base_repository: &'a str,
+    pub base_branch: &'a str,
+}
+
+struct AdoptedPullRequestObservation {
+    url: String,
+    head: GitOid,
 }
 impl PartialEq for StopPublishHost {
     fn eq(&self, other: &Self) -> bool {
@@ -1193,6 +1209,113 @@ impl HostDeliveryContext {
             body,
             forge,
         )
+    }
+
+    /// Update the authenticated adopted PR's existing head branch. The
+    /// persisted old head is an exact remote lease; replay accepts only that
+    /// old head or the already-pushed intended head and never creates a PR.
+    pub fn update_adopted_graph_pr_at_head(
+        self,
+        project: &Path,
+        expected_head: GitOid,
+        expected_remote_head: GitOid,
+        target: &GraphAdoptionTarget<'_>,
+        forge: &provenant_config::ForgeContext,
+    ) -> Result<GraphPublicationReceipt> {
+        let branch = GitRefName::branch(target.branch)
+            .map_err(|_| RunError::Validation("adopted PR branch"))?;
+        if target.pull_request == 0
+            || target.repository.trim().is_empty()
+            || target.base_repository.trim().is_empty()
+            || !target
+                .repository
+                .eq_ignore_ascii_case(target.base_repository)
+            || target.base_branch.trim().is_empty()
+            || !target.pull_request_url.starts_with("https://")
+            || target.pull_request_url.chars().any(char::is_whitespace)
+            || target.pull_request_url.chars().any(char::is_control)
+        {
+            return Err(delivery_refusal(
+                Stage::Prepare,
+                "adopted pull request identity is invalid",
+            ));
+        }
+        let request = Self::destination(crate::DeliveryMode::Pr, branch.short_name(), forge)?
+            .ok_or(RunError::Validation("adopted PR destination"))?;
+        let writer = WriterRequest {
+            extra: Default::default(),
+            custody_project: None,
+            project: project.into(),
+            worktree: project.into(),
+        };
+        let host = self.prepare_with_fetch(&writer, &request, false)?;
+        let bound = host.bound.as_ref().ok_or_else(|| {
+            delivery_refusal(Stage::Prepare, "delivery launch binding was not sealed")
+        })?;
+        let repo = bound.pull_request_repo.as_deref().ok_or_else(|| {
+            delivery_refusal(Stage::PullRequest, "pull request repository was not bound")
+        })?;
+        if !repo.eq_ignore_ascii_case(target.repository) {
+            return Err(delivery_refusal(
+                Stage::PullRequest,
+                "adopted pull request repository differs from the bound repository",
+            ));
+        }
+        host.verify_objects(&writer, expected_remote_head, Stage::Head)?;
+        host.verify_objects(&writer, expected_head, Stage::Head)?;
+        host.refuse_protected_target(&writer, branch.short_name(), Stage::Push, Some(forge))?;
+        host.refuse_remote_symbolic_target(
+            project,
+            &bound.push_url,
+            branch.short_name(),
+            Stage::Push,
+        )?;
+
+        let observed =
+            host.adopted_pull_request(project, target, &[expected_remote_head, expected_head])?;
+        if observed.head != expected_remote_head && observed.head != expected_head {
+            return Err(delivery_refusal(
+                Stage::Verify,
+                "adopted pull request moved from the persisted expected head",
+            ));
+        }
+        host.publish_graph_ref(
+            project,
+            &bound.push_url,
+            branch.short_name(),
+            expected_head,
+            Some(expected_remote_head),
+        )?;
+        let remote = host.command(
+            project,
+            "git",
+            &[
+                "ls-remote",
+                "--exit-code",
+                "--",
+                &bound.push_url,
+                &format!("refs/heads/{}", branch.short_name()),
+            ],
+            Stage::Verify,
+        )?;
+        if remote.split_whitespace().next() != Some(expected_head.to_string().as_str()) {
+            return Err(delivery_refusal(
+                Stage::Verify,
+                "adopted PR branch differs from the intended head",
+            ));
+        }
+        let observed = host.adopted_pull_request(project, target, &[expected_head])?;
+        if observed.head != expected_head {
+            return Err(delivery_refusal(
+                Stage::Verify,
+                "adopted pull request did not retain the intended head",
+            ));
+        }
+        Ok(GraphPublicationReceipt {
+            branch: branch.short_name().to_owned(),
+            head: expected_head,
+            pull_request: observed.url,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3435,6 +3558,69 @@ impl HostDeliveryContext {
         }
         Ok(Some(url.to_owned()))
     }
+
+    fn adopted_pull_request(
+        &self,
+        cwd: &Path,
+        target: &GraphAdoptionTarget<'_>,
+        allowed_heads: &[GitOid],
+    ) -> Result<AdoptedPullRequestObservation> {
+        let number = target.pull_request.to_string();
+        let raw = self
+            .command(
+                cwd,
+                "gh",
+                &[
+                    "pr",
+                    "view",
+                    &number,
+                    "--repo",
+                    target.repository,
+                    "--json",
+                    "url,state,headRefName,headRefOid,headRepository,baseRefName,baseRepository",
+                ],
+                Stage::PullRequest,
+            )
+            .map_err(pr_lookup_error)?;
+        let value: serde_json::Value = serde_json::from_str(&raw)
+            .map_err(|error| RunError::delivery(Stage::PullRequest, DeliveryCause::parse(error)))?;
+        let url = value["url"]
+            .as_str()
+            .filter(|url| {
+                url.starts_with("https://")
+                    && !url.chars().any(char::is_whitespace)
+                    && !url.chars().any(char::is_control)
+            })
+            .ok_or_else(|| {
+                delivery_refusal(Stage::PullRequest, "pull request has no usable URL")
+            })?;
+        let head_ref = value["headRefName"].as_str();
+        let head = value["headRefOid"]
+            .as_str()
+            .ok_or_else(|| delivery_refusal(Stage::Verify, "pull request has no head commit"))?
+            .parse::<GitOid>()
+            .map_err(|error| RunError::delivery(Stage::Verify, DeliveryCause::parse(error)))?;
+        let head_repository = value["headRepository"]["nameWithOwner"].as_str();
+        let base_repository = value["baseRepository"]["nameWithOwner"].as_str();
+        if url != target.pull_request_url
+            || value["state"].as_str() != Some("OPEN")
+            || head_ref != Some(target.branch)
+            || !allowed_heads.contains(&head)
+            || value["baseRefName"].as_str() != Some(target.base_branch)
+            || head_repository.is_none_or(|repo| !repo.eq_ignore_ascii_case(target.repository))
+            || base_repository.is_none_or(|repo| !repo.eq_ignore_ascii_case(target.base_repository))
+        {
+            return Err(delivery_refusal(
+                Stage::Verify,
+                "live pull request differs from the authenticated adoption target",
+            ));
+        }
+        Ok(AdoptedPullRequestObservation {
+            url: url.to_owned(),
+            head,
+        })
+    }
+
     pub(super) fn push(
         &self,
         writer: &WriterRequest,

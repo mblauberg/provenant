@@ -704,6 +704,8 @@ fn advance_gate<R: AttemptOwner, J: GraphJournal>(
         reason,
         node.on_fail.clone(),
         matches!(condition, GateCondition::Ci { .. }),
+        matches!(condition, GateCondition::Conflict { .. })
+            && ci::conflict_details_requested(plan, &node.id),
         plan.queue.is_some(),
     );
     if let Some(conflict) = checkpoint.nodes[node_index].conflict.as_mut() {
