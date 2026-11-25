@@ -530,6 +530,51 @@ fn recovery_returns_through_fresh_gates(
         })
 }
 
+// A generic bounded recovery round may retry its conflict gate without a
+// separate on-fail writer. The round's own publication must feed conflict,
+// then CI, then its terminal gate; the next round is owned by the loop.
+fn bounded_recovery_conflict(
+    gate: &PlannedNode,
+    publication_index: usize,
+    nodes: &[PlannedNode],
+    positions: &BTreeMap<String, usize>,
+) -> bool {
+    let Some(round) = gate.round.as_ref().filter(|round| round.retry_on) else {
+        return false;
+    };
+    let Some(owner) = positions.get(&round.loop_id).map(|index| &nodes[*index]) else {
+        return false;
+    };
+    let Some(spec) = owner.loop_body.as_ref() else {
+        return false;
+    };
+    let publication = &nodes[publication_index];
+    if spec.selected_publication.as_deref()
+        != publication.round.as_ref().map(|r| r.node_id.as_str())
+        || publication
+            .round
+            .as_ref()
+            .is_none_or(|r| r.loop_id != round.loop_id || r.round != round.round)
+        || publish_source_writer(nodes, positions, publication_index).is_none()
+    {
+        return false;
+    }
+    nodes.iter().any(|ci| {
+        matches!(&ci.condition, Some(GateCondition::Ci { .. }))
+            && ci
+                .round
+                .as_ref()
+                .is_some_and(|r| r.loop_id == round.loop_id && r.round == round.round)
+            && gate_targets_node(&ci.condition, &publication.id)
+            && ancestors(nodes, positions, &ci.id).contains(&positions[&gate.id])
+            && nodes.iter().any(|terminal| {
+                terminal.round.as_ref().is_some_and(|r| {
+                    r.loop_id == round.loop_id && r.round == round.round && r.until
+                }) && ancestors(nodes, positions, &terminal.id).contains(&positions[&ci.id])
+            })
+    })
+}
+
 /// Queue repairs must use their exact published head and retained worktree,
 /// then return through hygiene, a new publication, and gates for that head.
 /// Compound recovery targets are inspected after expansion.
@@ -584,9 +629,10 @@ pub(super) fn validate_conflict_recovery(
             // A bounded loop recheck has no repair edge of its own: a failed
             // conflict blocks the same-round CI outcome and activates retry.
             if is_conflict
-                && bounded_conflict_rechecks(nodes, positions)
-                    .iter()
-                    .any(|route| route.fresh_conflict == positions[&gate.id])
+                && (bounded_recovery_conflict(gate, published_index, nodes, positions)
+                    || bounded_conflict_rechecks(nodes, positions)
+                        .iter()
+                        .any(|route| route.fresh_conflict == positions[&gate.id]))
             {
                 continue;
             }
