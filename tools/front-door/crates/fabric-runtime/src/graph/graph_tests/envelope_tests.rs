@@ -152,6 +152,7 @@ fn filled_outputs(node: &PlannedNode) -> NodeOutputs {
         DISPOSITION_FINDINGS_BYTES
     };
     outputs.findings = findings(cap);
+    outputs.handoff = plans::agent(node).then(worst_handoff);
     if plans::writer(node) {
         outputs.warnings.push(worst(WARNING_BYTES));
     }

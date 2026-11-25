@@ -113,7 +113,7 @@ fn hygiene_writer_observation() -> AttemptObservation {
     let mut observation = terminal_with_result(
         AttemptOutcome::Succeeded,
         r#"```handoff
-{"schema_version":2,"status":"done","note":"Writer output is ready for hygiene","remaining":[],"decisions":[],"verify":[]}
+{"schema_version":2,"status":"done","note":"Writer output is ready for hygiene","remaining":[],"decisions":[],"verify":["Writer output was completed before hygiene"]}
 ```"#,
     );
     let AttemptObservation::Terminal {
@@ -159,6 +159,20 @@ fn hygiene_scheduler_runs_after_writer_and_publishes_its_typed_head() {
     assert_eq!(outputs.commit.as_deref(), Some("c".repeat(40).as_str()));
     assert_eq!(outputs.branch.as_deref(), Some("retained-branch"));
     assert!(outputs.hygiene.as_ref().unwrap().handoff.is_some());
+    let writer = &run.checkpoint.nodes[0];
+    assert!(writer.handoff.is_none(), "completed handoffs do not trigger continuation");
+    let writer_handoff = writer.outputs.as_ref().unwrap().handoff.as_ref().unwrap();
+    assert_eq!(
+        writer_handoff.status,
+        provenant_records::handoff::HandoffStatus::Done
+    );
+    assert_eq!(
+        serde_json::from_str::<provenant_records::handoff::Handoff>(
+            outputs.hygiene.as_ref().unwrap().handoff.as_deref().unwrap()
+        )
+        .unwrap(),
+        *writer_handoff
+    );
     let replay = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(replay.checkpoint, run.checkpoint);
     assert_eq!(owner.hygiene_calls, 1);
@@ -192,6 +206,17 @@ fn hygiene_error_park_replays_the_saved_transition_once() {
     );
     assert_eq!(park.item.as_deref(), Some("issue:3972"));
     assert_eq!(park.request_id, Some(request_id));
+    let writer_handoff = first.checkpoint.nodes[0]
+        .outputs
+        .as_ref()
+        .unwrap()
+        .handoff
+        .as_ref()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<provenant_records::handoff::Handoff>(&park.handoff).unwrap(),
+        *writer_handoff
+    );
     assert_eq!(owner.hygiene_calls, 1);
     assert_eq!(owner.park_calls.len(), 1);
     let replay = advance(&document, &mut owner, &mut journal).unwrap();
@@ -801,6 +826,24 @@ fn gate_reachability_handles_two_gates_and_deep_paths() {
     assert_eq!(
         validate_plan(&document).unwrap_err(),
         "node join: requires both gate outcomes"
+    );
+}
+
+#[test]
+fn ordinary_recovery_target_cannot_join_its_gate_success_prerequisite() {
+    let mut gate = gate_node(GateCondition::Budget {
+        extra: Default::default(),
+    });
+    gate.on_fail = Some("recovery".into());
+    let mut success = node("success", route("fixture"));
+    success.depends_on.push("gate".into());
+    let mut recovery = node("recovery", route("fixture"));
+    recovery.depends_on = vec!["gate".into(), "success".into()];
+
+    let document = graph(vec![gate, success, recovery]);
+    assert_eq!(
+        validate_plan(&document).unwrap_err(),
+        "node recovery: requires both gate outcomes"
     );
 }
 

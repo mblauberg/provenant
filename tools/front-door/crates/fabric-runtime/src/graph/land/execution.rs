@@ -88,6 +88,7 @@ fn outputs(record: &LandRecord) -> NodeOutputs {
         verdict_error: None,
         hygiene: None,
         publication: None,
+        handoff: None,
         schema_version: 2,
         decide_outcome: None,
         result: Some(ResultOutput {

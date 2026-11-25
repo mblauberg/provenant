@@ -264,6 +264,15 @@ pub(in crate::graph) fn validate_checkpoint<R: Error + 'static, J: Error + 'stat
                     .is_some_and(|outputs| outputs.schema_version != 2),
                 "output schema must be version 2",
             ),
+            (
+                progress.outputs.as_ref().is_some_and(|outputs| {
+                    outputs.handoff.as_ref().is_some_and(|handoff| {
+                        serde_json::to_vec(handoff)
+                            .map_or(true, |bytes| bytes.len() > plans::STORED_HANDOFF_BYTES)
+                    })
+                }),
+                "output handoff must fit the stored handoff byte cap",
+            ),
         ] {
             if invalid {
                 return Err(bad(invariant));
@@ -279,7 +288,7 @@ pub(in crate::graph) fn validate_checkpoint<R: Error + 'static, J: Error + 'stat
                         .context
                         .as_ref()
                         .and_then(|context| context.work_item.as_deref())
-                && park.handoff.len() <= 1024
+                && park.handoff.len() <= plans::STORED_HANDOFF_BYTES
                 && park.evidence.len() <= 8
                 && park.evidence.iter().all(|entry| entry.len() <= 512)
                 && park
@@ -799,6 +808,13 @@ pub(in crate::graph) fn validate_checkpoint<R: Error + 'static, J: Error + 'stat
                 && intent.is_none_or(|intent| {
                     !intent.operation_id.is_empty()
                         && intent.input_head.parse::<provenant_core::GitOid>().is_ok()
+                        && intent
+                            .handoff
+                            .as_deref()
+                            .is_none_or(|handoff| valid_hygiene_handoff(handoff))
+                })
+                && outcome.is_none_or(|outcome| {
+                    outcome.handoff.as_deref().is_none_or(valid_hygiene_handoff)
                 })
                 && output == outcome
                 && match progress.state {
@@ -1075,6 +1091,11 @@ fn retryable_hygiene_head_matches(
         .as_deref()
         .is_some_and(|head| head.parse::<provenant_core::GitOid>().is_ok())
         && outputs.commit == outcome.after_head
+}
+
+fn valid_hygiene_handoff(handoff: &str) -> bool {
+    handoff.len() <= plans::STORED_HANDOFF_BYTES
+        && serde_json::from_str::<provenant_records::handoff::Handoff>(handoff).is_ok()
 }
 
 /// A planner settled by its static fallback: it recorded the reason and

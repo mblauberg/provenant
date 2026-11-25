@@ -110,10 +110,12 @@ the same bounded, advisory admission policy. `max_parallel` is the active-item
 concurrency target, not just a launch-rate limit; a bounded wait warns before
 advisory overflow and records that overflow.
 Admission of CI work uses `admit` class `ci` across queues in the same host admission domain, from publication through a conclusive CI observation; persist
-the lease identity and reconcile it on restart. Waiting items retain their place
+the lease identity and reconcile it on restart. A zero CI slot cap is uncapped
+for that request, but its lease remains counted against capped requests. Dynamic
+slot locks are created under the CI domain lock and persisted before use. Waiting items retain their place
 and show why they wait. `src/tick.rs` advances due graphs and retries pending
 observations; `src/fabric/graph_status.rs` and the existing inbox show item,
-phase, head, round, rung, active lane, last event, source, wait and parked handoff as the board.
+phase, head, round, rung, active lane, last event, source, wait and parked handoff as the board. The checkpoint retains the bounded full writer handoff, including completed reports; the inbox request may show a truncated summary.
 
 Controls act on the exact graph and recorded revision with operation-idempotent
 receipts. `fix` is a chair intent mapped to `steer` for a live attempt or

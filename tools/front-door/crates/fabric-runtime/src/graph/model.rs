@@ -1646,6 +1646,9 @@ pub struct NodeOutputs {
     pub hygiene: Option<provenant_records::graph::HygieneOutcome>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publication: Option<DeliveryPublication>,
+    /// Bounded full report handoff; continuation still uses `NodeProgress.handoff`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff: Option<provenant_records::handoff::Handoff>,
     pub schema_version: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decide_outcome: Option<DecideOutcome>,

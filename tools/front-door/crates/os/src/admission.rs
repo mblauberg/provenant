@@ -867,10 +867,12 @@ impl AdmissionSlots {
         if selected.is_none() && preferred.is_none() {
             let index = indices.last().map_or(0, |last| last.saturating_add(1));
             let name = slot_name(index);
-            self.dir
-                .atomic_write(&name, ".ci-slot-", b"", PublishMode::NoReplace)?
-                .require_durable()?;
-            let guard = self.dir.try_lock_existing(&name, LockMode::Exclusive)?;
+            // Lock names are immutable through the general filesystem API.
+            // Create the next slot through the owner-lock API, which verifies
+            // the inode and acquires it while the CI domain lock is held.
+            // Sync the directory so the slot survives a host restart.
+            let guard = self.dir.try_lock(&name, LockMode::Exclusive)?;
+            self.dir.sync()?;
             selected = Some((index, guard));
         }
         let Some((index, guard)) = selected else {

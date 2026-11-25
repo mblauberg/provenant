@@ -53,7 +53,7 @@ pub(super) fn park_delivery_transition<R: AttemptOwner, J: GraphJournal>(
         .context
         .as_ref()
         .and_then(|context| context.work_item.as_deref());
-    let bounded_handoff = delivery_text(handoff, 1024);
+    let stored_handoff = delivery_text(handoff, plans::STORED_HANDOFF_BYTES);
     let bounded_evidence: Vec<String> = evidence
         .iter()
         .take(8)
@@ -67,7 +67,7 @@ pub(super) fn park_delivery_transition<R: AttemptOwner, J: GraphJournal>(
         "attempt_key": attempt_key,
         "attempt_ref": attempt_ref,
         "head": head,
-        "handoff": bounded_handoff,
+        "handoff": stored_handoff,
         "evidence": bounded_evidence,
     });
     let operation_id =
@@ -96,7 +96,7 @@ pub(super) fn park_delivery_transition<R: AttemptOwner, J: GraphJournal>(
             attempt_key: attempt_key.cloned(),
             attempt_ref: attempt_ref.map(str::to_owned),
             reason,
-            handoff: bounded_handoff.clone(),
+            handoff: stored_handoff.clone(),
             head: head.map(str::to_owned),
             evidence: bounded_evidence.clone(),
             request_id: None,
@@ -117,7 +117,7 @@ pub(super) fn park_delivery_transition<R: AttemptOwner, J: GraphJournal>(
             repository: None,
             session: document.decision_session.as_deref(),
             reason,
-            handoff: &bounded_handoff,
+            handoff: &stored_handoff,
             head,
             evidence: &bounded_evidence,
         })
@@ -238,9 +238,10 @@ pub(super) fn advance_hygiene<R: AttemptOwner, J: GraphJournal>(
     let input_head = input_head.to_owned();
     let expected_head = expected_head.to_owned();
     let source_branch = source_outputs.branch.clone();
-    let handoff = source_progress
+    let handoff = source_outputs
         .handoff
         .as_ref()
+        .or(source_progress.handoff.as_ref())
         .map(serde_json::to_string)
         .transpose()
         .map_err(|_| GraphError::BadCheckpoint {

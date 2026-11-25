@@ -1,4 +1,8 @@
 use super::*;
+
+fn publication_branch() -> String {
+    format!("provenant/graph/{}", "a".repeat(64))
+}
 use crate::config::{LandChoice, LandPolicy};
 use serde_json::json;
 use std::collections::VecDeque;
@@ -212,7 +216,7 @@ impl AttemptOwner for Owner {
         self.publication_heads
             .push(request.expected_head.to_owned());
         Ok(Some(DeliveryPublication {
-            branch: "provenant/graph/g-land".into(),
+            branch: publication_branch(),
             head: request.expected_head.to_owned(),
             pull_request: "https://example.invalid/pr/7".into(),
         }))
@@ -372,6 +376,11 @@ impl AttemptOwner for Owner {
                         || key.node_id == "delivery--review--synthesis")
                 {
                     "```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"disposition\":\"accepted\",\"reason\":\"confirmed\"}]}\n```\nVERDICT: FAIL"
+                } else if self.repair_fixture
+                    && key.node_id.starts_with("cycles--r")
+                    && key.node_id.ends_with("--synthesis")
+                {
+                    "```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"a.rs\",\"line\":1,\"summary\":\"defect\",\"status\":\"fixed\",\"evidence\":\"counterexample\",\"proposed_fix\":\"repair\",\"trigger\":{\"sequence\":\"Default invocation\",\"reach\":\"default_path\",\"observed\":true},\"disposition\":\"rejected\",\"reason\":\"The accepted repair removes the reported defect from the reviewed code\",\"triage\":{\"decision\":\"confirmed\",\"reason\":\"The original defect was real and the checked repair closes it\",\"worth_fixing\":false,\"root_cause\":\"input handling\",\"blocking_class\":\"none\",\"shared_flaw\":false},\"design_defect\":false}]}\n```\nVERDICT: PASS"
                 } else if self.repair_fixture {
                     "```findings\n{\"schema_version\":1,\"risk_tier\":\"substantial\",\"findings\":[]}\n```\nVERDICT: PASS"
                 } else {
@@ -635,6 +644,9 @@ fn document(tier: &str, session: Option<&str>) -> GraphDocument {
 }
 
 fn queue_publish_document(tier: &str) -> GraphDocument {
+    // The recovery loop is the join for the clean publication path and its
+    // retry path. Landing waits on that settled result, not the entry verdict,
+    // which may fail to activate the loop.
     let recovery_body = json!([
        {"id":"fix", "access":"worktree_write", "worktree":"/wt/feature",
         "prompt":"rebase the published branch", "route":{"alias":"senior"},
@@ -694,7 +706,7 @@ fn queue_publish_document(tier: &str) -> GraphDocument {
              "depends_on":["review"], "on_fail":"rebase", "inputs":[{"node":"review","outputs":["verdict"]}],
              "condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}},
             {"id":"land", "kind":"land", "access":"read_only",
-             "depends_on":["accepted","rebase"], "land":{"node":"rebase","tier":tier}}
+             "depends_on":["rebase"], "land":{"node":"rebase","tier":tier}}
         ]
     }))
     .unwrap();
@@ -778,7 +790,7 @@ fn queue_publication_without_writer_delivery_supports_head_review_and_landing() 
         .publication
         .as_ref()
         .unwrap();
-    assert_eq!(receipt.branch, "provenant/graph/g-land");
+    assert_eq!(receipt.branch, publication_branch());
     assert_eq!(receipt.head, REPAIR_HEAD);
     let conflict = node(&checkpoint, "conflict").conflict.as_ref().unwrap();
     assert_eq!(conflict.state, ConflictState::Clear);
@@ -1035,10 +1047,11 @@ fn queue_conflict_recovery_requires_the_published_head_and_retained_worktree() {
         .find(|node| node.id == "conflict")
         .unwrap()
         .on_fail = None;
-    assert!(
-        validate_plan(&missing_recovery)
-            .err()
-            .is_some_and(|error| error.contains("queue repair"))
+    // Loop admission catches the missing initial conflict entry before the
+    // later queue-repair relation check runs.
+    assert_eq!(
+        validate_plan(&missing_recovery).unwrap_err(),
+        "loop rebase initial_publication must be its directly bound publication seed and have an entry failure gate"
     );
 }
 

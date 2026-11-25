@@ -953,6 +953,7 @@ fn decision_outputs(ask_id: &str, outcome: DecideOutcome) -> NodeOutputs {
         verdict_error: None,
         hygiene: None,
         publication: None,
+        handoff: None,
         schema_version: 2,
         decide_outcome: Some(outcome.clone()),
         result: Some(ResultOutput {

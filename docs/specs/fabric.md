@@ -297,7 +297,8 @@ own `when` condition holds; a composite skipped by its own condition keeps that
 state whatever its members. An explicit `GraphPatch` skip of a composite stays
 authoritative until a later replacement or retry supersedes it, and a patch that
 replaces or skips a member recomputes the affected active composite boundaries in
-the same checkpoint.
+the same checkpoint. A node whose resolved `when` is false remains visible as
+skipped and needs no launch route; active agent nodes still require one.
 - Why: recovery must validate a checkpoint against the topology it records.
 - Owner: `crates/fabric-runtime/src/graph/composites.rs`,
   `crates/fabric-runtime/src/graph/patch.rs`

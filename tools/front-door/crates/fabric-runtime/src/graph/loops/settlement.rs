@@ -290,10 +290,17 @@ pub(in crate::graph) fn settle<R: AttemptOwner, J: GraphJournal>(
             let handoff = source
                 .and_then(|progress| {
                     progress
-                        .handoff
+                        .outputs
                         .as_ref()
-                        .map(|handoff| handoff.note.clone())
+                        .and_then(|outputs| outputs.handoff.as_ref())
+                        .or(progress.handoff.as_ref())
                 })
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|_| GraphError::BadCheckpoint {
+                    node: node.id.clone(),
+                    invariant: "loop exhaustion handoff must be serializable",
+                })?
                 .or_else(|| {
                     source
                         .and_then(|progress| progress.delivery_hygiene.as_ref())

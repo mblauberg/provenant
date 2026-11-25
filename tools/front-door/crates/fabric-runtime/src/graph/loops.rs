@@ -880,10 +880,23 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
             }
             // A node source outside the body is checked against the expanded
             // graph; the isolated body has only its local namespace.
-            if let Some(SourceBinding::Node { node: source }) = &child.source
-                && (source.starts_with("previous.")
-                    || !spec.body.iter().any(|node| &node.id == source))
-            {
+            let external_node_source = match &child.source {
+                Some(SourceBinding::Node { node: source })
+                    if source.starts_with("previous.")
+                        || !spec.body.iter().any(|node| &node.id == source) =>
+                {
+                    Some((source.clone(), source.starts_with("previous.")))
+                }
+                _ => None,
+            };
+            if let Some((source, previous_round)) = external_node_source {
+                if !previous_round {
+                    // Composite expansion adds a direct dependency for every
+                    // node source. The isolated loop-body plan cannot see that
+                    // outer node, so remove only this source-derived edge here;
+                    // loop expansion restores it before validating the graph.
+                    child.depends_on.retain(|parent| parent != &source);
+                }
                 child.source = None;
             }
             // External CI subjects are checked against the expanded graph.

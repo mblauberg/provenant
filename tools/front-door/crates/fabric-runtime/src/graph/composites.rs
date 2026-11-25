@@ -592,6 +592,7 @@ fn outputs(
         verdict_error: None,
         hygiene: None,
         publication: None,
+        handoff: None,
         findings: Vec::new(),
         findings_available: None,
         branch: None,

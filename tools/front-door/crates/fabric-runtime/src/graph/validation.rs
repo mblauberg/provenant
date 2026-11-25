@@ -352,6 +352,45 @@ fn node_plan_error(node: &GraphNode, reason: impl std::fmt::Display) -> Admissio
     AdmissionError::Plan(format!("node {}: {reason}", node.id))
 }
 
+fn retry_recovery_scope(
+    target: &str,
+    nodes: &[PlannedNode],
+    positions: &std::collections::BTreeMap<String, usize>,
+) -> Option<std::collections::BTreeSet<usize>> {
+    let target_index = *positions.get(target)?;
+    let owner = &nodes[target_index];
+    if !owner
+        .loop_body
+        .as_ref()
+        .is_some_and(|spec| !spec.retry_on.is_empty())
+    {
+        return None;
+    }
+
+    let mut scope = std::collections::BTreeSet::new();
+    let mut pending = vec![target_index];
+    while let Some(index) = pending.pop() {
+        if !scope.insert(index) {
+            continue;
+        }
+        let member = &nodes[index];
+        for child in &member.composite_members {
+            if let Some(child_index) = positions.get(child) {
+                pending.push(*child_index);
+            }
+        }
+        if member.loop_body.is_some() {
+            pending.extend(nodes.iter().enumerate().filter_map(|(child, node)| {
+                node.round
+                    .as_ref()
+                    .is_some_and(|round| round.loop_id == member.id)
+                    .then_some(child)
+            }));
+        }
+    }
+    Some(scope)
+}
+
 fn settled_retry_hygiene_source(
     node: &GraphNode,
     source_id: &str,
@@ -847,6 +886,7 @@ fn validate_flat_plan_inner(
             {
                 Vec::new()
             }
+            (None, None) if !when::holds(&node.when) => Vec::new(),
             (Some(route), None) => vec![route.clone()],
             (None, Some(routes)) if !routes.is_empty() => routes.clone(),
             (Some(_), Some(_)) => {
@@ -1111,6 +1151,7 @@ fn validate_flat_plan_inner(
         let Some(target) = &node.on_fail else {
             continue;
         };
+        let recovery_scope = retry_recovery_scope(target, &nodes, &positions);
         let mut required = vec![None; nodes.len()];
         let mut pending: std::collections::VecDeque<_> = children[gate]
             .iter()
@@ -1122,11 +1163,27 @@ fn validate_flat_plan_inner(
                         && !nodes[*child]
                             .round
                             .as_ref()
-                            .is_some_and(|r| &r.loop_id == target),
+                            .is_some_and(|round| &round.loop_id == target)
+                        && !recovery_scope
+                            .as_ref()
+                            .is_some_and(|scope| scope.contains(child)),
                 )
             })
             .collect();
+        if let Some(scope) = &recovery_scope {
+            pending.extend(scope.iter().map(|index| (*index, false)));
+        }
         while let Some((index, outcome)) = pending.pop_front() {
+            // Retry recovery owners collect several gate outcomes. Their
+            // round members are active only through the failure edge, even if
+            // an outer success dependency also reaches those nodes directly.
+            if outcome
+                && recovery_scope
+                    .as_ref()
+                    .is_some_and(|scope| scope.contains(&index))
+            {
+                continue;
+            }
             if let Some(prior) = required[index] {
                 if prior != outcome {
                     return Err(AdmissionError::Plan(format!(
@@ -1141,7 +1198,15 @@ fn validate_flat_plan_inner(
                 children[index]
                     .iter()
                     .filter(|child| nodes[**child].depends_on.contains(&nodes[index].id))
-                    .map(|child| (*child, outcome)),
+                    .map(|child| {
+                        (
+                            *child,
+                            outcome
+                                && !recovery_scope
+                                    .as_ref()
+                                    .is_some_and(|scope| scope.contains(child)),
+                        )
+                    }),
             );
         }
     }

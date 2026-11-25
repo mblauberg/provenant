@@ -2,6 +2,10 @@ use super::*;
 use std::collections::VecDeque;
 use std::convert::Infallible;
 
+fn publication_branch() -> String {
+    format!("provenant/graph/{}", "a".repeat(64))
+}
+
 #[derive(Default)]
 struct Journal(Option<GraphCheckpoint>);
 impl GraphJournal for Journal {
@@ -138,7 +142,7 @@ impl AttemptOwner for Owner {
         request: PublicationRequest<'_>,
     ) -> Result<Option<DeliveryPublication>, Self::Error> {
         Ok(Some(DeliveryPublication {
-            branch: format!("provenant/graph/{}", request.graph_id),
+            branch: publication_branch(),
             head: request.expected_head.to_owned(),
             pull_request: "https://example.invalid/pr/ci".into(),
         }))
@@ -1275,10 +1279,10 @@ fn queue_conflict_recheck_matches_a_bounded_round_and_reactivates_composite_reba
     let publication = &mut checkpoint.nodes[positions["publish"]];
     publication.state = NodeState::Succeeded;
     publication.outputs = Some(NodeOutputs {
-        branch: Some("provenant/graph/queue-ci".into()),
+        branch: Some(publication_branch()),
         commit: Some(head.clone()),
         publication: Some(DeliveryPublication {
-            branch: "provenant/graph/queue-ci".into(),
+            branch: publication_branch(),
             head: head.clone(),
             pull_request: "https://example.invalid/pr/ci".into(),
         }),
@@ -1419,10 +1423,10 @@ fn queue_conflict_recheck_replays_into_a_later_recovery_round() {
     let head = "a".repeat(40);
     checkpoint.nodes[positions["publish"]].state = NodeState::Succeeded;
     checkpoint.nodes[positions["publish"]].outputs = Some(NodeOutputs {
-        branch: Some("provenant/graph/queue-ci".into()),
+        branch: Some(publication_branch()),
         commit: Some(head.clone()),
         publication: Some(DeliveryPublication {
-            branch: "provenant/graph/queue-ci".into(),
+            branch: publication_branch(),
             head: head.clone(),
             pull_request: "https://example.invalid/pr/ci".into(),
         }),
@@ -1621,6 +1625,7 @@ fn queue_ci_without_a_published_head_does_not_reach_or_settle_the_gate() {
     let mut owner = Owner {
         branch: Some("delivered/topic".into()),
         commit: None,
+        integration_base: Some("f".repeat(40).parse().unwrap()),
         ..Default::default()
     };
 
@@ -1769,6 +1774,7 @@ fn queue_conflict_without_a_published_head_waits_instead_of_rebasing() {
     let mut owner = Owner {
         branch: Some("delivered/topic".into()),
         commit: None,
+        integration_base: Some("f".repeat(40).parse().unwrap()),
         conflict_observations: VecDeque::from([ConflictObservation {
             state: ConflictState::Conflicting,
             head_sha: Some("a".repeat(40)),

@@ -168,6 +168,31 @@ fn flat_plan_returns_typed_cause_with_original_text() {
 }
 
 #[test]
+fn skipped_conditional_task_does_not_need_a_launch_route() {
+    let graph = |actual: &str| {
+        document(
+            2,
+            json!([{
+                "id":"task",
+                "access":"read_only",
+                "prompt":"Run the optional delivery stage",
+                "role":"delivery-hygiene",
+                "when":[{"name":"delivery_execution_wired","expected":"true","actual":actual}]
+            }]),
+        )
+    };
+
+    assert!(graph("false").admit(&Default::default()).is_ok());
+    assert_eq!(
+        graph("true")
+            .admit(&Default::default())
+            .unwrap_err()
+            .to_string(),
+        "node task: route list is empty"
+    );
+}
+
+#[test]
 fn writer_plan_refusal_names_the_node_and_missing_worktree() {
     let graph = document(
         1,

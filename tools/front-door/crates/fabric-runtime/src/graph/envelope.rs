@@ -310,12 +310,12 @@ fn node_bound(
         (node.kind == Some(NodeKind::Hygiene)).then(|| DeliveryHygieneProgress {
             operation_id: "x".repeat(256),
             input_head: "1".repeat(64),
-            handoff: Some("x".repeat(OUTPUT_FIELD_BYTES)),
+            handoff: Some("\\".repeat(plans::STORED_HANDOFF_BYTES)),
             outcome: Some(provenant_records::graph::HygieneOutcome {
                 kind: provenant_records::graph::HygieneOutcomeKind::Error,
                 before_head: Some("2".repeat(64)),
                 after_head: Some("3".repeat(64)),
-                handoff: Some("x".repeat(OUTPUT_FIELD_BYTES)),
+                handoff: Some("\\".repeat(plans::STORED_HANDOFF_BYTES)),
             }),
         });
     let publication_writer = (node.kind == Some(NodeKind::Publish))
@@ -370,7 +370,7 @@ fn node_bound(
             attempt_key: Some(attempt_key),
             attempt_ref: Some(format!("{}/{}", "x".repeat(HOST_ID_BYTES), "x".repeat(32))),
             reason: provenant_records::graph::ParkReason::LoopExhausted,
-            handoff: "x".repeat(OUTPUT_FIELD_BYTES),
+            handoff: "\\".repeat(plans::STORED_HANDOFF_BYTES),
             head: Some("1".repeat(64)),
             evidence: vec!["x".repeat(512); 8],
             request_id: Some(provenant_core::HumanRequestId::from_bytes([u8::MAX; 16])),
@@ -522,7 +522,7 @@ fn node_bound(
                     kind: provenant_records::graph::HygieneOutcomeKind::UncommittedEdits,
                     before_head: Some("2".repeat(64)),
                     after_head: Some("3".repeat(64)),
-                    handoff: Some("x".repeat(OUTPUT_FIELD_BYTES)),
+                    handoff: Some("\\".repeat(plans::STORED_HANDOFF_BYTES)),
                 }),
                 branch: Some("x".repeat(OUTPUT_FIELD_BYTES)),
                 commit: Some("3".repeat(64)),
@@ -558,6 +558,7 @@ fn node_bound(
                 verdict_error: Some(String::new()),
                 hygiene: None,
                 publication: None,
+                handoff: None,
                 schema_version: 2,
                 decide_outcome: None,
                 result: Some(ResultOutput {
@@ -653,6 +654,9 @@ fn node_bound(
     }
     if plans::writer(node) {
         bytes += plans::STORED_HANDOFF_BYTES + 16; // the record and its key
+    }
+    if plans::agent(node) {
+        bytes += plans::STORED_HANDOFF_BYTES + 16; // the full report handoff and its key
     }
     if template::review_node(node) {
         bytes += plans::STORED_DECISION_BYTES + 16;

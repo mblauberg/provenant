@@ -595,8 +595,19 @@ fn advance_gate<R: AttemptOwner, J: GraphJournal>(
                         .cloned()
                 });
                 let handoff = writer
-                    .and_then(|progress| progress.handoff.as_ref())
-                    .map(|handoff| handoff.note.clone())
+                    .and_then(|progress| {
+                        progress
+                            .outputs
+                            .as_ref()
+                            .and_then(|outputs| outputs.handoff.as_ref())
+                            .or(progress.handoff.as_ref())
+                    })
+                    .map(serde_json::to_string)
+                    .transpose()
+                    .map_err(|_| GraphError::BadCheckpoint {
+                        node: node.id.clone(),
+                        invariant: "CI timeout handoff must be serializable",
+                    })?
                     .unwrap_or_else(|| {
                         "required CI did not settle before its bounded timeout".into()
                     });
@@ -793,8 +804,19 @@ fn advance_gate<R: AttemptOwner, J: GraphJournal>(
                 .and_then(|attempt| attempt.attempt_ref.clone())
         });
         let handoff = repair_progress
-            .and_then(|progress| progress.handoff.as_ref())
-            .map(|handoff| handoff.note.clone())
+            .and_then(|progress| {
+                progress
+                    .outputs
+                    .as_ref()
+                    .and_then(|outputs| outputs.handoff.as_ref())
+                    .or(progress.handoff.as_ref())
+            })
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|_| GraphError::BadCheckpoint {
+                node: node.id.clone(),
+                invariant: "delivery ladder handoff must be serializable",
+            })?
             .unwrap_or_else(|| "delivery repair ladder exhausted".into());
         let cause = escalation_cause.ok_or_else(|| GraphError::BadCheckpoint {
             node: node.id.clone(),
@@ -1369,9 +1391,16 @@ pub(super) fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
                                 })?;
                             let message = preparation_exhausted_message(message);
                             let handoff = checkpoint.nodes[node_index]
-                                .handoff
+                                .outputs
                                 .as_ref()
-                                .and_then(|handoff| serde_json::to_string(handoff).ok())
+                                .and_then(|outputs| outputs.handoff.as_ref())
+                                .or(checkpoint.nodes[node_index].handoff.as_ref())
+                                .map(serde_json::to_string)
+                                .transpose()
+                                .map_err(|_| GraphError::BadCheckpoint {
+                                    node: node.id.clone(),
+                                    invariant: "preparation park handoff must be serializable",
+                                })?
                                 .unwrap_or_else(|| message.clone());
                             let head = checkpoint.nodes[node_index]
                                 .outputs
@@ -1602,9 +1631,16 @@ pub(super) fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
                         .filter(|attempt| attempt.key == key)
                         .and_then(|attempt| attempt.attempt_ref.clone());
                     let handoff = progress
-                        .handoff
+                        .outputs
                         .as_ref()
-                        .map(|handoff| handoff.note.clone())
+                        .and_then(|outputs| outputs.handoff.as_ref())
+                        .or(progress.handoff.as_ref())
+                        .map(serde_json::to_string)
+                        .transpose()
+                        .map_err(|_| GraphError::BadCheckpoint {
+                            node: node.id.clone(),
+                            invariant: "review evidence handoff must be serializable",
+                        })?
                         .unwrap_or_else(|| {
                             "delivery review returned malformed or incomplete evidence".into()
                         });

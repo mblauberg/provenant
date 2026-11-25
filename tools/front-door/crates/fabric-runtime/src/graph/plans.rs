@@ -440,12 +440,29 @@ pub(super) fn handoff(
     let Some(handoff) = handoff.filter(provenant_records::handoff::Handoff::unfinished) else {
         return Ok(None);
     };
-    if serde_json::to_vec(&handoff).map_or(usize::MAX, |bytes| bytes.len()) > STORED_HANDOFF_BYTES {
+    validate_stored_handoff(&handoff)?;
+    Ok(Some(handoff))
+}
+
+/// A completed report stays available to downstream delivery and park records.
+pub(super) fn reported_handoff(
+    capture: &crate::result_capture::CapturedResult,
+) -> Result<Option<provenant_records::handoff::Handoff>, String> {
+    let handoff = capture.handoff.clone().map_err(|error| error.to_string())?;
+    let Some(handoff) = handoff else {
+        return Ok(None);
+    };
+    validate_stored_handoff(&handoff)?;
+    Ok(Some(handoff))
+}
+
+fn validate_stored_handoff(handoff: &provenant_records::handoff::Handoff) -> Result<(), String> {
+    if serde_json::to_vec(handoff).map_or(usize::MAX, |bytes| bytes.len()) > STORED_HANDOFF_BYTES {
         return Err(format!(
             "handoff block has too many escaped characters to store in {STORED_HANDOFF_BYTES} bytes"
         ));
     }
-    Ok(Some(handoff))
+    Ok(())
 }
 
 pub(super) fn agent(node: &PlannedNode) -> bool {
