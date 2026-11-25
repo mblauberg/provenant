@@ -648,30 +648,54 @@ struct GcCandidateProgress {
     deferred: usize,
     /// Best-effort bytes reclaimed from collected candidates.
     bytes: u64,
-    /// Bytes still retained by deferred candidates.
-    deferred_bytes: u64,
+    /// Retained bytes are unknown when any deferred tree was not fully measured.
+    deferred_bytes: Option<u64>,
 }
 
 fn candidate_progress(state: &provenant_run::ProviderStateGc) -> GcCandidateProgress {
-    let bytes = state
-        .attempt_tmp
-        .iter()
-        .map(|entry| entry.bytes)
-        .fold(0_u64, u64::saturating_add);
-    let deferred_bytes = state
-        .partial_tmp
-        .iter()
-        .map(|entry| entry.bytes)
-        .fold(0_u64, u64::saturating_add);
+    let bytes = state.temporary_bytes();
     let collected = state.attempt_tmp.len();
-    let deferred = state.partial_tmp.len() + state.kept.len();
+    let deferred = state.scratch_deferred.len();
     GcCandidateProgress {
         decided: collected.saturating_add(deferred),
         collected,
         deferred,
         bytes,
-        deferred_bytes,
+        deferred_bytes: state
+            .scratch_deferred
+            .iter()
+            .try_fold(0_u64, |total, entry| {
+                entry.bytes.map(|bytes| total.saturating_add(bytes))
+            }),
     }
+}
+
+fn candidate_progress_line(data: &GcData) -> String {
+    let Some(progress) = &data.candidate_progress else {
+        return "settled candidate progress: not measured (attempt scratch class did not run)\n"
+            .into();
+    };
+    let retained = progress
+        .deferred_bytes
+        .map_or_else(|| "unknown".into(), |bytes| format!("{bytes} bytes"));
+    format!(
+        "{} settled candidate(s) decided: {} {} ({} bytes {}), {} deferred ({} retained)\n",
+        progress.decided,
+        progress.collected,
+        if data.report.dry_run {
+            "would collect"
+        } else {
+            "collected"
+        },
+        progress.bytes,
+        if data.report.dry_run {
+            "reclaimable"
+        } else {
+            "reclaimed"
+        },
+        progress.deferred,
+        retained
+    )
 }
 
 #[derive(Serialize, Default)]
@@ -711,7 +735,7 @@ struct GcData {
     classes_not_run: Vec<provenant_config::RetentionKind>,
     /// Settled-scratch candidates decided, collected and deferred this pass.
     #[serde(default)]
-    candidate_progress: GcCandidateProgress,
+    candidate_progress: Option<GcCandidateProgress>,
     #[serde(skip)]
     retention_observations: Vec<provenant_config::RetentionBytes>,
     discard_archives: worktrees::ArchiveReport,
@@ -990,14 +1014,13 @@ fn gc_uncollected(data: &GcData) -> Vec<crate::gc_support::UncollectedItem> {
         });
     }
     for issue in &data.provider_state.kept {
-        // Scratch that remains after a partial collection carries the bytes the
-        // census did measure for that directory; a lock-held scratch has none.
+        // Only a separate retained-tree observation can describe bytes still here.
         let bytes = data
             .provider_state
-            .partial_tmp
+            .scratch_deferred
             .iter()
             .find(|entry| entry.path == issue.path)
-            .map(|entry| entry.bytes);
+            .and_then(|entry| entry.bytes);
         rows.push(UncollectedItem {
             path: issue.path.clone(),
             bytes,
@@ -1252,15 +1275,7 @@ fn gc_compact_summary(data: &GcData, full: bool) -> String {
         data.free_floor_bytes,
         data.free_floor_source
     );
-    let progress = &data.candidate_progress;
-    summary.push_str(&format!(
-        "{} settled candidate(s) decided: {} collected ({} bytes), {} deferred ({} bytes)\n",
-        progress.decided,
-        progress.collected,
-        progress.bytes,
-        progress.deferred,
-        progress.deferred_bytes
-    ));
+    summary.push_str(&candidate_progress_line(data));
     for line in gc_uncollected_aggregate_lines(data) {
         summary.push_str(&line);
         summary.push('\n');
@@ -1350,15 +1365,7 @@ fn gc_data_summary(data: &GcData) -> String {
         .sum();
     human.push_str(&format!("{trees} merged worktree(s), {outputs} output directory(s), {} attempt tmp directory(s), {} capture(s)\n",
         data.provider_state.attempt_tmp.len(), data.provider_state.attempt_logs.len()));
-    let progress = &data.candidate_progress;
-    human.push_str(&format!(
-        "{} settled candidate(s) decided: {} collected ({} bytes), {} deferred ({} bytes)\n",
-        progress.decided,
-        progress.collected,
-        progress.bytes,
-        progress.deferred,
-        progress.deferred_bytes
-    ));
+    human.push_str(&candidate_progress_line(data));
     human.push_str(&format!(
         "{} import pin(s) {}\n",
         data.import_pins,
@@ -1730,6 +1737,7 @@ enum GcOutput<'a> {
     },
     Summary {
         dry_run: bool,
+        candidate_progress: &'a Option<GcCandidateProgress>,
         retention_bytes: Vec<provenant_config::RetentionBytes>,
         removal_records: Vec<RemovalRecord>,
         removed: usize,
@@ -1817,6 +1825,7 @@ fn gc_result_data(data: &GcData, detailed: bool) -> GcOutput<'_> {
     }
     GcOutput::Summary {
         dry_run: data.report.dry_run,
+        candidate_progress: &data.candidate_progress,
         retention_bytes: gc_retention_bytes(data),
         removal_records: gc_removal_records(data),
         removed: data.report.removed.len(),
@@ -1932,14 +1941,14 @@ impl DwellerCensus {
         roots: &[PathBuf],
         cancel: &CancelToken,
     ) -> worktrees::HeldReport {
-        if roots.is_empty() {
-            return worktrees::HeldReport::default();
-        }
         if cancel.is_cancelled() {
             return worktrees::HeldReport {
                 incomplete: true,
                 ..worktrees::HeldReport::default()
             };
+        }
+        if roots.is_empty() {
+            return worktrees::HeldReport::default();
         }
         let clock = SystemClock::new();
         let started = clock.mono_now().as_micros();
@@ -3298,7 +3307,6 @@ fn gc(
         }
     }
     adapters.data.sweep_stopped = stopped;
-    adapters.data.candidate_progress = candidate_progress(&adapters.data.provider_state);
     // Advisory dweller census, deliberately after the collection classes: a
     // large settled store can no longer spend the sweep budget before any
     // candidate is decided. One bounded observation covers every root in the
@@ -4343,6 +4351,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
         if let Some(candidate) = report.interrupted_at.clone() {
             self.stop_at(None, Some(candidate), report.continuation.clone())?;
         }
+        self.data.candidate_progress = Some(candidate_progress(&report));
         self.data
             .provider_state
             .attempt_tmp
@@ -4351,6 +4360,10 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
             .provider_state
             .partial_tmp
             .append(&mut report.partial_tmp);
+        self.data
+            .provider_state
+            .scratch_deferred
+            .append(&mut report.scratch_deferred);
         self.data.provider_state.kept.append(&mut report.kept);
         self.data.provider_state.errors.append(&mut report.errors);
         Ok(())
@@ -4985,9 +4998,19 @@ mod gc_preview_tests {
             path: PathBuf::from("/attempts/2/tmp"),
             bytes: 1024,
         });
+        state.scratch_deferred.extend([
+            provenant_run::DeferredScratch {
+                path: PathBuf::from("/attempts/2/tmp"),
+                bytes: Some(512),
+            },
+            provenant_run::DeferredScratch {
+                path: PathBuf::from("/attempts/undecided/tmp"),
+                bytes: None,
+            },
+        ]);
         state.kept.push(provenant_run::ProviderStateIssue {
-            path: PathBuf::from("/attempts/undecided/tmp"),
-            reason: "custody undecided".into(),
+            path: PathBuf::from("/unrelated/provider-state"),
+            reason: "unrelated".into(),
         });
         let progress = candidate_progress(&state);
         assert_eq!(progress.decided, 4);
@@ -4996,8 +5019,18 @@ mod gc_preview_tests {
             progress.deferred, 2,
             "undecided candidates wait for the cursor"
         );
-        assert_eq!(progress.bytes, 12_288);
-        assert_eq!(progress.deferred_bytes, 1024);
+        assert_eq!(progress.bytes, 13_312);
+        assert_eq!(progress.deferred_bytes, None);
+        let _ = state.scratch_deferred.pop();
+        assert_eq!(candidate_progress(&state).deferred_bytes, Some(512));
+        assert!(DwellerCensus::observe(&workers, &[], &expired).incomplete);
+        let mut data = GcData::default();
+        assert!(candidate_progress_line(&data).contains("not measured"));
+        data.report.dry_run = true;
+        data.candidate_progress = Some(progress);
+        let line = candidate_progress_line(&data);
+        assert!(line.contains("would collect"));
+        assert!(line.contains("unknown retained"));
     }
 
     #[test]
@@ -5080,9 +5113,9 @@ mod gc_preview_tests {
         assert!(rows.iter().any(|row| row.reason.contains("unmerged work")));
         assert!(
             rows.iter().any(|row| {
-                row.path == std::path::Path::new("/attempts/1/scratch") && row.bytes == Some(2048)
+                row.path == std::path::Path::new("/attempts/1/scratch") && row.bytes.is_none()
             }),
-            "measured scratch bytes must reach its kept row: {rows:?}"
+            "removed bytes must not be reported as retained: {rows:?}"
         );
         let json = serde_json::to_value(gc_result_data(&data, false)).unwrap();
         assert_eq!(json["free_floor_bytes"], 4096);

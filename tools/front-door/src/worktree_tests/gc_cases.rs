@@ -1467,6 +1467,125 @@ pub(super) fn gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_a
     Ok(())
 }
 
+// Spec: docs/specs/disk.md#bounded-sweeps
+pub(super) fn gc_bounded_passes_collect_settled_scratch_and_keep_busy_custody() -> Result {
+    use provenant_os::fs::{Directory, LockMode};
+    use std::ffi::OsStr;
+    use std::os::unix::fs::DirBuilderExt;
+
+    let rig = repository()?;
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[gc]\nsweep_budget='1s'\nfree_floor='1B'\n",
+    )?;
+    let (roots, context) = writer_context(&rig)?;
+    let store = open_writer_store(&context)?;
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = provenant_core::CancelToken::new();
+    let call = writer_call(&clock, &cancel)?;
+    let mut scratch = Vec::new();
+    for seed in 0..96_u8 {
+        let mut input = writer_run(
+            provenant_run::WriterRequest {
+                extra: Default::default(),
+                custody_project: Some(context.project_id),
+                project: rig.project.clone(),
+                worktree: rig.project.join("unused"),
+            },
+            &format!("gc-census-{seed}"),
+            seed,
+            "fixture",
+        )?;
+        input.request.task.writer = None;
+        input.created_at = provenant_core::WallTime::from_micros(1)?;
+        store.create(&input, &call)?;
+        let tmp = rig.state.join(format!("attempts/{}/tmp", input.attempt_id));
+        fs::DirBuilder::new().mode(0o700).create(&tmp)?;
+        fs::write(tmp.join("payload"), [1_u8; 8192])?;
+        store.withdraw(
+            input.attempt_id,
+            provenant_run::AttemptState::Queued {
+                extra: Default::default(),
+            },
+            provenant_run::Outcome::Cancelled,
+            "fixture",
+            provenant_core::WallTime::from_micros(2)?,
+            &call,
+        )?;
+        scratch.push(tmp);
+    }
+    drop(store);
+    let db = rusqlite::Connection::open(rig.state.join("run.sqlite3"))?;
+    db.execute("UPDATE attempts SET tmp_retained=1", [])?;
+    drop(db);
+    let census_roots = crate::gc_support::settled_roots(&roots, &cancel);
+    assert!(
+        census_roots.len() >= scratch.len(),
+        "the census must see settled attempts"
+    );
+    let held_attempt = Directory::open_anchor(scratch[0].parent().ok_or("attempt")?)?;
+    let held = held_attempt.try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)?;
+    let mut previous = scratch.len();
+    let mut saw_progress = false;
+    let mut saw_deferred = false;
+    for _ in 0..30 {
+        let output = command(&rig, &["gc", "--apply", "--idle", "0", "--json"])?;
+        let report: Value = serde_json::from_slice(&output.stdout.bytes)?;
+        let remaining = scratch.iter().filter(|path| path.exists()).count();
+        assert!(
+            remaining <= previous,
+            "collection must be monotonic: {report}"
+        );
+        assert!(
+            scratch[0].exists(),
+            "busy custody must remain protected: {report}"
+        );
+        let progress = &report["data"]["candidate_progress"];
+        if progress["deferred"].as_u64().unwrap_or(0) > 0 {
+            saw_deferred = true;
+            assert!(
+                progress["deferred_bytes"].is_null()
+                    || progress["deferred_bytes"]
+                        .as_u64()
+                        .is_some_and(|bytes| bytes >= 8192),
+                "retained bytes are measured or explicitly unknown: {report}"
+            );
+        }
+        saw_progress |= remaining < previous;
+        previous = remaining;
+        if remaining == 1 {
+            break;
+        }
+    }
+    assert!(
+        saw_progress && saw_deferred && previous == 1,
+        "bounded passes must collect every available candidate"
+    );
+    drop(held);
+    for _ in 0..30 {
+        let output = command(&rig, &["gc", "--apply", "--idle", "0", "--json"])?;
+        let report: Value = serde_json::from_slice(&output.stdout.bytes)?;
+        let remaining = scratch.iter().filter(|path| path.exists()).count();
+        assert!(
+            remaining <= previous,
+            "collection must be monotonic: {report}"
+        );
+        previous = remaining;
+        if remaining == 0 {
+            assert!(
+                report["data"]["candidate_progress"].is_object(),
+                "scratch progress must be reported: {report}"
+            );
+            break;
+        }
+    }
+    assert_eq!(
+        previous, 0,
+        "bounded passes must finish after custody releases"
+    );
+    Ok(())
+}
+
 pub(super) fn gc_reports_terminal_tmp_details_and_compact_text_count() -> Result {
     use std::os::unix::fs::DirBuilderExt;
     let rig = repository()?;

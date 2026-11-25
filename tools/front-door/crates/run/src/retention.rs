@@ -50,6 +50,9 @@ pub struct ProviderStateGc {
     /// Bytes removed from scratch directories that remain for a later pass.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub partial_tmp: Vec<AttemptTmpRemoval>,
+    /// Scratch candidates examined but not fully collected, with bounded size observations.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub scratch_deferred: Vec<DeferredScratch>,
     pub attempt_logs: Vec<AttemptLogRemoval>,
     /// Event rows expired (or eligible to expire in a dry run).
     pub expired_events: u64,
@@ -67,6 +70,13 @@ impl ProviderStateGc {
             .map(|entry| entry.bytes)
             .fold(0_u64, u64::saturating_add)
     }
+}
+
+#[derive(Debug, Serialize)]
+pub struct DeferredScratch {
+    pub path: PathBuf,
+    /// None when the bounded observation could not measure the entire tree.
+    pub bytes: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -452,6 +462,7 @@ impl RunStore {
                     .state_root
                     .as_path()
                     .join(format!("attempts/{id}/provider-state"));
+                let first_scratch = report.attempt_tmp.len();
                 let first_removal = report.removed.len();
                 let first_tightened = report.tightened.len();
                 let result = (|| -> Result<()> {
@@ -699,6 +710,27 @@ impl RunStore {
                 prefix_removals(&mut report, first_removal, parent);
                 for tightened in &mut report.tightened[first_tightened..] {
                     *tightened = parent.join(&*tightened);
+                }
+                if scratch.is_some() && report.attempt_tmp.len() == first_scratch {
+                    let temporary = attempt_path.join("tmp");
+                    if !std::fs::symlink_metadata(&temporary)
+                        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+                    {
+                        temporary_sizes.entries.clear();
+                        temporary_sizes.errors.clear();
+                        let measured = if scan.permits(call) {
+                            temporary_sizes.measure("attempt_tmp", &temporary)
+                        } else {
+                            None
+                        };
+                        let bytes = measured
+                            .filter(|_| temporary_sizes.errors.is_empty())
+                            .map(|index| temporary_sizes.entries[index].allocated_bytes);
+                        report.scratch_deferred.push(DeferredScratch {
+                            path: temporary,
+                            bytes,
+                        });
+                    }
                 }
                 if let Err(error) = result {
                     let cancelled = call.cancel.is_cancelled()

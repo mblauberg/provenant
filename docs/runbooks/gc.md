@@ -27,8 +27,9 @@ provenant --project /absolute/path/to/repo gc --apply --json
 - The advisory dweller census runs after collection with one cached observation
   per pass, so a large settled store cannot spend `gc.sweep_budget` before
   anything is collected. The report names how many settled candidates were
-  decided, collected and deferred with their bytes; an undecided candidate is
-  kept and waits for the saved cursor.
+  decided, collected and deferred with their bytes when measured; retained
+  bytes are unknown when not measured. Previews say what would be collected,
+  and a class not reached is unmeasured. An undecided candidate is kept.
 
 ## What is removed and when
 

@@ -142,7 +142,10 @@ and terminal worktree instead of re-walking the process table per candidate.
 A census cut short by its bound or the sweep deadline is reported incomplete;
 an undecided candidate is kept, never treated as free. The report names how
 many settled candidates the pass decided, collected and deferred, with the
-bytes reclaimed and the bytes still retained.
+known bytes reclaimed and the bytes still retained, or unknown when retained
+bytes were not measured. A preview labels reclaimable bytes and candidates it
+would collect; a class not reached is reported as unmeasured. Partially removed
+bytes count as reclaimed, never as retained.
 - Why: a large or abandoned sweep must not prevent later collection, and a
   slow census must never spend the budget that collection needs.
 
