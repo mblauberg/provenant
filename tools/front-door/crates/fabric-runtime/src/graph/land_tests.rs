@@ -263,13 +263,12 @@ impl AttemptOwner for Owner {
             }
             _ => {
                 let verdict = if self.repair_fixture
-                    && (key.node_id == "initial--lens"
-                        || key.node_id == "delivery--initial-review--lenses--correctness")
+                    && (key.node_id == "initial--lens" || key.node_id == "delivery--review")
                 {
                     "```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"a.rs\",\"line\":1,\"summary\":\"defect\",\"status\":\"open\",\"evidence\":\"counterexample\",\"proposed_fix\":\"repair\",\"trigger\":{\"sequence\":\"Default invocation\",\"reach\":\"default_path\",\"observed\":true},\"triage\":{\"decision\":\"confirmed\",\"reason\":\"Observed at the checked caller\",\"worth_fixing\":true,\"root_cause\":\"input handling\",\"blocking_class\":\"default_path_defect\"}}]}\n```\nVERDICT: FAIL"
                 } else if self.repair_fixture
                     && (key.node_id == "initial--synthesis"
-                        || key.node_id == "delivery--initial-review--synthesis")
+                        || key.node_id == "delivery--review--synthesis")
                 {
                     "```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"disposition\":\"accepted\",\"reason\":\"confirmed\"}]}\n```\nVERDICT: FAIL"
                 } else if self.repair_fixture {
