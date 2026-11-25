@@ -585,10 +585,13 @@ pub(super) fn validate_flat_plan(
                 }
                 ci::validate_target(target, node, document)
                     .map_err(|reason| node_plan_error(node, reason))?;
-                if document.queue.is_some() && !matches!(target, CiTarget::Node { .. }) {
+                if document.queue.is_some()
+                    && !matches!(target, CiTarget::Node { node: published, .. }
+                        if positions.get(published).is_some_and(|index| document.nodes[*index].kind == Some(NodeKind::Publish)))
+                {
                     return Err(node_plan_error(
                         node,
-                        "delivery CI requires a published node target",
+                        "delivery CI requires a publication node target",
                     ));
                 }
                 if !(1..=604800).contains(timeout_seconds) || !node.inputs.is_empty() {
@@ -598,10 +601,13 @@ pub(super) fn validate_flat_plan(
             Some(GateCondition::Conflict { target, .. }) => {
                 ci::validate_target(target, node, document)
                     .map_err(|reason| node_plan_error(node, reason))?;
-                if document.queue.is_some() && !matches!(target, CiTarget::Node { .. }) {
+                if document.queue.is_some()
+                    && !matches!(target, CiTarget::Node { node: published, .. }
+                        if positions.get(published).is_some_and(|index| document.nodes[*index].kind == Some(NodeKind::Publish)))
+                {
                     return Err(node_plan_error(
                         node,
-                        "delivery conflict gate requires a published node target",
+                        "delivery conflict gate requires a publication node target",
                     ));
                 }
                 if !node.inputs.is_empty() {
@@ -998,6 +1004,8 @@ pub(super) fn validate_flat_plan(
         });
     }
     land::validate_relations(&nodes, &positions).map_err(AdmissionError::Plan)?;
+    land::validate_conflict_recovery(&nodes, &positions, document.queue.is_some())
+        .map_err(AdmissionError::Plan)?;
 
     // Dependencies are conjunctive. Reject nodes that require mutually
     // exclusive branches, including through transitive dependencies.
@@ -1620,6 +1628,11 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                 && !park.operation_id.is_empty()
                 && park.operation_id == park.transition_id
                 && park.operation_id.len() <= 256
+                && park.item.as_deref()
+                    == document
+                        .context
+                        .as_ref()
+                        .and_then(|context| context.work_item.as_deref())
                 && park.handoff.len() <= 1024
                 && park.evidence.len() <= 8
                 && park.evidence.iter().all(|entry| entry.len() <= 512)

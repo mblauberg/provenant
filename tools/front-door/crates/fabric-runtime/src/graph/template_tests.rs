@@ -2001,24 +2001,31 @@ fn compiler_lowers_and_admits_a_queue_delivery_composite() {
             "access": "read_only",
             "composite": {
                 "nodes": [
-                    {"id":"publish", "access":"worktree_write", "worktree":"/fixture/writer",
-                        "prompt":"publish the change", "route":{"alias":"senior"}},
+                    {"id":"writer", "access":"worktree_write", "worktree":"/fixture/writer",
+                        "prompt":"write the change", "route":{"alias":"senior"}},
+                    {"id":"hygiene", "kind":"hygiene", "access":"worktree_write",
+                        "worktree":"/fixture/writer", "depends_on":["writer"],
+                        "source":{"type":"node", "node":"writer"}},
+                    {"id":"publish", "kind":"publish", "access":"worktree_write",
+                        "worktree":"/fixture/writer", "depends_on":["hygiene"],
+                        "source":{"type":"node", "node":"hygiene"}},
                     {"id":"conflict", "kind":"gate", "access":"read_only",
                         "depends_on":["publish"], "on_fail":"rebase",
                         "condition":{"type":"conflict", "target":{"node":"publish"}}},
                     {"id":"rebase", "access":"worktree_write", "worktree":"/fixture/writer",
                         "prompt":"rebase the retained branch", "route":{"alias":"senior"},
-                        "depends_on":["conflict"]},
+                        "source":{"type":"head", "node":"publish"},
+                        "depends_on":["conflict", "publish"]},
                     {"id":"ci", "kind":"gate", "access":"read_only",
-                        "depends_on":["conflict"], "on_fail":"repair",
+                        "depends_on":["conflict", "publish"], "on_fail":"repair",
                         "condition":{"type":"ci", "target":{"node":"publish"}}},
                     {"id":"repair", "access":"worktree_write", "worktree":"/fixture/writer",
                         "prompt":"Repair the failed CI head. Sweep the whole defect class across related tests, help text and documentation that asserts the changed behaviour.",
                         "route":{"alias":"senior"}, "source":{"type":"head","node":"publish"},
                         "inputs":[{"node":"ci","outputs":["findings","commit"]}],
-                        "depends_on":["ci"]},
+                        "depends_on":["ci","publish"]},
                     {"id":"review", "kind":"composite", "access":"read_only",
-                        "depends_on":["repair"], "source":{"type":"head", "node":"repair"},
+                        "depends_on":["repair","publish"], "source":{"type":"head", "node":"publish"},
                         "delivery_review":{"shape":"single", "accept_inconclusive_without_blocking":false},
                         "composite":{"nodes":[
                             {"id":"lens", "access":"read_only", "prompt":"review the published head",
@@ -2040,6 +2047,32 @@ fn compiler_lowers_and_admits_a_queue_delivery_composite() {
     graph.admit(&limits()).unwrap();
 
     let expanded = graph.expanded(&limits()).unwrap();
+    let writer = expanded
+        .nodes
+        .iter()
+        .find(|node| node.id == "delivery--writer")
+        .unwrap();
+    let hygiene = expanded
+        .nodes
+        .iter()
+        .find(|node| node.id == "delivery--hygiene")
+        .unwrap();
+    let publish = expanded
+        .nodes
+        .iter()
+        .find(|node| node.id == "delivery--publish")
+        .unwrap();
+    assert_eq!(writer.access, AccessMode::WorktreeWrite);
+    assert_eq!(hygiene.kind, Some(NodeKind::Hygiene));
+    assert!(matches!(
+        &hygiene.source,
+        Some(SourceBinding::Node { node }) if node == "delivery--writer"
+    ));
+    assert_eq!(publish.kind, Some(NodeKind::Publish));
+    assert!(matches!(
+        &publish.source,
+        Some(SourceBinding::Node { node }) if node == "delivery--hygiene"
+    ));
     let conflict = expanded
         .nodes
         .iter()
@@ -2051,6 +2084,17 @@ fn compiler_lowers_and_admits_a_queue_delivery_composite() {
             target: CiTarget::Node { node, .. },
             ..
         }) if node == "delivery--publish"
+    ));
+    assert_eq!(conflict.on_fail.as_deref(), Some("delivery--rebase"));
+    let rebase = expanded
+        .nodes
+        .iter()
+        .find(|node| node.id == "delivery--rebase")
+        .unwrap();
+    assert_eq!(rebase.worktree.as_deref(), Some("/fixture/writer"));
+    assert!(matches!(
+        &rebase.source,
+        Some(SourceBinding::Head { node }) if node == "delivery--publish"
     ));
     let ci = expanded
         .nodes
@@ -2069,7 +2113,13 @@ fn compiler_lowers_and_admits_a_queue_delivery_composite() {
             .nodes
             .iter()
             .find(|node| node.id == "delivery--review")
-            .is_some_and(|node| node.delivery_review.is_some())
+            .is_some_and(|node| {
+                node.delivery_review.is_some()
+                    && matches!(
+                        &node.source,
+                        Some(SourceBinding::Head { node }) if node == "delivery--publish"
+                    )
+            })
     );
     let repair = expanded
         .nodes

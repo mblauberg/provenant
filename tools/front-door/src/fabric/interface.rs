@@ -552,6 +552,8 @@ fn override_launch(
             provenant_fabric_runtime::graph::NodeKind::Gate
                 | provenant_fabric_runtime::graph::NodeKind::Decide
                 | provenant_fabric_runtime::graph::NodeKind::Land
+                | provenant_fabric_runtime::graph::NodeKind::Hygiene
+                | provenant_fabric_runtime::graph::NodeKind::Publish
         )
     ) {
         let invalid = || FacadeError::invalid(InvalidInputDetail::Field("route".into()));
