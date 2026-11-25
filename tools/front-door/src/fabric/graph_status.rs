@@ -32,6 +32,10 @@ pub(crate) struct NodeDigest {
     pub escalation: Value,
     pub delivery_park: Value,
     pub wait_source: Option<String>,
+    pub item: Option<String>,
+    pub active_lane: Option<String>,
+    pub last_event_at: Option<String>,
+    pub last_event_source: Option<String>,
 }
 
 fn text(value: &Value, limit: usize) -> Option<String> {
@@ -221,6 +225,12 @@ pub(crate) fn node_digests(rows: &[Value]) -> Vec<NodeDigest> {
             let escalation = node["escalation"].clone();
             let delivery_park = node["delivery_park"].clone();
             let wait_source = text(&node["wait_source"], 128);
+            let item = text(&delivery_park["item"], 256);
+            let active_lane = (attempt_presence.as_deref() == Some("live"))
+                .then(|| text(&attempt["attempt_id"], 256))
+                .flatten();
+            let last_event_at = text(&attempt["last_event_at"], 128);
+            let last_event_source = text(&attempt["last_event_source"], 128);
             let current_state = lane_state(
                 &state,
                 attempt_state.as_deref(),
@@ -276,6 +286,18 @@ pub(crate) fn node_digests(rows: &[Value]) -> Vec<NodeDigest> {
             // The checkpoint head is an observation, not a fresh forge read.
             if let Some(head) = text(&attempt["head"], 128).or_else(|| text(&node["head"], 128)) {
                 line.push_str(&format!(" head={head}/recorded"));
+            }
+            if let Some(item) = &item {
+                line.push_str(&format!(" item={item}"));
+            }
+            if let Some(lane) = &active_lane {
+                line.push_str(&format!(" active_lane={lane}"));
+            }
+            if let Some(event) = &last_event_at {
+                line.push_str(&format!(" last_event={event}"));
+                if let Some(source) = &last_event_source {
+                    line.push_str(&format!(" ({source})"));
+                }
             }
             if let Some(round) = delivery_loop["round"].as_u64() {
                 line.push_str(&format!(" round={round}"));
@@ -366,6 +388,10 @@ pub(crate) fn node_digests(rows: &[Value]) -> Vec<NodeDigest> {
                 escalation,
                 delivery_park,
                 wait_source,
+                item,
+                active_lane,
+                last_event_at,
+                last_event_source,
             })
         })
         .collect();
@@ -559,13 +585,15 @@ mod tests {
         let rows = vec![json!({"kind":"node", "work_key":key, "state":"blocked",
             "head":"abc123", "delivery_loop":{"round":2},
             "escalation":{"rung":1}, "wait_source":"graph checkpoint",
-            "delivery_park":{"reason":"ci_unavailable", "handoff":"inspect CI"}})];
+            "delivery_park":{"item":"issue-42", "reason":"ci_unavailable", "handoff":"inspect CI"}})];
         let digest = super::node_digests(&rows).remove(0);
+        assert_eq!(digest.item.as_deref(), Some("issue-42"));
         assert_eq!(digest.delivery_loop["round"], 2);
         assert_eq!(digest.escalation["rung"], 1);
         assert_eq!(digest.delivery_park["handoff"], "inspect CI");
         for text in [
             "head=abc123/recorded",
+            "item=issue-42",
             "round=2",
             "rung=1",
             "wait_source=graph checkpoint",
