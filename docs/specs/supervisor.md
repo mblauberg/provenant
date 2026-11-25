@@ -183,8 +183,12 @@ flock stays held through import and [publication](run.md#publication-order). A
 missing or malformed reservation refuses automatic recovery of that attempt;
 [explicit abandonment](#explicit-abandonment) instead requires native exclusion
 and positive worktree non-occupancy. Scratch deletion needs a verified
-settlement commit.
-- Why: a writer must never be freed on a partial or forged settlement.
+settlement commit. A pre-lease reservation whose launch never produced a holder
+is stale evidence: listing reports it as a fence that reconcile and GC can
+clear with a command this version accepts, never as work for a previous
+version.
+- Why: a writer must never be freed on a partial or forged settlement, and a
+  holderless legacy reservation must not stay fenced with an unreachable remedy.
 
 ### Stable locks and atomic writes
 

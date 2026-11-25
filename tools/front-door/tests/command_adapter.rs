@@ -286,11 +286,15 @@ fn upgrade_corpus_allows_unrelated_read_only_launch() -> Result {
         &provenant_os::fs::Directory::open_anchor(&rig.state.join("worktrees").join(project))?,
     )?;
     assert!(
-        inventory.issues.iter().any(|issue| matches!(
-            issue.kind,
-            provenant_supervisor::custody::ReservationIssueKind::LegacyEvidence
-        )),
-        "corpus must exercise legacy guardian inventory: {inventory:?}"
+        inventory.issues.is_empty(),
+        "a pre-lease reservation with no live holder must not be reported as unresolvable legacy evidence: {inventory:?}"
+    );
+    assert!(
+        inventory.reservations.iter().any(|reservation| {
+            reservation.scope.attempt.to_string() == "02020202020202020202020202020202"
+                && reservation.live == Some(false)
+        }),
+        "corpus must exercise legacy reservation inventory: {inventory:?}"
     );
     // The seeded attempt parent must have the same private mode as the real
     // run-store writer, even when the process umask permits public access.

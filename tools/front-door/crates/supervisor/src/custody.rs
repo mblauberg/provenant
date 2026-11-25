@@ -89,7 +89,7 @@ pub enum CustodyError {
     #[error("record is invalid or belongs to another generation")]
     InvalidRecord,
     #[error(
-        "attempt evidence was written before shared worktree leases and is not upgraded in place; finish or stop that writer on the previous Provenant version, then reconcile it"
+        "attempt evidence was written before shared worktree leases and a holder may still be live; stop that holder and run `provenant reconcile` to clear the reservation"
     )]
     LegacyEvidence,
     #[error("launch handoff is unconfirmed; reservation remains fenced")]
@@ -2813,6 +2813,19 @@ fn reservation_holder_live(
     }
 }
 
+/// A pre-lease reservation whose launch never produced a holder has no process
+/// for a previous version to finish. This version can withdraw or settle it
+/// through reconcile, so it is listed as a fence with a current-version remedy
+/// instead of being reported as unresolvable legacy evidence.
+fn holderless_prelease_reservation(reservation: &Reservation) -> bool {
+    reservation.guardian.is_none()
+        && reservation.provider.is_none()
+        && matches!(
+            reservation.launch_state,
+            LaunchState::Prepared | LaunchState::NeverSpawned
+        )
+}
+
 fn format_age_ns(modified_ns: i128, now: provenant_core::WallTime) -> String {
     let now_ns = i128::from(now.as_micros()) * 1_000;
     let diff_ns = (now_ns - modified_ns).max(0);
@@ -3111,16 +3124,25 @@ pub fn list_writer_reservations_in_slot(slot: &Directory) -> Result<ReservationL
             if attempt != OsStr::new(&reservation.scope.attempt.to_string()) {
                 return Err(CustodyError::InvalidRecord);
             }
-            // Reported with the reservation's other issues, so reconcile warns
-            // and names the attempt instead of leaving it silently fenced.
-            if liveness::is_legacy_record(&child)? {
+            let legacy = liveness::is_legacy_record(&child)?;
+            let holderless = holderless_prelease_reservation(&reservation);
+            // A schema-1 record whose launch never produced a holder is stale
+            // evidence this version can reconcile, not work for an older
+            // version. List it so reconcile and GC name the attempt and offer a
+            // remedy this version can carry out. Keep the fence for records
+            // that may still have a live holder.
+            if legacy && !holderless {
                 return Err(CustodyError::LegacyEvidence);
             }
+            let live = if legacy && holderless {
+                Some(false)
+            } else {
+                reservation_holder_live(&reservation, &SystemProcessObserver)
+            };
             let branch = match &reservation.binding {
                 StoredWriterBinding::Worktree { branch, .. } => Some(branch.clone()),
                 _ => None,
             };
-            let live = reservation_holder_live(&reservation, &SystemProcessObserver);
             let age = child
                 .metadata_at(OsStr::new("reservation.json"), false)
                 .ok()
