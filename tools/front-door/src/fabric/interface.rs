@@ -2925,21 +2925,28 @@ impl Factory {
                     "remote smoke writer uses scratch branch {branch} from {base} (source: default smoke placement); pass --branch B --base REF to override"
                 ));
             }
-            // A bundled smoke review needs a fixed, non-empty range. When no
-            // launch bound diff_base, use the checkout's first parent and name
-            // the source, so a manual smoke does not fail on an empty range.
+            // Without an explicit base, a first parent supplies a distinct
+            // review range. A root commit (or unavailable Git) has no such
+            // range, so omit review rather than launching an empty one.
             if parameters
                 .get("diff_base")
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .is_empty()
-                && let Some(git) = provenant_os::git::git_executable()
-                && let Ok(base) = provenant_run::resolve_git_base(&git, &self.cwd, "HEAD^")
             {
-                parameters["diff_base"] = json!(base);
-                input_warnings.push(format!(
-                    "smoke review uses base {base} (source: checkout first parent); pass --set diff_base=BASE to override"
-                ));
+                if let Some(base) = provenant_os::git::git_executable()
+                    .and_then(|git| provenant_run::resolve_git_base(&git, &self.cwd, "HEAD^").ok())
+                {
+                    parameters["diff_base"] = json!(base);
+                    input_warnings.push(format!(
+                        "smoke review uses base {base} (source: checkout first parent); pass --set diff_base=BASE to override"
+                    ));
+                } else {
+                    parameters["smoke-review"] = json!(false);
+                    input_warnings.push(
+                        "smoke skipped review: no diff_base supplied and checkout first parent is unavailable; pass --set diff_base=BASE to enable review".into(),
+                    );
+                }
             }
             let peer_owned_writer = is_remote
                 && parameters
@@ -2963,7 +2970,7 @@ impl Factory {
                     "no writer worktree supplied; pass --worktree PATH or --branch B to run it"
                 };
                 input_warnings.push(format!(
-                    "smoke skipped node write: {reason}; read and review nodes still run"
+                    "smoke skipped node write: {reason}; other eligible nodes still run"
                 ));
             }
         }

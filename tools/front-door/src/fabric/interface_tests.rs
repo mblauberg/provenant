@@ -1829,6 +1829,75 @@ fn replay_digest_tracks_delivery_source_commit() -> Result {
 }
 
 #[test]
+fn smoke_root_commit_skips_review_without_blocking_other_nodes() -> Result {
+    let rig = crate::worktree_tests::repository()?;
+    let factory = factory(&rig)?;
+    let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+    let cancel = CancelToken::new();
+    let preview = factory.graph_document(
+        json!({"op":"run", "template":"smoke", "set":{"smoke-write":false}, "explain":true}),
+        budget,
+        &cancel,
+    )?;
+    let skipped = preview["skipped"].as_array().ok_or("skipped rows")?;
+    assert!(
+        skipped.iter().any(|row| {
+            row["node"]
+                .as_str()
+                .is_some_and(|id| id.contains("review--"))
+                && row["reason"]
+                    .as_str()
+                    .is_some_and(|reason| reason.contains("smoke-review"))
+        }),
+        "review must be skipped: {preview}"
+    );
+    assert!(
+        !skipped.iter().any(|row| {
+            row["node"].as_str().is_some_and(|id| {
+                id.ends_with("task--read")
+                    || id.ends_with("task--retry-route")
+                    || id.ends_with("task--steer-route")
+            })
+        }),
+        "other read nodes must remain eligible: {preview}"
+    );
+    assert!(
+        preview["warnings"]
+            .as_array()
+            .is_some_and(|warnings| warnings.iter().any(|warning| {
+                warning
+                    .as_str()
+                    .is_some_and(|text| text.contains("checkout first parent is unavailable"))
+            })),
+        "the reason must be recorded: {preview}"
+    );
+
+    let base = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+    std::fs::write(rig.project.join("subject.txt"), "subject\n")?;
+    crate::worktree_tests::git(&rig, &["add", "subject.txt"])?;
+    crate::worktree_tests::git(&rig, &["commit", "-qm", "subject"])?;
+    let with_parent = factory.graph_document(
+        json!({"op":"run", "template":"smoke", "set":{"smoke-write":false}, "explain":true}),
+        budget,
+        &cancel,
+    )?;
+    assert!(
+        !with_parent["skipped"]
+            .as_array()
+            .ok_or("skipped rows")?
+            .iter()
+            .any(|row| {
+                row["node"]
+                    .as_str()
+                    .is_some_and(|id| id.contains("review--"))
+            }),
+        "a parent must enable review: {with_parent}"
+    );
+    assert!(serde_json::to_string(&with_parent["document"])?.contains(&base));
+    Ok(())
+}
+
+#[test]
 fn smoke_graph_explains_writer_gating_for_default_remote_and_local() -> Result {
     let rig = TestRig::new()?;
     let remote_host = provenant_core::HostId::from_bytes([2; 16]);

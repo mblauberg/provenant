@@ -213,7 +213,9 @@ sender's graph does not bind or provision a local worktree for that writer; its 
 the peer provisioning intent for replay. A graph reader without an explicit worktree or attempt
 directory uses its selected project as its source; `upgrade --verify` selects a temporary
 committed scratch project for its smoke graph and binds a fixed review range so no lens fails on
-an empty range. A node may name a small project-relative fixture;
+an empty range. For a manual bundled smoke launch without a `diff_base`, the checkout's first
+parent supplies the range; if unavailable, review is skipped with a reason and the other eligible
+nodes continue. A node may name a small project-relative fixture;
 the host stages its bytes with the task, so a peer places the same file in its own candidate
 scratch and the brief names its path instead of leaking a caller path.
 - Why: a verification graph must run on a real install and exercise a writer, and a skipped node
