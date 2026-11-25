@@ -3397,14 +3397,13 @@ fn prior_publication_head(
         return adoption.receipt.map(|receipt| receipt.head);
     }
     let publication = progress.delivery_publication.as_ref()?;
-    (publication.source_branch == branch)
-        .then(|| {
-            publication
-                .receipt
-                .as_ref()
-                .map(|receipt| receipt.head.clone())
-        })
-        .flatten()
+    if publication.source_branch != branch {
+        return None;
+    }
+    publication
+        .receipt
+        .as_ref()
+        .map(|receipt| receipt.head.clone())
 }
 
 fn delivery_ci_wait_policy(document: &GraphDocument) -> provenant_records::Sourced<u64> {
