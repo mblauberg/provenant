@@ -271,53 +271,10 @@ fn reservation_listing_isolates_an_inaccessible_slot() -> TestResult {
 }
 
 #[test]
-fn legacy_guardian_evidence_is_reported_and_still_fences_its_slot() -> TestResult {
-    let root = tempfile::tempdir()?;
-    let slot_path = root.path().join("writer");
-    std::fs::create_dir(&slot_path)?;
-    let slot = Directory::open_anchor(&slot_path)?;
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    let legacy = crate::fixture::acquire_writer(
-        slot.try_clone()?,
-        scope(),
-        WaitBudget::cli(clock.mono_now(), 1)?,
-        &cancel,
-        &clock,
-    )?;
-    let legacy_path = slot_path.join(scope().attempt.to_string());
-    drop(legacy);
-    std::fs::write(
-        legacy_path.join("guardian-lock.json"),
-        br#"{"schema_version":1}"#,
-    )?;
-
-    let listing = list_writer_reservations(&Directory::open_anchor(root.path())?)?;
-    assert_eq!(listing.issues.len(), 1);
-    assert_eq!(listing.issues[0].kind, ReservationIssueKind::LegacyEvidence);
-    assert_eq!(
-        listing.issues[0].reservation,
-        PathBuf::from("writer")
-            .join(scope().attempt.to_string())
-            .join("reservation.json")
-    );
-
-    let other_attempt = Scope {
-        attempt: AttemptId::from_bytes([4; 16]),
-        generation: 1,
-    };
-    let error = acquire_writer_with_observer(
-        slot,
-        other_attempt,
-        WriterBinding::read_only(),
-        WaitBudget::nonblocking(clock.mono_now()),
-        &cancel,
-        &clock,
-        &EmptyNativeWorld,
-    )
-    .expect_err("legacy sibling evidence must keep its worktree fenced");
-    assert!(matches!(error, CustodyError::Fenced));
-    Ok(())
+fn legacy_evidence_remedy_names_a_current_version_command() {
+    let remedy = CustodyError::LegacyEvidence.to_string();
+    assert!(remedy.contains("provenant reconcile"), "{remedy}");
+    assert!(!remedy.contains("previous Provenant version"), "{remedy}");
 }
 
 #[test]

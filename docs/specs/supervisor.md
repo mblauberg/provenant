@@ -186,8 +186,20 @@ flock stays held through import and [publication](run.md#publication-order). A
 missing or malformed reservation refuses automatic recovery of that attempt;
 [explicit abandonment](#explicit-abandonment) instead requires native exclusion
 and positive worktree non-occupancy. Scratch deletion needs a verified
-settlement commit.
-- Why: a writer must never be freed on a partial or forged settlement.
+settlement commit. A pre-lease reservation whose launch never produced a holder
+remains fenced until reconcile or applied GC obtains writer and holder exclusion.
+They discover reservations even without an indexed attempt. Reconcile recovers
+proven orphans before scanning indexed runs, so a recovered reservation is not
+reported as a missing run. Host-wide GC scans project directories in the shared
+worktree registry alongside its other entries. For an orphan, they withdraw an
+unbound preparation or a bound never-spawned reservation only after proving the
+attempt row absent; a bound record must match its private attempt directory and
+hold its custody lock. An unbound record cannot identify its store, so another
+possible nested store keeps it fenced. Attempt evidence is retained. Any
+unproven case stays fenced, and a holderless legacy reservation is never
+presented as work for a previous version.
+- Why: a writer must never be freed on a partial or forged settlement, and a
+  holderless legacy reservation must not stay fenced with an unreachable remedy.
 
 ### Stable locks and atomic writes
 

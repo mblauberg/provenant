@@ -1685,11 +1685,12 @@ mod tests {
         )?;
 
         let listing = store.writer_fence_listing()?;
-        assert_eq!(listing.issues.len(), 1);
-        assert_eq!(
-            listing.issues[0].kind,
-            provenant_supervisor::custody::ReservationIssueKind::LegacyEvidence
-        );
+        // A schema-1 reservation with no live holder is listed for this
+        // version to reconcile, not reported as a previous-version task.
+        assert!(listing.issues.is_empty(), "{listing:?}");
+        assert_eq!(listing.reservations.len(), 1);
+        assert_eq!(listing.reservations[0].scope.attempt, legacy.attempt_id);
+        assert_eq!(listing.reservations[0].live, Some(false));
         let reason = "unresolvable queued route";
         assert!(matches!(
             store.abandon_settlement(
@@ -1707,7 +1708,10 @@ mod tests {
                 ..
             }
         ));
-        assert_eq!(store.writer_fence_listing()?.issues.len(), 1);
+        let listing = store.writer_fence_listing()?;
+        assert!(listing.issues.is_empty(), "{listing:?}");
+        assert_eq!(listing.reservations.len(), 1);
+        assert_eq!(listing.reservations[0].scope.attempt, legacy.attempt_id);
         Ok(())
     }
 

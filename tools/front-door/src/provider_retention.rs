@@ -161,19 +161,34 @@ fn collect_store(
             clock: &clock,
             cancel,
         };
-        if let Some(reader) = RunStore::open_read_only(&context, &call)? {
-            // Applied cleanup needs a writable store. Previews stay read-only
-            // and never create a run store just to collect it.
-            let store = if dry_run {
-                reader
-            } else {
+        let reader = RunStore::open_read_only(&context, &call)?;
+        let store = match reader {
+            Some(reader) if dry_run => Some(reader),
+            Some(reader) => {
                 drop(reader);
-                RunStore::open(&context, &call)?
-            };
+                Some(RunStore::open(&context, &call)?)
+            }
+            None if !dry_run && matches!(pass, RetentionPass::ProviderState { .. }) => {
+                // An absent database has no rows. Do not turn an existing but
+                // uninitialised or unreadable database into absence evidence.
+                match directory.metadata_at(std::ffi::OsStr::new("run.sqlite3"), false) {
+                    Err(error) if error.is_not_found() => Some(RunStore::open(&context, &call)?),
+                    Ok(_) => None,
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            None => None,
+        };
+        if let Some(store) = store {
             let store = store.with_writer_registry(host.state.as_path());
             let now = clock.wall_now()?;
             match pass {
                 RetentionPass::ProviderState { days, logs_days } => {
+                    if !dry_run {
+                        report
+                            .removed
+                            .extend(store.recover_orphan_reservations(true, &call)?);
+                    }
                     let mut collected = store.gc_provider_state_with_logs(
                         &directory, days, logs_days, now, dry_run, &call, scan,
                     )?;

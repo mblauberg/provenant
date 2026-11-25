@@ -248,6 +248,135 @@ fn settled(rig: &TestRig, reference: &str) -> Result<Value> {
     Ok(lane)
 }
 
+// Spec: docs/specs/supervisor.md#writer-reservation-and-settlement
+fn orphan_reservations_recovered_by(command: &[&str]) -> Result {
+    if !available()? {
+        return Ok(());
+    }
+    let rig = rig(json!({}))?;
+    let identity = rig.command(&["fabric", "identity", "--json"])?;
+    assert_eq!(code(&identity), 0);
+    let identity: Value = serde_json::from_slice(&identity.stdout.bytes)?;
+    let project = identity["data"]["project"].as_str().ok_or("project id")?;
+    let seed = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/upgrade-corpus/v2.4.1/seed.py");
+    let output = rig.execute(
+        std::path::Path::new("/usr/bin/python3"),
+        &[
+            seed.to_str().ok_or("seed path")?,
+            rig.state.to_str().ok_or("state path")?,
+            project,
+        ],
+        None,
+    )?;
+    assert_eq!(
+        code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    let evidence = rig
+        .state
+        .join("worktrees")
+        .join(project)
+        .join("legacy-writer")
+        .join("02020202020202020202020202020202");
+    let attempt = rig.state.join("attempts/02020202020202020202020202020202");
+    assert!(evidence.join("reservation.json").exists());
+    let before = provenant_supervisor::custody::list_writer_reservations(
+        &provenant_os::fs::Directory::open_anchor(&rig.state.join("worktrees").join(project))?,
+    )?;
+    assert!(
+        before.is_fenced(),
+        "legacy reservation must fence before recovery"
+    );
+    // Exercise an unbound preparation and a bound record with the wrong
+    // attempt identity beside the authentic bound upgrade record.
+    use std::io::Write;
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+    let slot = evidence.parent().ok_or("slot")?;
+    let prepared = slot.join("04040404040404040404040404040404");
+    let mismatch = slot.join("05050505050505050505050505050505");
+    let source: Value = serde_json::from_slice(&fs::read(evidence.join("reservation.json"))?)?;
+    let guardian = fs::read(evidence.join("guardian-lock.json"))?;
+    let make_reservation = |path: &std::path::Path, id: &str, is_prepared: bool| -> Result {
+        fs::DirBuilder::new().mode(0o700).create(path)?;
+        let metadata = fs::metadata(path)?;
+        let mut reservation = source.clone();
+        reservation["scope"]["attempt"] = json!(id);
+        reservation["reservation_device"] = json!(metadata.dev());
+        reservation["reservation_inode"] = json!(metadata.ino());
+        if is_prepared {
+            reservation["launch_state"] = json!("prepared");
+            reservation["attempt_device"] = Value::Null;
+            reservation["attempt_inode"] = Value::Null;
+            reservation["unresolved_cleanup"] = json!(true);
+            reservation["census_incomplete"] = json!(true);
+        } else {
+            let other = rig.state.join("attempts").join(id);
+            fs::DirBuilder::new().mode(0o700).create(other)?;
+        }
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path.join("reservation.json"))?
+            .write_all(&serde_json::to_vec(&reservation)?)?;
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path.join("guardian-lock.json"))?
+            .write_all(&guardian)?;
+        Ok(())
+    };
+    make_reservation(&prepared, "04040404040404040404040404040404", true)?;
+    // The host worktree registry also contains a removal ledger.
+    fs::write(rig.state.join("worktrees/removed.jsonl"), b"")?;
+    let output = rig.command(command)?;
+    assert_eq!(
+        code(&output),
+        0,
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout.bytes),
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    assert!(
+        !evidence.join("reservation.json").exists(),
+        "orphan must be recovered"
+    );
+    assert!(evidence.join("settlement.json").exists());
+    assert!(
+        !prepared.join("reservation.json").exists(),
+        "unbound preparation must be recovered"
+    );
+    make_reservation(&mismatch, "05050505050505050505050505050505", false)?;
+    let output = rig.command(command)?;
+    assert_eq!(
+        code(&output),
+        if command[0] == "reconcile" { 1 } else { 0 },
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout.bytes),
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    assert!(
+        mismatch.join("reservation.json").exists(),
+        "unproven identity must stay fenced"
+    );
+    assert!(attempt.is_dir(), "recovery retains attempt evidence");
+    Ok(())
+}
+
+#[test]
+fn reconcile_recovers_unindexed_upgrade_reservation() -> Result {
+    orphan_reservations_recovered_by(&["reconcile", "--json"])
+}
+
+#[test]
+fn gc_recovers_unindexed_upgrade_reservation() -> Result {
+    orphan_reservations_recovered_by(&["gc", "--apply", "--json"])
+}
+
 // Spec: docs/specs/supervisor.md#host-inventory-problems-stay-local
 #[test]
 fn upgrade_corpus_allows_unrelated_read_only_launch() -> Result {
@@ -286,11 +415,15 @@ fn upgrade_corpus_allows_unrelated_read_only_launch() -> Result {
         &provenant_os::fs::Directory::open_anchor(&rig.state.join("worktrees").join(project))?,
     )?;
     assert!(
-        inventory.issues.iter().any(|issue| matches!(
-            issue.kind,
-            provenant_supervisor::custody::ReservationIssueKind::LegacyEvidence
-        )),
-        "corpus must exercise legacy guardian inventory: {inventory:?}"
+        inventory.issues.is_empty(),
+        "a pre-lease reservation with no live holder must not be reported as unresolvable legacy evidence: {inventory:?}"
+    );
+    assert!(
+        inventory.reservations.iter().any(|reservation| {
+            reservation.scope.attempt.to_string() == "02020202020202020202020202020202"
+                && reservation.live == Some(false)
+        }),
+        "corpus must exercise legacy reservation inventory: {inventory:?}"
     );
     // The seeded attempt parent must have the same private mode as the real
     // run-store writer, even when the process umask permits public access.

@@ -2607,6 +2607,115 @@ impl crate::RunStore {
         Ok(projects)
     }
 
+    /// Recover unindexed reservations under writer exclusion. The host store
+    /// owns the attempt index; an unavailable index or mismatched bound attempt
+    /// leaves the reservation in place.
+    pub fn recover_orphan_reservations(
+        &self,
+        host_wide: bool,
+        call: &crate::Request<'_>,
+    ) -> Result<Vec<std::path::PathBuf>> {
+        let listing = if host_wide {
+            let mut result = provenant_supervisor::custody::ReservationListing::default();
+            let root = match Directory::open_anchor(&self.writer_registry.join("worktrees")) {
+                Ok(root) => root,
+                Err(error) if error.is_not_found() => return Ok(Vec::new()),
+                Err(error) => return Err(error.into()),
+            };
+            for name in root.entries()? {
+                let name = name?;
+                if name
+                    .to_str()
+                    .and_then(|name| ProjectId::parse(name).ok())
+                    .is_none()
+                {
+                    continue;
+                }
+                let project = root.open_verified_directory(&name)?;
+                let path = self.writer_registry.join("worktrees").join(&name);
+                let mut listing = provenant_supervisor::custody::list_writer_reservations(&project)
+                    .map_err(error("list writer reservations", Some(&path)))?;
+                for reservation in &mut listing.reservations {
+                    reservation.reservation = path.join(&reservation.reservation);
+                }
+                result.reservations.extend(listing.reservations);
+            }
+            result
+        } else {
+            self.writer_fence_listing_for_admission(true)?
+        };
+        // Unbound preparations carry no store identity. A nested store could
+        // own the row, so absence in this database proves an orphan only when
+        // this is the host store and no child store is present or unobservable.
+        let unbound_store_proven =
+            if self.context.state_root.as_path() == self.writer_registry.as_path() {
+                match self.root.open_verified_directory(OsStr::new("children")) {
+                    Ok(children) => children.entries()?.next().is_none(),
+                    Err(error) if error.is_not_found() => true,
+                    Err(_) => false,
+                }
+            } else {
+                false
+            };
+        let mut recovered = Vec::new();
+        for fence in listing.reservations {
+            if call.cancel.is_cancelled() {
+                break;
+            }
+            let Some(path) = fence.custody_directory() else {
+                continue;
+            };
+            let slot = match Directory::open_anchor(path) {
+                Ok(slot) => slot,
+                Err(_) => continue,
+            };
+            let recovery = match provenant_supervisor::custody::acquire_recovery(
+                slot,
+                fence.scope,
+                provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
+                call.cancel,
+                call.clock,
+            ) {
+                Ok(recovery) if recovery.scope() == fence.scope => recovery,
+                _ => continue,
+            };
+            // Attempt IDs are globally unique within this store, including
+            // refused rows and rows owned by another project.
+            let exists: bool = self.db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM attempts WHERE id=?1)",
+                rusqlite::params![fence.scope.attempt.to_string()],
+                |row| row.get(0),
+            )?;
+            if exists {
+                continue;
+            }
+            let attempt = match self.root.open_verified_directory(OsStr::new("attempts")) {
+                Ok(attempts) => match attempts
+                    .open_verified_directory(OsStr::new(&fence.scope.attempt.to_string()))
+                {
+                    Ok(attempt) => Some(attempt),
+                    Err(error) if error.is_not_found() => None,
+                    Err(_) => continue,
+                },
+                Err(error) if error.is_not_found() => None,
+                Err(_) => continue,
+            };
+            if recovery
+                .withdraw_orphan(
+                    attempt.as_ref(),
+                    unbound_store_proven,
+                    provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
+                    call.cancel,
+                    call.clock,
+                )
+                .unwrap_or(false)
+            {
+                recovered.push(fence.reservation);
+            }
+        }
+        Ok(recovered)
+    }
+
     pub fn writer_fence_listing(
         &self,
     ) -> Result<provenant_supervisor::custody::ReservationListing> {
