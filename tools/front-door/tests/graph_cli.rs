@@ -3018,7 +3018,7 @@ fn steer_at_a_settled_node_refuses_even_while_a_sibling_is_running() -> Result {
     let path = rig.document(&document)?;
     let output = rig.command().args(["run", "--file"]).arg(path).output()?;
     assert!(output.status.success(), "{output:?}");
-    use provenant_core::{CancelToken, RootInputs, StateRoot, WaitBudget};
+    use provenant_core::{CancelToken, Clock, RootInputs, StateRoot, WaitBudget};
     use provenant_fabric_runtime::graph::{AttemptState, FileJournal, GraphJournal, NodeState};
     let checkpoint_path = graph_records(&rig.state())?
         .into_iter()
