@@ -252,6 +252,7 @@ fn writer_preparation_steps(
         build_heavy: false,
         title: None,
         base: Some(review_oid.clone()),
+        fixture: None,
         head: Some(review_oid.clone()),
         source_head: None,
         base_ref: None,
@@ -787,6 +788,7 @@ fn writer_preparation_steps(
                 fresh_continuation: None,
                 schema_version: 1,
                 task: run::TaskRequest {
+            fixture: None,
                     context: Some(provenant_records::run::WorkContext {
                         graph_id: Some(format!("lane-{attempt_id}")),
                         node_id: Some("node".into()),

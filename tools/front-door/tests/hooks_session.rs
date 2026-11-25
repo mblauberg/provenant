@@ -120,6 +120,7 @@ fn create_numbered_lane(rig: &TestRig, seed: u8) -> Result<Lane> {
                     build_heavy: false,
                     title: None,
                     base: None,
+                    fixture: None,
                     head: None,
                     source_head: None,
                     base_ref: None,

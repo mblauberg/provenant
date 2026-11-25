@@ -521,15 +521,18 @@ impl AttemptSpec {
     /// This is an allowlist, not a list of fields to scrub: a new
     /// [`AttemptSpec`] field stays host-local until it is named here. Fields
     /// that name a sender-local filesystem path (`directory`, `policy_inputs`,
-    /// `write_scope`, `write_roots`), sender placement (`host`,
-    /// `new_worktree`), arbitrary extension state (`extra`) and host-only
-    /// replay state (`policy_sealed`, `sealed_profile`) are deliberately
-    /// absent, so they cannot reach a peer document. The sealed classification
+    /// `write_scope`, `write_roots`), sender placement (`host`), arbitrary
+    /// extension state (`extra`) and host-only replay state (`policy_sealed`,
+    /// `sealed_profile`) are deliberately absent, so they cannot reach a peer
+    /// document. A `new_worktree` names only a branch and a base ref, never a
+    /// path, so it is retained: the receiver provisions the writer in its own
+    /// clone instead of inheriting a caller path. The sealed classification
     /// (`confidential`, `launch_policy`, `parent_sandboxed`) and the remaining
     /// launch controls are carried, so the receiver does not downgrade or lose
     /// them.
     pub fn peer_bound(&self) -> Self {
         Self {
+            new_worktree: self.new_worktree.clone(),
             confidential: self.confidential,
             budget_sources: self.budget_sources.clone(),
             token_budget: self.token_budget,
@@ -727,6 +730,15 @@ pub struct GraphNode {
     pub read_roots: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<String>,
+    /// A project-relative file the host stages into the lane for the provider.
+    /// The bytes, not the path, cross a peer boundary, so every host places
+    /// the same fixture in its own candidate scratch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixture: Option<String>,
+    /// Fixture bytes carried across a host boundary, already staged by the
+    /// sender; the receiver places them in its own scratch without a path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixture_bytes: Option<provenant_records::run::StagedFixture>,
     /// Explicit node capability set; absent inherits the writer project default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<Vec<String>>,
@@ -2653,6 +2665,10 @@ pub struct NodeInput<'a> {
     pub context: provenant_records::run::WorkContext,
     pub read_roots: &'a [String],
     pub attachments: &'a [String],
+    /// Project-relative fixture the host stages into the lane's scratch.
+    pub fixture: Option<&'a str>,
+    /// Already-staged fixture bytes carried across a peer boundary.
+    pub fixture_bytes: Option<&'a provenant_records::run::StagedFixture>,
     pub capabilities: Option<&'a [String]>,
     pub capability_sources: Option<&'a provenant_records::run::CapabilitySources>,
     /// The node's attempt spec: an account for routes that name none, and

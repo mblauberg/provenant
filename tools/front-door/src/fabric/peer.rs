@@ -970,32 +970,51 @@ pub fn peer(
                             "ignored a sender-local attempt directory; the peer binds its own source checkout",
                         );
                     }
+                    // A peer creates a writer from the retained branch and
+                    // base in its own clone. Host placement and filesystem
+                    // grants never cross the boundary.
                     if attempt.host.is_some()
-                        || attempt.new_worktree.is_some()
                         || !attempt.write_roots.is_empty()
                         || !attempt.capabilities.is_empty()
                     {
                         return Err(FacadeError::ConfinementRefused { resource: None });
                     }
                     let SubmitInput::Submit { task, host, .. } = &**input;
+                    let caller_path = task
+                        .worktree
+                        .as_deref()
+                        .is_some_and(|path| !path.is_empty());
+                    let peer_writer = task.access
+                        == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
+                        && !caller_path
+                        && task.new_worktree.is_some()
+                        && attempt.new_worktree.is_some();
                     if host.is_some()
                         || task
                             .context
                             .as_ref()
                             .is_some_and(|context| context.graph_template_launch)
-                        || task.access != provenant_fabric_runtime::graph::AccessMode::ReadOnly
-                        || task.worktree.is_some()
-                        || task.new_worktree.is_some()
+                        || (task.access != provenant_fabric_runtime::graph::AccessMode::ReadOnly
+                            && !peer_writer)
+                        || caller_path
+                        || (task.access == provenant_fabric_runtime::graph::AccessMode::ReadOnly
+                            && task.new_worktree.is_some())
                     {
                         return Err(FacadeError::ConfinementRefused { resource: None });
                     }
                     let retry = graph_context.retry_limit;
                     let network = graph_context.network;
-                    let access = super::peer_source_binding::bind_reader_source(
-                        context.roots.state.as_path(),
-                        &cwd,
-                        network,
-                    )?;
+                    // A writer gets its own worktree from provisioning; only a
+                    // reader binds the peer's source checkout.
+                    let access = if peer_writer {
+                        None
+                    } else {
+                        Some(super::peer_source_binding::bind_reader_source(
+                            context.roots.state.as_path(),
+                            &cwd,
+                            network,
+                        )?)
+                    };
                     let mut input = SubmitInput::clone(input);
                     let SubmitInput::Submit { task, .. } = &mut input;
                     {
@@ -1020,7 +1039,7 @@ pub fn peer(
                         input,
                         actor,
                         attempt,
-                        access.network,
+                        access.and_then(|access| access.network).or(network),
                         retry,
                         budget,
                         &cancel,
@@ -1467,28 +1486,68 @@ pub(crate) fn peer_submit_graph(
         provenant_records::run::NetworkAccess::Provider => provenant_cli::Switch::Off,
         _ => provenant_cli::Switch::On,
     });
+    let mode = match task.access {
+        provenant_fabric_runtime::graph::AccessMode::ReadOnly => "read_only",
+        provenant_fabric_runtime::graph::AccessMode::WorktreeWrite => "worktree_write",
+    };
+    let peer_writer = task.access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite;
+    let worktree = if peer_writer {
+        // The peer creates this worktree in its own clone from the branch and
+        // base carried in `attempt.new_worktree`. Resolve the path against the
+        // peer's own managed layout, never against a caller-supplied path.
+        attempt
+            .new_worktree
+            .as_ref()
+            .and_then(|new| {
+                factory
+                    .context
+                    .port_table
+                    .managed_writer_path(&new.branch)
+                    .ok()
+                    .map(|path| factory.context.project_root.join(path))
+            })
+            .map(|path| path.to_string_lossy().into_owned())
+    } else {
+        None
+    };
     let mut document: GraphDocument = serde_json::from_value(serde_json::json!({
         "schema_version":1,"graph_id":graph,"template_library":{},"exclude":exclude,
-        "nodes":[{"id":node,"access":"read_only","prompt":task.prompt,"title":task.title,
-          "route":route,"attempt":attempt,"context":origin,"require_skill_location":task.require_skill_location,
+        "nodes":[{"id":node,"access":mode,"prompt":task.prompt,"title":task.title,
+          "worktree":worktree,"route":route,"attempt":attempt,"context":origin,
+          "require_skill_location":task.require_skill_location,
           "settlement_retries":retry}],
-    })).map_err(|_| FacadeError::StateCorrupt)?;
+    }))
+    .map_err(|_| FacadeError::StateCorrupt)?;
     // Preserve the origin's semantic role so review launches use the same
     // comparison-base path as local graph nodes, including exact model routes.
     document.nodes[0].role = origin.role.clone();
-    document.review_base = task.base.clone();
+    // Carry the sender-staged fixture bytes, not a sender path, so the peer
+    // places exactly the same fixture in its own candidate scratch.
+    document.nodes[0].fixture_bytes = task.fixture.clone();
+    // A reader compares against the sender's pinned base. A peer-owned writer
+    // starts from its own freshly provisioned worktree and has no review base.
+    document.review_base = if peer_writer { None } else { task.base.clone() };
     document.peer_origin_work_key = Some(origin_work_key.clone());
-    document.nodes[0].source =
+    // A reader is pinned to the sender's source commit. A peer-owned writer
+    // provisions its own worktree from the branch and base instead, so a
+    // source binding would conflict with that provisioning intent.
+    document.nodes[0].source = if peer_writer {
+        None
+    } else {
         task.head.as_ref().map(
             |head| provenant_fabric_runtime::graph::SourceBinding::Commit {
                 commit: head.clone(),
             },
-        );
-    let review_base = task
-        .base
-        .as_deref()
-        .map(|base| factory.resolve_base(&factory.cwd, base, &facts, cancel))
-        .transpose()?;
+        )
+    };
+    let review_base = if peer_writer {
+        None
+    } else {
+        task.base
+            .as_deref()
+            .map(|base| factory.resolve_base(&factory.cwd, base, &facts, cancel))
+            .transpose()?
+    };
     document.network = network.map(|network| match network {
         provenant_cli::Switch::On => provenant_fabric_runtime::graph::GraphNetwork::On,
         provenant_cli::Switch::Off => provenant_fabric_runtime::graph::GraphNetwork::Off,

@@ -4583,6 +4583,20 @@ pub(super) fn prepare_candidates_inner(
                 )
             })
             .map_err(|error| error.to_string())?;
+        // A portable fixture is staged from bytes carried with the task, so a
+        // peer places exactly the same file as the host without ever seeing a
+        // caller path. Its location is named in the brief below.
+        let fixture_location = match task.fixture.as_ref().filter(|f| f.is_valid()) {
+            Some(fixture) => {
+                let name = std::ffi::OsStr::new(&fixture.name);
+                scratch_directory
+                    .atomic_write(name, ".fixture-", &fixture.content, PublishMode::Replace)
+                    .and_then(|publication| publication.require_durable())
+                    .map_err(|error| error.to_string())?;
+                Some(scratch.join(&fixture.name))
+            }
+            None => None,
+        };
         let text = match &git_context {
             Some(context) => {
                 let location = context
@@ -4591,6 +4605,13 @@ pub(super) fn prepare_candidates_inner(
                 format!("{location}\n{prompt_text}")
             }
             None => prompt_text.to_owned(),
+        };
+        let text = match &fixture_location {
+            Some(path) => format!(
+                "Supplied fixture for this lane: {}. Read it to answer the brief.\n{text}",
+                path.display()
+            ),
+            None => text,
         };
         let text = match &writer_context {
             Some(context) => format!("{context}\n\n{text}"),
@@ -5048,7 +5069,9 @@ pub(super) fn prepare_candidates_inner(
                 account: account.as_ref(),
                 token,
                 cwd: &cwd,
-                git_context: git_context.is_some(),
+                // Staging any file in scratch, including a portable fixture,
+                // needs the same read grant the Git context files use.
+                git_context: git_context.is_some() || fixture_location.is_some(),
                 nonce,
                 provenant: LaneRuntime {
                     executable: &provenant_executable,
@@ -6017,6 +6040,7 @@ mod lane_access_tests {
             build_heavy: false,
             title: None,
             base: None,
+            fixture: None,
             head: None,
             source_head: None,
             base_ref: None,

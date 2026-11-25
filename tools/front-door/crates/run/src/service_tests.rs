@@ -206,6 +206,7 @@ pub(super) fn submission(prompt: &str) -> DispatchRequest {
             title: None,
             prompt: prompt.into(),
             base: None,
+            fixture: None,
             pinned_base: None,
             head: None,
             source_head: None,

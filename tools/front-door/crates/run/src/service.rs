@@ -317,6 +317,7 @@ impl<'a> Service<'a> {
                 prompt_digest: CanonicalV1::file_digest(task.prompt.as_bytes()),
                 base_ref,
                 base,
+                fixture: task.fixture.filter(|fixture| fixture.is_valid()),
                 head: task.head,
                 source_head: task.source_head,
                 route: task.route,
@@ -1045,6 +1046,8 @@ pub struct DispatchTask {
     pub title: Option<String>,
     pub prompt: String,
     pub base: Option<String>,
+    /// A portable fixture staged into the lane's candidate scratch.
+    pub fixture: Option<provenant_records::run::StagedFixture>,
     /// Commit pinned by owned worktree creation. Keep `base` for replay comparison.
     pub pinned_base: Option<provenant_core::GitOid>,
     pub head: Option<String>,

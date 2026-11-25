@@ -2409,20 +2409,16 @@ fn verify_smoke_with(
         "--name".into(),
         graph.clone().into(),
     ];
-    let remote = args
-        .host
-        .as_deref()
-        .is_some_and(|host| !matches!(host, "" | "local" | "localhost"));
-    if !remote {
-        // The writer node needs a linked worktree, which a primary checkout
-        // is not; ask the launch to create one on a branch of the fixture.
-        run.extend([
-            "--branch".into(),
-            format!("smoke/{graph}").into(),
-            "--base".into(),
-            "HEAD".into(),
-        ]);
-    }
+    // The writer node needs a linked worktree. Locally the launch creates one
+    // on a branch of the fixture; on a peer the branch and base are carried
+    // across as peer-owned provisioning intent, so the peer creates its own
+    // worktree instead of inheriting this host's scratch path.
+    run.extend([
+        "--branch".into(),
+        format!("smoke/{graph}").into(),
+        "--base".into(),
+        "HEAD".into(),
+    ]);
     if let Some(host) = &args.host {
         run.extend(["--host".into(), host.into()]);
     }

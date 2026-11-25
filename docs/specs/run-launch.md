@@ -188,11 +188,16 @@ A node whose launch condition (`when`) does not hold never runs, so it needs no 
 submission neither inspects nor preflights its worktree. A composite template takes no launch
 control (access mode, worktree, branch, base or write scope) and the first one given is named in
 the refusal; the bundled `smoke` template is the exception for worktree and branch/base, which
-bind to its write node only. Remote placement takes neither control. A graph reader without an
-explicit worktree or attempt directory uses its selected project as its source; `upgrade --verify`
-selects a temporary committed scratch project for its smoke graph.
-- Why: a verification graph must run on a real install, and a skipped node must not refuse the
-  run it does not take part in.
+bind to its write node only. Remote placement takes no caller path: a caller `worktree` is refused,
+but `--branch` with an optional `--base` is carried as peer-owned worktree intent so the peer
+creates the writer in its own clone. A graph reader without an explicit worktree or attempt
+directory uses its selected project as its source; `upgrade --verify` selects a temporary
+committed scratch project for its smoke graph. A node may name a small project-relative fixture;
+the host stages its bytes with the task, so a peer places the same file in its own candidate
+scratch and the brief names its path instead of leaking a caller path.
+- Why: a verification graph must run on a real install and exercise a writer, and a skipped node
+  must not refuse the run it does not take part in. A fixture must reach every host that runs a
+  reader, not just the host that owns the checkout.
 
 Every refusal of a launch input names the field that caused it, or the decoded path of a document
 or patch field; an unnamed `invalid input` is a defect. A refused bind keeps its typed cause to

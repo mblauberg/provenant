@@ -203,6 +203,7 @@ fn overview_needs_you() -> Result {
                 title: Some("Review changes".into()),
                 prompt: "PRIVATE PROMPT MARKER".into(),
                 base: None,
+                fixture: None,
                 pinned_base: None,
                 source_head: None,
                 head: None,

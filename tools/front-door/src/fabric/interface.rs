@@ -1252,15 +1252,29 @@ impl Factory {
                     .peer_host(name)
                     .ok_or(FacadeError::UnknownHost)?
             };
-            if host != local
-                && (node.access != provenant_fabric_runtime::graph::AccessMode::ReadOnly
-                    || node.worktree.is_some()
-                    || node
-                        .attempt
-                        .as_ref()
-                        .is_some_and(|attempt| attempt.new_worktree.is_some()))
-            {
-                return Err(FacadeError::WorktreeNotApplicable);
+            if host != local {
+                // A peer never accepts a caller path. It may provision a writer
+                // itself from a branch and a base ref, which carry no path.
+                let new_worktree = node
+                    .attempt
+                    .as_ref()
+                    .and_then(|attempt| attempt.new_worktree.as_ref());
+                let caller_path = node
+                    .worktree
+                    .as_deref()
+                    .is_some_and(|path| !path.is_empty());
+                let peer_writer = node.access
+                    == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
+                    && !caller_path
+                    && new_worktree.is_some();
+                if node.access != provenant_fabric_runtime::graph::AccessMode::ReadOnly
+                    && !peer_writer
+                    || caller_path
+                    || new_worktree.is_some()
+                        && node.access != provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
+                {
+                    return Err(FacadeError::WorktreeNotApplicable);
+                }
             }
         }
         if let Some(composite) = &node.composite {
@@ -2810,9 +2824,11 @@ impl Factory {
                 .is_some_and(|node| !node.is_empty());
             if controls {
                 // A remote graph must not retain or transmit a caller path.
-                if let Some(field) = first_control.filter(|_| is_remote) {
+                // `--branch`/`--base` name a worktree the peer creates in its
+                // own clone, so they are admitted; only a caller path is not.
+                if is_remote && first_control == Some(&"worktree") {
                     return Err(FacadeError::invalid(InvalidInputDetail::Field(
-                        (*field).into(),
+                        "worktree".into(),
                     )));
                 }
                 // A control and a `--set` of the same binding are two
@@ -2830,9 +2846,15 @@ impl Factory {
                     parameters["write_attempt"] = attempt.clone();
                 }
             }
+            // A peer-owned writer is provisioned from a branch and a base ref,
+            // never from a caller path. Drop the host path while retaining the
+            // branch intent so the peer can create its own worktree.
+            let peer_owned_writer = is_remote
+                && parameters
+                    .get("write_attempt")
+                    .and_then(|attempt| attempt.get("new_worktree"))
+                    .is_some();
             if is_remote {
-                // A remote graph must not retain or transmit a caller path,
-                // even though the writer is skipped by its launch condition.
                 parameters["worktree"] = json!("");
             }
             let requested = parameters.get("smoke-write").is_some();
@@ -2841,11 +2863,12 @@ impl Factory {
                     .get("worktree")
                     .and_then(Value::as_str)
                     .unwrap_or("");
-                parameters["smoke-write"] = json!(!is_remote && !worktree.is_empty());
+                parameters["smoke-write"] =
+                    json!(peer_owned_writer || (!is_remote && !worktree.is_empty()));
             }
             if parameters["smoke-write"] != json!(true) {
                 let reason = if is_remote {
-                    "remote placement does not accept caller paths"
+                    "remote placement needs --branch B to provision a peer-owned worktree; caller paths are not accepted"
                 } else if requested {
                     "smoke-write is not enabled"
                 } else {

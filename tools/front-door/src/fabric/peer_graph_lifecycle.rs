@@ -877,6 +877,8 @@ fn accepted_attempt_observes_stable_host_after_alias_is_renamed()
     let node = || graph::NodeInput {
         writer_dirty_preflight: false, review_launch: false,
         attachments: &[],
+        fixture: None,
+        fixture_bytes: None,
         capabilities: None,
         capability_sources: None,
         attempt: Some(&spec),

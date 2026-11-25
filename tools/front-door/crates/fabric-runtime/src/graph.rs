@@ -2527,6 +2527,8 @@ fn observe_attempt<R: AttemptOwner, J: GraphJournal>(
             },
             read_roots: &node.read_roots,
             attachments: &node.attachments,
+            fixture: node.fixture.as_deref(),
+            fixture_bytes: node.fixture_bytes.as_ref(),
             capabilities: node.capabilities.as_deref(),
             capability_sources: (!node.capability_sources.is_empty())
                 .then_some(&node.capability_sources),

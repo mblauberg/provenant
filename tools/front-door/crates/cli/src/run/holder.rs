@@ -1497,6 +1497,7 @@ mod tests {
                     build_heavy: false,
                     title: None,
                     base: None,
+                    fixture: None,
                     head: None,
                     source_head: None,
                     base_ref: None,

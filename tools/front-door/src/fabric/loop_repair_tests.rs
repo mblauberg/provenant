@@ -87,6 +87,7 @@ fn loop_round_settlement_retains_lane_owned_noop_worktree() -> Result<(), Box<dy
                 title: None,
                 prompt: "reply OK".into(),
                 base: Some(head.to_string()),
+                fixture: None,
                 pinned_base: None,
                 head: None,
                 profile: Default::default(),

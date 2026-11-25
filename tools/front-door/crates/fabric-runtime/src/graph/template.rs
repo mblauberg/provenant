@@ -1016,6 +1016,7 @@ impl Template {
                 "source",
                 "read_roots",
                 "attachments",
+                "fixture",
                 "route",
                 "routes",
                 "tier",

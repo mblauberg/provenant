@@ -89,6 +89,7 @@ impl CommitSourcePreparation {
             build_heavy: false,
             title: None,
             base: Some(head.clone()),
+            fixture: None,
             head: Some(head),
             source_head: None,
             base_ref: None,
