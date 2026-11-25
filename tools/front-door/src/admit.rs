@@ -582,7 +582,7 @@ pub fn run(class: &str, command: &[OsString], env: &[(OsString, OsString)]) -> i
             state: state_ref,
             class,
             limit: slots_count,
-            limit_source,
+            limit_source: limit_source.clone(),
             job_id: &id,
             owner: &owner,
             project_key: "",
