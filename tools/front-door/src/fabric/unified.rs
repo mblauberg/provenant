@@ -1071,6 +1071,7 @@ impl<'a> StatusFacts<'a> {
                 .map_err(|_| ())
             })
             .as_ref()
+            .map_err(|_| ())
     }
 }
 
@@ -1138,7 +1139,7 @@ fn enrich_status_rows_with_facts(
                     peer_subtree_after: None,
                 },
                 peer_budget,
-                cancel,
+                facts.call.cancel,
             );
             let response = match response {
                 Ok(response) => response,
