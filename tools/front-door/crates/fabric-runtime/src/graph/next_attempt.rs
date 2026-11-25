@@ -131,15 +131,20 @@ fn expected_preparation_failure(
 pub(crate) fn launch_contention_code(code: &str) -> bool {
     matches!(
         code,
-        "busy" | "writer_lock_busy" | "writer_unknown" | "writer_busy"
+        "busy" | "writer_lock_busy" | "writer_unknown" | "writer_busy" | "writer_lease_held"
     )
 }
 
 /// Writer-custody codes that prove the launch had not reached the host when it
 /// failed. Generic `busy` is excluded: it also covers post-acceptance
-/// filesystem lock timeouts, where a live guardian may already exist.
+/// filesystem lock timeouts, where a live guardian may already exist. A held
+/// lease is included: a just-stopped worktree still publishing its terminal
+/// record is a release in progress, not a foreign lane to refuse.
 pub(crate) fn pre_host_contention(code: &str) -> bool {
-    matches!(code, "writer_lock_busy" | "writer_unknown" | "writer_busy")
+    matches!(
+        code,
+        "writer_lock_busy" | "writer_unknown" | "writer_busy" | "writer_lease_held"
+    )
 }
 
 /// Typed counterpart of `pre_host_contention`. Called at disposition time to
@@ -171,6 +176,11 @@ pub(crate) fn launch_contention(error: &(dyn Error + 'static)) -> bool {
         Some(FacadeError::GitMutationFailed {
             lock_failure: true, ..
         }) => true,
+        // A live holder is another lane's work, not a release in progress;
+        // waiting it out would only delay the boundary-2 refusal.
+        Some(FacadeError::WriterLeaseHeld {
+            live: Some(true), ..
+        }) => false,
         // static_code, not code: a dynamic relay refusal code must not be
         // mistaken for a typed writer-custody cause.
         Some(error) => launch_contention_code(error.static_code()),
@@ -1318,12 +1328,17 @@ mod tests {
         assert!(pre_host_contention("writer_lock_busy"));
         assert!(pre_host_contention("writer_unknown"));
         assert!(pre_host_contention("writer_busy"));
+        assert!(pre_host_contention("writer_lease_held"));
         // Generic busy also covers post-acceptance filesystem lock timeouts.
         assert!(!pre_host_contention("busy"));
         assert!(!pre_host_contention("io"));
         // The wider wait classifier still includes generic busy.
         assert!(launch_contention_code("busy"));
         assert!(launch_contention_code("writer_lock_busy"));
+        assert!(launch_contention_code("writer_lease_held"));
+        // A caller reusing an operation ID with a different request is a
+        // permanent conflict, not a writer release to wait out.
+        assert!(!launch_contention_code("operation_conflict"));
 
         let holder = provenant_core::AttemptId::from_bytes([31; 16]);
         assert!(launch_pre_host(&FacadeError::WriterLockBusy {
@@ -1331,6 +1346,13 @@ mod tests {
         }));
         assert!(launch_pre_host(&FacadeError::WriterBusy { holder: None }));
         assert!(launch_pre_host(&FacadeError::WriterUnknown));
+        assert!(launch_pre_host(&FacadeError::WriterLeaseHeld {
+            holder: None,
+            branch: None,
+            worktree: None,
+            age: None,
+            live: None,
+        }));
         assert!(!launch_pre_host(&FacadeError::Busy));
         assert!(!launch_pre_host(&FacadeError::LaunchUnknown {
             operation_id: provenant_core::OperationId::parse("op").unwrap()

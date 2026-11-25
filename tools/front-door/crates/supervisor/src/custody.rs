@@ -2388,8 +2388,50 @@ pub fn other_holders_live(
     Ok(false)
 }
 
+/// Whether a writer slot has a reservation currently being released. A
+/// guardian publishes `Settling` before terminal publication and keeps
+/// `writer.lock` until settlement clears the reservation, so a relaunch in
+/// that window is waiting on a release that is already in progress. Unreadable
+/// evidence is not treated as a release: the ordinary bounded refusal still
+/// applies and no candidate gains custody from it.
+pub fn release_in_progress(slot: &Directory) -> bool {
+    let Ok(entries) = slot.entries() else {
+        return false;
+    };
+    for (index, name) in entries.enumerate() {
+        if index >= 10_000 {
+            return false;
+        }
+        let Ok(name) = name else {
+            return false;
+        };
+        let Ok(metadata) = slot.metadata_at(&name, false) else {
+            continue;
+        };
+        if metadata.kind != provenant_os::fs::FileKind::Directory {
+            continue;
+        }
+        let Ok(child) = slot.open_verified_directory(&name) else {
+            continue;
+        };
+        let Ok(reservation) = read_record::<Reservation>(&child, "reservation.json", RECORD_LIMIT)
+        else {
+            continue;
+        };
+        if validate_anchor(&child, &reservation).is_err() {
+            continue;
+        }
+        if reservation.launch_state == LaunchState::Settling {
+            return true;
+        }
+    }
+    false
+}
+
 /// Acquire shared worktree occupancy without keeping the observation gate
-/// while another holder owns the lease.
+/// while another holder owns the lease. Only a release already in progress
+/// justifies spending the caller's wait; a foreign live holder still refuses
+/// on the first probe.
 #[allow(clippy::disallowed_methods)] // The bounded wait must expire even with a stopped caller clock.
 pub fn lock_writer_occupancy(
     directory: &Directory,
@@ -2397,7 +2439,7 @@ pub fn lock_writer_occupancy(
     cancel: &CancelToken,
     clock: &dyn Clock,
 ) -> Result<LockGuard> {
-    lock_writer_mode(directory, LockMode::Shared, budget, cancel, clock)
+    lock_writer_mode(directory, LockMode::Shared, budget, cancel, clock, true)
 }
 
 /// Acquire exclusive worktree occupancy for removal and other operations that
@@ -2409,7 +2451,7 @@ pub fn lock_writer_exclusion(
     cancel: &CancelToken,
     clock: &dyn Clock,
 ) -> Result<LockGuard> {
-    lock_writer_mode(directory, LockMode::Exclusive, budget, cancel, clock)
+    lock_writer_mode(directory, LockMode::Exclusive, budget, cancel, clock, false)
 }
 
 #[allow(clippy::disallowed_methods)] // The bounded wait must expire even with a stopped caller clock.
@@ -2419,12 +2461,14 @@ fn lock_writer_mode(
     budget: WaitBudget,
     cancel: &CancelToken,
     clock: &dyn Clock,
+    wait_for_release: bool,
 ) -> Result<LockGuard> {
     let timeout = Duration::from_micros(budget.remaining(clock.mono_now()).as_micros());
     let path = directory.current_path()?.join("writer.lock");
     let deadline = Instant::now()
         .checked_add(timeout)
         .ok_or_else(|| FsError::LockDeadlineOverflow { path: path.clone() })?;
+    let mut release_waiting = false;
     loop {
         if cancel.is_cancelled() {
             return Err(FsError::Cancelled { path }.into());
@@ -2444,7 +2488,16 @@ fn lock_writer_mode(
         drop(observation);
         match attempt {
             Ok(lease) => return Ok(lease),
-            Err(FsError::LockTimeout { .. }) => {}
+            Err(FsError::LockTimeout { .. }) => {
+                // Decide once: a release already in progress is progress to
+                // wait out within the caller's budget, while a foreign live
+                // holder still refuses on the first probe. Exclusion callers
+                // keep their ordinary bounded wait unchanged.
+                if wait_for_release && !release_waiting && !release_in_progress(directory) {
+                    return Err(FsError::LockTimeout { path, timeout }.into());
+                }
+                release_waiting = true;
+            }
             Err(error) => return Err(error.into()),
         }
         if cancel.is_cancelled() {

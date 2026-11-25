@@ -782,7 +782,7 @@ pub(super) fn start_writer(
                 directory,
                 scope,
                 binding,
-                provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
+                call.lock_budget(),
                 call.cancel,
                 call.clock,
             )

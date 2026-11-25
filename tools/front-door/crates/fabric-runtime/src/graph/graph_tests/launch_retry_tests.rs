@@ -346,6 +346,78 @@ fn writer_lock_contention_retries_the_same_attempt_after_release() {
     assert_eq!(owner.calls[0], owner.calls[1]);
 }
 
+// Issue #3991: terminal publication precedes the guardian's release of the
+// worktree lease. A settling lease is a release in progress, so the launch
+// waits on the provisioning allowance instead of settling `blocked` at once.
+// A lease held by a live lane is not that case and still refuses immediately.
+#[test]
+fn settling_writer_lease_waits_but_a_live_holder_refuses() {
+    use crate::coordination::facade::FacadeError;
+    let settling = FacadeError::WriterLeaseHeld {
+        holder: Some(provenant_core::AttemptId::from_bytes([41; 16])),
+        branch: Some("fix/3991".into()),
+        worktree: Some("/project/.worktrees/lane".into()),
+        age: Some("2s".into()),
+        live: Some(false),
+    };
+    let live = FacadeError::WriterLeaseHeld {
+        holder: Some(provenant_core::AttemptId::from_bytes([42; 16])),
+        branch: None,
+        worktree: None,
+        age: None,
+        live: Some(true),
+    };
+    let allowance = crate::config::GraphConfig::default().writer_provision_seconds;
+    let policy = LaunchRetryPolicy {
+        limit: 0,
+        first_seconds: 1,
+        max_seconds: 1,
+        ..Default::default()
+    };
+    let new_checkpoint = || {
+        serde_json::from_value::<GraphCheckpoint>(serde_json::json!({
+            "schema_version":1,"graph_id":"g-test","plan_digest":"digest",
+            "nodes":[{"id":"writer","state":"pending","worktree":null,"attempts":[]}]
+        }))
+        .unwrap()
+    };
+
+    let mut waiting = new_checkpoint();
+    assert!(crate::graph::defer_launch_contention(
+        &mut waiting,
+        0,
+        &settling,
+        Some(at(0)),
+        allowance,
+        policy.clone(),
+    )
+    .unwrap());
+    assert_eq!(waiting.nodes[0].state, NodeState::Running);
+    assert_eq!(
+        waiting.nodes[0].advance_owner_code.as_deref(),
+        Some("writer_lease_held")
+    );
+    let retry = waiting.nodes[0].launch_retry.as_ref().unwrap();
+    assert!(
+        retry
+            .wake_at
+            .is_some_and(|wake| wake <= at(i64::try_from(allowance).unwrap()))
+    );
+
+    let mut refused = new_checkpoint();
+    assert!(!crate::graph::defer_launch_contention(
+        &mut refused,
+        0,
+        &live,
+        Some(at(0)),
+        allowance,
+        policy,
+    )
+    .unwrap());
+    assert_eq!(refused.nodes[0].state, NodeState::Pending);
+    assert!(refused.nodes[0].launch_retry.is_none());
+}
+
 #[test]
 fn an_unobserved_writer_disk_check_is_a_retryable_launch_error() {
     let document = graph(vec![node("one", route("first"))]);
