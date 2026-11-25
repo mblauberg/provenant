@@ -271,6 +271,10 @@ pub(crate) fn node_digests(rows: &[Value]) -> Vec<NodeDigest> {
                 },
                 result_path.as_deref().unwrap_or("-")
             ));
+            // The checkpoint head is an observation, not a fresh forge read.
+            if let Some(head) = text(&attempt["head"], 128).or_else(|| text(&node["head"], 128)) {
+                line.push_str(&format!(" head={head}/recorded"));
+            }
             if let Some(presence) = &attempt_presence {
                 line.push_str(&format!(" attempt_presence={presence}"));
             }
@@ -548,6 +552,14 @@ mod tests {
                 .contains("stalled last_event=2026-11-26T04:58:00Z")
         );
         assert!(!digest.settled, "a stall is not a settlement");
+    }
+
+    #[test]
+    fn digest_labels_the_recorded_head_as_an_observation() {
+        use provenant_core::ProjectId;
+        use provenant_records::WorkKey;
+        use serde_json::json;
+
     }
 
     #[test]

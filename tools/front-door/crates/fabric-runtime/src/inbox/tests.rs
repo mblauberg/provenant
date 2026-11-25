@@ -1840,3 +1840,47 @@ fn saved_receipt_keeps_unknown_fields_without_a_flatten_chain() {
     let result: InboxResult = serde_json::from_value(wire.clone()).unwrap();
     assert_eq!(serde_json::to_value(&result).unwrap(), wire);
 }
+
+#[test]
+fn delivery_park_replays_one_request_and_binds_its_transition() {
+    let f = Fixture::new();
+    let work = RequestWork {
+        extra: Default::default(),
+        graph: "graph-1".into(),
+        node: Some("review".into()),
+        attempt_id: Some(AttemptId::from_bytes([7; 16])),
+        repository: None,
+        head: None,
+    };
+    let input = delivery_park(
+        "session-a".into(),
+        OperationId::parse("park-transition-1").unwrap(),
+        work,
+        "issue-42",
+        provenant_records::graph::ParkReason::ReviewEvidence,
+        &"x".repeat(2000),
+        &["evidence-1".into()],
+    )
+    .unwrap();
+    let lookup = |_: &RequestWork, _: &Request<'_>| Ok(WorkCoverage::Verified);
+    let service = f.service().with_work_lookup(&lookup);
+    let first = receipt(service.execute(input.clone(), &f.cancel).unwrap());
+    assert_eq!(
+        receipt(service.execute(input.clone(), &f.cancel).unwrap()),
+        first
+    );
+    let stored = item(&f, first.request_id);
+    let body: serde_json::Value = serde_json::from_str(&stored.request.request.body).unwrap();
+    assert_eq!(body["reason"], "review_evidence");
+    assert_eq!(body["item"], "issue-42");
+    assert_eq!(body["handoff_truncated"], true);
+    assert_eq!(body["handoff"].as_str().unwrap().len(), 1024);
+    let mut changed = input;
+    if let InboxInput::Ask { request, .. } = &mut changed {
+        request.body.push(' ');
+    }
+    assert_eq!(
+        service.execute(changed, &f.cancel).unwrap_err().code(),
+        "operation_conflict"
+    );
+}
