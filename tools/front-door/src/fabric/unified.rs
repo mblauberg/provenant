@@ -3723,8 +3723,7 @@ fn host_graph_output(
     // lines, including "unreadable" lines for retained attempts whose records
     // can no longer be decoded (#3976). An unsettled lane or one with no result
     // still gets its failure diagnostics.
-    let needs_failures =
-        output_needs_graph_failures(command.target.attempt.is_some(), &checkpoint, progress);
+    let needs_failures = output_needs_graph_failures(command.target.attempt.is_some(), progress);
     let failure_rows = if needs_failures {
         node_failure_rows(
             factory,
@@ -3868,11 +3867,9 @@ fn composite_graph_output(
 /// attempt evidence only adds noise to that page.
 fn output_needs_graph_failures(
     attempt_given: bool,
-    checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
     progress: &provenant_fabric_runtime::graph::NodeProgress,
 ) -> bool {
-    let settled_with_result =
-        progress.outputs.is_some() && checkpoint.nodes.iter().all(|node| node.state.settled());
+    let settled_with_result = progress.outputs.is_some() && progress.state.settled();
     !attempt_given && !settled_with_result
 }
 

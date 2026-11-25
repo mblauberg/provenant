@@ -2775,37 +2775,45 @@ fn settled_lane_output_skips_stale_failure_rows() {
     .expect("settled review checkpoint");
     let progress = settled.nodes.first().expect("review node");
     assert!(
-        !super::output_needs_graph_failures(false, &settled, progress),
+        !super::output_needs_graph_failures(false, progress),
         "a settled review lane with a result must not append failure rows"
     );
 
     // An explicit attempt read never appends the graph's failure rows either.
-    assert!(!super::output_needs_graph_failures(
-        true, &settled, progress
-    ));
+    assert!(!super::output_needs_graph_failures(true, progress));
 
     // A failed settled lane's retained result is still its answer.
     let mut failed = settled.clone();
     failed.nodes[0].state = NodeState::Failed;
     assert!(
-        !super::output_needs_graph_failures(false, &failed, &failed.nodes[0]),
+        !super::output_needs_graph_failures(false, &failed.nodes[0]),
         "a failed settled lane with a result must not append failure rows"
     );
 
     // Failed work without a result still needs its diagnostics.
     failed.nodes[0].outputs = None;
-    assert!(super::output_needs_graph_failures(
-        false,
-        &failed,
-        &failed.nodes[0]
-    ));
+    assert!(super::output_needs_graph_failures(false, &failed.nodes[0]));
 
     // Unsettled work still needs its diagnostics, even after a prior result.
     let mut running = settled;
     running.nodes[0].state = NodeState::Running;
-    assert!(super::output_needs_graph_failures(
-        false,
-        &running,
-        &running.nodes[0]
-    ));
+    assert!(super::output_needs_graph_failures(false, &running.nodes[0]));
+}
+
+// Spec: docs/specs/cli.md#output-references-and-bounded-tails
+#[test]
+fn settled_lane_output_ignores_unfinished_sibling() {
+    let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
+        "schema_version":2,"graph_id":"review-panel","plan_digest":"digest","nodes":[
+            {"id":"review","state":"failed","worktree":null,"attempts":[],
+             "outputs":{"schema_version":2,"result":null,"verdict":"VERDICT: FAIL",
+                        "findings":[],"branch":null,"commit":null,"warnings":[]}},
+            {"id":"sibling","state":"running","worktree":null,"attempts":[]}
+        ]
+    }))
+    .expect("review panel checkpoint");
+    assert!(
+        !super::output_needs_graph_failures(false, &checkpoint.nodes[0]),
+        "a settled lane's retained output must not acquire stale failure rows while a sibling runs"
+    );
 }
