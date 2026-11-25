@@ -36,7 +36,7 @@ mod checkpoint_tests;
 mod ci_tests;
 mod composites;
 mod delivery;
-pub(super) use delivery::park_delivery_transition;
+use delivery::park_delivery_transition;
 use delivery::{
     advance_hygiene, advance_publish, delivery_ci_wait_policy, prior_publication_adoption,
     prior_publication_head,
