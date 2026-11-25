@@ -28,6 +28,10 @@ pub(crate) struct NodeDigest {
     pub handoff_status: Option<String>,
     pub open_asks: Vec<Value>,
     pub evidence_error: Option<String>,
+    pub delivery_loop: Value,
+    pub escalation: Value,
+    pub delivery_park: Value,
+    pub wait_source: Option<String>,
 }
 
 fn text(value: &Value, limit: usize) -> Option<String> {
@@ -94,8 +98,6 @@ pub(super) fn path_text(value: &Value) -> Option<String> {
 
 /// Select each node's current attempt once, or the explicitly selected older
 /// attempt. Node state owns settlement; a previous attempt cannot settle it.
-// TODO(#3972-queue): expose item phase, head, round, rung, wait and parked handoff on the queue board.
-// Queue controls must target a recorded revision and reconcile their receipts.
 pub(crate) fn node_digests(rows: &[Value]) -> Vec<NodeDigest> {
     let nodes: Vec<_> = rows.iter().filter(|row| row["kind"] == "node").collect();
     let selected: Vec<_> = if nodes.is_empty() {
@@ -186,6 +188,10 @@ pub(crate) fn node_digests(rows: &[Value]) -> Vec<NodeDigest> {
             };
             let open_asks = node["open_asks"].as_array().cloned().unwrap_or_default();
             let evidence_error = text(&attempt["evidence_error"], 200);
+            let delivery_loop = node["delivery_loop"].clone();
+            let escalation = node["escalation"].clone();
+            let delivery_park = node["delivery_park"].clone();
+            let wait_source = text(&node["wait_source"], 128);
             let current_state = lane_state(
                 &state,
                 attempt_state.as_deref(),
@@ -241,6 +247,21 @@ pub(crate) fn node_digests(rows: &[Value]) -> Vec<NodeDigest> {
             // The checkpoint head is an observation, not a fresh forge read.
             if let Some(head) = text(&attempt["head"], 128).or_else(|| text(&node["head"], 128)) {
                 line.push_str(&format!(" head={head}/recorded"));
+            }
+            if let Some(round) = delivery_loop["round"].as_u64() {
+                line.push_str(&format!(" round={round}"));
+            }
+            if let Some(rung) = escalation["rung"].as_u64() {
+                line.push_str(&format!(" rung={rung}"));
+            }
+            if let Some(source) = &wait_source {
+                line.push_str(&format!(" wait_source={source}"));
+            }
+            if let Some(reason) = text(&delivery_park["reason"], 128) {
+                line.push_str(&format!(" parked={reason}"));
+            }
+            if let Some(handoff) = text(&delivery_park["handoff"], 1024) {
+                line.push_str(&format!(" parked_handoff={handoff}"));
             }
             if let Some(presence) = &attempt_presence {
                 line.push_str(&format!(" attempt_presence={presence}"));
@@ -312,6 +333,10 @@ pub(crate) fn node_digests(rows: &[Value]) -> Vec<NodeDigest> {
                 handoff_status,
                 open_asks,
                 evidence_error,
+                delivery_loop,
+                escalation,
+                delivery_park,
+                wait_source,
             })
         })
         .collect();
@@ -493,6 +518,33 @@ mod tests {
         let rows = vec![json!({"kind":"node", "work_key":key, "state":"waiting", "head":"abc123"})];
         let digest = super::node_digests(&rows).remove(0);
         assert!(digest.line.contains("head=abc123/recorded"));
+    }
+
+    #[test]
+    fn delivery_digest_retains_recorded_progress_and_park() {
+        use provenant_core::ProjectId;
+        use provenant_records::WorkKey;
+        use serde_json::json;
+
+        let key = WorkKey::new(ProjectId::from_bytes([7; 16]), "graph", "task", 1).unwrap();
+        let rows = vec![json!({"kind":"node", "work_key":key, "state":"blocked",
+            "head":"abc123", "delivery_loop":{"round":2},
+            "escalation":{"rung":1}, "wait_source":"graph checkpoint",
+            "delivery_park":{"reason":"ci_unavailable", "handoff":"inspect CI"}})];
+        let digest = super::node_digests(&rows).remove(0);
+        assert_eq!(digest.delivery_loop["round"], 2);
+        assert_eq!(digest.escalation["rung"], 1);
+        assert_eq!(digest.delivery_park["handoff"], "inspect CI");
+        for text in [
+            "head=abc123/recorded",
+            "round=2",
+            "rung=1",
+            "wait_source=graph checkpoint",
+            "parked=ci_unavailable",
+            "parked_handoff=inspect CI",
+        ] {
+            assert!(digest.line.contains(text));
+        }
     }
 
     #[test]

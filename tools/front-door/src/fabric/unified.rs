@@ -367,6 +367,10 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
             "findings_count",
             "findings_available",
             "review_partial",
+            "delivery_loop",
+            "escalation",
+            "delivery_park",
+            "wait_source",
             // The result command reuses the same review projection wait and
             // status read, carrying the typed findings themselves, not a second
             // parse of the sealed result artifact.
@@ -418,6 +422,9 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
                     .or_else(|| node
                         .and_then(|node| node.writer_binding.as_ref())
                         .map(|binding| binding.head.clone()))
+                    .or_else(|| node
+                        .and_then(|node| node.delivery_park.as_ref())
+                        .and_then(|park| park.head.clone()))
             );
             row["pr"] = node
                 .and_then(|node| node.land.as_ref())
@@ -427,6 +434,14 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
                     |number| json!(number),
                 );
             row["ci"] = json!(node.and_then(|node| node.ci.as_ref()));
+            if row["kind"] == "node" {
+                row["delivery_loop"] = json!(node.and_then(|node| node.delivery_loop.as_ref()));
+                row["escalation"] = json!(node.and_then(|node| node.escalation.as_ref()));
+                row["delivery_park"] = json!(node.and_then(|node| node.delivery_park.as_ref()));
+                if node.and_then(|node| node.wait_reason.as_ref()).is_some() {
+                    row["wait_source"] = json!("graph checkpoint");
+                }
+            }
             row["handoff"] = json!(Ok::<_, provenant_records::handoff::HandoffError>(
                 node.and_then(|node| node.handoff.as_ref())
             ));
