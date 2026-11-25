@@ -1744,6 +1744,7 @@ fn steer_without_a_retained_session_leaves_the_running_attempt_untouched() -> Te
     Ok(())
 }
 
+#[test]
 fn explicit_cancel_after_delivered_steer_keeps_the_stop_and_blocks_successor() -> TestResult {
     use provenant_supervisor::census::ProcessObservation;
 

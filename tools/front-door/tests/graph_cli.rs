@@ -2993,7 +2993,9 @@ fn steer_graph_and_node_refuse_an_unlaunched_attempt_before_reading_stdin() -> R
         .human_command()
         .args(["steer", "steer-ambiguous/accept", "--brief", "amended work"])
         .output()?;
-    let text = String::from_utf8_lossy(&human.stdout);
+    assert!(!human.status.success(), "{human:?}");
+    // Non-JSON refusals are rendered on stderr, not stdout.
+    let text = String::from_utf8_lossy(&human.stderr);
     assert!(
         text.contains("has no further attempt")
             && text.contains("provenant run implement --worktree"),
