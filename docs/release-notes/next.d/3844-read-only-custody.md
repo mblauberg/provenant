@@ -1,1 +1,5 @@
+## Fixes
+
+### Lanes and settlement
+
 - A terminal read-only review whose guardian left a reservation no longer keeps custody uncertain. `provenant reconcile` and `provenant stop` settle it with a typed warning naming the retained slot instead of re-recording the same fence on every pass; writers, retained imports and live custody locks still fence. (#3844)
