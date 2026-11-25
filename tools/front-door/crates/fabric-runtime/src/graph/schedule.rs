@@ -680,13 +680,15 @@ fn advance_gate<R: AttemptOwner, J: GraphJournal>(
         && plan.queue.is_some()
         && reason.is_some()
         && delivery_review_gate_failed(condition, node, plan, checkpoint, positions);
-    let delivery_ci_supersession =
-        if gate_was_evaluated && plan.queue.is_some() && reason.is_some() && node.on_fail.is_some()
-        {
-            queue_conflict_supersession(condition, node_index, positions, checkpoint)
-        } else {
-            None
-        };
+    let delivery_ci_supersession = if gate_was_evaluated
+        && plan.queue.is_some()
+        && reason.is_some()
+        && (node.on_fail.is_some() || node.round.as_ref().is_some_and(|round| round.retry_on))
+    {
+        queue_conflict_supersession(condition, node_index, positions, checkpoint)
+    } else {
+        None
+    };
     let escalation_cause = if exact_queue_ci_red {
         Some(provenant_records::graph::EscalationCause::CiRed)
     } else if failed_delivery_review {
