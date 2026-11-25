@@ -217,9 +217,7 @@ pub fn delivery_park(
             .is_none_or(|node| node.trim().is_empty())
         || (work.attempt_id.is_none() && attempt_key.is_none())
         || attempt_key.is_some_and(|key| {
-            key.graph_id != work.graph
-                || work.node.as_deref() != Some(key.node_id.as_str())
-                || key.attempt == 0
+            key.graph_id != work.graph || key.node_id.trim().is_empty() || key.attempt == 0
         })
         || item.is_some_and(|item| item.trim().is_empty())
     {
