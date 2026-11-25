@@ -128,6 +128,7 @@ pub(super) fn checkpoint_bound(
         pull_request: Some(String::new()),
         integration_pin: Some(String::new()),
         cancelled: true,
+        delivery_ci_superseded: Vec::new(),
         cancel_reason: Some(String::new()),
         pause: provenant_records::pause::Pause::new(
             provenant_records::pause::PauseCause::Stop(
@@ -162,6 +163,16 @@ pub(super) fn checkpoint_bound(
         metric: "wall_time_seconds".into(),
         reason: Some(String::new()),
     };
+    let superseded_publications = vec![
+        DeliveryCiSupersession {
+            node_id: "n".repeat(longest_id),
+            head_sha: "f".repeat(64),
+        };
+        plan.nodes
+            .iter()
+            .filter(|node| node.kind == Some(NodeKind::Publish))
+            .count()
+    ];
     let fixed = [
         ENVELOPE_KEYS_BYTES,
         // GraphExecution stores the configured graph-wide bases beside the checkpoint.
@@ -198,6 +209,9 @@ pub(super) fn checkpoint_bound(
             + 6 * MAX_CANCEL_REASON_BYTES,
         MAX_UNKNOWN_USAGE * (UNKNOWN_USAGE_TEXT_BYTES + longest_id + 1),
         MAX_USAGE_EVENTS * (canonical_len(&event) + 64 + NOTE_BYTES + 1),
+        canonical_len(&serde_json::json!({
+            "delivery_ci_superseded": superseded_publications,
+        })),
         // The pause ask: one open at a time.
         plan.decision_session.as_deref().map_or(0, |session| {
             ask_bound(&asks::pause_ask(
@@ -332,6 +346,7 @@ fn node_bound(
             integration_base: "2".repeat(64),
             expected_remote_head: Some("3".repeat(64)),
             ci_admission: None,
+            ci_admission_wait: None,
             receipt: Some(DeliveryPublication {
                 branch: "x".repeat(OUTPUT_FIELD_BYTES),
                 head: "4".repeat(64),

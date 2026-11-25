@@ -821,6 +821,7 @@ fn restore_patch_rounds(document: &mut GraphDocument, expansion: &Expansion) {
                 round,
                 node_id: local.to_owned(),
                 until: local == spec.until,
+                retry_on: spec.retry_on.iter().any(|retry| retry == local),
                 previous_gate: (round > 1)
                     .then(|| format!("{}--r{}--{}", boundary.id, round - 1, spec.until)),
             });

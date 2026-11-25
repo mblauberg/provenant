@@ -30,9 +30,12 @@ pub(crate) fn acquire_delivery_ci_lease(
     state: &Path,
     owner: provenant_run::build::queue::CiLeaseOwner,
     ci_slots: &provenant_records::Sourced<usize>,
+    wait_policy: &provenant_records::Sourced<u64>,
+    allow_overflow: bool,
+    waited_millis: u64,
     wait_seconds: u64,
     cancel: &provenant_core::CancelToken,
-) -> provenant_fabric_runtime::graph::DeliveryCiAdmission {
+) -> Option<provenant_fabric_runtime::graph::DeliveryCiAdmission> {
     use provenant_run::build::{Priority, queue};
     use sha2::{Digest, Sha256};
 
@@ -41,9 +44,9 @@ pub(crate) fn acquire_delivery_ci_lease(
         Err(error) => {
             let reason = format!("cannot encode lease identity: {error}");
             say(&format!("delivery CI admission unavailable: {reason}"));
-            return provenant_fabric_runtime::graph::DeliveryCiAdmission::Unavailable {
-                reason,
-            };
+            return Some(
+                provenant_fabric_runtime::graph::DeliveryCiAdmission::Unavailable { reason },
+            );
         }
     };
     let digest = Sha256::digest(&identity)
@@ -58,9 +61,9 @@ pub(crate) fn acquire_delivery_ci_lease(
                 ci_slots.value, ci_slots.source.layer
             );
             say(&format!("delivery CI admission unavailable: {reason}"));
-            return provenant_fabric_runtime::graph::DeliveryCiAdmission::Unavailable {
-                reason,
-            };
+            return Some(
+                provenant_fabric_runtime::graph::DeliveryCiAdmission::Unavailable { reason },
+            );
         }
     };
     let limit_source = delivery_ci_cap_source(ci_slots);
@@ -77,7 +80,9 @@ pub(crate) fn acquire_delivery_ci_lease(
         priority: Priority::Interactive,
         aging: Duration::from_secs(120),
         command_digest: digest.clone(),
-        overflow: queue::OverflowPolicy::Queue,
+        overflow: queue::OverflowPolicy::Local {
+            after: Duration::ZERO,
+        },
         affinity: Vec::new(),
         excluded: Vec::new(),
         cancel,
@@ -86,10 +91,10 @@ pub(crate) fn acquire_delivery_ci_lease(
         command: Some(command),
         wait_seconds,
     };
-    match queue::admit_ci_lease(&request, owner.clone()) {
-        Ok(queue::CiLeaseAdmission::Held { lease, .. }) => {
+    match queue::try_admit_ci_lease(&request, owner.clone(), allow_overflow) {
+        Ok(queue::CiLeaseAttempt::Held { lease }) => {
             let owner = lease.owner;
-            provenant_fabric_runtime::graph::DeliveryCiAdmission::Held {
+            Some(provenant_fabric_runtime::graph::DeliveryCiAdmission::Held {
                 lease: provenant_fabric_runtime::graph::DeliveryCiLease {
                     id: lease.id,
                     slot: lease.slot,
@@ -99,14 +104,27 @@ pub(crate) fn acquire_delivery_ci_lease(
                     head_sha: owner.head_sha,
                     ci_slots: ci_slots.clone(),
                 },
-            }
+            })
         }
-        Ok(queue::CiLeaseAdmission::Overflow { waited }) => {
-            let waited_millis = waited.as_millis().min(u128::from(u64::MAX)) as u64;
+        Ok(queue::CiLeaseAttempt::Waiting) => None,
+        Ok(queue::CiLeaseAttempt::Overflow) => {
             say(&format!(
-                "delivery CI admission overflow after {waited_millis} ms; continuing under the advisory cap of {limit} from {limit_source}"
+                "delivery CI admission overflow after {waited_millis} ms; continuing under cap {limit} from {limit_source} after wait {} seconds from {:?}{}",
+                wait_policy.value,
+                wait_policy.source.layer,
+                wait_policy
+                    .source
+                    .origin
+                    .as_deref()
+                    .map(|origin| format!(" ({origin})"))
+                    .unwrap_or_default()
             ));
-            provenant_fabric_runtime::graph::DeliveryCiAdmission::Overflow { waited_millis }
+            Some(
+                provenant_fabric_runtime::graph::DeliveryCiAdmission::Overflow {
+                    waited_millis,
+                    ci_slots: ci_slots.clone(),
+                },
+            )
         }
         Err(error) => {
             let reason = provenant_core::bounded_line(
@@ -116,7 +134,7 @@ pub(crate) fn acquire_delivery_ci_lease(
             say(&format!(
                 "delivery CI admission unavailable; continuing without a class lease: {reason}"
             ));
-            provenant_fabric_runtime::graph::DeliveryCiAdmission::Unavailable { reason }
+            Some(provenant_fabric_runtime::graph::DeliveryCiAdmission::Unavailable { reason })
         }
     }
 }
@@ -471,7 +489,10 @@ pub fn run(class: &str, command: &[OsString], env: &[(OsString, OsString)]) -> i
     let limit_source = if class == "build" && get_env(ADMISSION_SLOTS).is_some() {
         format!("{ADMISSION_SLOTS} (host launch override)")
     } else {
-        format!("admission.{}.slots ({:?})", resolved.name, resolved.slots_source)
+        format!(
+            "admission.{}.slots ({:?})",
+            resolved.name, resolved.slots_source
+        )
     };
     let wait_duration = Duration::from_secs(wait_seconds);
 

@@ -1,10 +1,11 @@
 //! Restart-safe advancement for persisted delivery queues.
-use super::{Context, Factory, queue_registry::{QueueItem, QueueItemState, QueueRecord, QueueRegistry}};
+use super::{
+    Context, Factory,
+    queue_registry::{QueueItem, QueueItemState, QueueRecord, QueueRegistry},
+};
 use provenant_confinement::worktrees::WorkerObserver;
 use provenant_core::{CancelToken, Clock, WaitBudget, WallTime};
-use provenant_fabric_runtime::graph::{
-    CiState, CiTarget, FileJournal, GateCondition, GraphStatus,
-};
+use provenant_fabric_runtime::graph::{CiState, CiTarget, FileJournal, GateCondition, GraphStatus};
 use provenant_os::{clock::SystemClock, exec::SystemExecutor};
 use std::{collections::BTreeSet, path::Path};
 
@@ -23,27 +24,28 @@ pub(super) fn reconcile_controls_before_tick(
     let queues = match registry.queues(lock_budget, &cancel, &clock) {
         Ok(queues) => queues,
         Err(error) => {
-            report.warnings.push(format!("delivery queue controls were not reconciled: {error}"));
+            report.warnings.push(format!(
+                "delivery queue controls were not reconciled: {error}"
+            ));
             return report;
         }
     };
     for queue in queues {
         for item in queue.items.iter().filter(|item| {
-            matches!(item.state, QueueItemState::Launching | QueueItemState::Active)
+            matches!(
+                item.state,
+                QueueItemState::Launching | QueueItemState::Active
+            )
         }) {
             let project = match registered_project(resolved, &queue.project) {
                 Some(project) => project,
                 None => continue,
             };
-            let (factory, budget) = match factory_for(
-                resolved,
-                workers,
-                &project,
-                &item.execution_directory,
-            ) {
-                Ok(result) => result,
-                Err(_) => continue,
-            };
+            let (factory, budget) =
+                match factory_for(resolved, workers, &project, &item.execution_directory) {
+                    Ok(result) => result,
+                    Err(_) => continue,
+                };
             let snapshot = FileJournal::read_status_snapshot(
                 &factory.context.roots.state,
                 factory.context.identity.project,
@@ -58,12 +60,9 @@ pub(super) fn reconcile_controls_before_tick(
             {
                 continue;
             }
-            if let Err(error) = super::queue_controls::reconcile_pending(
-                &factory,
-                &item.graph_id,
-                budget,
-                &cancel,
-            ) {
+            if let Err(error) =
+                super::queue_controls::reconcile_pending(&factory, &item.graph_id, budget, &cancel)
+            {
                 report.warnings.push(format!(
                     "queue {} item {} control reconciliation was inconclusive: {error}",
                     queue.queue_id, item.identity.item
@@ -86,21 +85,27 @@ pub(super) fn tick_queues(
     let registry = match QueueRegistry::open(&resolved.roots.state) {
         Ok(registry) => registry,
         Err(error) => {
-            report.errors.push(format!("delivery queue registry: {error}"));
+            report
+                .errors
+                .push(format!("delivery queue registry: {error}"));
             return report;
         }
     };
     let projects = match provenant_config::registered_projects(&resolved.roots) {
         Ok(projects) => projects,
         Err(error) => {
-            report.errors.push(format!("delivery queue project registry: {error}"));
+            report
+                .errors
+                .push(format!("delivery queue project registry: {error}"));
             return report;
         }
     };
     let queues = match registry.queues(lock_budget, &cancel, &clock) {
         Ok(queues) => queues,
         Err(error) => {
-            report.errors.push(format!("delivery queue registry: {error}"));
+            report
+                .errors
+                .push(format!("delivery queue registry: {error}"));
             return report;
         }
     };
@@ -117,23 +122,22 @@ pub(super) fn tick_queues(
             continue;
         };
         for item in queue.items.iter().filter(|item| {
-            matches!(item.state, QueueItemState::Launching | QueueItemState::Active)
+            matches!(
+                item.state,
+                QueueItemState::Launching | QueueItemState::Active
+            )
         }) {
-            let (factory, budget) = match factory_for(
-                resolved,
-                workers,
-                &project,
-                &item.execution_directory,
-            ) {
-                Ok(result) => result,
-                Err(error) => {
-                    report.warnings.push(format!(
-                        "queue {} item {} remains reserved: {error}",
-                        queue.queue_id, item.identity.item
-                    ));
-                    continue;
-                }
-            };
+            let (factory, budget) =
+                match factory_for(resolved, workers, &project, &item.execution_directory) {
+                    Ok(result) => result,
+                    Err(error) => {
+                        report.warnings.push(format!(
+                            "queue {} item {} remains reserved: {error}",
+                            queue.queue_id, item.identity.item
+                        ));
+                        continue;
+                    }
+                };
             match observe_item(&factory, &registry, queue, item, budget, &cancel) {
                 Ok(()) => {}
                 Err(error) => report.warnings.push(format!(
@@ -142,32 +146,24 @@ pub(super) fn tick_queues(
                 )),
             }
         }
-        let schedule = match registry.claim_queue(
-            &queue.queue_id,
-            now,
-            lock_budget,
-            &cancel,
-            &clock,
-        ) {
-            Ok(schedule) => schedule,
-            Err(error) => {
-                report.warnings.push(format!(
-                    "queue {} could not claim pending items: {error}",
-                    queue.queue_id
-                ));
-                continue;
-            }
-        };
+        let schedule =
+            match registry.claim_queue(&queue.queue_id, now, lock_budget, &cancel, &clock) {
+                Ok(schedule) => schedule,
+                Err(error) => {
+                    report.warnings.push(format!(
+                        "queue {} could not claim pending items: {error}",
+                        queue.queue_id
+                    ));
+                    continue;
+                }
+            };
         for warning in &schedule.warnings {
             super::interface::warn_operator(warning);
         }
         if !schedule.warnings.is_empty() {
-            if let Err(error) = registry.acknowledge_wait_warning(
-                &queue.queue_id,
-                lock_budget,
-                &cancel,
-                &clock,
-            ) {
+            if let Err(error) =
+                registry.acknowledge_wait_warning(&queue.queue_id, lock_budget, &cancel, &clock)
+            {
                 report.warnings.push(format!(
                     "queue {} cap warning acknowledgement failed; overflow remains gated: {error}",
                     queue.queue_id
@@ -181,22 +177,25 @@ pub(super) fn tick_queues(
             if item.state != QueueItemState::Launching {
                 continue;
             }
-            let (item_factory, item_budget) = match factory_for(
-                resolved,
-                workers,
-                &project,
-                &item.execution_directory,
+            let (item_factory, item_budget) =
+                match factory_for(resolved, workers, &project, &item.execution_directory) {
+                    Ok(result) => result,
+                    Err(error) => {
+                        report.warnings.push(format!(
+                            "queue {} item {} remains reserved: {error}",
+                            queue_id, item.identity.item
+                        ));
+                        continue;
+                    }
+                };
+            match launch_item(
+                &item_factory,
+                &registry,
+                &queue_id,
+                &item,
+                item_budget,
+                &cancel,
             ) {
-                Ok(result) => result,
-                Err(error) => {
-                    report.warnings.push(format!(
-                        "queue {} item {} remains reserved: {error}",
-                        queue_id, item.identity.item
-                    ));
-                    continue;
-                }
-            };
-            match launch_item(&item_factory, &registry, &queue_id, &item, item_budget, &cancel) {
                 Ok(QueueLaunchDisposition::Launched) => report.advanced += 1,
                 Ok(QueueLaunchDisposition::Observed) => {}
                 Ok(QueueLaunchDisposition::Unavailable(reason)) => report.warnings.push(format!(
@@ -238,7 +237,9 @@ fn factory_for(
     let context = Context::open(resolved.roots.clone(), &resolved.home, cwd)
         .map_err(|error| format!("cannot reopen registered queue project: {error}"))?;
     if context.identity.project != *project || context.in_lane || context.inspection_only {
-        return Err("saved execution directory no longer belongs to its registered host project".into());
+        return Err(
+            "saved execution directory no longer belongs to its registered host project".into(),
+        );
     }
     let clock = SystemClock::new();
     let budget = WaitBudget::cli(clock.mono_now(), context.config.graph.launch_wait_seconds)
@@ -269,15 +270,14 @@ fn observe_item(
     cancel: &CancelToken,
 ) -> Result<(), String> {
     let project = factory.context.identity.project;
-    let snapshot = FileJournal::read_status_snapshot(
-        &factory.context.roots.state,
-        project,
-        &item.graph_id,
-    )
-    .map_err(|error| error.to_string())?;
+    let snapshot =
+        FileJournal::read_status_snapshot(&factory.context.roots.state, project, &item.graph_id)
+            .map_err(|error| error.to_string())?;
     let Some((execution, _)) = snapshot else {
         if item.state == QueueItemState::Active {
-            return Err("active queue graph checkpoint is absent; ownership remains uncertain".into());
+            return Err(
+                "active queue graph checkpoint is absent; ownership remains uncertain".into(),
+            );
         }
         return Ok(());
     };
@@ -289,36 +289,31 @@ fn observe_item(
     }
     super::queue_controls::reconcile_pending(factory, &item.graph_id, budget, cancel)
         .map_err(|error| error.to_string())?;
-    let snapshot = FileJournal::read_status_snapshot(
-        &factory.context.roots.state,
-        project,
-        &item.graph_id,
-    )
-    .map_err(|error| error.to_string())?;
+    let snapshot =
+        FileJournal::read_status_snapshot(&factory.context.roots.state, project, &item.graph_id)
+            .map_err(|error| error.to_string())?;
     let Some((execution, checkpoint)) = snapshot else {
         return Err("queue graph checkpoint disappeared during reconciliation".into());
     };
     match super::graph_status::graph_snapshot(checkpoint).status {
-        GraphStatus::Cancelled => registry
-            .mark_terminal(
-                &queue.queue_id,
-                &item.identity,
-                &item.graph_id,
-                "cancelled",
-                budget,
-                cancel,
-                &factory.clock,
-            ),
-        GraphStatus::Complete => registry
-            .mark_terminal(
-                &queue.queue_id,
-                &item.identity,
-                &item.graph_id,
-                "complete",
-                budget,
-                cancel,
-                &factory.clock,
-            ),
+        GraphStatus::Cancelled => registry.mark_terminal(
+            &queue.queue_id,
+            &item.identity,
+            &item.graph_id,
+            "cancelled",
+            budget,
+            cancel,
+            &factory.clock,
+        ),
+        GraphStatus::Complete => registry.mark_terminal(
+            &queue.queue_id,
+            &item.identity,
+            &item.graph_id,
+            "complete",
+            budget,
+            cancel,
+            &factory.clock,
+        ),
         GraphStatus::Paused | GraphStatus::Pending => {
             if item.state == QueueItemState::Launching {
                 registry.mark_active(
@@ -351,12 +346,9 @@ fn launch_item(
     cancel: &CancelToken,
 ) -> Result<QueueLaunchDisposition, String> {
     let project = factory.context.identity.project;
-    if let Some((execution, checkpoint)) = FileJournal::read_status_snapshot(
-        &factory.context.roots.state,
-        project,
-        &item.graph_id,
-    )
-    .map_err(|error| error.to_string())?
+    if let Some((execution, checkpoint)) =
+        FileJournal::read_status_snapshot(&factory.context.roots.state, project, &item.graph_id)
+            .map_err(|error| error.to_string())?
     {
         if execution.document.graph_id != item.graph_id
             || execution.document.queue.is_none()
@@ -420,10 +412,12 @@ fn launch_item(
                     )?;
                     return Ok(QueueLaunchDisposition::Unavailable(reason));
                 }
-                _ => return Err(format!(
-                    "{}; checkpoint absence could not be proved",
-                    super::queue_dispatch::TYPED_BINDER_UNAVAILABLE_REASON
-                )),
+                _ => {
+                    return Err(format!(
+                        "{}; checkpoint absence could not be proved",
+                        super::queue_dispatch::TYPED_BINDER_UNAVAILABLE_REASON
+                    ));
+                }
             }
         }
         Err(error) => return Err(error.to_string()),
@@ -458,17 +452,25 @@ fn reconcile_ci_class(
             continue;
         };
         for graph_id in ids {
-            let Ok(Some(execution)) = FileJournal::execution(&resolved.roots.state, project, &graph_id) else {
+            let Ok(Some(execution)) =
+                FileJournal::execution(&resolved.roots.state, project, &graph_id)
+            else {
                 continue;
             };
-            let Ok(Some(checkpoint)) = FileJournal::read_checkpoint(&resolved.roots.state, project, &graph_id) else {
+            let Ok(Some(checkpoint)) =
+                FileJournal::read_checkpoint(&resolved.roots.state, project, &graph_id)
+            else {
                 continue;
             };
             let directory = execution.directory.to_string_lossy().into_owned();
             let expanded = match factory_for(resolved, workers, &project, &directory) {
                 Ok((factory, _)) => {
-                    wait_seconds = wait_seconds.max(factory.context.config.graph.launch_wait_seconds);
-                    execution.document.expanded(&factory.context.config.graph.limits).ok()
+                    wait_seconds =
+                        wait_seconds.max(factory.context.config.graph.launch_wait_seconds);
+                    execution
+                        .document
+                        .expanded(&factory.context.config.graph.limits)
+                        .ok()
                 }
                 Err(_) => None,
             };
@@ -488,25 +490,47 @@ fn reconcile_ci_class(
             }
             for progress in &checkpoint.nodes {
                 if let Some(publication) = &progress.delivery_publication {
-                    let owner = lease_owner(&project.to_string(), &graph_id, &progress.id, &publication.input_head);
+                    let owner = lease_owner(
+                        &project.to_string(),
+                        &graph_id,
+                        &progress.id,
+                        &publication.input_head,
+                    );
                     let done = graph_terminal
                         || expanded.as_ref().is_some_and(|document| {
-                            exact_ci_result(document, &checkpoint, &progress.id, &publication.input_head)
+                            exact_ci_result(
+                                document,
+                                &checkpoint,
+                                &progress.id,
+                                &publication.input_head,
+                            )
                         });
-                    if done { conclusive.insert(owner); } else { active.insert(owner); }
+                    if done {
+                        conclusive.insert(owner);
+                    } else {
+                        active.insert(owner);
+                    }
                 }
                 if let Some(node) = expanded.as_ref().and_then(|document| {
-                    document.nodes.iter().find(|node| node.id == progress.id && node.delivery_adoption.is_some())
+                    document
+                        .nodes
+                        .iter()
+                        .find(|node| node.id == progress.id && node.delivery_adoption.is_some())
                 }) && let Some(intent) = &node.delivery_adoption
                     && let Some(adoption) = progress.delivery_adoption()
                     && adoption.receipt.is_some()
                 {
-                    let owner = lease_owner(&project.to_string(), &graph_id, &progress.id, &intent.head);
+                    let owner =
+                        lease_owner(&project.to_string(), &graph_id, &progress.id, &intent.head);
                     let done = graph_terminal
                         || expanded.as_ref().is_some_and(|document| {
                             exact_ci_result(document, &checkpoint, &progress.id, &intent.head)
                         });
-                    if done { conclusive.insert(owner); } else { active.insert(owner); }
+                    if done {
+                        conclusive.insert(owner);
+                    } else {
+                        active.insert(owner);
+                    }
                 }
             }
             for owner in superseded_owners {
@@ -557,7 +581,11 @@ fn exact_ci_result(
     head_sha: &str,
 ) -> bool {
     document.nodes.iter().any(|node| {
-        let Some(GateCondition::Ci { target: CiTarget::Node { node: target, .. }, .. }) = &node.condition else {
+        let Some(GateCondition::Ci {
+            target: CiTarget::Node { node: target, .. },
+            ..
+        }) = &node.condition
+        else {
             return false;
         };
         if target != publication_node {

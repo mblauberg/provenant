@@ -10,7 +10,11 @@ use provenant_os::fs::{Directory, LockMode, PublishMode};
 use provenant_records::Sourced;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{collections::{BTreeMap, BTreeSet}, ffi::OsStr, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    ffi::OsStr,
+    path::Path,
+};
 
 const REGISTRY_FILE: &str = "registry.json";
 const REGISTRY_LOCK: &str = "registry.lock";
@@ -39,7 +43,11 @@ impl QueueIdentity {
         {
             return Err("queue identity components must be non-empty text".into());
         }
-        Ok(Self { project, tracker, item })
+        Ok(Self {
+            project,
+            tracker,
+            item,
+        })
     }
 }
 
@@ -145,7 +153,11 @@ struct RegistryHeader {
 
 impl Default for Registry {
     fn default() -> Self {
-        Self { schema_version: REGISTRY_SCHEMA, generation: 0, queues: BTreeMap::new() }
+        Self {
+            schema_version: REGISTRY_SCHEMA,
+            generation: 0,
+            queues: BTreeMap::new(),
+        }
     }
 }
 
@@ -244,10 +256,20 @@ impl QueueRegistry {
         clock: &dyn Clock,
         operation: impl FnOnce(&mut Registry) -> Result<T, String>,
     ) -> Result<T, String> {
-        let _guard = self.directory
-            .lock(OsStr::new(REGISTRY_LOCK), LockMode::Exclusive, budget, cancel, clock)
+        let _guard = self
+            .directory
+            .lock(
+                OsStr::new(REGISTRY_LOCK),
+                LockMode::Exclusive,
+                budget,
+                cancel,
+                clock,
+            )
             .map_err(|error| format!("delivery queue registry lock failed: {error}"))?;
-        let mut registry = match self.directory.read_bounded(OsStr::new(REGISTRY_FILE), REGISTRY_BYTES) {
+        let mut registry = match self
+            .directory
+            .read_bounded(OsStr::new(REGISTRY_FILE), REGISTRY_BYTES)
+        {
             Ok(bytes) => {
                 let header = serde_json::from_slice::<RegistryHeader>(&bytes)
                     .map_err(|error| format!("delivery queue registry is corrupt: {error}"))?;
@@ -268,19 +290,23 @@ impl QueueRegistry {
         if registry == before {
             return Ok(result);
         }
-        registry.generation = registry.generation.checked_add(1)
+        registry.generation = registry
+            .generation
+            .checked_add(1)
             .ok_or_else(|| "delivery queue registry generation exhausted".to_owned())?;
         let encoded = serde_json::to_vec(&registry)
             .map_err(|error| format!("delivery queue registry encode failed: {error}"))?;
         if encoded.len() as u64 > REGISTRY_BYTES {
             return Err("delivery queue registry reached its storage bound".into());
         }
-        self.directory.atomic_write(
-            OsStr::new(REGISTRY_FILE),
-            "delivery-queue-registry",
-            &encoded,
-            PublishMode::Replace,
-        ).and_then(|publication| publication.require_durable())
+        self.directory
+            .atomic_write(
+                OsStr::new(REGISTRY_FILE),
+                "delivery-queue-registry",
+                &encoded,
+                PublishMode::Replace,
+            )
+            .and_then(|publication| publication.require_durable())
             .map_err(|error| format!("delivery queue registry write failed: {error}"))?;
         Ok(result)
     }
@@ -304,13 +330,15 @@ impl QueueRegistry {
             return Err("queue submission digest must be a canonical sha256 digest".into());
         }
         self.locked(budget, cancel, clock, |registry| {
-            let Some(existing) = registry.queues.get(queue_id) else { return Ok(None); };
-            if existing.project == project
-                && existing.submission_digest == submission_digest
-            {
+            let Some(existing) = registry.queues.get(queue_id) else {
+                return Ok(None);
+            };
+            if existing.project == project && existing.submission_digest == submission_digest {
                 return Ok(Some(existing.clone()));
             }
-            Err(format!("delivery queue id `{queue_id}` already names different input"))
+            Err(format!(
+                "delivery queue id `{queue_id}` already names different input"
+            ))
         })
     }
 
@@ -327,7 +355,10 @@ impl QueueRegistry {
         clock: &dyn Clock,
     ) -> Result<AuthorizedQueueLaunch, String> {
         let marker: QueueItemMarker = serde_json::from_value(
-            request.get("queue_item").cloned().ok_or("queue launch marker is missing")?,
+            request
+                .get("queue_item")
+                .cloned()
+                .ok_or("queue launch marker is missing")?,
         )
         .map_err(|_| "queue launch marker is invalid".to_owned())?;
         let mut replay_request = request.clone();
@@ -356,10 +387,15 @@ impl QueueRegistry {
                 .iter()
                 .find(|item| item.identity == marker.identity && item.graph_id == marker.graph_id)
                 .ok_or_else(|| "queue launch item identity or graph id changed".to_owned())?;
-            let expected_digest =
-                launch_digest(&item.launch_request, &item.execution_directory, &item.adoption)?;
-            if !matches!(item.state, QueueItemState::Launching | QueueItemState::Active)
-                || item.launch_digest != marker.launch_digest
+            let expected_digest = launch_digest(
+                &item.launch_request,
+                &item.execution_directory,
+                &item.adoption,
+            )?;
+            if !matches!(
+                item.state,
+                QueueItemState::Launching | QueueItemState::Active
+            ) || item.launch_digest != marker.launch_digest
                 || item.execution_directory != execution_directory
                 || item.launch_request != replay_request
                 || expected_digest != item.launch_digest
@@ -400,8 +436,11 @@ impl QueueRegistry {
                     queue.items.iter().filter_map(move |item| {
                         (item.graph_id == graph_id
                             && &item.identity == identity
-                            && matches!(item.state, QueueItemState::Launching | QueueItemState::Active))
-                            .then_some((queue, item))
+                            && matches!(
+                                item.state,
+                                QueueItemState::Launching | QueueItemState::Active
+                            ))
+                        .then_some((queue, item))
                     })
                 })
                 .collect();
@@ -427,8 +466,7 @@ impl QueueRegistry {
                 || &snapshot_item.identity != identity
                 || snapshot_item.data["id"].as_str() != Some(identity.item.as_str())
                 || snapshot_item.data["number"].as_u64() != value["issue_number"].as_u64()
-                || !snapshot_item
-                    .data["repository"]
+                || !snapshot_item.data["repository"]
                     .as_str()
                     .zip(value["repository"].as_str())
                     .is_some_and(|(snapshot_repo, adoption_repo)| {
@@ -455,27 +493,42 @@ impl QueueRegistry {
                 if existing.project == submission.project
                     && existing.submission_digest == submission.submission_digest
                 {
-                    return Ok(QueueAdmission::Admitted { queue: existing.clone(), replayed: true });
+                    return Ok(QueueAdmission::Admitted {
+                        queue: existing.clone(),
+                        replayed: true,
+                    });
                 }
-                return Err(format!("delivery queue id `{}` already names different input", submission.queue_id));
+                return Err(format!(
+                    "delivery queue id `{}` already names different input",
+                    submission.queue_id
+                ));
             }
             sanitize_submission(&mut submission)?;
             validate_submission(&submission)?;
-            let items: Vec<QueueItem> = submission.items.iter().enumerate().map(|(index, item)| {
-                Ok(QueueItem {
-                    identity: item.identity.clone(),
-                    graph_id: item.graph_id.clone(),
-                    snapshot_index: index,
-                    launch_request: item.launch_request.clone(),
-                    execution_directory: item.execution_directory.clone(),
-                    adoption: item.adoption.clone(),
-                    launch_digest: launch_digest(&item.launch_request, &item.execution_directory, &item.adoption)?,
-                    state: QueueItemState::Pending,
-                    terminal_outcome: None,
-                    unavailable_reason: None,
-                    overflow_reason: None,
+            let items: Vec<QueueItem> = submission
+                .items
+                .iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    Ok(QueueItem {
+                        identity: item.identity.clone(),
+                        graph_id: item.graph_id.clone(),
+                        snapshot_index: index,
+                        launch_request: item.launch_request.clone(),
+                        execution_directory: item.execution_directory.clone(),
+                        adoption: item.adoption.clone(),
+                        launch_digest: launch_digest(
+                            &item.launch_request,
+                            &item.execution_directory,
+                            &item.adoption,
+                        )?,
+                        state: QueueItemState::Pending,
+                        terminal_outcome: None,
+                        unavailable_reason: None,
+                        overflow_reason: None,
+                    })
                 })
-            }).collect::<Result<_, String>>()?;
+                .collect::<Result<_, String>>()?;
             let queue = QueueRecord {
                 queue_id: submission.queue_id.clone(),
                 submission_digest: submission.submission_digest.clone(),
@@ -495,28 +548,52 @@ impl QueueRegistry {
             for item in &queue.items {
                 if registry.queues.values().any(|existing| {
                     existing.project == queue.project
-                        && existing.items.iter().any(|prior| prior.graph_id == item.graph_id)
+                        && existing
+                            .items
+                            .iter()
+                            .any(|prior| prior.graph_id == item.graph_id)
                 }) {
-                    return Err(format!("queue item graph id `{}` is already reserved", item.graph_id));
+                    return Err(format!(
+                        "queue item graph id `{}` is already reserved",
+                        item.graph_id
+                    ));
                 }
             }
-            let selected: BTreeSet<_> = queue.items.iter().map(|item| item.identity.clone()).collect();
-            let owners: Vec<_> = registry.queues.values().flat_map(|current| {
-                current.items.iter().filter(|item| {
-                    selected.contains(&item.identity) && item.state != QueueItemState::Terminal
-                }).map(move |item| ExistingOwner {
-                    identity: item.identity.clone(),
-                    queue_id: current.queue_id.clone(),
-                    graph_id: item.graph_id.clone(),
-                    state: item.state,
-                    unavailable_reason: item.unavailable_reason.clone(),
+            let selected: BTreeSet<_> = queue
+                .items
+                .iter()
+                .map(|item| item.identity.clone())
+                .collect();
+            let owners: Vec<_> = registry
+                .queues
+                .values()
+                .flat_map(|current| {
+                    current
+                        .items
+                        .iter()
+                        .filter(|item| {
+                            selected.contains(&item.identity)
+                                && item.state != QueueItemState::Terminal
+                        })
+                        .map(move |item| ExistingOwner {
+                            identity: item.identity.clone(),
+                            queue_id: current.queue_id.clone(),
+                            graph_id: item.graph_id.clone(),
+                            state: item.state,
+                            unavailable_reason: item.unavailable_reason.clone(),
+                        })
                 })
-            }).collect();
+                .collect();
             if !owners.is_empty() {
                 return Ok(QueueAdmission::Owned(owners));
             }
-            registry.queues.insert(queue.queue_id.clone(), queue.clone());
-            Ok(QueueAdmission::Admitted { queue, replayed: false })
+            registry
+                .queues
+                .insert(queue.queue_id.clone(), queue.clone());
+            Ok(QueueAdmission::Admitted {
+                queue,
+                replayed: false,
+            })
         })
     }
 
@@ -632,13 +709,25 @@ impl QueueRegistry {
         cancel: &CancelToken,
         clock: &dyn Clock,
     ) -> Result<(), String> {
-        self.update_item(queue_id, identity, graph_id, budget, cancel, clock, |item| {
-            if item.state == QueueItemState::Terminal { return Err("terminal queue item cannot become active".into()); }
-            if item.state == QueueItemState::Pending { return Err("queue item must be claimed before launch acceptance".into()); }
-            item.state = QueueItemState::Active;
-            item.unavailable_reason = None;
-            Ok(())
-        })
+        self.update_item(
+            queue_id,
+            identity,
+            graph_id,
+            budget,
+            cancel,
+            clock,
+            |item| {
+                if item.state == QueueItemState::Terminal {
+                    return Err("terminal queue item cannot become active".into());
+                }
+                if item.state == QueueItemState::Pending {
+                    return Err("queue item must be claimed before launch acceptance".into());
+                }
+                item.state = QueueItemState::Active;
+                item.unavailable_reason = None;
+                Ok(())
+            },
+        )
     }
 
     /// Retain a deterministic refusal made before graph persistence so tick does not replay it forever.
@@ -653,14 +742,22 @@ impl QueueRegistry {
         clock: &dyn Clock,
     ) -> Result<(), String> {
         let reason = sanitize_persisted_text(reason)?;
-        self.update_item(queue_id, identity, graph_id, budget, cancel, clock, |item| {
-            if item.state == QueueItemState::Terminal || item.state == QueueItemState::Active {
-                return Err("only an unaccepted queue item can become unavailable".into());
-            }
-            item.state = QueueItemState::Pending;
-            item.unavailable_reason = Some(reason);
-            Ok(())
-        })
+        self.update_item(
+            queue_id,
+            identity,
+            graph_id,
+            budget,
+            cancel,
+            clock,
+            |item| {
+                if item.state == QueueItemState::Terminal || item.state == QueueItemState::Active {
+                    return Err("only an unaccepted queue item can become unavailable".into());
+                }
+                item.state = QueueItemState::Pending;
+                item.unavailable_reason = Some(reason);
+                Ok(())
+            },
+        )
     }
 
     /// Explicit queue replay retries items held by a deterministic pre-effect refusal.
@@ -672,7 +769,10 @@ impl QueueRegistry {
         clock: &dyn Clock,
     ) -> Result<(), String> {
         self.locked(budget, cancel, clock, |registry| {
-            let queue = registry.queues.get_mut(queue_id).ok_or_else(|| format!("unknown queue `{queue_id}`"))?;
+            let queue = registry
+                .queues
+                .get_mut(queue_id)
+                .ok_or_else(|| format!("unknown queue `{queue_id}`"))?;
             for item in &mut queue.items {
                 if item.state == QueueItemState::Pending {
                     item.unavailable_reason = None;
@@ -691,7 +791,9 @@ impl QueueRegistry {
         clock: &dyn Clock,
     ) -> Result<(), String> {
         self.locked(budget, cancel, clock, |registry| {
-            let queue = registry.queues.get_mut(queue_id)
+            let queue = registry
+                .queues
+                .get_mut(queue_id)
                 .ok_or_else(|| format!("unknown queue `{queue_id}`"))?;
             if queue.wait_warning.is_some() {
                 queue.wait_warning_emitted = true;
@@ -711,19 +813,31 @@ impl QueueRegistry {
         cancel: &CancelToken,
         clock: &dyn Clock,
     ) -> Result<(), String> {
-        if outcome.trim().is_empty() { return Err("terminal outcome must be non-empty".into()); }
-        self.update_item(queue_id, identity, graph_id, budget, cancel, clock, |item| {
-            if item.state == QueueItemState::Pending {
-                return Err("pending queue item has no graph to settle".into());
-            }
-            if item.state == QueueItemState::Terminal {
-                if item.terminal_outcome.as_deref() == Some(outcome) { return Ok(()); }
-                return Err("terminal queue outcome is already recorded".into());
-            }
-            item.state = QueueItemState::Terminal;
-            item.terminal_outcome = Some(outcome.to_owned());
-            Ok(())
-        })
+        if outcome.trim().is_empty() {
+            return Err("terminal outcome must be non-empty".into());
+        }
+        self.update_item(
+            queue_id,
+            identity,
+            graph_id,
+            budget,
+            cancel,
+            clock,
+            |item| {
+                if item.state == QueueItemState::Pending {
+                    return Err("pending queue item has no graph to settle".into());
+                }
+                if item.state == QueueItemState::Terminal {
+                    if item.terminal_outcome.as_deref() == Some(outcome) {
+                        return Ok(());
+                    }
+                    return Err("terminal queue outcome is already recorded".into());
+                }
+                item.state = QueueItemState::Terminal;
+                item.terminal_outcome = Some(outcome.to_owned());
+                Ok(())
+            },
+        )
     }
 
     pub(super) fn queues(
@@ -732,7 +846,9 @@ impl QueueRegistry {
         cancel: &CancelToken,
         clock: &dyn Clock,
     ) -> Result<Vec<QueueRecord>, String> {
-        self.locked(budget, cancel, clock, |registry| Ok(registry.queues.values().cloned().collect()))
+        self.locked(budget, cancel, clock, |registry| {
+            Ok(registry.queues.values().cloned().collect())
+        })
     }
 
     fn update_item(
@@ -746,8 +862,14 @@ impl QueueRegistry {
         update: impl FnOnce(&mut QueueItem) -> Result<(), String>,
     ) -> Result<(), String> {
         self.locked(budget, cancel, clock, |registry| {
-            let queue = registry.queues.get_mut(queue_id).ok_or_else(|| format!("unknown queue `{queue_id}`"))?;
-            let item = queue.items.iter_mut().find(|item| &item.identity == identity && item.graph_id == graph_id)
+            let queue = registry
+                .queues
+                .get_mut(queue_id)
+                .ok_or_else(|| format!("unknown queue `{queue_id}`"))?;
+            let item = queue
+                .items
+                .iter_mut()
+                .find(|item| &item.identity == identity && item.graph_id == graph_id)
                 .ok_or_else(|| "queue item identity or graph id changed".to_owned())?;
             update(item)
         })
@@ -758,7 +880,10 @@ fn validate_submission(submission: &QueueSubmission) -> Result<(), String> {
     if submission.queue_id.trim().is_empty() || submission.queue_id.contains('\0') {
         return Err("queue id must be non-empty text".into());
     }
-    submission.knobs.validate().map_err(|error| format!("invalid sealed queue knobs: {error}"))?;
+    submission
+        .knobs
+        .validate()
+        .map_err(|error| format!("invalid sealed queue knobs: {error}"))?;
     if submission.knobs.max_parallel.value == 0 {
         return Err("queue max_parallel must be positive".into());
     }
@@ -768,7 +893,9 @@ fn validate_submission(submission: &QueueSubmission) -> Result<(), String> {
     if !is_sha256_digest(&submission.submission_digest) {
         return Err("queue submission digest must be a canonical sha256 digest".into());
     }
-    if submission.admitted_at > submission.warning_at || submission.warning_at >= submission.overflow_at {
+    if submission.admitted_at > submission.warning_at
+        || submission.warning_at >= submission.overflow_at
+    {
         return Err("queue deadlines must satisfy admitted_at <= warning_at < overflow_at".into());
     }
     let deadlines = bounded_wait_deadlines(submission.admitted_at, &submission.cap_wait)?;
@@ -781,35 +908,55 @@ fn validate_submission(submission: &QueueSubmission) -> Result<(), String> {
     if submission.project != submission.project.to_ascii_lowercase()
         || submission.tracker != submission.tracker.to_ascii_lowercase()
     {
-        return Err("queue project and tracker identities must be canonical lowercase values".into());
+        return Err(
+            "queue project and tracker identities must be canonical lowercase values".into(),
+        );
     }
     if submission.items.is_empty() || submission.items.len() != submission.snapshot.items.len() {
         return Err("queue snapshot and item graph count must match and be non-empty".into());
     }
-    if submission.snapshot.selector.trim().is_empty() || submission.snapshot.source.trim().is_empty() {
+    if submission.snapshot.selector.trim().is_empty()
+        || submission.snapshot.source.trim().is_empty()
+    {
         return Err("queue tracker snapshot must record its selector and source".into());
     }
     let mut identities = BTreeSet::new();
     let mut graph_ids = BTreeSet::new();
-    for (index, (item, snapshot)) in submission.items.iter().zip(&submission.snapshot.items).enumerate() {
+    for (index, (item, snapshot)) in submission
+        .items
+        .iter()
+        .zip(&submission.snapshot.items)
+        .enumerate()
+    {
         if item.identity != snapshot.identity {
-            return Err(format!("queue snapshot identity at position {index} does not match its item graph"));
+            return Err(format!(
+                "queue snapshot identity at position {index} does not match its item graph"
+            ));
         }
         if item.identity.project != submission.project.to_ascii_lowercase()
             || item.identity.tracker != submission.tracker.to_ascii_lowercase()
-            || [item.identity.project.as_str(), item.identity.tracker.as_str(), item.identity.item.as_str()]
-                .iter().any(|part| part.trim().is_empty() || part.contains('\0'))
+            || [
+                item.identity.project.as_str(),
+                item.identity.tracker.as_str(),
+                item.identity.item.as_str(),
+            ]
+            .iter()
+            .any(|part| part.trim().is_empty() || part.contains('\0'))
         {
             return Err("queue item identity does not match its project and tracker".into());
         }
         if !identities.insert(item.identity.clone()) {
             return Err("queue submission contains a duplicate tracker identity".into());
         }
-        if item.graph_id.trim().is_empty() || item.graph_id.contains('\0') || !graph_ids.insert(&item.graph_id) {
+        if item.graph_id.trim().is_empty()
+            || item.graph_id.contains('\0')
+            || !graph_ids.insert(&item.graph_id)
+        {
             return Err("queue item graph ids must be non-empty and unique".into());
         }
-        let canonical_graph_id = provenant_fabric_runtime::graph::template::fold_graph_name(&item.graph_id)
-            .map_err(|_| "queue item graph id is invalid".to_owned())?;
+        let canonical_graph_id =
+            provenant_fabric_runtime::graph::template::fold_graph_name(&item.graph_id)
+                .map_err(|_| "queue item graph id is invalid".to_owned())?;
         if canonical_graph_id != item.graph_id {
             return Err("queue item graph id must already be canonical".into());
         }
@@ -825,16 +972,23 @@ fn validate_submission(submission: &QueueSubmission) -> Result<(), String> {
     Ok(())
 }
 
-fn launch_digest(request: &Value, execution_directory: &str, adoption: &Option<Value>) -> Result<String, String> {
+fn launch_digest(
+    request: &Value,
+    execution_directory: &str,
+    adoption: &Option<Value>,
+) -> Result<String, String> {
     let bytes = serde_json::to_vec(&(request, execution_directory, adoption))
         .map_err(|_| "queue replay identity could not be encoded".to_owned())?;
     Ok(provenant_records::CanonicalV1::file_digest(&bytes).to_string())
 }
 
 fn is_sha256_digest(value: &str) -> bool {
-    value
-        .strip_prefix("sha256:")
-        .is_some_and(|hex| hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()))
+    value.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    })
 }
 
 fn sanitize_submission(submission: &mut QueueSubmission) -> Result<(), String> {
@@ -842,7 +996,11 @@ fn sanitize_submission(submission: &mut QueueSubmission) -> Result<(), String> {
     submission.snapshot.source = sanitize_persisted_text(&submission.snapshot.source)?;
     for item in &mut submission.items {
         item.launch_request = sanitize_persisted_value(&item.launch_request)?;
-        item.adoption = item.adoption.as_ref().map(sanitize_persisted_value).transpose()?;
+        item.adoption = item
+            .adoption
+            .as_ref()
+            .map(sanitize_persisted_value)
+            .transpose()?;
     }
     for item in &mut submission.snapshot.items {
         item.data = sanitize_persisted_value(&item.data)?;
@@ -853,8 +1011,7 @@ fn sanitize_submission(submission: &mut QueueSubmission) -> Result<(), String> {
 fn sanitize_persisted_text(value: &str) -> Result<String, String> {
     let safe = provenant_redact::publication_text(value.as_bytes(), [])
         .map_err(|_| "queue input could not be sanitised for durable storage".to_owned())?;
-    String::from_utf8(safe)
-        .map_err(|_| "queue input sanitisation produced invalid text".to_owned())
+    String::from_utf8(safe).map_err(|_| "queue input sanitisation produced invalid text".to_owned())
 }
 
 fn sanitize_persisted_value(value: &Value) -> Result<Value, String> {
@@ -886,16 +1043,35 @@ fn validate_persistable_object(value: &Value) -> Result<(), String> {
             Value::Object(fields) => {
                 for (name, child) in fields {
                     let folded = name.to_ascii_lowercase();
-                    if matches!(folded.as_str(), "token" | "access_token" | "refresh_token" | "password" | "secret" | "credentials" | "authorization" | "api_key" | "private_key") {
-                        return Err(format!("queue launch request contains forbidden secret field `{name}`"));
+                    if matches!(
+                        folded.as_str(),
+                        "token"
+                            | "access_token"
+                            | "refresh_token"
+                            | "password"
+                            | "secret"
+                            | "credentials"
+                            | "authorization"
+                            | "api_key"
+                            | "private_key"
+                    ) {
+                        return Err(format!(
+                            "queue launch request contains forbidden secret field `{name}`"
+                        ));
                     }
                     if matches!(folded.as_str(), "wait_seconds" | "explain" | "detached") {
-                        return Err(format!("queue launch request contains ephemeral field `{name}`"));
+                        return Err(format!(
+                            "queue launch request contains ephemeral field `{name}`"
+                        ));
                     }
                     visit(child)?;
                 }
             }
-            Value::Array(values) => for child in values { visit(child)?; },
+            Value::Array(values) => {
+                for child in values {
+                    visit(child)?;
+                }
+            }
             _ => {}
         }
         Ok(())

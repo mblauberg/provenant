@@ -1,20 +1,19 @@
 //! Queue admission and fixed-identity launches for `run deliver --over`.
-use super::{Factory, FacadeError};
 use super::queue_registry::{
-    ExistingOwner, QueueAdmission, QueueIdentity, QueueItemMarker, QueueItemSpec,
-    QueueItemState, QueueRecord, QueueRegistry, QueueSubmission, bounded_wait_deadlines,
+    ExistingOwner, QueueAdmission, QueueIdentity, QueueItemMarker, QueueItemSpec, QueueItemState,
+    QueueRecord, QueueRegistry, QueueSubmission, bounded_wait_deadlines,
 };
+use super::{FacadeError, Factory};
 use provenant_core::{CancelToken, Clock, WaitBudget};
 use provenant_fabric_runtime::graph::QueueKnobs;
-use provenant_records::{Layer, Sourced, Source};
+use provenant_records::{Layer, Source, Sourced};
 use serde_json::{Value, json};
 use std::time::Duration;
 
 const MAX_QUEUE_ITEMS: usize = 256;
 const MAX_TRACKER_QUERY_BYTES: usize = 1024;
 const MAX_ITEM_BODY_BYTES: usize = 512 * 1024;
-pub(super) const TYPED_BINDER_UNAVAILABLE_REASON: &str =
-    "queue item graph admission is disabled until the authenticated typed delivery binder is available";
+pub(super) const TYPED_BINDER_UNAVAILABLE_REASON: &str = "queue item graph admission is disabled until the authenticated typed delivery binder is available";
 
 pub(super) fn is_queue_submission(input: &Value) -> bool {
     input.get("queue_item").is_none()
@@ -37,10 +36,10 @@ pub(super) fn submit_queue(
     }
 
     let mut request = super::interface::launch_input(input)?;
-    let selector_values = selector_values(&request["over"])
-        .map_err(super::interface::graph_input_reason)?;
-    let selector = normalize_selector(&selector_values)
-        .map_err(super::interface::graph_input_reason)?;
+    let selector_values =
+        selector_values(&request["over"]).map_err(super::interface::graph_input_reason)?;
+    let selector =
+        normalize_selector(&selector_values).map_err(super::interface::graph_input_reason)?;
     let adoption_number = request.get("pr").and_then(Value::as_u64);
     if request.get("pr").is_some_and(|value| !value.is_null())
         && adoption_number.is_none_or(|number| number == 0)
@@ -77,10 +76,8 @@ pub(super) fn submit_queue(
     let mut stable = request.clone();
     stable["queue_project"] = json!(project);
     stable["execution_directory"] = json!(execution_directory);
-    let stable_bytes = serde_json::to_vec(&stable)
-        .map_err(|_| FacadeError::StateCorrupt)?;
-    let submission_digest =
-        provenant_records::CanonicalV1::file_digest(&stable_bytes).to_string();
+    let stable_bytes = serde_json::to_vec(&stable).map_err(|_| FacadeError::StateCorrupt)?;
+    let submission_digest = provenant_records::CanonicalV1::file_digest(&stable_bytes).to_string();
     let project_digest =
         provenant_records::CanonicalV1::file_digest(project.as_bytes()).to_string();
     let operation_component = if let Some(name) = &explicit_name {
@@ -220,9 +217,8 @@ pub(super) fn submit_queue(
         .clock
         .wall_now()
         .map_err(|_| FacadeError::StateCorrupt)?;
-    let (warning_at, overflow_at) =
-        bounded_wait_deadlines(admitted_at, &cap_wait)
-            .map_err(super::interface::graph_input_reason)?;
+    let (warning_at, overflow_at) = bounded_wait_deadlines(admitted_at, &cap_wait)
+        .map_err(super::interface::graph_input_reason)?;
     let base_brief = request
         .get("brief")
         .and_then(Value::as_str)
@@ -281,12 +277,23 @@ pub(super) fn submit_queue(
         };
         let graph_id = item_graph_id(&queue_id, &snapshot_item.identity)?;
         let mut launch_request = request.clone();
-        let object = launch_request.as_object_mut().ok_or(FacadeError::StateCorrupt)?;
-        for field in ["over", "pr", "head", "wait_seconds", "explain", "detached", "queue_item"] {
+        let object = launch_request
+            .as_object_mut()
+            .ok_or(FacadeError::StateCorrupt)?;
+        for field in [
+            "over",
+            "pr",
+            "head",
+            "wait_seconds",
+            "explain",
+            "detached",
+            "queue_item",
+        ] {
             object.remove(field);
         }
         launch_request["name"] = json!(graph_id);
-        launch_request["brief"] = json!(item_brief(&base_brief, &snapshot_item.data, &mut warnings)?);
+        launch_request["brief"] =
+            json!(item_brief(&base_brief, &snapshot_item.data, &mut warnings)?);
         items.push(QueueItemSpec {
             identity: snapshot_item.identity.clone(),
             graph_id,
@@ -300,7 +307,9 @@ pub(super) fn submit_queue(
         .items
         .first()
         .map(|item| item.identity.tracker.clone())
-        .ok_or_else(|| super::interface::graph_input_reason("tracker selector resolved to no issues"))?;
+        .ok_or_else(|| {
+            super::interface::graph_input_reason("tracker selector resolved to no issues")
+        })?;
     let submission = QueueSubmission {
         queue_id: queue_id.clone(),
         submission_digest,
@@ -533,11 +542,15 @@ fn has_writer_checkout_override(input: &Value) -> bool {
     {
         return true;
     }
-    if input.get("attempt").and_then(Value::as_object).is_some_and(|attempt| {
-        ["worktree", "branch", "base", "new_worktree"]
-            .iter()
-            .any(|field| attempt.get(*field).is_some_and(|value| !value.is_null()))
-    }) {
+    if input
+        .get("attempt")
+        .and_then(Value::as_object)
+        .is_some_and(|attempt| {
+            ["worktree", "branch", "base", "new_worktree"]
+                .iter()
+                .any(|field| attempt.get(*field).is_some_and(|value| !value.is_null()))
+        })
+    {
         return true;
     }
     input
@@ -545,7 +558,10 @@ fn has_writer_checkout_override(input: &Value) -> bool {
         .and_then(Value::as_object)
         .is_some_and(|settings| {
             settings.keys().any(|key| {
-                matches!(key.rsplit('.').next(), Some("worktree" | "branch" | "base" | "new_worktree"))
+                matches!(
+                    key.rsplit('.').next(),
+                    Some("worktree" | "branch" | "base" | "new_worktree")
+                )
             })
         })
 }
@@ -570,7 +586,9 @@ fn normalize_selector(values: &[String]) -> Result<String, String> {
                     numbers.push(parsed);
                 }
                 if numbers.len() > MAX_QUEUE_ITEMS {
-                    return Err(format!("delivery issue selection exceeds {MAX_QUEUE_ITEMS} items"));
+                    return Err(format!(
+                        "delivery issue selection exceeds {MAX_QUEUE_ITEMS} items"
+                    ));
                 }
             }
         }
@@ -579,16 +597,24 @@ fn normalize_selector(values: &[String]) -> Result<String, String> {
         }
         return Ok(format!(
             "issues:{}",
-            numbers.iter().map(u64::to_string).collect::<Vec<_>>().join(",")
+            numbers
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
         ));
     }
     if let Some(query) = first.strip_prefix("query:") {
         if values.len() != 1 {
-            return Err("tracker query must be one --over value; quote it to preserve spaces".into());
+            return Err(
+                "tracker query must be one --over value; quote it to preserve spaces".into(),
+            );
         }
         let query = query.trim();
         if query.is_empty() || query.len() > MAX_TRACKER_QUERY_BYTES || query.contains('\0') {
-            return Err(format!("tracker query must contain 1..={MAX_TRACKER_QUERY_BYTES} bytes"));
+            return Err(format!(
+                "tracker query must contain 1..={MAX_TRACKER_QUERY_BYTES} bytes"
+            ));
         }
         return Ok(format!("query:{query}"));
     }
@@ -605,12 +631,12 @@ fn item_graph_id(queue_id: &str, identity: &QueueIdentity) -> Result<String, Fac
 }
 
 fn item_brief(base: &str, data: &Value, warnings: &mut Vec<String>) -> Result<String, FacadeError> {
-    let title = data["title"]
-        .as_str()
-        .ok_or_else(|| super::interface::graph_input_reason("tracker snapshot issue has no title"))?;
-    let body = data["body"]
-        .as_str()
-        .ok_or_else(|| super::interface::graph_input_reason("tracker snapshot issue has no body"))?;
+    let title = data["title"].as_str().ok_or_else(|| {
+        super::interface::graph_input_reason("tracker snapshot issue has no title")
+    })?;
+    let body = data["body"].as_str().ok_or_else(|| {
+        super::interface::graph_input_reason("tracker snapshot issue has no body")
+    })?;
     let user_task = if base.trim().is_empty() {
         "Deliver the tracker item described below."
     } else {
@@ -685,13 +711,30 @@ fn queue_receipt(
     warnings: &[String],
     waiting: &[String],
 ) -> Value {
-    let state = if queue.items.iter().all(|item| item.state == QueueItemState::Terminal) {
+    let state = if queue
+        .items
+        .iter()
+        .all(|item| item.state == QueueItemState::Terminal)
+    {
         "terminal"
-    } else if queue.items.iter().any(|item| matches!(item.state, QueueItemState::Launching | QueueItemState::Active)) {
+    } else if queue.items.iter().any(|item| {
+        matches!(
+            item.state,
+            QueueItemState::Launching | QueueItemState::Active
+        )
+    }) {
         "active"
-    } else if queue.items.iter().any(|item| item.state == QueueItemState::Pending && item.unavailable_reason.is_none()) {
+    } else if queue
+        .items
+        .iter()
+        .any(|item| item.state == QueueItemState::Pending && item.unavailable_reason.is_none())
+    {
         "pending"
-    } else if queue.items.iter().any(|item| item.unavailable_reason.is_some()) {
+    } else if queue
+        .items
+        .iter()
+        .any(|item| item.unavailable_reason.is_some())
+    {
         "unavailable"
     } else {
         "pending"

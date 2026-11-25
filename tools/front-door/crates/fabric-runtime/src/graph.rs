@@ -35,6 +35,9 @@ mod checkpoint_tests;
 #[path = "graph/ci_tests.rs"]
 mod ci_tests;
 mod composites;
+#[cfg(test)]
+#[path = "graph/delivery_ci_admission_tests.rs"]
+mod delivery_ci_admission_tests;
 mod envelope;
 mod journal;
 mod land;
@@ -51,6 +54,7 @@ pub mod patch;
 mod plans;
 mod prompt_store;
 mod prompt_text;
+mod queue_adoption;
 pub mod relay;
 mod repair;
 mod schedule;
@@ -70,6 +74,9 @@ pub mod when;
 pub use next_step::{DepletionFacts, DepletionRequest};
 pub use plans::prompt as rendered_prompt;
 pub use prompt_text::normalise_prompt_text;
+pub use queue_adoption::{
+    DeliveryAdoptionIntent, DeliveryAdoptionProgress, DeliveryAdoptionRequest,
+};
 pub use validation::minimum_schema_version;
 pub use when::WhenTerm;
 #[cfg(test)]
@@ -626,6 +633,49 @@ pub trait AttemptOwner {
         _request: PublicationRequest<'_>,
     ) -> Result<Option<DeliveryPublication>, Self::Error> {
         Ok(None)
+    }
+
+    /// Revalidate and adopt an existing pull request for one authenticated
+    /// queue item. The graph stores only the request until the host returns a
+    /// receipt; the same operation identity is replayed after interruption.
+    fn seed_delivery_adoption(
+        &mut self,
+        _request: DeliveryAdoptionRequest<'_>,
+    ) -> Result<Option<DeliveryPublication>, Self::Error> {
+        Ok(None)
+    }
+
+    /// Try the shared CI class without waiting in-process. Queue owners persist
+    /// wait state and retry on tick; hosts without this integration record an
+    /// advisory unavailable result.
+    fn admit_delivery_ci(
+        &mut self,
+        _graph_id: &str,
+        _node_id: &str,
+        _head_sha: &str,
+        ci_slots: &provenant_records::Sourced<usize>,
+        _wait_policy: &provenant_records::Sourced<u64>,
+        _allow_overflow: bool,
+        _waited_millis: u64,
+    ) -> Result<Option<DeliveryCiAdmission>, Self::Error> {
+        Ok(Some(DeliveryCiAdmission::Unavailable {
+            reason: format!(
+                "host delivery CI admission is unavailable; ci_slots={} from {:?}{}",
+                ci_slots.value,
+                ci_slots.source.layer,
+                ci_slots
+                    .source
+                    .origin
+                    .as_deref()
+                    .map(|origin| format!(" ({origin})"))
+                    .unwrap_or_default()
+            ),
+        }))
+    }
+
+    /// Release a lease only after its conclusive CI gate evidence is durable.
+    fn release_delivery_ci(&mut self, _lease: &DeliveryCiLease) -> Result<(), Self::Error> {
+        Ok(())
     }
 
     /// File one durable inbox request for a delivery transition. `None` means
@@ -3356,6 +3406,91 @@ fn advance_hygiene<R: AttemptOwner, J: GraphJournal>(
     Ok(())
 }
 
+const DELIVERY_CI_WAIT_MAX_SECONDS: u64 = 14_400;
+const DELIVERY_CI_RETRY_MICROS: i64 = 1_000_000;
+
+fn delivery_ci_wait_policy(document: &GraphDocument) -> provenant_records::Sourced<u64> {
+    document
+        .queue_ci_wait()
+        .unwrap_or_else(|| provenant_records::Sourced {
+            value: crate::config::GraphConfig::default().launch_wait_seconds,
+            source: provenant_records::Source {
+                layer: provenant_records::Layer::Default,
+                origin: None,
+            },
+        })
+}
+
+fn start_delivery_ci_wait<R: AttemptOwner, J: GraphJournal>(
+    document: &GraphDocument,
+    node_id: &str,
+    wall_now: Option<provenant_core::WallTime>,
+) -> Result<DeliveryCiAdmissionWait, GraphError<R::Error, J::Error>> {
+    let policy = delivery_ci_wait_policy(document);
+    if !(1..=DELIVERY_CI_WAIT_MAX_SECONDS).contains(&policy.value) {
+        return Err(GraphError::BadCheckpoint {
+            node: node_id.into(),
+            invariant: "queue CI admission wait must be bounded to 1..=14400 seconds",
+        });
+    }
+    let started_at = wall_now.unwrap_or_else(|| provenant_core::WallTime::from_micros(0));
+    let micros = i64::try_from(policy.value.saturating_mul(1_000_000)).unwrap_or(i64::MAX);
+    let deadline = started_at
+        .checked_add(DurationMicros::from_micros(micros))
+        .map_err(|_| GraphError::BadCheckpoint {
+            node: node_id.into(),
+            invariant: "queue CI admission deadline exceeds representable time",
+        })?;
+    Ok(DeliveryCiAdmissionWait {
+        started_at,
+        deadline,
+        wake_at: started_at,
+        policy,
+        clock_missing: wall_now.is_none(),
+    })
+}
+
+fn delivery_ci_wait_elapsed_millis(
+    wait: &DeliveryCiAdmissionWait,
+    now: Option<provenant_core::WallTime>,
+) -> u64 {
+    let Some(now) = now else {
+        return 0;
+    };
+    now.as_micros()
+        .saturating_sub(wait.started_at.as_micros())
+        .max(0) as u64
+        / 1_000
+}
+
+fn delivery_ci_wait_retry_at(
+    wait: &DeliveryCiAdmissionWait,
+    now: provenant_core::WallTime,
+) -> provenant_core::WallTime {
+    let next = now
+        .checked_add(DurationMicros::from_micros(DELIVERY_CI_RETRY_MICROS))
+        .unwrap_or(now);
+    if now < wait.deadline && next > wait.deadline {
+        wait.deadline
+    } else {
+        next
+    }
+}
+
+fn delivery_ci_wait_ready(
+    wait: &DeliveryCiAdmissionWait,
+    now: Option<provenant_core::WallTime>,
+) -> Option<provenant_core::WallTime> {
+    now.filter(|now| *now >= wait.wake_at)
+}
+
+fn delivery_ci_wait_expired(
+    wait: &DeliveryCiAdmissionWait,
+    now: Option<provenant_core::WallTime>,
+) -> bool {
+    !wait.clock_missing && now.is_some_and(|now| now >= wait.deadline)
+}
+
 fn advance_publish<R: AttemptOwner, J: GraphJournal>(
     document: &GraphDocument,
     node_index: usize,
@@ -3372,6 +3507,9 @@ fn advance_publish<R: AttemptOwner, J: GraphJournal>(
             node: document.graph_id.clone(),
             invariant: "publish node index must exist",
         })?;
+    if node.delivery_adoption.is_some() {
+        return advance_adopted_publish(document, node_index, plan, checkpoint, owner, journal);
+    }
     if let Some(park) = checkpoint.nodes[node_index].delivery_park.clone() {
         return park_delivery_transition(
             document,
@@ -3578,6 +3716,8 @@ fn advance_publish<R: AttemptOwner, J: GraphJournal>(
             source_branch: source_branch.clone(),
             integration_base: integration_base.clone(),
             expected_remote_head: expected_remote_head.clone(),
+            ci_admission: None,
+            ci_admission_wait: None,
             receipt: None,
             error: None,
         });
@@ -3588,6 +3728,7 @@ fn advance_publish<R: AttemptOwner, J: GraphJournal>(
     let intent = checkpoint.nodes[node_index]
         .delivery_publication
         .as_ref()
+        .cloned()
         .ok_or_else(|| GraphError::BadCheckpoint {
             node: node.id.clone(),
             invariant: "publication intent must be saved before execution",
@@ -3606,6 +3747,98 @@ fn advance_publish<R: AttemptOwner, J: GraphJournal>(
             node: node.id.clone(),
             invariant: "publication replay must retain its original source and remote lease",
         });
+    }
+    if let Some(queue) = plan.queue.as_ref()
+        && checkpoint.nodes[node_index]
+            .delivery_publication
+            .as_ref()
+            .is_some_and(|progress| progress.ci_admission.is_none())
+    {
+        let mut wait = checkpoint.nodes[node_index]
+            .delivery_publication
+            .as_ref()
+            .and_then(|progress| progress.ci_admission_wait.clone());
+        if wait.is_none() {
+            wait = Some(start_delivery_ci_wait::<R, J>(
+                document,
+                &node.id,
+                owner.wall_now(),
+            )?);
+            checkpoint.nodes[node_index]
+                .delivery_publication
+                .as_mut()
+                .ok_or_else(|| GraphError::BadCheckpoint {
+                    node: node.id.clone(),
+                    invariant: "publication intent must remain persisted during CI admission",
+                })?
+                .ci_admission_wait = wait.clone();
+            asks::refresh_wake(checkpoint);
+            journal.save(checkpoint).map_err(GraphError::Journal)?;
+        }
+        let mut wait = wait.ok_or_else(|| GraphError::BadCheckpoint {
+            node: node.id.clone(),
+            invariant: "CI admission wait must be persisted before its attempt",
+        })?;
+        let wall_now = owner.wall_now();
+        if wait.clock_missing && wall_now.is_some() {
+            wait = start_delivery_ci_wait::<R, J>(document, &node.id, wall_now)?;
+            checkpoint.nodes[node_index]
+                .delivery_publication
+                .as_mut()
+                .ok_or_else(|| GraphError::BadCheckpoint {
+                    node: node.id.clone(),
+                    invariant: "publication intent must remain persisted during CI admission",
+                })?
+                .ci_admission_wait = Some(wait.clone());
+            asks::refresh_wake(checkpoint);
+            journal.save(checkpoint).map_err(GraphError::Journal)?;
+        }
+        let Some(now) = delivery_ci_wait_ready(&wait, wall_now) else {
+            return Ok(());
+        };
+        let allow_overflow = delivery_ci_wait_expired(&wait, wall_now);
+        let waited_millis = delivery_ci_wait_elapsed_millis(&wait, wall_now);
+        match owner
+            .admit_delivery_ci(
+                &document.graph_id,
+                &node.id,
+                &expected_head,
+                &queue.ci_slots,
+                &wait.policy,
+                allow_overflow,
+                waited_millis,
+            )
+            .map_err(GraphError::Run)?
+        {
+            Some(admission) => {
+                checkpoint.nodes[node_index]
+                    .delivery_publication
+                    .as_mut()
+                    .ok_or_else(|| GraphError::BadCheckpoint {
+                        node: node.id.clone(),
+                        invariant: "publication intent must remain persisted during CI admission",
+                    })?
+                    .ci_admission = Some(admission);
+                asks::refresh_wake(checkpoint);
+                journal.save(checkpoint).map_err(GraphError::Journal)?;
+            }
+            None => {
+                if wall_now.is_some() {
+                    wait.wake_at = delivery_ci_wait_retry_at(&wait, now);
+                }
+                checkpoint.nodes[node_index]
+                    .delivery_publication
+                    .as_mut()
+                    .ok_or_else(|| GraphError::BadCheckpoint {
+                        node: node.id.clone(),
+                        invariant: "publication intent must remain persisted during CI admission",
+                    })?
+                    .ci_admission_wait = Some(wait);
+                asks::refresh_wake(checkpoint);
+                journal.save(checkpoint).map_err(GraphError::Journal)?;
+                return Ok(());
+            }
+        }
     }
     if let Some(receipt) = intent.receipt.clone() {
         let outputs = checkpoint.nodes[node_index]
@@ -3744,6 +3977,240 @@ fn advance_publish<R: AttemptOwner, J: GraphJournal>(
         journal,
         checkpoint,
     )
+}
+
+fn advance_adopted_publish<R: AttemptOwner, J: GraphJournal>(
+    document: &GraphDocument,
+    node_index: usize,
+    plan: &PlannedGraph,
+    checkpoint: &mut GraphCheckpoint,
+    owner: &mut R,
+    journal: &mut J,
+) -> Result<(), GraphError<R::Error, J::Error>> {
+    let node = plan
+        .nodes
+        .get(node_index)
+        .ok_or_else(|| GraphError::BadCheckpoint {
+            node: document.graph_id.clone(),
+            invariant: "adopted publication node index must exist",
+        })?;
+    let intent =
+        node.delivery_adoption
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| GraphError::BadCheckpoint {
+                node: node.id.clone(),
+                invariant: "adopted publication must retain its untrusted intent",
+            })?;
+    if document.queue.is_none()
+        || node.kind != Some(NodeKind::Publish)
+        || node.source.is_some()
+        || node.worktree.as_deref() != Some(intent.worktree.as_str())
+        || !intent.valid()
+    {
+        return Err(GraphError::BadCheckpoint {
+            node: node.id.clone(),
+            invariant: "adoption intent must be a valid queue-only publication seed",
+        });
+    }
+    if let Some(park) = checkpoint.nodes[node_index].delivery_park.clone() {
+        return park_delivery_transition(
+            document,
+            node_index,
+            park.reason,
+            park.attempt_key.as_ref(),
+            park.attempt_ref.as_deref(),
+            &park.handoff,
+            park.head.as_deref(),
+            &park.evidence,
+            owner,
+            journal,
+            checkpoint,
+        );
+    }
+    if checkpoint.nodes[node_index].delivery_adoption().is_none() {
+        checkpoint.nodes[node_index]
+            .set_delivery_adoption(&DeliveryAdoptionProgress {
+                operation_id: intent.operation_id.clone(),
+                ci_admission: None,
+                ci_admission_wait: None,
+                receipt: None,
+                error: None,
+            })
+            .map_err(|_| GraphError::BadCheckpoint {
+                node: node.id.clone(),
+                invariant: "adoption intent progress must be serializable",
+            })?;
+        checkpoint.nodes[node_index].state = NodeState::Running;
+        checkpoint.nodes[node_index].wait_reason = None;
+        journal.save(checkpoint).map_err(GraphError::Journal)?;
+    }
+    let mut adoption = checkpoint.nodes[node_index]
+        .delivery_adoption()
+        .ok_or_else(|| GraphError::BadCheckpoint {
+            node: node.id.clone(),
+            invariant: "adoption intent must be saved before host verification",
+        })?;
+    if !adoption.matches_intent(&intent)
+        || adoption.ci_admission.is_some() && adoption.receipt.is_none()
+    {
+        return Err(GraphError::BadCheckpoint {
+            node: node.id.clone(),
+            invariant: "adoption replay must retain its original operation and receipt",
+        });
+    }
+    let mut diagnostic = None;
+    let receipt = match adoption.receipt.clone() {
+        Some(receipt) => Some(receipt),
+        None => match owner.seed_delivery_adoption(DeliveryAdoptionRequest {
+            graph_id: &document.graph_id,
+            node_id: &node.id,
+            intent: &intent,
+        }) {
+            Ok(Some(receipt)) if intent.receipt_matches(&receipt) => Some(receipt),
+            Ok(Some(_)) => {
+                diagnostic =
+                    Some("host adoption receipt did not match the requested PR head".into());
+                None
+            }
+            Ok(None) => {
+                diagnostic = Some("host does not provide queue pull-request adoption".into());
+                None
+            }
+            Err(error) => {
+                diagnostic = Some(delivery_text(&error.to_string(), 1024));
+                None
+            }
+        },
+    };
+    let Some(receipt) = receipt else {
+        let evidence =
+            vec![diagnostic.unwrap_or_else(|| "queue pull-request adoption failed".into())];
+        adoption.error = Some(evidence[0].clone());
+        checkpoint.nodes[node_index]
+            .set_delivery_adoption(&adoption)
+            .map_err(|_| GraphError::BadCheckpoint {
+                node: node.id.clone(),
+                invariant: "adoption error must be serializable",
+            })?;
+        checkpoint.nodes[node_index].state = NodeState::Running;
+        checkpoint.nodes[node_index].advance_error_code =
+            Some("publication_adoption_unavailable".into());
+        checkpoint.nodes[node_index].advance_error = Some(evidence[0].clone());
+        journal.save(checkpoint).map_err(GraphError::Journal)?;
+        return park_delivery_transition(
+            document,
+            node_index,
+            provenant_records::graph::ParkReason::OperationError,
+            None,
+            None,
+            "The host could not verify and adopt the existing pull request for this queue item.",
+            Some(&intent.head),
+            &evidence,
+            owner,
+            journal,
+            checkpoint,
+        );
+    };
+    adoption.receipt = Some(receipt.clone());
+    adoption.error = None;
+    if adoption.ci_admission.is_none() {
+        let queue = plan
+            .queue
+            .as_ref()
+            .ok_or_else(|| GraphError::BadCheckpoint {
+                node: node.id.clone(),
+                invariant: "adopted publication requires sealed queue CI admission",
+            })?;
+        let mut wait = adoption.ci_admission_wait.clone();
+        if wait.is_none() {
+            wait = Some(start_delivery_ci_wait::<R, J>(
+                document,
+                &node.id,
+                owner.wall_now(),
+            )?);
+            adoption.ci_admission_wait = wait.clone();
+            checkpoint.nodes[node_index]
+                .set_delivery_adoption(&adoption)
+                .map_err(|_| GraphError::BadCheckpoint {
+                    node: node.id.clone(),
+                    invariant: "adoption wait must be serializable before its attempt",
+                })?;
+            asks::refresh_wake(checkpoint);
+            journal.save(checkpoint).map_err(GraphError::Journal)?;
+        }
+        let mut wait = wait.ok_or_else(|| GraphError::BadCheckpoint {
+            node: node.id.clone(),
+            invariant: "adoption CI wait must be persisted before its attempt",
+        })?;
+        let wall_now = owner.wall_now();
+        if wait.clock_missing && wall_now.is_some() {
+            wait = start_delivery_ci_wait::<R, J>(document, &node.id, wall_now)?;
+            adoption.ci_admission_wait = Some(wait.clone());
+            checkpoint.nodes[node_index]
+                .set_delivery_adoption(&adoption)
+                .map_err(|_| GraphError::BadCheckpoint {
+                    node: node.id.clone(),
+                    invariant: "adoption wait must be serializable after clock recovery",
+                })?;
+            asks::refresh_wake(checkpoint);
+            journal.save(checkpoint).map_err(GraphError::Journal)?;
+        }
+        adoption.ci_admission_wait = Some(wait.clone());
+        let Some(now) = delivery_ci_wait_ready(&wait, wall_now) else {
+            return Ok(());
+        };
+        let allow_overflow = delivery_ci_wait_expired(&wait, wall_now);
+        let waited_millis = delivery_ci_wait_elapsed_millis(&wait, wall_now);
+        let admission = owner
+            .admit_delivery_ci(
+                &document.graph_id,
+                &node.id,
+                &receipt.head,
+                &queue.ci_slots,
+                &wait.policy,
+                allow_overflow,
+                waited_millis,
+            )
+            .map_err(GraphError::Run)?;
+        let Some(admission) = admission else {
+            if wall_now.is_some() {
+                wait.wake_at = delivery_ci_wait_retry_at(&wait, now);
+            }
+            adoption.ci_admission_wait = Some(wait);
+            checkpoint.nodes[node_index]
+                .set_delivery_adoption(&adoption)
+                .map_err(|_| GraphError::BadCheckpoint {
+                    node: node.id.clone(),
+                    invariant: "adoption wait must be serializable during its retry",
+                })?;
+            asks::refresh_wake(checkpoint);
+            journal.save(checkpoint).map_err(GraphError::Journal)?;
+            return Ok(());
+        };
+        adoption.ci_admission = Some(admission);
+    }
+    let progress = &mut checkpoint.nodes[node_index];
+    progress
+        .set_delivery_adoption(&adoption)
+        .map_err(|_| GraphError::BadCheckpoint {
+            node: node.id.clone(),
+            invariant: "verified adoption receipt must be serializable",
+        })?;
+    progress.outputs = Some(NodeOutputs {
+        schema_version: 2,
+        publication: Some(receipt.clone()),
+        branch: Some(receipt.branch.clone()),
+        commit: Some(receipt.head.clone()),
+        ..Default::default()
+    });
+    progress.state = NodeState::Succeeded;
+    progress.advance_error_code = None;
+    progress.advance_error = None;
+    progress.wait_reason = None;
+    transitions::record_delivery(checkpoint, receipt.pull_request.clone())
+        .map_err(GraphError::Refused)?;
+    journal.save(checkpoint).map_err(GraphError::Journal)
 }
 
 /// Effect driver: load the checkpoint, collect host facts, apply the pure
@@ -4182,6 +4649,29 @@ fn gate_outputs(passed: bool) -> NodeOutputs {
     }
 }
 
+fn delivery_review_disposition_matches(progress: &NodeProgress, outputs: &NodeOutputs) -> bool {
+    let Some(disposition) = progress.delivery_review_disposition() else {
+        return false;
+    };
+    let Some(settlement) = progress.review_settlement.as_ref() else {
+        return false;
+    };
+    disposition.head == settlement.head
+        && !disposition.reason.trim().is_empty()
+        && disposition.reason.len() <= 512
+        && !disposition.reason.contains('\0')
+        && settlement.independent
+        && settlement.verdict != provenant_records::workflow::ReviewVerdict::Approve
+        && !outputs.partial
+        && outputs.findings_available == Some(true)
+        && outputs.verdict_error.is_none()
+        && outputs
+            .verdict
+            .as_deref()
+            .and_then(provenant_records::workflow::ReviewVerdict::from_token)
+            == Some(settlement.verdict)
+}
+
 fn delivery_review_gate_failed(
     condition: &GateCondition,
     gate: &PlannedNode,
@@ -4225,7 +4715,9 @@ fn delivery_review_gate_failed(
         {
             return false;
         }
-        if !review::delivery_matches(policy, outputs, expected) {
+        if !review::delivery_matches(policy, outputs, expected)
+            && !delivery_review_disposition_matches(progress, outputs)
+        {
             if verdict == ReviewVerdict::Approve {
                 return false;
             }
@@ -4378,6 +4870,7 @@ fn gate_failure(
             threshold,
             ..
         } => {
+            use provenant_records::workflow::ReviewVerdict;
             for input in &node.inputs {
                 if let Some(error) = checkpoint.nodes[positions[&input.node]]
                     .outputs
@@ -4396,12 +4889,18 @@ fn gate_failure(
                     if let Some(policy) = &plan.nodes[index].delivery_review {
                         return outputs.is_some_and(|outputs| {
                             review::delivery_matches(policy, outputs, expected)
+                                || (plan.queue.is_some()
+                                    && ReviewVerdict::from_token(expected)
+                                        == Some(ReviewVerdict::Approve)
+                                    && delivery_review_disposition_matches(
+                                        &checkpoint.nodes[index],
+                                        outputs,
+                                    ))
                         });
                     }
                     outputs
                         .and_then(|outputs| outputs.verdict.as_ref())
                         .is_some_and(|actual| {
-                            use provenant_records::workflow::ReviewVerdict;
                             match (
                                 ReviewVerdict::from_token(actual),
                                 ReviewVerdict::from_token(expected),

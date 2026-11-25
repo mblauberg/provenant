@@ -17,11 +17,11 @@ fn wait_seconds_invalid() -> FacadeError {
     FacadeError::invalid(InvalidInputDetail::Field("wait_seconds".into()))
 }
 
-fn graph_input_reason(reason: impl std::fmt::Display) -> FacadeError {
+pub(super) fn graph_input_reason(reason: impl std::fmt::Display) -> FacadeError {
     FacadeError::invalid(InvalidInputDetail::graph_reason(reason))
 }
 
-fn seal_delivery_queue_knobs(
+pub(super) fn seal_delivery_queue_knobs(
     config: &provenant_fabric_runtime::config::QueueConfig,
     origins: &BTreeMap<String, provenant_config::Origin>,
     authored: Option<&QueueKnobs>,
@@ -39,7 +39,7 @@ fn seal_delivery_queue_knobs(
         (QUEUE_PREP_RETRIES_KEY, config.prep_retries),
     ] {
         let source = provenant_cli::config_reads::origin_source(origins.get(key), key);
-        if source.layer == Layer::Host {
+        if matches!(source.layer, Layer::Host | Layer::Project) {
             candidates
                 .entry(key)
                 .or_default()
@@ -505,7 +505,7 @@ fn control_receipt_unfinished(
 }
 
 /// Attempt settings are reserved launch controls, not template parameters.
-fn launch_input(input: &Value) -> Result<Value, FacadeError> {
+pub(super) fn launch_input(input: &Value) -> Result<Value, FacadeError> {
     let mut input = input.clone();
     let invalid = || FacadeError::invalid(InvalidInputDetail::Field("attempt".into()));
     let mut attempt = input.get("attempt").cloned().unwrap_or_else(|| json!({}));
@@ -1617,6 +1617,13 @@ impl Factory {
         use provenant_fabric_runtime::graph::relay::{ChildLaunch, ChildRequest};
         let input = self.apply_pr_repair(launch_input(input)?)?;
         let input = &input;
+        if input.get("template").and_then(Value::as_str) == Some("deliver")
+            && input.get("over").is_some_and(|value| !value.is_null())
+        {
+            return Err(graph_input_reason(
+                "deliver --over is only supported by the top-level durable queue dispatcher",
+            ));
+        }
         let invalid = || FacadeError::invalid(InvalidInputDetail::Field("document".into()));
         let raw = input.get("document").filter(|value| !value.is_null());
         if raw.is_some_and(|value| !value.is_object()) {
@@ -1728,7 +1735,7 @@ impl Factory {
                 None => json!({"use":"task"}),
             }
         };
-        // TODO(#3972-queue): resolve `deliver --over` to a persisted item snapshot before compiling item graphs.
+        // Top-level queue selectors are dispatched before this nested-run compiler.
         let library = self.template_library(Some(&inline))?;
         let template_name = input
             .get("template")
@@ -2003,7 +2010,21 @@ impl Factory {
         cancel: &CancelToken,
         announce: Option<super::graph_execution::Announce<'_>>,
     ) -> Result<Value, FacadeError> {
+        if input.get("queue_control").is_some() {
+            if self.context.in_lane || self.context.inspection_only {
+                return Err(FacadeError::ConfinementRefused { resource: None });
+            }
+            return super::queue_controls::handle_graph_operation(self, input, budget, cancel);
+        }
         let operation = required(&input, "op")?;
+        if operation == "run"
+            && input.get("template").and_then(Value::as_str) == Some("deliver")
+            && input.get("over").is_some_and(|value| !value.is_null())
+        {
+            return Err(graph_input_reason(
+                "deliver --over must enter through the top-level durable queue dispatcher",
+            ));
+        }
         let warnings = if matches!(operation, "edit" | "retry") {
             self.graph_input_warnings(&input)?
         } else {
@@ -2144,8 +2165,37 @@ impl Factory {
         cancel: &CancelToken,
         announce: Option<super::graph_execution::Announce<'_>>,
     ) -> Result<Value, FacadeError> {
+        if super::queue_dispatch::is_queue_submission(input) {
+            return super::queue_dispatch::submit_queue(self, input, budget, cancel, announce);
+        }
         let submitted = input;
-        let mut input = self.apply_pr_repair(launch_input(input)?)?;
+        let prepared = launch_input(input)?;
+        let queue_launch = if prepared.get("queue_item").is_some() {
+            let registry = super::queue_registry::QueueRegistry::open(&self.context.roots.state)
+                .map_err(|_| FacadeError::StateCorrupt)?;
+            let project = self.context.identity.project.to_string();
+            let execution_directory = self.cwd.to_string_lossy().into_owned();
+            Some(
+                registry
+                    .authorize_launch(
+                        &project,
+                        &execution_directory,
+                        &prepared,
+                        budget,
+                        cancel,
+                        &self.clock,
+                    )
+                    .map_err(|_| FacadeError::Conflict)?,
+            )
+        } else {
+            None
+        };
+        if queue_launch.is_some() {
+            return Err(graph_input_reason(
+                super::queue_dispatch::TYPED_BINDER_UNAVAILABLE_REASON,
+            ));
+        }
+        let mut input = self.apply_pr_repair(prepared)?;
         let raw_owned = input.get("document").cloned();
         let raw = raw_owned.as_ref();
         let mut input_warnings = self.graph_input_warnings(&input)?;
@@ -2364,6 +2414,42 @@ impl Factory {
             raw.and_then(|document| document.get("graph_id"))
                 .and_then(Value::as_str)
         });
+        // A queue item owns one fixed graph handle. Its launch digest remains
+        // part of the submission identity, so journal custody can accept an
+        // exact replay and reject a competing launch under the same handle.
+        let strict_queue_id = input
+            .get("queue_item")
+            .map(|item| {
+                let valid = item.is_object()
+                    && item["queue_id"]
+                        .as_str()
+                        .is_some_and(|value| !value.is_empty())
+                    && item["launch_digest"]
+                        .as_str()
+                        .is_some_and(|value| value.starts_with("sha256:"))
+                    && ["project", "tracker", "item"].iter().all(|field| {
+                        item["identity"][field]
+                            .as_str()
+                            .is_some_and(|value| !value.is_empty())
+                    });
+                let graph_id = item["graph_id"].as_str().filter(|value| !value.is_empty());
+                if valid && graph_id.is_some() {
+                    Ok(graph_id)
+                } else {
+                    Err(FacadeError::invalid(InvalidInputDetail::Field(
+                        "queue_item".into(),
+                    )))
+                }
+            })
+            .transpose()?;
+        let strict_queue_id = strict_queue_id.flatten();
+        if let Some(queue_id) = strict_queue_id
+            && requested.is_none_or(|name| name != queue_id)
+        {
+            return Err(FacadeError::invalid(InvalidInputDetail::Field(
+                "queue_item.graph_id".into(),
+            )));
+        }
         let (base, named) = match requested {
             Some(name) => {
                 let folded = provenant_fabric_runtime::graph::template::fold_graph_name(name)
@@ -2411,6 +2497,9 @@ impl Factory {
                 .map_err(graph_input_reason)?
             {
                 NameDecision::Replay(id) => {
+                    if strict_queue_id.is_some_and(|queue_id| id != queue_id) {
+                        return Err(FacadeError::Conflict);
+                    }
                     // The same input is the same launch: report that graph as
                     // it stands and start nothing. Advancing it stays with the
                     // scheduler and explicit recovery.
@@ -2427,7 +2516,12 @@ impl Factory {
                     result["named"] = json!({"requested":requested, "graph":id, "replayed":true});
                     return Ok(result);
                 }
-                NameDecision::Create { id, taken } => (id, taken),
+                NameDecision::Create { id, taken } => {
+                    if strict_queue_id.is_some_and(|queue_id| id != queue_id) {
+                        return Err(FacadeError::Conflict);
+                    }
+                    (id, taken)
+                }
             }
         };
         let id = generated_id.as_str();
@@ -2782,7 +2876,9 @@ impl Factory {
         let mut result = match self.launch_submission(document, input, budget, cancel, announce) {
             // A concurrent launch bound this name to other input between the
             // choice and the bind. Choose again: the family now includes it.
-            Err(FacadeError::Conflict) if self.name_taken_by_other_input(id, &digest) => {
+            Err(FacadeError::Conflict)
+                if strict_queue_id.is_none() && self.name_taken_by_other_input(id, &digest) =>
+            {
                 return self.submit_document(submitted, budget, cancel, announce);
             }
             result => result?,
@@ -3318,6 +3414,9 @@ impl Factory {
             .load(&id)
             .map_err(graph_journal_error)?
             .ok_or(FacadeError::NotFound)?;
+        if super::queue_controls::drop_fence_active(&checkpoint)? {
+            return Err(graph_input_reason("dropped queue items cannot be edited"));
+        }
         let library = self.template_library(None)?;
         let resolver = self.launch_resolvers(Some(&encode(&execution.document)?))?;
         let catalogue = provenant_cli::route::effective_catalogue(&self.context.roots).ok();
@@ -3364,7 +3463,7 @@ impl Factory {
         )
     }
 
-    fn retry_document(
+    pub(super) fn retry_document(
         &self,
         input: &Value,
         budget: WaitBudget,
@@ -3422,6 +3521,31 @@ impl Factory {
         document: &GraphDocument,
         checkpoint: &mut provenant_fabric_runtime::graph::GraphCheckpoint,
     ) -> Result<(), FacadeError> {
+        self.prepare_retry_inner(target, input, document, checkpoint, None)
+    }
+
+    pub(super) fn prepare_retry_with_journal(
+        &self,
+        target: &mut super::unified::GraphTarget,
+        input: &Value,
+        document: &GraphDocument,
+        checkpoint: &mut provenant_fabric_runtime::graph::GraphCheckpoint,
+        journal: &mut FileJournal,
+    ) -> Result<(), FacadeError> {
+        self.prepare_retry_inner(target, input, document, checkpoint, Some(journal))
+    }
+
+    fn prepare_retry_inner(
+        &self,
+        target: &mut super::unified::GraphTarget,
+        input: &Value,
+        document: &GraphDocument,
+        checkpoint: &mut provenant_fabric_runtime::graph::GraphCheckpoint,
+        mut journal: Option<&mut FileJournal>,
+    ) -> Result<(), FacadeError> {
+        if super::queue_controls::drop_fence_active(checkpoint)? {
+            return Err(graph_input_reason("dropped queue items cannot be retried"));
+        }
         if provenant_redact::mode().masks_egress()
             && let Some(brief) = input.get("brief").and_then(Value::as_str)
         {
@@ -3492,6 +3616,58 @@ impl Factory {
                     }
                 },
             };
+            if let Some(control) = input.get("queue_control") {
+                let metadata = super::queue_controls::decode_metadata(control)?;
+                if !matches!(
+                    metadata.action,
+                    super::queue_controls::Action::Retry | super::queue_controls::Action::Fix
+                ) {
+                    return Err(graph_input_reason(
+                        "queue retry metadata requires the retry or fix action",
+                    ));
+                }
+                let payload = super::queue_controls::without_queue_control(input)?;
+                let operation_digest = super::queue_controls::control_digest(
+                    &metadata,
+                    &id,
+                    Some(&node),
+                    None,
+                    &payload,
+                )?;
+                let (terminal, _) = super::queue_controls::reserve_retry_control(
+                    checkpoint, document, &id, &node, &metadata, &payload,
+                )?;
+                let journal = journal.as_deref_mut().ok_or(FacadeError::StateCorrupt)?;
+                if terminal {
+                    journal.save(checkpoint).map_err(graph_journal_error)?;
+                    return Err(FacadeError::Conflict);
+                }
+                journal.save(checkpoint).map_err(graph_journal_error)?;
+                let library = self.template_library(None)?;
+                let resolver = self.launch_resolvers(Some(&encode(document)?))?;
+                patch::retry_node_and_dependants_with_key(
+                    &mut LiveGraph {
+                        document,
+                        checkpoint,
+                    },
+                    &node,
+                    input.get("brief").and_then(Value::as_str),
+                    &PatchContext {
+                        catalogue: None,
+                        library: &library,
+                        resolvers: &resolver,
+                        journal: None,
+                        limits: &self.context.config.graph.limits,
+                        worktree_layout: self.context.port_table.worktree_layout.clone(),
+                    },
+                    &metadata.operation_id.to_string(),
+                    &operation_digest,
+                )
+                .map_err(retry_patch_error)?;
+                target.node = Some(node);
+                journal.save(checkpoint).map_err(graph_journal_error)?;
+                return Ok(());
+            }
             // A previous retry may have committed its reset before its resume
             // failed. Resume that already admitted retry rather than archive
             // its predecessor a second time.

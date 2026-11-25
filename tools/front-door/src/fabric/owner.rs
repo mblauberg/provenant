@@ -2534,7 +2534,10 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         node_id: &str,
         head_sha: &str,
         ci_slots: &provenant_records::Sourced<usize>,
-    ) -> Result<provenant_fabric_runtime::graph::DeliveryCiAdmission, Self::Error> {
+        wait_policy: &provenant_records::Sourced<u64>,
+        allow_overflow: bool,
+        waited_millis: u64,
+    ) -> Result<Option<provenant_fabric_runtime::graph::DeliveryCiAdmission>, Self::Error> {
         let owner = provenant_run::build::queue::CiLeaseOwner {
             project: self.factory.context.identity.project.to_string(),
             graph_id: graph_id.to_owned(),
@@ -2545,6 +2548,9 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             self.factory.context.roots.state.as_path(),
             owner,
             ci_slots,
+            wait_policy,
+            allow_overflow,
+            waited_millis,
             self.factory.context.config.graph.launch_wait_seconds,
             self.cancel,
         ))

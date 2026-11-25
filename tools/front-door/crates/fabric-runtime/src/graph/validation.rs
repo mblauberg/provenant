@@ -4,6 +4,7 @@ pub(super) fn nodes_have_v2(nodes: &[GraphNode]) -> bool {
     nodes.iter().any(|node| {
         node.escalate.is_some()
             || node.delivery_review.is_some()
+            || node.delivery_adoption.is_some()
             || matches!(node.kind, Some(NodeKind::Hygiene | NodeKind::Publish))
             || matches!(node.condition, Some(GateCondition::Conflict { .. }))
             || node.loop_body.as_ref().is_some_and(|spec| {
@@ -55,6 +56,7 @@ fn value_has_v2(value: &serde_json::Value) -> bool {
         serde_json::Value::Object(map) => {
             map.contains_key("escalate")
                 || map.contains_key("delivery_review")
+                || map.contains_key("delivery_adoption")
                 || matches!(
                     map.get("kind").and_then(serde_json::Value::as_str),
                     Some("hygiene" | "publish")
@@ -62,6 +64,8 @@ fn value_has_v2(value: &serde_json::Value) -> bool {
                 || map.get("type").and_then(serde_json::Value::as_str) == Some("conflict")
                 || map.contains_key("outcome_edge")
                 || map.contains_key("previous_bindings")
+                || map.contains_key("retry_on")
+                || map.contains_key("selected_publication")
                 || map.contains_key("family_group")
                 || map.contains_key("review_base")
                 || map
@@ -86,7 +90,10 @@ pub fn minimum_schema_version(document: &GraphDocument) -> u32 {
 }
 
 pub(super) fn document_requires_review_fields(document: &GraphDocument) -> bool {
-    document.queue.is_some() || document.review_base.is_some() || nodes_have_v2(&document.nodes)
+    document.queue.is_some()
+        || document.review_base.is_some()
+        || document.extra.contains_key(QUEUE_CI_WAIT_KEY)
+        || nodes_have_v2(&document.nodes)
 }
 
 pub(super) fn supplied_kinds(node: &GraphNode) -> Vec<OutputKind> {
@@ -244,6 +251,14 @@ pub(super) fn validate_schema(document: &GraphDocument) -> Result<(), AdmissionE
     // cannot carry one.
     if !matches!(document.schema_version, 1 | 2) || document.schema_version == 1 && has_v2 {
         return Err(AdmissionError::Schema("schema version".into()));
+    }
+    if document.extra.contains_key(QUEUE_CI_WAIT_KEY) {
+        let Some(wait) = document.queue_ci_wait() else {
+            return Err(AdmissionError::Schema("queue CI wait source".into()));
+        };
+        if document.queue.is_none() || !(1..=14_400).contains(&wait.value) {
+            return Err(AdmissionError::Schema("queue CI wait bounds".into()));
+        }
     }
     Ok(())
 }
@@ -491,12 +506,30 @@ pub(super) fn validate_flat_plan(
         }
         let is_publish = node.kind == Some(NodeKind::Publish);
         if is_publish {
+            let seed = node.delivery_adoption.as_ref();
             let hygiene = match &node.source {
                 Some(SourceBinding::Node { node: source }) if node.depends_on.contains(source) => {
                     positions.get(source).map(|index| &document.nodes[*index])
                 }
                 _ => None,
             };
+            let valid_seed = seed.is_some_and(|intent| {
+                document.queue.is_some()
+                    && document
+                        .integration_branch
+                        .as_deref()
+                        .is_some_and(|branch| branch == intent.base_branch)
+                    && intent.valid()
+                    && node.source.is_none()
+                    && node.worktree.as_deref() == Some(intent.worktree.as_str())
+            });
+            let valid_publication = seed.is_some() && valid_seed
+                || seed.is_none()
+                    && hygiene.is_some_and(|source| {
+                        source.kind == Some(NodeKind::Hygiene)
+                            && source.worktree.is_some()
+                            && source.worktree == node.worktree
+                    });
             if document.queue.is_none()
                 || document.integration_branch.is_none()
                 || node.access != AccessMode::WorktreeWrite
@@ -507,15 +540,11 @@ pub(super) fn validate_flat_plan(
                 || node.delivery.is_some()
                 || node.required_verdict.is_some()
                 || node.on_fail.is_some()
-                || hygiene.is_none_or(|source| {
-                    source.kind != Some(NodeKind::Hygiene)
-                        || source.worktree.is_none()
-                        || source.worktree != node.worktree
-                })
+                || !valid_publication
             {
                 return Err(node_plan_error(
                     node,
-                    "publish requires a direct hygiene source, retained worktree and sealed integration branch, with no agent configuration",
+                    "publish requires either a direct hygiene source or a host-verified queue adoption intent, with a retained worktree and sealed integration branch",
                 ));
             }
         }

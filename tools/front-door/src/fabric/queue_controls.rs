@@ -121,9 +121,10 @@ fn ledger(
 }
 
 fn ledger_has_drop_fence(ledger: &Ledger) -> bool {
-    ledger.intents.values().any(|intent| {
-        intent.metadata.action == Action::Drop && intent.phase != Phase::Refused
-    })
+    ledger
+        .intents
+        .values()
+        .any(|intent| intent.metadata.action == Action::Drop && intent.phase != Phase::Refused)
 }
 
 pub(super) fn drop_fence_active(
@@ -198,7 +199,9 @@ fn reserve_checkpoint(
         return Ok((saved.clone(), true));
     }
     if ledger_has_drop_fence(&ledger) {
-        return Err(refusal("dropped queue items cannot receive further controls"));
+        return Err(refusal(
+            "dropped queue items cannot receive further controls",
+        ));
     }
     let current = patch::revision(checkpoint);
     if current != metadata.expected_revision {
@@ -518,7 +521,9 @@ fn begin(
         return Ok((saved.clone(), true));
     }
     if ledger_has_drop_fence(&ledger) {
-        return Err(refusal("dropped queue items cannot receive further controls"));
+        return Err(refusal(
+            "dropped queue items cannot receive further controls",
+        ));
     }
     let current = patch::revision(&checkpoint);
     if current != metadata.expected_revision {

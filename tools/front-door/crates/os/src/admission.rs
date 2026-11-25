@@ -568,13 +568,12 @@ fn read_ci_lease_cap(dir: &Directory, index: u64) -> Result<Option<AdmissionCap>
         Err(error) if error.is_not_found() => return Ok(None),
         Err(error) => return Err(error),
     };
-    let record: CiLeaseCapMarker = serde_json::from_slice(&bytes).map_err(|source| {
-        FsError::Io {
+    let record: CiLeaseCapMarker =
+        serde_json::from_slice(&bytes).map_err(|source| FsError::Io {
             operation: "decode durable ci admission cap",
             path: PathBuf::from(&name),
             source: std::io::Error::other(source),
-        }
-    })?;
+        })?;
     Ok(Some(record.lease.cap))
 }
 
@@ -779,7 +778,10 @@ impl AdmissionSlots {
                 source: std::io::Error::other("CI caps require the ci class"),
             });
         }
-        let _domain = match self.dir.try_lock_existing(OsStr::new(CI_DOMAIN_LOCK), LockMode::Exclusive) {
+        let _domain = match self
+            .dir
+            .try_lock_existing(OsStr::new(CI_DOMAIN_LOCK), LockMode::Exclusive)
+        {
             Ok(guard) => guard,
             Err(FsError::LockTimeout { .. }) => return Ok(None),
             Err(error) => return Err(error),
@@ -909,8 +911,13 @@ impl AdmissionSlots {
                 source: std::io::Error::other("CI domain lock requires the ci class"),
             });
         }
-        self.dir
-            .lock(OsStr::new(CI_DOMAIN_LOCK), LockMode::Exclusive, budget, cancel, clock)
+        self.dir.lock(
+            OsStr::new(CI_DOMAIN_LOCK),
+            LockMode::Exclusive,
+            budget,
+            cancel,
+            clock,
+        )
     }
 
     fn try_acquire_indices(&self, order: impl Iterator<Item = u64>) -> Result<Option<SlotGuard>> {
@@ -924,10 +931,7 @@ impl AdmissionSlots {
                 .try_lock_existing(&slot_name(index), LockMode::Exclusive)
             {
                 Ok(guard) => {
-                    let leased = match self
-                        .dir
-                        .read_stable(&durable_lease_name(index), 64 * 1024)
-                    {
+                    let leased = match self.dir.read_stable(&durable_lease_name(index), 64 * 1024) {
                         Ok(_) => true,
                         Err(error) if error.is_not_found() => false,
                         Err(error) => return Err(error),
@@ -1041,8 +1045,7 @@ impl Drop for SlotGuard {
     fn drop(&mut self) {
         if let Some((directory, marker, id)) = self.ci_holder.take()
             && let Ok(bytes) = directory.read_stable(&marker, CI_CAP_MAX_BYTES)
-            && serde_json::from_slice::<CiCapMarker>(&bytes)
-                .is_ok_and(|record| record.id == id)
+            && serde_json::from_slice::<CiCapMarker>(&bytes).is_ok_and(|record| record.id == id)
         {
             let _ = directory.unlink(&marker);
             let _ = directory.sync();
@@ -1161,17 +1164,21 @@ mod tests {
                 drop(guard);
             });
             assert_eq!(entered_rx.recv().unwrap(), Some(3));
-            assert!(slots
-                .try_acquire_ci(1, "queue.ci_slots=1 from launch")
-                .unwrap()
-                .is_none());
+            assert!(
+                slots
+                    .try_acquire_ci(1, "queue.ci_slots=1 from launch")
+                    .unwrap()
+                    .is_none()
+            );
             drop(first);
             drop(second);
             drop(third);
-            assert!(slots
-                .try_acquire_ci(1, "queue.ci_slots=1 from launch")
-                .unwrap()
-                .is_none());
+            assert!(
+                slots
+                    .try_acquire_ci(1, "queue.ci_slots=1 from launch")
+                    .unwrap()
+                    .is_none()
+            );
             release_tx.send(()).unwrap();
             high.join().unwrap();
         });
@@ -1180,15 +1187,19 @@ mod tests {
             .try_acquire_ci(1, "queue.ci_slots=1 from launch")
             .unwrap()
             .unwrap();
-        assert!(slots
-            .try_acquire_ci(4, "queue.ci_slots=4 from launch")
-            .unwrap()
-            .is_none());
+        assert!(
+            slots
+                .try_acquire_ci(4, "queue.ci_slots=4 from launch")
+                .unwrap()
+                .is_none()
+        );
         drop(low);
-        assert!(slots
-            .try_acquire_ci(4, "queue.ci_slots=4 from launch")
-            .unwrap()
-            .is_some());
+        assert!(
+            slots
+                .try_acquire_ci(4, "queue.ci_slots=4 from launch")
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
@@ -1203,10 +1214,12 @@ mod tests {
             .try_acquire_ci(0, "queue.ci_slots=0 from launch")
             .unwrap()
             .unwrap();
-        assert!(slots
-            .try_acquire_ci(1, "queue.ci_slots=1 from project")
-            .unwrap()
-            .is_none());
+        assert!(
+            slots
+                .try_acquire_ci(1, "queue.ci_slots=1 from project")
+                .unwrap()
+                .is_none()
+        );
         drop(uncapped);
         drop(low);
     }

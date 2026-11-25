@@ -6,8 +6,8 @@
 
 use super::{Factory, queue_registry::QueueSnapshotItem};
 use provenant_config::{ForgeOperation, ForgePort};
-use provenant_core::{CancelToken, WaitBudget};
 use provenant_confinement::{repo::GitRefName, worktrees};
+use provenant_core::{CancelToken, WaitBudget};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{path::Path, time::Duration};
@@ -95,7 +95,11 @@ pub(super) fn resolve(
         return Err("queue item identity does not match its tracker snapshot".into());
     }
     let selected_project = factory.context.identity.project.to_string();
-    if !item.identity.project.eq_ignore_ascii_case(&selected_project) {
+    if !item
+        .identity
+        .project
+        .eq_ignore_ascii_case(&selected_project)
+    {
         return Err("queue item project does not match the selected project".into());
     }
     let project = item.identity.project.clone();
@@ -169,17 +173,13 @@ pub(super) fn revalidate(
     if request.node_id != SEED_NODE || !valid_intent(intent) {
         return Err("adoption seed request is invalid".into());
     }
-    let identity = super::queue_registry::QueueIdentity::new(
-        &intent.project,
-        &intent.tracker,
-        &intent.item,
-    )?;
+    let identity =
+        super::queue_registry::QueueIdentity::new(&intent.project, &intent.tracker, &intent.item)?;
     if identity.project != intent.project || identity.tracker != intent.tracker {
         return Err("adoption tracker identity is not canonical".into());
     }
-    let registry = super::queue_registry::QueueRegistry::open(
-        factory.context.roots.state.as_path(),
-    )?;
+    let registry =
+        super::queue_registry::QueueRegistry::open(factory.context.roots.state.as_path())?;
     let persisted = registry.adoption_for(
         request.graph_id,
         &identity,
@@ -201,11 +201,7 @@ pub(super) fn revalidate(
         &intent.issue_identity,
         intent.issue_number,
         cancel,
-        Duration::from_micros(
-            budget
-                .remaining(factory.clock.mono_now())
-                .as_micros(),
-        ),
+        Duration::from_micros(budget.remaining(factory.clock.mono_now()).as_micros()),
     )?;
     if pull.url != intent.pull_request_url
         || pull.branch != intent.branch
@@ -217,8 +213,8 @@ pub(super) fn revalidate(
         return Err("live pull request differs from the sealed adoption intent".into());
     }
 
-    let branch = GitRefName::branch(&intent.branch)
-        .map_err(|_| "adoption intent has an invalid branch")?;
+    let branch =
+        GitRefName::branch(&intent.branch).map_err(|_| "adoption intent has an invalid branch")?;
     let custody = resolve_worktree(factory, &branch, &intent.head, cancel)?;
     if custody.path != intent.worktree
         || custody.identity != intent.source_directory_identity
@@ -262,9 +258,15 @@ fn intent_matches(
 }
 
 fn valid_intent(intent: &provenant_fabric_runtime::graph::DeliveryAdoptionIntent) -> bool {
-    let is_digest = intent.operation_id.strip_prefix("sha256:").is_some_and(|value| {
-        value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    });
+    let is_digest = intent
+        .operation_id
+        .strip_prefix("sha256:")
+        .is_some_and(|value| {
+            value.len() == 64
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        });
     let nonempty = |value: &str| {
         !value.trim().is_empty() && value.trim() == value && !value.chars().any(char::is_control)
     };
@@ -297,7 +299,10 @@ fn valid_intent(intent: &provenant_fabric_runtime::graph::DeliveryAdoptionIntent
         && intent.pull_request_url.starts_with("https://")
         && intent.worktree.starts_with('/')
         && GitRefName::branch(&intent.branch).is_ok()
-        && intent.custody_host.parse::<provenant_core::HostId>().is_ok()
+        && intent
+            .custody_host
+            .parse::<provenant_core::HostId>()
+            .is_ok()
         && intent
             .custody_attempt
             .parse::<provenant_core::AttemptId>()
@@ -337,10 +342,7 @@ fn resolve_pull_request(
         "query {{ repository(owner: {repository_field}, name: {name_field}) {{ pullRequest(number: {number}) {{ number url state headRefName headRefOid baseRefName baseRefOid headRepository {{ nameWithOwner }} baseRepository {{ nameWithOwner }} closingIssuesReferences(first: {MAX_ISSUE_REFERENCES}) {{ nodes {{ id number repository {{ nameWithOwner }} }} pageInfo {{ hasNextPage }} }} }} }} }}"
     );
     let ports = &factory.context.port_table;
-    if matches!(
-        &ports.forge.backend,
-        &provenant_config::PortBackend::None
-    ) {
+    if matches!(&ports.forge.backend, &provenant_config::PortBackend::None) {
         return Err("delivery queue forge port is disabled".into());
     }
     let project = factory.context.project_root.as_path();
@@ -364,14 +366,18 @@ fn resolve_pull_request(
         .filter(|value| !value.is_null())
         .ok_or_else(|| format!("pull request #{number} was not found in {repository}"))?;
     if pull["number"].as_u64() != Some(number) || pull["state"].as_str() != Some("OPEN") {
-        return Err(format!("pull request #{number} is not open in {repository}"));
+        return Err(format!(
+            "pull request #{number} is not open in {repository}"
+        ));
     }
     let head_repository = repository_field_value(&pull["headRepository"], "head")?;
     let base_repository = repository_field_value(&pull["baseRepository"], "base")?;
     if !same_repository(&head_repository, repository)
         || !same_repository(&base_repository, repository)
     {
-        return Err("adopted pull request must use the selected repository for both head and base".into());
+        return Err(
+            "adopted pull request must use the selected repository for both head and base".into(),
+        );
     }
     let references = pull
         .pointer("/closingIssuesReferences/nodes")
@@ -397,15 +403,15 @@ fn resolve_pull_request(
         })
         .count();
     if matches != 1 {
-        return Err("pull request does not close exactly the selected tracker issue identity".into());
+        return Err(
+            "pull request does not close exactly the selected tracker issue identity".into(),
+        );
     }
 
     let url = pull["url"]
         .as_str()
         .filter(|url| {
-            url.len() <= 2048
-                && url.starts_with("https://")
-                && !url.chars().any(char::is_control)
+            url.len() <= 2048 && url.starts_with("https://") && !url.chars().any(char::is_control)
         })
         .ok_or("pull request response has no valid URL")?
         .to_owned();
@@ -478,9 +484,7 @@ fn resolve_worktree(
                 .map_err(|_| worktrees::WorktreeError::InvalidRequest)?
                 .as_ref()
                 .ok_or(worktrees::WorktreeError::InvalidRequest)?;
-            if owner.branch != branch.short_name()
-                || owner.host != factory.context.identity.host
-            {
+            if owner.branch != branch.short_name() || owner.host != factory.context.identity.host {
                 return Err(worktrees::WorktreeError::InvalidRequest);
             }
             let attempt = owner
@@ -517,7 +521,7 @@ fn resolve_worktree(
                 expected_head,
                 cancel,
             )
-                .map_err(|_| worktrees::WorktreeError::InvalidRequest)?;
+            .map_err(|_| worktrees::WorktreeError::InvalidRequest)?;
             let path = tree
                 .path()
                 .to_str()
@@ -575,7 +579,10 @@ fn validate_owner_attempt(
             .custody_released(&record, &call)
             .map_err(|error| format!("cannot verify adopted worktree custody release: {error}"))?
     {
-        return Err("adopted worktree owner attempt is not terminal with released custody at the PR head".into());
+        return Err(
+            "adopted worktree owner attempt is not terminal with released custody at the PR head"
+                .into(),
+        );
     }
     let operation = store
         .attempt_operation(attempt, &call)
@@ -635,9 +642,9 @@ fn valid_repository(value: &str) -> bool {
     !owner.is_empty()
         && !name.is_empty()
         && !name.contains('/')
-        && value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'/')
-        })
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'/'))
 }
 
 fn same_repository(left: &str, right: &str) -> bool {
@@ -656,7 +663,10 @@ fn response_json(status: Option<u16>, bytes: &[u8]) -> Result<Value, String> {
         return Err("forge response exceeds the adoption limit".into());
     }
     if status.is_some_and(|status| !(200..300).contains(&status)) {
-        return Err(format!("forge returned HTTP status {}", status.unwrap_or_default()));
+        return Err(format!(
+            "forge returned HTTP status {}",
+            status.unwrap_or_default()
+        ));
     }
     let value: Value = serde_json::from_slice(bytes)
         .map_err(|error| format!("invalid forge response: {error}"))?;
@@ -679,16 +689,16 @@ fn graphql_string(value: &str) -> Result<String, String> {
 }
 
 fn adoption_operation_id(identity: &AdoptionIdentity<'_>) -> Result<String, String> {
-    let digest = provenant_records::CanonicalV1::record_digest(
-        "delivery-queue-adoption",
-        1,
-        identity,
-    )
-    .map_err(|_| "cannot seal adopted pull request identity")?;
+    let digest =
+        provenant_records::CanonicalV1::record_digest("delivery-queue-adoption", 1, identity)
+            .map_err(|_| "cannot seal adopted pull request identity")?;
     Ok(digest.to_string())
 }
 
-#[allow(clippy::disallowed_methods, reason = "forge request uses one bounded absolute deadline")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "forge request uses one bounded absolute deadline"
+)]
 fn request(cancel: &CancelToken, budget: Duration) -> provenant_config::ports::Request {
     let budget = budget.min(MAX_READ_BUDGET);
     let now = std::time::Instant::now();

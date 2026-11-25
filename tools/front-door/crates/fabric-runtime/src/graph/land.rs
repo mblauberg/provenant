@@ -592,11 +592,15 @@ pub(super) fn validate_conflict_recovery(
             }
             return Err(invalid());
         };
-        let Some(published_writer) = publish_source_writer(nodes, positions, published_index)
-        else {
-            return Err(invalid());
-        };
-        let Some(retained_worktree) = nodes[published_writer].worktree.as_deref() else {
+        let retained_worktree = published
+            .delivery_adoption
+            .as_ref()
+            .map(|intent| intent.worktree.as_str())
+            .or_else(|| {
+                publish_source_writer(nodes, positions, published_index)
+                    .and_then(|writer| nodes[writer].worktree.as_deref())
+            });
+        let Some(retained_worktree) = retained_worktree else {
             return Err(invalid());
         };
         let Some(recovery_index) = positions.get(recovery_id).copied() else {
@@ -700,7 +704,11 @@ pub(super) fn validate_relations(
                 upstream.contains(index)
                     && target.continues.is_none()
                     && (target.kind == Some(NodeKind::Publish)
-                        || (plans::writer(target) && target.delivery == Some(DeliveryMode::Pr)))
+                        || (plans::writer(target) && target.delivery == Some(DeliveryMode::Pr))
+                        || target
+                            .loop_body
+                            .as_ref()
+                            .is_some_and(|body| body.selected_publication.is_some()))
             }) else {
                 return Err(format!(
                     "node {}: land must follow a PR writer or queue publication node",
@@ -757,6 +765,69 @@ pub(super) fn validate_relations(
                         node.id
                     ));
                 }
+            } else if nodes[target]
+                .loop_body
+                .as_ref()
+                .is_some_and(|body| body.selected_publication.is_some())
+            {
+                let local = nodes[target]
+                    .loop_body
+                    .as_ref()
+                    .and_then(|body| body.selected_publication.as_deref())
+                    .expect("selected loop target was checked");
+                let publications: Vec<_> = upstream
+                    .iter()
+                    .copied()
+                    .filter(|index| {
+                        nodes[*index].kind == Some(NodeKind::Publish)
+                            && nodes[*index].round.as_ref().is_some_and(|round| {
+                                round.loop_id == spec.node && round.node_id == local
+                            })
+                    })
+                    .collect();
+                let gates_valid = !publications.is_empty()
+                    && publications.iter().all(|publication| {
+                        let publication_id = &nodes[*publication].id;
+                        let after_publication = |gate: usize| {
+                            ancestors(nodes, positions, &nodes[gate].id).contains(publication)
+                        };
+                        let conflicts: Vec<_> = upstream
+                            .iter()
+                            .copied()
+                            .filter(|gate| {
+                                gate_targets_node(&nodes[*gate].condition, publication_id)
+                                    && matches!(
+                                        &nodes[*gate].condition,
+                                        Some(GateCondition::Conflict { .. })
+                                    )
+                                    && after_publication(*gate)
+                            })
+                            .collect();
+                        let ci_after_conflict = upstream.iter().any(|gate| {
+                            gate_targets_node(&nodes[*gate].condition, publication_id)
+                                && matches!(&nodes[*gate].condition, Some(GateCondition::Ci { .. }))
+                                && after_publication(*gate)
+                                && conflicts.iter().any(|conflict| {
+                                    ancestors(nodes, positions, &nodes[*gate].id).contains(conflict)
+                                })
+                        });
+                        let verdict_after_ci = upstream.iter().any(|gate| {
+                            matches!(&nodes[*gate].condition, Some(GateCondition::Verdict { .. }))
+                                && after_publication(*gate)
+                                && upstream.iter().any(|ci| {
+                                    matches!(&nodes[*ci].condition, Some(GateCondition::Ci { .. }))
+                                        && ancestors(nodes, positions, &nodes[*gate].id)
+                                            .contains(ci)
+                                })
+                        });
+                        !conflicts.is_empty() && ci_after_conflict && verdict_after_ci
+                    });
+                if !gates_valid {
+                    return Err(format!(
+                        "node {}: land must follow conflict, CI and verdict gates for every selected publication round",
+                        node.id
+                    ));
+                }
             } else if !gate_after_writer(true) || !gate_after_writer(false) {
                 return Err(format!(
                     "node {}: land must follow a verdict gate and a CI gate after its writer",
@@ -798,6 +869,24 @@ fn land_subject(
     target: &str,
 ) -> Option<(String, String)> {
     let index = *positions.get(target)?;
+    if plan.nodes[index].loop_body.is_some() {
+        let boundary = checkpoint.nodes.get(index)?;
+        if boundary.state != NodeState::Succeeded {
+            return None;
+        }
+        let selected = selected_loop_publication_node(plan, checkpoint, positions, target)?;
+        let subject = land_subject(plan, checkpoint, positions, &selected)?;
+        let selected_outputs = checkpoint.nodes[positions[&selected]].outputs.as_ref()?;
+        let selected_receipt = selected_outputs.publication.as_ref()?;
+        let boundary_outputs = boundary.outputs.as_ref()?;
+        if boundary_outputs.publication.as_ref() != Some(selected_receipt)
+            || boundary_outputs.branch.as_deref() != Some(subject.0.as_str())
+            || boundary_outputs.commit.as_deref() != Some(subject.1.as_str())
+        {
+            return None;
+        }
+        return Some(subject);
+    }
     if plan.nodes[index].kind != Some(NodeKind::Publish) {
         return delivered_head(plan, checkpoint, target);
     }
@@ -807,8 +896,21 @@ fn land_subject(
     }
     let outputs = progress.outputs.as_ref()?;
     let publication = outputs.publication.as_ref()?;
-    let receipt = progress.delivery_publication.as_ref()?.receipt.as_ref()?;
-    if publication != receipt
+    let receipt = if let Some(intent) = plan.nodes[index].delivery_adoption.as_ref() {
+        let adoption = progress.delivery_adoption()?;
+        if !adoption.matches_intent(intent) || adoption.ci_admission.is_none() {
+            return None;
+        }
+        adoption.receipt?
+    } else {
+        progress
+            .delivery_publication
+            .as_ref()?
+            .receipt
+            .as_ref()?
+            .clone()
+    };
+    if publication != &receipt
         || publication.branch.trim().is_empty()
         || publication.pull_request.trim().is_empty()
         || publication.head.parse::<provenant_core::GitOid>().is_err()
@@ -819,6 +921,39 @@ fn land_subject(
         return None;
     }
     Some((publication.branch.clone(), publication.head.clone()))
+}
+
+fn selected_loop_publication_node(
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &BTreeMap<String, usize>,
+    target: &str,
+) -> Option<String> {
+    let boundary_index = *positions.get(target)?;
+    let boundary = &plan.nodes[boundary_index];
+    let local = boundary
+        .loop_body
+        .as_ref()?
+        .selected_publication
+        .as_deref()?;
+    let round = checkpoint
+        .nodes
+        .iter()
+        .filter_map(|progress| {
+            let round = progress.round.as_ref()?;
+            (round.loop_id == target && round.until && progress.state == NodeState::Succeeded)
+                .then_some(round.round)
+        })
+        .max()?;
+    plan.nodes
+        .iter()
+        .find(|node| {
+            node.kind == Some(NodeKind::Publish)
+                && node.round.as_ref().is_some_and(|member| {
+                    member.loop_id == target && member.round == round && member.node_id == local
+                })
+        })
+        .map(|node| node.id.clone())
 }
 
 fn verified_publication_writer<'a>(
@@ -1104,6 +1239,9 @@ pub(super) fn chain_head(
         if !upstream.contains(index) {
             return None;
         }
+        if plan.nodes[*index].delivery_adoption.is_some() {
+            return land_subject(plan, checkpoint, positions, writer).map(|(_, head)| head);
+        }
         return verified_publication_writer(plan, checkpoint, positions, writer)
             .and_then(|_| land_subject(plan, checkpoint, positions, writer))
             .map(|(_, head)| head);
@@ -1125,6 +1263,9 @@ pub(super) fn chain_source_attempt(
         && plan.nodes[*index].kind == Some(NodeKind::Publish)
     {
         if !upstream.contains(index) {
+            return None;
+        }
+        if plan.nodes[*index].delivery_adoption.is_some() {
             return None;
         }
         return verified_publication_writer(plan, checkpoint, positions, writer)
@@ -1149,6 +1290,9 @@ pub(super) fn chain_attempts(
     {
         if !upstream.contains(publish_index) {
             return Vec::new();
+        }
+        if let Some(intent) = plan.nodes[*publish_index].delivery_adoption.as_ref() {
+            return vec![intent.custody_attempt.clone()];
         }
         let Some((published_writer, _, _)) =
             verified_publication_writer(plan, checkpoint, positions, writer)
@@ -1466,9 +1610,21 @@ pub(super) fn advance<R: AttemptOwner, J: GraphJournal>(
     if checkpoint.nodes[index].state.settled() {
         return Ok(());
     }
-    let publish_target = positions
-        .get(&spec.node)
-        .is_some_and(|target| plan.nodes[*target].kind == Some(NodeKind::Publish));
+    let target_index = positions.get(&spec.node).copied();
+    let publish_target = target_index.is_some_and(|target| {
+        plan.nodes[target].kind == Some(NodeKind::Publish)
+            || plan.nodes[target]
+                .loop_body
+                .as_ref()
+                .is_some_and(|body| body.selected_publication.is_some())
+    });
+    let publication_node = target_index.and_then(|target| {
+        if plan.nodes[target].kind == Some(NodeKind::Publish) {
+            Some(spec.node.clone())
+        } else {
+            selected_loop_publication_node(plan, checkpoint, positions, &spec.node)
+        }
+    });
     let published_subject = if publish_target {
         land_subject(plan, checkpoint, positions, &spec.node)
     } else {
@@ -1497,9 +1653,21 @@ pub(super) fn advance<R: AttemptOwner, J: GraphJournal>(
                 invariant: "land record must match its queue publication receipt",
             });
         }
-        if let Some(reason) =
-            queue_landing_gate_error(plan, checkpoint, positions, &node.id, &spec.node, head)
-        {
+        let publication_node =
+            publication_node
+                .as_deref()
+                .ok_or_else(|| GraphError::BadCheckpoint {
+                    node: node.id.clone(),
+                    invariant: "selected loop publication must resolve for landing",
+                })?;
+        if let Some(reason) = queue_landing_gate_error(
+            plan,
+            checkpoint,
+            positions,
+            &node.id,
+            publication_node,
+            head,
+        ) {
             return fail::<R, J>(index, "land_gate_stale", reason, checkpoint, journal);
         }
         if let Some(reason) = acceptance_error(
@@ -1508,7 +1676,7 @@ pub(super) fn advance<R: AttemptOwner, J: GraphJournal>(
             positions,
             owner,
             &node.id,
-            &spec.node,
+            publication_node,
             (branch.as_str(), head.as_str()),
         )
         .map_err(GraphError::Run)?

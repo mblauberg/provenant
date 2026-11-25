@@ -546,7 +546,10 @@ pub fn admit_delivery_review_disposition(
         serde_json::to_value(disposition)
             .map_err(|error| PatchError::invalid(error.to_string()))?,
     );
-    extra.insert("delivery_review_node".into(), Value::String(node_id.to_owned()));
+    extra.insert(
+        "delivery_review_node".into(),
+        Value::String(node_id.to_owned()),
+    );
     let expansion = Expansion {
         extra,
         retired: None,
@@ -854,9 +857,7 @@ pub fn retry_node_and_dependants_with_key(
     operation_id: &str,
     operation_digest: &str,
 ) -> Result<Admitted, PatchError> {
-    let reason = format!(
-        "queue control {operation_id} retry node {id} intent {operation_digest}"
-    );
+    let reason = format!("queue control {operation_id} retry node {id} intent {operation_digest}");
     if let Some(record) = graph
         .checkpoint
         .expansions
