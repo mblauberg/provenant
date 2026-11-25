@@ -3855,10 +3855,10 @@ fn output_needs_graph_failures(
 ) -> bool {
     let failed = graph_snapshot(checkpoint.clone()).outcome
         == Some(provenant_fabric_runtime::graph::GraphOutcome::Failed);
-    !attempt_given
-        && !failed
+    let settled_with_result = !failed
         && progress.outputs.is_some()
-        && checkpoint.nodes.iter().all(|node| node.state.settled())
+        && checkpoint.nodes.iter().all(|node| node.state.settled());
+    !attempt_given && !settled_with_result
 }
 
 /// The failed or blocked node rows under a graph or node target.

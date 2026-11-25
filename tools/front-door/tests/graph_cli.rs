@@ -3868,10 +3868,11 @@ fn cancelled_graph_retry_resumes_without_refusal() -> Result {
 }
 
 // Spec: docs/specs/retry-owner.md#recovery-preserves-work-and-budget
-// A cancel flag on a graph with nothing left to restore resumes nothing, so a
-// retry that does nothing must still be refused (#3456).
+// A cancel flag alone restores nothing (#3456), but a settled graph of one node
+// now infers its only node (#3976): the retry stages a fresh attempt instead of
+// being refused as a graph-wide no-op.
 #[test]
-fn cancelled_flag_without_restorable_work_is_still_refused() -> Result {
+fn cancelled_flag_without_restorable_work_infers_the_only_node() -> Result {
     use provenant_core::{CancelToken, Clock, RootInputs, StateRoot, WaitBudget};
     use provenant_fabric_runtime::graph::{FileJournal, GraphJournal};
 
@@ -3912,9 +3913,20 @@ fn cancelled_flag_without_restorable_work_is_still_refused() -> Result {
 
     let (output, retried) = rig.run(&["retry", &id])?;
     assert!(
-        !output.status.success(),
-        "a retry that restores nothing must not exit 0: {retried}"
+        output.status.success(),
+        "retry: {retried}, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
+    // The inferred node is a changed retry: it resets the node and stages a
+    // new attempt, and the cancel fence is cleared with it.
+    assert!(
+        retried["data"]["rows"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|row| row["kind"] == "attempt")),
+        "{retried}"
+    );
+    let resumed = FileJournal::read_checkpoint(&state, project, &id)?.ok_or("checkpoint")?;
+    assert!(!resumed.cancelled, "cancelled state must be cleared");
     Ok(())
 }
 

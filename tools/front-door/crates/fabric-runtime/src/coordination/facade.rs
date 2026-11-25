@@ -982,11 +982,15 @@ impl FacadeError {
                 projected = projected.detail(refusal.to_string())
                     .next(next);
             }
-            Self::InvalidInput { detail: Some(detail @ InvalidInputDetail::StaleHead { current, .. }) }
-            | Self::GraphRelayRefused { detail: Some(detail @ InvalidInputDetail::StaleHead { current, .. }), .. } => {
+            Self::InvalidInput { detail: Some(detail @ InvalidInputDetail::StaleHead { supplied, .. }) }
+            | Self::GraphRelayRefused { detail: Some(detail @ InvalidInputDetail::StaleHead { supplied, .. }), .. } => {
                 let text = detail.safe_text().unwrap_or_default();
+                // The caller pinned the head they just pushed; the forge still
+                // reports its predecessor. Name the pinned head in the repair:
+                // rerunning with the forge's stale head would repeat the review
+                // of the wrong commit once the push becomes visible.
                 projected = projected.detail(text).next(format!(
-                    "the pinned head is stale; rerun with --head {current} once the push is visible"
+                    "the pinned head is stale; rerun with --head {supplied} once the push is visible"
                 ));
             }
             Self::InvalidInput { detail: Some(detail) } | Self::GraphRelayRefused { detail: Some(detail), .. } => {

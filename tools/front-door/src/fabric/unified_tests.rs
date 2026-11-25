@@ -2655,7 +2655,8 @@ fn settled_lane_output_skips_stale_failure_rows() {
     let settled: GraphCheckpoint = serde_json::from_value(json!({
         "schema_version":2,"graph_id":"settled-review","plan_digest":"digest","nodes":[
             {"id":"review","state":"succeeded","worktree":null,"attempts":[],
-             "outputs":{"schema_version":2,"findings":[],"verdict":"VERDICT: PASS"}}
+             "outputs":{"schema_version":2,"result":null,"verdict":"VERDICT: PASS",
+                        "findings":[],"branch":null,"commit":null,"warnings":[]}}
         ]
     }))
     .expect("settled review checkpoint");
