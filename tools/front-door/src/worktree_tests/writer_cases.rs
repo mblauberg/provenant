@@ -377,7 +377,7 @@ pub(super) fn writer_terminal_retains_sequencer_state() -> Result {
     let holder = holder_context(&rig, &roots, &context);
     let started = start_writer(&store, record.attempt_id, &provider, &holder, &call)?;
     assert!(matches!(started.as_slice(), [provenant_run::Started::Launched(id)] if *id == attempt));
-    // Spec: docs/specs/run-settlement.md — an unfinished operation in the
+    // Spec: docs/specs/run-settlement.md#settlement — an unfinished operation in the
     // lane's own Git is retained and named; settlement publishes the committed
     // tip instead of refusing the attempt.
     let terminal = await_terminal(&store, attempt, &call)?;

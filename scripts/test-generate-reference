@@ -45,6 +45,17 @@ class ReferenceTests(unittest.TestCase):
         self.assertIn('`providers.codex.clean_config`', compact)
         self.assertIn('`clean_config`', advanced)
 
+    def test_compact_configuration_grows_with_documented_fields(self):
+        # The curated documented_fields list drives the compact surface, so a
+        # user-facing knob can be added without a generator code change.
+        names = [f'lanes.new_knob_{index}' for index in range(45)]
+        data = {'documented_fields': names,
+                'knobs': {name: {'default': index, 'effect': f'New knob {index}.'}
+                          for index, name in enumerate(names)}}
+        compact = GEN['config_reference'](data)
+        for name in names:
+            self.assertIn(f'`{name}`', compact)
+
 
     def test_missing_sources_are_named_without_losing_available_sources(self):
         source = self.root / GEN['KNOBS']
