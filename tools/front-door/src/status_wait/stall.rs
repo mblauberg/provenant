@@ -44,14 +44,14 @@ pub(super) fn timeout_wake(now: Instant, stall_deadline: Option<Instant>) -> Gra
 
 #[cfg(test)]
 mod tests {
-    use super::{local_stall_wait, timeout_wake};
-    use crate::status_wait::{GraphWake, Settle, classify_rows, graph_reads_for_wake};
-    use serde_json::json;
-    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-
     #[test]
     // Spec: docs/specs/cli.md#waits-are-readers
     fn local_stall_deadline_rereads_a_pending_wait_without_an_event() {
+        use super::{local_stall_wait, timeout_wake};
+        use crate::status_wait::{GraphWake, Settle, classify_rows, graph_reads_for_wake};
+        use serde_json::json;
+        use std::time::{Duration, Instant, UNIX_EPOCH};
+
         let last_event = provenant_core::WallTime::parse_rfc3339("2026-11-26T04:58:00.000000Z")
             .expect("fixture last event");
         let before_threshold =
