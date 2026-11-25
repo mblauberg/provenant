@@ -8,7 +8,10 @@ pub(super) fn nodes_have_v2(nodes: &[GraphNode]) -> bool {
             || matches!(node.kind, Some(NodeKind::Hygiene | NodeKind::Publish))
             || matches!(node.condition, Some(GateCondition::Conflict { .. }))
             || node.loop_body.as_ref().is_some_and(|spec| {
-                spec.outcome_edge.is_some() || !spec.previous_bindings.is_empty()
+                spec.outcome_edge.is_some()
+                    || !spec.previous_bindings.is_empty()
+                    || !spec.retry_on.is_empty()
+                    || spec.selected_publication.is_some()
             })
             || node.review_base.is_some()
             || node.family_group.is_some()

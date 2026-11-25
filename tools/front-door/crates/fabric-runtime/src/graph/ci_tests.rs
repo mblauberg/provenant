@@ -1175,6 +1175,7 @@ fn expanded_gates_in_distinct_members_of_one_loop_share_a_round() {
         round: 2,
         node_id: "conflict".into(),
         until: false,
+        retry_on: false,
         previous_gate: Some("checks--r1--ci".into()),
     };
     let ci = loops::LoopRound {
