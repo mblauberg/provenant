@@ -2221,18 +2221,77 @@ fn compiler_lowers_and_admits_a_queue_delivery_composite() {
                     {"id":"conflict", "kind":"gate", "access":"read_only",
                         "depends_on":["publish"], "on_fail":"rebase",
                         "condition":{"type":"conflict", "target":{"node":"publish"}}},
-                    {"id":"rebase", "access":"worktree_write", "worktree":"/fixture/writer",
-                        "prompt":"rebase the retained branch", "route":{"alias":"senior"},
-                        "source":{"type":"head", "node":"publish"},
-                        "depends_on":["conflict", "publish"]},
+                    {"id":"rebase", "kind":"loop", "access":"read_only",
+                        "depends_on":["conflict", "publish", "hygiene"],
+                        "loop":{"max_rounds":2, "until":"accepted",
+                            "retry_on":["verified_clean", "fresh_conflict", "fresh_ci", "accepted"],
+                            "selected_publication":"refresh", "initial_publication":"publish",
+                            "previous_bindings":{"refresh":"publish", "verified_clean":"hygiene"},
+                            "body":[
+                                {"id":"fix", "access":"worktree_write", "worktree":"/fixture/writer",
+                                    "prompt":"rebase the retained branch", "route":{"alias":"senior"},
+                                    "source":{"type":"node", "node":"previous.verified_clean"},
+                                    "inputs":[{"node":"previous.refresh", "outputs":["branch", "commit"]}]},
+                                {"id":"verified_clean", "kind":"hygiene", "access":"worktree_write",
+                                    "worktree":"/fixture/writer", "depends_on":["fix"],
+                                    "source":{"type":"node", "node":"fix"}},
+                                {"id":"refresh", "kind":"publish", "access":"worktree_write",
+                                    "worktree":"/fixture/writer", "depends_on":["verified_clean"],
+                                    "source":{"type":"node", "node":"verified_clean"}},
+                                {"id":"fresh_conflict", "kind":"gate", "access":"read_only",
+                                    "depends_on":["refresh"],
+                                    "condition":{"type":"conflict", "target":{"node":"refresh"}}},
+                                {"id":"fresh_ci", "kind":"gate", "access":"read_only",
+                                    "depends_on":["fresh_conflict"],
+                                    "condition":{"type":"ci", "target":{"node":"refresh"}}},
+                                {"id":"fresh_review", "access":"read_only",
+                                    "prompt":"review the recovery publication",
+                                    "source":{"type":"head", "node":"refresh"},
+                                    "depends_on":["refresh", "fresh_conflict", "fresh_ci"],
+                                    "route":{"alias":"senior"}},
+                                {"id":"accepted", "kind":"gate", "access":"read_only",
+                                    "depends_on":["fresh_review", "fresh_ci"],
+                                    "inputs":[{"node":"fresh_review", "outputs":["verdict"]}],
+                                    "condition":{"type":"verdict", "expected":"VERDICT: PASS", "threshold":"all"}}
+                            ]}},
                     {"id":"ci", "kind":"gate", "access":"read_only",
                         "depends_on":["conflict", "publish"], "on_fail":"repair",
                         "condition":{"type":"ci", "target":{"node":"publish"}}},
-                    {"id":"repair", "access":"worktree_write", "worktree":"/fixture/writer",
-                        "prompt":"Repair the failed CI head. Sweep the whole defect class across related tests, help text and documentation that asserts the changed behaviour.",
-                        "route":{"alias":"senior"}, "source":{"type":"head","node":"publish"},
-                        "inputs":[{"node":"ci","outputs":["findings","commit"]}],
-                        "depends_on":["ci","publish"]},
+                    {"id":"repair", "kind":"loop", "access":"read_only",
+                        "depends_on":["ci", "publish", "hygiene"],
+                        "inputs":[{"node":"ci", "outputs":["findings", "commit"]}],
+                        "loop":{"max_rounds":2, "until":"accepted",
+                            "retry_on":["verified_clean", "fresh_conflict", "fresh_ci", "accepted"],
+                            "selected_publication":"refresh", "initial_publication":"publish",
+                            "previous_bindings":{"refresh":"publish", "verified_clean":"hygiene"},
+                            "body":[
+                                {"id":"fix", "access":"worktree_write", "worktree":"/fixture/writer",
+                                    "prompt":"Repair the failed CI head. Sweep the whole defect class across related tests, help text and documentation that asserts the changed behaviour.",
+                                    "route":{"alias":"senior"},
+                                    "source":{"type":"node", "node":"previous.verified_clean"},
+                                    "inputs":[{"node":"previous.refresh", "outputs":["branch", "commit"]}]},
+                                {"id":"verified_clean", "kind":"hygiene", "access":"worktree_write",
+                                    "worktree":"/fixture/writer", "depends_on":["fix"],
+                                    "source":{"type":"node", "node":"fix"}},
+                                {"id":"refresh", "kind":"publish", "access":"worktree_write",
+                                    "worktree":"/fixture/writer", "depends_on":["verified_clean"],
+                                    "source":{"type":"node", "node":"verified_clean"}},
+                                {"id":"fresh_conflict", "kind":"gate", "access":"read_only",
+                                    "depends_on":["refresh"],
+                                    "condition":{"type":"conflict", "target":{"node":"refresh"}}},
+                                {"id":"fresh_ci", "kind":"gate", "access":"read_only",
+                                    "depends_on":["fresh_conflict"],
+                                    "condition":{"type":"ci", "target":{"node":"refresh"}}},
+                                {"id":"fresh_review", "access":"read_only",
+                                    "prompt":"review the repaired publication",
+                                    "source":{"type":"head", "node":"refresh"},
+                                    "depends_on":["refresh", "fresh_conflict", "fresh_ci"],
+                                    "route":{"alias":"senior"}},
+                                {"id":"accepted", "kind":"gate", "access":"read_only",
+                                    "depends_on":["fresh_review", "fresh_ci"],
+                                    "inputs":[{"node":"fresh_review", "outputs":["verdict"]}],
+                                    "condition":{"type":"verdict", "expected":"VERDICT: PASS", "threshold":"all"}}
+                            ]}},
                     {"id":"review", "kind":"composite", "access":"read_only",
                         "depends_on":["repair","publish"], "source":{"type":"head", "node":"publish"},
                         "delivery_review":{"shape":"single", "accept_inconclusive_without_blocking":false},
@@ -2252,6 +2311,7 @@ fn compiler_lowers_and_admits_a_queue_delivery_composite() {
         .unwrap();
     let mut graph = document(vec![composite]);
     graph.schema_version = 2;
+    graph.integration_branch = Some("delivery/item".into());
     graph.queue = Some(QueueKnobs::default());
     graph.admit(&limits()).unwrap();
 
@@ -2300,11 +2360,31 @@ fn compiler_lowers_and_admits_a_queue_delivery_composite() {
         .iter()
         .find(|node| node.id == "delivery--rebase")
         .unwrap();
-    assert_eq!(rebase.worktree.as_deref(), Some("/fixture/writer"));
+    assert_eq!(rebase.kind, Some(NodeKind::Loop));
+    assert_eq!(
+        rebase
+            .loop_body
+            .as_ref()
+            .unwrap()
+            .selected_publication
+            .as_deref(),
+        Some("refresh")
+    );
+    let rebase_writer = expanded
+        .nodes
+        .iter()
+        .find(|node| node.id == "delivery--rebase--r1--fix")
+        .unwrap();
+    assert_eq!(rebase_writer.worktree.as_deref(), Some("/fixture/writer"));
     assert!(matches!(
-        &rebase.source,
-        Some(SourceBinding::Head { node }) if node == "delivery--publish"
+        &rebase_writer.source,
+        Some(SourceBinding::Node { node }) if node == "delivery--hygiene"
     ));
+    assert!(rebase_writer.inputs.iter().any(|input| {
+        input.node == "delivery--publish"
+            && input.outputs.contains(&OutputKind::Branch)
+            && input.outputs.contains(&OutputKind::Commit)
+    }));
     let ci = expanded
         .nodes
         .iter()
@@ -2335,17 +2415,28 @@ fn compiler_lowers_and_admits_a_queue_delivery_composite() {
         .iter()
         .find(|node| node.id == "delivery--repair")
         .unwrap();
+    assert_eq!(repair.kind, Some(NodeKind::Loop));
+    let repair_writer = expanded
+        .nodes
+        .iter()
+        .find(|node| node.id == "delivery--repair--r1--fix")
+        .unwrap();
     assert!(matches!(
-        &repair.source,
-        Some(SourceBinding::Head { node }) if node == "delivery--publish"
+        &repair_writer.source,
+        Some(SourceBinding::Node { node }) if node == "delivery--hygiene"
     ));
+    assert!(repair_writer.inputs.iter().any(|input| {
+        input.node == "delivery--publish"
+            && input.outputs.contains(&OutputKind::Branch)
+            && input.outputs.contains(&OutputKind::Commit)
+    }));
     assert!(repair.inputs.iter().any(|input| {
         input.node == "delivery--ci"
             && input.outputs.len() == 2
             && input.outputs.contains(&OutputKind::Findings)
             && input.outputs.contains(&OutputKind::Commit)
     }));
-    assert!(repair.prompt.contains("whole defect class"));
+    assert!(repair_writer.prompt.contains("whole defect class"));
 }
 
 #[test]
