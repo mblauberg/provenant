@@ -68,3 +68,54 @@ fn exact_ci_supersession_is_durable_and_idempotent() {
     assert_eq!(restored.delivery_ci_superseded[0].node_id, "publish");
     assert_eq!(restored.delivery_ci_superseded[0].head_sha, head);
 }
+
+#[test]
+fn adopted_publication_is_the_expected_head_for_a_republish() {
+    let head = "a".repeat(40);
+    let operation = format!("sha256:{}", "b".repeat(64));
+    let mut document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version":2, "graph_id":"adopted", "integration_branch":"topic",
+        "nodes":[{"id":"adopted-publish", "kind":"publish", "access":"worktree_write",
+            "worktree":"/repo/topic", "delivery_adoption":{
+                "operation_id":operation, "project":"project", "tracker":"github", "item":"issue",
+                "repository":"owner/repo", "issue_identity":"issue", "issue_number":7,
+                "pull_request":8, "pull_request_url":"https://example.test/pr/8",
+                "branch":"topic", "worktree":"/repo/topic", "source_directory_identity":{"device":1,"inode":2},
+                "custody_host":"host", "custody_attempt":"attempt", "custody_operation":"custody",
+                "head":head, "base_repository":"owner/repo", "base_branch":"main", "base_head":"c".repeat(40)
+            }}]
+    })).unwrap();
+    document.queue = Some(QueueKnobs::default());
+    let (plan, _) = validate_flat_plan(&document, &Default::default()).unwrap();
+    let mut checkpoint =
+        transitions::initial_checkpoint(&document, &plan, "digest".into(), None, None, None);
+    checkpoint.nodes[0].state = NodeState::Succeeded;
+    checkpoint.nodes[0]
+        .set_delivery_adoption(&DeliveryAdoptionProgress {
+            operation_id: operation,
+            ci_admission: Some(DeliveryCiAdmission::Unavailable {
+                reason: "offline".into(),
+            }),
+            ci_admission_wait: None,
+            receipt: Some(DeliveryPublication {
+                branch: "topic".into(),
+                head: head.clone(),
+                pull_request: "https://example.test/pr/8".into(),
+            }),
+            error: None,
+        })
+        .unwrap();
+    assert_eq!(
+        prior_publication_head(&plan.nodes[0], &checkpoint.nodes[0], "topic"),
+        Some(head)
+    );
+    assert_eq!(
+        prior_publication_head(&plan.nodes[0], &checkpoint.nodes[0], "another"),
+        None
+    );
+    checkpoint.nodes[0].state = NodeState::Pending;
+    assert_eq!(
+        prior_publication_head(&plan.nodes[0], &checkpoint.nodes[0], "topic"),
+        None
+    );
+}
