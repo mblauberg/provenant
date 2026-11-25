@@ -365,9 +365,20 @@ fn occupancy_snapshot_while(pid: i32, keep_going: &dyn Fn() -> bool) -> Occupanc
     let exe_known = record(-1, &exe, &mut snapshot);
     let listing = || -> Result<Vec<std::ffi::OsString>, OccupancyGap> {
         let mut names = Vec::new();
-        for entry in
-            std::fs::read_dir(proc.join("fd")).map_err(|_| OccupancyGap::DescriptorsUnavailable)?
-        {
+        let fd_dir = proc.join("fd");
+        let gap = |error: &io::Error| {
+            // A missing descriptor directory means the process exited only
+            // when its whole /proc entry is gone too. Otherwise a live
+            // process with an unreadable table stays conservative.
+            if error.kind() == io::ErrorKind::NotFound
+                && matches!(std::fs::metadata(&proc), Err(lost) if lost.kind() == io::ErrorKind::NotFound)
+            {
+                OccupancyGap::Vanished
+            } else {
+                OccupancyGap::DescriptorsUnavailable
+            }
+        };
+        for entry in std::fs::read_dir(&fd_dir).map_err(|error| gap(&error))? {
             if !keep_going() {
                 return Err(OccupancyGap::Unobserved);
             }
@@ -419,13 +430,15 @@ fn occupancy_snapshot_while(pid: i32, keep_going: &dyn Fn() -> bool) -> Occupanc
     snapshot
 }
 
-/// The least serious macOS descriptor failure: libproc refused the query.
+/// Classify a failed macOS descriptor query. ESRCH means the process is gone
+/// and therefore holds nothing; EPERM is a permission refusal on a live
+/// process and must stay conservative.
 #[cfg(any(target_os = "macos", test))]
 fn darwin_query_gap(errno: Option<i32>) -> crate::pid::OccupancyGap {
-    if errno == Some(libc::EPERM) {
-        crate::pid::OccupancyGap::DescriptorsDenied
-    } else {
-        crate::pid::OccupancyGap::DescriptorsUnavailable
+    match errno {
+        Some(libc::ESRCH) => crate::pid::OccupancyGap::Vanished,
+        Some(libc::EPERM) => crate::pid::OccupancyGap::DescriptorsDenied,
+        _ => crate::pid::OccupancyGap::DescriptorsUnavailable,
     }
 }
 
@@ -677,16 +690,24 @@ fn only_a_refused_descriptor_query_is_the_excusable_gap() {
         fd_info_gap(0, 10, Some(libc::EPERM)),
         Some(DescriptorsDenied)
     );
+    // A vanished process holds nothing; an old test expected the generic
+    // unavailable gap, which made the census treat it as an incomplete
+    // observation of a live writer.
+    assert_eq!(fd_info_gap(-1, 10, Some(libc::ESRCH)), Some(Vanished));
     assert_eq!(
-        fd_info_gap(-1, 10, Some(libc::ESRCH)),
-        Some(DescriptorsUnavailable)
+        fd_list_records(0, 1024, 8, Some(libc::ESRCH)),
+        Err(Vanished)
     );
+    assert_eq!(darwin_query_gap(Some(libc::ESRCH)), Vanished);
+    assert_eq!(darwin_pidpath_gap(Some(libc::ESRCH)), Some(Vanished));
     assert_eq!(DescriptorsDenied.worse(Churn), Churn);
     assert_eq!(Churn.worse(DescriptorsDenied), Churn);
     assert_eq!(
         DescriptorsDenied.worse(DescriptorsDenied),
         DescriptorsDenied
     );
+    assert_eq!(Vanished.worse(DescriptorsDenied), Vanished);
+    assert_eq!(DescriptorsDenied.worse(Vanished), Vanished);
 }
 
 #[cfg(test)]
@@ -783,18 +804,18 @@ fn budget_expiry_stops_retries_and_retains_positive_paths() {
 #[cfg(test)]
 #[test]
 fn deleted_executables_are_not_gaps_but_other_failures_are() {
-    for errno in [
-        Some(libc::ENOENT),
-        Some(libc::EPERM),
-        Some(libc::ESRCH),
-        None,
-    ] {
+    for errno in [Some(libc::ENOENT), Some(libc::EPERM), None] {
         assert_eq!(
             darwin_pidpath_gap(errno),
             (errno != Some(libc::ENOENT))
                 .then_some(crate::pid::OccupancyGap::ExecutableUnavailable)
         );
     }
+    // ESRCH says the process exited, not that its image merely moved.
+    assert_eq!(
+        darwin_pidpath_gap(Some(libc::ESRCH)),
+        Some(crate::pid::OccupancyGap::Vanished)
+    );
     let gone: io::Result<(u64, u64)> = Err(io::Error::from_raw_os_error(libc::ENOENT));
     assert_eq!(darwin_image_gap(&gone), None);
     assert_eq!(darwin_image_gap(&Ok((1, 2))), None);
@@ -1733,7 +1754,13 @@ pub(crate) fn executable_path(pid: i32) -> Option<std::path::PathBuf> {
 /// belongs to no existing root and is judged by cwd and descriptors.
 #[cfg(any(target_os = "macos", test))]
 fn darwin_pidpath_gap(errno: Option<i32>) -> Option<crate::pid::OccupancyGap> {
-    (errno != Some(libc::ENOENT)).then_some(crate::pid::OccupancyGap::ExecutableUnavailable)
+    match errno {
+        // A deleted image belongs to no root, but a vanished process holds
+        // nothing at all.
+        Some(libc::ESRCH) => Some(crate::pid::OccupancyGap::Vanished),
+        Some(libc::ENOENT) => None,
+        _ => Some(crate::pid::OccupancyGap::ExecutableUnavailable),
+    }
 }
 
 #[cfg(any(target_os = "macos", test))]

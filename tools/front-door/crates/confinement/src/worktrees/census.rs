@@ -1671,6 +1671,19 @@ pub(super) fn observe_worker_holders_while(
             child = parent;
         }
     }
+    // The caller's own children are part of the caller, not independent
+    // writers. A short-lived child spawned for a probe can vanish while its
+    // descriptors are read, so it must not turn a free worktree Unknown. Only
+    // descendants whose full parent chain is present and verified are
+    // excluded; an ambiguous chain keeps the process in the census.
+    for fact in census.facts() {
+        if !within_budget() {
+            return (states, holders, details, taints);
+        }
+        if census.ancestry(&fact.identity, &current.identity) == Ancestry::Yes {
+            excluded.insert(fact.identity.clone());
+        }
+    }
     // Custody is decided per root. A gap that could hide a process anywhere
     // (an incomplete or truncated listing, or a process that could not be
     // described or placed) leaves every root that is not positively live
@@ -1685,6 +1698,11 @@ pub(super) fn observe_worker_holders_while(
             let occupancy = cwd_observer.occupancy_with_retries_while(pid, &within_budget);
             if !within_budget() {
                 return (states, holders, details, taints);
+            }
+            // The listing could not name this pid, but an explicit ESRCH from
+            // its descriptors proves it is gone rather than incomplete.
+            if occupancy.gap == Some(provenant_os::pid::OccupancyGap::Vanished) {
+                continue;
             }
             // EPERM is a common limit of process listings. Place every
             // positive path first; only a complete descriptor observation can
@@ -1817,6 +1835,13 @@ pub(super) fn observe_worker_holders_while(
             occupancy_complete = occupancy.complete;
             if !within_budget() {
                 return (states, holders, details, taints);
+            }
+            // An explicit ESRCH from a descriptor or executable query is a
+            // vanished process, not an incomplete observation of a live one.
+            // It holds nothing now, whatever an earlier snapshot appeared to
+            // show. Permission denials never take this path.
+            if occupancy.gap == Some(provenant_os::pid::OccupancyGap::Vanished) {
+                continue;
             }
             let uids_after = cwd_observer.process_uids(pid);
             let after = observer.observe(pid);
