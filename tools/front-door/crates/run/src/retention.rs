@@ -1329,7 +1329,7 @@ impl RunStore {
                     report.interrupted_phase = Some("evict");
                     break;
                 }
-                match self.evict_attempt(&id, &entry, now, dry_run, &path, keep_going) {
+                match self.evict_attempt(&id, &entry, now, dry_run, &path, keep_going, call) {
                     Ok(true) => {
                         total = total.saturating_sub(entry.bytes);
                         report.reclaimed_bytes = report.reclaimed_bytes.saturating_add(entry.bytes);
@@ -1432,7 +1432,7 @@ impl RunStore {
                         Err(error) if error.is_not_found() => {}
                         Err(error) => return Err(error.into()),
                     }
-                    let (held, pinned) = match self.hold_attempt(&record) {
+                    let (held, pinned) = match self.hold_attempt(&record, call) {
                         Ok(Some(held)) => {
                             let pinned = held.continuing || pinned_payload(&held.attempt, &record)?;
                             (Some(held), pinned)
@@ -1498,6 +1498,7 @@ impl RunStore {
         dry_run: bool,
         path: &std::path::Path,
         keep_going: &dyn Fn() -> bool,
+        call: &Request<'_>,
     ) -> Result<bool> {
         if !keep_going() {
             return Err(RunError::Cancelled);
@@ -1518,7 +1519,7 @@ impl RunStore {
         {
             return Ok(false);
         }
-        let Some(held) = self.hold_attempt(&record)? else {
+        let Some(held) = self.hold_attempt(&record, call)? else {
             return Ok(false);
         };
         if held.continuing || pinned_payload(&held.attempt, &record)? {
