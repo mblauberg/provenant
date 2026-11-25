@@ -1679,7 +1679,7 @@ fn recovery_container_members(
                 if child
                     .round
                     .as_ref()
-                    .is_some_and(|round| round.loop_id == node.id && round.round == 1)
+                    .is_some_and(|round| round.loop_id == node.id)
                     && members.insert(index)
                 {
                     pending.push(index);
@@ -1688,6 +1688,69 @@ fn recovery_container_members(
         }
     }
     members
+}
+
+fn prior_clear_conflict_gate(
+    node_index: usize,
+    published: &str,
+    head: &str,
+    plan: &PlannedGraph,
+    positions: &std::collections::BTreeMap<String, usize>,
+    checkpoint: &GraphCheckpoint,
+) -> Option<usize> {
+    graph_ancestors(node_index, plan, positions)
+        .into_iter()
+        .rev()
+        .find(|index| {
+            same_expanded_round(
+                plan.nodes[*index].round.as_ref(),
+                plan.nodes[node_index].round.as_ref(),
+            ) && matches!(
+                &plan.nodes[*index].condition,
+                Some(GateCondition::Conflict {
+                    target: CiTarget::Node { node, .. },
+                    ..
+                }) if node == published
+            ) && checkpoint.nodes[*index].state == NodeState::Succeeded
+                && checkpoint.nodes[*index]
+                    .gate
+                    .as_ref()
+                    .is_some_and(|gate| gate.passed)
+                && checkpoint.nodes[*index]
+                    .conflict
+                    .as_ref()
+                    .is_some_and(|evidence| {
+                        evidence.state == ConflictState::Clear
+                            && evidence.head_sha.as_deref() == Some(head)
+                    })
+        })
+}
+
+fn queue_conflict_recheck_already_observed(
+    node_index: usize,
+    condition: &GateCondition,
+    plan: &PlannedGraph,
+    positions: &std::collections::BTreeMap<String, usize>,
+    checkpoint: &GraphCheckpoint,
+) -> bool {
+    let GateCondition::Ci { target, .. } = condition else {
+        return false;
+    };
+    let CiTarget::Node { node: published, .. } = target else {
+        return false;
+    };
+    let Some(published_index) = positions.get(published).copied() else {
+        return false;
+    };
+    if plan.nodes[published_index].kind != Some(NodeKind::Publish) {
+        return false;
+    }
+    let Some(head) = ci::published_head(target, checkpoint, true) else {
+        return false;
+    };
+    prior_clear_conflict_gate(node_index, published, &head, plan, positions, checkpoint)
+        .and_then(|index| checkpoint.nodes[index].conflict.as_ref())
+        .is_some_and(|evidence| evidence.ci_rechecks > 0)
 }
 
 fn reset_skipped_conflict_branch(
@@ -1721,6 +1784,7 @@ fn queue_conflict_recheck(
     plan: &PlannedGraph,
     positions: &std::collections::BTreeMap<String, usize>,
     checkpoint: &mut GraphCheckpoint,
+    wall_now: Option<provenant_core::WallTime>,
 ) -> Result<(usize, usize), &'static str> {
     let GateCondition::Ci { target, .. } = condition else {
         return Err("queue CI conflict must target a published node");
@@ -1740,38 +1804,15 @@ fn queue_conflict_recheck(
     let Some(head) = ci::published_head(target, checkpoint, true) else {
         return Err("queue CI conflict lost its published head");
     };
-    let same_round = |candidate: usize| {
-        same_expanded_round(
-            plan.nodes[candidate].round.as_ref(),
-            plan.nodes[node_index].round.as_ref(),
-        )
-    };
-    let conflict_index = graph_ancestors(node_index, plan, positions)
-        .into_iter()
-        .rev()
-        .find(|index| {
-            same_round(*index)
-                && matches!(
-                    &plan.nodes[*index].condition,
-                    Some(GateCondition::Conflict {
-                        target: CiTarget::Node { node, .. },
-                        ..
-                    }) if node == published
-                )
-                && checkpoint.nodes[*index].state == NodeState::Succeeded
-                && checkpoint.nodes[*index]
-                    .gate
-                    .as_ref()
-                    .is_some_and(|gate| gate.passed)
-                && checkpoint.nodes[*index]
-                    .conflict
-                    .as_ref()
-                    .is_some_and(|evidence| {
-                        evidence.state == ConflictState::Clear
-                            && evidence.head_sha.as_deref() == Some(head.as_str())
-                    })
-        })
-        .ok_or("queue CI conflict has no prior clear conflict gate")?;
+    let conflict_index = prior_clear_conflict_gate(
+        node_index,
+        published,
+        &head,
+        plan,
+        positions,
+        checkpoint,
+    )
+    .ok_or("queue CI conflict has no prior clear conflict gate")?;
     let rebase = plan.nodes[conflict_index]
         .on_fail
         .as_ref()
@@ -1780,7 +1821,12 @@ fn queue_conflict_recheck(
         .ok_or("queue conflict gate has no rebase writer")?;
     let recovery_container =
         plan.nodes[rebase].composite.is_some() || plan.nodes[rebase].loop_body.is_some();
-    if (!plans::writer(&plan.nodes[rebase]) && !recovery_container) || !same_round(rebase) {
+    if (!plans::writer(&plan.nodes[rebase]) && !recovery_container)
+        || !same_expanded_round(
+            plan.nodes[rebase].round.as_ref(),
+            plan.nodes[node_index].round.as_ref(),
+        )
+    {
         return Err("queue conflict recovery target is not a same-round writer or container");
     }
 
@@ -1792,19 +1838,38 @@ fn queue_conflict_recheck(
     };
     for candidate in 0..plan.nodes.len() {
         let contained_member = contained.contains(&candidate);
-        let same_round_descendant =
-            same_round(candidate) && node_depends_on(candidate, rebase, plan, positions);
+        let same_round_descendant = same_expanded_round(
+            plan.nodes[candidate].round.as_ref(),
+            plan.nodes[node_index].round.as_ref(),
+        ) && node_depends_on(candidate, rebase, plan, positions);
         if candidate != rebase && (contained_member || same_round_descendant) {
             reset_skipped_conflict_branch(candidate, checkpoint)?;
         }
     }
 
     let conflict = &mut checkpoint.nodes[conflict_index];
-    conflict.state = NodeState::Pending;
+    let prior_conflict = conflict.conflict.as_ref();
+    let ci_rechecks = prior_conflict
+        .filter(|evidence| evidence.head_sha.as_deref() == Some(head.as_str()))
+        .map_or(0, |evidence| evidence.ci_rechecks)
+        .saturating_add(1);
+    let pending_observations = prior_conflict.map_or(0, |evidence| evidence.pending_observations)
+        .saturating_add(1);
+    conflict.state = NodeState::Running;
     conflict.wait_reason = None;
     conflict.gate = None;
     conflict.outputs = None;
-    conflict.conflict = None;
+    conflict.conflict = Some(ci::ConflictEvidence {
+        state: ConflictState::Pending,
+        head_sha: Some(head),
+        summary: "rechecking mergeability after CI reported conflict".into(),
+        wake_at: Some(wall_now.unwrap_or_else(|| {
+            provenant_core::WallTime::from_micros(0)
+                .expect("epoch is a representable wall time")
+        })),
+        pending_observations,
+        ci_rechecks,
+    });
 
     let ci = &mut checkpoint.nodes[node_index];
     ci.state = NodeState::Pending;
@@ -2012,7 +2077,7 @@ fn advance_gate<R: AttemptOwner, J: GraphJournal>(
         }
         let backoff = owner.ci_poll_backoff(&node.id);
         observed_ci.insert(node.id.clone());
-        let evaluation = if matches!(condition, GateCondition::Conflict { .. }) {
+        let mut evaluation = if matches!(condition, GateCondition::Conflict { .. }) {
             ci::evaluate_conflict(
                 plan.queue.is_some(),
                 node_index,
@@ -2034,6 +2099,66 @@ fn advance_gate<R: AttemptOwner, J: GraphJournal>(
             )
         }
         .map_err(GraphError::Refused)?;
+        if plan.queue.is_some()
+            && matches!(condition, GateCondition::Ci { .. })
+            && checkpoint.nodes[node_index]
+                .ci
+                .as_ref()
+                .is_some_and(|evidence| evidence.state == CiState::Conflict)
+            && queue_conflict_recheck_already_observed(
+                node_index,
+                condition,
+                plan,
+                positions,
+                checkpoint,
+            )
+        {
+            let timeout_seconds = match condition {
+                GateCondition::Ci {
+                    timeout_seconds, ..
+                } => *timeout_seconds,
+                _ => unreachable!(),
+            };
+            let timed_out = checkpoint.nodes[node_index]
+                .ci
+                .as_ref()
+                .is_some_and(|evidence| evidence.elapsed_seconds >= timeout_seconds);
+            let evidence = checkpoint.nodes[node_index]
+                .ci
+                .as_mut()
+                .ok_or_else(|| GraphError::BadCheckpoint {
+                    node: node.id.clone(),
+                    invariant: "CI conflict recheck must retain its observation",
+                })?;
+            evidence.state = CiState::Pending;
+            evidence.summary = "CI still reports conflict after the exact published head was observed clear; waiting for CI to reconcile".into();
+            if timed_out {
+                evidence.wake_at = None;
+                evaluation = ci::Evaluation::ParkUnavailable;
+            } else {
+                let now = wall_now.ok_or_else(|| {
+                    GraphError::Refused(format!(
+                        "node {}: no wall clock to set its CI conflict-reconciliation wake deadline",
+                        node.id
+                    ))
+                })?;
+                let delay_micros = backoff
+                    .delay_seconds(evidence.pending_observations)
+                    .saturating_mul(1_000_000);
+                let wake_at = now
+                    .checked_add(provenant_core::DurationMicros::from_micros(delay_micros))
+                    .map_err(|_| {
+                        GraphError::Refused(format!(
+                            "node {}: CI conflict-reconciliation wake deadline exceeds representable time",
+                            node.id
+                        ))
+                    })?;
+                evidence.wake_at = Some(wake_at);
+                evidence.pending_observations = evidence.pending_observations.saturating_add(1);
+                checkpoint.nodes[node_index].state = NodeState::Running;
+                evaluation = ci::Evaluation::Pending;
+            }
+        }
         match evaluation {
             ci::Evaluation::Pending => {
                 asks::refresh_wake(&mut *checkpoint);
@@ -2109,12 +2234,11 @@ fn advance_gate<R: AttemptOwner, J: GraphJournal>(
             .as_ref()
             .is_some_and(|evidence| evidence.state == CiState::Conflict)
     {
-        queue_conflict_recheck(node_index, condition, plan, positions, checkpoint).map_err(
-            |_| GraphError::BadCheckpoint {
+        queue_conflict_recheck(node_index, condition, plan, positions, checkpoint, wall_now)
+            .map_err(|_| GraphError::BadCheckpoint {
                 node: node.id.clone(),
                 invariant: "queue CI conflict must re-enter its exact published conflict gate",
-            },
-        )?;
+            })?;
         asks::refresh_wake(checkpoint);
         journal.save(&*checkpoint).map_err(GraphError::Journal)?;
         return Ok(GateStep::Reschedule);
