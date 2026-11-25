@@ -169,4 +169,3 @@ fn explicit_queue_on_named_full_document_is_sealed_with_config_sources() {
     assert_eq!(queue.prep_retries.value, 3);
     assert_eq!(queue.prep_retries.source.layer, Layer::Host);
 }
-
