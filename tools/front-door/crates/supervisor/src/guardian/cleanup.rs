@@ -54,6 +54,7 @@ impl Driver<'_> {
                         || self.reservation.provider.as_ref() == Some(&fact.identity))
             }) {
                 found = true;
+                self.record_holder(fact.identity.pid, fact.command.as_deref(), &resource, true);
                 push_warning(
                     warnings,
                     omitted,
@@ -85,6 +86,12 @@ impl Driver<'_> {
                     .occupancy_while(fact.identity.pid, &|| Instant::now() < deadline);
                 if observed.paths.iter().any(|path| path == &resource) {
                     found = true;
+                    self.record_holder(
+                        fact.identity.pid,
+                        fact.command.as_deref(),
+                        &resource,
+                        false,
+                    );
                     push_warning(
                         warnings,
                         omitted,
@@ -110,6 +117,30 @@ impl Driver<'_> {
                 ),
             );
         }
+    }
+
+    /// Keep the holder observation for status. The bound keeps the durable
+    /// exit small; warnings already carry the full text for the owner.
+    fn record_holder(
+        &mut self,
+        pid: i64,
+        command: Option<&str>,
+        resource: &std::path::Path,
+        ownership_proven: bool,
+    ) {
+        if self.observed_holders.len() >= 8
+            || self.observed_holders.iter().any(|holder| {
+                holder.pid == pid && holder.resource == resource.display().to_string()
+            })
+        {
+            return;
+        }
+        self.observed_holders.push(crate::custody::ObservedHolder {
+            pid,
+            command: provenant_core::bounded_line(command.unwrap_or("unknown"), 128),
+            resource: resource.display().to_string(),
+            ownership_proven,
+        });
     }
 
     pub(super) fn persist_tracking(&mut self, warnings: &mut Vec<String>, omitted: &mut u64) {

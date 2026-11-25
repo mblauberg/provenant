@@ -558,7 +558,18 @@ pub fn release_progress(
         #[serde(default)]
         unresolved_identities: Vec<provenant_supervisor::census::ProcessIdentity>,
         #[serde(default)]
+        observed_holders: Vec<ObservedHolder>,
+        #[serde(default)]
         retention: Option<custody::Retention>,
+    }
+    #[derive(serde::Deserialize)]
+    struct ObservedHolder {
+        pid: i64,
+        #[serde(default)]
+        command: String,
+        resource: String,
+        #[serde(default)]
+        ownership_proven: bool,
     }
     let exit: Cleanup = crate::db::decode(&raw).ok()?;
     if exit.scope != RunStore::scope(record) {
@@ -588,19 +599,58 @@ pub fn release_progress(
             )
         })
         .collect::<Vec<_>>();
-    let holder = exit.retention.map(|retention| {
+    // Descriptor occupancy names a contended resource but never proves its
+    // owner. Say so explicitly; only recorded descendants may be signalled.
+    let holders = exit
+        .observed_holders
+        .iter()
+        .take(8)
+        .map(|observed| {
+            let command = if observed.command.is_empty() {
+                "unknown"
+            } else {
+                observed.command.as_str()
+            };
+            format!(
+                "pid {} ({command}) on {}{}",
+                observed.pid,
+                provenant_core::bounded_line(&observed.resource, 128),
+                if observed.ownership_proven {
+                    ""
+                } else {
+                    ", ownership unproven"
+                }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let held = if holders.is_empty() {
+        String::new()
+    } else {
+        format!("; held resources: {holders}")
+    };
+    // One command ends every survivor this attempt proved; unproven holders
+    // stay named so the owner can close the service themselves.
+    let remedy = if exit.unresolved_pids.is_empty() && holders.is_empty() {
+        String::new()
+    } else {
+        "; run `provenant reconcile <lane>` to end proven survivors".to_owned()
+    };
+    let retention = exit.retention.map(|retention| {
         let guardian = custody::GuardianLiveness::observe(census, &retention.guardian);
         format!("; {}", retention.describe(guardian, now))
     });
     Some(format!(
-        "releasing ({} survivors: {}){}",
+        "releasing ({} survivors: {}){}{}{}",
         exit.unresolved_pids.len(),
         if names.is_empty() {
             "census pending".into()
         } else {
             names.join(", ")
         },
-        holder.unwrap_or_default(),
+        held,
+        remedy,
+        retention.unwrap_or_default(),
     ))
 }
 
@@ -2447,7 +2497,7 @@ impl RunStore {
                 hook();
             }
         });
-        let Ok(recovery) = custody::acquire_recovery(
+        let Ok(mut recovery) = custody::acquire_recovery(
             directory,
             scope,
             provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
@@ -2463,6 +2513,23 @@ impl RunStore {
             || read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_some()
         {
             return Ok(None);
+        }
+        // A lane killed before its guardian could publish an exit can leave
+        // its recorded tree alive and holding the heavy lock. End only what
+        // the attempt recorded; a live guardian keeps the fence and falls
+        // through to the normal proof path.
+        match recovery.end_recorded_orphans(observer, ORPHAN_PATIENCE) {
+            Ok(report) if !report.survivors.is_empty() => {
+                return Ok(Some(Reconciled::Escaped {
+                    pids: report
+                        .survivors
+                        .iter()
+                        .map(|identity| identity.pid)
+                        .collect(),
+                }));
+            }
+            Ok(_) | Err(CustodyError::Fenced) => {}
+            Err(error) => return Ok(Some(Reconciled::custody_unavailable(&error))),
         }
         if custody::holder_gone(&attempt, scope, observer)
             && recovery.observe_with(observer) == RecoveryState::Absent
