@@ -191,6 +191,19 @@ impl std::fmt::Display for DetachedWorktreeRemedies {
     }
 }
 
+/// Facts for a refused branch with no merge base with its declared base.
+/// Boxed inside [`WorktreeError`] so a wide refusal cannot enlarge every CLI
+/// result that carries the error through `RunError`. The type is public because
+/// it is the payload of a public [`WorktreeError`] variant; its fields stay
+/// private to this module, so the refusal is read only through that error.
+#[derive(Debug)]
+pub struct UnrelatedBaseRefusal {
+    pub(super) branch: String,
+    pub(super) head: GitOid,
+    pub(super) base: String,
+    pub(super) base_oid: GitOid,
+}
+
 #[derive(Debug, Error)]
 pub enum WorktreeError {
     #[error(transparent)]
@@ -207,6 +220,11 @@ pub enum WorktreeError {
         branch: String,
         reason: String,
     },
+    #[error(
+        "base {} at {} has no merge base with branch {} at {}; pass --worktree to use the existing checkout, or merge or rebase the branch onto the intended base before launching",
+        .0.base, .0.base_oid, .0.branch, .0.head
+    )]
+    UnrelatedBase(Box<UnrelatedBaseRefusal>),
     #[error(
         "registered Git project has no verified primary checkout; run `provenant worktree list` from its primary checkout to refresh the layout, then retry"
     )]
@@ -455,7 +473,10 @@ impl WorktreeError {
         Some(match self {
             Self::StaleRegistration => "run `git worktree prune`, then retry",
             Self::WorktreeExists { .. } => {
-                "run `provenant worktree list` to inspect the existing checkout, then remove it with `provenant worktree remove NAME` or retry with a matching clean tree; for a base conflict, omit --base or pick a matching base"
+                "run `provenant worktree list` to inspect the existing checkout, then remove it with `provenant worktree remove NAME` or retry with a matching clean tree"
+            }
+            Self::UnrelatedBase(..) => {
+                "pass --worktree PATH to launch from the existing branch checkout, or merge or rebase the branch onto the intended base before retrying"
             }
             Self::GitEntryHeld { locked: true } => "run `git worktree unlock <path>`, then retry",
             Self::GitEntryHeld { locked: false } => {

@@ -306,7 +306,8 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "writer_reconcile_keeps_unfinished_cherry_pick_and_releases",
             "recreated_worktree_accepts_writer_after_settlement",
             "existing_branch_behind_base_warns_and_keeps_its_tip",
-            "existing_branch_with_base_names_the_repair_in_json_and_human_output",
+            "existing_branch_containing_base_launches_without_a_behind_warning",
+            "unrelated_base_refuses_and_names_worktree",
             "create_reuses_a_clean_worktree_and_names_an_existing_conflict",
             "create_from_remote_base_reports_ok_and_exists",
             "create_list_and_remove_a_managed_worktree",
@@ -429,6 +430,12 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 }
                 "existing_branch_behind_base_warns_and_keeps_its_tip" => {
                     existing_branch_behind_base_warns_and_keeps_its_tip()
+                }
+                "existing_branch_containing_base_launches_without_a_behind_warning" => {
+                    existing_branch_containing_base_launches_without_a_behind_warning()
+                }
+                "unrelated_base_refuses_and_names_worktree" => {
+                    unrelated_base_refuses_and_names_worktree()
                 }
                 "create_reuses_a_clean_worktree_and_names_an_existing_conflict" => {
                     create_reuses_a_clean_worktree_and_names_an_existing_conflict()

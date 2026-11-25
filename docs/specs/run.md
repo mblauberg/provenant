@@ -173,6 +173,14 @@ tip. `lanes.history.unrooted_tip` judges the lane head before any merge runs, so
 supply ancestry the head lacks; its `warn` and `off` values never override an unrelated-history
 refusal. The base stays pinned until publication.
 
+At launch, `--base` on an existing branch names that branch's merge target rather than an ancestry
+requirement: the lane starts at the branch tip, and a branch behind its base warns
+`BRANCH_BEHIND_BASE` with the number of commits behind while keeping its tip and the given base.
+A branch that already contains its base launches without that warning. A base with no merge base
+with the branch cannot be its merge target and refuses with `WRITER_SCOPE`, naming `--worktree` and
+a merge or rebase remedy; a shallow clone whose missing history prevents proof warns and proceeds.
+These rules apply both to a free managed path and to a clean checkout reused at an occupied path.
+
 The worktree's native index follows the branch from a recorded commit and the digest of the
 index Provenant left, advanced under a per-worktree lock (never the admission gate) after
 each publication and on every settlement or resume until it matches the tip. The advance is

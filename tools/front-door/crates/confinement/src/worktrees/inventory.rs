@@ -1275,6 +1275,86 @@ pub fn is_ancestor(
     Ok(require_exit(&command, &outcome, &[0, 1])? == 0)
 }
 
+/// How a declared base relates to the tip of an existing branch.
+///
+/// `--base` is a merge target for an existing branch, not an ancestry rule: a
+/// branch behind its base is admitted with an advisory, while a base from an
+/// unrelated history cannot be that branch's merge target at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum BaseRelation {
+    /// The branch tip already contains the base; no advisory is due.
+    Contains,
+    /// The histories share a merge base, but the tip does not contain the
+    /// base. `missing` counts the base commits the branch has not merged.
+    Behind { missing: Option<u64> },
+    /// No common ancestor exists, so the base cannot be a merge target.
+    Unrelated,
+}
+
+/// Count commits reachable from `base` but not from `tip`. Advisory only: a
+/// failed or malformed read leaves the count unknown rather than refusing a
+/// branch that is already known to share history with the base.
+fn commits_behind(
+    context: &WorktreeContext<'_>,
+    base: GitOid,
+    tip: GitOid,
+    cancel: &CancelToken,
+) -> Option<u64> {
+    let read = GitRead::AncestorCount {
+        base: tip,
+        head: base,
+    };
+    let command = read.command_label();
+    let outcome = run_git(context, context.repo, read, cancel).ok()?;
+    if require_exit(&command, &outcome, &[0]).ok()? != 0 {
+        return None;
+    }
+    std::str::from_utf8(trim_ascii(&outcome.stdout.bytes))
+        .ok()?
+        .parse::<u64>()
+        .ok()
+}
+
+/// Classify a declared base against an existing branch tip.
+///
+/// A shallow clone can report no merge base even for related histories, so an
+/// absent merge base is only a refusal when the repository is not shallow.
+/// Spec: docs/specs/run.md#lane-git-and-import
+pub(super) fn base_relation(
+    context: &WorktreeContext<'_>,
+    base: GitOid,
+    tip: GitOid,
+    cancel: &CancelToken,
+) -> Result<BaseRelation, WorktreeError> {
+    if is_ancestor(context, base, tip, cancel)? {
+        return Ok(BaseRelation::Contains);
+    }
+    let read = GitRead::MergeBase {
+        left: base,
+        right: tip,
+    };
+    let command = read.command_label();
+    let outcome = run_git(context, context.repo, read, cancel)?;
+    match require_exit(&command, &outcome, &[0, 1])? {
+        0 => Ok(BaseRelation::Behind {
+            missing: commits_behind(context, base, tip, cancel),
+        }),
+        1 => {
+            let shallow_read = GitRead::IsShallow;
+            let shallow_command = shallow_read.command_label();
+            let shallow = run_git(context, context.repo, shallow_read, cancel)?;
+            require_exit(&shallow_command, &shallow, &[0])?;
+            if matches!(trim_ascii(&shallow.stdout.bytes), b"true") {
+                // Missing history cannot prove unrelatedness. Proceed with the
+                // behind-base advisory instead of refusing on absent evidence.
+                return Ok(BaseRelation::Behind { missing: None });
+            }
+            Ok(BaseRelation::Unrelated)
+        }
+        _ => Err(WorktreeError::InvalidOutput),
+    }
+}
+
 pub(super) fn is_first_parent_commit(
     context: &WorktreeContext<'_>,
     history_tip: GitOid,

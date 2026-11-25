@@ -8,9 +8,18 @@ use std::path::Component;
 /// one typed warning that names both commits so the operator can merge the base
 /// before landing.
 /// Spec: docs/specs/run.md#lane-git-and-import
-fn branch_behind_base_warning(branch: &str, head: GitOid, base: GitOid) -> String {
+fn branch_behind_base_warning(
+    branch: &str,
+    head: GitOid,
+    base: GitOid,
+    missing: Option<u64>,
+) -> String {
+    let behind = missing.map_or_else(
+        || format!("branch {branch} does not contain base {base}"),
+        |count| format!("branch {branch} is {count} commits behind {base}"),
+    );
     let message = format!(
-        "branch {branch} at {head} does not contain base {base}; reusing the branch at {head} with {base} as its merge target"
+        "branch {branch} at {head} does not contain base {base}; {behind}; reusing the branch at {head} with {base} as its merge target; the lane may merge it"
     );
     warn(
         Warning::new(BRANCH_BEHIND_BASE, message.clone())
@@ -581,13 +590,29 @@ fn reuse_existing_worktree(
         .ok_or_else(|| conflict("the checkout has no HEAD".to_owned()))?;
     if let Some(base) = request.base.as_deref() {
         let base_oid = pin_revision(context, context.facts, base, cancel)?;
-        // Admission on an occupied path must match a free path: a base that
-        // the checkout's HEAD descends from is already satisfied. Only a base
-        // outside that history is a conflict.
-        if !is_ancestor(context, base_oid, head, cancel)? {
-            return Err(conflict(format!(
-                "base {base} at {base_oid} does not contain the checkout at {head}; omit --base or pick a base at or before that commit"
-            )));
+        // Admission on an occupied path must match a free path: a branch behind
+        // its base is reused at its own tip with an advisory, and only a base
+        // from an unrelated history cannot name a merge target.
+        match base_relation(context, base_oid, head, cancel)? {
+            BaseRelation::Contains => {}
+            BaseRelation::Behind { missing } => {
+                warnings.push(branch_behind_base_warning(
+                    &request.branch,
+                    head,
+                    base_oid,
+                    missing,
+                ));
+            }
+            BaseRelation::Unrelated => {
+                return Err(WorktreeError::UnrelatedBase(Box::new(
+                    UnrelatedBaseRefusal {
+                        branch: request.branch.clone(),
+                        head,
+                        base: base.to_owned(),
+                        base_oid,
+                    },
+                )));
+            }
         }
     }
     let verified = verify_probed_worktree(context, &entry.path, cancel)?;
@@ -811,9 +836,9 @@ fn create_with_default(
     if let Some(entry) = checked_out {
         let head = entry.head.ok_or(WorktreeError::InvalidOutput)?;
         if let Some(base) = requested_base
-            && !is_ancestor(context, base, head, cancel)?
+            && let BaseRelation::Behind { missing } = base_relation(context, base, head, cancel)?
         {
-            branch_behind_base_warning(&request.branch, head, base);
+            branch_behind_base_warning(&request.branch, head, base, missing);
         }
         return Err(WorktreeError::CheckedOut);
     }
@@ -827,14 +852,29 @@ fn create_with_default(
     let existing = branch_tips.get(&branch).copied();
     let mut behind_base = None;
     if let Some(existing_head) = existing
-        && let Some(base) = requested_base
-        && !is_ancestor(context, base, existing_head, cancel)?
+        && let Some((base_text, base)) = request.base.as_deref().zip(requested_base)
     {
-        behind_base = Some(branch_behind_base_warning(
-            &request.branch,
-            existing_head,
-            base,
-        ));
+        match base_relation(context, base, existing_head, cancel)? {
+            BaseRelation::Contains => {}
+            BaseRelation::Behind { missing } => {
+                behind_base = Some(branch_behind_base_warning(
+                    &request.branch,
+                    existing_head,
+                    base,
+                    missing,
+                ));
+            }
+            BaseRelation::Unrelated => {
+                return Err(WorktreeError::UnrelatedBase(Box::new(
+                    UnrelatedBaseRefusal {
+                        branch: request.branch.clone(),
+                        head: existing_head,
+                        base: base_text.to_owned(),
+                        base_oid: base,
+                    },
+                )));
+            }
+        }
     }
     let create_branch = existing.is_none();
     if create_branch && request.base.is_none() && default.is_none() {
