@@ -945,6 +945,7 @@ pub(super) fn validate_flat_plan(
             loop_body: node.loop_body.clone(),
             escalate: node.escalate.clone(),
             delivery_review: node.delivery_review.clone(),
+            delivery_adoption: node.delivery_adoption.clone(),
             decide: node.decide.clone(),
             continues: node.continues.clone(),
             land: node.land.clone(),

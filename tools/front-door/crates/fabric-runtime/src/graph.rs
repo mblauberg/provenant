@@ -1100,6 +1100,8 @@ struct PlannedNode {
     #[serde(skip_serializing_if = "Option::is_none")]
     delivery_review: Option<DeliveryReviewSpec>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    delivery_adoption: Option<DeliveryAdoptionIntent>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     decide: Option<DecideSpec>,
     #[serde(skip_serializing_if = "Option::is_none")]
     continues: Option<String>,
