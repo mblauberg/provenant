@@ -3287,11 +3287,22 @@ fn advance_hygiene<R: AttemptOwner, J: GraphJournal>(
         })
         .map_err(GraphError::Run)?;
     execution.outcome.handoff = intent_handoff.clone();
-    if execution.outcome.kind == provenant_records::graph::HygieneOutcomeKind::Clean
-        && execution.outcome.after_head.is_none()
-    {
-        execution.outcome.kind = provenant_records::graph::HygieneOutcomeKind::Error;
-        execution.diagnostic = Some("hygiene completed without a verified output head".into());
+    if execution.outcome.kind == provenant_records::graph::HygieneOutcomeKind::Clean {
+        if execution.outcome.after_head.is_none() {
+            execution.outcome.kind = provenant_records::graph::HygieneOutcomeKind::Error;
+            execution.diagnostic = Some("hygiene completed without a verified output head".into());
+        } else if document.queue.is_some()
+            && execution
+                .branch
+                .as_ref()
+                .or(source_branch.as_ref())
+                .is_none_or(|branch| {
+                    branch.trim().is_empty() || branch.chars().any(char::is_control)
+                })
+        {
+            execution.outcome.kind = provenant_records::graph::HygieneOutcomeKind::Error;
+            execution.diagnostic = Some("queue hygiene completed without a verified branch".into());
+        }
     }
     let outcome = execution.outcome;
     let formatter_warnings = execution
