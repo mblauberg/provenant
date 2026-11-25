@@ -3228,9 +3228,16 @@ impl RunStore {
         tree: &provenant_confinement::VerifiedWorktree,
         call: &Request<'_>,
     ) -> Result<()> {
-        if record.retry_of.is_some() {
-            // A manual continuation follows its immediate run predecessor,
-            // whose launch already checked any older graph predecessor.
+        if record.retry_of.is_some()
+            && task
+                .context
+                .as_ref()
+                .and_then(|context| context.writer_predecessor)
+                != record.retry_of
+        {
+            // Manual continuations without a graph predecessor follow the
+            // immediate run's owner chain. Graph continuations also recheck
+            // their sealed source and head below.
             return self.check_writer_lineage(record, tree, call).map(|_| ());
         }
         let Some(context) = task.context.as_ref() else {
@@ -3299,18 +3306,19 @@ impl RunStore {
         // commits, not the earlier graph's pins, so it keeps its inherited head.
         let head_matches = adopted_prior_graph
             || task.head == head
-            || owner.is_some()
-                && head
-                    .as_deref()
-                    .and_then(|pinned| provenant_core::GitOid::parse(pinned).ok())
-                    .zip(
-                        task.head
-                            .as_deref()
-                            .and_then(|current| provenant_core::GitOid::parse(current).ok()),
-                    )
-                    .is_some_and(|(pinned, current)| {
-                        Self::repinned_head_descends(tree, pinned, current)
-                    });
+            || owner.is_some_and(|owner| {
+                owner.origin == provenant_confinement::worktrees::WorktreeOrigin::Lane
+            }) && head
+                .as_deref()
+                .and_then(|pinned| provenant_core::GitOid::parse(pinned).ok())
+                .zip(
+                    task.head
+                        .as_deref()
+                        .and_then(|current| provenant_core::GitOid::parse(current).ok()),
+                )
+                .is_some_and(|(pinned, current)| {
+                    Self::repinned_head_descends(tree, pinned, current)
+                });
         if !head_matches {
             return Err(RunError::WriterLineage(
                 "graph predecessor writer or source",

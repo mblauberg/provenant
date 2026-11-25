@@ -1284,6 +1284,48 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         }))
     }
 
+    fn continuation_refused(&mut self, reference: &str) -> Result<bool, Self::Error> {
+        let (host, attempt) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
+        let target = AttemptTarget {
+            extra: Default::default(),
+            host: Some(host.parse().map_err(|_| FacadeError::StateCorrupt)?),
+            attempt: attempt.parse().map_err(|_| FacadeError::StateCorrupt)?,
+        };
+        let owner = BinaryRunOwner {
+            factory: self.factory,
+            allow_remote: true,
+            actor: None,
+            chair: None,
+        };
+        let record = owner.snapshot(target.clone(), self.budget, self.cancel)?;
+        let refused = |steering: &provenant_records::run::SteeringStatus| {
+            steering.state == provenant_records::run::SteeringState::NotContinued
+                && steering.cause
+                    == Some(provenant_records::run::SteeringCause::ContinuationRefused)
+        };
+        if record.steering.as_ref().is_some_and(refused) {
+            return Ok(true);
+        }
+        // The graph may already have adopted the successor before the launch
+        // receipt was recorded. Its parent owns the steering disposition.
+        if record.provider_launched == Some(false)
+            && let Some(parent) = record.retry_of
+        {
+            let parent = owner.snapshot(
+                AttemptTarget {
+                    attempt: parent,
+                    ..target
+                },
+                self.budget,
+                self.cancel,
+            )?;
+            return Ok(parent.steering.as_ref().is_some_and(|steering| {
+                steering.successor == Some(record.attempt_id) && refused(steering)
+            }));
+        }
+        Ok(false)
+    }
+
     fn detect_repair_growth(&mut self, before: &str, after: &str) -> Result<bool, String> {
         let before =
             provenant_core::GitOid::parse(before).map_err(|_| "repair source commit is invalid")?;
@@ -4073,6 +4115,16 @@ impl BoundGraphOwner<'_> {
                             attempt_ref: reference,
                         });
                     }
+                }
+                // Admission is not a launch receipt. Keep observing the
+                // predecessor while its accepted steer is unresolved, so a
+                // concurrently advancing graph cannot adopt a refused child.
+                if attempt.steering.as_ref().is_some_and(|steering| {
+                    steering.state == provenant_records::run::SteeringState::Queued
+                }) {
+                    return Ok(AttemptObservation::Pending {
+                        attempt_ref: reference,
+                    });
                 }
                 let pickup = if remote {
                     None

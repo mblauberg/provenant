@@ -1900,6 +1900,14 @@ impl RunStore {
                 match launch.repin_head(&git, pinned)? {
                     crate::RepinOutcome::Unchanged { .. } => {}
                     crate::RepinOutcome::Repinned { head, .. } => {
+                        let owner = self.check_writer_lineage(&record, &launch.worktree, call)?;
+                        if !owner.is_some_and(|owner| {
+                            owner.origin == provenant_confinement::worktrees::WorktreeOrigin::Lane
+                        }) {
+                            return Err(RunError::WriterLineage(
+                                "re-pin requires the predecessor's lane-owned writer",
+                            ));
+                        }
                         let outcome = crate::RepinOutcome::Repinned { pinned, head };
                         repin_warning = outcome.warning();
                         repin_head = Some(head);

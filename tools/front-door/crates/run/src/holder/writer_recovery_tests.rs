@@ -742,13 +742,14 @@ fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
         ExplicitAfterSteer,
         DeliveredSteerUnavailable,
         DeliveredSteerDescendant,
+        DeliveredSteerAdopted,
         Deadline,
         // The outcome commits on the outcome-only pass; the worktree turns dirty before the quiet pass delivers.
         LateDirty,
     }
     use Marker::{
-        DeliveredSteer, DeliveredSteerDescendant, DeliveredSteerUnavailable,
-        ExplicitAfterSteer, ExplicitCancel,
+        DeliveredSteer, DeliveredSteerAdopted, DeliveredSteerDescendant,
+        DeliveredSteerUnavailable, ExplicitAfterSteer, ExplicitCancel,
     };
     for (changed, dirty, blocked, shared, budget, marker) in [
         (false, false, false, false, false, Marker::AdmissionSteer),
@@ -766,6 +767,7 @@ fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
         (true, false, false, true, false, DeliveredSteer),
         (true, false, false, true, false, DeliveredSteerUnavailable),
         (true, false, false, true, false, DeliveredSteerDescendant),
+        (true, false, false, true, false, DeliveredSteerAdopted),
         (true, false, false, true, false, ExplicitCancel),
         (true, false, false, true, false, ExplicitAfterSteer),
         (true, false, false, false, true, Marker::None),
@@ -777,6 +779,7 @@ fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
                 | ExplicitAfterSteer
                 | DeliveredSteerUnavailable
                 | DeliveredSteerDescendant
+                | DeliveredSteerAdopted
         );
         let explicit = matches!(marker, ExplicitCancel | ExplicitAfterSteer);
         let late = marker == Marker::LateDirty;
@@ -861,6 +864,14 @@ fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
             execution.state_root.as_path(),
             execution.project_id,
         )?;
+        if marker == DeliveredSteerDescendant {
+            let mut owner = provenant_confinement::worktrees::load_owner(&launch.worktree)?
+                .ok_or("writer owner")?;
+            owner.origin = provenant_confinement::worktrees::WorktreeOrigin::Lane;
+            owner.attempt_id = Some(id);
+            owner.operation_id = Some(run.operation_id.clone());
+            provenant_confinement::worktrees::save_owner(&launch.worktree, &owner)?;
+        }
         launch.snapshot(
             execution.state_root.as_path(),
             &attempt,
@@ -894,6 +905,7 @@ fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
             DeliveredSteer
                 | DeliveredSteerUnavailable
                 | DeliveredSteerDescendant
+                | DeliveredSteerAdopted
                 | ExplicitCancel
                 | ExplicitAfterSteer
                 | Marker::Deadline
@@ -1203,7 +1215,7 @@ fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
             None
         };
         let finished = store.finish(id, &attempt, &observed, &fake, &call)?;
-        if marker == DeliveredSteerDescendant {
+        if matches!(marker, DeliveredSteerDescendant | DeliveredSteerAdopted) {
             // The writer commits in its own worktree after the stop was
             // sealed: the successor pin is now a strict ancestor of HEAD.
             std::fs::write(
@@ -1394,6 +1406,11 @@ fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
                     Some("fresh")
                 );
                 assert_eq!(store.record(id, &call)?.superseded_by, Some(child));
+                continue;
+            }
+            if marker == DeliveredSteerAdopted {
+                assert!(matches!(child, Err(RunError::WriterLineage(_))));
+                assert_eq!(store.record(id, &call)?.superseded_by, None);
                 continue;
             }
             let child = child?;

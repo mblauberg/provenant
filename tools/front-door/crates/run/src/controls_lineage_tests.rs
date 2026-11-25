@@ -197,6 +197,21 @@ fn graph_writer_resume_uses_the_committed_terminal_head_and_original_source()
         &call,
     )?;
 
+    // A resumed graph attempt has retry_of as well as a graph predecessor.
+    // It must still verify the graph's sealed source rather than taking the
+    // manual-resume owner-only shortcut.
+    let mut forged = child_task.clone();
+    forged.source_head = Some(predecessor.to_string());
+    assert!(matches!(
+        store.check_launch_writer_lineage(
+            &store.record(child.attempt_id, &call)?,
+            &forged,
+            &resumed.worktree,
+            &call,
+        ),
+        Err(RunError::WriterLineage(_))
+    ));
+
     std::fs::write(
         info.path.join("foreign-drift.txt"),
         "newer after settlement",
