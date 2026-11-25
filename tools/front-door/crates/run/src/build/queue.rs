@@ -99,9 +99,20 @@ pub enum CiLeaseAdmission {
         lease: CiAdmissionLease,
         waited: Duration,
     },
+    /// No slot was available on this nonblocking tick; the caller keeps its
+    /// durable waiter and schedules another attempt.
+    Waiting,
     Overflow {
         waited: Duration,
     },
+}
+
+/// One nonblocking durable CI admission attempt.
+#[derive(Debug)]
+pub enum CiLeaseAttempt {
+    Held { lease: CiAdmissionLease },
+    Waiting,
+    Overflow,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -182,6 +193,94 @@ pub fn admit_ci_lease(
             Ok(CiLeaseAdmission::Held { lease, waited })
         }
     }
+}
+
+/// Attempt a durable queue CI admission without waiting in-process. A positive
+/// request keeps a fair, restart-safe waiter record between ticks; the class
+/// slot and lease marker are still acquired atomically against direct `ci`
+/// users. Once `allow_overflow` is true, a saturated class may proceed under
+/// the caller's persisted advisory policy.
+pub fn try_admit_ci_lease(
+    request: &AdmissionRequest<'_>,
+    owner: CiLeaseOwner,
+    allow_overflow: bool,
+) -> Result<CiLeaseAttempt, BuildError> {
+    if request.class != "ci" {
+        return Err(unavailable("delivery CI leases require admission class `ci`"));
+    }
+    validate_ci_lease_owner(&owner)?;
+    if request.cancel.is_cancelled() {
+        return Err(BuildError::Cancelled);
+    }
+    let slots = open_ci_slots(request.state, request.limit)?;
+    let directory = ci_lease_directory(request.state)?;
+    if let Some(lease) = find_ci_lease_in(&directory, &owner)? {
+        remove_ci_waiter(request.state, &owner)?;
+        return Ok(CiLeaseAttempt::Held { lease });
+    }
+
+    let waiter_id = ci_waiter_id(&owner)?;
+    if request.limit > 0 {
+        ensure_ci_waiter(request, &owner, &waiter_id)?;
+    }
+    let queue_path = ci_queue_path(request.state);
+    let queue_dir = Directory::open_anchor(&queue_path).map_err(unavailable)?;
+    let mut tickets = live_tickets(&queue_dir, &queue_path)?;
+    let now = provenant_os::clock::now_unix_millis();
+    tickets.sort_by(|a, b| ticket_key(a, now).cmp(&ticket_key(b, now)));
+    let at_head = request.limit == 0 || tickets.first().is_some_and(|ticket| ticket.id == waiter_id);
+
+    if at_head {
+        if let Some(guard) = slots
+            .try_acquire_ci(request.limit, &request.limit_source)
+            .map_err(unavailable)?
+        {
+            let Some(registry) = try_lock_ci_lease_registry(&directory)? else {
+                drop(guard);
+                return Ok(CiLeaseAttempt::Waiting);
+            };
+            if let Some(lease) = find_ci_lease_in(&directory, &owner)? {
+                remove_ci_waiter(request.state, &owner)?;
+                drop(registry);
+                drop(guard);
+                return Ok(CiLeaseAttempt::Held { lease });
+            }
+            let lease = CiAdmissionLease {
+                id: ci_lease_id(&owner)?,
+                slot: guard.index(),
+                owner: owner.clone(),
+                cap: provenant_os::admission::AdmissionCap {
+                    limit: request.limit,
+                    source: request.limit_source.clone(),
+                },
+            };
+            let bytes = serde_json::to_vec(&CiLeaseRecord {
+                schema: 1,
+                lease: lease.clone(),
+            })
+            .map_err(unavailable)?;
+            directory
+                .atomic_write(
+                    &ci_lease_marker(lease.slot),
+                    ".ci-lease-",
+                    &bytes,
+                    PublishMode::NoReplace,
+                )
+                .map_err(unavailable)?
+                .require_durable()
+                .map_err(unavailable)?;
+            remove_ci_waiter(request.state, &owner)?;
+            drop(registry);
+            drop(guard);
+            return Ok(CiLeaseAttempt::Held { lease });
+        }
+    }
+
+    if allow_overflow {
+        remove_ci_waiter(request.state, &owner)?;
+        return Ok(CiLeaseAttempt::Overflow);
+    }
+    Ok(CiLeaseAttempt::Waiting)
 }
 
 /// Release a conclusive lease. The caller first records the conclusive CI
@@ -271,6 +370,26 @@ pub fn reconcile_ci_leases(
             report.uncertain += 1;
         }
     }
+    let waiters = ci_waiter_records(state)?;
+    let leases = ci_lease_directory(state)?;
+    for waiter in waiters {
+        let Some(owner) = waiter.durable_owner else {
+            continue;
+        };
+        if find_ci_lease_in(&leases, &owner)?.is_some() {
+            remove_ci_waiter(state, &owner)?;
+            continue;
+        }
+        if active.contains(&owner) {
+            continue;
+        }
+        if conclusive.contains(&owner) {
+            remove_ci_waiter(state, &owner)?;
+            report.released += 1;
+        } else {
+            report.uncertain += 1;
+        }
+    }
     Ok(report)
 }
 
@@ -317,8 +436,129 @@ fn lock_ci_lease_registry(
         .map_err(unavailable)
 }
 
+fn try_lock_ci_lease_registry(directory: &Directory) -> Result<Option<LockGuard>, BuildError> {
+    let name = OsStr::new(CI_LEASE_REGISTRY_LOCK);
+    match directory.atomic_write(name, ".ci-lease-lock-", b"", PublishMode::NoReplace) {
+        Ok(receipt) => receipt.require_durable().map_err(unavailable)?,
+        Err(error) if error.is_exists() => {}
+        Err(error) => return Err(unavailable(error)),
+    }
+    match directory.try_lock_existing(name, LockMode::Exclusive) {
+        Ok(guard) => Ok(Some(guard)),
+        Err(FsError::LockTimeout { .. }) => Ok(None),
+        Err(error) if error.is_not_found() => Ok(None),
+        Err(error) => Err(unavailable(error)),
+    }
+}
+
+fn open_ci_slots(state: &Path, limit: u64) -> Result<AdmissionSlots, BuildError> {
+    match AdmissionSlots::open(state, "ci") {
+        Ok(slots) => Ok(slots),
+        Err(provenant_os::admission::AdmissionError::Fs(error)) if error.is_not_found() => {
+            match AdmissionSlots::provision(state, "ci", limit.max(1)) {
+                Ok(()) => AdmissionSlots::open(state, "ci").map_err(unavailable),
+                Err(provenant_os::admission::AdmissionError::Fs(error))
+                    if error.is_exists() =>
+                {
+                    AdmissionSlots::open(state, "ci").map_err(unavailable)
+                }
+                Err(error) => Err(unavailable(error)),
+            }
+        }
+        Err(error) => Err(unavailable(error)),
+    }
+}
+
 fn ci_lease_marker(slot: u64) -> OsString {
     format!("slot-{slot}.lease.json").into()
+}
+
+fn ci_queue_path(state: &Path) -> PathBuf {
+    state.join("build/queue/ci")
+}
+
+fn ci_waiter_id(owner: &CiLeaseOwner) -> Result<String, BuildError> {
+    Ok(format!("delivery-{}", ci_lease_id(owner)?))
+}
+
+fn ci_waiter_name(owner: &CiLeaseOwner) -> Result<OsString, BuildError> {
+    Ok(format!("{}.json", ci_waiter_id(owner)?).into())
+}
+
+fn ci_waiter_records(state: &Path) -> Result<Vec<Ticket>, BuildError> {
+    let path = ci_queue_path(state);
+    if !path.is_dir() {
+        return Ok(Vec::new());
+    }
+    let directory = Directory::open_anchor(&path).map_err(unavailable)?;
+    Ok(live_tickets(&directory, &path)?
+        .into_iter()
+        .filter(|ticket| ticket.durable_owner.is_some())
+        .collect())
+}
+
+fn ensure_ci_waiter(
+    request: &AdmissionRequest<'_>,
+    owner: &CiLeaseOwner,
+    id: &str,
+) -> Result<(), BuildError> {
+    let path = ci_queue_path(request.state);
+    std::fs::create_dir_all(&path).map_err(unavailable)?;
+    let directory = Directory::open_anchor(&path).map_err(unavailable)?;
+    let name = ci_waiter_name(owner)?;
+    match directory.read_stable(&name, CI_LEASE_MAX_BYTES) {
+        Ok(bytes) => {
+            let ticket: Ticket = serde_json::from_slice(&bytes).map_err(unavailable)?;
+            if ticket.id != id || ticket.durable_owner.as_ref() != Some(owner) {
+                return Err(unavailable("delivery CI waiter identity changed"));
+            }
+            return Ok(());
+        }
+        Err(error) if error.is_not_found() => {}
+        Err(error) => return Err(unavailable(error)),
+    }
+    let ticket = Ticket {
+        schema: 1,
+        id: id.to_owned(),
+        owner: format!("delivery:{}:{}", owner.graph_id, owner.node_id),
+        project_key: owner.project.clone(),
+        priority: super::Priority::Interactive,
+        aging_ms: Duration::from_secs(120).as_millis() as u64,
+        enqueued_unix_ms: provenant_os::clock::now_unix_millis(),
+        pid: 0,
+        start_time: 0,
+        command_digest: ci_lease_id(owner)?,
+        durable_owner: Some(owner.clone()),
+    };
+    let bytes = serde_json::to_vec(&ticket).map_err(unavailable)?;
+    match directory.atomic_write(&name, ".ci-waiter-", &bytes, PublishMode::NoReplace) {
+        Ok(receipt) => receipt.require_durable().map_err(unavailable),
+        Err(error) if error.is_exists() => {
+            let bytes = directory
+                .read_stable(&name, CI_LEASE_MAX_BYTES)
+                .map_err(unavailable)?;
+            let existing: Ticket = serde_json::from_slice(&bytes).map_err(unavailable)?;
+            if existing.id == id && existing.durable_owner.as_ref() == Some(owner) {
+                Ok(())
+            } else {
+                Err(unavailable("delivery CI waiter identity changed"))
+            }
+        }
+        Err(error) => Err(unavailable(error)),
+    }
+}
+
+fn remove_ci_waiter(state: &Path, owner: &CiLeaseOwner) -> Result<(), BuildError> {
+    let path = ci_queue_path(state);
+    if !path.is_dir() {
+        return Ok(());
+    }
+    let directory = Directory::open_anchor(&path).map_err(unavailable)?;
+    match directory.unlink(&ci_waiter_name(owner)?) {
+        Ok(()) => directory.sync().map_err(unavailable),
+        Err(error) if error.is_not_found() => Ok(()),
+        Err(error) => Err(unavailable(error)),
+    }
 }
 
 fn ci_lease_records(directory: &Directory) -> Result<Vec<CiLeaseRecord>, BuildError> {
@@ -448,6 +688,8 @@ struct Ticket {
     pid: u32,
     start_time: u64,
     command_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    durable_owner: Option<CiLeaseOwner>,
 }
 
 fn affinity(job: &Job, context: &RunContext, limit: u64) -> Vec<u64> {
@@ -599,6 +841,31 @@ fn live_tickets_with(
             Err(error) => return Err(unavailable(error)),
         }
     }
+    let durable_entries = match std::fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(tickets),
+        Err(error) => return Err(unavailable(error)),
+    };
+    for entry in durable_entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(unavailable(error)),
+        };
+        let name = entry.file_name();
+        if Path::new(&name).extension() != Some(OsStr::new("json")) {
+            continue;
+        }
+        let bytes = match std::fs::read(entry.path()) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(unavailable(error)),
+        };
+        let ticket: Ticket = serde_json::from_slice(&bytes).map_err(unavailable)?;
+        if ticket.durable_owner.is_some() {
+            tickets.push(ticket);
+        }
+    }
     Ok(tickets)
 }
 
@@ -659,7 +926,7 @@ pub fn admit(request: &AdmissionRequest<'_>) -> Result<Admitted, BuildError> {
     } else {
         false
     };
-    if !ci_waiting
+    if (!ci_waiting || (request.class == "ci" && request.limit == 0))
         && let Some(guard) = try_slot(&slots, &order, request.limit, &request.limit_source)?
     {
         check_cancel(request, &signals)?;
@@ -697,6 +964,7 @@ pub fn admit(request: &AdmissionRequest<'_>) -> Result<Admitted, BuildError> {
             .and_then(|s| s.split_once(':').and_then(|(_, start)| start.parse().ok()))
             .unwrap_or(0),
         command_digest: request.command_digest.clone(),
+        durable_owner: None,
     };
     let lock_name = format!("{}.lock", request.job_id);
     let ticket_name = format!("{}.json", request.job_id);
@@ -1046,6 +1314,79 @@ mod tests {
             .unwrap()
             .is_some());
     }
+
+    #[test]
+    fn ci_lease_waiter_replays_and_keeps_its_fair_place() {
+        let state = tempfile::tempdir().unwrap();
+        let cancel = CancelToken::new();
+        let mut admission = request(state.path(), "delivery", "graph", "digest", &cancel);
+        admission.class = "ci";
+        let owner = CiLeaseOwner {
+            project: "project-1".into(),
+            graph_id: "delivery-waiter".into(),
+            node_id: "publish".into(),
+            head_sha: "d".repeat(40),
+        };
+        let slots = open_ci_slots(state.path(), 1).unwrap();
+        let held = slots
+            .try_acquire_ci(1, "queue.ci_slots=1 from launch")
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            try_admit_ci_lease(&admission, owner.clone(), false).unwrap(),
+            CiLeaseAttempt::Waiting
+        ));
+        assert!(ci_queue_path(state.path())
+            .join(ci_waiter_name(&owner).unwrap())
+            .exists());
+        drop(held);
+
+        let CiLeaseAttempt::Held { lease } =
+            try_admit_ci_lease(&admission, owner, false).unwrap()
+        else {
+            panic!("the durable waiter should acquire on its retry")
+        };
+        assert!(!ci_queue_path(state.path())
+            .join(format!("delivery-{}.json", lease.id))
+            .exists());
+        assert!(state
+            .path()
+            .join(format!("build/ci/slot-{}.lease.json", lease.slot))
+            .exists());
+    }
+
+    #[test]
+    fn uncapped_ci_bypasses_earlier_capped_ticket_and_records_its_holder() {
+        let state = tempfile::tempdir().unwrap();
+        let cancel = CancelToken::new();
+        let mut capped = request(state.path(), "earlier", "queue", "earlier", &cancel);
+        capped.class = "ci";
+        let earlier = CiLeaseOwner {
+            project: "project-1".into(),
+            graph_id: "delivery-earlier".into(),
+            node_id: "publish".into(),
+            head_sha: "e".repeat(40),
+        };
+        let waiter_id = ci_waiter_id(&earlier).unwrap();
+        ensure_ci_waiter(&capped, &earlier, &waiter_id).unwrap();
+
+        let mut uncapped = request(state.path(), "zero", "queue", "zero", &cancel);
+        uncapped.class = "ci";
+        uncapped.limit = 0;
+        uncapped.limit_source = "queue.ci_slots=0 from launch".into();
+        let Admitted::Held { guard, .. } = admit(&uncapped).unwrap() else {
+            panic!("uncapped CI should bypass queued capped requests")
+        };
+        let holder = std::fs::read_to_string(
+            state.path().join(format!("build/ci/slot-{}.holder.json", guard.index())),
+        )
+        .unwrap();
+        assert!(holder.contains("\"limit\":0"));
+        assert!(holder.contains("queue.ci_slots=0 from launch"));
+        drop(guard);
+        remove_ci_waiter(state.path(), &earlier).unwrap();
+    }
+
     fn ticket(id: &str, priority: super::super::Priority, time: u64) -> Ticket {
         Ticket {
             schema: 1,
@@ -1058,6 +1399,7 @@ mod tests {
             pid: 1,
             start_time: 1,
             command_digest: id.into(),
+            durable_owner: None,
         }
     }
     #[test]
