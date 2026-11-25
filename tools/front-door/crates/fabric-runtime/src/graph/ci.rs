@@ -237,6 +237,11 @@ pub(super) fn evaluate<O: AttemptOwner>(
             truncated: false,
         },
     };
+    // A node target may still be waiting for its writer to publish a branch.
+    // It is not an unavailable CI provider and must not settle as a failure.
+    if binding.is_none() && matches!(target, CiTarget::Node { .. }) {
+        observation.state = CiState::Pending;
+    }
     // An invalid SHA is an incomplete observation, like a missing one.
     observation.head_sha = observation
         .head_sha
