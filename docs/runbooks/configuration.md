@@ -156,11 +156,10 @@ the setting and its source.
 
 - `lanes.history.rebase` (`allow` default, `refuse`): `allow` publishes a lane
   whose history diverged from the host lane branch by first merging the host
-  branch into the lane tip. When the lane rewrote and force-pushed its own branch
-  and the pushed upstream tip is its final head, the host branch moves to that
-  head with a rewritten-history warning and the displaced tip is retained at
-  `refs/provenant/recovery/<oid>`; a host commit made during the lane is not the
-  pushed tip and still takes the merge path. A real conflict stays retained with
+  branch into the lane tip. A lane rewrite replaces the unchanged custody-pinned
+  launch tip with a warning and retains it at `refs/provenant/recovery/<oid>`.
+  Pushes and remote-tracking refs are not used as ownership evidence; a host tip
+  advanced during the lane takes the merge path. A real conflict stays retained with
   the files named; unrelated histories, a configured `merge.*.driver` and a
   branch rewound behind its launch base are retained with their own typed cause.
   `refuse` retains the lane's private commits and refuses with the divergence

@@ -710,32 +710,6 @@ fn known_ancestor(
     Ok(None)
 }
 
-/// Whether the judged lane head is the tip of the branch the writer pushed
-/// upstream. A writer that rebased and force-pushed its own branch leaves the
-/// remote-tracking ref at its new head while the host branch still points at the
-/// displaced tip. That rewrite is the lane's own work, not a host commit gained
-/// during the lane, so publication moves the host branch to the pushed head
-/// instead of merging the displaced commits back into it.
-fn pushed_upstream_tip(
-    git: &Path,
-    repo: &VerifiedRepo,
-    head: GitOid,
-    branch: &str,
-) -> Result<bool> {
-    let short = branch.strip_prefix("refs/heads/").unwrap_or(branch);
-    let pattern = format!("refs/remotes/*/{short}");
-    let refs = execute(
-        git,
-        repo.common_git_dir(),
-        repo.root_path(),
-        &args(&["for-each-ref", "--format=%(objectname)", &pattern]),
-        None,
-    )?;
-    Ok(String::from_utf8_lossy(&refs)
-        .lines()
-        .any(|line| GitOid::parse(line.trim()).is_ok_and(|oid| oid == head)))
-}
-
 pub(crate) struct BranchPublication<'a> {
     pub branch: &'a str,
     pub base: GitOid,
@@ -977,16 +951,16 @@ pub(crate) fn publish_branch(
         // The branch already contains the lane head, so publishing changes
         // nothing.
         (current, false, false)
-    } else if current == base || advances_current {
-        // Fast-forward from the launch base or from later lane commits.
+    } else if advances_current {
         (head, false, false)
-    } else if history.rebase.value == Rebase::Allow && pushed_upstream_tip(git, repo, head, branch)?
-    {
-        // The lane rewrote its branch, force-pushed it and left the upstream ref
-        // at its new head. Moving the host branch there is not a merge: the
-        // displaced tip is the lane's own superseded commits, and the CAS below
-        // retains them for host recovery. A host commit made during the lane is
-        // not the pushed tip, so it still takes the merge/refusal path.
+    } else if current == base {
+        // Custody pins the branch tip before launch. Only that unchanged tip is
+        // proven to be superseded by this lane; a remote ref cannot prove it.
+        if history.rebase.value == Rebase::Refuse {
+            return Err(RunError::PublicationDiverged {
+                setting: history.rebase.setting(REBASE),
+            });
+        }
         (head, false, true)
     } else {
         match history.rebase.value {
@@ -1021,7 +995,7 @@ pub(crate) fn publish_branch(
         // Spec: docs/specs/cli.md#warnings-are-typed-values
         let message = if rewritten {
             format!(
-                "lane history on {branch} was rewritten and force-pushed; published the pushed tip {head} over the displaced host tip {current}; {}; set {REBASE} to refuse to retain the lane's private history instead",
+                "lane history on {branch} was rewritten; published tip {head} over the unchanged launch tip {current}; {}; set {REBASE} to refuse to retain the lane's private history instead",
                 history.rebase.setting(REBASE),
             )
         } else {

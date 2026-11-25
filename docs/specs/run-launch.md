@@ -39,9 +39,9 @@ attempt's staging and launching another attempt never resets a live sibling's in
 private views keep native semantics for commit, merge, cherry-pick and rebase without a shell
 interceptor. A commit becomes visible on the host branch only after object verification and
 settlement's expected-old-tip compare-and-swap. A divergent sibling publication is merged into
-the host branch by the host when no conflict exists, and published; a sibling's own
-force-pushed rewrite whose head is the pushed upstream tip moves the branch to that head with a
-warning and a recovery ref. A real conflict, or
+the host branch by the host when no conflict exists, and published. A rewrite replaces the
+unchanged custody-pinned launch tip with a warning and a recovery ref; a later host tip takes the
+merge path regardless of remote-tracking refs. A real conflict, or
 `lanes.history.rebase = "refuse"`, retains the loser's private commits and index; the refusal
 names the setting and the conflicting files. A continuation that needs a predecessor commit
 launches after that predecessor settles. Scope attribution starts at the attempt's captured
