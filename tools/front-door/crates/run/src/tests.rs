@@ -3180,6 +3180,15 @@ fn receipt_prelaunch_cancel_and_deadline_have_distinct_evidence() -> TestResult 
                 None
             }
         );
+        let replayed = store.replay_terminal(id, &call)?;
+        assert_eq!(
+            replayed.cancellation_disposition,
+            record.cancellation_disposition
+        );
+        assert_eq!(
+            replayed.terminal_evidence,
+            Some(TerminalEvidence::ProcessExit)
+        );
     }
     Ok(())
 }

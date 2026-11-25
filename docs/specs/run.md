@@ -249,6 +249,8 @@ status report `settling` has a provider that can no longer act on a stop intent:
 or settlement driver is live, the stop settles it as cancelled from the provider's own exit,
 keeping that exit, the handoff and every captured artifact as evidence. The owner stop does not
 prove delivery to the exited provider. Publication and crash replay retain that distinction.
+A prelaunch explicit cancellation remains effective even when a never-spawned exit was sealed;
+a wall deadline is not an explicit cancellation.
 A live holder still gets the ordinary stop request and settles the attempt itself; an active
 settlement driver or an already sealed terminal intent keeps ownership of it.
 - Why: every stop reader needs the same meaning, and a steer must never cancel the work it

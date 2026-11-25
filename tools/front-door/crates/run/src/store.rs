@@ -123,6 +123,12 @@ pub(crate) fn work_key(
     provenant_records::WorkKey::new(project, graph, node, attempt)
         .map_err(|_| RunError::Validation("work key"))
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TerminalDecision {
+    Ordinary,
+    GraphStopAfterExit,
+}
+
 /// Result and route material is supplied by the trusted provider/confinement
 /// composition edge, after secret scanning. This storage API never launches.
 #[derive(Clone)]
@@ -1147,6 +1153,7 @@ impl RunStore {
             outcome_exit,
             !exit.never_spawned,
             exit.cancel_delivered_before_exit,
+            TerminalDecision::Ordinary,
             false,
             call,
         );
@@ -1361,6 +1368,7 @@ impl RunStore {
                 None,
                 false,
                 None,
+                TerminalDecision::Ordinary,
                 true,
                 call,
             )
@@ -1608,6 +1616,7 @@ impl RunStore {
         outcome_exit: Option<i64>,
         launched: bool,
         cancellation_delivered: Option<bool>,
+        decision: TerminalDecision,
         publication_locked: bool,
         call: &Request<'_>,
     ) -> Result<AttemptRecord> {
@@ -1712,7 +1721,7 @@ impl RunStore {
             next.cancellation_disposition = Some(CancellationDisposition::ImportEffective);
         } else if publication.outcome == Outcome::Cancelled
             && publication.terminal_cause != Some(TerminalCause::Steered)
-            && ((!launched && next.terminal_evidence != Some(TerminalEvidence::ProcessExit))
+            && ((!launched && decision == TerminalDecision::Ordinary)
                 || cancellation_delivered == Some(true))
         {
             next.cancellation_disposition = Some(CancellationDisposition::Effective);
@@ -1965,6 +1974,7 @@ impl RunStore {
             outcome_exit,
             !exit.never_spawned,
             exit.cancel_delivered_before_exit,
+            TerminalDecision::GraphStopAfterExit,
             true,
             call,
         )?;
