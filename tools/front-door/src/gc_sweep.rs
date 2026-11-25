@@ -1435,6 +1435,71 @@ mod tests {
         assert_eq!(resumed_candidates.len(), 256 - visited + 1);
     }
 
+    // Spec: docs/specs/disk.md#bounded-sweeps
+    #[test]
+    fn repeated_bounded_passes_collect_monotonically_and_finish() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let fixture = root.join("attempts");
+        std::fs::create_dir(&fixture).unwrap();
+        for index in 0..64 {
+            std::fs::create_dir(fixture.join(format!("candidate-{index:03}"))).unwrap();
+        }
+        let mut clock = test_clock();
+        let budget = Duration::from_secs(1);
+        let mut cursor: Option<Cursor> = None;
+        let mut collected = std::collections::BTreeSet::new();
+        let mut passes = 0;
+        loop {
+            passes += 1;
+            let Acquire::Held(mut lease) = acquire(&root, budget, &clock).unwrap() else {
+                panic!("pass {passes} should acquire the released lease")
+            };
+            lease.set_identity("full_gc", "monotonic").unwrap();
+            let start = cursor.as_ref().and_then(|saved| saved.candidate.clone());
+            let mut candidates = std::fs::read_dir(&fixture)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .collect::<Vec<_>>();
+            candidates.sort();
+            let mut visited = 0;
+            for candidate in candidates
+                .into_iter()
+                .filter(|candidate| start.as_ref().is_none_or(|start| candidate >= start))
+            {
+                if holder_over_budget(&lease.progress, &clock) {
+                    break;
+                }
+                lease
+                    .checkpoint(Cursor {
+                        class: "AttemptScratch".into(),
+                        project: Some(fixture.clone()),
+                        candidate: Some(candidate.clone()),
+                        detail: None,
+                    })
+                    .unwrap();
+                collected.insert(candidate);
+                visited += 1;
+                clock.advance(DurationMicros::from_micros(20_000)).unwrap();
+            }
+            assert!(visited > 0, "pass {passes} must decide a candidate");
+            cursor = lease.cursor().cloned();
+            let finished = cursor.as_ref().and_then(|saved| saved.candidate.as_ref())
+                == Some(&fixture.join("candidate-063"));
+            drop(lease);
+            if finished {
+                break;
+            }
+            assert!(passes < 64, "the bounded sweep never finished");
+        }
+        assert!(passes > 1, "a tight budget must require more than one pass");
+        assert_eq!(
+            collected.len(),
+            64,
+            "every candidate was eventually collected"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn saved_cursor_round_trips_native_path_bytes() {

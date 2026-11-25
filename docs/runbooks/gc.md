@@ -24,6 +24,11 @@ provenant --project /absolute/path/to/repo gc --apply --json
 - `gc --idle DURATION` overrides `gc.idle` for one run; `--idle 0` makes
   ownerless idle artefacts eligible at once. `--full` lists each affected PID
   where the text output aggregates them.
+- The advisory dweller census runs after collection with one cached observation
+  per pass, so a large settled store cannot spend `gc.sweep_budget` before
+  anything is collected. The report names how many settled candidates were
+  decided, collected and deferred with their bytes; an undecided candidate is
+  kept and waits for the saved cursor.
 
 ## What is removed and when
 
