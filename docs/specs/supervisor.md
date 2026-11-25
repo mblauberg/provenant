@@ -105,9 +105,12 @@ The loss intent is durable before the attempt is committed `lost`; repeating an
 interrupted abandonment with the same reason finishes it, and an incomplete
 intent stays visibly settling. Abandonment warns and retains all attempt
 evidence, scratch, worktree contents and private Git. A never-dispatched queued
-attempt keeps its evidence-preserving cancellation.
+attempt keeps its evidence-preserving cancellation. A settled writer attempt whose
+retained fence is missing is not corrupt: abandon completes it, leaves the worktree
+and its uncommitted files untouched, and warns (`ABANDON_RETAINED_FENCE_MISSING`)
+with the custody slot that was to hold the fence.
 - Why: an incomplete process census must not become permission to reuse a
-  worktree.
+  worktree; a missing fence must not be the one record an operator cannot release.
 - Owner: `crates/run/src/settlement.rs`, `crates/cli/src/run/reconcile.rs`
 
 ### Guardian holds custody past its owner

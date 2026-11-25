@@ -315,7 +315,10 @@ outcome itself and does not change read-only presence classification.
 `reconcile --abandon` of custody not observed absent, such as a dead guardian with unresolved
 cleanup, first tries the same proof from a fresh census. A proof makes custody quiescent and
 abandonment proceeds; otherwise it refuses and names the blocker, including any live or
-unidentifiable PID or omitted descendants.
+unidentifiable PID or omitted descendants. A terminal writer attempt whose retained fence is
+absent is different: it is still abandonable. Abandon completes the journal, retains the
+worktree and its uncommitted work, and warns with the custody slot that was to hold the fence
+instead of treating the record as corrupt.
 
 An unreadable process alone is not an occupant, but only an explicit host policy may free a
 root. Before any excusal the census computes placement evidence for every root from the

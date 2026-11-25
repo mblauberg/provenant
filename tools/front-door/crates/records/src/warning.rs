@@ -170,6 +170,9 @@ pub const PR_CONTRIBUTION_BINDING_FAILED: WarningCode =
     WarningCode("PR_CONTRIBUTION_BINDING_FAILED");
 /// Writer fence listing failed; the settlement outcome is unchanged.
 pub const WRITER_FENCE_LIST_FAILED: WarningCode = WarningCode("WRITER_FENCE_LIST_FAILED");
+/// A settled writer attempt named a retained fence that is missing; abandon proceeds.
+pub const ABANDON_RETAINED_FENCE_MISSING: WarningCode =
+    WarningCode("ABANDON_RETAINED_FENCE_MISSING");
 /// A lane tool-state commit was refused by policy; settlement continues.
 pub const TOOL_STATE_COMMIT_FAILED: WarningCode = WarningCode("TOOL_STATE_COMMIT_FAILED");
 /// An admission receipt is visible but its durability is unconfirmed.
