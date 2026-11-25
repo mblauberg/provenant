@@ -204,10 +204,12 @@ handoffs and never count as negative provider-quality evidence.
 A terminal read-only review holds no Git work, so custody is not uncertain merely because its
 departed guardian left a reservation in the attempt directory. Reconcile and `stop` treat that
 custody as released with a typed warning naming the slot; they do not re-record the same fence on
-every pass. A writer, an unreadable request, a retained import fence and a live custody lock all
-fail closed and keep the fence, and cleanup still refuses a retained reservation under exclusion.
-- Why: a reservation can only protect commits, staging or an import, none of which a review owns;
-  treating it as uncertainty strands a finished review forever (#3844).
+every pass. This exception still requires the lock-aware custody release decision: a live custody
+lock remains a fence even when reboot recovery cannot acquire it, and must not clear temporary
+retention. A writer, an unreadable request, and a retained import fence also fail closed, and cleanup
+still refuses a retained reservation under exclusion.
+- Why: reservations fence commits, staging and imports, which a review does not own, but the custody
+  lock must remain an exclusion boundary during concurrent release (#3844).
 - Owner: `crates/run/src/reader.rs`, `crates/run/src/controls.rs`
 
 The handoff is the closed `handoff` fence that ends the answer, which always wins. When an answer

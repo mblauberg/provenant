@@ -4573,7 +4573,9 @@ impl RunStore {
                     // departed guardian left cannot fence anything, so it is
                     // not uncertain custody (#3844). Cleanup still refuses a
                     // retained reservation under exclusion below.
-                    if !self.terminal_read_only_without_git_work(record, call, scope) {
+                    if !self.terminal_read_only_without_git_work(record, call, scope)
+                        || !self.custody_released(record, call)?
+                    {
                         return Ok(Some(Reconciled::uncertain(
                             UncertainReason::GuardianNotObservable,
                         )));

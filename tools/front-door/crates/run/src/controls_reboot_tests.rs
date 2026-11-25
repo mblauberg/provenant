@@ -300,6 +300,67 @@ fn reader_refusal_published_before_recovery_exclusion_is_not_lost()
     Ok(())
 }
 
+/// A Lost read-only review may ignore its stale reservation only after the
+/// custody lock is free, even when reboot recovery could not acquire it.
+// Spec: docs/specs/run-settlement.md#outcome-before-release
+#[test]
+fn lost_read_only_review_keeps_reservation_fenced_by_live_custody_lock() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let clock = crate::tests::clock();
+    let cancel = provenant_core::CancelToken::new();
+    let call = crate::tests::call(&clock, &cancel);
+    let context = crate::tests::context(temp.path())?;
+    let store = RunStore::open(&context, &call)?;
+    let input = crate::tests::input();
+    let id = input.attempt_id;
+    store.create(&input, &call)?;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &crate::tests::route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+    let mut record = store.record(id, &call)?;
+    record.state = AttemptState::Terminal {
+        extra: Default::default(),
+        terminal_cause: None,
+        terminal_note: None,
+        stop: None,
+        outcome: Outcome::Lost,
+        exit_code: None,
+        finished_at: record.queued_at,
+        reason: Some("guardian lost".into()),
+    };
+    record.provider_launched = Some(true);
+    let scope = RunStore::scope(&record);
+    let attempt = store.attempt_dir(id, false)?;
+    drop(custody::acquire_reader(
+        attempt.try_clone()?,
+        scope,
+        call.lock_budget(),
+        &cancel,
+        &clock,
+    )?);
+    assert!(custody::reservation_present(&attempt, scope)?);
+    let custody_lock = attempt.try_lock(
+        std::ffi::OsStr::new("custody.lock"),
+        provenant_os::fs::LockMode::Exclusive,
+    )?;
+
+    let result = store.reconcile_terminal_temporary(&record, &call, &SystemProcessObserver)?;
+
+    assert!(
+        matches!(result, Some(Reconciled::Uncertain { .. })),
+        "a live custody lock keeps the terminal review fenced: {result:?}"
+    );
+    assert!(custody::reservation_present(&attempt, scope)?);
+    drop(custody_lock);
+    Ok(())
+}
+
 #[test]
 fn reboot_settlement_error_propagates() -> std::result::Result<(), Box<dyn std::error::Error>> {
     use provenant_supervisor::census::{Census, CensusError, ProcessObservation, ProcessObserver};
