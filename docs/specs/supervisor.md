@@ -109,9 +109,19 @@ attempt keeps its evidence-preserving cancellation. A settled writer attempt who
 retained fence is missing is not corrupt: abandon completes it, leaves the worktree
 and its uncommitted files untouched, and warns (`ABANDON_RETAINED_FENCE_MISSING`)
 with the custody slot that was to hold the fence.
+After settlement, a removed
+checkout whose Git registration proves this lane's ownership is pruned: only
+that one admin directory is removed, so its branch is no longer reported
+checked out at a missing path and no other registration is touched. A
+registration that is locked, ambiguous, unreadable or owned by another attempt
+is never pruned here; abandonment still settles and warns with the exact
+`git -C <common> worktree prune` remedy. A prune failure cannot undo the loss
+outcome.
 - Why: an incomplete process census must not become permission to reuse a
-  worktree; a missing fence must not be the one record an operator cannot release.
-- Owner: `crates/run/src/settlement.rs`, `crates/cli/src/run/reconcile.rs`
+  worktree; a missing fence must remain releasable, and a settled lane must not leave a stale registration that blocks
+  creating a worktree for its branch.
+- Owner: `crates/run/src/settlement.rs`, `crates/cli/src/run/reconcile.rs`,
+  `crates/confinement/src/worktrees/owner.rs`
 
 ### Guardian holds custody past its owner
 
