@@ -889,10 +889,10 @@ impl AdmissionSlots {
             path: PathBuf::from(&marker),
             source: std::io::Error::other(source),
         })?;
+        let directory = self.dir.try_clone()?;
         self.dir
             .atomic_write(&marker, ".ci-holder-", &bytes, PublishMode::NoReplace)?
             .require_durable()?;
-        let directory = Directory::open_anchor(&self.dir.anchored_path())?;
         Ok(Some(SlotGuard {
             guard,
             index,

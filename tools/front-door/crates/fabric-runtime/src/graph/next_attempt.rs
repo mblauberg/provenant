@@ -1365,7 +1365,6 @@ mod tests {
         second["key"]["attempt"] = serde_json::json!(2);
         let mut failed_review = attempt(0, true, "terminal", Some("task_failed"));
         failed_review["key"]["attempt"] = serde_json::json!(3);
-        failed_review["review_substitution"] = serde_json::json!(true);
         let progress = progress(vec![first, second, failed_review], serde_json::json!({}));
         assert_eq!(
             next_attempt_transition(
