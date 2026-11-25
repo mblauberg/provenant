@@ -613,110 +613,289 @@ fn review_templates_record_the_raising_lens() {
     }
 }
 
-#[test]
-fn delivery_templates_admit_bounded_review_repairs() {
-    let bundled = library();
-    let resolvers = BTreeMap::from([
-        ("review-frame".to_owned(), vec!["true".to_owned()]),
-        ("review-verify".to_owned(), vec!["true".to_owned()]),
-        ("review-synthesis".to_owned(), vec!["true".to_owned()]),
+fn deliver_resolvers(panel: bool) -> BTreeMap<String, Vec<String>> {
+    let mut resolvers = BTreeMap::from([
+        ("review-frame".to_owned(), vec!["false".to_owned()]),
+        ("review-verify".to_owned(), vec!["false".to_owned()]),
+        ("review-synthesis".to_owned(), vec!["false".to_owned()]),
         ("review-verifiers".to_owned(), vec!["1".to_owned()]),
-        (
-            "review-panel".to_owned(),
-            vec!["security".to_owned(), "tests".to_owned()],
-        ),
-        ("review-advice-security".to_owned(), vec![String::new()]),
-        ("review-advice-tests".to_owned(), vec![String::new()]),
     ]);
+    if panel {
+        resolvers.insert(
+            "review-panel".to_owned(),
+            vec!["correctness".to_owned(), "tests".to_owned()],
+        );
+        resolvers.insert("review-advice-correctness".to_owned(), vec![String::new()]);
+        resolvers.insert("review-advice-tests".to_owned(), vec![String::new()]);
+    }
+    resolvers
+}
+
+fn compiled_delivery(with: Value, panel: bool) -> GraphDocument {
+    let library = library();
+    let resolvers = deliver_resolvers(panel);
     let compiler = Compiler {
-        library: &bundled,
+        library: &library,
         resolvers: &resolvers,
     };
-    for template in ["deliver", "batch"] {
-        let mut raw = json!({"id":"delivery", "use":template,
-            "with":{"worktree":"/fixture/writer", "write_scope":["src"], "max_repair_cycles":2}});
-        if template == "deliver" {
-            raw["with"]["plan"] = json!(false);
-        }
-        let doc = if template == "batch" {
-            compiled_batch(raw)
-        } else {
-            document(vec![compiler.compile(&raw).unwrap()])
-        };
-        let delivery_limits = crate::config::GraphLimits::default();
-        doc.admit(&delivery_limits).unwrap();
-        let expanded = doc.expanded(&delivery_limits).unwrap();
-        let delta = expanded
-            .nodes
-            .iter()
-            .find(|node| {
-                node.id.contains("repair--cycles--r1--check--") && node.repair_lens.is_some()
+    let mut raw = json!({"id":"delivery", "use":"deliver",
+        "with":{"worktree":"/fixture/writer", "write_scope":["src"]}});
+    for (key, value) in with.as_object().unwrap() {
+        raw["with"][key] = value.clone();
+    }
+    let mut doc = document(vec![compiler.compile(&raw).unwrap()]);
+    doc.schema_version = 2;
+    doc
+}
+
+/// Expand a delivery graph without the execution admission gate, which stays
+/// closed until the execution slices wire delivery policy.
+fn expanded_delivery(
+    document: &GraphDocument,
+    limits: &crate::config::GraphLimits,
+) -> GraphDocument {
+    super::loops::expand(document, &[], limits).unwrap()
+}
+
+fn find_compiled_node<'a>(node: &'a GraphNode, id: &str) -> Option<&'a GraphNode> {
+    if node.id == id {
+        return Some(node);
+    }
+    node.composite
+        .as_ref()
+        .and_then(|spec| {
+            spec.nodes
+                .iter()
+                .find_map(|child| find_compiled_node(child, id))
+        })
+        .or_else(|| {
+            node.loop_body.as_ref().and_then(|spec| {
+                spec.body
+                    .iter()
+                    .find_map(|child| find_compiled_node(child, id))
             })
-            .unwrap();
-        assert!(delta.repair_risk_assessment);
-        assert!(delta.prompt.contains("top-level risk_tier"));
-        let repair = expanded
-            .nodes
-            .iter()
-            .find(|node| node.id.ends_with("repair--cycles"))
-            .unwrap();
-        let policy = repair.loop_body.as_ref().unwrap();
-        assert_eq!(policy.max_rounds, 2);
-        assert!(policy.review_repair);
-        assert!(repair.on_fail.as_ref().unwrap().ends_with("design"));
-        let design = expanded
-            .nodes
-            .iter()
-            .find(|node| node.id.ends_with("repair--design"))
-            .unwrap();
-        assert_eq!(design.access, AccessMode::ReadOnly);
-        assert_eq!(
-            design.route.as_ref().unwrap().alias.as_deref(),
-            Some("principal")
+        })
+}
+
+/// The default delivery shape is one writer and one single reviewer, plus the
+/// ordered deterministic stages. Panel mode replaces that single reviewer with
+/// one panel, not a second panel.
+#[test]
+fn delivery_composites_compile_both_review_shapes() {
+    for (panel, shape, template) in [(false, "single", "review"), (true, "panel", "review-panel")] {
+        let doc = compiled_delivery(
+            json!({"review_shape": shape, "review_template": template, "plan": false}),
+            panel,
         );
-        let continuation = expanded
-            .nodes
-            .iter()
-            .find(|node| node.id.ends_with("repair--continue"))
-            .unwrap();
-        let slice = &continuation.plan.as_ref().unwrap().templates[0];
-        assert_eq!(slice.name.as_deref(), Some("repair-slice"));
-        assert_eq!(slice.node["write_scope"], json!(["src"]));
-        assert_eq!(slice.node["worktree"], "/fixture/writer");
-        assert_eq!(slice.node[TEMPLATE_FIELD], "implement.fix");
-        let mut slices = library();
-        slices
-            .insert(Layer::Launch, "repair-slice", slice.clone())
-            .unwrap();
-        let compiled = Compiler::new(&slices)
-            .compile(&json!({"id":"slice", "use":"repair-slice"}))
-            .unwrap();
-        assert_eq!(compiled.template.as_deref(), Some("implement.fix"));
-        if template == "deliver" {
-            let accept = expanded
-                .nodes
-                .iter()
-                .find(|node| node.id == "delivery--accept")
-                .unwrap();
-            assert!(
-                matches!(&accept.condition, Some(GateCondition::Verdict { expected, threshold: VerdictThreshold::All, .. }) if expected == "VERDICT: PASS")
-            );
-            let review = expanded
-                .nodes
-                .iter()
-                .find(|node| node.id == "delivery--review--selected--lenses--security")
-                .unwrap();
-            assert!(
-                matches!(&review.source, Some(SourceBinding::Head { node }) if node == "delivery--implement")
-            );
+        let limits = limits();
+        // Delivery policy stays un-admittable until the execution slices wire
+        // it (AdmissionError::DeliveryQueueUnsupported); compilation and
+        // expansion are the template contract this slice owns.
+        let expanded = expanded_delivery(&doc, &limits);
+        let order: Vec<_> = [
+            "implement",
+            "hygiene",
+            "publish",
+            "conflict",
+            "ci",
+            "ci-repair",
+            "review",
+            "accept",
+            "land",
+        ]
+        .iter()
+        .map(|suffix| format!("delivery--{suffix}"))
+        .collect();
+        for id in &order {
+            let present = if id.ends_with("--review") && panel {
+                expanded
+                    .nodes
+                    .iter()
+                    .any(|node| node.id.starts_with("delivery--review--"))
+            } else {
+                expanded.nodes.iter().any(|node| &node.id == id)
+            };
+            assert!(present, "missing {id} for {shape}");
+        }
+        let review = find_compiled_node(&doc.nodes[0], "review").unwrap();
+        assert_eq!(
+            review.delivery_review.as_ref().unwrap().shape,
+            serde_json::from_value::<provenant_records::graph::ReviewShape>(json!(shape)).unwrap()
+        );
+        if panel {
+            assert!(review.composite.is_some());
             assert!(
                 expanded
                     .nodes
                     .iter()
-                    .any(|node| node.id == "delivery--land" && node.land.is_some())
+                    .any(|node| node.id.contains("delivery--review--selected--lenses--"))
+            );
+        } else {
+            assert!(review.composite.is_none());
+            assert_eq!(review.review_behaviour, Some(ReviewBehaviour::Lens));
+            assert!(
+                expanded
+                    .nodes
+                    .iter()
+                    .any(|node| node.id == "delivery--review"
+                        && node.review_behaviour == Some(ReviewBehaviour::Lens))
             );
         }
+        // No pre-CI findings panel and no second post-CI panel.
+        assert!(
+            !expanded
+                .nodes
+                .iter()
+                .any(|node| node.id.contains("initial-review"))
+        );
     }
+}
+
+/// Sourced queue knobs resolve over the declared layers and seal the winning
+/// value with its source; undeclared layers are ignored with a warning.
+#[test]
+fn delivery_queue_knobs_resolve_and_seal_with_sources() {
+    use provenant_records::{Layer, Source, Sourced};
+    let sourced = |value: usize, layer: Layer, origin: &str| Sourced {
+        value,
+        source: Source {
+            layer,
+            origin: Some(origin.into()),
+        },
+    };
+    let overrides = BTreeMap::from([(
+        QUEUE_MAX_PARALLEL_KEY,
+        vec![
+            sourced(4, Layer::Default, "compiled"),
+            sourced(7, Layer::Host, "~/.config/provenant/config.toml"),
+            sourced(9, Layer::Project, ".provenant/config.toml"),
+        ],
+    )]);
+    let knobs = seal_queue_knobs(&overrides);
+    assert_eq!(knobs.max_parallel.value, 9);
+    assert_eq!(knobs.max_parallel.source.layer, Layer::Project);
+    assert_eq!(
+        knobs.max_parallel.source.origin.as_deref(),
+        Some(".provenant/config.toml")
+    );
+    // Absent keys keep their shipped value and source.
+    assert_eq!(knobs.ci_slots.value, 1);
+    assert_eq!(knobs.ci_slots.source.layer, Layer::Default);
+    assert_eq!(knobs.prep_retries.value, 2);
+    assert!(knobs.validate().is_ok());
+    let launch = seal_queue_knobs(&BTreeMap::from([(
+        QUEUE_CI_SLOTS_KEY,
+        vec![sourced(3, Layer::Launch, "--ci-slots")],
+    )]));
+    assert_eq!(launch.ci_slots.value, 3);
+    assert_eq!(launch.ci_slots.source.layer, Layer::Launch);
+    assert_eq!(launch.ci_slots.source.origin.as_deref(), Some("--ci-slots"));
+    // Zero CI slots disables the cap; zero max_parallel is refused.
+    let mut invalid = knobs.clone();
+    invalid.ci_slots.value = 0;
+    assert!(invalid.validate().is_ok());
+    invalid.max_parallel.value = 0;
+    assert!(invalid.validate().is_err());
+}
+
+/// The optional scope is a read-only planner whose result joins the writer
+/// brief only when `plan` is true.
+#[test]
+fn delivery_optional_scope_propagates_into_the_writer() {
+    let limits = limits();
+    let planned = compiled_delivery(json!({"plan": true}), false);
+    let expanded = expanded_delivery(&planned, &limits);
+    let writer = expanded
+        .nodes
+        .iter()
+        .find(|node| {
+            node.access == AccessMode::WorktreeWrite
+                && node.delivery == Some(provenant_records::run::DeliveryMode::Pr)
+                && node.continues.is_none()
+        })
+        .unwrap();
+    assert!(
+        writer
+            .inputs
+            .iter()
+            .any(|input| input.node.ends_with("--plan"))
+    );
+    let unplanned = compiled_delivery(json!({"plan": false}), false);
+    let expanded = expanded_delivery(&unplanned, &limits);
+    assert!(!expanded.nodes.iter().any(|node| node.id.contains("--plan")));
+}
+
+/// The final-rung brief widens scope within authority. Repair briefs carry the
+/// failing head, a bounded excerpt and the sweep-the-class instruction.
+#[test]
+fn delivery_policy_briefs_carry_rung_and_repair_inputs() {
+    let doc = compiled_delivery(
+        json!({"plan": false, "failing_head": "deadbeef", "failure_excerpt": "noise\nfatal: real failure"}),
+        false,
+    );
+    let limits = limits();
+    let expanded = expanded_delivery(&doc, &limits);
+    let writer = expanded
+        .nodes
+        .iter()
+        .find(|node| node.id == "delivery--implement")
+        .unwrap();
+    assert!(writer.prompt.contains(FINAL_RUNG_SCOPE_BRIEF));
+    let fix = expanded
+        .nodes
+        .iter()
+        .find(|node| {
+            node.id.contains("ci-repair") && node.prompt.contains(REPAIR_SWEEP_INSTRUCTION)
+        })
+        .unwrap();
+    assert!(fix.prompt.contains("deadbeef"));
+    assert!(fix.prompt.contains("fatal: real failure"));
+    let widened = widen_final_rung_brief("base");
+    assert_eq!(widened, format!("base\n\n{FINAL_RUNG_SCOPE_BRIEF}"));
+    let repair = repair_brief("head", "line one\nline two");
+    assert!(repair.contains(REPAIR_SWEEP_INSTRUCTION));
+    let long = repair_brief("head", "x".repeat(9000));
+    assert!(long.chars().count() < 5000);
+    assert!(long.contains('…'));
+}
+
+/// A sealed old plan has no delivery fields and replays byte-for-byte: the new
+/// contract fields stay absent, so a restart cannot silently add policy.
+#[test]
+fn sealed_old_delivery_plan_replays_unchanged() {
+    let sealed = json!({
+        "schema_version": 1,
+        "graph_id": "legacy",
+        "nodes": [{
+            "id": "task", "access": "read_only", "prompt": "work",
+            "route": {"alias": "senior"}
+        }]
+    });
+    let decoded: GraphDocument = serde_json::from_value(sealed.clone()).unwrap();
+    let wire = serde_json::to_value(&decoded).unwrap();
+    assert_eq!(wire, sealed);
+    assert!(wire.get("queue").is_none());
+    assert!(wire["nodes"][0].get("escalate").is_none());
+    assert!(wire["nodes"][0].get("delivery_review").is_none());
+    assert!(wire["nodes"][0].get("loop").is_none());
+}
+
+/// The old bounded `batch` repair shape keeps working: the slice only replaces
+/// the `deliver` default, not unrelated composites.
+#[test]
+fn batch_repair_shape_is_untouched_by_the_deliver_change() {
+    let raw = json!({"id":"batch", "use":"batch",
+        "with":{"worktree":"/fixture/writer", "write_scope":["src"], "max_repair_cycles":2}});
+    let doc = compiled_batch(raw);
+    let limits = crate::config::GraphLimits::default();
+    doc.admit(&limits).unwrap();
+    let expanded = expanded_delivery(&doc, &limits);
+    let repair = expanded
+        .nodes
+        .iter()
+        .find(|node| node.id.ends_with("repair--cycles"))
+        .unwrap();
+    assert_eq!(repair.loop_body.as_ref().unwrap().max_rounds, 2);
 }
 
 #[test]
@@ -1754,7 +1933,7 @@ fn batch_items_accept_structured_tables_and_bare_strings() {
     let doc = compiled_batch(raw);
     let limits = crate::config::GraphLimits::default();
     doc.admit(&limits).unwrap();
-    let expanded = doc.expanded(&limits).unwrap();
+    let expanded = expanded_delivery(&doc, &limits);
 
     let bare = expanded
         .nodes
@@ -1802,7 +1981,7 @@ fn batch_per_item_routing_route_vs_model() {
     let doc = compiled_batch(raw);
     let limits = crate::config::GraphLimits::default();
     doc.admit(&limits).unwrap();
-    let expanded = doc.expanded(&limits).unwrap();
+    let expanded = expanded_delivery(&doc, &limits);
 
     let route_node = expanded
         .nodes
