@@ -135,8 +135,23 @@ so a large tree progresses across passes. A survey snapshot never grants removal
 authority: takeover and resumption need fresh candidate custody checks. Each
 trigger and scope keeps its own bounded restart record, so unfinished scopes
 resume independently without growing the lease record, and an ambiguous cursor
-restarts its scope from the beginning rather than skipping work.
-- Why: a large or abandoned sweep must not prevent later collection.
+restarts its scope from the beginning rather than skipping work. Attempt
+scratch collection precedes the broader provider-state and payload-cap scans so
+they cannot consume its first pass budget. The advisory dweller census runs
+after the collection classes: one bounded observation is cached for the whole
+pass and reused for every settled attempt
+and terminal worktree instead of re-walking the process table per candidate.
+A census cut short by its bound or the sweep deadline is reported incomplete;
+an undecided candidate is kept, never treated as free. The report names how
+many settled candidates the pass decided, collected and deferred, with the
+known bytes reclaimed and the bytes still retained, or unknown when retained
+bytes were not measured. Deferred paths and byte observations refer to
+`attempt-scratch/<attempt-id>/tmp`; custody locks remain with the attempt record.
+A preview labels reclaimable bytes and candidates it
+would collect; a class not reached is reported as unmeasured. Partially removed
+bytes count as reclaimed, never as retained.
+- Why: a large or abandoned sweep must not prevent later collection, and a
+  slow census must never spend the budget that collection needs.
 
 Collection belongs to [worktrees](supervisor.md#worktrees) and
 [state retention](state.md#retention-keeps-evidence).

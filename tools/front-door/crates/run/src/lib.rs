@@ -94,9 +94,9 @@ pub use plan::{
     read_only_plan, scratch_root,
 };
 pub use retention::{
-    AttemptLogRemoval, AttemptTmpRemoval, PayloadEviction, PayloadReport, ProviderStateGc,
-    ProviderStateIssue, RetentionScan, ScratchOwner, ScratchOwnerResolver, ScratchPolicy,
-    TOMBSTONE, gc_import_pins, payload_totals,
+    AttemptLogRemoval, AttemptTmpRemoval, DeferredScratch, PayloadEviction, PayloadReport,
+    ProviderStateGc, ProviderStateIssue, RetentionScan, ScratchOwner, ScratchOwnerResolver,
+    ScratchPolicy, TOMBSTONE, gc_import_pins, payload_totals,
 };
 pub use writer::{
     BoundSandboxBackend, LaunchConfinement, RepinOutcome, WriterFence, WriterLaunch,
