@@ -2388,6 +2388,10 @@ impl<'a> Compiler<'a> {
             #[serde(default)]
             previous_bindings: BTreeMap<String, String>,
             #[serde(default)]
+            retry_on: Vec<String>,
+            #[serde(default)]
+            selected_publication: Option<String>,
+            #[serde(default)]
             max_extension_rounds: Option<usize>,
             #[serde(default)]
             review_repair: bool,
@@ -2435,6 +2439,15 @@ impl<'a> Compiler<'a> {
                 .map(|(body_node, initial_node)| (body_node, Value::String(initial_node)))
                 .collect();
             spec.insert("previous_bindings".into(), Value::Object(bindings));
+        }
+        if !repeat.retry_on.is_empty() {
+            spec.insert(
+                "retry_on".into(),
+                Value::Array(repeat.retry_on.into_iter().map(Value::String).collect()),
+            );
+        }
+        if let Some(publication) = repeat.selected_publication {
+            spec.insert("selected_publication".into(), Value::String(publication));
         }
         if review_repair {
             if repeat.max_rounds == 0 {
