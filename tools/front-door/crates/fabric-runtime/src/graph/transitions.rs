@@ -100,6 +100,7 @@ pub(super) fn apply_gate_result(
     reason: Option<String>,
     on_fail: Option<String>,
     is_ci: bool,
+    is_conflict: bool,
     delivery_queue: bool,
 ) {
     let passed = reason.is_none();
@@ -116,6 +117,8 @@ pub(super) fn apply_gate_result(
     });
     progress.outputs = Some(if is_ci {
         ci::outputs(passed, progress.ci.as_ref(), delivery_queue)
+    } else if is_conflict {
+        ci::conflict_outputs(passed, progress.conflict.as_ref())
     } else {
         gate_outputs(passed)
     });
@@ -1758,6 +1761,7 @@ pub(super) fn dependency_state(
         let progress = &checkpoint.nodes[positions[parent]];
         if !checkpoint.node_successful(progress)
             && !(plan.nodes[positions[parent]].advisory
+                && progress.delivery_park.is_none()
                 && matches!(progress.state, NodeState::Failed | NodeState::Blocked))
         {
             return Some(NodeState::Blocked);
@@ -1816,7 +1820,9 @@ pub(super) fn dependency_state(
                     .is_some_and(|round| &round.loop_id == target)
         });
         match checkpoint.nodes[index].state {
-            NodeState::Failed | NodeState::Blocked if plan.nodes[index].advisory => {}
+            NodeState::Failed | NodeState::Blocked
+                if plan.nodes[index].advisory
+                    && checkpoint.nodes[index].delivery_park.is_none() => {}
             // A failed CI gate that reported no failing check leaves a node
             // that consumes its findings nothing to act on, so it is skipped,
             // not launched. Other recovery nodes (notify, diagnose) still run.
