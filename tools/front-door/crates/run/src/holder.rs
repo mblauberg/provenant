@@ -8230,6 +8230,12 @@ mod writer_recovery_tests {
     }
 
     #[test]
+    fn writer_import_succeeds_after_a_concurrent_gc_pass()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        settlement_fault_modes(&["gc_during_import"])
+    }
+
+    #[test]
     fn settlement_publish_advanced_branch_clears_fence()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         settlement_fault_modes(&["publish_advanced"])
@@ -8298,7 +8304,8 @@ mod writer_recovery_tests {
                 launch.branch.as_str(),
                 launch.base,
             )?;
-            let retained_commit = if mode.starts_with("reconcile_") || mode == "held_import_success"
+            let retained_commit = if mode.starts_with("reconcile_")
+                || matches!(mode, "held_import_success" | "gc_during_import")
             {
                 // Make a real commit that exists only in the lane's private objects.
                 let tree = crate::objects::command(
@@ -8546,6 +8553,7 @@ mod writer_recovery_tests {
                         | "archived_fault"
                         | "reconcile_failed"
                         | "reconcile_reboot"
+                        | "gc_during_import"
                 ))
             });
             let first = store.drive_settlement(
@@ -9079,6 +9087,49 @@ mod writer_recovery_tests {
                         .any(|(_, state)| matches!(state, crate::Reconciled::Uncertain { .. })),
                     "{found:?}"
                 );
+            } else if mode == "gc_during_import" {
+                // A concurrent GC pass while the settlement driver owns the
+                // retry must not take the private objects the import reads.
+                let driver = crate::settlement::Guard::claim(&attempt, scope, &clock)?
+                    .ok_or("settlement driver claim")?;
+                let root = Directory::open_anchor(execution.state_root.as_path())?;
+                let finished = |_: &AttemptRecord, _: &CanonicalRequest| ScratchOwner::Finished;
+                let policy = ScratchPolicy {
+                    owner: Some(&finished),
+                    ..ScratchPolicy::new(0)
+                };
+                let gc = store.gc_temporary(
+                    &root,
+                    &policy,
+                    clock
+                        .wall_now()?
+                        .checked_add(provenant_core::DurationMicros::from_seconds(90 * 86_400)?)?,
+                    false,
+                    &call,
+                    &RetentionScan::default(),
+                )?;
+                assert!(
+                    gc.attempt_tmp.is_empty(),
+                    "GC collected scratch under a live settlement driver: {gc:?}"
+                );
+                assert!(
+                    candidate.join("git-objects").is_dir(),
+                    "private objects vanished before import"
+                );
+                drop(driver);
+                let journal_name = OsStr::new("settlement-progress.json");
+                let mut journal: serde_json::Value =
+                    crate::db::decode(&attempt.read_stable(journal_name, RECORD_LIMIT)?)?;
+                journal["retry_after_ms"] = 0.into();
+                attempt
+                    .atomic_write(
+                        journal_name,
+                        ".gc-retry-fixture-",
+                        &crate::db::bytes(&journal)?,
+                        provenant_os::fs::PublishMode::Replace,
+                    )?
+                    .require_durable()?;
+                store.finish(id, &attempt, &observed, &providers, &call)?;
             } else {
                 store.finish(id, &attempt, &observed, &providers, &call)?;
             }

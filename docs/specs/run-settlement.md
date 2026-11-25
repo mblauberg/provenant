@@ -74,6 +74,15 @@ cannot reach them.
   from its scratch, and a foreign record could not be told from settlement's own
   (#3844, #3947).
 
+While a settlement driver holds its lease, GC treats the attempt as busy: it leaves the
+sibling scratch root alone until import and final reconciliation have finished, so a
+writer's private Git objects and a reviewer's source checkout cannot be collected
+under a live driver.
+- Why: scratch is outside the attempt record directory, so GC can reach it while
+  settlement still needs it; losing it turns a correct lane into a failed import or
+  a vanished review checkout (#3975).
+- Owner: `crates/run/src/retention.rs`, `crates/run/src/settlement.rs`
+
 A result or handoff a lane leaves group- or other-readable in Provenant's private attempt
 directory is a recoverable condition, not a settlement refusal. Settlement's read of a
 provider-written settlement input — `result.md`, the `handoff.json` snapshot, and the progress

@@ -485,7 +485,7 @@ impl RunStore {
                         continuing,
                         _publication,
                         _writer,
-                    }) = self.hold_attempt(&record)?
+                    }) = self.hold_attempt(&record, call)?
                     else {
                         return Ok(());
                     };
@@ -884,8 +884,9 @@ pub fn gc_import_pins(
 }
 
 /// Every custody check that protects an attempt's payload: the publication
-/// and writer locks, writer reservations, abandonment and refused Git imports.
-/// `None` means the attempt is pinned or its directory is gone.
+/// and writer locks, a live settlement owner, writer reservations, abandonment
+/// and refused Git imports. `None` means the attempt is pinned, busy or its
+/// directory is gone.
 struct Held {
     attempt: Directory,
     continuing: bool,
@@ -901,12 +902,22 @@ impl RunStore {
         )?)
     }
 
-    fn hold_attempt(&self, record: &AttemptRecord) -> Result<Option<Held>> {
+    fn hold_attempt(&self, record: &AttemptRecord, call: &Request<'_>) -> Result<Option<Held>> {
         let run = match self.attempt_dir(record.attempt_id, false) {
             Ok(run) => run,
             Err(error) if missing_directory(&error) => return Ok(None),
             Err(error) => return Err(error),
         };
+        // A settlement driver still owns this attempt's import and final
+        // reconciliation. Its private objects and review checkout live in
+        // scratch, so GC must treat the attempt as busy until the driver is
+        // done. Check before taking publication.lock: the driver does not hold
+        // that lock while importing, so it cannot fence us here itself.
+        if crate::settlement::settlement_owner_live(&run, Self::scope(record), call.clock)
+            == Some(true)
+        {
+            return Ok(None);
+        }
         let _publication =
             run.try_lock_existing(OsStr::new("publication.lock"), LockMode::Exclusive)?;
         if record.provider_launched == Some(true)
@@ -3927,6 +3938,61 @@ mod tests {
         assert_eq!(after_release.attempt_tmp.len(), 1);
         assert!(!temporary.exists());
         assert_eq!(fs::read(attempt.join("terminal-pending.json"))?, terminal);
+        Ok(())
+    }
+
+    #[test]
+    fn gc_spares_private_objects_while_a_settlement_driver_is_importing() -> TestResult {
+        let (_temp, context, store, input, attempt) = seeded()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let temporary = scratch_root_of(&attempt).join("tmp");
+        let objects = temporary.join("candidate-0/git-objects");
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&objects)?;
+        let private = b"the lane's private commit";
+        fs::write(objects.join("private"), private)?;
+        withdraw(&store, &input, &call)?;
+        let finished = |_: &AttemptRecord, _: &CanonicalRequest| ScratchOwner::Finished;
+        let policy = ScratchPolicy {
+            owner: Some(&finished),
+            ..ScratchPolicy::new(0)
+        };
+        let root = Directory::open_anchor(context.state_root.as_path())?;
+        let collection_time = WallTime::from_micros(200 + 31 * DAY_MICROS)?;
+        let dir = Directory::open_anchor(&attempt)?;
+        let record = store.record(input.attempt_id, &call)?;
+        // The driver owns import and final reconciliation for its whole life.
+        let driver = crate::settlement::Guard::claim(&dir, RunStore::scope(&record), &clock)?
+            .ok_or("settlement claim")?;
+        let busy = store.gc_temporary(
+            &root,
+            &policy,
+            collection_time,
+            false,
+            &call,
+            &RetentionScan::default(),
+        )?;
+        assert!(
+            busy.attempt_tmp.is_empty(),
+            "GC collected scratch under a live settlement driver: {busy:?}"
+        );
+        // The import reads the same private objects after the GC pass.
+        assert_eq!(fs::read(objects.join("private"))?, private);
+        drop(driver);
+
+        let after = store.gc_temporary(
+            &root,
+            &policy,
+            collection_time,
+            false,
+            &call,
+            &RetentionScan::default(),
+        )?;
+        assert_eq!(after.attempt_tmp.len(), 1, "{after:?}");
+        assert!(!temporary.exists());
         Ok(())
     }
 
