@@ -191,6 +191,57 @@ fn hygiene_error_park_replays_the_saved_transition_once() {
 }
 
 #[test]
+fn hygiene_error_and_park_intent_survive_each_checkpoint_boundary() {
+    #[derive(Default)]
+    struct RecordingJournal {
+        current: MemoryJournal,
+        saves: Vec<GraphCheckpoint>,
+    }
+    impl GraphJournal for RecordingJournal {
+        type Error = Infallible;
+        fn load(&mut self, graph_id: &str) -> Result<Option<GraphCheckpoint>, Self::Error> {
+            self.current.load(graph_id)
+        }
+        fn save(&mut self, checkpoint: &GraphCheckpoint) -> Result<(), Self::Error> {
+            self.saves.push(checkpoint.clone());
+            self.current.save(checkpoint)
+        }
+    }
+    let document = hygiene_graph();
+    let request_id = provenant_core::HumanRequestId::from_bytes([78; 16]);
+    let mut owner = FakeOwner {
+        observations: VecDeque::from([hygiene_writer_observation()]),
+        hygiene_outcomes: VecDeque::from([provenant_records::graph::HygieneOutcome {
+            kind: provenant_records::graph::HygieneOutcomeKind::Error,
+            before_head: Some("b".repeat(40)),
+            after_head: Some("b".repeat(40)),
+            handoff: None,
+        }]),
+        park_receipt: Some(request_id),
+        ..Default::default()
+    };
+    let mut journal = RecordingJournal::default();
+    let settled = advance(&document, &mut owner, &mut journal).unwrap();
+    let operation = owner.park_calls[0].clone();
+    let snapshots: Vec<_> = journal.saves.into_iter().filter(|checkpoint| {
+        let node = &checkpoint.nodes[1];
+        node.state == NodeState::Running
+            && node.delivery_hygiene.as_ref().and_then(|intent| intent.outcome.as_ref())
+                .is_some_and(|outcome| outcome.kind == provenant_records::graph::HygieneOutcomeKind::Error)
+    }).collect();
+    assert!(snapshots.iter().any(|checkpoint| checkpoint.nodes[1].delivery_park.is_none()));
+    assert!(snapshots.iter().any(|checkpoint| checkpoint.nodes[1].delivery_park.is_some()));
+    for checkpoint in snapshots {
+        let mut replay = MemoryJournal(Some(serde_json::from_slice(&serde_json::to_vec(&checkpoint).unwrap()).unwrap()));
+        let mut resumed = FakeOwner { park_receipt: Some(request_id), ..Default::default() };
+        let result = advance(&document, &mut resumed, &mut replay).unwrap();
+        assert_eq!(result.checkpoint, settled.checkpoint);
+        assert_eq!(resumed.hygiene_calls, 0);
+        assert_eq!(resumed.park_calls, vec![operation.clone()]);
+    }
+}
+
+#[test]
 fn publication_requires_the_retained_hygiene_source() {
     let mut document: GraphDocument = serde_json::from_value(serde_json::json!({
         "schema_version":2, "graph_id":"publication-binding", "integration_branch":"delivery/item",

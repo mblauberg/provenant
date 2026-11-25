@@ -1736,7 +1736,10 @@ fn queue_conflict_recheck_already_observed(
     let GateCondition::Ci { target, .. } = condition else {
         return false;
     };
-    let CiTarget::Node { node: published, .. } = target else {
+    let CiTarget::Node {
+        node: published, ..
+    } = target
+    else {
         return false;
     };
     let Some(published_index) = positions.get(published).copied() else {
@@ -1804,15 +1807,9 @@ fn queue_conflict_recheck(
     let Some(head) = ci::published_head(target, checkpoint, true) else {
         return Err("queue CI conflict lost its published head");
     };
-    let conflict_index = prior_clear_conflict_gate(
-        node_index,
-        published,
-        &head,
-        plan,
-        positions,
-        checkpoint,
-    )
-    .ok_or("queue CI conflict has no prior clear conflict gate")?;
+    let conflict_index =
+        prior_clear_conflict_gate(node_index, published, &head, plan, positions, checkpoint)
+            .ok_or("queue CI conflict has no prior clear conflict gate")?;
     let rebase = plan.nodes[conflict_index]
         .on_fail
         .as_ref()
@@ -1853,7 +1850,8 @@ fn queue_conflict_recheck(
         .filter(|evidence| evidence.head_sha.as_deref() == Some(head.as_str()))
         .map_or(0, |evidence| evidence.ci_rechecks)
         .saturating_add(1);
-    let pending_observations = prior_conflict.map_or(0, |evidence| evidence.pending_observations)
+    let pending_observations = prior_conflict
+        .map_or(0, |evidence| evidence.pending_observations)
         .saturating_add(1);
     conflict.state = NodeState::Running;
     conflict.wait_reason = None;
@@ -1864,8 +1862,7 @@ fn queue_conflict_recheck(
         head_sha: Some(head),
         summary: "rechecking mergeability after CI reported conflict".into(),
         wake_at: Some(wall_now.unwrap_or_else(|| {
-            provenant_core::WallTime::from_micros(0)
-                .expect("epoch is a representable wall time")
+            provenant_core::WallTime::from_micros(0).expect("epoch is a representable wall time")
         })),
         pending_observations,
         ci_rechecks,
@@ -2106,11 +2103,7 @@ fn advance_gate<R: AttemptOwner, J: GraphJournal>(
                 .as_ref()
                 .is_some_and(|evidence| evidence.state == CiState::Conflict)
             && queue_conflict_recheck_already_observed(
-                node_index,
-                condition,
-                plan,
-                positions,
-                checkpoint,
+                node_index, condition, plan, positions, checkpoint,
             )
         {
             let timeout_seconds = match condition {
@@ -2123,13 +2116,12 @@ fn advance_gate<R: AttemptOwner, J: GraphJournal>(
                 .ci
                 .as_ref()
                 .is_some_and(|evidence| evidence.elapsed_seconds >= timeout_seconds);
-            let evidence = checkpoint.nodes[node_index]
-                .ci
-                .as_mut()
-                .ok_or_else(|| GraphError::BadCheckpoint {
+            let evidence = checkpoint.nodes[node_index].ci.as_mut().ok_or_else(|| {
+                GraphError::BadCheckpoint {
                     node: node.id.clone(),
                     invariant: "CI conflict recheck must retain its observation",
-                })?;
+                }
+            })?;
             evidence.state = CiState::Pending;
             evidence.summary = "CI still reports conflict after the exact published head was observed clear; waiting for CI to reconcile".into();
             if timed_out {
@@ -4838,21 +4830,21 @@ fn advance_hygiene<R: AttemptOwner, J: GraphJournal>(
             invariant: "hygiene handoff must be serializable",
         })?;
 
+    let operation_id = delivery_operation(
+        "delivery-hygiene",
+        "hygiene",
+        &serde_json::json!({
+            "graph": document.graph_id,
+            "node": node.id,
+            "source_attempt": source_key,
+            "input_head": input_head,
+            "expected_head": expected_head,
+        }),
+    )
+    .map_err(GraphError::Canonical)?;
     if checkpoint.nodes[node_index].delivery_hygiene.is_none() {
-        let operation_id = delivery_operation(
-            "delivery-hygiene",
-            "hygiene",
-            &serde_json::json!({
-                "graph": document.graph_id,
-                "node": node.id,
-                "source_attempt": source_key,
-                "input_head": input_head,
-                "expected_head": expected_head,
-            }),
-        )
-        .map_err(GraphError::Canonical)?;
         checkpoint.nodes[node_index].delivery_hygiene = Some(DeliveryHygieneProgress {
-            operation_id,
+            operation_id: operation_id.clone(),
             input_head: input_head.clone(),
             handoff: handoff.clone(),
             outcome: None,
@@ -4868,13 +4860,15 @@ fn advance_hygiene<R: AttemptOwner, J: GraphJournal>(
             node: node.id.clone(),
             invariant: "hygiene intent must be saved before execution",
         })?;
-    if intent.input_head != input_head || intent.handoff != handoff {
+    if intent.operation_id != operation_id
+        || intent.input_head != input_head
+        || intent.handoff != handoff
+    {
         return Err(GraphError::BadCheckpoint {
             node: node.id.clone(),
-            invariant: "hygiene replay must retain its original writer input and handoff",
+            invariant: "hygiene replay must retain its original operation, writer input and handoff",
         });
     }
-    let operation_id = intent.operation_id.clone();
     let intent_handoff = intent.handoff.clone();
     let intent_input_head = intent.input_head.clone();
     if let Some(outcome) = intent.outcome.clone() {

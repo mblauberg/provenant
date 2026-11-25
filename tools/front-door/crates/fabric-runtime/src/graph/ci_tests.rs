@@ -1305,12 +1305,7 @@ fn queue_conflict_recheck_replays_into_a_later_recovery_round() {
     let mut inactive_replay = replay.clone();
     inactive_replay.nodes[first_until_index].state = NodeState::Succeeded;
     assert!(matches!(
-        super::transitions::node_action(
-            second_fix_index,
-            &plan,
-            &mut inactive_replay,
-            &positions
-        ),
+        super::transitions::node_action(second_fix_index, &plan, &mut inactive_replay, &positions),
         super::transitions::NodeAction::Wait { changed: true }
     ));
     assert_eq!(

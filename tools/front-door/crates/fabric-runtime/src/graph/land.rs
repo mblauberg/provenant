@@ -275,10 +275,7 @@ fn recovery_source_is_published_head(
     bound
 }
 
-fn loop_is_at_final_round(
-    gate: &PlannedNode,
-    nodes: &[PlannedNode],
-) -> bool {
+fn loop_is_at_final_round(gate: &PlannedNode, nodes: &[PlannedNode]) -> bool {
     let Some(round) = &gate.round else {
         return false;
     };
@@ -318,8 +315,10 @@ fn recovery_returns_through_fresh_gates(
                     .iter()
                     .enumerate()
                     .filter(|(_, gate)| {
-                        matches!(gate.condition.as_ref(), Some(GateCondition::Conflict { .. }))
-                            && gate_targets_node(&gate.condition, &publish.id)
+                        matches!(
+                            gate.condition.as_ref(),
+                            Some(GateCondition::Conflict { .. })
+                        ) && gate_targets_node(&gate.condition, &publish.id)
                             && ancestors(nodes, positions, &gate.id).contains(&publish_index)
                     })
                     .map(|(index, _)| index)
@@ -348,7 +347,10 @@ pub(super) fn validate_conflict_recovery(
         return Ok(());
     }
     for gate in nodes {
-        let is_conflict = matches!(gate.condition.as_ref(), Some(GateCondition::Conflict { .. }));
+        let is_conflict = matches!(
+            gate.condition.as_ref(),
+            Some(GateCondition::Conflict { .. })
+        );
         let is_ci_repair = matches!(gate.condition.as_ref(), Some(GateCondition::Ci { .. }))
             && gate.on_fail.is_some();
         if !is_conflict && !is_ci_repair {
@@ -1629,9 +1631,7 @@ mod recovery_members_tests {
         let recovery = positions["recovery"];
         let prerequisite = positions["prerequisite"];
         let mut nodes = plan.nodes;
-        nodes[recovery]
-            .after_expansion
-            .push("prerequisite".into());
+        nodes[recovery].after_expansion.push("prerequisite".into());
 
         let members = recovery_members(recovery, &nodes, &positions);
         assert!(members.contains(&recovery));
