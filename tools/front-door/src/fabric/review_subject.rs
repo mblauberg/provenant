@@ -58,9 +58,14 @@ fn graphql_pull_subject(
     project: &std::path::Path,
     number: u64,
 ) -> Option<PullSubject> {
-    let crate::pr::status::batch::Batch::Entries(entries) =
-        crate::pr::status::batch::single(state, project, number)
-    else {
+    subject_from_batch(crate::pr::status::batch::single(state, project, number))
+}
+
+/// Mapping a complete batched row to a subject is transport-independent, so a
+/// row can be tested without standing up a forge port. A row missing either
+/// base field is from an older cache and cannot answer a subject read.
+fn subject_from_batch(batch: crate::pr::status::batch::Batch) -> Option<PullSubject> {
+    let crate::pr::status::batch::Batch::Entries(entries) = batch else {
         return None;
     };
     let entry = entries.into_iter().next()?;
@@ -711,33 +716,34 @@ mod tests {
     }
 
     /// Issue #3986: a spent REST core quota is a typed, retryable refusal, not
-    /// an invalid input field the caller never supplied. No GraphQL row is
-    /// available here, so the reset is carried in the safe repair.
+    /// an invalid input field the caller never supplied. With no GraphQL row
+    /// available the reset is carried in the safe repair. The forge port is
+    /// disabled here so the fallback cannot answer and no real forge is read.
     #[test]
     fn rate_limited_subject_is_a_typed_retryable_refusal() -> crate::worktree_tests::support::Result
     {
         use super::*;
-        use std::ffi::OsStr;
 
-        let rig = crate::worktree_tests::repository()?;
-        // The fake forge names `owner/repo`; pre-record a live REST limit in
-        // the shared observer state so the pull read refuses before a request.
-        let dir = crate::pr::observer::shared_dir(&rig.state, "owner/repo")?;
-        let reset = jiff::Timestamp::now().as_second() + 3600;
-        dir.atomic_write(
-            OsStr::new("rate-limit.json"),
-            ".rate-",
-            &serde_json::to_vec(&serde_json::json!({"reset": reset}))?,
-            provenant_os::fs::PublishMode::Replace,
-        )?;
-        let request = provenant_config::ports::Request::within(Duration::from_secs(60));
-        let error = observed_pull(&rig.state, &rig.project, 7, &request)
-            .err()
-            .ok_or("a rate-limited subject must refuse")?;
+        let state = tempfile::tempdir()?;
+        let project = tempfile::tempdir()?;
+        let mut ports = provenant_config::PortTable::builtin();
+        ports.forge.backend = provenant_config::PortBackend::None;
+        std::fs::write(state.path().join("ports.json"), serde_json::to_vec(&ports)?)?;
+
+        let reset = jiff::Timestamp::from_second(2_000_000_000).expect("reset");
+        let error = subject_read_result(
+            state.path(),
+            project.path(),
+            7,
+            crate::pr::observer::ObserveError::RateLimited { reset },
+        )
+        .err()
+        .ok_or("a rate-limited subject must refuse")?;
         assert_eq!(error.code(), "FORGE_QUOTA", "{error:?}");
         let diagnostic = error.diagnostic();
         let next = diagnostic.next.as_deref().unwrap_or_default();
         assert!(next.contains("retry after"), "{next}");
+        assert!(next.contains(&reset.to_string()), "{next}");
         let detail = diagnostic.detail.as_deref().unwrap_or_default();
         assert!(detail.contains("rate limit"), "{detail}");
         assert_eq!(
@@ -751,46 +757,36 @@ mod tests {
     }
 
     /// Issue #3986: where the batched GraphQL read can serve the range, it
-    /// answers the subject instead of refusing at all. A fresh cached row that
-    /// carries base and head is enough; older rows lack the base fields.
+    /// answers the subject instead of refusing at all. A complete row carries
+    /// base and head; an older row without a base cannot serve the read.
     #[test]
     fn graphql_row_serves_a_rate_limited_subject() -> crate::worktree_tests::support::Result {
         use super::*;
-        use crate::worktree_tests::support::git;
-        use std::ffi::OsStr;
+        use crate::pr::status::batch::{Batch, Entry};
 
-        let rig = crate::worktree_tests::repository()?;
-        let base = git(&rig, &["rev-parse", "HEAD"])?;
-        let dir = crate::pr::observer::shared_dir(&rig.state, "owner/repo")?;
-        let cache = serde_json::json!({
-            "entries": [{
-                "fetched_at": jiff::Timestamp::now().as_millisecond(),
-                "entry": {
-                    "number": 7,
-                    "state": "OPEN",
-                    "head": base,
-                    "draft": false,
-                    "merge": "CLEAN",
-                    "review": null,
-                    "url": "https://github.com/owner/repo/pull/7",
-                    "base_ref_oid": base,
-                    "base_ref_name": "main",
-                    "checks": [],
-                    "truncated": false
-                }
-            }]
-        });
-        dir.atomic_write(
-            OsStr::new("pr-status.json"),
-            ".pr-status-",
-            &serde_json::to_vec(&cache)?,
-            provenant_os::fs::PublishMode::Replace,
-        )?;
-        let subject = graphql_pull_subject(&rig.state, &rig.project, 7)
+        let oid = provenant_core::GitOid::parse("1111111111111111111111111111111111111111")
+            .expect("fixture oid");
+        let entry = Entry {
+            number: 7,
+            state: "OPEN".into(),
+            head: oid.to_string(),
+            draft: false,
+            merge: "CLEAN".into(),
+            review: None,
+            url: "https://github.com/owner/repo/pull/7".into(),
+            base_ref_oid: oid.to_string(),
+            base_ref_name: "main".into(),
+            checks: Vec::new(),
+            truncated: false,
+        };
+        let subject = subject_from_batch(Batch::Entries(vec![entry.clone()]))
             .ok_or("a complete GraphQL row must serve the subject")?;
-        assert_eq!(subject.base_ref_oid.to_string(), base);
-        assert_eq!(subject.head_ref_oid.to_string(), base);
+        assert_eq!(subject.base_ref_oid, oid);
+        assert_eq!(subject.head_ref_oid, oid);
         assert_eq!(subject.base_ref_name, "main");
+        let mut older = entry;
+        older.base_ref_oid.clear();
+        assert!(subject_from_batch(Batch::Entries(vec![older])).is_none());
         Ok(())
     }
 }
