@@ -267,7 +267,9 @@ fn checked_issue(issue: &Value, repository: &str, expected_number: Option<u64>) 
     let number = issue["number"]
         .as_u64()
         .ok_or("tracker issue has no number")?;
-    if issue_repository != repository || expected_number.is_some_and(|expected| expected != number) {
+    if !issue_repository.eq_ignore_ascii_case(repository)
+        || expected_number.is_some_and(|expected| expected != number)
+    {
         return Err("tracker issue identity does not match the selected repository and number".into());
     }
     for field in ["id", "title", "url", "state"] {
@@ -324,4 +326,42 @@ fn valid_repository(value: &str) -> bool {
         && value.bytes().all(|byte| {
             byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'/')
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn checked_issue_accepts_repository_case_variation_and_preserves_selected_name() {
+        let issue = json!({
+            "id": "issue-node-id",
+            "number": 42,
+            "title": "Queue issue",
+            "body": "",
+            "state": "OPEN",
+            "url": "https://github.com/Owner/Repo/issues/42",
+            "repository": {"nameWithOwner": "OWNER/repo"}
+        });
+
+        let snapshot = checked_issue(&issue, "Owner/Repo", Some(42)).unwrap();
+
+        assert_eq!(snapshot["repository"], "Owner/Repo");
+    }
+
+    #[test]
+    fn checked_issue_rejects_a_different_repository() {
+        let issue = json!({
+            "id": "issue-node-id",
+            "number": 42,
+            "title": "Queue issue",
+            "body": "",
+            "state": "OPEN",
+            "url": "https://github.com/Owner/Repo/issues/42",
+            "repository": {"nameWithOwner": "Owner/Repo"}
+        });
+
+        assert!(checked_issue(&issue, "Other/Repo", Some(42)).is_err());
+    }
 }
