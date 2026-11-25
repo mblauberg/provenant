@@ -727,6 +727,17 @@ impl MandatoryRoots {
                                 })
                         })
                         .collect::<Result<Vec<_>, _>>()?;
+                    // A legacy holderless reservation is listed so reconcile
+                    // can clear it, but its state slot still carries custody
+                    // evidence: protect it until that recovery happens.
+                    for reservation in &listing.reservations {
+                        if reservation.legacy_fence {
+                            let slot = reservation.custody_directory().ok_or_else(|| {
+                                inventory_error(&project_state, "writer custody inventory")
+                            })?;
+                            controls.push((subtree(&project_state.join(slot)), false));
+                        }
+                    }
                     for issue in listing.issues {
                         let Some(std::path::Component::Normal(slot)) =
                             issue.reservation.components().next()

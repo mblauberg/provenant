@@ -765,7 +765,7 @@ pub(crate) fn acquire_writer_with_observer(
     };
     reservation.validate()?;
     let siblings = list_writer_reservations_in_slot(&lock_directory)?;
-    if !siblings.issues.is_empty() {
+    if siblings.is_fenced() {
         return Err(CustodyError::Fenced);
     }
     let sibling_present = siblings
@@ -2535,7 +2535,7 @@ pub fn worktree_sharing_guard(
         return Err(CustodyError::InvalidRecord);
     }
     let siblings = list_writer_reservations_in_slot(slot)?;
-    if !siblings.issues.is_empty() {
+    if siblings.is_fenced() {
         return Err(CustodyError::Fenced);
     }
     let sibling_present = siblings
@@ -2783,6 +2783,11 @@ pub struct WriterReservation {
     /// Native presence of the recorded guardian; None means unobservable.
     pub live: Option<bool>,
     pub age: Option<String>,
+    /// Schema-1 evidence with no holder to stop: listed so reconcile and GC
+    /// can clear it, but still fencing until they do. Kept out of the report
+    /// so the stable serialized listing does not grow a policy-only field.
+    #[serde(skip)]
+    pub legacy_fence: bool,
 }
 impl WriterReservation {
     /// The stable lock slot containing this attempt's journal.
@@ -2817,7 +2822,7 @@ fn reservation_holder_live(
 /// for a previous version to finish. This version can withdraw or settle it
 /// through reconcile, so it is listed as a fence with a current-version remedy
 /// instead of being reported as unresolvable legacy evidence.
-fn holderless_prelease_reservation(reservation: &Reservation) -> bool {
+fn holderless_pre_lease_reservation(reservation: &Reservation) -> bool {
     reservation.guardian.is_none()
         && reservation.provider.is_none()
         && matches!(
@@ -2858,6 +2863,15 @@ pub enum ReservationIssueKind {
 pub struct ReservationListing {
     pub reservations: Vec<WriterReservation>,
     pub issues: Vec<ReservationIssue>,
+}
+impl ReservationListing {
+    /// Whether this listing holds custody evidence that keeps the slot fenced
+    /// until reconcile or GC clears it. Legacy holderless reservations are
+    /// listed rather than reported as issues so recovery can name and withdraw
+    /// them, but they must not open the slot to a new holder first.
+    pub fn is_fenced(&self) -> bool {
+        !self.issues.is_empty() || self.reservations.iter().any(|r| r.legacy_fence)
+    }
 }
 /// Malformed or inaccessible entries are reported without hiding other
 /// reservations. Only supervisor interprets its private reservation format.
@@ -3125,7 +3139,7 @@ pub fn list_writer_reservations_in_slot(slot: &Directory) -> Result<ReservationL
                 return Err(CustodyError::InvalidRecord);
             }
             let legacy = liveness::is_legacy_record(&child)?;
-            let holderless = holderless_prelease_reservation(&reservation);
+            let holderless = holderless_pre_lease_reservation(&reservation);
             // A schema-1 record whose launch never produced a holder is stale
             // evidence this version can reconcile, not work for an older
             // version. List it so reconcile and GC name the attempt and offer a
@@ -3154,6 +3168,7 @@ pub fn list_writer_reservations_in_slot(slot: &Directory) -> Result<ReservationL
                 branch,
                 live,
                 age,
+                legacy_fence: legacy && holderless,
             }))
         };
         match entry() {

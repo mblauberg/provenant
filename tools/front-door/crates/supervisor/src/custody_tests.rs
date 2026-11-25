@@ -278,7 +278,7 @@ fn legacy_evidence_remedy_names_a_current_version_command() {
 }
 
 #[test]
-fn holderless_prelease_reservation_is_reconcilable_without_a_previous_version() -> TestResult {
+fn holderless_pre_lease_reservation_is_reconcilable_without_a_previous_version() -> TestResult {
     let root = tempfile::tempdir()?;
     let slot_path = root.path().join("writer");
     std::fs::create_dir(&slot_path)?;
