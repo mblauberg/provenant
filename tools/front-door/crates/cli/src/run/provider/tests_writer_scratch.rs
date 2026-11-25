@@ -329,7 +329,13 @@ fn writer_preparation_steps(
             "provider fence fixture",
             &paths,
             None,
-            |_| panic!("an updating provider must not be probed"),
+            |name| {
+                if name == "gh" {
+                    Err("fixture gh unavailable".into())
+                } else {
+                    panic!("an updating provider must not be probed: {name}")
+                }
+            },
             None,
             Some(0),
         )
@@ -397,6 +403,9 @@ fn writer_preparation_steps(
             &pool_paths,
             None,
             |adapter| {
+                if adapter == "gh" {
+                    return Err("fixture gh unavailable".into());
+                }
                 assert_eq!(adapter, "cursor", "updating provider was probed");
                 Ok(executable.clone())
             },
@@ -874,7 +883,7 @@ printf 'agy 1.0.0\n'
                 temporary_alias: None,
             };
             for path in [&paths.scratch, &paths.provider_state, &paths.temporary] {
-                std::fs::create_dir_all(path)?;
+                std::fs::DirBuilder::new().recursive(true).mode(0o700).create(path)?;
             }
             let linked_cwd = project.join(".worktrees/writer");
             let selected_registry = Registry {
@@ -1130,6 +1139,9 @@ printf 'agy 1.0.0\n'
         &paths,
         None,
         |adapter| {
+            if adapter == "gh" {
+                return Err("fixture gh unavailable".into());
+            }
             assert_eq!(adapter, "cursor", "unrelated adapter was probed");
             Ok(executable.clone())
         },
@@ -1847,6 +1859,9 @@ printf 'agy 1.0.0\n'
         &redraw_paths,
         None,
         |adapter| {
+            if adapter == "gh" {
+                return Err("fixture gh unavailable".into());
+            }
             assert_eq!(adapter, "cursor");
             let count = lookup_count.get() + 1;
             lookup_count.set(count);
@@ -1906,7 +1921,11 @@ printf 'agy 1.0.0\n'
         redraw_prompt,
         &no_retry_paths,
         None,
-        |_| {
+        |adapter| {
+            if adapter == "gh" {
+                return Err("fixture gh unavailable".into());
+            }
+            assert_eq!(adapter, "cursor");
             let count = calls.get() + 1;
             calls.set(count);
             if count == 3 {
@@ -2084,6 +2103,9 @@ printf 'agy 1.0.0\n'
         &continued_paths,
         Some(&prior),
         |adapter| {
+            if adapter == "gh" {
+                return Err("fixture gh unavailable".into());
+            }
             assert_eq!(adapter, "cursor", "resume probed a different provider");
             Ok(executable.clone())
         },
