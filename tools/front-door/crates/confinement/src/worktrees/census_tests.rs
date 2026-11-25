@@ -680,6 +680,17 @@ fn native_unreadable_windowserver_allows_cleanup_of_a_merged_clean_tree()
 #[test]
 #[allow(clippy::disallowed_methods)] // A real child provides the cwd observation fixture.
 fn system_observer_names_the_process_inside_a_tree() -> Result<(), Box<dyn Error>> {
+    const ROOT: &str = "PROVENANT_CENSUS_NAMED_PROCESS_ROOT";
+    const PID: &str = "PROVENANT_CENSUS_NAMED_PROCESS_PID";
+    if let Some(root) = std::env::var_os(ROOT) {
+        let pid: i64 = std::env::var(PID)?.parse()?;
+        assert!(matches!(
+            live_refusal(&SystemWorkerObserver, Path::new(&root)),
+            WorktreeError::LiveProcess(process) if process.pid == pid
+        ));
+        return Ok(());
+    }
+
     struct Child(std::process::Child);
     impl Drop for Child {
         fn drop(&mut self) {
@@ -698,10 +709,27 @@ fn system_observer_names_the_process_inside_a_tree() -> Result<(), Box<dyn Error
             .spawn()?,
     );
     let pid = i64::from(child.0.id());
-    assert!(matches!(
-        live_refusal(&SystemWorkerObserver, &path),
-        WorktreeError::LiveProcess(process) if process.pid == pid
-    ));
+    // The observer is a sibling of the occupant, like a separate lane. A
+    // direct child of the observer is deliberately excluded from the census.
+    let output = std::process::Command::new(std::env::current_exe()?)
+        .args([
+            "--exact",
+            "worktrees::census_tests::system_observer_names_the_process_inside_a_tree",
+        ])
+        .env(ROOT, &path)
+        .env(PID, pid.to_string())
+        .output()?;
+    assert!(
+        output.status.success(),
+        "observer failed: {}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+        "observer test did not run: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
     Ok(())
 }
 
