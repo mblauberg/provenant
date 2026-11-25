@@ -296,9 +296,9 @@ reads. It replaces FILE and reports the written byte count; it requires a settle
 is clamped to the shared line bound in every reader, including peer, composite
 and event reads. A non-applicable header is omitted, never printed as
 unavailable, and when stdout is not a TTY human output carries no ANSI escapes.
-A settled lane that already carries a result is not followed by the graph's
-failure rows: stale attempt status, including unreadable records, belongs to a
-reader of unfinished work, not to the lane's answer. `output` and `steer`
+A settled lane that already carries a result, including a failed lane, is not
+followed by the graph's failure rows: stale attempt status, including unreadable
+records, belongs to a reader of unfinished work, not to the lane's answer. `output` and `steer`
 resolve the same numbered attempt, and a clamped tail
 reports its effective bound in `tail` for bytes or `tail_lines` for lines, with
 `tail_clamped` indicating whether the requested line count was reduced.

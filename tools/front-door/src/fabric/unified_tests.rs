@@ -2671,9 +2671,15 @@ fn settled_lane_output_skips_stale_failure_rows() {
         true, &settled, progress
     ));
 
-    // Failed work without a result still needs its diagnostics.
+    // A failed settled lane's retained result is still its answer.
     let mut failed = settled.clone();
     failed.nodes[0].state = NodeState::Failed;
+    assert!(
+        !super::output_needs_graph_failures(false, &failed, &failed.nodes[0]),
+        "a failed settled lane with a result must not append failure rows"
+    );
+
+    // Failed work without a result still needs its diagnostics.
     failed.nodes[0].outputs = None;
     assert!(super::output_needs_graph_failures(
         false,

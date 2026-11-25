@@ -3853,11 +3853,8 @@ fn output_needs_graph_failures(
     checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
     progress: &provenant_fabric_runtime::graph::NodeProgress,
 ) -> bool {
-    let failed = graph_snapshot(checkpoint.clone()).outcome
-        == Some(provenant_fabric_runtime::graph::GraphOutcome::Failed);
-    let settled_with_result = !failed
-        && progress.outputs.is_some()
-        && checkpoint.nodes.iter().all(|node| node.state.settled());
+    let settled_with_result =
+        progress.outputs.is_some() && checkpoint.nodes.iter().all(|node| node.state.settled());
     !attempt_given && !settled_with_result
 }
 
