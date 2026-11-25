@@ -1344,13 +1344,19 @@ mod tests {
             Census, CensusError, ProcessFact, ProcessIdentity, ProcessObservation, ProcessObserver,
         };
 
+        // A removed checkout is still censused like any other root: it is free
+        // only when no process path lies under it, so report it available.
         struct AbsentWorkers;
         impl WorkerObserver for AbsentWorkers {
             fn observe_roots(
                 &self,
-                _: &[std::path::PathBuf],
+                roots: &[std::path::PathBuf],
             ) -> std::collections::BTreeMap<std::path::PathBuf, Occupancy> {
-                panic!("an absent writer tree must not consult the census")
+                roots
+                    .iter()
+                    .cloned()
+                    .map(|root| (root, Occupancy::Available))
+                    .collect()
             }
         }
         struct Quiet(ProcessFact);
