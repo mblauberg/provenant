@@ -780,6 +780,45 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
                 .then(|| (child.id.clone(), source.clone()))
             })
             .collect();
+        // Composite expansion can add enclosing dependencies to a loop body.
+        // They are invisible to the isolated body validator, but must be
+        // restored unchanged when its rounds are placed in the full graph.
+        let outer_dependencies: BTreeMap<_, _> = body
+            .iter()
+            .map(|child| {
+                let external = |parent: &&String| {
+                    !spec.body.iter().any(|member| &member.id == *parent)
+                        && document.nodes.iter().any(|node| &node.id == *parent)
+                };
+                (
+                    child.id.clone(),
+                    (
+                        child
+                            .depends_on
+                            .iter()
+                            .filter(external)
+                            .cloned()
+                            .collect::<Vec<_>>(),
+                        child
+                            .after_settled
+                            .iter()
+                            .filter(external)
+                            .cloned()
+                            .collect::<Vec<_>>(),
+                    ),
+                )
+            })
+            .collect();
+        for child in &mut body {
+            if let Some((dependencies, settled)) = outer_dependencies.get(&child.id) {
+                child
+                    .depends_on
+                    .retain(|parent| !dependencies.contains(parent));
+                child
+                    .after_settled
+                    .retain(|parent| !settled.contains(parent));
+            }
+        }
         for child in &mut body {
             if child.access != AccessMode::WorktreeWrite {
                 continue;
@@ -1019,6 +1058,20 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
                             child.depends_on.push(previous);
                         } else {
                             child.after_settled.push(previous);
+                        }
+                    }
+                }
+                if let Some((dependencies, settled)) = outer_dependencies.get(&local) {
+                    for parent in dependencies {
+                        if !child.depends_on.contains(parent) {
+                            child.depends_on.push(parent.clone());
+                        }
+                    }
+                    for parent in settled {
+                        if !child.depends_on.contains(parent)
+                            && !child.after_settled.contains(parent)
+                        {
+                            child.after_settled.push(parent.clone());
                         }
                     }
                 }

@@ -149,6 +149,9 @@ impl AttemptOwner for Owner {
         }
         Ok(families)
     }
+    fn detect_repair_growth(&mut self, _: &str, _: &str) -> Result<bool, String> {
+        Ok(false)
+    }
     fn review_range(&mut self, _: &str, _: bool) -> Result<ReviewRange, Self::Error> {
         Ok(if self.equal_review_range {
             ReviewRange::Resolved {
@@ -2204,7 +2207,15 @@ fn queue_ci_conflict_after_clear_rebases_republishes_and_rechecks_after_replay()
         failed_after_conflict_reset: true,
         ..Default::default()
     };
-    let replayed = advance(&document, &mut replay_owner, &mut replay_journal).unwrap();
+    let replayed =
+        advance(&document, &mut replay_owner, &mut replay_journal).unwrap_or_else(|error| {
+            let saved = replay_journal.checkpoint.as_ref().unwrap();
+            panic!(
+                "replay failed: {error:?}; publish={:#?}; hygiene={:#?}",
+                node(saved, "publish"),
+                node(saved, "hygiene")
+            );
+        });
 
     assert_eq!(
         node(&replayed.checkpoint, "conflict").state,

@@ -1017,7 +1017,7 @@ fn loop_expansion_safety_refusal_names_bound_and_owner_at_each_boundary() {
         &Default::default(),
     );
     assert!(
-        matches!(result, Err(GraphError::Admission(AdmissionError::Composite(ref actual))) if actual == &reason)
+        matches!(result, Err(GraphError::Candidate(CandidateError::Composite(ref actual))) if actual == &reason)
     );
     assert!(owner.calls.is_empty());
 }

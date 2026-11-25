@@ -1256,7 +1256,7 @@ fn queue_conflict_recheck_matches_a_bounded_round_and_reactivates_composite_reba
                  "depends_on":["ci"],
                  "after_settled":["conflict","rebase","rebase_hygiene","rebase_publish","rebase_conflict",
                                   "rebase_ci","ci_repair","ci_hygiene","ci_publish","ci_conflict","ci_refresh"],
-                 "condition":{"type":"budget"}}
+                 "condition":{"type":"ci","target":{"node":"publish"}}}
             ]}
         }))
         .unwrap(),

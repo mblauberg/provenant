@@ -222,7 +222,9 @@ select outputs from either kind of direct dependency; unavailable optional
 outputs stay absent and required outputs still gate admission. When loop
 expansion binds a source or gate target that was inherited as an ordering-only
 edge, the source's success requirement replaces that ordering edge; a retry of
-failed hygiene retains its settled-only source edge.
+failed hygiene retains its settled-only source edge. Dependencies inherited
+from an enclosing composite are checked against the full expanded graph and
+remain attached to each round.
 
 ### Implementation planning
 
@@ -489,7 +491,9 @@ with bounded conditional cycles, escalation and durable item scheduling.
 
 Admission counts every possible round. A body writer integrates by fast-forward
 only and never merges. Exhaustion pauses the graph without delivery, and an
-extension never adds rounds twice.
+extension never adds rounds twice. Admission treats the edge into a later round
+as a retry on the previous outcome, rather than carrying that round's success
+requirements into its failure path.
 - Why: repeated review and repair needs bounded admission and a human decision at
   the bound.
 

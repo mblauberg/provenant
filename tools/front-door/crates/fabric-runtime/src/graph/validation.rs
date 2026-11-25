@@ -1192,7 +1192,13 @@ fn validate_flat_plan_inner(
             pending.extend(
                 children[index]
                     .iter()
-                    .filter(|child| nodes[**child].depends_on.contains(&nodes[index].id))
+                    .filter(|child| {
+                        nodes[**child].depends_on.contains(&nodes[index].id)
+                            // A later round is entered on the prior until gate's
+                            // failure, not its success. Its path cannot inherit
+                            // the successful ancestry of the prior round.
+                            && !loops::round_failure_edge(&nodes[**child], &nodes[index])
+                    })
                     .map(|child| {
                         (
                             *child,
