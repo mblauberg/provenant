@@ -4,6 +4,38 @@ use provenant_fabric_runtime::graph::{
     GraphCheckpoint, GraphDocument, GraphExecution, GraphJournal,
 };
 
+// Spec: docs/specs/delivery-queue.md#queue-and-controls
+#[test]
+fn status_projects_recorded_delivery_progress_into_the_digest()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut value = serde_json::to_value(checkpoint("g"))?;
+    let node = &mut value["nodes"][0];
+    let key = json!({"graph_id":"g","node_id":"parent","attempt":1,"route_index":0});
+    node["delivery_loop"] = json!({"name":"repair","round":2,"last_attempt":key});
+    node["escalation"] = json!({"rung":1,"cause":"ci_red","transition_attempt":key});
+    node["delivery_park"] = json!({"transition_id":"p1","operation_id":"p1",
+        "item":"issue-42","attempt_key":key,"attempt_ref":null,"reason":"ci_unavailable",
+        "handoff":"inspect checks","head":"abc123","evidence":[],"request_id":null});
+    let checkpoint: GraphCheckpoint = serde_json::from_value(value)?;
+    let target = GraphTarget {
+        graph: "g".into(),
+        node: None,
+        attempt: None,
+    };
+    let mut rows = status_rows(&graph_snapshot(checkpoint), &target);
+    super::status_keys(&mut rows, provenant_core::ProjectId::from_bytes([3; 16]))?;
+    let digests = super::super::graph_status::node_digests(&rows);
+    let digest = digests
+        .iter()
+        .find(|digest| digest.item.as_deref() == Some("issue-42"))
+        .expect("parked item is projected");
+    assert_eq!(digest.delivery_loop["round"], 2);
+    assert_eq!(digest.escalation["rung"], 1);
+    assert_eq!(digest.delivery_park["handoff"], "inspect checks");
+    assert!(digest.line.contains("head=abc123/recorded"));
+    Ok(())
+}
+
 // Spec: docs/specs/cli.md#status-selection
 #[test]
 fn full_status_liveness_detail_names_event_source_directory_command_and_wait() {
