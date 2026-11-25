@@ -692,8 +692,8 @@ fn assert_fits_with_repair_metadata(document: GraphDocument, tier: &str, grew: b
         extra: Default::default(),
         schema_version: 1,
         digest: checkpoint_digest(&checkpoint, &execution)
-        .unwrap()
-        .to_string(),
+            .unwrap()
+            .to_string(),
         checkpoint,
         execution,
     };
@@ -724,12 +724,8 @@ fn queue_prep_retries_reserve_each_possible_attempt_row() {
     queue.prep_retries.value = 0;
     document.queue = Some(queue);
     let single_attempt_plan = planned(&document);
-    let single_attempt_bound = envelope::checkpoint_bound(
-        &document,
-        &[],
-        &[],
-        &single_attempt_plan,
-    );
+    let single_attempt_bound =
+        envelope::checkpoint_bound(&document, &[], &[], &single_attempt_plan);
 
     let mut escalated = document.clone();
     escalated.nodes[0].escalate = Some(EscalateSpec {
@@ -827,8 +823,19 @@ fn a_loop_extension_past_the_envelope_refuses_without_saving() {
     // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
     for journal in [&mut cancelled_journal, &mut journal] {
         let before = journal.0.clone();
-        let error = resume_with_budget(&document, &mut owner, journal, &limits, &Default::default(), &["loop.revise.rounds=25".into()]).unwrap_err();
-        assert!(matches!(error, GraphError::Candidate(CandidateError::Envelope(_))));
+        let error = resume_with_budget(
+            &document,
+            &mut owner,
+            journal,
+            &limits,
+            &Default::default(),
+            &["loop.revise.rounds=25".into()],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            GraphError::Candidate(CandidateError::Envelope(_))
+        ));
         assert_eq!(journal.0, before);
     }
     assert_eq!(owner.calls.len(), 18);
