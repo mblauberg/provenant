@@ -1362,8 +1362,8 @@ fn constraints(path: &str) -> Vec<String> {
                 limits::TAIL_LINES
             ),
             format!(
-                "a result shows whole up to {} KiB, then its head and tail; at most {} changed paths of {} bytes are named; missing evidence is null",
-                limits::OUTPUT_BYTES / 1024,
+                "a result page shows whole up to {} KiB, then a short head and tail; --final --to FILE exports the complete sealed result; at most {} changed paths of {} bytes are named; missing evidence is null",
+                (limits::FINAL_HEAD_BYTES + limits::FINAL_TAIL_BYTES) / 1024,
                 limits::OUTPUT_PATHS,
                 limits::PATH_BYTES
             ),

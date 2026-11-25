@@ -3490,6 +3490,42 @@ pub(crate) fn unified_graph_output(
         provenant_cli::Part::Receipt => "receipt",
         provenant_cli::Part::Transcript => "transcript",
     };
+    if command.final_result {
+        let result = provenant_cli::run::collect_final(command, |page| {
+            let input = json!({"op":"output", "id":page.target.to_string(),
+                "render":true, "part":part, "offset":page.offset, "full":false,
+                "max_bytes":page.max_bytes});
+            let response = provenant_cli::fabric::graph_relay::from_lane(
+                &provenant_fabric_runtime::graph::relay::RelayOp::Read { input },
+                &CancelToken::new(),
+                std::time::Duration::from_secs(55),
+            )
+            .map_err(|error| {
+                provenant_cli::run::Fail::new(
+                    provenant_records::Outcome::Error,
+                    provenant_run::ErrorKind::Fabric,
+                    error.to_string(),
+                )
+            })?;
+            let result: provenant_records::CommandResult<Value> =
+                serde_json::from_value(response["result"].clone()).map_err(|error| {
+                    provenant_cli::run::Fail::new(
+                        provenant_records::Outcome::Error,
+                        provenant_run::ErrorKind::StateCorrupt,
+                        error.to_string(),
+                    )
+                })?;
+            if let Some(error) = result.error {
+                return Err(provenant_cli::run::Fail::new(
+                    result.status,
+                    provenant_run::ErrorKind::Fabric,
+                    error.message,
+                ));
+            }
+            Ok((result.data, String::new()))
+        });
+        return provenant_cli::run::render_output(command.clone(), result, globals.full);
+    }
     let result = (|| -> Result<provenant_cli::run::Reply, Box<dyn std::error::Error>> {
         if command.path {
             return Err("lane reads return content; omit --path".into());
@@ -3624,6 +3660,13 @@ fn composite_graph_output(
     progress: &provenant_fabric_runtime::graph::NodeProgress,
     full: bool,
 ) -> Result<provenant_cli::run::Reply, Box<dyn std::error::Error>> {
+    if command.final_result {
+        return Ok(output_fail(
+            provenant_records::Outcome::Invalid,
+            "INVALID",
+            "--final needs a lane attempt; a composite exposes only its declared result",
+        ));
+    }
     if command.path {
         return Ok(output_fail(
             provenant_records::Outcome::Invalid,
@@ -4313,6 +4356,7 @@ pub(crate) fn read_lane_graph(
             target,
             part,
             to: None,
+            final_result: false,
             path: false,
             offset: input["offset"].as_u64().unwrap_or(0),
             tail: input["tail"].as_u64(),

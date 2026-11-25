@@ -285,6 +285,11 @@ exports without inventing an attempt identity, `output GRAPH/NODE` selects a
 composite explicitly, and a bare graph with several top-level nodes is
 ambiguous and lists them. Offsets and limits count bytes; a page that splits a
 UTF-8 character returns lossless base64 and advances by the bytes returned.
+The default view shows a bounded page, keeping its opening and tail and naming any omitted middle.
+A result may span pages or exceed that view. `output TARGET --final --to FILE` collects the complete
+sealed lane result into FILE, including its final message and handoff, checking page identity as it
+reads. It replaces FILE and reports the written byte count; it requires a settled lane attempt.
+`--full` prints the selected page with host facts.
 `--tail N` bounds the last N bytes; `--tail-lines N` bounds the last N lines and
 is clamped to the shared line bound in every reader, including peer, composite
 and event reads. A non-applicable header is omitted, never printed as
