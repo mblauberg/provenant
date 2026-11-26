@@ -902,9 +902,29 @@ pub(super) fn validate_relations(
                     && writer.worktree == node.worktree
             });
             if !valid {
+                let candidates: Vec<&str> = upstream
+                    .iter()
+                    .filter(|index| {
+                        let writer = &nodes[**index];
+                        plans::writer(writer)
+                            && matches!(
+                                writer.delivery,
+                                Some(DeliveryMode::Pr | DeliveryMode::Push)
+                            )
+                            && writer.continues.is_none()
+                            && writer.worktree == node.worktree
+                    })
+                    .map(|index| nodes[*index].id.as_str())
+                    .collect();
                 return Err(format!(
-                    "node {}: continues must name an upstream writer that delivers pr or push from the same worktree",
-                    node.id
+                    "node {}: continues must name an upstream writer that delivers pr or push from the same worktree (got {:?}; expected its expanded id; candidates: {})",
+                    node.id,
+                    target,
+                    if candidates.is_empty() {
+                        "none".to_owned()
+                    } else {
+                        candidates.join(", ")
+                    }
                 ));
             }
         }

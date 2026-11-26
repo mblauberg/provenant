@@ -199,6 +199,13 @@ Nothing downstream splits, prefixes or re-derives the stored id: preparation,
 successor deduplication and prior-model exclusions parse it directly. This is
 what lets a batch route match `run implement --model` and a declared route
 equal to a ladder hand-off appear once among successors.
+`run --explain` reports a `node_routes` row for each launchable node with the
+effective adapter, model and effort and the source of each (`node field`,
+`policy`, `pool` or `default`). An exact node field or a configured named route
+resolves to one spelling; a pool is shown as its candidate models without
+drawing a pick, because the weighted selection, account and credential decision
+remain launch-only. The row's `selection` names that boundary, so pool routing
+can be checked before launch.
 - Why: a model id may itself contain `/`, so re-parsing a stored id silently
   changes which model runs.
 - Owner: `crates/routing/src/catalog.rs`,
