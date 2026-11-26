@@ -349,7 +349,7 @@ fn read_with_budget(
                     projection::session_line(structured, found.summary_line);
                 let record = serde_json::to_value(&found.record).map_err(|_| Error::Encode)?;
                 let consistency =
-                    serde_json::to_value(&found.consistency).map_err(|_| Error::Encode)?;
+                    serde_json::to_value(found.consistency).map_err(|_| Error::Encode)?;
                 let source = serde_json::to_value(summary_source).map_err(|_| Error::Encode)?;
                 sessions.push(projection::session_row(
                     &record,
