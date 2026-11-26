@@ -37,39 +37,6 @@ fn dispatch_preserves_launch_fields_on_request_reopen() -> TestResult {
 }
 
 #[test]
-fn dispatch_persists_the_admitted_subject_on_the_request() -> TestResult {
-    let temp = tempfile::tempdir()?;
-    let (clock, cancel) = (clock(), CancelToken::new());
-    let call = call(&clock, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
-    let subject = provenant_records::subject::PinnedSubject {
-        extra: Default::default(),
-        base: Some(provenant_core::GitOid::parse(&"a".repeat(40))?),
-        head: provenant_core::GitOid::parse(&"b".repeat(40))?,
-        origin: provenant_records::subject::SubjectOrigin::Explicit,
-        pinned_at: provenant_core::WallTime::from_micros(1)?,
-        policy: provenant_records::subject::SubjectPolicy::Pinned,
-        repository: Some("owner/repo".into()),
-        base_ref: Some("main".into()),
-        policy_source: Some(provenant_records::Source::at(
-            provenant_records::Layer::Default,
-            "graph admission (always pinned)",
-        )),
-        followed_from: Vec::new(),
-    };
-    let mut request = submission("subject on request");
-    request.task.subject = Some(subject.clone());
-    let run = Service::new(&store).dispatch(request, temp.path(), &call)?;
-    let persisted = store.request(run.attempt_id, &call)?.task.subject;
-    assert_eq!(
-        persisted,
-        Some(subject),
-        "the admitted subject's OIDs and origin survive dispatch into the stored request"
-    );
-    Ok(())
-}
-
-#[test]
 fn peer_wait_views_keep_terminal_and_show_custody_until_released() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());

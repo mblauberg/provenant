@@ -950,7 +950,6 @@ pub(super) fn writer_run(
                 head: None,
                 source_head: None,
                 base_ref: None,
-                subject: None,
                 account: None,
                 profile: provenant_run::HarnessProfile::default(),
                 prompt_digest,

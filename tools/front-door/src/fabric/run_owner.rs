@@ -1715,7 +1715,6 @@ impl BinaryRunOwner<'_> {
                 fixture: task.fixture,
                 pinned_base: None,
                 head: task.head,
-                subject: task.subject,
                 source_head: task.source_head,
                 prompt: task.prompt,
                 title: task.title,

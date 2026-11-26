@@ -318,7 +318,6 @@ impl<'a> Service<'a> {
                 base_ref,
                 base,
                 fixture: task.fixture.filter(|fixture| fixture.is_valid()),
-                subject: task.subject,
                 head: task.head,
                 source_head: task.source_head,
                 route: task.route,
@@ -1056,8 +1055,6 @@ pub struct DispatchTask {
     /// Commit pinned by owned worktree creation. Keep `base` for replay comparison.
     pub pinned_base: Option<provenant_core::GitOid>,
     pub head: Option<String>,
-    /// Admitted subject provenance carried beside `head` onto the run request.
-    pub subject: Option<provenant_records::subject::PinnedSubject>,
     /// Original source pin for a writer continuing a settled predecessor.
     pub source_head: Option<String>,
     pub route: RequestedRoute,

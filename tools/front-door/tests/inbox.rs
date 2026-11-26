@@ -531,7 +531,6 @@ fn request_correlation_edges_verify_host_seals_and_refuse_mismatches() -> Result
                 base: None,
                 fixture: None,
                 pinned_base: None,
-                subject: None,
                 source_head: None,
                 head: None,
                 route: RequestedRoute::Named {

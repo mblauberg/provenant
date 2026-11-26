@@ -64,7 +64,6 @@ fn recovery_rebuild_preserves_request_digest_for_any_submitted_spec()
                                 base: None,
                                 fixture: None,
                                 base_ref: None,
-                                subject: None,
                                 route: provenant_records::run::RequestedRoute::Named {
                                     required_family: None,
                                     extra: Default::default(),
