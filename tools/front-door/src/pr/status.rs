@@ -1275,6 +1275,7 @@ pub(super) fn class_of(head: &str, checks: &[super::observer::Check]) -> &'stati
 fn snapshot(project: &Path, state: &Path, numbers: &[u64]) -> Vec<Line> {
     // One GraphQL query answers every pull request when it can; the per-PR
     // REST reads remain the fallback when the batch transport cannot.
+    let review_gate_contexts = gate_contexts(project, state);
     let batch = batch::snapshot(state, project, numbers);
     let batch_limited = matches!(batch, batch::Batch::RateLimited(_));
     let entries = match batch {
@@ -1283,7 +1284,12 @@ fn snapshot(project: &Path, state: &Path, numbers: &[u64]) -> Vec<Line> {
     };
     let mut lines: Vec<(_, Line)> = entries
         .iter()
-        .map(|entry| (entry.number, batch::line_from_entry(entry)))
+        .map(|entry| {
+            (
+                entry.number,
+                batch::line_from_entry(entry, &review_gate_contexts),
+            )
+        })
         .collect();
     // A rollup too large for one page is not evidence; re-read it exactly.
     for entry in &entries {
@@ -1310,7 +1316,16 @@ fn snapshot(project: &Path, state: &Path, numbers: &[u64]) -> Vec<Line> {
         if answered.contains(&number) {
             continue;
         }
-        lines.push((number, rest_line(project, state, number, !batch_limited)));
+        lines.push((
+            number,
+            rest_line(
+                project,
+                state,
+                number,
+                !batch_limited,
+                &review_gate_contexts,
+            ),
+        ));
     }
     let order: std::collections::BTreeMap<u64, usize> = numbers
         .iter()
@@ -1326,7 +1341,13 @@ fn snapshot(project: &Path, state: &Path, numbers: &[u64]) -> Vec<Line> {
 /// The per-PR REST read, falling back to one GraphQL query when REST itself
 /// runs out of quota. `batch_limited` is false only while the GraphQL quota
 /// may still answer, so a PR never loops between the two transports.
-fn rest_line(project: &Path, state: &Path, number: u64, try_graphql: bool) -> Line {
+fn rest_line(
+    project: &Path,
+    state: &Path,
+    number: u64,
+    try_graphql: bool,
+    review_gate_contexts: &[String],
+) -> Line {
     let request = provenant_config::ports::Request::within(std::time::Duration::from_secs(60));
     match wait_line(project, state, number, &request, std::time::Duration::ZERO) {
         Ok(line) => line,
@@ -1337,7 +1358,7 @@ fn rest_line(project: &Path, state: &Path, number: u64, try_graphql: bool) -> Li
                 && let Some(entry) = entries.first()
                 && !entry.truncated
             {
-                return batch::line_from_entry(entry);
+                return batch::line_from_entry(entry, review_gate_contexts);
             }
             Line {
                 number,
