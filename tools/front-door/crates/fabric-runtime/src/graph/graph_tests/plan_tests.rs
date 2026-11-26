@@ -3261,6 +3261,47 @@ fn replacing_an_unstarted_writer_with_a_false_condition_settles_it_as_skipped() 
     assert!(row.writer_binding.is_none(), "{row:?}");
 }
 
+// Spec: docs/specs/state.md#graph-checkpoints-cover-persisted-text
+#[test]
+fn a_when_skipped_writer_keeps_its_disposition_when_binding_would_fail() {
+    let document: GraphDocument = serde_json::from_value(json!({
+        "schema_version":1, "graph_id":"smoke", "nodes":[{
+            "id":"write", "access":"worktree_write", "worktree":"/fixture/lane",
+            "prompt":"Write", "route":{"alias":"senior"},
+            "when":[{"name":"flag","expected":"true","actual":"false"}]
+        }]
+    }))
+    .unwrap();
+    let mut owner = ErrorLauncher {
+        binding_error: Some(crate::coordination::facade::FacadeError::DispatchRefused {
+            reason: "Git private directory is not registered to this worktree".into(),
+            disk: None,
+            fact: None,
+        }),
+        ..Default::default()
+    };
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    let row = &run.checkpoint.nodes[0];
+    assert_eq!(row.state, NodeState::Skipped, "{row:?}");
+    assert_eq!(
+        row.skip_reason.as_deref(),
+        Some("when flag = true; it is false"),
+        "{row:?}"
+    );
+    assert!(row.attempts.is_empty(), "{row:?}");
+    assert!(row.writer_binding.is_none(), "{row:?}");
+
+    // Reloading applies the same validation as a real advance. A binding
+    // failure written over the skip would leave a checkpoint this rejects.
+    let reloaded = advance(
+        &document,
+        &mut ErrorLauncher::default(),
+        &mut MemoryJournal(Some(run.checkpoint)),
+    )
+    .expect("the when-skip checkpoint must remain loadable");
+    assert_eq!(reloaded.checkpoint.nodes[0].state, NodeState::Skipped);
+}
+
 #[test]
 fn admit_patch_confines_lane_edits_but_allows_owner_and_planner_edits() {
     let (document, checkpoint) = running_graph();

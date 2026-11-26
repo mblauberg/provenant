@@ -86,11 +86,15 @@ checkpoint, externalises text without changing its bytes and validates the
 reconstructed result before atomic publication; readers see one complete
 published record. Every corrupt checkpoint stays visible as unreadable through
 status with its graph ID and typed reason, and landing review reports unreadable
-graph sources by graph ID while keeping valid settlements. The first tick read of
-a corrupt checkpoint records its file digest and reason in a quarantine marker;
-identical bytes are skipped on later ticks, changed bytes are reported again and
-`provenant stop -- NAME` retires the record. Pending-index recovery never uses
-unverified lifecycle fields to classify a corrupt record as settled.
+graph sources by graph ID while keeping valid settlements. A checkpoint that
+decodes but fails the semantic validation an advance applies — for example a
+writer failure written over a node its own `when` skips — is unloadable in the
+same way. The first tick read of either kind records the file digest, the plan
+digest and the typed reason in a quarantine marker; identical bytes under the
+same plan are skipped on later ticks, changed bytes or a changed plan are
+reported again, and `provenant stop -- NAME` retires the record. Pending-index
+recovery never uses unverified lifecycle fields to classify an unloadable record
+as settled.
 - Why: stored text must verify on reload, and one damaged graph must not hide
   another's review evidence or flood every tick with an unresolvable retry.
 - Owner: `crates/fabric-runtime/src/graph/journal.rs`, `src/pr/landing/adapters.rs`

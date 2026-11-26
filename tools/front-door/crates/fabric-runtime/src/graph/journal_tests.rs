@@ -1651,6 +1651,87 @@ fn tick_reports_corrupt_checkpoints_once_until_bytes_change_or_retired() {
     std::fs::write(&path, b"{} ").unwrap();
     assert!(FileJournal::read_checkpoint_for_tick(&root, project, "g-test").is_err());
 }
+
+// Spec: docs/specs/state.md#graph-checkpoints-cover-persisted-text
+#[test]
+fn tick_reports_a_validation_failure_once_until_bytes_or_plan_change_or_retired() {
+    let temp = crate::test_support::tempdir().unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = std::fs::canonicalize(temp.path()).unwrap();
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
+    let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+    let project = ProjectId::from_bytes([1; 16]);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+    let mut fixture = stored_fixture();
+    // The checkpoint decodes cleanly, but a writer failure was persisted over
+    // a `when` skip: it no longer passes the validation an advance applies.
+    fixture.execution.document.nodes[0].when = vec![WhenTerm {
+        name: "flag".into(),
+        expected: "true".into(),
+        actual: "false".into(),
+    }];
+    let digest = fixture_plan_digest(&fixture.execution.document);
+    fixture.checkpoint.plan_digest = digest.clone();
+    let node = &mut fixture.checkpoint.nodes[0];
+    node.state = NodeState::Failed;
+    node.skip_reason = Some("when flag = true; it is false".into());
+    node.attempts.clear();
+    node.outputs = None;
+    let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
+    journal.bind(fixture.execution).unwrap();
+    journal.save(&fixture.checkpoint).unwrap();
+    drop(journal);
+    let path = base
+        .join("state/fabric/graphs")
+        .join(project.to_string())
+        .join("graph-g-test.json");
+    let marker = path.with_file_name("graph-g-test.unreadable");
+    // The strict read still decodes it: the record is semantically invalid, not corrupt.
+    assert!(FileJournal::read_checkpoint(&root, project, "g-test").is_ok());
+    let first = FileJournal::read_checkpoint_for_tick(&root, project, "g-test").unwrap_err();
+    assert!(first.to_string().contains("bad_checkpoint"), "{first}");
+    assert!(
+        first.to_string().contains("provenant stop -- g-test"),
+        "{first}"
+    );
+    assert!(
+        first
+            .to_string()
+            .contains("a node skipped by its when condition"),
+        "{first}"
+    );
+    // The same bytes under the same plan are quarantined on later ticks.
+    assert!(
+        FileJournal::read_checkpoint_for_tick(&root, project, "g-test")
+            .unwrap()
+            .is_none()
+    );
+    assert!(marker.is_file());
+    let content = std::fs::read_to_string(&marker).unwrap();
+    assert_eq!(content.lines().nth(1), Some("bad_checkpoint"));
+    assert_eq!(content.lines().nth(2), Some(digest.as_str()));
+    // A changed plan is a new observation even when the bytes are unchanged.
+    std::fs::write(
+        &marker,
+        format!(
+            "{}\nbad_checkpoint\nother-plan",
+            CanonicalV1::file_digest(&std::fs::read(&path).unwrap())
+        ),
+    )
+    .unwrap();
+    assert!(FileJournal::read_checkpoint_for_tick(&root, project, "g-test").is_err());
+    // Named retirement removes a decode-valid but invalid record as it does a corrupt one.
+    let retired =
+        FileJournal::retire_unreadable(&root, project, "g-test", budget, &cancel, &clock, |_| {
+            Ok(())
+        })
+        .unwrap();
+    assert!(retired);
+    assert!(!path.exists());
+    assert!(!marker.exists());
+}
 #[test]
 fn tick_reports_undecodable_undelivered_pr_with_skipped_node() {
     let temp = crate::test_support::tempdir().unwrap();

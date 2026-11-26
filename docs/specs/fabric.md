@@ -653,7 +653,8 @@ index uses the validated published value and recovery loads and validates the
 committed checkpoint independently. `graph::checkpoint_digest` and
 `graph::graph_plan_digest` own the identities; hand-built fixtures use
 `FileJournal::prepare_fixture_checkpoint`, and production saves never repair a
-supplied plan digest. Corrupt-checkpoint reporting and quarantine are in
+supplied plan digest. Reporting and quarantine of checkpoints that are corrupt
+or that fail semantic validation are in
 [state](state.md#graph-checkpoints-cover-persisted-text). Landing skips unusable
 review sources, keeps their graph identities in report warnings, and refuses only
 when no independent approval remains.

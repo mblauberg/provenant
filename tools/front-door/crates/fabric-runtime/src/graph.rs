@@ -1492,6 +1492,41 @@ fn restore_cancelled_nodes(checkpoint: &mut GraphCheckpoint) -> Result<(), (Stri
     Ok(())
 }
 
+/// Project a stored checkpoint into the exact shape the node validator checks.
+/// The advance path and tick reads share this projection, so a record that
+/// contradicts its plan is classified the same way whichever path sees it
+/// (#4105). The clone keeps cancellation and wake evidence out of the saved
+/// checkpoint: a validation read never reopens a settled admission fence.
+pub(super) fn checkpoint_validation_view(
+    stored: &GraphCheckpoint,
+) -> Result<GraphCheckpoint, (String, &'static str)> {
+    let mut validation = stored.clone();
+    restore_cancelled_nodes(&mut validation)?;
+    for node in &mut validation.nodes {
+        if node
+            .skip_reason
+            .as_deref()
+            .is_some_and(|reason| reason.starts_with("parent "))
+            && let Some(state) = node.cancelled_from.take()
+        {
+            node.state = state;
+            node.skip_reason = None;
+        }
+    }
+    asks::refresh_wake(&mut validation);
+    Ok(validation)
+}
+
+/// Whether a progress row was settled by its own false launch condition. The
+/// checkpoint reason is authoritative: re-reading the plan predicate would let
+/// a replaced, false-`when` writer launch unbound (#3899).
+pub(super) fn is_when_skipped(progress: &NodeProgress) -> bool {
+    progress
+        .skip_reason
+        .as_deref()
+        .is_some_and(|reason| reason.starts_with("when "))
+}
+
 /// Fence one node and its attached descendants before stopping their attempts.
 /// The checkpoint that settles a stopped writer, with its plan: the restart
 /// patch, or a chair pause when admission, planning or the owner refuses the
@@ -1736,6 +1771,13 @@ fn settle_writer_binding_failure<R: AttemptOwner, J: GraphJournal>(
     owner: &R,
     error: &R::Error,
 ) -> Result<LoopStep, GraphError<R::Error, J::Error>> {
+    // A row already settled by its own false condition keeps that disposition.
+    // A binding failure here must never write `failed` over a when-skip and
+    // leave a checkpoint the validator rejects on reload (#4105).
+    if is_when_skipped(&checkpoint.nodes[node_index]) {
+        journal.save(&*checkpoint).map_err(GraphError::Journal)?;
+        return Ok(LoopStep::Break);
+    }
     if defer_launch_contention(
         checkpoint,
         node_index,
@@ -3077,23 +3119,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
 
     let mut checkpoint = match stored {
         Some(checkpoint) => {
-            let mut validation = checkpoint.clone();
-            restore_cancelled_nodes(&mut validation)
+            let validation = checkpoint_validation_view(&checkpoint)
                 .map_err(|(node, invariant)| GraphError::BadCheckpoint { node, invariant })?;
-            // Cancellation retains attempt custody evidence. Validate the
-            // original state without reopening the actual admission fence.
-            for node in &mut validation.nodes {
-                if node
-                    .skip_reason
-                    .as_deref()
-                    .is_some_and(|reason| reason.starts_with("parent "))
-                    && let Some(state) = node.cancelled_from.take()
-                {
-                    node.state = state;
-                    node.skip_reason = None;
-                }
-            }
-            asks::refresh_wake(&mut validation);
             validate_checkpoint(document, &validation, &plan, &plan_digest)?;
             checkpoint
         }

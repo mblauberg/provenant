@@ -166,22 +166,29 @@ pub fn unreadable_graph_explanation(graph_id: &str, _error: &JournalError) -> St
 }
 
 /// A tick notice already recorded in the dedicated unreadable marker. The
-/// reason is the typed `JournalError` code that made the checkpoint unreadable.
+/// reason is the typed code that made the checkpoint unreadable; the detail is
+/// the invariant a decode-valid but semantically invalid record violated.
 #[derive(Debug, Error)]
-#[error("{}", unreadable_graph_guidance_with_reason(.0, .1))]
-pub struct UnreadableCheckpointNotice(pub String, pub &'static str);
+#[error("{}", unreadable_graph_guidance_with_reason(.0, .1, .2))]
+pub struct UnreadableCheckpointNotice(pub String, pub &'static str, pub String);
 
-/// Guidance for a graph whose checkpoint cannot be interpreted.
+/// Guidance for a graph whose checkpoint cannot be interpreted or fails
+/// validation. Both conditions are retired by the same named command.
 pub fn unreadable_graph_guidance(graph_id: &str) -> String {
     format!(
-        "Graph {graph_id} state is unreadable. From the project and state directory that own it, run `provenant stop -- {graph_id}` to remove its record from the listing. There is no safe automatic repair. Other graphs and separately listed attempts remain available; inspect active attempts and writer fences separately."
+        "Graph {graph_id} state is unreadable or fails validation. From the project and state directory that own it, run `provenant stop -- {graph_id}` to retire its record from the listing. There is no safe automatic repair. Other graphs and separately listed attempts remain available; inspect active attempts and writer fences separately."
     )
 }
 
 /// Guidance carrying the typed reason recorded in the quarantine marker.
-fn unreadable_graph_guidance_with_reason(graph_id: &str, reason: &str) -> String {
+fn unreadable_graph_guidance_with_reason(graph_id: &str, reason: &str, detail: &str) -> String {
+    let detail = if detail.is_empty() {
+        String::new()
+    } else {
+        format!(" ({detail})")
+    };
     format!(
-        "Graph {graph_id} state is unreadable ({reason}); it is quarantined and will not be retried until its bytes change. From the project and state directory that own it, run `provenant stop -- {graph_id}` to retire its record. There is no safe automatic repair. Other graphs and separately listed attempts remain available; inspect active attempts and writer fences separately."
+        "Graph {graph_id} state is unreadable ({reason}){detail}; it is quarantined and will not be retried until its bytes or plan change. From the project and state directory that own it, run `provenant stop -- {graph_id}` to retire its record. There is no safe automatic repair. Other graphs and separately listed attempts remain available; inspect active attempts and writer fences separately."
     )
 }
 
@@ -1665,9 +1672,10 @@ impl FileJournal {
         .map_err(|error: JournalError| error.for_graph(&error_graph_id))
     }
 
-    /// An unreadable checkpoint is reported once and then skipped by later
-    /// ticks over the same bytes, independently of advance errors. A changed
-    /// record is reported again. Only a genuinely absent record returns `None`.
+    /// An unreadable or semantically invalid checkpoint is reported once and
+    /// then skipped by later ticks over the same bytes and plan, independently
+    /// of advance errors. A changed record or plan is reported again. Only a
+    /// genuinely absent record returns `None`.
     pub fn read_checkpoint_for_tick(
         root: &StateRoot,
         project: ProjectId,
@@ -1694,13 +1702,18 @@ impl FileJournal {
             Err(error) if error.is_not_found() => return Ok(false),
             Err(error) => return Err(error.into()),
         };
-        // A readable checkpoint needs no retirement. Inspect the atomic
-        // snapshot first so an ordinary stop never waits on a live graph writer
-        // before it can persist its independent cancellation request.
-        match load_checkpoint(&directory, graph_id) {
-            Ok(_) => return Ok(false),
+        // A checkpoint that decodes and validates needs no retirement. Inspect
+        // the atomic snapshot first so an ordinary stop never waits on a live
+        // graph writer before it can persist its independent cancellation request.
+        // A decode-valid record that fails validation is just as unloadable and
+        // is retired by the same named command (#4105).
+        let retireable = match load_checkpoint(&directory, graph_id) {
+            Ok(stored) => semantic_validation_error(&stored).is_some(),
             Err(error) if !error.is_unreadable() => return Err(error.into()),
-            Err(_) => {}
+            Err(_) => true,
+        };
+        if !retireable {
+            return Ok(false);
         }
         let lock_name = format!("graph-{graph_id}.lock");
         let _lock = directory.lock(
@@ -1710,25 +1723,26 @@ impl FileJournal {
             cancel,
             clock,
         )?;
-        match load_checkpoint(&directory, graph_id) {
+        let recovered = match load_checkpoint(&directory, graph_id) {
             Err(error) if error.is_unreadable() => {
                 let bytes = read_checkpoint_bytes(&directory, graph_id)
                     .map_err(|error| error.for_graph(graph_id))?;
-                let recovered = bytes.as_deref().and_then(|bytes| {
+                bytes.as_deref().and_then(|bytes| {
                     let bytes = prompt_store::rehydrate(&directory, graph_id, bytes).ok()?;
                     decode_verified_checkpoint(&bytes, graph_id, bytes.len() as u64).ok()
-                });
-                cleanup(recovered.as_ref().map(|stored| &stored.checkpoint))?;
-                directory.unlink(OsStr::new(&format!("graph-{graph_id}.json")))?;
-                directory
-                    .sync()
-                    .map_err(JournalError::DurabilityUnconfirmed)?;
-                let _ = directory.unlink(&unreadable_marker_name(graph_id));
-                Ok(true)
+                })
             }
-            Err(error) => Err(error.for_graph(graph_id).into()),
-            Ok(_) => Ok(false),
-        }
+            Ok(stored) if semantic_validation_error(&stored).is_some() => Some(stored),
+            Ok(_) => return Ok(false),
+            Err(error) => return Err(error.for_graph(graph_id).into()),
+        };
+        cleanup(recovered.as_ref().map(|stored| &stored.checkpoint))?;
+        directory.unlink(OsStr::new(&format!("graph-{graph_id}.json")))?;
+        directory
+            .sync()
+            .map_err(JournalError::DurabilityUnconfirmed)?;
+        let _ = directory.unlink(&unreadable_marker_name(graph_id));
+        Ok(true)
     }
 
     /// Record why an automatic advance failed, or clear the record with
@@ -2218,33 +2232,34 @@ pub(super) fn load_checkpoint(
     .map_err(|error: JournalError| error.for_graph(graph_id))
 }
 
-/// Record an unreadable checkpoint once, keyed by the exact bytes that failed.
-/// Returns true only when this observation should be reported. The marker keeps
-/// the file digest and the typed reason; an identical later read is skipped and
-/// changed bytes are reported again. This is independent of advance errors, so
-/// an operator can always retire the record with `provenant stop -- NAME`.
+/// Record an unreadable or invalid checkpoint once, keyed by the exact bytes
+/// that failed and, when known, by the plan they were validated against. Returns
+/// true only when this observation should be reported. The marker keeps both
+/// digests and the typed reason: an identical later read is skipped, while changed
+/// bytes or a changed plan are reported again. This is independent of advance
+/// errors, so an operator can always retire the record with `provenant stop -- NAME`.
 fn quarantine_unreadable_once(
     directory: &Directory,
     graph_id: &str,
     bytes: &[u8],
     reason: &'static str,
+    plan_digest: Option<&str>,
 ) -> bool {
     let digest = CanonicalV1::file_digest(bytes).to_string();
     let name = unreadable_marker_name(graph_id);
     let mut previous = String::new();
     if let Ok(mut file) = directory.open_read(&name) {
-        let _ = file.by_ref().take(128).read_to_string(&mut previous);
+        let _ = file.by_ref().take(256).read_to_string(&mut previous);
     }
-    // Older markers held only the digest on one line; read that first line so
-    // they keep quarantining the same bytes.
-    let already = previous
-        .lines()
-        .next()
-        .is_some_and(|line| line.trim() == digest);
+    // Older markers held only the digest and reason; a missing plan line means
+    // the same bytes under the previous key, so they keep quarantining them.
+    let mut lines = previous.lines();
+    let already = lines.next().is_some_and(|line| line.trim() == digest)
+        && lines.nth(1).unwrap_or("").trim() == plan_digest.unwrap_or("");
     if already {
         return false;
     }
-    let content = format!("{digest}\n{reason}");
+    let content = format!("{digest}\n{reason}\n{}", plan_digest.unwrap_or(""));
     let _ = directory.atomic_write(
         &name,
         ".graph-unreadable.",
@@ -2254,10 +2269,41 @@ fn quarantine_unreadable_once(
     true
 }
 
+/// A checkpoint can decode cleanly and still contradict its own plan: a writer
+/// binding failure written over a `when` skip is one such record (#4105). Classify
+/// that through the same validation projection an advance uses, so a tick reports
+/// it once under a typed reason instead of re-reporting the advance error forever.
+fn semantic_validation_error(
+    stored: &StoredCheckpoint,
+) -> Option<GraphError<JournalError, JournalError>> {
+    let document = &stored.execution.document;
+    let limits = replay_limits();
+    let expanded = plans::expand(
+        document,
+        &stored.checkpoint.extensions,
+        &stored.checkpoint.expansions,
+        &limits,
+    )
+    .ok()?;
+    let (plan, _) = validate_flat_plan(&expanded, &limits).ok()?;
+    let (base, _) = validate_replay_plan(document, &limits).ok()?;
+    let digest = plan_digest(&base).ok()?.to_string();
+    let view = match checkpoint_validation_view(&stored.checkpoint) {
+        Ok(view) => view,
+        Err((node, invariant)) => {
+            return Some(GraphError::BadCheckpoint { node, invariant });
+        }
+    };
+    match validate_checkpoint::<JournalError, JournalError>(document, &view, &plan, &digest) {
+        Ok(()) => None,
+        Err(error) => Some(error),
+    }
+}
+
 /// Load a checkpoint for a host tick read. Unreadable records are quarantined
-/// once and skipped on later ticks over the same bytes. Only a genuinely absent
-/// record returns `None`; a first sighting of corrupt bytes reports a typed
-/// notice, and a transport or lock error keeps its own cause.
+/// once and skipped on later ticks over the same bytes or plan. Only a genuinely
+/// absent record returns `None`; a first sighting of an invalid record reports a
+/// typed notice, and a transport or lock error keeps its own cause.
 fn load_checkpoint_for_tick(
     root: &StateRoot,
     project: ProjectId,
@@ -2282,13 +2328,24 @@ fn load_checkpoint_for_tick(
     };
     match decode_checkpoint_in(&directory, &bytes, graph_id) {
         Ok(stored) => {
+            if let Some(error) = semantic_validation_error(&stored) {
+                let reason = error.code();
+                let detail = error.to_string();
+                let plan_digest = Some(stored.checkpoint.plan_digest.as_str());
+                if quarantine_unreadable_once(&directory, graph_id, &bytes, reason, plan_digest) {
+                    return Err(
+                        UnreadableCheckpointNotice(graph_id.to_owned(), reason, detail).into(),
+                    );
+                }
+                return Ok(None);
+            }
             let _ = directory.unlink(&unreadable_marker_name(graph_id));
             Ok(Some(stored))
         }
         Err(error) if error.is_unreadable() => {
             let reason = error.root_cause().code();
-            if quarantine_unreadable_once(&directory, graph_id, &bytes, reason) {
-                Err(UnreadableCheckpointNotice(graph_id.to_owned(), reason).into())
+            if quarantine_unreadable_once(&directory, graph_id, &bytes, reason, None) {
+                Err(UnreadableCheckpointNotice(graph_id.to_owned(), reason, String::new()).into())
             } else {
                 Ok(None)
             }

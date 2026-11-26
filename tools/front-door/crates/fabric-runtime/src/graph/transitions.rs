@@ -1005,6 +1005,13 @@ pub(super) fn fail_with(progress: &mut NodeProgress, code: &str, message: String
 }
 
 pub(super) fn writer_binding_failed(progress: &mut NodeProgress, _id: &str, reason: &str) {
+    // A row settled by its own false `when` stays skipped: a binding failure
+    // must not turn it into a failed node with a dangling skip reason, which
+    // would be rejected on reload (#4105). Callers already gate on the skipped
+    // state; this is the last line of defence for any future caller.
+    if is_when_skipped(progress) {
+        return;
+    }
     fail_with(progress, "writer_binding_unavailable", reason.to_owned());
 }
 
