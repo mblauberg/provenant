@@ -10,6 +10,7 @@
 use super::standing::{STANDING_KEY, parse_standing};
 use super::summary::{empty_header, header_end, parse_header};
 use serde_json::{Map, Value};
+use thiserror::Error;
 
 /// A body larger than this is a gap against the template. It is measured
 /// after frontmatter, so a typed standing record never counts as body text.
@@ -28,11 +29,13 @@ pub const TEMPLATE_HEADINGS: [&str; 5] = [
 const INTENT: &str = "## Intent";
 const TITLE: &str = "# Session checkpoint";
 
+#[derive(Debug, Error)]
+#[error("could not serialize checkpoint frontmatter")]
+pub struct TemplateError(#[source] serde_saphyr::SerializeError);
+
 /// The frontmatter a first save gets when neither the input nor the previous
 /// revision carries a typed standing record. Empty lists are explicit: an
 /// omitted `waiting_on_owner` must never read as "nothing waits".
-const EMPTY_STANDING: &str = "---\nprovenant_standing:\n  schema_version: 1\n  goal: \"\"\n  grants: []\n  obligations: []\n  waiting_on_owner: []\n---\n";
-
 fn body(markdown: &str) -> &str {
     let end = header_end(markdown).ok().flatten().unwrap_or(0);
     &markdown[end..]
@@ -115,19 +118,22 @@ fn frontmatter_values(header: Option<&str>) -> Option<Map<String, Value>> {
 }
 
 fn empty_standing() -> Value {
-    let end = header_end(EMPTY_STANDING)
-        .expect("static standing frontmatter is valid")
-        .expect("static standing frontmatter has a closing delimiter");
-    parse_header(EMPTY_STANDING, end)
-        .expect("static standing frontmatter is valid")
-        .remove(STANDING_KEY)
-        .expect("static standing frontmatter contains its record")
+    serde_json::json!({
+        "schema_version": 1,
+        "goal": "",
+        "grants": [],
+        "obligations": [],
+        "waiting_on_owner": [],
+    })
 }
 
 /// Merge root keys from both headers, with the input taking precedence. The
 /// typed standing record is selected separately so an invalid input record
 /// cannot discard a valid record from the previous checkpoint.
-fn merged_frontmatter(input: Option<&str>, previous: Option<&str>) -> String {
+fn merged_frontmatter(
+    input: Option<&str>,
+    previous: Option<&str>,
+) -> Result<String, TemplateError> {
     let input_values = frontmatter_values(input);
     let previous_values = frontmatter_values(previous);
     let standing = input
@@ -146,9 +152,8 @@ fn merged_frontmatter(input: Option<&str>, previous: Option<&str>) -> String {
     }
     values.insert(STANDING_KEY.to_owned(), standing);
 
-    let yaml = serde_json::to_string_pretty(&values)
-        .expect("frontmatter values are serializable JSON values");
-    format!("---\n{yaml}\n---\n")
+    let yaml = serde_saphyr::to_string(&values).map_err(TemplateError)?;
+    Ok(format!("---\n{yaml}---\n"))
 }
 
 fn push_section(out: &mut String, text: &str) {
@@ -165,18 +170,16 @@ fn push_section(out: &mut String, text: &str) {
 /// typed standing record carries forward unless the input supplies a valid one.
 /// Unknown sections are appended so a scaffold never drops owner content.
 /// A first save has no previous revision and gets the empty scaffold.
-pub fn scaffold_checkpoint(previous: Option<&str>, input: &str) -> String {
+pub fn scaffold_checkpoint(previous: Option<&str>, input: &str) -> Result<String, TemplateError> {
     let (previous_frontmatter, previous_sections) =
         previous.map(split).unwrap_or((None, Vec::new()));
     let (input_frontmatter, input_sections) = split(input);
     let mut out = String::new();
-    push_section(
-        &mut out,
-        &merged_frontmatter(
-            input_frontmatter.as_deref(),
-            previous_frontmatter.as_deref(),
-        ),
-    );
+    let frontmatter = merged_frontmatter(
+        input_frontmatter.as_deref(),
+        previous_frontmatter.as_deref(),
+    )?;
+    push_section(&mut out, &frontmatter);
     if let Some(title) = input_sections
         .iter()
         .find(|(name, _)| name.starts_with("# ") && !name.starts_with("## "))
@@ -211,7 +214,7 @@ pub fn scaffold_checkpoint(previous: Option<&str>, input: &str) -> String {
         }
         push_section(&mut out, text);
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -219,6 +222,7 @@ mod tests {
     use super::super::summary::parse_summary;
     use super::*;
 
+    const EMPTY_STANDING: &str = "---\nprovenant_standing:\n  schema_version: 1\n  goal: \"\"\n  grants: []\n  obligations: []\n  waiting_on_owner: []\n---\n";
     const REV5: &str = "# Session checkpoint\n\n## Goal\nLand the review fixes.\n\n## Plan\nResume on the fleet.\n";
 
     #[test]
@@ -258,8 +262,15 @@ mod tests {
 
     #[test]
     fn first_save_scaffolds_every_template_section() {
-        let scaffold = scaffold_checkpoint(None, "## Goal\nLand #4029.\n");
-        assert!(scaffold.starts_with(EMPTY_STANDING));
+        let scaffold = scaffold_checkpoint(None, "## Goal\nLand #4029.\n").unwrap();
+        assert!(
+            scaffold.starts_with("---\nprovenant_standing:\n"),
+            "{scaffold}"
+        );
+        assert!(
+            matches!(parse_standing(&scaffold), Ok(Some(_))),
+            "{scaffold}"
+        );
         for heading in TEMPLATE_HEADINGS {
             assert!(scaffold.contains(heading), "{scaffold}");
         }
@@ -273,7 +284,8 @@ mod tests {
         let scaffold = scaffold_checkpoint(
             Some(previous),
             "## Goal\nNew goal.\n\n## Direction\nNow named.\n",
-        );
+        )
+        .unwrap();
         assert!(scaffold.contains("Land lane PRs after green CI"));
         assert!(scaffold.contains("New goal."));
         assert!(!scaffold.contains("Old goal."));
@@ -287,7 +299,7 @@ mod tests {
     #[test]
     fn scaffold_keeps_other_frontmatter_keys_when_it_adds_a_standing_record() {
         let input = "---\nprovenant_summary:\n  schema_version: 1\n  now: \"Keep me\"\n---\n# Title\n\n## Intent\nA because B.\n";
-        let scaffold = scaffold_checkpoint(None, input);
+        let scaffold = scaffold_checkpoint(None, input).unwrap();
         assert!(scaffold.contains("Keep me"), "{scaffold}");
         assert!(template_gaps(&scaffold).is_empty(), "{scaffold}");
     }
@@ -297,7 +309,7 @@ mod tests {
         let previous = "---\nprovenant_summary:\n  schema_version: 1\n  revision: 7\n  updated_at: \"2026-10-28T03:00:00Z\"\n  now: \"Keep this checkpoint summary\"\n  next: \"Continue the work\"\n  needs_you: []\n  risk: \"None\"\ncustom: previous\n---\n# Session checkpoint\n";
         let input = "---\nprovenant_standing:\n  schema_version: 1\n  goal: \"Save the checkpoint\"\n  grants: []\n  obligations: []\n  waiting_on_owner: []\ncustom: input\n---\n# Session checkpoint\n\n## Intent\nKeep this intent.\n";
 
-        let scaffold = scaffold_checkpoint(Some(previous), input);
+        let scaffold = scaffold_checkpoint(Some(previous), input).unwrap();
 
         let summary = parse_summary(&scaffold).unwrap().unwrap();
         assert_eq!(summary.now, "Keep this checkpoint summary");
@@ -308,7 +320,8 @@ mod tests {
 
     #[test]
     fn scaffold_accepts_stdin_shaped_input_without_losing_its_sections() {
-        let scaffold = scaffold_checkpoint(None, "# Other title\n\n## Intent\nA because B.\n");
+        let scaffold =
+            scaffold_checkpoint(None, "# Other title\n\n## Intent\nA because B.\n").unwrap();
         assert!(scaffold.contains("# Other title"));
         assert!(scaffold.contains("A because B."));
         assert!(template_gaps(&scaffold).is_empty());

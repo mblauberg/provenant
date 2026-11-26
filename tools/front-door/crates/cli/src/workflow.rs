@@ -579,6 +579,7 @@ fn execute(
                 let previous = store.read()?.map(|checkpoint| checkpoint.markdown);
                 let input = std::str::from_utf8(&input).map_err(|e| invalid(e.to_string()))?;
                 provenant_workflow::session::scaffold_checkpoint(previous.as_deref(), input)
+                    .map_err(|error| invalid(error.to_string()))?
                     .into_bytes()
             } else {
                 input
