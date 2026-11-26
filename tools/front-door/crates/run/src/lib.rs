@@ -11,8 +11,6 @@ pub use completion::{
     LaneLocation, PreambleExtras, handoff_progress_guidance, lane_preamble, lane_preamble_with,
     route_label,
 };
-mod verification;
-pub use verification::{VerificationResolution, conflict_cause};
 mod controls;
 pub use controls::release_progress;
 mod correlation;

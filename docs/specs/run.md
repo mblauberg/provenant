@@ -31,14 +31,12 @@ the read-only Cargo home and `PROVENANT_CARGO_SOURCE_WRITES`. `credentials` and 
 are always denied read and write, including in relocated homes; host `config` files are read-only
 data.
 
-## Lanes do not build
+## Lane verification
 
-Lanes format and coordinate only. The chair runs one warm host-owned integrated
-check per epic through the build port, capped by `[admission.build].slots`, and
-CI runs clippy and the tests. `lanes.verification` sets the format-only writer
-preamble. Lane Cargo output is bounded by `lanes.cargo_cache_max` and collected
-after `gc.cargo_target_idle`; `domains.fabric.lanes.cargo_source_writes`
-controls writes to the shared source caches.
+Writer lanes run the commands and scopes declared in the project's `verify.lane`
+port. With no declaration they run the repository formatter and declared
+pre-commit hooks. Git hooks are part of commit and push. Build admission and
+shared caches remain subject to host policy.
 
 ## Publication order
 
@@ -113,15 +111,14 @@ and never fails the tick.
 | OS purges Caches | slot recreated with its record |
 | ledger unwritable | row goes to the attempt scratch ledger and the report counts it missing |
 
-- Why: the chair and landing share one strategy, one outcome row and one host cap; lanes do not build.
+- Why: the chair and landing share one strategy, one outcome row and one host cap.
 - Owner: `crates/run/src/build/`, `src/admit.rs`, `src/verify.rs`, `src/pr/landing/gate.rs`
 
 ## Verification and admission
 
-A writer preamble describes its verification scope (`lanes.verification`,
-default `targeted`) but the lane performs no build; the summary names what the
-chair's integrated check and CI will run. A brief line `Verification scope:
-check|targeted|full` overrides the paragraph and names source `brief`.
+A writer preamble renders the project's `verify.lane` entries with their tier,
+argv, scope and source. Invalid entries warn and are omitted; without a usable
+entry the formatter and declared pre-commit hooks are the default.
 
 Admission attribution has host scope and serves the chair's host-owned warm
 check. Before confinement each lane registers under

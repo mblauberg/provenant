@@ -59,7 +59,7 @@ busy and unreleased attempts are never touched, and collection preserves durable
 results, handoffs, logs and process records. After a merge, cleanup targets only
 the merged branch's worktree and attempt scratch.
 
-Lanes do not build. Cargo targets here belong to the chair's warm check, CI or
+Cargo targets here may serve lane checks, the chair's warm check, CI or
 a person's worktree; the host never allocates one per lane. Discard archives
 exclude ignored build output (`target/` and
 any `CACHEDIR.TAG` directory) and expire after `gc.discard_archive_retention`.

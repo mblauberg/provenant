@@ -8,12 +8,10 @@ The required check, suite tiers and green-evidence rules are in the
 
 ## Build tiers
 
-There is one build model with three tiers. Lanes run formatting only and never
-compile, seed or admit a build. The chair merges slices into one integration
-worktree and runs one warm, host-owned integrated check per epic. CI runs
-clippy and the tests on the integration pull request. `.worktrees/.cargo/config.toml`
-is the single mechanism that disables lane cargo; there is no lane build
-strategy, port row or admission knob to configure.
+Projects declare lane checks through `verify.lane`. The chair runs a warm,
+host-owned integrated check per epic and CI runs the full checks on the
+integration pull request. Local project policy may further constrain lane
+builds, including through `.worktrees/.cargo/config.toml`.
 
 ## Rust front-door tests
 

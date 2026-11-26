@@ -198,13 +198,11 @@ replayable authority.
 
 ### Build context
 
-Lanes have no Cargo shims and receive no host build context: they never
-compile, seed or admit a build. The chair's host-owned warm check and
-`provenant verify` tiers use the one `slots` strategy, bounded by
-`[admission.build].slots`; layered `build.*` ports are in
-[state](state.md#configuration). `.worktrees/.cargo/config.toml` is the single
-mechanism that disables lane cargo.
-- Why: one build model keeps lane custody independent of host compilation.
+Lane verification follows the project's `verify.lane` declarations and local
+policy. The chair's host-owned warm check and `provenant verify` tiers use the
+`slots` strategy, bounded by `[admission.build].slots`; layered `build.*` ports
+are in [state](state.md#configuration).
+- Why: one host build model keeps lane custody independent of host compilation.
 - Owner: `src/admit.rs`; `src/verify.rs`; `crates/run/src/build/`
 
 ## Permission policy

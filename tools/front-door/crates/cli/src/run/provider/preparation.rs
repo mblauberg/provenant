@@ -4673,6 +4673,7 @@ pub(super) fn prepare_candidates_inner(
         };
         if let Ok(ports) = provenant_config::PortTable::read_for(project_root, state_root) {
             brief.set_static_checks_from_ports(&ports, role);
+            brief.set_lane_checks_from_ports(&ports, role);
         }
         let extras = run::PreambleExtras {
             route: Some(provider.clone()),
@@ -4682,10 +4683,6 @@ pub(super) fn prepare_candidates_inner(
                 base: writer.source_commit().to_string(),
                 primary_checkout: writer.project_root().map(ToOwned::to_owned),
             }),
-            verification: Some(run::VerificationResolution::resolve(
-                &task.profile,
-                prompt_text,
-            )),
             build_cap: Some(run::BuildCap::from(&build_class)),
             brief: Some(brief),
             role,

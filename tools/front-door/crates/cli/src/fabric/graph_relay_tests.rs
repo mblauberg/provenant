@@ -940,6 +940,21 @@ mod provisioning_tests {
             &roots,
             provenant_config::ProjectLocation::new(project.join(".git"))?,
         )?;
+        std::fs::create_dir_all(project.join(".provenant"))?;
+        let prepare_runs = root.path().join("prepare-runs");
+        let quoted_prepare_runs = format!(
+            "'{}'",
+            prepare_runs.to_string_lossy().replace('\'', "'\\''")
+        );
+        let ports = serde_json::json!({
+            "build": {
+                "prepare": [["/bin/sh", "-c", format!("printf 'run\\n' >> {quoted_prepare_runs}")]]
+            }
+        });
+        std::fs::write(
+            project.join(".provenant/ports.json"),
+            serde_json::to_vec(&ports)?,
+        )?;
         let context = Context::open(roots, &home, &project)?;
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(provenant_os::clock::SystemClock.mono_now(), 55)?;
@@ -953,6 +968,15 @@ mod provisioning_tests {
             budget,
             &cancel,
         )?;
+        provision_writer(
+            &context,
+            ".worktrees/topic-fix",
+            "topic/fix",
+            &source,
+            budget,
+            &cancel,
+        )?;
+        assert_eq!(std::fs::read_to_string(&prepare_runs)?, "run\n");
         let branch = provenant_os::fixture::git_command()
             .current_dir(project.join(".worktrees/topic-fix"))
             .args(["rev-parse", "--abbrev-ref", "HEAD"])
@@ -980,6 +1004,7 @@ mod provisioning_tests {
             WaitBudget::cli(clock.mono_now(), 1)?,
             &cancel,
         )?;
+        assert_eq!(std::fs::read_to_string(&prepare_runs)?, "run\nrun\n");
         let output = provenant_os::fixture::git_command()
             .current_dir(project.join(path))
             .args(["rev-parse", "HEAD"])

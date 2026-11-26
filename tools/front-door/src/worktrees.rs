@@ -461,6 +461,33 @@ fn execute(
                     let info = worktrees::create(context, WorktreeCreate { branch, base }, cancel)?;
                     let verified = provenant_confinement::verify_worktree(context.repo, &info.path)
                         .map_err(WorktreeError::from)?;
+                    match provenant_config::PortTable::read_for(
+                        Some(project),
+                        roots.state.as_path(),
+                    ) {
+                        Ok(ports) => {
+                            let env = provenant_run::build::prepare::lane_environment(home);
+                            if let Err(error) = provenant_run::build::prepare::run_if_changed(
+                                verified.repo().private_dir(),
+                                &ports.build.prepare,
+                                verified.path(),
+                                &env,
+                                WaitBudget::up_to(
+                                    context.clock.mono_now(),
+                                    provenant_core::DurationMicros::from_micros(30_000_000),
+                                ),
+                                cancel,
+                                context.clock,
+                            ) {
+                                provenant_fabric_runtime::custody::warning(format_args!(
+                                    "lane worktree preparation warning (build.prepare): {error}; worktree creation continues"
+                                ));
+                            }
+                        }
+                        Err(error) => provenant_fabric_runtime::custody::warning(format_args!(
+                            "lane worktree preparation warning (build.prepare): cannot read project declarations: {error}; worktree creation continues"
+                        )),
+                    }
                     let mut subjects = vec![worktrees::acquire_worktree_subject(verified.repo())?];
                     if let Some(branch) = info.branch.as_deref().and_then(|reference| {
                         provenant_confinement::repo::GitRefName::new(reference).ok()

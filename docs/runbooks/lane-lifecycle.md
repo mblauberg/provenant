@@ -63,15 +63,12 @@ refs intact. Failed and cancelled lanes keep their worktrees.
 - Missing GitHub tools, a failed login lookup or an access restriction warn;
   ordinary lane work continues without publishing credentials.
 
-## Lanes do not build
+## Lane verification
 
-Lanes run formatting and coordination only. They never provision, seed or
-admit a compiler job; the chair runs one warm integrated check per epic and CI
-runs clippy and the tests. `lanes.verification` sets the format-only writer
-preamble, and lane Cargo output is bounded by `lanes.cargo_cache_max` and
-collected after `gc.cargo_target_idle`. Native npm, pnpm and Corepack launches
-keep host cache selectors when a provider changes HOME or XDG state; explicit
-settings win. Corepack keeps its downloads shared through `COREPACK_HOME`.
+Writer lanes run the commands and scopes declared in the project's `verify.lane`
+port. With no declaration they run the repository formatter and declared
+pre-commit hooks. Git hooks are part of commit and push. Build admission and
+shared caches remain subject to host policy.
 
 ## Recovery
 
