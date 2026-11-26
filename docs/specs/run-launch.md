@@ -206,8 +206,15 @@ Standing lane rules come from `lanes.brief_preamble`: a file path set at the hos
 file whose first line is a `<!-- provenant-roles: ... -->` header applies only to the roles it
 names: writer, review or read-only. A missing or unreadable file warns with its layer, and the
 launch proceeds without it. A writer's preamble also lists the project's declared no-build
-static checks from the port table under `Static checks:`, to run before pushing. Readers do
-not get that list.
+static checks from the port table under `Static checks:`, to run before pushing. A project
+declares them as `verify.static_checks` entries in `.provenant/ports.json` (or the host port
+table): each has an `argv`, a repository-relative `cwd` and a `timeout_seconds` cap. An absent
+or empty list adds no text and invents no tier for other stacks; an invalid entry warns and is
+dropped rather than refusing the launch. The list is labelled with the layer and key that
+declared it, and that same sourced list is recorded as `static_checks` on the launch receipt
+beside `ci_scope` and `pr_policy`. Config merging replaces arrays wholesale, so one source
+covers the list rather than each entry. A failure is reported in the handoff and does not
+refuse the push; CI still gates the merge. Readers get neither the list nor its receipt.
 - Why: standing rules belong in one owned file per layer, not repeated in every brief, and a
   writer should run the cheap checks the project declares before CI does.
 

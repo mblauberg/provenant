@@ -5888,6 +5888,12 @@ pub(super) fn prepare_candidates_inner(
                 key: "lanes.ci_scope".into(),
                 extra: Default::default(),
             });
+            // The same sourced list the writer's preamble names goes on the
+            // launch receipt. An absent or empty tier records nothing.
+            provider.static_checks = extras
+                .brief
+                .as_ref()
+                .and_then(|brief| brief.static_checks_receipt());
         }
         gh_selection.finalise_environment(&mut spec.env);
         if adapter_spec.is_some_and(|spec| {

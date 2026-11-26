@@ -71,7 +71,8 @@ A project may declare cheap `verify.static_checks` entries in its port table
 `timeout_seconds` cap. The writer preamble names them with their source and
 tells the writer to run them before pushing. They need no build. A failure is
 reported in the handoff, does not refuse the push, and CI still gates the
-merge. With no declaration, no static-check text is added.
+merge. The same sourced list is recorded as `static_checks` on the launch
+receipt; with no declaration there is no preamble text and no receipt field.
 
 ## Wait and recover
 

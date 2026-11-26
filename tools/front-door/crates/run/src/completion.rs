@@ -709,6 +709,39 @@ impl BriefPreamble {
             self.static_checks_source = Some(source);
         }
     }
+
+    /// The declared checks and their single source, for the launch receipt.
+    /// An absent or empty tier yields `None`, so it adds neither preamble text
+    /// nor a receipt field. The config merge replaces arrays wholesale, so one
+    /// source covers the whole list (Spec: docs/specs/run-launch.md#layered-brief-preamble).
+    pub fn static_checks_receipt(&self) -> Option<provenant_records::run::StaticChecksReceipt> {
+        if self.static_checks.is_empty() {
+            return None;
+        }
+        let default_origin = format!("{}#verify.static_checks", provenant_config::PORTS_CONFIG);
+        let (layer, key) = match &self.static_checks_source {
+            Some(source) => (
+                source.layer,
+                source.origin.clone().unwrap_or(default_origin),
+            ),
+            None => (Layer::Project, default_origin),
+        };
+        Some(provenant_records::run::StaticChecksReceipt {
+            checks: self
+                .static_checks
+                .iter()
+                .map(|check| provenant_records::run::StaticCheckReceipt {
+                    argv: check.argv.clone(),
+                    cwd: check.cwd.display().to_string(),
+                    timeout_seconds: check.timeout_seconds,
+                    extra: Default::default(),
+                })
+                .collect(),
+            source: layer,
+            key,
+            extra: Default::default(),
+        })
+    }
 }
 
 /// Optional preamble overrides. Default uses the targeted verification paragraph.
@@ -1208,6 +1241,88 @@ mod tests {
             writer.contains("source: project; .provenant/ports.json#verify.static_checks"),
             "{writer}"
         );
+    }
+
+    /// An absent or empty `verify.static_checks` declaration adds no preamble
+    /// text and no receipt: no tier is invented for stacks that declare none.
+    /// Spec: docs/specs/run-launch.md#layered-brief-preamble
+    #[test]
+    fn no_declared_static_checks_add_no_preamble_text_or_receipt() {
+        let state = tempfile::tempdir().unwrap();
+        for declaration in [None, Some("{\"verify\":{\"static_checks\":[]}}")] {
+            let project = tempfile::tempdir().unwrap();
+            if let Some(text) = declaration {
+                std::fs::create_dir_all(project.path().join(".provenant")).unwrap();
+                std::fs::write(project.path().join(".provenant/ports.json"), text).unwrap();
+            }
+            let ports = provenant_config::PortTable::read_for(Some(project.path()), state.path())
+                .expect("a project with no static checks is valid");
+            assert!(ports.verify.static_checks.is_empty());
+
+            let mut brief = BriefPreamble::default();
+            let ((), warnings) = provenant_records::warning::capture(|| {
+                brief.set_static_checks_from_ports(&ports, BriefRole::Writer);
+            });
+            assert!(warnings.is_empty(), "{warnings:?}");
+            assert!(brief.static_checks.is_empty(), "{brief:?}");
+            assert!(brief.static_checks_source.is_none(), "{brief:?}");
+            assert!(brief.static_checks_receipt().is_none(), "{brief:?}");
+
+            let writer = lane_preamble_with(
+                "Policy",
+                &Default::default(),
+                Some(crate::ResolvedCiScope::resolve(&Default::default())),
+                None,
+                &PreambleExtras {
+                    brief: Some(brief),
+                    role: BriefRole::Writer,
+                    ..Default::default()
+                },
+            );
+            assert!(!writer.contains("Static checks:"), "{writer}");
+        }
+    }
+
+    /// The declared tier reaches the launch receipt as one sourced list, beside
+    /// `ci_scope` and `pr_policy`. Invalid entries are dropped from both the
+    /// preamble and the receipt; one source covers the list because config
+    /// merging replaces arrays wholesale.
+    /// Spec: docs/specs/run-launch.md#layered-brief-preamble
+    #[test]
+    fn declared_static_checks_reach_the_launch_receipt_with_source() {
+        let state = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join(".provenant")).unwrap();
+        std::fs::write(
+            project.path().join(".provenant/ports.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "verify": {
+                    "static_checks": [
+                        {"argv": ["scripts/check-extra-fields"], "cwd": ".", "timeout_seconds": 30},
+                        {"argv": [], "cwd": ".", "timeout_seconds": 30},
+                    ],
+                },
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let ports = provenant_config::PortTable::read_for(Some(project.path()), state.path())
+            .expect("an invalid static check is not a table refusal");
+
+        let mut brief = BriefPreamble::default();
+        let ((), warnings) = provenant_records::warning::capture(|| {
+            brief.set_static_checks_from_ports(&ports, BriefRole::Writer);
+        });
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        let receipt = brief
+            .static_checks_receipt()
+            .expect("a declared tier has a receipt");
+        assert_eq!(receipt.checks.len(), 1, "{receipt:?}");
+        assert_eq!(receipt.checks[0].argv, ["scripts/check-extra-fields"]);
+        assert_eq!(receipt.checks[0].cwd, ".");
+        assert_eq!(receipt.checks[0].timeout_seconds, 30);
+        assert_eq!(receipt.source, Layer::Project);
+        assert_eq!(receipt.key, ".provenant/ports.json#verify.static_checks");
     }
 
     /// A review or read-only lane never renders the `Static checks:` paragraph,
