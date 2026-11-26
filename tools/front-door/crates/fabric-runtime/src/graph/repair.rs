@@ -293,6 +293,29 @@ pub(super) struct SplitAdjudication {
     pub(super) revision: u64,
 }
 
+/// A panel can synthesise its verdict after a nested lens group split.
+fn panel_has_split(parent: &NodeProgress, checkpoint: &GraphCheckpoint) -> bool {
+    let mut pending = vec![parent];
+    while let Some(node) = pending.pop() {
+        if node.state == NodeState::Succeeded
+            && node.outputs.as_ref().is_some_and(|outputs| {
+                outputs
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.starts_with("review_split_verdict:"))
+            })
+        {
+            return true;
+        }
+        pending.extend(
+            node.children
+                .iter()
+                .filter_map(|id| checkpoint.nodes.iter().find(|child| child.id == *id)),
+        );
+    }
+    false
+}
+
 /// A gate only adjudicates split panels whose verdicts it consumes.
 pub(super) fn split_adjudication(
     gate: &PlannedNode,
@@ -309,14 +332,7 @@ pub(super) fn split_adjudication(
         let Some(parent) = checkpoint.nodes.iter().find(|node| node.id == id) else {
             continue;
         };
-        if parent.state != NodeState::Succeeded
-            || !parent.outputs.as_ref().is_some_and(|outputs| {
-                outputs
-                    .warnings
-                    .iter()
-                    .any(|warning| warning.starts_with("review_split_verdict:"))
-            })
-        {
+        if parent.state != NodeState::Succeeded || !panel_has_split(parent, checkpoint) {
             continue;
         }
         let head = split_panel_head(&parent.id, checkpoint)?;

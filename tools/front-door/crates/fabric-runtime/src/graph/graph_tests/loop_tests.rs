@@ -413,9 +413,11 @@ fn loop_body_preserves_outer_node_sources_and_entry_dependencies() {
         .find(|node| node.id == "cycle--r1--settled-reader")
         .unwrap();
     assert!(settled_reader.after_settled.contains(&"writer".to_owned()));
-    assert!(!settled_reader
-        .after_settled
-        .contains(&"cycle--r1--writer".to_owned()));
+    assert!(
+        !settled_reader
+            .after_settled
+            .contains(&"cycle--r1--writer".to_owned())
+    );
     assert!(validate_flat_plan(&expanded, &Default::default()).is_ok());
 }
 
@@ -3842,7 +3844,11 @@ fn failed_replanned_panel_repairs_its_findings_within_cycle_limit() {
         );
         let new_finding = initial
             .replace("F1", "F2")
-            .replace("correctness", "security");
+            .replace("correctness", "security")
+            .replace(
+                "\"summary\":\"constraint\"",
+                "\"class\":\"security invariant\",\"summary\":\"constraint\"",
+            );
         let checked_new_finding = new_finding.replace(
             "\"status\":\"open\"",
             "\"status\":\"open\",\"disposition\":\"accepted\",\"reason\":\"Reproduced on the repaired head\"",
@@ -3897,12 +3903,18 @@ fn failed_replanned_panel_repairs_its_findings_within_cycle_limit() {
             .find(|node| node.id == "repair--r1--accepted")
             .unwrap();
         assert_eq!(first_gate.state, NodeState::Failed);
-        let adjudication = run
+        let adjudicators: Vec<_> = run
             .checkpoint
             .nodes
             .iter()
-            .find(|node| node.id.ends_with("--adjudicate"))
-            .expect("split panel adds one adjudicator");
+            .filter(|node| node.id.ends_with("--adjudicate"))
+            .collect();
+        assert_eq!(
+            adjudicators.len(),
+            1,
+            "nested lens split adds one adjudicator"
+        );
+        let adjudication = adjudicators[0];
         assert_eq!(adjudication.state, NodeState::Succeeded);
         assert_eq!(
             adjudication
@@ -4431,7 +4443,11 @@ fn compiled_repair_rechecks_new_panel_lens_after_the_next_fix() {
     let initial = repair_finding(false);
     let security = initial
         .replace("F1", "F2")
-        .replace("correctness", "security");
+        .replace("correctness", "security")
+        .replace(
+            "\"summary\":\"constraint\"",
+            "\"class\":\"security invariant\",\"summary\":\"constraint\"",
+        );
     let checked_security = security.replace(
         "\"status\":\"open\"",
         "\"status\":\"open\",\"disposition\":\"accepted\",\"reason\":\"Reproduced on the repaired head\"",
