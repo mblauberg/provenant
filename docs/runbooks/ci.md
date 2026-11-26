@@ -101,7 +101,8 @@ Linux re-run evidence and stay actionable until a maintainer confirms them.
 Fixtures wait on events or pass their deadline to
 `provenant-test-support::wait_until`/`wait_step`; do not add a `thread::sleep`,
 `park_timeout` or fixed `Duration` wait to a test. `workspace_policy` warns on
-those waits and refuses them under `PROVENANT_STRICT_TEST_WAITS=1`.
+those waits, including fixed durations passed through local variables to timeout
+primitives, and refuses them under `PROVENANT_STRICT_TEST_WAITS=1`.
 
 ## Tool downloads
 

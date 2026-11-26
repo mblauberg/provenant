@@ -1,5 +1,6 @@
 //! Fast manifest and source policy checks. No Cargo subprocess required.
 use std::{
+    collections::HashMap,
     error::Error,
     fs,
     path::{Path, PathBuf},
@@ -540,7 +541,77 @@ fn fixed_wait_violations(source: &str, test_file: bool) -> Vec<String> {
                 })
             };
             let mut violations = Vec::new();
+            // Track local bindings by lexical block, including aliases and reassignment.
+            // A shadowing binding replaces the outer value until its block ends.
+            let mut bindings: Vec<HashMap<&str, bool>> = vec![HashMap::new()];
+            let is_fixed = |expression: &[&str], bindings: &[HashMap<&str, bool>]| {
+                expression.windows(3).any(|window| {
+                    window[0] == "Duration"
+                        && window[1] == "::"
+                        && matches!(
+                            window[2],
+                            "from_secs" | "from_millis" | "from_micros" | "from_nanos"
+                        )
+                }) || expression.iter().any(|name| {
+                    bindings
+                        .iter()
+                        .rev()
+                        .find_map(|scope| scope.get(name))
+                        .copied()
+                        .unwrap_or(false)
+                })
+            };
             for (index, token) in tokens.iter().enumerate() {
+                match *token {
+                    "{" => bindings.push(HashMap::new()),
+                    "}" if bindings.len() > 1 => {
+                        bindings.pop();
+                    }
+                    _ => {}
+                }
+                let declaration = *token == "let";
+                let name_index = index + 1 + usize::from(tokens.get(index + 1) == Some(&"mut"));
+                let assignment = !declaration
+                    && tokens.get(index + 1) == Some(&"=")
+                    && (index == 0 || matches!(tokens[index - 1], ";" | "{" | "}"));
+                if declaration || assignment {
+                    let name_index = if declaration { name_index } else { index };
+                    if let Some(name) = tokens.get(name_index).copied() {
+                        let end = (name_index + 1..tokens.len())
+                            .find(|position| matches!(tokens[*position], ";" | "{" | "}"))
+                            .unwrap_or(tokens.len());
+                        if let Some(equal) =
+                            (name_index + 1..end).find(|position| tokens[*position] == "=")
+                        {
+                            let fixed = is_fixed(&tokens[equal + 1..end], &bindings);
+                            if declaration {
+                                bindings.last_mut().expect("root scope").insert(name, fixed);
+                            } else if let Some(scope) = bindings
+                                .iter_mut()
+                                .rev()
+                                .find(|scope| scope.contains_key(name))
+                            {
+                                scope.insert(name, fixed);
+                            }
+                        }
+                    }
+                }
+                if matches!(*token, "recv_timeout" | "wait_timeout")
+                    && tokens.get(index + 1) == Some(&"(")
+                {
+                    let mut depth = 0usize;
+                    let end = (index + 1..tokens.len()).find(|position| {
+                        match tokens[*position] {
+                            "(" => depth += 1,
+                            ")" => depth = depth.saturating_sub(1),
+                            _ => {}
+                        }
+                        depth == 0
+                    });
+                    if end.is_some_and(|end| is_fixed(&tokens[index + 2..end], &bindings)) {
+                        violations.push(format!("{token}, fixed duration wait in a test"));
+                    }
+                }
                 if matches!(*token, "sleep" | "park_timeout") && tokens.get(index + 1) == Some(&"(")
                 {
                     violations.push(format!("{token}, fixed wait in a test"));
@@ -609,6 +680,45 @@ fn fixed_wait_rule_distinguishes_explicit_boundaries_from_test_waits() {
 }
 
 #[test]
+fn fixed_duration_bindings_to_timeouts_warn_and_refuse_in_strict_mode() {
+    let split = r#"
+        #[test]
+        fn flaky() {
+            let timeout = Duration::from_millis(50);
+            receiver.recv_timeout(timeout);
+        }
+    "#;
+    let found = fixed_wait_violations(split, false);
+    assert!(!found.is_empty(), "split fixed duration must be reported");
+    assert!(!fixed_waits_refused(&found, false));
+    assert!(fixed_waits_refused(&found, true));
+    let aliases_and_shadowing = r#"
+        #[test]
+        fn waits() {
+            let mut timeout = deadline;
+            timeout = Duration::from_secs(1);
+            let alias = timeout;
+            { let alias = deadline; receiver.recv_timeout(alias); }
+            receiver.recv_timeout(alias);
+        }
+    "#;
+    assert!(!fixed_wait_violations(aliases_and_shadowing, false).is_empty());
+    let shadowed = r#"
+        #[test]
+        fn bounded() {
+            let timeout = Duration::from_secs(1);
+            { let timeout = deadline; receiver.recv_timeout(timeout); }
+            wait_for("ready", timeout, observe, reached);
+        }
+    "#;
+    assert!(fixed_wait_violations(shadowed, false).is_empty());
+}
+
+fn fixed_waits_refused(violations: &[String], strict: bool) -> bool {
+    strict && !violations.is_empty()
+}
+
+#[test]
 #[allow(
     clippy::print_stderr,
     reason = "warn-first policy reports fixed waits on stderr"
@@ -639,7 +749,7 @@ fn test_waits_warn_before_refusal() -> Result<(), Box<dyn Error>> {
         }
     }
     assert!(
-        violations.is_empty() || !strict,
+        !fixed_waits_refused(&violations, strict),
         "fixed waits in tests under PROVENANT_STRICT_TEST_WAITS=1:\n{}",
         violations.join("\n")
     );

@@ -130,7 +130,8 @@ disabling a suite.
 Fixtures wait on an event or pass the deadline they already own to
 `provenant-test-support::wait_until`; they never name a fixed sleep as a
 synchronisation primitive. `workspace_policy` warns on fixed waits in test
-scopes and refuses them when `PROVENANT_STRICT_TEST_WAITS=1` is set, so the
+scopes, including fixed durations assigned to local variables and passed to timeout
+primitives, and refuses them when `PROVENANT_STRICT_TEST_WAITS=1` is set, so the
 migration can be adopted without breaking existing fixtures. The supervisor
 custody group uses the shared `wait_step` boundary and names no fixed sleep.
 
