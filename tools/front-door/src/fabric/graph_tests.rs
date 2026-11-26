@@ -445,7 +445,7 @@ mod graph_writer_admission_tests {
                     owner.now = Some(clock.wall_now().unwrap());
                     Ok(advance(&document, &mut owner, &mut journal).unwrap())
                 },
-                |_| Ok(()),
+                |run| Ok(run.clone()),
             )
             .unwrap();
             let node = &waited.checkpoint.nodes[0];
@@ -482,6 +482,7 @@ mod graph_writer_admission_tests {
         let local_host = provenant_core::HostId::from_bytes([1; 16]);
         let remote_host = provenant_core::HostId::from_bytes([2; 16]);
         attempt.attempt_ref = Some(format!("{remote_host}/attempt"));
+        journal.0 = Some(pending.checkpoint.clone());
 
         let clock = TestClock::new(WallTime::from_micros(0).unwrap(), MonoTime::from_micros(0));
         let cancel = CancelToken::new();
@@ -500,13 +501,204 @@ mod graph_writer_admission_tests {
             &mut observation,
             Some(local_host),
             |_| Ok(pending_again.clone()),
-            |_| {
+            |run| {
                 remote_reads.set(remote_reads.get() + 1);
-                Ok(())
+                Ok(run.clone())
             },
         )
         .unwrap();
         assert!(remote_reads.get() >= 2);
+    }
+
+    #[test]
+    fn submission_wait_settles_after_earlier_remote_reading_errors() {
+        use provenant_core::{Clock, MonoTime, TestClock, WallTime};
+        use provenant_fabric_runtime::graph::{AttemptState, GraphDocument, GraphStatus, NodeState};
+        use std::cell::Cell;
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"graph_id":"cli-wait-recovery","nodes":[{
+                "id":"writer","access":"worktree_write","worktree":"lane",
+                "prompt":"write code","route":{"adapter":"mock","model":"mock-model"}
+            }]
+        }))
+        .unwrap();
+        let mut owner = MockWriterOwner::default();
+        let mut journal = MemoryJournal::default();
+        let completed = advance(&document, &mut owner, &mut journal).unwrap();
+        let mut pending = completed.clone();
+        pending.status = GraphStatus::Pending;
+        pending.checkpoint.nodes[0].state = NodeState::Running;
+        let attempt = &mut pending.checkpoint.nodes[0].attempts[0];
+        attempt.state = AttemptState::Starting;
+        attempt.outcome = None;
+        let local_host = provenant_core::HostId::from_bytes([1; 16]);
+        let remote_host = provenant_core::HostId::from_bytes([2; 16]);
+        attempt.attempt_ref = Some(format!("{remote_host}/attempt"));
+
+        let clock = TestClock::new(WallTime::from_micros(0).unwrap(), MonoTime::from_micros(0));
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(clock.mono_now(), 1).unwrap();
+        let mut observation = crate::status_wait::LocalObservation::paced(
+            provenant_cli::wait::LocalCadence::compiled(std::time::Duration::from_millis(20)),
+            "fixture event source unavailable",
+        );
+        let reads = Cell::new(0);
+        let advancements = Cell::new(0);
+        let pending_again = pending.clone();
+        let (waited, _, _) = super::interface::wait_submission(
+            pending,
+            budget,
+            &clock,
+            &cancel,
+            &mut observation,
+            Some(local_host),
+            |_| Ok(pending_again.clone()),
+            |run| {
+                assert!(run.checkpoint.nodes.iter().any(|node| !node.state.settled()));
+                let call = reads.get() + 1;
+                reads.set(call);
+                match call {
+                    1 => Err(FacadeError::HomeUnavailable),
+                    2 => Err(FacadeError::Busy),
+                    _ => super::interface::observation::advance_after_remote_terminal(run, true, || {
+                        advancements.set(advancements.get() + 1);
+                        advance(&document, &mut owner, &mut journal)
+                            .map_err(|_| FacadeError::StateCorrupt)
+                    }),
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(waited.status, GraphStatus::Complete);
+        assert!(reads.get() >= 3);
+        assert_eq!(advancements.get(), 1);
+        // A later successful reading clears the failures that preceded it.
+        assert_eq!(waited.advance_error.as_deref(), None);
+    }
+
+    #[test]
+    fn submission_wait_survives_n_unavailable_readings_then_settles() {
+        use provenant_core::{Clock, MonoTime, TestClock, WallTime};
+        use provenant_fabric_runtime::graph::{AttemptState, GraphDocument, GraphStatus, NodeState};
+        use std::cell::Cell;
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"graph_id":"cli-wait-outage","nodes":[{
+                "id":"writer","access":"worktree_write","worktree":"lane",
+                "prompt":"write code","route":{"adapter":"mock","model":"mock-model"}
+            }]
+        }))
+        .unwrap();
+        let mut owner = MockWriterOwner::default();
+        let mut journal = MemoryJournal::default();
+        let completed = advance(&document, &mut owner, &mut journal).unwrap();
+        let mut pending = completed.clone();
+        pending.status = GraphStatus::Pending;
+        pending.checkpoint.nodes[0].state = NodeState::Running;
+        let attempt = &mut pending.checkpoint.nodes[0].attempts[0];
+        attempt.state = AttemptState::Starting;
+        attempt.outcome = None;
+        let local_host = provenant_core::HostId::from_bytes([1; 16]);
+        let remote_host = provenant_core::HostId::from_bytes([2; 16]);
+        attempt.attempt_ref = Some(format!("{remote_host}/attempt"));
+        journal.0 = Some(pending.checkpoint.clone());
+
+        let clock = TestClock::new(WallTime::from_micros(0).unwrap(), MonoTime::from_micros(0));
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(clock.mono_now(), 1).unwrap();
+        let mut observation = crate::status_wait::LocalObservation::paced(
+            provenant_cli::wait::LocalCadence::compiled(std::time::Duration::from_millis(20)),
+            "fixture event source unavailable",
+        );
+        let reads = Cell::new(0);
+        let advancements = Cell::new(0);
+        let pending_again = pending.clone();
+        let (waited, _, _) = super::interface::wait_submission(
+            pending,
+            budget,
+            &clock,
+            &cancel,
+            &mut observation,
+            Some(local_host),
+            |_| Ok(pending_again.clone()),
+            |run| {
+                assert!(run.checkpoint.nodes.iter().any(|node| !node.state.settled()));
+                let call = reads.get() + 1;
+                reads.set(call);
+                if call <= 4 {
+                    Err(FacadeError::HomeUnavailable)
+                } else {
+                    super::interface::observation::advance_after_remote_terminal(run, true, || {
+                        advancements.set(advancements.get() + 1);
+                        advance(&document, &mut owner, &mut journal)
+                            .map_err(|_| FacadeError::StateCorrupt)
+                    })
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(waited.status, GraphStatus::Complete);
+        assert!(reads.get() >= 5);
+        assert_eq!(advancements.get(), 1);
+    }
+
+    #[test]
+    fn submission_wait_names_last_remote_error_at_budget_end() {
+        use provenant_core::{Clock, MonoTime, TestClock, WallTime};
+        use provenant_fabric_runtime::graph::{AttemptState, GraphDocument, GraphStatus};
+        use std::cell::Cell;
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"graph_id":"cli-wait-last-error","nodes":[{
+                "id":"writer","access":"worktree_write","worktree":"lane",
+                "prompt":"write code","route":{"adapter":"mock","model":"mock-model"}
+            }]
+        }))
+        .unwrap();
+        let mut owner = MockWriterOwner::default();
+        let mut journal = MemoryJournal::default();
+        let completed = advance(&document, &mut owner, &mut journal).unwrap();
+        let mut pending = completed.clone();
+        pending.status = GraphStatus::Pending;
+        let attempt = &mut pending.checkpoint.nodes[0].attempts[0];
+        attempt.state = AttemptState::Starting;
+        attempt.outcome = None;
+        let local_host = provenant_core::HostId::from_bytes([1; 16]);
+        let remote_host = provenant_core::HostId::from_bytes([2; 16]);
+        attempt.attempt_ref = Some(format!("{remote_host}/attempt"));
+
+        let clock = TestClock::new(WallTime::from_micros(0).unwrap(), MonoTime::from_micros(0));
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(clock.mono_now(), 1).unwrap();
+        let mut observation = crate::status_wait::LocalObservation::paced(
+            provenant_cli::wait::LocalCadence::compiled(std::time::Duration::from_millis(20)),
+            "fixture event source unavailable",
+        );
+        let errors = [
+            FacadeError::HomeUnavailable,
+            FacadeError::Busy,
+            FacadeError::OwnerUnavailable,
+        ];
+        let reads = Cell::new(0);
+        let pending_again = pending.clone();
+        let (waited, _, _) = super::interface::wait_submission(
+            pending,
+            budget,
+            &clock,
+            &cancel,
+            &mut observation,
+            Some(local_host),
+            |_| Ok(pending_again.clone()),
+            |_| {
+                let index = reads.get().min(errors.len() - 1);
+                reads.set(reads.get() + 1);
+                Err(errors[index].clone())
+            },
+        )
+        .unwrap();
+        assert!(reads.get() >= errors.len());
+        assert_eq!(
+            waited.advance_error.as_deref(),
+            Some("run execution owner is unavailable")
+        );
     }
 
     #[test]
@@ -547,7 +739,7 @@ mod graph_writer_admission_tests {
             &mut observation,
             Some(local_host),
             |_| Ok(completed.clone()),
-            |_| Ok(()),
+            |run| Ok(run.clone()),
         )
         .unwrap();
         assert_eq!(settled.status, GraphStatus::Complete);
