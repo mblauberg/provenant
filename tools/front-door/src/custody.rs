@@ -7,6 +7,7 @@ use provenant_os::clock::SystemClock;
 use provenant_records::{CommandResult, Outcome, custody::*};
 use serde_json::json;
 use std::{
+    io::Write,
     path::Path,
     time::{Duration, Instant},
 };
@@ -625,41 +626,54 @@ pub fn status(args: &Status, globals: &Globals) -> u8 {
             limit: args.limit.min(100),
             ..Default::default()
         };
-        let page = match ledger {
-            Some(ledger) => ledger.custody(&query, &call)?,
-            None => CustodyPage {
-                items: Vec::new(),
-                next: None,
-            },
+        let (records, next) = match ledger {
+            Some(ledger) => ledger.custody_with_cursors(&query, &call)?,
+            None => (Vec::new(), None),
         };
-        let census = page
-            .items
-            .iter()
-            .any(|record| matches!(&record.holder, Holder::Attempt { .. }))
-            .then(|| {
-                provenant_supervisor::census::ProcessObserver::census(
-                    &provenant_supervisor::census::SystemProcessObserver,
-                    provenant_supervisor::census::MAX_CENSUS_ENTRIES,
-                )
-                .ok()
-            })
-            .flatten();
+        let mut stdout = std::io::stdout().lock();
+        if args.custody_stream {
+            writeln!(stdout, "{}", json!({"total": records.len(), "next": next}))?;
+            stdout.flush()?;
+        }
+        let mut census = None;
         let mut items = Vec::new();
         let mut lines = Vec::new();
-        for record in page.items {
+        for (cursor, record) in records {
+            if matches!(&record.holder, Holder::Attempt { .. }) && census.is_none() {
+                census = Some(
+                    provenant_supervisor::census::ProcessObserver::census(
+                        &provenant_supervisor::census::SystemProcessObserver,
+                        provenant_supervisor::census::MAX_CENSUS_ENTRIES,
+                    )
+                    .ok(),
+                );
+            }
             let presence = presence_with_census(
                 &record,
                 &resolved.roots,
                 chair.host,
                 chair.actor,
-                census.as_ref(),
+                census.as_ref().and_then(Option::as_ref),
             );
             let mine = record.holder.belongs_to(&chair);
-            if args.adoptable {
-                if presence != HolderPresence::Unattended {
-                    continue;
-                }
-            } else if !mine && presence != HolderPresence::Unattended {
+            let include = if args.adoptable {
+                presence == HolderPresence::Unattended
+            } else {
+                mine || presence == HolderPresence::Unattended
+            };
+            if args.custody_stream {
+                let item = include.then(|| {
+                    json!({
+                        "subject": record.subject.to_string(),
+                        "project": record.project.to_string(),
+                        "presence": presence,
+                        "mine": mine,
+                    })
+                });
+                writeln!(stdout, "{}", json!({"cursor": cursor, "item": item}))?;
+                stdout.flush()?;
+            }
+            if !include {
                 continue;
             }
             lines.push(if globals.full {
@@ -684,7 +698,7 @@ pub fn status(args: &Status, globals: &Globals) -> u8 {
                 mine,
             });
         }
-        if let Some(cursor) = page.next {
+        if let Some(cursor) = next {
             lines.push(format!("more: provenant status --mine --cursor {cursor}"));
         }
         if lines.is_empty() {
@@ -694,15 +708,16 @@ pub fn status(args: &Status, globals: &Globals) -> u8 {
                 "no active custody".into()
             });
         }
+        if args.custody_stream {
+            return Ok((serde_json::Value::Null, String::new()));
+        }
         Ok((
-            serde_json::to_value(CustodyStatus {
-                items,
-                next: page.next,
-            })?,
+            serde_json::to_value(CustodyStatus { items, next })?,
             format!("{}\n", lines.join("\n")),
         ))
     };
     match read() {
+        Ok(_) if args.custody_stream => 0,
         Ok((data, human)) => emit(
             &CommandResult::new("status", Outcome::Ok, data),
             globals,

@@ -6,4 +6,4 @@
 
 ### Session and hooks
 
-- The session-start inventory keeps a custody answer a child wrote before its deadline, even when that child is killed before it can exit. Bounded, paged reads now yield a partial summary that names an unavailable section and carries the next-page command rather than dropping a completed custody section to `unavailable: timed out`. (#4072)
+- Session-start custody and lane inventories stream completed rows before their deadline and offer a continuation for any unread rows. Lane pages use ordered index scans and defer process observation until needed, so a large history no longer needs a project-wide sort before it can report progress. (#4072)

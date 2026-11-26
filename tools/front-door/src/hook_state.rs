@@ -7,7 +7,6 @@ use provenant_cli::Globals;
 use provenant_core::{Clock, MonoTime};
 use provenant_os::clock::SystemClock;
 use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
-use provenant_records::custody::HolderPresence;
 use provenant_workflow::session::{
     CommandPrefix, CustodyLine, DigestScope, LaneLine, SessionState, Unavailable, WorktreeLine,
 };
@@ -137,6 +136,36 @@ impl<'a> Cli<'a> {
         Err(provenant_workflow::session::clean(message, 120))
     }
 
+    fn custody_listing(
+        &self,
+        deadline: MonoTime,
+        session: Option<&str>,
+    ) -> Result<(Vec<CustodyLine>, Option<String>), String> {
+        let time = LISTING_TIME.min(self.remaining(deadline));
+        if time < Duration::from_millis(50) {
+            return Err("hook deadline reached".into());
+        }
+        let mut args = vec!["status", "--mine", "--custody-stream", "--limit", LANE_PAGE];
+        if let Some(session) = session {
+            args.extend(["--session", session]);
+        }
+        let argv = self.argv(&args);
+        let mut options = ExecOptions::new(&argv, self.cwd, time);
+        options.stdout = StreamPolicy::Capture { limit: OUTPUT_CAP };
+        options.stderr = StreamPolicy::Capture { limit: 2048 };
+        let out = self
+            .executor
+            .execute(options)
+            .map_err(|error| format!("could not start: {error}"))?;
+        parse_custody_stream(&out.stdout.bytes).ok_or_else(|| {
+            if out.timed_out {
+                "timed out".into()
+            } else {
+                "inventory unavailable".into()
+            }
+        })
+    }
+
     /// Preserve complete inventory records even when the child hits its budget.
     fn worktree_listing(&self, deadline: MonoTime) -> Result<(Vec<WorktreeLine>, usize), String> {
         let time = LISTING_TIME.min(self.remaining(deadline));
@@ -253,13 +282,7 @@ fn collect_with_cli(
         let worktrees = want
             .worktrees
             .then(|| scope.spawn(move || cli.worktree_listing(deadline)));
-        let custody = scope.spawn(move || {
-            let mut args = vec!["status", "--mine", "--limit", LANE_PAGE];
-            if let Some(session) = want.session.as_deref() {
-                args.extend(["--session", session]);
-            }
-            cli.data(&args, LISTING_TIME, deadline)
-        });
+        let custody = scope.spawn(move || cli.custody_listing(deadline, want.session.as_deref()));
         match active.join() {
             Ok(Ok((lanes, next, skipped))) => {
                 state.active = lanes;
@@ -307,33 +330,16 @@ fn collect_with_cli(
             }
         }
         match custody.join() {
-            Ok(Ok(data)) => {
-                match serde_json::from_value::<provenant_records::custody::CustodyStatus>(data) {
-                    Ok(view) => {
-                        for item in view.items {
-                            let presence = match item.presence {
-                                HolderPresence::Live => "live",
-                                HolderPresence::Unattended => "unattended",
-                                HolderPresence::Unknown => "unknown",
-                            };
-                            state.custody.push(CustodyLine {
-                                subject: item.record.subject.to_string(),
-                                presence: presence.to_owned(),
-                                project: item.record.project.to_string(),
-                                mine: item.mine,
-                            });
-                        }
-                        state.custody_more = view.next.map(|cursor| {
-                            state
-                                .commands
-                                .command(&format!("status --mine --cursor {cursor}"))
-                        });
-                    }
-                    Err(error) => state.unavailable.push(Unavailable {
-                        source: "custody".into(),
-                        reason: format!("invalid custody response: {error}"),
-                    }),
-                }
+            Ok(Ok((items, next))) => {
+                state.custody = items;
+                state.custody_more = next.map(|cursor| {
+                    let suffix = if cursor.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" --cursor {cursor}")
+                    };
+                    state.commands.command(&format!("status --mine{suffix}"))
+                });
             }
             Ok(Err(reason)) => state.unavailable.push(Unavailable {
                 source: "custody".into(),
@@ -442,6 +448,67 @@ fn parse_lanes(data: &Value, settled_after_unix: Option<i64>) -> (Vec<LaneLine>,
         });
     }
     (lanes, data["next_cursor"].as_str().map(str::to_owned))
+}
+
+/// Keep complete inspected custody rows and resume before an interrupted row.
+fn parse_custody_stream(bytes: &[u8]) -> Option<(Vec<CustodyLine>, Option<String>)> {
+    let mut lines = bytes.split_inclusive(|byte| *byte == b'\n');
+    let header = lines.next()?;
+    if !header.ends_with(b"\n") {
+        return None;
+    }
+    let header: Value = serde_json::from_slice(header).ok()?;
+    let total = usize::try_from(header.get("total")?.as_u64()?).ok()?;
+    if total > 100 {
+        return None;
+    }
+    let mut items = Vec::new();
+    let mut inspected = 0;
+    let mut last = None;
+    for line in lines {
+        if !line.ends_with(b"\n") || inspected >= total {
+            break;
+        }
+        let Ok(event) = serde_json::from_slice::<Value>(line) else {
+            break;
+        };
+        let Some(cursor) = event.get("cursor").and_then(Value::as_u64) else {
+            break;
+        };
+        let Some(item) = event.get("item") else {
+            break;
+        };
+        if !item.is_null() {
+            let (Some(subject), Some(project), Some(presence), Some(mine)) = (
+                item.get("subject").and_then(Value::as_str),
+                item.get("project").and_then(Value::as_str),
+                item.get("presence").and_then(Value::as_str),
+                item.get("mine").and_then(Value::as_bool),
+            ) else {
+                break;
+            };
+            if !matches!(presence, "live" | "unattended" | "unknown") {
+                break;
+            }
+            items.push(CustodyLine {
+                subject: subject.into(),
+                presence: presence.into(),
+                project: project.into(),
+                mine,
+            });
+        }
+        inspected += 1;
+        last = Some(cursor);
+    }
+    let next = if inspected < total {
+        Some(last.map_or_else(String::new, |cursor| cursor.to_string()))
+    } else {
+        header
+            .get("next")
+            .and_then(Value::as_u64)
+            .map(|cursor| cursor.to_string())
+    };
+    Some((items, next))
 }
 
 /// The header describes one page; a timed-out partial page resumes after its
@@ -569,7 +636,9 @@ mod tests {
             fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
                 self.0.lock().unwrap().push(options.timeout);
                 let args: Vec<&str> = options.argv.iter().filter_map(|arg| arg.to_str()).collect();
-                let stdout = if args.contains(&"worktree") {
+                let stdout = if args.contains(&"--custody-stream") {
+                    "{\"total\":0,\"next\":null}\n"
+                } else if args.contains(&"worktree") {
                     WORKTREES
                 } else if args.contains(&"--all") {
                     SETTLED
@@ -808,6 +877,18 @@ mod tests {
             data["items"][0]["record"]["subject"].as_str(),
             Some("g/a#1")
         );
+    }
+
+    #[test]
+    fn custody_stream_resumes_after_last_complete_inspected_row() {
+        use super::*;
+        let stream = b"{\"total\":3,\"next\":9}\n{\"cursor\":3,\"item\":{\"subject\":\"branch-a\",\"project\":\"p\",\"presence\":\"live\",\"mine\":true}}\n{\"cursor\":4,\"item\":null}\n{\"cursor\":5";
+        let (items, next) = parse_custody_stream(stream).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].subject, "branch-a");
+        assert_eq!(next.as_deref(), Some("4"));
+        let (_, next) = parse_custody_stream(b"{\"total\":1,\"next\":null}\n").unwrap();
+        assert_eq!(next.as_deref(), Some(""));
     }
 
     #[test]

@@ -624,13 +624,8 @@ fn session_inventory_page(
         context,
         chair: None,
     };
-    // One bounded host census serves the entire read-only page. If unavailable,
-    // rows remain Unknown and no read queues recovery or guesses from a PID.
-    let census = provenant_supervisor::census::ProcessObserver::census(
-        &provenant_supervisor::census::SystemProcessObserver,
-        provenant_supervisor::census::MAX_CENSUS_ENTRIES,
-    )
-    .ok();
+    // Initialise only after the page header and only for a live row.
+    let mut census = None;
     let mut query = lane_query(all, limit, after);
     query.newest_first = all;
     let mut failed = false;
@@ -638,7 +633,31 @@ fn session_inventory_page(
         if failed { return; }
         let event = match entry {
             None => json!({"total": total, "next": next}),
+            // The settled digest filters non-terminal rows. Advance its cursor
+            // without opening host evidence or delaying later settled rows.
+            Some((cursor, lane)) if all && !matches!(lane.state, run::AttemptState::Terminal { .. }) => {
+                let projected = project_lane_with_census(
+                    lane,
+                    &[],
+                    session.context.state_root.as_path(),
+                    clock.wall_now().ok(),
+                    false,
+                    Err(()),
+                );
+                json!({"cursor": cursor, "lane": {
+                    "key": lane.key, "attempt_id": lane.attempt_id,
+                    "state": projected.state, "reason": projected.reason, "finished_at": null,
+                    "requested_route": lane.requested_route, "applied_route": lane.applied_route,
+                    "delivery": lane.delivery,
+                }})
+            }
             Some((cursor, lane)) => {
+                if !matches!(lane.state, run::AttemptState::Terminal { .. }) && census.is_none() {
+                    census = Some(provenant_supervisor::census::ProcessObserver::census(
+                        &provenant_supervisor::census::SystemProcessObserver,
+                        provenant_supervisor::census::MAX_CENSUS_ENTRIES,
+                    ).ok());
+                }
                 let waits = if all {
                     Vec::new()
                 } else {
@@ -650,7 +669,7 @@ fn session_inventory_page(
                     session.context.state_root.as_path(),
                     clock.wall_now().ok(),
                     lane.superseded_by.is_none(),
-                    census.as_ref().ok_or(()),
+                    census.as_ref().and_then(Option::as_ref).ok_or(()),
                 );
                 let state = projected.state;
                 let reason = projected.reason;

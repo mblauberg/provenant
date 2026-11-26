@@ -1537,7 +1537,7 @@ pub fn dispatch(
     // Whether a status read waited: telemetry separates waits from reads.
     let status_wait = match &parsed {
         ParseOutcome::Invocation(inv) => match &inv.command {
-            Command::Status(args) if !args.session_stream => Some(false),
+            Command::Status(args) if !args.session_stream && !args.custody_stream => Some(false),
             Command::Wait(_) => Some(true),
             _ => None,
         },
@@ -1546,7 +1546,7 @@ pub fn dispatch(
     let read_only_graph = match &parsed {
         ParseOutcome::Invocation(inv) => {
             matches!(&inv.command, Command::Run(args) if args.explain)
-                || matches!(&inv.command, Command::Status(args) if args.session_stream)
+                || matches!(&inv.command, Command::Status(args) if args.session_stream || args.custody_stream)
                 || matches!(&inv.command, Command::Templates(_))
         }
         _ => false,

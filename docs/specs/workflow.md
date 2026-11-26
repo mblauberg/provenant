@@ -60,12 +60,14 @@ path in the JSON warnings and human output. Each save keeps the text it
 replaces as a bounded, hashed revision. Hooks are advisory:
 they emit only their own key's checkpoint, and mark a missing or slow
 source unavailable, never empty. Autosave never writes the chair's
-`checkpoint.md`. Session-start inventory reads are bounded and paged: each
-child has one deadline and one maximum page, and a child's complete answer is
-read even when it is killed before it exits, so a large or slow store yields a
-partial summary that names the unavailable section and carries the command
-that reads the next page. A slow store never turns a completed row into an
-empty section, and the hook still returns inside its own budget.
+`checkpoint.md`. Session-start inventory reads are bounded and paged: each child has one deadline
+and one maximum page. Custody and lane inventories flush a page header before
+presence observations and flush each inspected row with its cursor. A deadline
+preserves complete rows and offers a continuation from the last inspected row,
+including when that row was filtered out; an interrupted first row resumes the
+page from its start. Lane pages use ordered index scans and defer the host census
+until a non-terminal row needs it. A source that cannot produce its header is
+reported unavailable, never empty, and the hook still returns inside its budget.
 Hook state carries custody-ledger, lane and worktree rows. Inside a lane,
 hook context is one line directing progress to the lane handoff, and chair
 checkpoint text, standing grants and save commands are withheld; outside a lane

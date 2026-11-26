@@ -253,6 +253,19 @@ fn dead_and_unobservable_writer_projection_is_truthful_and_actionable()
         reason.contains("provenant reconcile") && reason.contains(&target.to_string())
     }));
 
+    let settling = LaneRow::project(
+        &attempt,
+        LaneProjectionFacts {
+            presence: Some(LanePresence::Settling),
+            ..Default::default()
+        },
+    );
+    assert_eq!(settling.state, "settling");
+    assert_eq!(
+        settling.reason.as_deref(),
+        Some("the writer exited; settlement recovery is outstanding")
+    );
+
     let unknown = LaneRow::project(
         &attempt,
         LaneProjectionFacts {

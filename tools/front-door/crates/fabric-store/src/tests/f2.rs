@@ -969,6 +969,38 @@ fn custody_queries_page_and_include_nested_lanes_without_crossing_chairs() {
     assert!(!seen.is_empty());
 }
 #[test]
+fn custody_cursor_after_each_inspected_row_resumes_without_skipping() {
+    let f = Fixture::new();
+    let ledger = HostStore::open(&f.root, &f.request()).unwrap();
+    for n in 1..=3 {
+        ledger
+            .acquire_custody(
+                project(),
+                &Subject::new(SubjectKind::Branch, format!("branch-{n}")),
+                &holder(1),
+                Origin::Provenant,
+                &f.request(),
+            )
+            .unwrap();
+    }
+    let query = CustodyQuery {
+        limit: 3,
+        ..Default::default()
+    };
+    let (first, _) = ledger.custody_with_cursors(&query, &f.request()).unwrap();
+    let (rest, _) = ledger
+        .custody_with_cursors(
+            &CustodyQuery {
+                after: first[0].0,
+                ..query
+            },
+            &f.request(),
+        )
+        .unwrap();
+    assert_eq!(rest, first[1..]);
+}
+
+#[test]
 fn custody_event_failure_rolls_back_the_record() {
     let f = Fixture::new();
     let ledger = HostStore::open(&f.root, &f.request()).unwrap();
